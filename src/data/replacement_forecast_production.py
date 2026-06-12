@@ -492,6 +492,30 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
                 k: upgrade_report.get(k)
                 for k in ("upgrades_detected", "seeds_enqueued", "already_enqueued", "enqueued")
             }
+    # U5 step 2a — NEWER-CYCLE re-materialization TRIGGER (sister of the fusion-upgrade trigger).
+    # This availability-poll lane already KNOWS the moment a fresher cycle's raw legs land (the
+    # per-leg fetches above), so the cycle-advance re-seed rides the SAME tick (operator law:
+    # 下载有自己的daemon — no new daemon, no parallel materialization path). It enqueues ONE seed per
+    # active-window family whose latest posterior consumed a STRICTLY older cycle than the freshest
+    # materializable one, HELD positions first, idempotent per (scope, target-cycle). Fail-soft.
+    cycle_advance_report = _enqueue_cycle_advance_reseeds_if_needed(cfg)
+    if cycle_advance_report is not None:
+        report["cycle_advance_status"] = cycle_advance_report.get("status")
+        report["cycle_advance_seeds_enqueued"] = cycle_advance_report.get("seeds_enqueued")
+        if cycle_advance_report.get("advances_detected"):
+            report["cycle_advance_detail"] = {
+                k: cycle_advance_report.get(k)
+                for k in (
+                    "freshest_materializable_cycle",
+                    "advances_detected",
+                    "held_advances_detected",
+                    "seeds_enqueued",
+                    "held_seeds_enqueued",
+                    "already_enqueued",
+                    "manifest_missing",
+                    "enqueued",
+                )
+            }
     return report
 
 
@@ -520,6 +544,36 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(cfg: dict[str, object]) -> dict[st
     except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll
         logger.warning("fusion-upgrade trigger skipped (fail-soft): %s", exc)
         return {"status": "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED", "error": str(exc)}
+
+
+def _enqueue_cycle_advance_reseeds_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
+    """U5 step 2a — enqueue re-materialization seeds for active-window families whose latest
+    posterior consumed a STRICTLY OLDER cycle than the freshest materializable in-universe cycle.
+    Delegates the comparison + enqueue to the single-authority module so the rule lives at one site.
+    HELD positions (read-only from zeus_trades.db) are prioritized. Returns the trigger report (None
+    when seed_dir / forecast_db / raw_manifest_dir are not configured). Fail-soft: any error returns
+    a status dict, never raises into the poll."""
+    forecast_db = cfg.get("forecast_db")
+    seed_dir = cfg.get("seed_dir")
+    raw_manifest_dir = cfg.get("raw_manifest_dir")
+    if forecast_db is None or seed_dir is None or raw_manifest_dir is None:
+        return None
+    try:
+        from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+            enqueue_cycle_advance_reseeds,
+        )
+        from src.state.db import _zeus_trade_db_path  # noqa: PLC0415
+
+        return enqueue_cycle_advance_reseeds(
+            forecast_db=Path(str(forecast_db)),
+            seed_dir=Path(str(seed_dir)),
+            raw_manifest_dir=Path(str(raw_manifest_dir)),
+            trades_db=_zeus_trade_db_path(),
+            limit=int(cfg.get("seed_limit") or cfg.get("limit") or 10),
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll
+        logger.warning("cycle-advance trigger skipped (fail-soft): %s", exc)
+        return {"status": "CYCLE_ADVANCE_TRIGGER_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
 @_scheduler_job("anchor_meta_stamp_cross_check")

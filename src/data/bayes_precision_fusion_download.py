@@ -669,9 +669,24 @@ def download_bayes_precision_fusion_extra_raw_inputs(
 
     cycle_utc = cycle.astimezone(UTC)
     cycle_iso = cycle_utc.isoformat()
-    source_available_iso = (cycle_utc + timedelta(hours=release_lag_hours)).isoformat()
     captured_at = datetime.now(tz=UTC)
     captured_iso = max(captured_at, cycle_utc).isoformat()
+    # HONEST AVAILABILITY (U5 step 2a, freshness investigation 2026-06-12 §Q2A/§(d)): the prior
+    # code stamped a SYNTHETIC source_available_at = cycle + 14h for every row — a fabricated
+    # timestamp ~8-10h LATER than real dissemination (real global lag 4-6h), with zero spread over
+    # 12,053 rows. That violates the no-unsupported-hardcoded-values + data-provenance laws: a
+    # consumer that read it as a freshness signal would believe data was unavailable for ~8h after
+    # it actually disseminated. We only append a row when we POSSESS the value (sv/pv is not None),
+    # so captured_at PROVES availability by then — the honest, provenance-clean stamp is the
+    # proof-of-possession bound min(captured_at, nominal), exactly as the manifest producer does
+    # (scripts/download_replacement_forecast_current_targets.py). The release_lag_hours constant
+    # survives only as the nominal backfill ceiling, never as a fabricated live freshness signal.
+    # Consumer audit (grep raw_model_forecasts.source_available_at): the current-value serving
+    # authority keys freshness on source_cycle_time + captured_at, and the de-bias history provider
+    # explicitly does NOT read source_available_at as run_time — so no consumer is poisoned by the
+    # honest value (it only stops being a lie).
+    nominal_available = cycle_utc + timedelta(hours=release_lag_hours)
+    source_available_iso = min(captured_at, nominal_available).isoformat()
     cutoff_iso = (captured_at - timedelta(days=int(retention_days))).isoformat()
 
     target_list = list(targets)

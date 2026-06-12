@@ -628,6 +628,32 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             ON fusion_upgrade_enqueues(city, target_date, metric, source_cycle_time,
                                        capturable_family_set)
     """)
+    # U5 step 2a (newer-cycle-triggered re-materialization, freshness investigation 2026-06-12)
+    # idempotency marker. Sibling of fusion_upgrade_enqueues: when the cycle-advance trigger
+    # (src/data/replacement_cycle_advance_trigger.py) detects that a scope's latest posterior
+    # consumed a model cycle OLDER than the freshest in-universe cycle now ingested, it enqueues ONE
+    # re-materialization seed and writes one row here. The UNIQUE index on
+    # (city, target_date, metric, target_cycle_time) is the bound: a scope is re-enqueued AT MOST
+    # ONCE per (target-cycle) advance, so a still-unmaterialized seed (manifest not yet on disk,
+    # day0 guard) can never loop the queue — it heals on the next tick once the seed drains, and
+    # the NEXT fresher cycle gets its own distinct marker. SHADOW research surface only.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cycle_advance_enqueues (
+            enqueue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            enqueued_at TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            consumed_cycle_time TEXT NOT NULL,
+            target_cycle_time TEXT NOT NULL,
+            held_position INTEGER NOT NULL DEFAULT 0,
+            seed_file TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_cycle_advance_enqueues_scope_target_cycle
+            ON cycle_advance_enqueues(city, target_date, metric, target_cycle_time)
+    """)
 
 
 def _create_calibration_pairs(conn: sqlite3.Connection) -> None:

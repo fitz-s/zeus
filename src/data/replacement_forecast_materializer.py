@@ -395,6 +395,74 @@ def _artifact_identity_block_reasons(conn: sqlite3.Connection, request: Replacem
     return tuple(reasons)
 
 
+def _cycle_monotone_block_reasons(
+    conn: sqlite3.Connection, request: ReplacementForecastMaterializeRequest, *, metric: str
+) -> tuple[str, ...]:
+    """MONOTONE CONSUMED-CYCLE ADVANCE (U5 step 2a, freshness investigation 2026-06-12).
+
+    A family's posterior must never step BACKWARD onto a model cycle OLDER than the one its
+    CURRENT (latest) posterior already consumed. The freshness investigation measured this as a
+    real disease: ~14% of posteriors were born stale (an older anchor cycle consumed while a
+    fresher one was already ingested) and 78 backward consumed-cycle transitions thrashed
+    q_mean by ±2.5 °C across 267 live families (docs/evidence/freshness/2026-06-12). Belief
+    drift is a STEP function on NEW cycles, so consuming an OLDER cycle is a self-inflicted
+    staleness event with no upside.
+
+    The consumed cycle is recorded as ``forecast_posteriors.source_cycle_time`` (the provenance
+    field; no new column). The refusal is keyed on the SAME (source_id, city, target_date,
+    temperature_metric) family identity the fusion-upgrade trigger and serving authority use, so
+    the three sites can never disagree on family identity.
+
+    EQUAL cycle is ALLOWED: re-materializing the SAME cycle is the legitimate same-cycle path
+    (instrument-set expansion / fusion upgrade — Task #32). Only a STRICTLY older request cycle
+    is refused. A typed BLOCKED reason makes the backward step unconstructable (it never writes a
+    row), not a silent thrash. Fail-open ONLY on a read/schema error (the bounded-staleness gate
+    in _prewrite_block_reasons remains the backstop) — a backward step is never *silently*
+    admitted, but an unreadable DB must not wedge all materialization.
+    """
+    try:
+        request_cycle = _to_utc(request.source_cycle_time, field_name="source_cycle_time")
+    except Exception:
+        return ()
+    try:
+        row = conn.execute(
+            """
+            SELECT source_cycle_time
+            FROM forecast_posteriors
+            WHERE source_id = ? AND city = ? AND target_date = ? AND temperature_metric = ?
+            ORDER BY computed_at DESC
+            LIMIT 1
+            """,
+            (SOURCE_ID, request.city, _date_text(request.target_date), metric),
+        ).fetchone()
+    except Exception:
+        return ()
+    if row is None:
+        return ()
+    consumed_iso = row[0] if not hasattr(row, "keys") else row["source_cycle_time"]
+    if consumed_iso is None or not str(consumed_iso).strip():
+        return ()
+    try:
+        consumed_cycle = _to_utc(str(consumed_iso), field_name="latest_posterior_source_cycle_time")
+    except Exception:
+        return ()
+    if request_cycle < consumed_cycle:
+        import logging  # noqa: PLC0415
+
+        logging.getLogger("zeus.replacement_cycle_monotone").warning(
+            "REFUSED backward consumed-cycle materialization for %s %s %s: request cycle %s is "
+            "OLDER than the family's current posterior cycle %s (monotone-advance law). The "
+            "backward step is unconstructable; the family keeps its fresher belief.",
+            request.city,
+            _date_text(request.target_date),
+            metric,
+            request_cycle.isoformat(),
+            consumed_cycle.isoformat(),
+        )
+        return ("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION",)
+    return ()
+
+
 def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMaterializeRequest, *, metric: str) -> int:
     anchor = request.openmeteo_anchor
     target_date = _date_text(request.target_date)
@@ -1851,6 +1919,19 @@ def materialize_replacement_forecast_shadow(
         return ReplacementForecastMaterializeResult(
             status="BLOCKED",
             reason_codes=artifact_reasons,
+            posterior_id=None,
+            anchor_id=None,
+            readiness_id=None,
+        )
+    # MONOTONE CONSUMED-CYCLE ADVANCE (U5 step 2a): refuse a request whose cycle is OLDER than the
+    # family's current posterior cycle. Placed after artifact identity (request is structurally
+    # valid) and before the value-building precision/insert path so a backward step never writes a
+    # row. See _cycle_monotone_block_reasons.
+    monotone_reasons = _cycle_monotone_block_reasons(conn, request, metric=metric)
+    if monotone_reasons:
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=monotone_reasons,
             posterior_id=None,
             anchor_id=None,
             readiness_id=None,

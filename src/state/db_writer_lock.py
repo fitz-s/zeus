@@ -660,6 +660,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/data/replacement_forecast_live_dry_run.py",  # read_only_ro_uri: replacement switch dry-run inventory opens forecasts DB mode=ro + query_only; SELECT-only
         "src/observability/status_summary.py",  # RO: status dashboard read-only
         "src/engine/position_belief.py",  # read_only_ro_uri: K1 single belief authority — held-position belief reads forecast_posteriors mode=ro, short-lived, SELECT-only (settlement-losses incident 2026-06-12)
+        "src/data/replacement_cycle_advance_trigger.py",  # read_only_ro_uri: U5 step 2a re-mat trigger reads zeus_trades.position_current mode=ro for HELD-position prioritization, short-lived, SELECT-only (never writes trades; forecasts writes go through _connect live) — docs/evidence/freshness/2026-06-12
         "src/execution/exchange_reconcile.py",  # read_only_ro_uri: settled-external absorber reads canonical market_events (zeus-forecasts) mode=ro, short-lived, SELECT-only — docs/evidence/settlement_guard/2026-06-11_settled_external_absorber_plan.md
         "scripts/verify_e2e_money_path.py",  # read_only_ro_uri: e2e money-path walker opens every DB mode=ro, SELECT-only (operator-demanded full-chain diagnostic, 2026-06-11)
         "scripts/query_decision_provenance.py",  # read_only_ro_uri: decision-provenance query opens zeus-world.db mode=ro, SELECT-only over regret/no_submit receipts — operator "一切可被溯源" query entry 2026-06-11 (docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md)
