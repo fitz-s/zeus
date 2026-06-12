@@ -11945,8 +11945,22 @@ def _maybe_apply_settlement_coverage_to_lcb(
     apply_settlement_coverage (only UNLICENSED moves the number; the shrink only ever
     LOWERS the LCB). The new entry's calibration_source becomes SETTLEMENT_ISOTONIC.
 
-    FAIL-OPEN: any error keeps the upstream lcb (never crash the hot path, never
-    widen optimistically). Touches ONLY lcb_by_direction; q/p_values/prefilter stay.
+    GATE OFF (default): IMMEDIATE no-op, byte-identical lcb (never reached below).
+
+    FINDING-C FIX (external review 2026-06-12): when the GATE IS ON (live coverage
+    licensing), this is a SAFETY gate (it can only LOWER an unlicensed bound). Two
+    outcomes were previously conflated under one fail-OPEN swallow:
+      (1) "no historical coverage data" — settlement_backward_coverage_check returns a
+          typed INSUFFICIENT_DATA VERDICT (NOT an exception); apply_settlement_coverage
+          keeps the lcb (new_q == claimed). This is the legitimate no-shrink path and
+          STAYS — it never raises.
+      (2) "coverage AUTHORITY threw" — a structural fault (DB read error, grade_receipt
+          crash, import/season failure). The prior code swallowed this and kept the
+          UNSHRUNK upstream q_lcb: a SAFETY GATE FAILING OPEN in live sizing.
+    With the gate ON, a structural exception now FAILS CLOSED with the typed TRANSIENT
+    reason QLCB_COVERAGE_AUTHORITY_FAULT (registered in TRANSIENT_MONEY_PATH_REASONS):
+    the candidate requeues (the read re-runs clean next cycle) rather than sizing on the
+    unshrunk, unlicensed bound. Touches ONLY lcb_by_direction; q/p_values/prefilter stay.
     """
     import logging as _logging
 
@@ -11954,9 +11968,13 @@ def _maybe_apply_settlement_coverage_to_lcb(
         if not bool(settings["edli"].get("q_lcb_settlement_coverage_gate_enabled", False)):
             return
     except Exception:
+        # The flag READ itself is not the coverage authority; a config read fault keeps
+        # the OFF default (no-op) rather than fabricating a live-gate fault.
         return
 
     log = _logging.getLogger("zeus.qlcb_settlement_coverage")
+    # GATE IS ON past this point: the coverage authority is a live SAFETY gate, so any
+    # structural fault in it must fail CLOSED (never proceed on the unshrunk bound).
     try:
         from src.calibration.qlcb_provenance import _qlcb_float, _set_qlcb_provenance
         from src.calibration.settlement_backward_coverage import (
@@ -11970,8 +11988,9 @@ def _maybe_apply_settlement_coverage_to_lcb(
         lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
         season = season_from_date(str(getattr(family, "target_date", "")), lat=lat)
     except Exception as exc:
-        log.warning("K3 coverage setup failed (non-fatal, lcb kept): %s", exc)
-        return
+        raise ValueError(
+            f"QLCB_COVERAGE_AUTHORITY_FAULT:setup:{exc}"
+        ) from exc
 
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
@@ -12010,11 +12029,15 @@ def _maybe_apply_settlement_coverage_to_lcb(
                         verdict.status, verdict.n_settlement_observations,
                     )
             except Exception as exc:
-                log.warning(
-                    "K3 coverage skipped bin %s/%s (non-fatal, lcb kept): %s",
-                    family.city, getattr(bin_obj, "label", "?"), exc,
-                )
-                continue
+                # FINDING-C: the coverage authority threw for this (bin, direction).
+                # "Insufficient data" is a typed VERDICT, not an exception — so reaching
+                # here is a STRUCTURAL fault. Fail CLOSED (the gate is ON): never keep the
+                # unshrunk lcb. Transient -> the candidate requeues, the read re-runs.
+                raise ValueError(
+                    "QLCB_COVERAGE_AUTHORITY_FAULT:"
+                    f"city={family.city}:bin={getattr(bin_obj, 'label', '?')}:"
+                    f"dir={direction}:{exc}"
+                ) from exc
 
 
 def _snapshot_p_raw(

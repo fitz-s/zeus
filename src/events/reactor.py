@@ -7,9 +7,10 @@ must flow through injected final-intent/executor seams owned by `src.engine` and
 
 # Last reused/audited: 2026-06-12
 # Authority basis (2026-06-12 external deep-review): registered TRANSIENT money-path
-#   reason bases LIVE_DEPTH_AUTHORITY_MISSING (FINDING-A taker-depth twin-authority) and
-#   BANKROLL_FREE_CASH_MISSING (FINDING-B free-cash bound under injected provider) for
-#   the event_reactor_adapter fail-closed fixes (C reason added in its own commit).
+#   reason bases LIVE_DEPTH_AUTHORITY_MISSING (FINDING-A taker-depth twin-authority),
+#   BANKROLL_FREE_CASH_MISSING (FINDING-B free-cash bound under injected provider) and
+#   QLCB_COVERAGE_AUTHORITY_FAULT (FINDING-C settlement-coverage shrinker fail-closed)
+#   for the event_reactor_adapter fail-closed fixes.
 # Authority basis (2026-06-11 operator follow-up): (a) SOURCE_TRUTH intake gate
 #   defers to the serving authority — coverage PARTIAL/BLOCKED passes through,
 #   dead-letter only for junk run identity (twin-authority #8, 16:33:51Z six-city
@@ -2085,6 +2086,14 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # The wallet free-cash record is a cycle-warmed cached read, so a cold/absent read is
     # TRANSIENT (the next warm cycle repopulates it) — requeue, never size unclamped.
     "BANKROLL_FREE_CASH_MISSING",
+    # FINDING-C (external review 2026-06-12): the settlement-coverage q_lcb shrinker is
+    # a live SAFETY gate (it can only LOWER an unlicensed bound). "No historical data" is
+    # a typed INSUFFICIENT_DATA verdict (keeps the lcb, fine); a STRUCTURAL exception in
+    # the coverage authority previously failed OPEN (kept the UNSHRUNK bound). With the
+    # coverage gate ON it now fails CLOSED with this base. The fault is TRANSIENT (a
+    # coverage-table/DB read that threw re-runs clean next cycle) — requeue, never size
+    # on the unlicensed bound.
+    "QLCB_COVERAGE_AUTHORITY_FAULT",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
