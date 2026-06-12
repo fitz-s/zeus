@@ -1303,6 +1303,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
     calibration_conn: sqlite3.Connection | None = None,
     live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
+    free_cash_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
     replacement_forecast_runtime_flags: Mapping[str, object] | None = None,
@@ -1381,6 +1382,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
                 calibration_conn=calibration_conn,
                 get_current_level=get_current_level,
                 bankroll_usd_provider=bankroll_usd_provider,
+                free_cash_usd_provider=free_cash_usd_provider,
                 portfolio_state_provider=portfolio_state_provider,
                 portfolio_reservation=portfolio_reservation,
                 locked_opportunity_conn=live_cap_conn or trade_conn,
@@ -1416,6 +1418,7 @@ def event_bound_live_adapter_from_trade_conn(
     calibration_conn: sqlite3.Connection | None = None,
     live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
+    free_cash_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
     replacement_forecast_runtime_flags: Mapping[str, object] | None = None,
@@ -1591,6 +1594,7 @@ def event_bound_live_adapter_from_trade_conn(
             calibration_conn=calibration_conn,
             get_current_level=get_current_level,
             bankroll_usd_provider=bankroll_usd_provider,
+            free_cash_usd_provider=free_cash_usd_provider,
             portfolio_state_provider=portfolio_state_provider,
             portfolio_reservation=portfolio_reservation,
             locked_opportunity_conn=live_cap_conn or trade_conn,
@@ -2051,6 +2055,7 @@ def _build_event_bound_no_submit_receipt_core(
     topology_conn: sqlite3.Connection | None = None,
     calibration_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
+    free_cash_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
@@ -2764,14 +2769,32 @@ def _build_event_bound_no_submit_receipt_core(
         # FREE-CASH ONE-TIME BOUND (operator single-Kelly directive 2026-06-10, spec
         # point 2): ``bankroll_usd`` above is now TOTAL portfolio equity (the sizing
         # basis, applied once); free available cash bounds the chosen stake ONCE in the
-        # kernel (min, never a multiplicative haircut). When the bankroll comes from an
-        # injected provider (tests/tools), free cash is unknown -> None (bound no-ops,
-        # equity-basis behavior). On the live cached path, read the SAME wallet record.
-        free_cash_usd = (
-            None
-            if bankroll_usd_provider is not None
-            else _runtime_free_cash_usd(cached_only=True)
-        )
+        # kernel (min, never a multiplicative haircut).
+        #
+        # FINDING-B FIX (external review 2026-06-12): the prior code set
+        # ``free_cash_usd=None`` WHENEVER a bankroll provider was injected, so the cash
+        # bound VANISHED under an injected bankroll — a strong-edge stake could exceed
+        # available free cash with no clamp. The fix threads a COMPANION
+        # ``free_cash_usd_provider`` alongside the bankroll provider:
+        #   - bankroll provider + free-cash provider present: use the provider's value.
+        #     A live free-cash AUTHORITY that returns None is a TYPED FAULT
+        #     (BANKROLL_FREE_CASH_MISSING, transient) — never a silent no-clamp.
+        #   - bankroll provider WITHOUT a free-cash provider: legacy proof-only / tool
+        #     injection that wired no cash authority -> None (bound no-ops, as before).
+        #   - no bankroll provider (live cached path): read the SAME wallet record.
+        if bankroll_usd_provider is not None:
+            if free_cash_usd_provider is not None:
+                _provided_free_cash = free_cash_usd_provider()
+                if _provided_free_cash is None:
+                    raise ValueError(
+                        "BANKROLL_FREE_CASH_MISSING:"
+                        "free_cash_usd_provider_returned_none"
+                    )
+                free_cash_usd = float(_provided_free_cash)
+            else:
+                free_cash_usd = None
+        else:
+            free_cash_usd = _runtime_free_cash_usd(cached_only=True)
         kelly_multiplier = _runtime_kelly_multiplier()
         (
             kelly_multiplier,
@@ -3322,6 +3345,7 @@ def build_event_bound_no_submit_receipt(
     topology_conn: sqlite3.Connection | None = None,
     calibration_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
+    free_cash_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
@@ -3354,6 +3378,7 @@ def build_event_bound_no_submit_receipt(
         topology_conn=topology_conn,
         calibration_conn=calibration_conn,
         bankroll_usd_provider=bankroll_usd_provider,
+        free_cash_usd_provider=free_cash_usd_provider,
         portfolio_state_provider=portfolio_state_provider,
         portfolio_reservation=portfolio_reservation,
         locked_opportunity_conn=locked_opportunity_conn,

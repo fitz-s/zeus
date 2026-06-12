@@ -7,8 +7,9 @@ must flow through injected final-intent/executor seams owned by `src.engine` and
 
 # Last reused/audited: 2026-06-12
 # Authority basis (2026-06-12 external deep-review): registered TRANSIENT money-path
-#   reason base LIVE_DEPTH_AUTHORITY_MISSING for the event_reactor_adapter FINDING-A
-#   fail-closed taker-depth twin-authority fix (B/C reasons added in their own commits).
+#   reason bases LIVE_DEPTH_AUTHORITY_MISSING (FINDING-A taker-depth twin-authority) and
+#   BANKROLL_FREE_CASH_MISSING (FINDING-B free-cash bound under injected provider) for
+#   the event_reactor_adapter fail-closed fixes (C reason added in its own commit).
 # Authority basis (2026-06-11 operator follow-up): (a) SOURCE_TRUTH intake gate
 #   defers to the serving authority — coverage PARTIAL/BLOCKED passes through,
 #   dead-letter only for junk run identity (twin-authority #8, 16:33:51Z six-city
@@ -2077,6 +2078,13 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # matching price+depth authority), so the candidate requeues with a refresh —
     # mirroring EXECUTABLE_SNAPSHOT_STALE's shape.
     "LIVE_DEPTH_AUTHORITY_MISSING",
+    # FINDING-B (external review 2026-06-12): under an injected bankroll provider the
+    # free-cash one-time bound could not be resolved and was silently set to None (no
+    # clamp). When a live free-cash AUTHORITY is wired (free_cash_usd_provider) but
+    # returns None, the adapter fails CLOSED with this base rather than sizing unclamped.
+    # The wallet free-cash record is a cycle-warmed cached read, so a cold/absent read is
+    # TRANSIENT (the next warm cycle repopulates it) — requeue, never size unclamped.
+    "BANKROLL_FREE_CASH_MISSING",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)

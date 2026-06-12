@@ -622,6 +622,7 @@ state_machines:
       # with a fresh-substrate re-decision rather than sizing on a stale/unwitnessed/
       # unlicensed authority. Not venue order states; never prove fill.
       - LIVE_DEPTH_AUTHORITY_MISSING          # FINDING-A: fresh-price witness lacks the swept depth
+      - BANKROLL_FREE_CASH_MISSING            # FINDING-B: live bankroll provider with unresolvable free cash
     invariant_tests:
       - tests/events/test_forecast_snapshot_ready.py
       - tests/events/test_reactor.py
