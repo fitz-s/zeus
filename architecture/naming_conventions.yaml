@@ -65,6 +65,7 @@ file_naming:
 
         data_completeness_audit.py: legacy word-order exception; keep until renamed
         deep_heartbeat.py: established runtime heartbeat helper
+        reconcile_realized_fees.py: established reconciliation verb-form (mirrors exchange_reconcile/reconcile_pending_redeems runtime surfaces); fee-evidence artifact writer (2026-06-12)
         deploy_live.py: operator-facing deploy gate command; verb-first name retained because 'deploy' is the operator action (restart-safety gate, PR #407)
         deprecate_legacy_state_files.py: established repair command name
         digest_profiles_export.py: derived digest profile mirror exporter; name retained because it mirrors the generated artifact module name

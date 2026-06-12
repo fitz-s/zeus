@@ -1757,6 +1757,26 @@ def _default_weather_fee_rate() -> float:
 
 
 def _fee_rate_for_token(clob: PolymarketClient, token_id: str) -> float:
+    """Taker fee fraction for EV math — realized-fill authority over schedule.
+
+    Every branch below yields the venue fee SCHEDULE fraction (the CLOB
+    metadata's base_fee CAP — 1000 bps on weather markets). Incident
+    2026-06-12: consuming the schedule as the actual fee taxed every EV
+    calculation with a ~10% phantom fee while 42/42 realized fills carried
+    trade-level fee_rate_bps=0. resolve_taker_fee_fraction caps the schedule
+    by the reconciled realized evidence (state/fee_reconciliation.json) and
+    degrades back to the schedule when evidence is thin or stale.
+    """
+    from src.contracts.fee_authority import resolve_taker_fee_fraction
+
+    schedule = _schedule_fee_rate_for_token(clob, token_id)
+    fraction, source = resolve_taker_fee_fraction(schedule)
+    if fraction != schedule:
+        logger.debug("fee authority: schedule=%.4f -> realized=%.4f (%s)", schedule, fraction, source)
+    return fraction
+
+
+def _schedule_fee_rate_for_token(clob: PolymarketClient, token_id: str) -> float:
     details_getter = getattr(clob, "get_fee_rate_details", None)
     if callable(details_getter):
         try:

@@ -864,6 +864,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/zeus_status.py",  # read_only_ro_uri: money-funnel heartbeat CLI; opens all 3 live DBs via file:...?mode=ro + PRAGMA query_only=ON; SELECT-only; never writes
         # --- big-direction ops file (2026-06-12): schema cheatsheet generator (READ-ONLY) ---
         "scripts/generate_schema_cheatsheet.py",  # read_only_ro_uri: schema-cheatsheet generator; opens all 3 live DBs via file:...?mode=ro; reads sqlite_master + PRAGMA table_info only; writes docs/reference/schema_cheatsheet.md
+        # --- fee reconciliation evidence (2026-06-12): READ-ONLY fills scan ---
+        "scripts/reconcile_realized_fees.py",  # read_only_ro_uri: venue_order_facts trade-level fee fields + position_current cost-basis arithmetic via file:...?mode=ro; SELECT-only; writes state/fee_reconciliation.json
     }
 )
 

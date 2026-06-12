@@ -13306,7 +13306,14 @@ def _native_quote_book_from_snapshot_row(row: dict[str, Any]):
     min_tick_size = Decimal(str(row.get("min_tick_size") or row.get("tick_size") or "0.01"))
     min_order_size = Decimal(str(row.get("min_order_size") or "1"))
     fee_details = _json_object(row.get("fee_details_json") or row.get("fee_details") or {})
-    fee_rate = fee_rate_fraction_from_details(fee_details)
+    # Realized-fee authority over the schedule CAP (incident 2026-06-12: the
+    # CLOB base_fee=1000bps schedule was consumed as the actual fee — ~10%
+    # phantom tax on every EV — while all realized fills carried 0 bps).
+    from src.contracts.fee_authority import resolve_taker_fee_fraction
+
+    fee_rate, _fee_source = resolve_taker_fee_fraction(
+        fee_rate_fraction_from_details(fee_details)
+    )
     neg_risk = bool(_optional_bool(row.get("neg_risk")) or False)
     depth = _json_object(row.get("orderbook_depth_json") or row.get("orderbook_depth_jsonb") or {})
     yes_token_id = str(row.get("yes_token_id") or "")
