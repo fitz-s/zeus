@@ -166,7 +166,7 @@ def test_model_bias_ens_roundtrip_with_lineage(conn):
         bias_unit="C", posterior_bias_c=-3.2, posterior_sd_c=0.7,
         n_live=14, n_prior=238, n_paired=12, weight_live=0.6,
         paired_delta_c=-1.28, v0_c2=0.30, vo_c2=0.02,
-        estimator="empirical_bayes_shrinkage_v1", training_cutoff="2026-05-20",
+        estimator="empirical_bayes_shrinkage", training_cutoff="2026-05-20",
         contributor_policy="full_contributor_only",
     )
     row = read_bias_model(conn, city="San Francisco", season="MAM", month=5,
@@ -186,7 +186,7 @@ def test_read_bias_model_requires_exact_live_data_version(conn):
                      bias_unit="C", posterior_bias_c=-1.0, posterior_sd_c=0.5,
                      n_live=20, n_prior=200, n_paired=10, weight_live=0.5,
                      paired_delta_c=0.0, v0_c2=0.3, vo_c2=0.02,
-                     estimator="empirical_bayes_shrinkage_v1", training_cutoff=None,
+                     estimator="empirical_bayes_shrinkage", training_cutoff=None,
                      contributor_policy="full_contributor_only")
     # missing live_data_version must NOT silently return an arbitrary row
     with pytest.raises(ValueError, match="live_data_version"):

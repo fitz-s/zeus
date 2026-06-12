@@ -41,7 +41,7 @@ FORECAST_LIVE_STARTUP_JOB_ID = "forecast_live_opendata_startup_catch_up"
 FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID = "forecast_live_opendata_safe_cycle_poll"
 FORECAST_LIVE_HEARTBEAT_JOB_ID = "forecast_live_heartbeat"
 FORECAST_LIVE_SOURCE_HEALTH_JOB_ID = "forecast_live_source_health_probe"
-# Operator Point-1 directive 2026-06-08: U0R/replacement forecast PRODUCTION jobs moved here
+# Operator Point-1 directive 2026-06-08: BAYES_PRECISION_FUSION/replacement forecast PRODUCTION jobs moved here
 # from the live-trading daemon. The heavy ~365MB AIFS ensemble download must run on THIS data
 # daemon, never on the trading process. These ids are registered OUTSIDE the OpenData registry
 # job-set (after the registry/cutover/legacy scheduler is built), on their own dedicated
@@ -58,7 +58,7 @@ REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
 # runs for tens of minutes (8 Open-Meteo models x all cities; slowed further by fail-soft
 # 400-retries on short-range models). On a SHARED max_workers=1 lane it serialized AHEAD of
 # the 5-min materialize, starving readiness production for the whole download (observed
-# 2026-06-08: a 75-min download blocked the materialize so U0R readiness aged out -> the
+# 2026-06-08: a 75-min download blocked the materialize so BAYES_PRECISION_FUSION readiness aged out -> the
 # replacement-forecast hook BLOCKED every live FSR event -> zero trades). A dedicated
 # download lane makes "a long download starves the materialize" structurally impossible:
 # the materialize keeps its own worker and refreshes readiness every interval regardless of

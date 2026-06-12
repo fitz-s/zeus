@@ -196,7 +196,7 @@ def _settings_for_stage(stage: str, **overrides: object) -> dict[str, object]:
         "edli_live_operator_authorized": stage == "edli_live",
     }
     edli.update(overrides)
-    return {"edli_v1": edli}
+    return {"edli": edli}
 
 
 def test_release_gate_passes_only_as_read_only_evidence(tmp_path: Path) -> None:

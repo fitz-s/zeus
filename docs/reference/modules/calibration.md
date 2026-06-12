@@ -4,7 +4,7 @@
 **Current code path:** `src/calibration`
 **Authority status:** Dense module reference for post-signal calibration, drift management, and training-group hygiene.
 
-> **Strategy of record (2026-06-09):** Extended Platt (`platt.py`) is now the **legacy baseline / LCB-cap** calibration. The live q is built by the replacement chain — per-model walk-forward de-bias (`src/forecast/u0r_bayes.py` `eb_bias`) → T2 Bayesian fusion (`fuse_u0r_posterior`) → settlement-preimage integration (**`src/calibration/emos.py` `bin_probability_settlement`**, in this zone). Authority `docs/authority/replacement_final_form_2026_06_09.md`. `emos.py`, not Platt, owns the live q.
+> **Strategy of record (2026-06-09):** Extended Platt (`platt.py`) is now the **legacy baseline / LCB-cap** calibration. The live q is built by the replacement chain — per-model walk-forward de-bias (`src/forecast/bayes_precision_fusion.py` `eb_bias`) → T2 Bayesian fusion (`fuse_bayes_precision_posterior`) → settlement-preimage integration (**`src/calibration/emos.py` `bin_probability_settlement`**, in this zone). Authority `docs/authority/replacement_final_form_2026_06_09.md`. `emos.py`, not Platt, owns the live q.
 
 ## 1. Module purpose
 Turn raw predictive distributions into calibrated probabilities using point-in-time features, correct outcome pairing, and defensible grouping/drift logic. (Platt path = baseline; live q via `emos.py` — see banner.)

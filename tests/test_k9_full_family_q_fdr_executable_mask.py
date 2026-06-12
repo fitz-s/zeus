@@ -328,10 +328,10 @@ def test_d_selected_bin_absent_returns_selected_snapshot_missing(monkeypatch):
     was tradeable.  The new gate: entry gate checks ONLY the selected bin.
     """
     from src.config import settings
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli["edli_emos_sole_calibrator_enabled"] = False
     edli["edli_bias_correction_enabled"] = False
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
 
     from src.engine.event_reactor_adapter import executable_snapshot_gate_from_trade_conn
 
@@ -467,10 +467,10 @@ def test_a_q_vector_byte_identical_whether_8_or_11_bins_have_snapshots(monkeypat
     from types import SimpleNamespace
 
     from src.config import settings
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli["edli_emos_sole_calibrator_enabled"] = False
     edli["edli_bias_correction_enabled"] = False
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
 
     from src.engine.event_reactor_adapter import _snapshot_p_raw
 

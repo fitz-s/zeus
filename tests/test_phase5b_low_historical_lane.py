@@ -779,7 +779,7 @@ class TestRefitPlattV2LowMetricIsolation:
     The current script hardcodes 'high:' bucket keys and HIGH_LOCALDAY_MAX throughout.
     Phase 5B parametrizes via METRIC_SPECS iteration. These tests anchor that contract.
 
-    Target: scripts.refit_platt — refit_v2() + _fit_bucket() (exists but hardcoded — RED)
+    Target: scripts.refit_platt — refit() + _fit_bucket() (exists but hardcoded — RED)
     """
 
     def _make_calibration_db(self, tmp_path, temperature_metric: str, data_version: str):
@@ -837,7 +837,7 @@ class TestRefitPlattV2LowMetricIsolation:
         bucket_keys prefixed 'low:', never 'high:'."""
         from unittest.mock import patch, MagicMock
         from src.types.metric_identity import LOW_LOCALDAY_MIN
-        from scripts.refit_platt import refit_v2
+        from scripts.refit_platt import refit
 
         db = self._make_calibration_db(
             tmp_path,
@@ -852,11 +852,11 @@ class TestRefitPlattV2LowMetricIsolation:
 
         with patch("scripts.refit_platt.save_platt_model", side_effect=fake_save), \
              patch("scripts.refit_platt.deactivate_model", return_value=0):
-            refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
+            refit(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_keys = [k for k in captured_keys if k.startswith("high:")]
         assert not high_keys, (
-            f"refit_v2 with LOW_LOCALDAY_MIN emitted 'high:' bucket keys: {high_keys}. "
+            f"refit with LOW_LOCALDAY_MIN emitted 'high:' bucket keys: {high_keys}. "
             "Low-track refit must use 'low:' prefix."
         )
 
@@ -865,7 +865,7 @@ class TestRefitPlattV2LowMetricIsolation:
         during a low-track refit, never with HIGH_LOCALDAY_MAX."""
         from unittest.mock import patch, call
         from src.types.metric_identity import LOW_LOCALDAY_MIN, HIGH_LOCALDAY_MAX
-        from scripts.refit_platt import refit_v2
+        from scripts.refit_platt import refit
 
         db = self._make_calibration_db(
             tmp_path,
@@ -881,7 +881,7 @@ class TestRefitPlattV2LowMetricIsolation:
 
         with patch("scripts.refit_platt.deactivate_model", side_effect=fake_deactivate), \
              patch("scripts.refit_platt.save_platt_model", return_value=None):
-            refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
+            refit(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_calls = [m for m in deactivate_calls if m == HIGH_LOCALDAY_MAX]
         assert not high_calls, (
@@ -894,7 +894,7 @@ class TestRefitPlattV2LowMetricIsolation:
         during a low-track refit, never with HIGH_LOCALDAY_MAX."""
         from unittest.mock import patch
         from src.types.metric_identity import LOW_LOCALDAY_MIN, HIGH_LOCALDAY_MAX
-        from scripts.refit_platt import refit_v2
+        from scripts.refit_platt import refit
 
         db = self._make_calibration_db(
             tmp_path,
@@ -909,7 +909,7 @@ class TestRefitPlattV2LowMetricIsolation:
 
         with patch("scripts.refit_platt.save_platt_model", side_effect=fake_save), \
              patch("scripts.refit_platt.deactivate_model", return_value=0):
-            refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
+            refit(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_calls = [m for m in save_calls if m == HIGH_LOCALDAY_MAX]
         assert not high_calls, (
@@ -924,7 +924,7 @@ class TestRefitPlattV2LowMetricIsolation:
         """
         from unittest.mock import patch
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
-        from scripts.refit_platt import refit_v2
+        from scripts.refit_platt import refit
 
         db = self._make_calibration_db(
             tmp_path,
@@ -932,7 +932,7 @@ class TestRefitPlattV2LowMetricIsolation:
             data_version=HIGH_LOCALDAY_MAX.data_version,
         )
 
-        # refit_v2 currently doesn't accept metric_identity param — this test RED until
+        # refit currently doesn't accept metric_identity param — this test RED until
         # 5B adds the param. The high regression guard is only GREEN after refactor lands.
         captured_keys = []
 
@@ -941,25 +941,25 @@ class TestRefitPlattV2LowMetricIsolation:
 
         with patch("scripts.refit_platt.save_platt_model", side_effect=fake_save), \
              patch("scripts.refit_platt.deactivate_model", return_value=0):
-            refit_v2(db, metric_identity=HIGH_LOCALDAY_MAX, dry_run=False, force=True)
+            refit(db, metric_identity=HIGH_LOCALDAY_MAX, dry_run=False, force=True)
 
         low_keys = [k for k in captured_keys if k.startswith("low:")]
         assert not low_keys, (
-            f"refit_v2 with HIGH_LOCALDAY_MAX emitted 'low:' bucket keys: {low_keys}. "
+            f"refit with HIGH_LOCALDAY_MAX emitted 'low:' bucket keys: {low_keys}. "
             "High-track refit must not bleed into low: namespace."
         )
 
     def test_refit_v2_accepts_metric_identity_kwarg(self, tmp_path):
-        """R-AO (acceptance): refit_v2 must accept a metric_identity kwarg to select track.
+        """R-AO (acceptance): refit must accept a metric_identity kwarg to select track.
 
-        Currently refit_v2(conn, *, dry_run, force) has no metric_identity param.
+        Currently refit(conn, *, dry_run, force) has no metric_identity param.
         Phase 5B adds it. This test fails RED until exec-emma adds the param.
         """
         import inspect
-        from scripts.refit_platt import refit_v2
+        from scripts.refit_platt import refit
 
-        sig = inspect.signature(refit_v2)
+        sig = inspect.signature(refit)
         assert "metric_identity" in sig.parameters, (
-            "refit_v2 has no metric_identity parameter. "
+            "refit has no metric_identity parameter. "
             "Phase 5B must add metric_identity kwarg to enable low-track refit."
         )

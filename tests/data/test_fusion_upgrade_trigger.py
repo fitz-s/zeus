@@ -52,7 +52,7 @@ def _insert_posterior(
     used_models: list[str],
     computed_at: str,
 ) -> None:
-    prov = {"u0r_fusion": {"used_models": used_models}}
+    prov = {"bayes_precision_fusion": {"used_models": used_models}}
     conn.execute(
         """
         INSERT INTO forecast_posteriors

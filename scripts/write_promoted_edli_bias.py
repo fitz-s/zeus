@@ -9,7 +9,7 @@
 #   column (SCHEMA_WORLD_VERSION≥8). Superseded by write_d7_rolling_edli_bias.py for
 #   causal rolling bias; retain for static snapshot operator overrides. DRY-RUN default.
 # Authority basis: A4 per-city EDLI bias correction. Writes model_bias_ens rows the LIVE
-#   _snapshot_p_raw reads when edli_v1.edli_bias_correction_enabled is ON.
+#   _snapshot_p_raw reads when edli.edli_bias_correction_enabled is ON.
 #   2026-06-03 (#89 honest q_lcb): now also stamps heterogeneity_var_c2 (mean-estimation
 #   drift = var_resid/n) and total_residual_sd_c (full predictive σ = σ_resid·sqrt(1+1/n)),
 #   the genuine forward predictive uncertainty the live q_lcb inflater reads. Previously

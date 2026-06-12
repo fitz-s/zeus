@@ -476,7 +476,7 @@ def test_curve_side_mismatch_is_unconstructable():
 def test_no_runtime_flag_routes_materialization():
     """SINGLE PATH: _native_side_candidate_from_proof has no env/settings toggle.
 
-    The materialization is one path; no ZEUS_* env var or edli_v1 setting can
+    The materialization is one path; no ZEUS_* env var or edli setting can
     route it to an alternate candidate shape. We assert the source carries no
     os.environ / settings lookup inside the helper body.
     """

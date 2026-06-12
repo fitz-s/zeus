@@ -75,7 +75,7 @@ def _check_live_sentinel() -> None:
     """Raise SystemExit(1) if the live-rebuild sentinel file exists.
 
     Called at module load (below). Isolated as a function so tests can patch
-    it out while still importing the module's rebuild_v2 / rebuild_all_v2.
+    it out while still importing the module's rebuild / rebuild_all.
     The check fires before any sqlite3.connect call.
     """
     if _SENTINEL_PATH.exists():
@@ -219,7 +219,7 @@ def _native_error_params_for_snapshot(
     snapshot is then rebuilt uncorrected).
 
     Caches the °C model per (city, season_label, metric) for the lifetime of one
-    rebuild_v2 call. The °C→native conversion is a pure scalar (×1.8 for degF)
+    rebuild call. The °C→native conversion is a pure scalar (×1.8 for degF)
     applied per snapshot so a single cached fit serves every snapshot in the
     bucket.
     """
@@ -1534,7 +1534,7 @@ def _dry_run_evaluate_snapshot_v2(
     stats.per_city[city.name] = stats.per_city.get(city.name, 0) + len(bins)
 
 
-def rebuild_v2(
+def rebuild(
     conn: sqlite3.Connection,
     *,
     dry_run: bool,
@@ -1574,7 +1574,7 @@ def rebuild_v2(
             f"supported: {SUPPORTED_ERROR_MODELS!r}"
         )
     # Per-(city, season, metric) PredictiveErrorModel cache, lifetime = one
-    # rebuild_v2 call. Shared by the sequential and parallel pre-compute paths.
+    # rebuild call. Shared by the sequential and parallel pre-compute paths.
     error_cache: dict = {}
 
     stats = RebuildStatsV2()
@@ -1917,7 +1917,7 @@ def rebuild_v2(
     return stats
 
 
-def rebuild_all_v2(
+def rebuild_all(
     conn: sqlite3.Connection,
     *,
     dry_run: bool,
@@ -1941,7 +1941,7 @@ def rebuild_all_v2(
 ) -> dict[str, RebuildStatsV2]:
     """Rebuild calibration_pairs_v2 for all METRIC_SPECS.
 
-    T1E: Each metric spec is processed via rebuild_v2, which commits per
+    T1E: Each metric spec is processed via rebuild, which commits per
     (city, metric) bucket. No outer SAVEPOINT — each bucket is independently
     atomic. A metric-level failure does not roll back previously committed
     city buckets from prior metrics; operators should inspect the DB on failure.
@@ -1954,7 +1954,7 @@ def rebuild_all_v2(
         if temperature_metric == "all" or spec.identity.temperature_metric == temperature_metric
     ]
     for spec in specs:
-        stats = rebuild_v2(
+        stats = rebuild(
             conn,
             dry_run=dry_run,
             force=force,
@@ -2260,7 +2260,7 @@ def main() -> int:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 600000")
         try:
-            per_metric = rebuild_all_v2(
+            per_metric = rebuild_all(
                 conn,
                 dry_run=args.dry_run,
                 force=args.force,
@@ -2333,7 +2333,7 @@ def main() -> int:
             # still has the full wait window against riskguard ticks.
             conn.execute("PRAGMA busy_timeout = 600000")
             try:
-                per_metric = rebuild_all_v2(
+                per_metric = rebuild_all(
                     conn,
                     dry_run=args.dry_run,
                     force=args.force,

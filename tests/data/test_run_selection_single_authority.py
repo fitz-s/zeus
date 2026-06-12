@@ -121,19 +121,19 @@ def test_download_job_skips_with_receipt_when_probes_unresolved(monkeypatch, tmp
     assert report["status"] == "CYCLE_PROBE_UNRESOLVED_SKIP"
 
 
-def test_u0r_capture_lane_skips_with_receipt_when_probes_unresolved(monkeypatch) -> None:
+def test_bayes_precision_fusion_capture_lane_skips_with_receipt_when_probes_unresolved(monkeypatch) -> None:
     import src.config as cfg
     import src.data.replacement_forecast_production as production
 
     monkeypatch.setitem(
-        cfg.settings["edli_v1"], "replacement_0_1_u0r_multimodel_capture_enabled", True
+        cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_capture_enabled", True
     )
     monkeypatch.setattr(production, "_probe_resolved_available_cycle", lambda: None)
-    report = production._download_u0r_extra_raw_inputs_if_needed(
+    report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         {"forecast_db": "zeus-forecasts.db"}
     )
     assert report is not None
-    assert report["status"] == "U0R_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"
 
 
 def test_anchor_probe_mirrors_the_bucket_rung(monkeypatch) -> None:
@@ -190,7 +190,7 @@ def test_manifest_availability_is_proof_of_possession_bounded() -> None:
 
 
 def test_availability_poll_also_feeds_the_extras_lane(monkeypatch, tmp_path) -> None:
-    """Relationship pin: the probe-driven poll tick invokes the u0r extras lane so
+    """Relationship pin: the probe-driven poll tick invokes the bayes_precision_fusion extras lane so
     fusion's same-cycle multimodel rows (the q_lcb substrate) arrive with the legs —
     never hours later on a lag-modeled cron."""
     import src.data.replacement_cycle_availability as availability
@@ -210,10 +210,10 @@ def test_availability_poll_also_feeds_the_extras_lane(monkeypatch, tmp_path) -> 
 
     def _record_extras(cfg):
         extras_calls.append(dict(cfg))
-        return {"status": "U0R_EXTRA_RAW_INPUTS_DOWNLOADED"}
+        return {"status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"}
 
     monkeypatch.setattr(
-        production, "_download_u0r_extra_raw_inputs_if_needed", _record_extras
+        production, "_download_bayes_precision_fusion_extra_raw_inputs_if_needed", _record_extras
     )
     report = production._replacement_cycle_availability_poll_if_needed(
         {
@@ -224,4 +224,4 @@ def test_availability_poll_also_feeds_the_extras_lane(monkeypatch, tmp_path) -> 
     )
     assert report is not None
     assert extras_calls, "poll tick must feed the extras lane (q_lcb substrate)"
-    assert report["u0r_extras_status"] == "U0R_EXTRA_RAW_INPUTS_DOWNLOADED"
+    assert report["bayes_precision_fusion_extras_status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"

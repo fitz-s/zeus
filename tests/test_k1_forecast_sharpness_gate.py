@@ -3,7 +3,7 @@
 # Authority basis: Phase-2 K1 — ForecastSharpnessEvidence contract (structural fix plan
 #   §3 P2.2; root cause K1 "no forecast-sharpness contract -> flat q -> 96% buy_no").
 #   Antibody discipline: the TYPE is required at construction (TypeError on omission);
-#   the EDGE-REJECTION behavior is flag-gated OFF (edli_v1.forecast_sharpness_gate_enabled).
+#   the EDGE-REJECTION behavior is flag-gated OFF (edli.forecast_sharpness_gate_enabled).
 
 """K1 relationship tests: forecast-sharpness gate at MarketAnalysis construction.
 
@@ -122,15 +122,15 @@ def _make_ma(
 def test_flat_c_city_suppressed_when_gate_on(monkeypatch):
     monkeypatch.setenv("ZEUS_FORECAST_SHARPNESS_GATE", "1")  # see conftest hook
     from src.config import settings
-    settings["edli_v1"]["forecast_sharpness_gate_enabled"] = True
-    settings["edli_v1"]["forecast_sharpness_mae_multiplier"] = 1.5
+    settings["edli"]["forecast_sharpness_gate_enabled"] = True
+    settings["edli"]["forecast_sharpness_mae_multiplier"] = 1.5
     try:
         bins = _c_bins()
         ma = _make_ma(unit="C", bins=bins, sharpness=_ev("C", 2.5, 1.0))
         edges = ma.find_edges(n_bootstrap=50)
         assert edges == [], "flat C city (MAE 2.5 >= 1.5*1) must emit zero edges"
     finally:
-        settings["edli_v1"]["forecast_sharpness_gate_enabled"] = False
+        settings["edli"]["forecast_sharpness_gate_enabled"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -139,15 +139,15 @@ def test_flat_c_city_suppressed_when_gate_on(monkeypatch):
 
 def test_sharp_c_city_emits_when_gate_on():
     from src.config import settings
-    settings["edli_v1"]["forecast_sharpness_gate_enabled"] = True
-    settings["edli_v1"]["forecast_sharpness_mae_multiplier"] = 1.5
+    settings["edli"]["forecast_sharpness_gate_enabled"] = True
+    settings["edli"]["forecast_sharpness_mae_multiplier"] = 1.5
     try:
         bins = _c_bins()
         ma = _make_ma(unit="C", bins=bins, sharpness=_ev("C", 1.1, 1.0))
         edges = ma.find_edges(n_bootstrap=50)
         assert len(edges) >= 1, "sharp C city (MAE 1.1 < 1.5*1) must NOT be suppressed"
     finally:
-        settings["edli_v1"]["forecast_sharpness_gate_enabled"] = False
+        settings["edli"]["forecast_sharpness_gate_enabled"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +156,8 @@ def test_sharp_c_city_emits_when_gate_on():
 
 def test_f_unit_threshold_uses_native_bin_width():
     from src.config import settings
-    settings["edli_v1"]["forecast_sharpness_gate_enabled"] = True
-    settings["edli_v1"]["forecast_sharpness_mae_multiplier"] = 1.5
+    settings["edli"]["forecast_sharpness_gate_enabled"] = True
+    settings["edli"]["forecast_sharpness_mae_multiplier"] = 1.5
     try:
         bins = _f_bins()  # width=2
         # MAE 3.5°F: 1.5*2 = 3.0 threshold -> 3.5 >= 3.0 -> SUPPRESS.
@@ -168,7 +168,7 @@ def test_f_unit_threshold_uses_native_bin_width():
         ma_sharp = _make_ma(unit="F", bins=bins, sharpness=_ev("F", 2.5, 2.0))
         assert len(ma_sharp.find_edges(n_bootstrap=50)) >= 1, "MAE 2.5°F < 3.0 must emit"
     finally:
-        settings["edli_v1"]["forecast_sharpness_gate_enabled"] = False
+        settings["edli"]["forecast_sharpness_gate_enabled"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -197,15 +197,15 @@ def test_missing_forecast_sharpness_is_typeerror():
 
 def test_day0_exempt_bypasses_gate():
     from src.config import settings
-    settings["edli_v1"]["forecast_sharpness_gate_enabled"] = True
-    settings["edli_v1"]["forecast_sharpness_mae_multiplier"] = 1.5
+    settings["edli"]["forecast_sharpness_gate_enabled"] = True
+    settings["edli"]["forecast_sharpness_mae_multiplier"] = 1.5
     try:
         bins = _c_bins()
         # exempt() carries no MAE; obs replaces the forecast on day0/imminent paths.
         ma = _make_ma(unit="C", bins=bins, sharpness=_ev("C", None, 1.0, day0=True))
         assert len(ma.find_edges(n_bootstrap=50)) >= 1, "day0 exempt must bypass suppression"
     finally:
-        settings["edli_v1"]["forecast_sharpness_gate_enabled"] = False
+        settings["edli"]["forecast_sharpness_gate_enabled"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -214,14 +214,14 @@ def test_day0_exempt_bypasses_gate():
 
 def test_missing_evidence_fails_closed():
     from src.config import settings
-    settings["edli_v1"]["forecast_sharpness_gate_enabled"] = True
-    settings["edli_v1"]["forecast_sharpness_mae_multiplier"] = 1.5
+    settings["edli"]["forecast_sharpness_gate_enabled"] = True
+    settings["edli"]["forecast_sharpness_mae_multiplier"] = 1.5
     try:
         bins = _c_bins()
         ma = _make_ma(unit="C", bins=bins, sharpness=_ev("C", None, 1.0, present=False))
         assert ma.find_edges(n_bootstrap=50) == [], "missing forecast_skill row must fail closed"
     finally:
-        settings["edli_v1"]["forecast_sharpness_gate_enabled"] = False
+        settings["edli"]["forecast_sharpness_gate_enabled"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +254,8 @@ def test_family_scan_empty_for_gated_city():
     from src.config import settings
     from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
 
-    settings["edli_v1"]["forecast_sharpness_gate_enabled"] = True
-    settings["edli_v1"]["forecast_sharpness_mae_multiplier"] = 1.5
+    settings["edli"]["forecast_sharpness_gate_enabled"] = True
+    settings["edli"]["forecast_sharpness_mae_multiplier"] = 1.5
     try:
         bins = _c_bins()
         ma = _make_ma(unit="C", bins=bins, sharpness=_ev("C", 2.5, 1.0))
@@ -265,7 +265,7 @@ def test_family_scan_empty_for_gated_city():
         ma2 = _make_ma(unit="C", bins=bins, sharpness=_ev("C", 1.1, 1.0))
         assert len(scan_full_hypothesis_family(ma2, n_bootstrap=50)) >= 1
     finally:
-        settings["edli_v1"]["forecast_sharpness_gate_enabled"] = False
+        settings["edli"]["forecast_sharpness_gate_enabled"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +277,7 @@ def test_family_scan_empty_for_gated_city():
 def test_flag_off_emit_unchanged():
     from src.config import settings
     # Ensure flag is OFF (default).
-    settings["edli_v1"]["forecast_sharpness_gate_enabled"] = False
+    settings["edli"]["forecast_sharpness_gate_enabled"] = False
 
     bins = _c_bins()
     p = _peaked_dist(len(bins), len(bins) // 2, mass=0.5)

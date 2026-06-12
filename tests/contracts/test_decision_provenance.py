@@ -102,7 +102,7 @@ def _bundle() -> _FakeBundle:
         },
         provenance_json={
             "replacement_q_mode": "FUSED_NORMAL_PARTIAL",
-            "u0r_fusion": {
+            "bayes_precision_fusion": {
                 "method": "bayes_precision_fusion",
                 "used_models": ["ecmwf_ifs", "gem_global", "jma_seamless"],
                 "dropped_models": ["gfs_global"],

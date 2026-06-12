@@ -675,9 +675,9 @@ def _check_stage_settings(stage: str, settings_json: Path) -> GateResult:
         settings = json.loads(settings_json.read_text())
     except json.JSONDecodeError as exc:
         return GateResult("stage_settings", FAIL, f"invalid_json:{exc}")
-    edli_cfg = settings.get("edli_v1") if isinstance(settings, dict) else None
+    edli_cfg = settings.get("edli") if isinstance(settings, dict) else None
     if not isinstance(edli_cfg, dict):
-        return GateResult("stage_settings", FAIL, "missing_edli_v1")
+        return GateResult("stage_settings", FAIL, "missing_edli")
     errors: list[str] = []
     if str(edli_cfg.get("live_execution_mode") or "") != stage:
         errors.append(f"live_execution_mode={edli_cfg.get('live_execution_mode')!r}")

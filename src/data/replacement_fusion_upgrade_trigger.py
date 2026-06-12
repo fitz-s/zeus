@@ -5,7 +5,7 @@
 #   capture (gem via previous_runs exception) at the AIFS/anchor cycle; a provider whose
 #   single_runs row was not yet persisted at materialize time is dropped, and the resulting
 #   served<5 posterior is then marked "covered" (q_lcb NOT NULL) by all three coverage gates —
-#   which key coverage on the baseline_b0 (ecmwf_open_data) run, BLIND to the u0r decorrelated
+#   which key coverage on the baseline_b0 (ecmwf_open_data) run, BLIND to the bayes_precision_fusion decorrelated
 #   instrument set. So the scope never re-materializes even after its 5th provider lands.
 #   K-decision: ONE comparison — the latest posterior's served decorrelated-provider FAMILY set
 #   vs the family set CAPTURABLE NOW at the SAME source_cycle_time. A strict superset = an
@@ -114,7 +114,7 @@ def _latest_posterior_served(
     conn: sqlite3.Connection, *, city: str, target_date: str, metric: str
 ) -> tuple[str | None, frozenset[str]]:
     """Return (source_cycle_time_iso, served_provider_family_set) for the LATEST soft-anchor
-    posterior of this scope. The served set is derived from provenance_json.u0r_fusion.used_models
+    posterior of this scope. The served set is derived from provenance_json.bayes_precision_fusion.used_models
     (the SAME field the fusion records). (None, empty) when there is no posterior or it carries no
     used_models (a single-anchor / pre-fusion row — nothing to upgrade from). Fail-soft: any read
     or JSON error -> (None, empty)."""
@@ -138,7 +138,7 @@ def _latest_posterior_served(
         prov = json.loads(row[1]) if row[1] else {}
     except Exception:
         return source_cycle_iso, frozenset()
-    used = (prov.get("u0r_fusion", {}) or {}).get("used_models") or []
+    used = (prov.get("bayes_precision_fusion", {}) or {}).get("used_models") or []
     if not isinstance(used, (list, tuple)):
         return source_cycle_iso, frozenset()
     return source_cycle_iso, decorrelated_provider_families_of(set(str(m) for m in used))

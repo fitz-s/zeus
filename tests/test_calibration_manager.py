@@ -934,7 +934,7 @@ class TestBlockedOOSCalibration:
         report = {
             "run_id": "run-1",
             "model_name": "extended_platt",
-            "model_version": "blocked_oos_v1",
+            "model_version": "blocked_oos",
             "metrics": {
                 "n_test_groups": 40,
                 "n_test_rows": 440,

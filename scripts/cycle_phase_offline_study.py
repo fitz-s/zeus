@@ -23,7 +23,7 @@ Stages (sub-commands):
   grade       - join scratch posteriors to VERIFIED settlement truth and emit per-phase metrics.
 
 WHY SCRATCH-FAITHFUL: materialize_replacement_forecast_shadow(conn, request) consumes raw_model_
-forecasts + settlement history from the PASSED conn for U0R fusion; the scratch DB carries those
+forecasts + settlement history from the PASSED conn for bayes_precision_fusion; the scratch DB carries those
 rows verbatim, and the flags read from config are the live flags, so a scratch posterior is
 byte-faithful to what live would have produced from the same cycle. EB-bias + sigma-floor lookups
 open the live world DB read-only (flag-gated; EB bias is OFF in current config).
@@ -730,7 +730,7 @@ def grade(scratch_db: Path, *, trades_db: Path) -> dict[str, object]:
             prov = json.loads(r["provenance_json"] or "{}")
             q_settled = float(q[settled_qkey])
             modal_key = max(q, key=lambda k: q[k]) if q else None
-            # The fused center mu (u0r_fusion.anchor_value_c) is in CELSIUS; settlement_value is in
+            # The fused center mu (bayes_precision_fusion.anchor_value_c) is in CELSIUS; settlement_value is in
             # the city's settlement unit (F for US cities). Convert settle_val to C so the residual
             # (settled - mu) is a true degC error, not a unit-mismatch artifact.
             from src.config import cities_by_name as _cbn  # noqa: PLC0415
@@ -748,7 +748,7 @@ def grade(scratch_db: Path, *, trades_db: Path) -> dict[str, object]:
                 "logloss": -math.log(max(1e-12, min(1.0, q_settled))),
                 "q_mode": prov.get("replacement_q_mode"),
                 "q_shape": prov.get("q_shape"),
-                "mu": (prov.get("u0r_fusion") or {}).get("anchor_value_c"),
+                "mu": (prov.get("bayes_precision_fusion") or {}).get("anchor_value_c"),
             }
             # (a) bounds coverage. NOTE: the per-cell "settled bin's q within [lcb,ucb]" check is
             # VACUOUS-BY-CONSTRUCTION (the materializer clips q_lcb <= q_point <= q_ucb per bin),

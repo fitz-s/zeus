@@ -47,7 +47,7 @@ def apply_day0_mask(state: LiveBinState, mask: Mapping[str, float]) -> LiveBinSt
     )
 
 
-def apply_orderbook_event_v1(state: LiveBinState, _event: object) -> LiveBinState:
-    """Orderbook data is executable-cost evidence in EDLI v1; it does not change q."""
+def apply_orderbook_event(state: LiveBinState, _event: object) -> LiveBinState:
+    """Orderbook data is executable-cost evidence; it does not change q."""
 
     return state

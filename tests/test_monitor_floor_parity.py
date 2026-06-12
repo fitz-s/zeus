@@ -80,11 +80,11 @@ _BINS = [(None, 26.0), (27.0, 27.0), (28.0, None)]
 _TARGET_D = date(2026, 7, 15)  # JJA season
 
 
-def _edli_v1_floor_on():
+def _edli_floor_on():
     return {"edli_settlement_sigma_floor_enabled": True, "edli_settlement_sigma_floor_required": False}
 
 
-def _edli_v1_floor_off():
+def _edli_floor_off():
     return {"edli_settlement_sigma_floor_enabled": False, "edli_settlement_sigma_floor_required": False}
 
 
@@ -159,7 +159,7 @@ def test_r1_floor_enabled_cell_missing_marks_not_fresh(monkeypatch):
     city = _make_city()
     semantics = MagicMock()
 
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_on(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_on(), "ensemble": {}}):
         q = _build_monitor_one_calibrator_q(
             city=city,
             target_d=_TARGET_D,
@@ -214,7 +214,7 @@ def test_r2_floor_present_both_sides_applies_parity(monkeypatch):
     city = _make_city()
     semantics = MagicMock()
 
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_on(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_on(), "ensemble": {}}):
         q = _build_monitor_one_calibrator_q(
             city=city,
             target_d=_TARGET_D,
@@ -241,14 +241,14 @@ def test_r2_floor_present_q_is_wider_than_no_floor(monkeypatch):
     semantics = MagicMock()
 
     monkeypatch.setattr(emos_mod, "_sigma_floor_cache", _FLOOR_TABLE_EMPTY, raising=False)
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_off(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_off(), "ensemble": {}}):
         q_off = _build_monitor_one_calibrator_q(
             city=city, target_d=_TARGET_D, metric="high", lead_days=3.0,
             member_extrema=_MEMBERS, semantics=semantics, all_bins=_BINS,
         )
 
     monkeypatch.setattr(emos_mod, "_sigma_floor_cache", _FLOOR_TABLE_WITH_CELL, raising=False)
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_on(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_on(), "ensemble": {}}):
         q_on = _build_monitor_one_calibrator_q(
             city=city, target_d=_TARGET_D, metric="high", lead_days=3.0,
             member_extrema=_MEMBERS, semantics=semantics, all_bins=_BINS,
@@ -279,7 +279,7 @@ def test_r3_floor_disabled_no_blocking(monkeypatch):
     city = _make_city()
     semantics = MagicMock()
 
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_off(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_off(), "ensemble": {}}):
         q = _build_monitor_one_calibrator_q(
             city=city,
             target_d=_TARGET_D,
@@ -311,7 +311,7 @@ def test_r3_low_metric_with_missing_floor_cell_flag_off_no_blocking(monkeypatch)
     city = _make_city()
     semantics = MagicMock()
 
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_off(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_off(), "ensemble": {}}):
         q = _build_monitor_one_calibrator_q(
             city=city,
             target_d=_TARGET_D,

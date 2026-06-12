@@ -208,7 +208,7 @@ def test_prune_working_set_expires_stale_fsr_before_skip_snapshot(monkeypatch):
             "reactor_prune_interval_seconds": 0,
             "reactor_prune_batch_limit": 10,
         }
-        if name == "edli_v1"
+        if name == "edli"
         else (default if default is not None else {}),
     )
 

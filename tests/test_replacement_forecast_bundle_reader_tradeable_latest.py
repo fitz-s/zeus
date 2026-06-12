@@ -3,7 +3,7 @@
 # Authority basis: operator clobber-category directive 2026-06-10 (tradeable-latest read
 #   semantics). Third recurrence of the bounds-less clobber: a NEWER model cycle that has
 #   anchor manifests but no fusion instruments yet writes a bounds-less posterior
-#   (q_lcb_json NULL, replacement_q_mode=U0R_CAPTURE_MISSING — a SHADOW row by design) which
+#   (q_lcb_json NULL, replacement_q_mode=BAYES_PRECISION_FUSION_CAPTURE_MISSING — a SHADOW row by design) which
 #   the absolute-latest read semantics serve over the older tradeable-grade FUSED row, so live
 #   eligibility collapses. The fix makes the category impossible at the ONE bundle reader: LIVE
 #   selection prefers the latest row WITH certified bounds + live-eligible q_mode over a newer
@@ -43,7 +43,7 @@ from src.state.schema.v2_schema import apply_canonical_schema
 UTC = timezone.utc
 _TOPO_HASH = "topo-hash-tradeable-001"
 _FUSED_FULL = "FUSED_NORMAL_FULL"
-_U0R_MISSING = "U0R_CAPTURE_MISSING"
+_BAYES_PRECISION_FUSION_MISSING = "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 
 
 @dataclass(frozen=True)
@@ -245,13 +245,13 @@ def test_newer_bounds_less_does_not_clobber_older_fused() -> None:
         q_mode=_FUSED_FULL,
         with_bounds=True,
     )
-    # NEWER bounds-less SHADOW row (06Z cycle, instruments lag -> U0R_CAPTURE_MISSING).
+    # NEWER bounds-less SHADOW row (06Z cycle, instruments lag -> BAYES_PRECISION_FUSION_CAPTURE_MISSING).
     shadow_id = _insert_posterior(
         conn,
         source_cycle_time=_dt(6, 6),
         source_available_at=_dt(6, 11),
         computed_at=_dt(6, 11, 30),
-        q_mode=_U0R_MISSING,
+        q_mode=_BAYES_PRECISION_FUSION_MISSING,
         with_bounds=False,
     )
     assert shadow_id > fused_id
@@ -333,7 +333,7 @@ def test_older_fused_beyond_staleness_served_with_brand() -> None:
         source_cycle_time=_dt(6, 6),
         source_available_at=_dt(6, 11),
         computed_at=_dt(6, 11, 30),
-        q_mode=_U0R_MISSING,
+        q_mode=_BAYES_PRECISION_FUSION_MISSING,
         with_bounds=False,
     )
     readiness = _readiness(
@@ -382,7 +382,7 @@ def test_afternoon_clobber_does_not_change_eligibility() -> None:
         source_cycle_time=_dt(6, 6),
         source_available_at=_dt(6, 11),
         computed_at=_dt(6, 11, 30),
-        q_mode=_U0R_MISSING,
+        q_mode=_BAYES_PRECISION_FUSION_MISSING,
         with_bounds=False,
     )
     readiness_after = _readiness(

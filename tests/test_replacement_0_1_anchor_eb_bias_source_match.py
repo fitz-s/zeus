@@ -51,8 +51,8 @@ _FOREIGN_ENS_MARKERS = ("opendata", "open_data", "mx2t3", "mn2t3", "_ens", "ense
 
 def _edli_cfg() -> dict:
     settings = json.loads((ROOT / "config" / "settings.json").read_text(encoding="utf-8"))
-    edli = settings.get("edli_v1", {})
-    assert isinstance(edli, dict), "edli_v1 section missing"
+    edli = settings.get("edli", {})
+    assert isinstance(edli, dict), "edli section missing"
     return edli
 
 

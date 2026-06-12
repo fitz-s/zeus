@@ -10,7 +10,7 @@
 All (city, target\_date, temperature\_metric) triples with both a VERIFIED settlement and at least one recorded live posterior whose `computed_at` precedes local day-start. All cells are `target_date = 2026-06-08`. For each cell, the posterior with the **latest** `computed_at` on 2026-06-07 is taken as "the live q." **n = 39 cells** (33 high, 6 low). All graded by all three arms; no exclusions.
 
 ### Three arms (identical cell set)
-- **Arm A (live q):** The recorded `q_json` from `forecast_posteriors`. Shape = AIFS 51-member ensemble member votes; center/sigma overridden by `anchor_value_c` / `anchor_sigma_c` from the U0R soft-anchor.
+- **Arm A (live q):** The recorded `q_json` from `forecast_posteriors`. Shape = AIFS 51-member ensemble member votes; center/sigma overridden by `anchor_value_c` / `anchor_sigma_c` from the BAYES_PRECISION_FUSION soft-anchor.
 - **Arm B (fused-N direct):** N(mu\*, sigma\*) integrated over the identical bin topology as Arm A.
 - **Arm C (live-shape recentered):** The live q's implied distribution recentered on mu\* — shape unchanged, center shifted. Separates center-gain from shape-gain.
 

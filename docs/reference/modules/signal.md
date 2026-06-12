@@ -4,7 +4,7 @@
 **Current code path:** `src/signal`
 **Authority status:** Dense module reference for predictive signal generation, day0 routing, diurnal logic, and uncertainty features.
 
-> **Strategy of record (2026-06-09):** this module is now the **legacy baseline / LCB-cap** producer. The live forecast authority is the replacement chain in `src/forecast/` + `src/data/replacement_forecast_*` (`u0r_bayes.fuse_u0r_posterior` → `emos.bin_probability_settlement`) — authority `docs/authority/replacement_final_form_2026_06_09.md`. This module's P_raw feeds the LCB cap, not the primary q.
+> **Strategy of record (2026-06-09):** this module is now the **legacy baseline / LCB-cap** producer. The live forecast authority is the replacement chain in `src/forecast/` + `src/data/replacement_forecast_*` (`bayes_precision_fusion.fuse_bayes_precision_posterior` → `emos.bin_probability_settlement`) — authority `docs/authority/replacement_final_form_2026_06_09.md`. This module's P_raw feeds the LCB cap, not the primary q.
 
 ## 1. Module purpose
 Transform forecast ensembles and observation-derived context into raw predictive distributions and day0 signals that match Zeus's discrete-settlement market objects. (Baseline path; the live q is built by the replacement chain — see banner.)

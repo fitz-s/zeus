@@ -2452,9 +2452,9 @@ scripts:
       - docs/the_path/RESTART_RUNBOOK.md
       - src/forecast/replacement_forecast_runtime_policy.py
     required_tests:
-      - tests/test_preflight_restart_check_reads_edli_v1_flags.py
+      - tests/test_preflight_restart_check_reads_edli_flags.py
 
-  backfill_u0r_history_from_b0.py:
+  backfill_bayes_precision_fusion_history_from_b0.py:
     class: etl_writer
     status: active
     lifecycle: long_lived
@@ -2470,21 +2470,21 @@ scripts:
     promotion_barrier: >
       Writes ONLY trade_authority_status='SHADOW_ONLY', training_allowed=0 rows.
       Does NOT change any posterior or live-money table. Fusion reaches T2_BAYES
-      only after replacement_0_1_u0r_fusion_enabled is flipped AND U0RHistoryProvider
+      only after replacement_0_1_bayes_precision_fusion_enabled is flipped AND BayesPrecisionFusionHistoryProvider
       reads the seeded rows. INSERT OR IGNORE — fully idempotent.
     reuse_when: >
       Run once (or idempotently re-run) to seed raw_model_forecasts with the proven
-      fixed-lead multi-model dataset (B0_multilead_dataset.json) so U0RHistoryProvider
+      fixed-lead multi-model dataset (B0_multilead_dataset.json) so BayesPrecisionFusionHistoryProvider
       has walk-forward training history immediately without waiting 25 days for forward
       accrual. Always use --dry-run first to verify row count and settlement join.
     do_not_use_when: >
       --db and --b0 are both REQUIRED. Never point --db at the live zeus-forecasts.db
       without explicit operator intent. Never run without verifying the self-check
       settlement join count (should be >0 if settlements are present).
-    canonical_command: "python3 scripts/backfill_u0r_history_from_b0.py --b0 <path/to/B0_multilead_dataset.json> --db <path/to/zeus-forecasts.db> [--dry-run]"
+    canonical_command: "python3 scripts/backfill_bayes_precision_fusion_history_from_b0.py --b0 <path/to/B0_multilead_dataset.json> --db <path/to/zeus-forecasts.db> [--dry-run]"
     required_helpers:
-      - src/forecast/u0r_history_provider.py::U0RHistoryProvider
-      - src/forecast/u0r_bayes.py
+      - src/data/bayes_precision_fusion_history_provider.py::BayesPrecisionFusionHistoryProvider
+      - src/forecast/bayes_precision_fusion.py
     required_tests:
-      - tests/test_u0r_history_provider_materializer_wiring.py
-      - tests/test_u0r_no_leak_history_join.py
+      - tests/test_bayes_precision_fusion_history_provider_materializer_wiring.py
+      - tests/test_bayes_precision_fusion_no_leak_history_join.py

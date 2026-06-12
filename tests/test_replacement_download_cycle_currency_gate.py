@@ -5,7 +5,7 @@
 #   the ALREADY_COVERED / HAVE_RAW_MANIFESTS short-circuits contained NO cycle comparison, so once
 #   any cycle fully materialized the download cron could never advance the anchor again —
 #   deterministic_forecast_anchors froze at 2026-06-08T18 for ~24h while Open-Meteo served
-#   2026-06-09T00 (httpx 200 OK on the U0R leg of the SAME job run).
+#   2026-06-09T00 (httpx 200 OK on the BAYES_PRECISION_FUSION leg of the SAME job run).
 """RELATIONSHIP antibody: current-target COVERAGE never implies CYCLE CURRENCY.
 
 Cross-module invariant (plan coverage -> download gate boundary):

@@ -1,9 +1,9 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: BLOCKER 4 — cell_selection and elevation/downscaling are first-class product identity and must be persisted alongside every raw_model_forecasts row.
-# Reuse: Run with pytest; update if product-identity columns or cell_selection/elevation handling in the U0R downloader changes.
+# Reuse: Run with pytest; update if product-identity columns or cell_selection/elevation handling in the BAYES_PRECISION_FUSION downloader changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §6 F1 + Fitz Constraint #4. Open-Meteo's cell_selection
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 + Fitz Constraint #4. Open-Meteo's cell_selection
 #   (nearest vs land vs sea) and elevation/downscaling materially change the returned 2m
 #   temperature: the SAME lat/lon with cell_selection=land vs nearest can pick a DIFFERENT
 #   grid cell -> a different physical product. These are first-class product identity, not
@@ -34,17 +34,17 @@ def _forecast_db(tmp_path: Path) -> Path:
 
 
 def _target():
-    from src.data.u0r_multimodel_download import U0RDownloadTarget
-    return U0RDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
+    from src.data.bayes_precision_fusion_download import BayesPrecisionFusionDownloadTarget
+    return BayesPrecisionFusionDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
                              lead_days=1, latitude=48.967, longitude=2.428,
                              timezone_name="Europe/Paris")
 
 
 def test_cell_selection_and_elevation_persisted(tmp_path) -> None:
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
-    download_u0r_extra_raw_inputs(
+    download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=datetime(2026, 6, 8, tzinfo=UTC), targets=[_target()],
         single_runs_fetch=lambda **k: 20.0, previous_runs_fetch=lambda **k: 19.5,
     )
@@ -69,7 +69,7 @@ def test_different_cell_selection_yields_different_model_domain_hash(tmp_path) -
     """The model_domain_hash binds (provider, model_name, cell_selection, elevation_param,
     downscaling_policy, endpoint_mode). Changing cell_selection changes the hash -> two
     physical cells are never conflated under one identity."""
-    from src.data.u0r_multimodel_download import _model_domain_hash
+    from src.data.bayes_precision_fusion_download import _model_domain_hash
 
     base = dict(
         provider="open-meteo", model_name="gfs_global", cell_selection="nearest",

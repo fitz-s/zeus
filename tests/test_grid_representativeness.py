@@ -3,7 +3,7 @@
 # Authority basis: docs/operations/FORECAST_COLD_ROOT_UNIVERSAL_2026-06-02.md
 #   grid→point representativeness offset loader + reactor hook.
 #   Per-(city,season) offset applied to ENS member maxes BEFORE p_raw.
-#   Flag-gated: edli_v1.edli_grid_representativeness_correction_enabled (default OFF).
+#   Flag-gated: edli.edli_grid_representativeness_correction_enabled (default OFF).
 """Relationship tests for grid representativeness offset loader and reactor hook.
 
 TDD order: RED (all fail when src/calibration/grid_representativeness.py absent
@@ -43,7 +43,7 @@ def _make_family(city_name: str, target_date: str = "2026-05-15", metric: str = 
 
 def _patched_settings(flag_on: bool):
     """Return a settings dict with the grid-correction flag at the requested value."""
-    return {"edli_v1": {"edli_grid_representativeness_correction_enabled": flag_on}}
+    return {"edli": {"edli_grid_representativeness_correction_enabled": flag_on}}
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +207,7 @@ class TestHookFlagOff:
         # settings without the flag key at all
         with mock.patch(
             "src.engine.event_reactor_adapter.settings",
-            {"edli_v1": {}},
+            {"edli": {}},
         ):
             corrected, applied = _maybe_apply_grid_representativeness_correction(
                 raw, snapshot=snapshot, family=family, city=city, payload=payload

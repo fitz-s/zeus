@@ -261,7 +261,7 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
             str(row[1]) for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
         }
         # TRADEABLE-GRADE COVERAGE (operator directive 2026-06-10): a covering posterior must
-        # carry q_lcb_json IS NOT NULL. A NULL-q_lcb posterior (U0R_CAPTURE_MISSING /
+        # carry q_lcb_json IS NOT NULL. A NULL-q_lcb posterior (BAYES_PRECISION_FUSION_CAPTURE_MISSING /
         # FUSED_Q_BUILD_FAILED) is NOT live-eligible — the bundle reader's q-mode + bounds gates
         # reject it — yet it would otherwise satisfy this coverage check and PERMANENTLY mask a
         # scope that COULD be re-materialized to fusion grade once the capture is healthy. That is

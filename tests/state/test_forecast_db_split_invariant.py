@@ -386,11 +386,11 @@ def test_relA_attach_partial_world_still_produces_critical_indexes(
 
     Post-P2 DDL refactor (2026-05-14): world.db no longer holds v2 forecast-class
     tables (init_schema uses forecast_tables=False). The ATTACH path copies only
-    world-class tables from world.db; _ensure_v2_forecast_indexes() runs
+    world-class tables from world.db; _ensure_forecast_indexes() runs
     unconditionally after both ATTACH and static-fallback branches to guarantee
     v2 index coverage regardless of branch taken.
 
-    This test verifies _ensure_v2_forecast_indexes() runs correctly under the
+    This test verifies _ensure_forecast_indexes() runs correctly under the
     ATTACH branch (world.db exists but lacks v2 forecast tables).
     """
     from src.state import db as state_db
@@ -418,8 +418,8 @@ def test_relA_attach_partial_world_still_produces_critical_indexes(
     missing = required - have
     fcast.close()
     assert not missing, (
-        f"REL-A: ATTACH branch + _ensure_v2_forecast_indexes() failed to produce "
-        f"critical v2 indexes: {sorted(missing)}. _ensure_v2_forecast_indexes() "
+        f"REL-A: ATTACH branch + _ensure_forecast_indexes() failed to produce "
+        f"critical v2 indexes: {sorted(missing)}. _ensure_forecast_indexes() "
         "must run unconditionally post-ATTACH so v2 indexes are always present "
         "on the forecasts conn regardless of world.db v2 table presence."
     )
@@ -434,7 +434,7 @@ def test_relA_attach_and_static_branches_produce_same_v2_index_superset(
     the exact relationship defect Option A closes.
 
     Post-P2 DDL refactor (2026-05-14): world.db no longer holds v2 forecast-class
-    tables. ATTACH branch copies only world-class tables; _ensure_v2_forecast_indexes
+    tables. ATTACH branch copies only world-class tables; _ensure_forecast_indexes
     runs unconditionally after both branches to guarantee v2 index equivalence.
     """
     from src.state import db as state_db

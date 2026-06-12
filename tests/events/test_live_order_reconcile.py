@@ -463,7 +463,7 @@ def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch,
         main,
         "settings",
         {
-            "edli_v1": {
+            "edli": {
                 "enabled": True,
                 "edli_user_channel_reconcile_enabled": True,
                 "edli_user_channel_message_queue_path": str(queue_path),
@@ -519,7 +519,7 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_queue_messages
         main,
         "settings",
         {
-            "edli_v1": {
+            "edli": {
                 "enabled": True,
                 "edli_user_channel_reconcile_enabled": True,
                 "edli_user_channel_message_queue_path": str(queue_path),
@@ -640,7 +640,7 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_trade_messages
         main,
         "settings",
         {
-            "edli_v1": {
+            "edli": {
                 "enabled": True,
                 "edli_user_channel_reconcile_enabled": True,
                 "edli_user_channel_message_queue_path": str(queue_path),
@@ -697,7 +697,7 @@ def test_user_channel_reconcile_cycle_clears_submit_unknown_from_venue_fact(monk
         main,
         "settings",
         {
-            "edli_v1": {
+            "edli": {
                 "enabled": True,
                 "edli_user_channel_reconcile_enabled": True,
                 "edli_user_channel_message_queue_path": "",

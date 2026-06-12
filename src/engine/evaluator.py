@@ -780,7 +780,7 @@ def _make_rejection_decision(
     )
 
 
-def _read_v2_snapshot_metadata(
+def _read_snapshot_metadata(
     conn, city_name: str, target_date: str, temperature_metric: str,
     snapshot_id: str | None = None,
 ) -> dict:
@@ -813,7 +813,7 @@ def _read_v2_snapshot_metadata(
 
         forecasts_conn = get_forecasts_connection_read_only()
         try:
-            return _read_v2_snapshot_metadata(
+            return _read_snapshot_metadata(
                 forecasts_conn,
                 city_name,
                 target_date,
@@ -4437,7 +4437,7 @@ def evaluate_candidate(
             rejection_reason_detail="ENS snapshot persistence failed: decision_snapshot_id unavailable",
         )]
 
-    v2_snapshot_meta = _read_v2_snapshot_metadata(
+    v2_snapshot_meta = _read_snapshot_metadata(
         snapshot_persistence_conn,
         city.name,
         target_date,

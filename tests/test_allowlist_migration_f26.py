@@ -173,7 +173,7 @@ F26_CLEANUP_PROMOTED: frozenset[str] = frozenset(
         "scripts/backfill_obs.py",
         "scripts/backfill_ogimet_metar.py",
         "scripts/backfill_outcome_fact.py",
-        "scripts/backfill_tigge_snapshot_p_raw_v2.py",
+        "scripts/backfill_tigge_snapshot_p_raw.py",
         "scripts/backfill_wu_daily_all.py",
         "scripts/cleanup_ghost_positions.py",
         "scripts/fill_obs_dst_gaps.py",

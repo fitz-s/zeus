@@ -1,9 +1,9 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §3 (source identities, DEDUP icon_seamless==icon_d2),
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (source identities, DEDUP icon_seamless==icon_d2),
 #   §4 algorithm steps (1) eligible / (2) provider reps / (3) alias dedup, §7 antibodies
 #   ("regional-outside-domain (polygon)", "icon_seamless==icon_d2 (alias dedup)"); F4.
-#   U0R_PROOF_RESULT.md: regional SHADOW-ONLY/DEFER, polygon tightened (open question #3).
+#   BAYES_PRECISION_FUSION_PROOF_RESULT.md: regional SHADOW-ONLY/DEFER, polygon tightened (open question #3).
 """F4 model selection — decorrelated provider reps, alias dedup, regional polygon gate.
 
 THE STRUCTURAL ANTIBODIES (Fitz #1: K structural decisions, not N if-statements):
@@ -31,7 +31,7 @@ THE STRUCTURAL ANTIBODIES (Fitz #1: K structural decisions, not N if-statements)
      fail-soft upstream). Moscow (out-of-polygon) -> icon_d2 ABSENT, proven D1-D0 == 0.0.
 
 These make the out-of-domain-leak and double-count error CATEGORIES impossible, rather than
-patching each city. The selection output is consumed by u0r_bayes.fuse_u0r_posterior.
+patching each city. The selection output is consumed by bayes_precision_fusion.fuse_bayes_precision_posterior.
 """
 from __future__ import annotations
 

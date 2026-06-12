@@ -225,7 +225,7 @@ def _resolve_pin_for_bucket(
 _V2_TIGGE_FALLBACK_RESCUE_SEEN: set = set()
 
 
-def _emit_v2_tigge_fallback_rescue_warning(
+def _emit_tigge_fallback_rescue_warning(
     *,
     city: str,
     metric: str,
@@ -265,7 +265,7 @@ def _emit_v2_tigge_fallback_rescue_warning(
     )
 
 
-def _emit_v2_legacy_fallback_warning(
+def _emit_legacy_fallback_warning(
     path: str, cluster: str, season: str, metric: str
 ) -> None:
     """Emit a deduplicated WARNING when v2 misses and legacy fills.
@@ -449,7 +449,7 @@ def _low_live_min_decision_groups() -> int:
     return level2
 
 
-def _calibration_bin_source_v2_fit_enabled() -> bool:
+def _calibration_bin_source_fit_enabled() -> bool:
     """Return True when the canonical_v2 bin_source fit flag is ON.
 
     FIX-1 shadow flag (2026-06-03): gates the correction that makes
@@ -531,7 +531,7 @@ def _calibration_domain_from_parts(
     )
 
 
-def _parse_v2_model_key_domain(model_key: str | None):
+def _parse_model_key_domain(model_key: str | None):
     if not model_key:
         return None
     parts = model_key.split(":")
@@ -671,7 +671,7 @@ def get_calibration_authority_result(
         ):
             break
     if primary_model is not None and primary_model.get("input_space") == "width_normalized_density":
-        served_domain = _parse_v2_model_key_domain(primary_model.get("model_key"))
+        served_domain = _parse_model_key_domain(primary_model.get("model_key"))
         if served_domain is None:
             served_domain = _calibration_domain_from_parts(
                 source_id=primary_model.get("bucket_source_id") or requested_source_id,
@@ -753,7 +753,7 @@ def get_calibration_authority_result(
         )
 
     model_key = getattr(cal, "_bucket_model_key", None)
-    served_domain = _parse_v2_model_key_domain(model_key)
+    served_domain = _parse_model_key_domain(model_key)
     n_samples = int(getattr(cal, "n_samples", 0) or 0)
     if served_domain is None:
         served_domain = requested_domain
@@ -917,7 +917,7 @@ def get_calibrator(
                 tigge_rescue_data_version = expected_data_version
             break
     if tigge_rescue_data_version is not None:
-        _emit_v2_tigge_fallback_rescue_warning(
+        _emit_tigge_fallback_rescue_warning(
             city=city.name,
             metric=temperature_metric,
             target_date=target_date,
@@ -996,7 +996,7 @@ def get_calibrator(
     #   canonical_v2 pairs → own read-time fit for uncorrected cities.
     # Both states maintain count/fit population agreement (no new mismatch).
     if temperature_metric == "high":
-        _bin_source_v2 = _calibration_bin_source_v2_fit_enabled()
+        _bin_source_v2 = _calibration_bin_source_fit_enabled()
         _fit_bin_source: str | None = (
             CANONICAL_CALIBRATION_PAIR_BIN_SOURCE if _bin_source_v2 else None
         )
@@ -1061,7 +1061,7 @@ def get_calibrator(
                     season_pool_tigge_rescue_dv = expected_data_version
                 break
         if season_pool_tigge_rescue_dv is not None:
-            _emit_v2_tigge_fallback_rescue_warning(
+            _emit_tigge_fallback_rescue_warning(
                 city=city.name,
                 metric=temperature_metric,
                 target_date=target_date,
@@ -1164,7 +1164,7 @@ def _fit_from_pairs(
     # read seam and satisfies the store-side enforcement landed in slice A1.
     #
     # FIX-1 (2026-06-03): bin_source_filter is threaded from get_calibrator
-    # via _calibration_bin_source_v2_fit_enabled(). Flag-OFF: None (legacy,
+    # via _calibration_bin_source_fit_enabled(). Flag-OFF: None (legacy,
     # equivalent to old "canonical_v1" hardcode but now correctly returns 0
     # on the all-v2 corpus). Flag-ON: CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
     # ("canonical_v2"). Both states come from ONE constant so a future

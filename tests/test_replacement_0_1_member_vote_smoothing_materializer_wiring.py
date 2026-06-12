@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-06-09
 # Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-09
 # 2026-06-09 STALE_LAW re-pin: smoothing flag promoted default-OFF -> default-ON
-#   (config edli_v1.replacement_0_1_member_vote_smoothing_enabled=true). The shipped-
+#   (config edli.replacement_0_1_member_vote_smoothing_enabled=true). The shipped-
 #   config resolver test now asserts the default alpha; OFF inertness stays covered by
 #   the monkeypatch tests.
 # Purpose: Protect the replacement_forecast_materializer wiring of the flag-gated AIFS
@@ -173,7 +173,7 @@ def test_flag_on_materialized_posterior_matches_smoothed_construction(monkeypatc
 
 def test_resolver_shipped_config_flag_is_on_returns_default_alpha() -> None:
     # STALE_LAW re-pin 2026-06-09: replacement_0_1_member_vote_smoothing_enabled was
-    # promoted from default-OFF to default-ON (authority: config edli_v1.
+    # promoted from default-OFF to default-ON (authority: config edli.
     # replacement_0_1_member_vote_smoothing_enabled=true; the alpha key is absent so the
     # resolver falls back to MEMBER_VOTE_SMOOTHING_ALPHA=0.05). The live path now applies
     # Laplace smoothing. (Flag-OFF inertness is still covered by the monkeypatch tests.)
@@ -185,7 +185,7 @@ def test_resolver_shipped_config_flag_is_on_returns_default_alpha() -> None:
 def test_resolver_returns_alpha_when_flag_enabled(monkeypatch) -> None:
     import src.config as cfg
 
-    edli = cfg.settings["edli_v1"]  # the underlying mutable dict
+    edli = cfg.settings["edli"]  # the underlying mutable dict
     monkeypatch.setitem(edli, "replacement_0_1_member_vote_smoothing_enabled", True)
     monkeypatch.setitem(edli, "replacement_0_1_member_vote_smoothing_alpha", MEMBER_VOTE_SMOOTHING_ALPHA)
     assert mod._replacement_member_vote_smoothing_alpha() == pytest.approx(MEMBER_VOTE_SMOOTHING_ALPHA)
@@ -194,7 +194,7 @@ def test_resolver_returns_alpha_when_flag_enabled(monkeypatch) -> None:
 def test_resolver_fail_closed_on_nonpositive_alpha(monkeypatch) -> None:
     import src.config as cfg
 
-    edli = cfg.settings["edli_v1"]  # the underlying mutable dict
+    edli = cfg.settings["edli"]  # the underlying mutable dict
     monkeypatch.setitem(edli, "replacement_0_1_member_vote_smoothing_enabled", True)
     monkeypatch.setitem(edli, "replacement_0_1_member_vote_smoothing_alpha", 0.0)  # invalid -> fail-closed
     assert mod._replacement_member_vote_smoothing_alpha() is None

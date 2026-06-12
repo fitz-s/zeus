@@ -74,7 +74,7 @@ class ServedInstrumentValue:
     lead_days: int | None      # the served row's lead bucket — the SAME bucket its history uses
 
     def as_provenance(self) -> dict[str, object]:
-        """The per-instrument provenance payload recorded in u0r_fusion.current_value_serving."""
+        """The per-instrument provenance payload recorded in bayes_precision_fusion.current_value_serving."""
         return {
             "served_via": self.served_via,
             "previous_run_substitution": self.served_via == SERVED_VIA_PREVIOUS_RUNS,

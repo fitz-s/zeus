@@ -1,9 +1,9 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: BLOCKER 3 — anchor prior must match the live 9km product or go through an explicit bridge; raw 025 history must not be used as-if it were 9km.
-# Reuse: Run with pytest; update if anchor product identity or bridge logic in u0r_bayes/materializer changes.
+# Reuse: Run with pytest; update if anchor product identity or bridge logic in bayes_precision_fusion/materializer changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §3 (the anchor prior = the LIVE 9km/0.1 ecmwf_ifs product)
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (the anchor prior = the LIVE 9km/0.1 ecmwf_ifs product)
 #   + Fitz Constraint #4 (data provenance): the anchor history residuals/tau0/prior-strength
 #   MUST come from the SAME physical product as the live anchor, OR be reconciled through an
 #   explicit, declared bridge. Open-Meteo's previous-runs API serves ONLY ecmwf_ifs025 (0.25);
@@ -12,14 +12,14 @@
 """BLOCKER 3 — the anchor prior must be built from a product matching the live anchor, or via
 an explicit ifs025->ifs9 bridge.
 
-u0r_bayes.ANCHOR_MODEL='ecmwf_ifs' is the live 9km/0.1 anchor (prior mean). The OM previous-runs
+bayes_precision_fusion.ANCHOR_MODEL='ecmwf_ifs' is the live 9km/0.1 anchor (prior mean). The OM previous-runs
 download stores the anchor history under model='ecmwf_ifs' but the PHYSICAL product is
 model_name='ecmwf_ifs025' (0.25). Using the 025 residuals directly as the 9km prior would give
 the wrong anchor sigma + q_lcb. The bridge module declares the reconciliation explicitly.
 """
 from __future__ import annotations
 
-from src.forecast import u0r_anchor_bridge as bridge
+from src.forecast import bayes_precision_fusion_anchor_bridge as bridge
 
 
 def test_bridge_identity_and_product_labels() -> None:

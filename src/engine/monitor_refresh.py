@@ -142,7 +142,7 @@ class MonitorOneCalibratorQ:
 
 def _monitor_emos_regime_enabled() -> bool:
     try:
-        return bool(settings["edli_v1"].get("edli_emos_sole_calibrator_enabled", False))
+        return bool(settings["edli"].get("edli_emos_sole_calibrator_enabled", False))
     except Exception:
         return False
 
@@ -226,10 +226,10 @@ def _build_monitor_one_calibrator_q(
     season = _monitor_emos_season(target_d)
     unit = str(city.settlement_unit)
     apply_settlement_floor = bool(
-        settings["edli_v1"].get("edli_settlement_sigma_floor_enabled", False)
+        settings["edli"].get("edli_settlement_sigma_floor_enabled", False)
     )
     require_settlement_floor = bool(
-        settings["edli_v1"].get("edli_settlement_sigma_floor_required", True)
+        settings["edli"].get("edli_settlement_sigma_floor_required", True)
     )
 
     # PARITY: probe floor availability when the flag is on. Probed ONCE here (not twice) and

@@ -36,7 +36,7 @@ the NEAREST present bound (open-ended ">= X" / "<= X" bins use their single boun
 
 mu*/sigma provenance (Fitz #4): the replacement-path posterior carries
 provenance_json.anchor_value_c (the fused center) and
-provenance_json.u0r_fusion.predictive_sigma_c - both in Celsius. Legacy rows
+provenance_json.bayes_precision_fusion.predictive_sigma_c - both in Celsius. Legacy rows
 without fusion fall back to the q-distribution mean over the family bins (computed
 by the caller in the bin-native unit); the sigma fallback is None, which makes the
 threshold strictly conservative (T = 1 settlement step).

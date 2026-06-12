@@ -41,7 +41,7 @@ import math
 import statistics
 from dataclasses import dataclass
 
-ESTIMATOR_NAME = "empirical_bayes_shrinkage_v1"
+ESTIMATOR_NAME = "empirical_bayes_shrinkage"
 
 # Irreducible transfer-uncertainty floor (degC^2) added to the TIGGE prior
 # variance. TIGGE is a *different product* from the live OpenData ENS, so even

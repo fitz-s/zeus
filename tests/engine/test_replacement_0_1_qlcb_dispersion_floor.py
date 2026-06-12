@@ -181,11 +181,11 @@ def _run_replacement(monkeypatch, *, floor_flag: bool):
     feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = True
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
 
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli["replacement_qlcb_settlement_sigma_floor_enabled"] = floor_flag
     # Keep the K3 coverage gate OFF for this test (it is a separate item).
     edli["q_lcb_settlement_coverage_gate_enabled"] = False
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
 
     monkeypatch.setattr(hook_factory, "_latest_replacement_readiness", lambda *a, **k: object())
     monkeypatch.setattr(

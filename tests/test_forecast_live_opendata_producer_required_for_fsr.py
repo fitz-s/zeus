@@ -22,7 +22,7 @@ from __future__ import annotations
 #                                                     ▼ emits FORECAST_SNAPSHOT_READY
 #                                            EDLI reactor → live decisions
 #
-# The U0R replacement forecast is an OVERLAY authority: it produces soft-anchor
+# The BAYES_PRECISION_FUSION replacement forecast is an OVERLAY authority: it produces soft-anchor
 # posteriors + a live-authority readiness that DEPENDS ON the baseline_b0
 # (ecmwf_open_data) source_run — it writes NO source_run / ensemble_snapshots of
 # its own. Therefore the replacement can never substitute for the opendata baseline

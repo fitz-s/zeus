@@ -7,7 +7,7 @@
 The live emos_q_lcb override (event_reactor_adapter._canonical_probability_and_fdr_proof)
 replaces the MC q_5pct (lcb_by_direction) with the coverage-honest EMOS analytic CI
 ONLY for cities present in this license file AND only when the live flag
-(edli_v1.edli_emos_ci_live_enabled) is True.
+(edli.edli_emos_ci_live_enabled) is True.
 
 The file is operator-armed: it is intentionally NOT created by this build. Absent file
 → empty license → no city licensed → the override never fires (flag-OFF / no-city is the

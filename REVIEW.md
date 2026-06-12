@@ -142,7 +142,7 @@ Detailed path table at `docs/review/review_scope_map.md`. Compressed map:
 - `bindings/zeus/safety_overrides.yaml` — loaded by `maintenance_worker/core/validator.py`; defines the forbidden-rule set at runtime
 
 **Tier 1 — Data / probability / persistence correctness**
-- `src/forecast/**` — **live forecast authority (strategy of record)**: `u0r_bayes` T2 Bayesian fusion (`fuse_u0r_posterior`, `eb_bias`), walk-forward de-bias
+- `src/forecast/**` — **live forecast authority (strategy of record)**: `bayes_precision_fusion` T2 Bayesian fusion (`fuse_bayes_precision_posterior`, `eb_bias`), walk-forward de-bias
 - `src/data/replacement_forecast_*` — replacement materializer/bundle (`_insert_posterior` owns q_mode); `src/calibration/emos.py` is the live settlement q integrator (`bin_probability_settlement`)
 - `src/calibration/**` — Extended Platt (`platt.py`) is now LEGACY BASELINE / LCB-cap calibration; manager, replay
 - `src/signal/**` — baseline P_raw (closed-form `analytic_p_raw_vector_from_maxes`), ensemble, ASOS rounding — feeds the LCB cap, not the live q

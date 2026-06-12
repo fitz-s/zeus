@@ -11,7 +11,7 @@ tests for the city-local time boundary: "when a UTC instant flows into the per-c
 lead computation, does the local-calendar property hold across DST and the dateline?"
 
 The system under test is the real production function:
-    src.data.replacement_forecast_materializer._u0r_city_local_lead_days
+    src.data.replacement_forecast_materializer._bayes_precision_fusion_city_local_lead_days
 We do NOT re-implement it — we pin the cross-boundary properties it must satisfy.
 
 Spring-forward regression pin: London 2025-03-30 02:00 local does not exist (clocks
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from src.data.replacement_forecast_materializer import _u0r_city_local_lead_days
+from src.data.replacement_forecast_materializer import _bayes_precision_fusion_city_local_lead_days
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +40,7 @@ def test_tokyo_evening_utc_is_next_local_day_lead_zero() -> None:
     the UTC date would give lead 1 (wrong); the local date gives lead 0 (correct).
     """
     computed_at = datetime(2026, 6, 3, 16, 30, tzinfo=timezone.utc)
-    lead = _u0r_city_local_lead_days(
+    lead = _bayes_precision_fusion_city_local_lead_days(
         computed_at=computed_at,
         target_local_date=date(2026, 6, 4),
         tz_name="Asia/Tokyo",
@@ -58,7 +58,7 @@ def test_utc_date_naive_lead_would_be_one_proving_local_matters() -> None:
     computed_at = datetime(2026, 6, 3, 16, 30, tzinfo=timezone.utc)
     target = date(2026, 6, 4)
     naive_utc_lead = max(0, (target - computed_at.date()).days)
-    local_lead = _u0r_city_local_lead_days(
+    local_lead = _bayes_precision_fusion_city_local_lead_days(
         computed_at=computed_at, target_local_date=target, tz_name="Asia/Tokyo"
     )
     assert naive_utc_lead == 1
@@ -72,7 +72,7 @@ def test_utc_date_naive_lead_would_be_one_proving_local_matters() -> None:
 def test_lead_floors_at_zero_for_target_before_local_decision_date() -> None:
     """A target before the city-local decision date is lead 0 (floored), never negative."""
     computed_at = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
-    lead = _u0r_city_local_lead_days(
+    lead = _bayes_precision_fusion_city_local_lead_days(
         computed_at=computed_at,
         target_local_date=date(2026, 6, 8),  # two days in the past
         tz_name="America/New_York",
@@ -83,7 +83,7 @@ def test_lead_floors_at_zero_for_target_before_local_decision_date() -> None:
 def test_unresolvable_tz_falls_back_to_utc_date() -> None:
     """An unresolvable timezone name falls back to the UTC date (defensive contract)."""
     computed_at = datetime(2026, 6, 3, 16, 30, tzinfo=timezone.utc)
-    lead = _u0r_city_local_lead_days(
+    lead = _bayes_precision_fusion_city_local_lead_days(
         computed_at=computed_at,
         target_local_date=date(2026, 6, 4),
         tz_name="Not/AZone",
@@ -107,7 +107,7 @@ def test_london_spring_forward_2025_03_30_lead_is_local_not_utc() -> None:
     answer. The discriminating case follows below.
     """
     computed_at = datetime(2025, 3, 30, 0, 30, tzinfo=timezone.utc)
-    lead = _u0r_city_local_lead_days(
+    lead = _bayes_precision_fusion_city_local_lead_days(
         computed_at=computed_at,
         target_local_date=date(2025, 3, 30),
         tz_name="Europe/London",
@@ -123,7 +123,7 @@ def test_london_spring_forward_post_transition_local_date_holds() -> None:
     the transition does not corrupt the local DATE (the hour skip is within the day).
     """
     computed_at = datetime(2025, 3, 30, 1, 30, tzinfo=timezone.utc)  # 02:30 BST
-    lead = _u0r_city_local_lead_days(
+    lead = _bayes_precision_fusion_city_local_lead_days(
         computed_at=computed_at,
         target_local_date=date(2025, 3, 31),
         tz_name="Europe/London",
@@ -139,7 +139,7 @@ def test_london_late_evening_utc_is_same_local_day_in_bst() -> None:
     BST-local date 07-01 gives lead 0.
     """
     computed_at = datetime(2025, 6, 30, 23, 30, tzinfo=timezone.utc)
-    local_lead = _u0r_city_local_lead_days(
+    local_lead = _bayes_precision_fusion_city_local_lead_days(
         computed_at=computed_at,
         target_local_date=date(2025, 7, 1),
         tz_name="Europe/London",
@@ -163,7 +163,7 @@ def test_auckland_dateline_local_day_ahead_of_utc() -> None:
     06-11 gives lead 0. The mirror image of cities behind UTC.
     """
     computed_at = datetime(2026, 6, 10, 13, 0, tzinfo=timezone.utc)
-    local_lead = _u0r_city_local_lead_days(
+    local_lead = _bayes_precision_fusion_city_local_lead_days(
         computed_at=computed_at,
         target_local_date=date(2026, 6, 11),
         tz_name="Pacific/Auckland",
@@ -182,7 +182,7 @@ def test_auckland_southern_dst_spring_forward_2026_09_27() -> None:
     southern spring-forward day does not regress the lead to a UTC-date answer.
     """
     computed_at = datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
-    lead = _u0r_city_local_lead_days(
+    lead = _bayes_precision_fusion_city_local_lead_days(
         computed_at=computed_at,
         target_local_date=date(2026, 9, 27),
         tz_name="Pacific/Auckland",
@@ -201,10 +201,10 @@ def test_dateline_and_behind_utc_disagree_on_same_instant() -> None:
     """
     computed_at = datetime(2026, 6, 10, 13, 0, tzinfo=timezone.utc)
     target = date(2026, 6, 11)
-    auckland = _u0r_city_local_lead_days(
+    auckland = _bayes_precision_fusion_city_local_lead_days(
         computed_at=computed_at, target_local_date=target, tz_name="Pacific/Auckland"
     )
-    honolulu = _u0r_city_local_lead_days(
+    honolulu = _bayes_precision_fusion_city_local_lead_days(
         computed_at=computed_at, target_local_date=target, tz_name="Pacific/Honolulu"
     )
     assert auckland == 0

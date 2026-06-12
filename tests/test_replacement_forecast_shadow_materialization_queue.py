@@ -749,9 +749,9 @@ def test_new_listing_scout_writes_intent_not_request(tmp_path, monkeypatch) -> N
     new_cid = "0xnewlisting000000000000000000000000000000000000000000000000000001"
 
     # Enable the EDLI gate so the scout body runs.
-    edli_cfg = dict(main_module._settings_section("edli_v1", {}) or {})
+    edli_cfg = dict(main_module._settings_section("edli", {}) or {})
     edli_cfg["enabled"] = True
-    monkeypatch.setitem(main_module.settings._data, "edli_v1", edli_cfg)
+    monkeypatch.setitem(main_module.settings._data, "edli", edli_cfg)
 
     # Pre-seed the known-set with a DIFFERENT cid so the DB-init branch is skipped and
     # new_cid is detected as brand-new.
