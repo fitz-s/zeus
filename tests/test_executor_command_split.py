@@ -646,7 +646,8 @@ class TestLiveOrderCommandSplit:
             init_schema(conn)
             return conn
 
-        monkeypatch.setattr(executor_module, "get_trade_connection_with_world", _trade_conn)
+        # get_trade_connection_with_world (non-required variant) was deleted from
+        # executor's namespace — only the _required form remains (single lane).
         monkeypatch.setattr(executor_module, "get_trade_connection_with_world_required", _trade_conn)
         monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
