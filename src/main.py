@@ -4736,13 +4736,15 @@ def _startup_world_db_schema_prepare() -> str:
     try:
         row = conn.execute("PRAGMA user_version").fetchone()
         current_version = int(row[0]) if row and row[0] is not None else 0
-        if current_version == 43:
-            return str(current_version)
-
-        logger.warning(
-            "world DB schema stale at live boot: user_version=%s — running idempotent init_schema()",
-            current_version,
-        )
+        # B2 says init_schema runs UNCONDITIONALLY (idempotent preparatory DDL);
+        # an early return on user_version==43 made every ensure_table migration
+        # added without a version bump unreachable on live DBs forever — the
+        # 2026-06-12 nullable-disposition rebuild never executed (retry storm).
+        if current_version != 43:
+            logger.warning(
+                "world DB schema stale at live boot: user_version=%s — running idempotent init_schema()",
+                current_version,
+            )
         db_module.init_schema(conn)
         conn.commit()
         row = conn.execute("PRAGMA user_version").fetchone()

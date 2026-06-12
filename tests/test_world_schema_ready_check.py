@@ -323,3 +323,34 @@ class TestWorldSchemaReadyCheck:
             ).fetchone() == (1,)
         finally:
             conn.close()
+
+
+def test_world_db_schema_prepare_runs_init_schema_even_when_version_current(monkeypatch, tmp_path):
+    """Antibody (2026-06-13): the early return on user_version==43 made every
+    ensure_table migration added without a version bump UNREACHABLE on live DBs
+    (the nullable-disposition rebuild never executed -> fill-bridge retry storm).
+    B2 design: init_schema is idempotent and runs UNCONDITIONALLY at boot."""
+    import sqlite3
+
+    import src.main as main_module
+    import src.state.db as db_module
+
+    db_path = tmp_path / "world.db"
+    seed = sqlite3.connect(db_path)
+    seed.execute("PRAGMA user_version = 43")
+    seed.commit()
+    seed.close()
+
+    calls = []
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", db_path)
+    monkeypatch.setattr(
+        db_module, "get_world_connection",
+        lambda write_class=None: sqlite3.connect(db_path),
+    )
+    monkeypatch.setattr(db_module, "init_schema", lambda conn: calls.append("init"))
+
+    main_module._startup_world_db_schema_prepare()
+    assert calls == ["init"], (
+        "init_schema must run even when user_version is already current — "
+        "idempotent ensure_table migrations are otherwise unreachable on live DBs"
+    )
