@@ -859,6 +859,12 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- e2e fill verification script (2026-06-10) ---
         "scripts/verify_fill_e2e.py",  # read_only_ro_uri: opens trades+world DBs with mode=ro uri; SELECT-only; operator diagnostic; never daemon path
         "scripts/verify_pipeline_liveness.py",  # read_only_ro_uri: data-supply e2e liveness check (forecasts+world, mode=ro, SELECT-only); antibody for the 2026-06-10 10h download dead-zone incident
+        # --- big-direction ops file (2026-06-12): READ-ONLY money-funnel heartbeat ---
+        "scripts/zeus_status.py",  # read_only_ro_uri: money-funnel heartbeat CLI; opens all 3 live DBs via file:...?mode=ro + PRAGMA query_only=ON; SELECT-only; never writes
+        # --- big-direction ops file (2026-06-12): deploy/dev split (no DB) ---
+        "scripts/deploy_live.py",  # no_db: never opens any DB (subprocess git/launchctl only); allowlisted defensively for the AST scan if a connect is ever added
+        # --- big-direction ops file (2026-06-12): schema cheatsheet generator (READ-ONLY) ---
+        "scripts/gen_schema_cheatsheet.py",  # read_only_ro_uri: schema-cheatsheet generator; opens all 3 live DBs via file:...?mode=ro; reads sqlite_master + PRAGMA table_info only; writes docs/reference/schema_cheatsheet.md
     }
 )
 
