@@ -9,6 +9,7 @@
 #   silently widens every window to "all of today".
 # Last reused/audited: 2026-06-12
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
+#   + external-review mediums inventory 2026-06-12 (price-cache hole census, Task 3)
 """Zeus money-funnel heartbeat — one invocation, full picture, ~5 seconds.
 
 Prints, top to bottom, the path money would travel and where it stops:
@@ -507,6 +508,7 @@ def collect() -> dict:
         "blocks": section_blocks(),
         "surface": section_surface(),
         "obs_holes": section_obs_holes(),
+        "price_holes": section_price_holes(),
         "positions": section_positions(),
         "orders": section_orders(),
     }
@@ -618,6 +620,30 @@ def render_text(data: dict) -> str:
             )
     L.append("")
 
+    # PRICE HOLES (price-cache freshness for cities with open markets today/tomorrow)
+    ph = data.get("price_holes", {})
+    if ph.get("error"):
+        L.append(f"PRICE    ERR {ph['error']}")
+    else:
+        holes = ph.get("holes", [])
+        cities_total = ph.get("cities_total", "?")
+        fresh = ph.get("fresh_count", 0)
+        if holes:
+            names = ", ".join(
+                f"{h['city']}({h['age']})" for h in holes[:10]
+            )
+            more = f" +{len(holes) - 10} more" if len(holes) > 10 else ""
+            L.append(
+                f"PRICE    HOLES={len(holes)}/{cities_total} "
+                f"(> {ph.get('stale_hours')}h): {names}{more}"
+            )
+        else:
+            L.append(
+                f"PRICE    holes=0/{cities_total} "
+                f"(all {fresh} open-market cities fresh within {ph.get('stale_hours')}h)"
+            )
+    L.append("")
+
     # POSITIONS
     p = data["positions"]
     if p.get("error"):
@@ -700,6 +726,119 @@ def section_obs_holes() -> dict:
             holes.append({"city": r["city"], "age": age})
     out["cities_total"] = len(rows)
     out["holes"] = holes
+    return out
+
+
+# Section: PRICE HOLES (zeus_trades.db executable_market_snapshots freshness per city)
+# --------------------------------------------------------------------------
+PRICE_HOLE_STALE_HOURS = 2.0
+
+
+def section_price_holes() -> dict:
+    """Per-city price-cache freshness census for cities with an OPEN market today/tomorrow.
+
+    Queries market_events (zeus-forecasts.db) for (city, condition_id) pairs
+    with target_date today or tomorrow, then probes executable_market_snapshots
+    (zeus_trades.db) for the freshest captured_at per city across those
+    condition_ids.  The two DBs are queried separately and joined in Python —
+    market_events only exists in zeus-forecasts.db, not in zeus_trades.db.
+    A city whose freshest snapshot is older than PRICE_HOLE_STALE_HOURS (or has
+    no snapshot at all) is flagged as a PRICE HOLE.
+    """
+    out: dict = {"stale_hours": PRICE_HOLE_STALE_HOURS}
+    today = _now().strftime("%Y-%m-%d")
+    from datetime import timedelta
+    tomorrow = (_now() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # 1. Fetch (city, condition_id) pairs for open markets (forecasts DB only).
+    try:
+        fc = ro(FORECASTS_DB)
+        try:
+            city_cond_rows = fc.execute(
+                "SELECT DISTINCT city, condition_id FROM market_events "
+                "WHERE target_date IN (?, ?)",
+                (today, tomorrow),
+            ).fetchall()
+        finally:
+            fc.close()
+    except sqlite3.Error as exc:
+        out["error"] = f"forecasts_db: {type(exc).__name__}: {exc}"
+        return out
+
+    # Build: city -> set of condition_ids
+    city_to_conds: dict[str, list[str]] = {}
+    for r in city_cond_rows:
+        city_to_conds.setdefault(r["city"], []).append(r["condition_id"])
+
+    open_cities = set(city_to_conds.keys())
+    out["cities_with_open_markets"] = len(open_cities)
+
+    if not open_cities:
+        out["holes"] = []
+        out["cities_total"] = 0
+        return out
+
+    # 2. Freshest captured_at per condition_id from trades DB (no cross-DB JOIN).
+    #    Use a single query with IN over all condition_ids across all open cities.
+    all_conds = [c for conds in city_to_conds.values() for c in conds]
+    try:
+        tr = ro(TRADES_DB)
+        try:
+            placeholders = ",".join("?" * len(all_conds))
+            cond_snap_rows = tr.execute(
+                f"SELECT condition_id, max(captured_at) AS freshest "
+                f"FROM executable_market_snapshots "
+                f"WHERE condition_id IN ({placeholders}) "
+                f"GROUP BY condition_id",
+                all_conds,
+            ).fetchall()
+        finally:
+            tr.close()
+    except sqlite3.Error as exc:
+        out["error"] = f"trades_db: {type(exc).__name__}: {exc}"
+        return out
+
+    # Build map condition_id -> freshest captured_at
+    cond_freshest: dict[str, str] = {r["condition_id"]: r["freshest"] for r in cond_snap_rows}
+
+    # Aggregate to city level: freshest across all that city's condition_ids.
+    city_freshest: dict[str, str | None] = {}
+    for city, conds in city_to_conds.items():
+        freshest: str | None = None
+        for cond in conds:
+            ts = cond_freshest.get(cond)
+            if ts is not None and (freshest is None or ts > freshest):
+                freshest = ts
+        city_freshest[city] = freshest
+
+    holes = []
+    fresh_count = 0
+    for city in sorted(open_cities):
+        freshest_ts = city_freshest.get(city)
+        if freshest_ts is None:
+            # No snapshot at all = definitely a hole.
+            holes.append({"city": city, "age": "NONE", "freshest": None})
+            continue
+        age = age_str(freshest_ts)
+        # Compute hours since freshest snapshot.
+        try:
+            ts = str(freshest_ts).replace(" ", "T")
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            hours = (_now() - dt).total_seconds() / 3600.0
+        except (ValueError, TypeError):
+            hours = float("inf")
+        if hours > PRICE_HOLE_STALE_HOURS:
+            holes.append({"city": city, "age": age, "freshest": freshest_ts})
+        else:
+            fresh_count += 1
+
+    out["cities_total"] = len(open_cities)
+    out["holes"] = holes
+    out["fresh_count"] = fresh_count
     return out
 
 

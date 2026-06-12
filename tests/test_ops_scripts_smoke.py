@@ -60,7 +60,7 @@ def test_zeus_status_failsoft_on_empty_dbs(tmp_path, capsys):
     out = capsys.readouterr().out
     data = json.loads(out)  # must be valid JSON
     # All sections present even though the queries failed.
-    for sect in ("daemons", "events", "blocks", "surface", "positions", "orders"):
+    for sect in ("daemons", "events", "blocks", "surface", "positions", "orders", "price_holes"):
         assert sect in data
     # Sections that query missing tables must carry an error key (fail-soft),
     # not have raised.
@@ -158,6 +158,143 @@ def test_zeus_status_age_str():
     now_iso = datetime.now(timezone.utc).isoformat()
     out = zs.age_str(now_iso)
     assert out.endswith(("s", "m", "h", "d"))
+
+
+def test_zeus_status_price_holes_fresh_city(tmp_path):
+    """City with a fresh snapshot (<2h) must not appear in holes."""
+    from datetime import datetime, timezone, timedelta
+    zs = _load("zeus_status_smoke_price1", "zeus_status.py")
+
+    fdb = tmp_path / "forecasts.db"
+    tdb = tmp_path / "trades.db"
+
+    fc = sqlite3.connect(str(fdb))
+    fc.execute(
+        "CREATE TABLE market_events "
+        "(city TEXT, target_date TEXT, condition_id TEXT, "
+        "temperature_metric TEXT, range_label TEXT)"
+    )
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    fc.execute(
+        "INSERT INTO market_events VALUES ('Tokyo', ?, 'cond-tok', 'high', '30-31')",
+        (today,),
+    )
+    fc.commit()
+    fc.close()
+
+    tr = sqlite3.connect(str(tdb))
+    tr.execute(
+        "CREATE TABLE executable_market_snapshots "
+        "(condition_id TEXT, outcome_label TEXT, "
+        "orderbook_top_ask REAL, captured_at TEXT)"
+    )
+    # Fresh snapshot (just now).
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    tr.execute(
+        "INSERT INTO executable_market_snapshots VALUES ('cond-tok', 'YES', 0.55, ?)",
+        (now_iso,),
+    )
+    tr.commit()
+    tr.close()
+
+    zs.FORECASTS_DB = str(fdb)
+    zs.TRADES_DB = str(tdb)
+
+    result = zs.section_price_holes()
+    assert result.get("error") is None, result.get("error")
+    assert result["cities_total"] == 1
+    assert result["holes"] == [], f"Expected no holes, got {result['holes']}"
+    assert result["fresh_count"] == 1
+
+
+def test_zeus_status_price_holes_stale_city(tmp_path):
+    """City with a snapshot older than 2h must appear in holes."""
+    from datetime import datetime, timezone, timedelta
+    zs = _load("zeus_status_smoke_price2", "zeus_status.py")
+
+    fdb = tmp_path / "forecasts.db"
+    tdb = tmp_path / "trades.db"
+
+    fc = sqlite3.connect(str(fdb))
+    fc.execute(
+        "CREATE TABLE market_events "
+        "(city TEXT, target_date TEXT, condition_id TEXT, "
+        "temperature_metric TEXT, range_label TEXT)"
+    )
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    fc.execute(
+        "INSERT INTO market_events VALUES ('Seoul', ?, 'cond-seo', 'high', '28-29')",
+        (today,),
+    )
+    fc.commit()
+    fc.close()
+
+    tr = sqlite3.connect(str(tdb))
+    tr.execute(
+        "CREATE TABLE executable_market_snapshots "
+        "(condition_id TEXT, outcome_label TEXT, "
+        "orderbook_top_ask REAL, captured_at TEXT)"
+    )
+    # Stale snapshot (4h ago).
+    stale_iso = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%S")
+    tr.execute(
+        "INSERT INTO executable_market_snapshots VALUES ('cond-seo', 'YES', 0.55, ?)",
+        (stale_iso,),
+    )
+    tr.commit()
+    tr.close()
+
+    zs.FORECASTS_DB = str(fdb)
+    zs.TRADES_DB = str(tdb)
+
+    result = zs.section_price_holes()
+    assert result.get("error") is None, result.get("error")
+    assert result["cities_total"] == 1
+    assert len(result["holes"]) == 1
+    assert result["holes"][0]["city"] == "Seoul"
+
+
+def test_zeus_status_price_holes_no_snapshot(tmp_path):
+    """City with open market but no snapshot at all must appear as NONE hole."""
+    from datetime import datetime, timezone
+    zs = _load("zeus_status_smoke_price3", "zeus_status.py")
+
+    fdb = tmp_path / "forecasts.db"
+    tdb = tmp_path / "trades.db"
+
+    fc = sqlite3.connect(str(fdb))
+    fc.execute(
+        "CREATE TABLE market_events "
+        "(city TEXT, target_date TEXT, condition_id TEXT, "
+        "temperature_metric TEXT, range_label TEXT)"
+    )
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    fc.execute(
+        "INSERT INTO market_events VALUES ('Mumbai', ?, 'cond-mum', 'high', '32-33')",
+        (today,),
+    )
+    fc.commit()
+    fc.close()
+
+    tr = sqlite3.connect(str(tdb))
+    tr.execute(
+        "CREATE TABLE executable_market_snapshots "
+        "(condition_id TEXT, outcome_label TEXT, "
+        "orderbook_top_ask REAL, captured_at TEXT)"
+    )
+    # Intentionally leave table empty — no snapshot for Mumbai.
+    tr.commit()
+    tr.close()
+
+    zs.FORECASTS_DB = str(fdb)
+    zs.TRADES_DB = str(tdb)
+
+    result = zs.section_price_holes()
+    assert result.get("error") is None, result.get("error")
+    assert result["cities_total"] == 1
+    assert len(result["holes"]) == 1
+    assert result["holes"][0]["city"] == "Mumbai"
+    assert result["holes"][0]["age"] == "NONE"
 
 
 # --------------------------------------------------------------------------

@@ -1286,6 +1286,7 @@ categories:
     - tests/test_truth_layer.py
 
   diagnostic:
+    - tests/test_ops_scripts_smoke.py
     - tests/test_audit_city_data_readiness.py
     - tests/test_automation_analysis.py
     - tests/test_bayesian_sigma_evaluation.py
