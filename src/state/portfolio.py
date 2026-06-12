@@ -2207,6 +2207,10 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         entry_price=_load_d6_field(row, "entry_price"),
         p_posterior=float(row.get("p_posterior") or 0.0),
         entry_ci_width=float(row.get("entry_ci_width") or 0.0),
+        # Exit-retry persistence (2026-06-12): reload the bounded-backoff state
+        # so MAX_EXIT_RETRIES -> backoff_exhausted is reachable across cycles.
+        exit_retry_count=int(row.get("exit_retry_count") or 0),
+        next_exit_retry_at=(str(row.get("next_exit_retry_at")) if row.get("next_exit_retry_at") else None),
         entered_at=entered_at if state != "pending_tracked" else "",
         day0_entered_at=day0_entered_at,
         decision_snapshot_id=str(row.get("decision_snapshot_id") or ""),

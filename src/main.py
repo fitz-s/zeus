@@ -7713,9 +7713,26 @@ def _edli_user_channel_reconcile_cycle() -> None:
                 payload=fact.get("payload") if isinstance(fact.get("payload"), dict) else None,
             )
             reconcile_count += 1
-        from src.events.edli_trade_fact_bridge import append_confirmed_trade_facts_to_edli
+        from src.events.edli_trade_fact_bridge import (
+            append_confirmed_trade_facts_to_edli,
+            append_rest_filled_orphan_trade_facts_to_edli,
+        )
 
         reconcile_count += append_confirmed_trade_facts_to_edli(conn, now=now)
+        # Fill-orphan recovery (HK 30C 2026-06-12 incident): a venue fill whose
+        # WS_USER CONFIRMED message was lost to a user-channel dropout exists
+        # only as a REST trade fact and can never reach FILL_CONFIRMED through
+        # the bridge above — the position is never materialised and the P&L is
+        # never booked. The recovery lane asserts fill truth under the explicit
+        # RECONCILE_SOURCE authority (cmd terminal FILLED/PARTIAL + REST fact +
+        # grace window for the user channel), with full provenance in payload.
+        if bool(_settings_section("edli_v1", {}).get("edli_rest_filled_bridge_enabled", True)):
+            try:
+                reconcile_count += append_rest_filled_orphan_trade_facts_to_edli(conn, now=now)
+            except Exception as exc:  # noqa: BLE001 — recovery lane must not break WS truth path
+                logger.error(
+                    "EDLI rest-filled orphan bridge failed (non-fatal): %s", exc, exc_info=True
+                )
         conn.commit()
     finally:
         conn.close()

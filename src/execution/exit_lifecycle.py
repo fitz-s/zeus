@@ -783,6 +783,19 @@ def handle_exit_pending_missing(
         or os.environ.get("POLYMARKET_PROXY_ADDRESS")
         or ""
     )
+    if not safe_address:
+        # SINGLE CONFIG AUTHORITY (2026-06-12): the env vars above were never
+        # set in the daemon plist, so the chain-truth gate — the DESIGNED
+        # resolution path for exit_pending_missing — was silently bypassed on
+        # 100% of cycles and every position fell into the legacy branch.
+        # Resolve the funder from the same Keychain authority
+        # PolymarketClient uses; env vars remain an explicit override only.
+        try:
+            from src.data.polymarket_client import resolve_funder_address
+
+            safe_address = resolve_funder_address()
+        except Exception:  # noqa: BLE001 — credential absence falls back to legacy logic
+            safe_address = ""
     if asset_id and safe_address:
         on_chain_balance = _query_ctf_balance(
             asset_id, safe_address, rpc_call=rpc_call
@@ -838,6 +851,14 @@ def handle_exit_pending_missing(
             return {"action": "closed", "position": closed}
         return {"action": "skip", "position": None}
     if position.exit_state in EXIT_LIFECYCLE_RECOVERY_STATES:
+        # DELIBERATE in-memory-only close (antibody
+        # test_recoverable_exit_pending_missing_does_not_persist_admin_close):
+        # a recoverable state must keep its pending_exit projection so the next
+        # cycle retries — persisting admin_closed here would hide real on-chain
+        # exposure. The loop TERMINATES through the chain-truth gate above
+        # (funder now resolves from Keychain, 2026-06-12) whose retries are
+        # bounded by the persisted exit_retry_count → backoff_exhausted →
+        # persisted admin close.
         closed = mark_admin_closed(portfolio, position.trade_id, "EXIT_CHAIN_MISSING_REVIEW_REQUIRED")
         return {"action": "closed", "position": closed}
     if position.exit_state in EXIT_LIFECYCLE_OWNED_STATES:

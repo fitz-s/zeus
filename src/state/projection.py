@@ -25,6 +25,8 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "entry_price",
     "p_posterior",
     "entry_ci_width",
+    "exit_retry_count",
+    "next_exit_retry_at",
     "last_monitor_prob",
     "last_monitor_edge",
     "last_monitor_market_price",

@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from src.events.live_order_aggregate import LiveOrderAggregateLedger
-from src.events.live_order_reconcile import append_user_trade_observed
+from src.events.live_order_reconcile import (
+    append_reconcile_recovered_fill,
+    append_user_trade_observed,
+)
 
 
 def append_confirmed_trade_facts_to_edli(
@@ -117,6 +120,145 @@ def append_confirmed_trade_facts_to_edli(
                 "transaction_hash": _row_get(row, "tx_hash"),
                 "source_trade_fact_id": int(_row_get(row, "trade_fact_id")),
                 "source_trade_fact_authority": "venue_trade_facts:WS_USER:CONFIRMED",
+            },
+        )
+        appended += 1
+    return appended
+
+
+def append_rest_filled_orphan_trade_facts_to_edli(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime | None = None,
+    grace_minutes: float = 15.0,
+    limit: int = 50,
+    trade_db_path: str | Path | None = None,
+) -> int:
+    """Recover fill orphans whose WS_USER CONFIRMED message never arrived.
+
+    THE ORPHAN CLASS (HK 30°C 2026-06-12 incident): the user channel dropped
+    for ~3h; a real venue fill exists only as a REST-sourced trade fact
+    (state MATCHED) under a venue command in terminal FILLED/PARTIAL state.
+    ``append_confirmed_trade_facts_to_edli`` requires WS_USER+CONFIRMED, so
+    the fill can never reach FILL_CONFIRMED, the position is never
+    materialised, and the P&L is never booked.
+
+    Recovery contract (explicit reconcile authority, RECONCILE_SOURCE):
+    - the trade fact has filled_size > 0 and fill_price > 0;
+    - the owning venue command is in a terminal fill state (FILLED/PARTIAL);
+    - the fact is OLDER than ``grace_minutes`` — the user channel had every
+      chance to deliver first (within the window this bridge does nothing);
+    - no UserTradeObserved event exists for the trade under ANY authority
+      (the WS bridge always wins when it ran).
+    Every recovered event carries the full provenance chain in its payload.
+    """
+
+    _ensure_trades_attached_if_needed(conn, trade_db_path=trade_db_path)
+    trade_schema = _schema_with_table(conn, "venue_trade_facts", preferred="trades")
+    if trade_schema is None or not _table_exists(conn, "edli_live_order_events"):
+        return 0
+    venue_trade_facts = _q(trade_schema, "venue_trade_facts")
+    venue_commands = _q(trade_schema, "venue_commands")
+
+    default_now = now or datetime.now(timezone.utc)
+    grace_cutoff = default_now.timestamp() - max(0.0, float(grace_minutes)) * 60.0
+
+    rows = conn.execute(
+        f"""
+        WITH execution_commands AS (
+            SELECT aggregate_id,
+                   json_extract(payload_json, '$.event_id') AS event_id,
+                   json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
+                   json_extract(payload_json, '$.execution_command_id') AS execution_command_id
+              FROM edli_live_order_events
+             WHERE event_type = 'ExecutionCommandCreated'
+        ),
+        submit_acks AS (
+            SELECT aggregate_id,
+                   json_extract(payload_json, '$.venue_order_id') AS venue_order_id
+              FROM edli_live_order_events
+             WHERE event_type = 'VenueSubmitAcknowledged'
+        )
+        SELECT exec.aggregate_id,
+               exec.event_id,
+               exec.final_intent_id,
+               exec.execution_command_id,
+               cmd.command_id,
+               cmd.state AS command_state,
+               trade.trade_fact_id,
+               trade.trade_id,
+               trade.venue_order_id,
+               trade.state,
+               trade.source AS trade_source,
+               trade.filled_size,
+               trade.fill_price,
+               trade.tx_hash,
+               trade.observed_at,
+               trade.raw_payload_hash,
+               trade.raw_payload_json
+          FROM execution_commands exec
+          JOIN submit_acks ack
+            ON ack.aggregate_id = exec.aggregate_id
+          JOIN {venue_commands} cmd
+            ON cmd.decision_id = exec.execution_command_id
+          JOIN {venue_trade_facts} trade
+            ON trade.command_id = cmd.command_id
+           AND trade.venue_order_id = ack.venue_order_id
+         WHERE UPPER(COALESCE(cmd.state, '')) IN ('FILLED', 'PARTIAL')
+           AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+           AND CAST(COALESCE(trade.fill_price, '0') AS REAL) > 0
+           AND NOT EXISTS (
+                 SELECT 1
+                   FROM {venue_trade_facts} ws
+                  WHERE ws.trade_id = trade.trade_id
+                    AND ws.source = 'WS_USER'
+                    AND UPPER(COALESCE(ws.state, '')) = 'CONFIRMED'
+               )
+           AND NOT EXISTS (
+                 SELECT 1
+                   FROM edli_live_order_events existing
+                  WHERE existing.aggregate_id = exec.aggregate_id
+                    AND existing.event_type = 'UserTradeObserved'
+                    AND json_extract(existing.payload_json, '$.trade_id') = trade.trade_id
+               )
+         ORDER BY trade.observed_at ASC, trade.trade_fact_id ASC
+         LIMIT ?
+        """,
+        (max(0, limit),),
+    ).fetchall()
+
+    ledger = LiveOrderAggregateLedger(conn)
+    appended = 0
+    for row in rows:
+        observed_at = _parse_dt(_row_get(row, "observed_at"), default=default_now)
+        if observed_at.timestamp() > grace_cutoff:
+            continue  # still inside the user-channel grace window
+        message_hash = _message_hash(row)
+        append_reconcile_recovered_fill(
+            ledger,
+            aggregate_id=str(_row_get(row, "aggregate_id")),
+            event_id=str(_row_get(row, "event_id")),
+            final_intent_id=str(_row_get(row, "final_intent_id")),
+            venue_order_id=str(_row_get(row, "venue_order_id")),
+            occurred_at=observed_at,
+            payload={
+                "raw_user_channel_message_hash": message_hash,
+                "trade_id": str(_row_get(row, "trade_id")),
+                "filled_size": str(_row_get(row, "filled_size")),
+                "fill_price": str(_row_get(row, "fill_price")),
+                "avg_fill_price": str(_row_get(row, "fill_price")),
+                "transaction_hash": _row_get(row, "tx_hash"),
+                "source_trade_fact_id": int(_row_get(row, "trade_fact_id")),
+                "source_trade_fact_authority": (
+                    f"venue_trade_facts:{_row_get(row, 'trade_source')}:"
+                    f"{_row_get(row, 'state')}"
+                ),
+                "venue_command_state": str(_row_get(row, "command_state")),
+                "recovery_basis": (
+                    "ws_user_confirmed_missing_after_grace;"
+                    f"grace_minutes={float(grace_minutes):g};"
+                    "cmd_terminal_fill_state+rest_trade_fact"
+                ),
             },
         )
         appended += 1
