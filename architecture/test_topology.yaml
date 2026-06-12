@@ -736,7 +736,8 @@ test_trust_policy:
     tests/test_replacement_live_qlcb_missing_floor_blocks.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 7 RT: LIVE replacement_0_1 q_lcb path BLOCKS on a missing settlement sigma-floor input (anchor/cell/topology/setup) — never degrades to the raw overconfident Wilson bound; antibody verified to fail on revert"}
     tests/test_replacement_shadow_qlcb_missing_floor_logs_raw_fallback.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 7 RT: SHADOW half of the mode split — missing floor input logs raw-fallback + returns None (keep raw); live_authority=True on same input raises"}
     # PR #400 compliance additions — operator-directed TDD tests (2026-06-08)
-    tests/test_preflight_restart_check_reads_edli_v1_flags.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 1 RT: preflight_restart_check.py reads flags from correct scope (edli_v1/feature_flags), not top-level cfg dict"}
+    tests/test_no_internal_version_suffixes.py: {created: "2026-06-11", last_used: "2026-06-12", note: "PR#405 rename ban-test: no internal _v[0-9] suffixes (allowlist external SDK names; grandfather shrinks only); u0r=0 occurrences pin"}
+    tests/test_preflight_restart_check_reads_edli_flags.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 1 RT: preflight_restart_check.py reads flags from correct scope (edli_v1/feature_flags), not top-level cfg dict"}
     tests/test_bayes_precision_fusion_covariance_uses_common_target_dates_only.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: covariance rows aligned by target_date not positional index — the critical date-alignment stat bug"}
     tests/test_bayes_precision_fusion_covariance_rejects_equal_length_misaligned_histories.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: equal-length but fully date-misaligned histories must not yield a learned off-diagonal covariance"}
     tests/test_bayes_precision_fusion_covariance_falls_back_to_diag_when_common_dates_low.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: date-intersection too short -> collapse to diagonal C0 (PARSIMONY rule)"}
@@ -3503,7 +3504,7 @@ test_metadata:
     last_reused_or_audited: 2026-06-03
 
   # PR #400 operator-directed TDD tests — 2026-06-08
-  tests/test_preflight_restart_check_reads_edli_v1_flags.py:
+  tests/test_preflight_restart_check_reads_edli_flags.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
