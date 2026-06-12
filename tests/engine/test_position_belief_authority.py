@@ -4,6 +4,9 @@
 #   719/719 monitor refreshes with last_monitor_prob_is_fresh=False while the
 #   entry authority forecast_posteriors was live and had re-ranked the held bin
 #   to family top 18h before settlement) + consult REQ-20260612-052802 K1.
+#   2026-06-12 update: regime law U1/U2 + Denver incident (stale 0.79 masked as
+#   fresh while market 0.22) — replacement-authority positions must FAULT
+#   (BELIEF_AUTHORITY_FAULT) + reseed, never substitute the legacy ENS belief.
 """ANTIBODY: held-position belief comes from the SAME authority entry used.
 
 The disease: entry decisions read ``forecast_posteriors`` (replacement chain)
@@ -253,6 +256,143 @@ class TestMonitorPrimaryAuthority:
         )
         assert is_fresh is not True
         assert "replacement_posterior_missing" in pos.applied_validations
+
+
+class TestReplacementAuthorityFaultSuppressesLegacy:
+    """Regime law U1/U2 (2026-06-12) + Denver incident: a REPLACEMENT-authority
+    held position (edli trade_id) whose replacement belief is stale/missing must
+    NOT be papered over by the legacy ENS forecast belief. Instead: not-fresh +
+    BELIEF_AUTHORITY_FAULT + a fail-soft single-family reseed. A LEGACY-entered
+    (non-edli) position still gets the legacy path, clearly branded."""
+
+    def _edli_pos(self, trade_id="edli-belief-1", entry_method="ens_member_counting"):
+        from src.state.portfolio import Position
+
+        return Position(
+            trade_id=trade_id, market_id="m1", city="Karachi",
+            cluster="Karachi", target_date="2026-06-12", bin_label=BIN,
+            direction="buy_no", unit="C", temperature_metric="high",
+            entry_method=entry_method, entry_price=0.66, p_posterior=0.855,
+        )
+
+    def _stale_belief(self):
+        return ReplacementBelief(
+            held_side_prob=0.758, q_yes_bin=0.242, posterior_id="p9",
+            computed_at="2026-06-12T00:00:00+00:00", age_hours=99.0,
+            fresh=False, bin_key=BIN, direction="buy_no",
+        )
+
+    def test_edli_stale_belief_faults_and_suppresses_legacy_and_reseeds(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: self._stale_belief())
+        legacy_called = []
+        monkeypatch.setattr(
+            mr, "_refresh_ens_member_counting",
+            lambda **kw: legacy_called.append("ens") or (0.5, []),
+        )
+        reseeds = []
+        monkeypatch.setattr(
+            mr, "_enqueue_single_family_belief_reseed_failsoft",
+            lambda **kw: reseeds.append(kw) or {"status": "ok", "enqueued": True},
+        )
+
+        pos = self._edli_pos()
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos, conn=None, city=object(), target_d=None,
+        )
+
+        # Legacy ENS forecast belief was NOT substituted.
+        assert legacy_called == [], "legacy ENS path must not run for edli fault"
+        assert is_fresh is False
+        assert "BELIEF_AUTHORITY_FAULT" in pos.applied_validations
+        assert "legacy_belief_substitution_suppressed" in pos.applied_validations
+        # A targeted single-family reseed was enqueued for THIS family.
+        assert len(reseeds) == 1
+        assert reseeds[0] == {
+            "city": "Karachi", "target_date": "2026-06-12", "metric": "high",
+        }
+
+    def test_edli_missing_belief_faults_and_reseeds(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: None)
+        legacy_called = []
+        monkeypatch.setattr(
+            mr, "_refresh_ens_member_counting",
+            lambda **kw: legacy_called.append("ens") or (0.5, []),
+        )
+        reseeds = []
+        monkeypatch.setattr(
+            mr, "_enqueue_single_family_belief_reseed_failsoft",
+            lambda **kw: reseeds.append(kw) or None,
+        )
+
+        pos = self._edli_pos(trade_id="edli-belief-2")
+        _, _, is_fresh = mr.monitor_probability_refresh(
+            pos, conn=None, city=object(), target_d=None,
+        )
+        assert legacy_called == []
+        assert is_fresh is False
+        assert "BELIEF_AUTHORITY_FAULT" in pos.applied_validations
+        assert len(reseeds) == 1
+
+    def test_reseed_failure_does_not_crash_monitor(self, monkeypatch):
+        """The reseed enqueue is fail-soft: an exception inside it must not
+        propagate out of monitor_probability_refresh."""
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: self._stale_belief())
+
+        def _boom(**kw):
+            raise RuntimeError("reseed lane exploded")
+
+        # Patch the REAL helper (not the wrapper) to ensure the wrapper's own
+        # try/except absorbs it. Here we patch the inner trigger via the wrapper's
+        # fail-soft contract by making the config lookup raise.
+        monkeypatch.setattr(
+            "src.data.replacement_forecast_production._replacement_forecast_shadow_materialization_queue_config",
+            _boom,
+        )
+        monkeypatch.setattr(mr, "_refresh_ens_member_counting", lambda **kw: (0.5, []))
+
+        pos = self._edli_pos(trade_id="edli-belief-3")
+        # Must not raise.
+        _, _, is_fresh = mr.monitor_probability_refresh(
+            pos, conn=None, city=object(), target_d=None,
+        )
+        assert is_fresh is False
+        assert "BELIEF_AUTHORITY_FAULT" in pos.applied_validations
+
+    def test_legacy_entered_position_still_gets_legacy_path(self, monkeypatch):
+        """A pre-replacement (non-edli trade_id) position is NOT replacement
+        authority — it keeps the legacy fall-through, with no BELIEF_AUTHORITY_FAULT
+        suppression and no reseed."""
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: self._stale_belief())
+        legacy_called = []
+        monkeypatch.setattr(
+            mr, "_refresh_ens_member_counting",
+            lambda **kw: legacy_called.append("ens") or (0.5, []),
+        )
+        reseeds = []
+        monkeypatch.setattr(
+            mr, "_enqueue_single_family_belief_reseed_failsoft",
+            lambda **kw: reseeds.append(kw),
+        )
+
+        pos = self._edli_pos(trade_id="legacy-trade-77")  # NON-edli
+        mr.monitor_probability_refresh(pos, conn=None, city=object(), target_d=None)
+
+        # Legacy path ran; no fault suppression; no reseed.
+        assert legacy_called == ["ens"]
+        assert "legacy_belief_substitution_suppressed" not in pos.applied_validations
+        assert reseeds == []
 
 
 class TestBeliefDeadWatchdog:
