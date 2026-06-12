@@ -1,5 +1,6 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-06-12 (external review FINDING 2: per-family materializable-cycle
+#   gate + typed leg-artifact-missing reason)
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
 #   docs/authority/regime_unification_2026-06-12.md §U2; docs/evidence/freshness/
 #   2026-06-12_forecast_freshness_truth.md §Q3/§Q4). Relationship-first pins for:
@@ -23,8 +24,12 @@ import pytest
 
 from src.data.replacement_cycle_advance_trigger import (
     SOURCE_ID as ADV_SOURCE_ID,
+    family_materializable_cycle,
     freshest_materializable_cycle,
     scope_needs_cycle_advance,
+)
+from src.data.replacement_forecast_source_run_identity import (
+    expected_replacement_dependency_identity_by_role,
 )
 from src.data.replacement_forecast_materializer import (
     SOURCE_ID as MAT_SOURCE_ID,
@@ -250,6 +255,123 @@ def test_cycle_advance_marker_unique_bounds_enqueue_to_once_per_target_cycle() -
     assert _insert("2026-06-12T06:00:00+00:00", "s1.json") == 1, "first enqueue inserts"
     assert _insert("2026-06-12T06:00:00+00:00", "s2.json") == 0, "same target cycle is a no-op"
     assert _insert("2026-06-12T12:00:00+00:00", "s3.json") == 1, "a fresher target cycle re-enqueues"
+
+
+# ===========================================================================
+# (C) PER-FAMILY MATERIALIZABLE CYCLE (external review FINDING 2) — the universe-wide high-water
+# mark is NOT the per-family materializability authority. A cycle is materializable for a SPECIFIC
+# (city, target_date, metric) only when BOTH legs' raw artifacts exist for THAT scope. When a leg
+# is missing for the family, the trigger must NOT falsely advance and must NOT silently skip — it
+# records a typed CYCLE_LEG_ARTIFACT_MISSING reason so the gap is visible (ALWAYS-DECIDABLE).
+# ===========================================================================
+class _FakeManifest:
+    """Minimal stand-in for RawForecastArtifactManifest carrying the fields family_materializable_
+    cycle reads (source_id, data_version, source_cycle_time) plus city/target_date for the fake
+    latest_manifest filter. Mirrors the real manifest's scope-filtered lookup without disk I/O."""
+    def __init__(self, *, source_id: str, data_version: str, cycle: datetime, city: str, target_date: str) -> None:
+        self.source_id = source_id
+        self.data_version = data_version
+        self.source_cycle_time = cycle
+        self._city = city
+        self._target_date = target_date
+
+
+def _fake_latest_manifest(manifests, *, source_id, data_version, city, target_date):
+    """Mirror _latest_manifest's contract: newest manifest matching source_id+data_version that is
+    allowed for (city, target_date), or None when no manifest matches the scope+leg. This is the
+    SAME scope-filtered selection the seed builder uses — it returns None precisely when THIS
+    family lacks THIS leg's artifact, which is the gap family_materializable_cycle must detect."""
+    cands = [
+        m for m in manifests
+        if m.source_id == source_id and m.data_version == data_version
+        and m._city == city and m._target_date == target_date
+    ]
+    if not cands:
+        return None
+    return max(cands, key=lambda m: m.source_cycle_time)
+
+
+def _legs_for(metric: str, *, city: str, target_date: str, cycle: datetime,
+              include_anchor: bool = True) -> list[_FakeManifest]:
+    ident = expected_replacement_dependency_identity_by_role(metric)
+    aifs = ident["aifs_sampled_2t"]
+    anchor = ident["openmeteo_ifs9_anchor"]
+    out = [_FakeManifest(source_id=aifs.source_id, data_version=aifs.data_version,
+                         cycle=cycle, city=city, target_date=target_date)]
+    if include_anchor:
+        out.append(_FakeManifest(source_id=anchor.source_id, data_version=anchor.data_version,
+                                 cycle=cycle, city=city, target_date=target_date))
+    return out
+
+
+def test_family_materializable_cycle_both_legs_present_returns_min() -> None:
+    """Both legs present for the family -> the family-scoped cycle is MIN over the legs, no gap."""
+    cyc = datetime(2026, 6, 12, 12, tzinfo=UTC)
+    manifests = _legs_for("high", city="CityA", target_date="2026-06-13", cycle=cyc)
+    got, missing = family_materializable_cycle(
+        manifests, city="CityA", target_date="2026-06-13", metric="high",
+        expected_identity=expected_replacement_dependency_identity_by_role,
+        latest_manifest=_fake_latest_manifest,
+    )
+    assert got == cyc
+    assert missing == ()
+
+
+def test_family_materializable_cycle_missing_leg_blocks_and_names_gap() -> None:
+    """THE FINDING: AIFS 12Z exists for CityB but OM9 12Z exists only for CityA. The universe-wide
+    freshest cycle says 12Z is materializable — but family_materializable_cycle for CityB MUST
+    return None (not materializable) and name the missing OM9 leg, so the trigger records a typed
+    gap instead of a false advance + silent manifest_missing skip."""
+    cyc = datetime(2026, 6, 12, 12, tzinfo=UTC)
+    # Universe: CityA has BOTH legs at 12Z; CityB has ONLY the AIFS leg at 12Z (anchor missing).
+    manifests = (
+        _legs_for("high", city="CityA", target_date="2026-06-13", cycle=cyc)
+        + _legs_for("high", city="CityB", target_date="2026-06-13", cycle=cyc, include_anchor=False)
+    )
+    # CityA: fully materializable.
+    got_a, missing_a = family_materializable_cycle(
+        manifests, city="CityA", target_date="2026-06-13", metric="high",
+        expected_identity=expected_replacement_dependency_identity_by_role,
+        latest_manifest=_fake_latest_manifest,
+    )
+    assert got_a == cyc and missing_a == ()
+    # CityB: NOT materializable — anchor leg absent for THIS family. No false advance.
+    got_b, missing_b = family_materializable_cycle(
+        manifests, city="CityB", target_date="2026-06-13", metric="high",
+        expected_identity=expected_replacement_dependency_identity_by_role,
+        latest_manifest=_fake_latest_manifest,
+    )
+    assert got_b is None, "CityB must NOT advance: it lacks the OM9 anchor leg at 12Z"
+    assert len(missing_b) == 1
+    role, src = missing_b[0]
+    assert role == "openmeteo_ifs9_anchor"
+    anchor_src = expected_replacement_dependency_identity_by_role("high")["openmeteo_ifs9_anchor"].source_id
+    assert src == anchor_src, "the typed gap must name the exact missing leg source"
+
+
+def test_cycle_advance_marker_reason_column_persists() -> None:
+    """The cycle_advance_enqueues table carries a `reason` column so a leg-artifact gap is recorded
+    as a typed, idempotent row (CYCLE_LEG_ARTIFACT_MISSING:...) rather than a silent skip."""
+    conn = _conn()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(cycle_advance_enqueues)")}
+    assert "reason" in cols, "cycle_advance_enqueues must have a reason column (FINDING 2)"
+    reason = "CYCLE_LEG_ARTIFACT_MISSING:openmeteo_ecmwf_ifs_9km@2026-06-12T12:00:00+00:00"
+    conn.execute(
+        """
+        INSERT INTO cycle_advance_enqueues
+            (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+             held_position, seed_file, reason)
+        VALUES ('t', 'CityB', '2026-06-13', 'high', '2026-06-12T06:00:00+00:00',
+                '2026-06-12T12:00:00+00:00', 0, NULL, ?)
+        """,
+        (reason,),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT seed_file, reason FROM cycle_advance_enqueues WHERE city = 'CityB'"
+    ).fetchone()
+    assert row["seed_file"] is None, "a gap row carries no seed_file (it never materialized)"
+    assert row["reason"] == reason
 
 
 # ===========================================================================
