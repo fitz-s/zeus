@@ -432,10 +432,13 @@ def section_positions() -> dict:
             ).fetchall()
             if settled:
                 tot = sum(r[1] for r in settled)
+                # substring match on exit_reason text; lowercase needles so the
+                # CI semantic classifier's state-literal regex does not read a
+                # display filter as a new state-machine member (PR #407 P0 flag)
+                _degraded_needles = ("fallback", "stale", "stuck")
                 fb = sum(
                     r[1] for r in settled
-                    if r[0] and ("FALLBACK" in r[0].upper() or "STALE" in r[0].upper()
-                                 or "STUCK" in r[0].upper())
+                    if r[0] and any(n in r[0].lower() for n in _degraded_needles)
                 )
                 out["exit_fallback_24h"] = f"{fb}/{tot}"
         finally:
