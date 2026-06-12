@@ -3699,20 +3699,35 @@ def _build_live_execution_command_certificates(
         # UnboundLocalError at cert build. None → tick_size falls back to the
         # executable_snapshot payload default, which is correct for the MAKER path.
         _snap_for_depth = None
-        if str(order_mode).strip().upper() == "TAKER" and trade_conn is not None:
-            from src.contracts.execution_intent import (
-                quantize_submit_shares_for_venue_at_most,
-                simulate_clob_sweep,
-            )
-            _snap_id_for_depth = str(
+        # MARKET-IDENTITY HYDRATION FOR ALL MODES (live 2026-06-12 00:52-01:13Z,
+        # five maker intents PRE_SUBMIT_ERROR): the snapshot OBJECT also feeds
+        # _executable_market_context_from_snapshot below, whose event_id becomes
+        # the final intent's market_event_id — the venue-event identity the
+        # executor's pre-venue guard compares against the snapshot row
+        # (executor.py "FinalExecutionIntent event_id does not match executable
+        # snapshot"). Loading the object ONLY inside the TAKER depth block left
+        # every MAKER intent with market_event_id=None → the intent fell back to
+        # the EDLI opportunity event id → guaranteed namespace mismatch → every
+        # maker submit died pre-venue. (Denver's taker fill passed because the
+        # taker path loaded the object for the depth sweep.) The hydration is a
+        # PK lookup, fail-soft; depth-sweep usage stays taker-only.
+        _snap_for_context = None
+        if trade_conn is not None:
+            _snap_id_for_context = str(
                 executable_snapshot.payload.get("identity")
                 or executable_snapshot.payload.get("selected_snapshot_id")
                 or ""
             )
             try:
-                _snap_for_depth = get_snapshot(trade_conn, _snap_id_for_depth) if _snap_id_for_depth else None
+                _snap_for_context = get_snapshot(trade_conn, _snap_id_for_context) if _snap_id_for_context else None
             except Exception:
-                _snap_for_depth = None
+                _snap_for_context = None
+        if str(order_mode).strip().upper() == "TAKER" and trade_conn is not None:
+            from src.contracts.execution_intent import (
+                quantize_submit_shares_for_venue_at_most,
+                simulate_clob_sweep,
+            )
+            _snap_for_depth = _snap_for_context
             if _snap_for_depth is not None:
                 _action_payload = actionable.payload
                 _min_order_size_d = Decimal(str(
@@ -3840,7 +3855,7 @@ def _build_live_execution_command_certificates(
                         str(_venue_quantized_sweep.average_price)
                         if _venue_quantized_sweep.average_price is not None else None
                     )
-        executable_market_context = _executable_market_context_from_snapshot(_snap_for_depth)
+        executable_market_context = _executable_market_context_from_snapshot(_snap_for_context)
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,

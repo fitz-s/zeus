@@ -300,3 +300,71 @@ class TestReceiptCarriesModeFields:
         )
         payload = _actionable_payload_from_receipt(r, self._cap())
         assert "proof_execution_mode_intent" not in payload
+
+
+class TestMakerMarketIdentityContext:
+    """ANTIBODY (live 2026-06-12 00:52-01:13Z, five maker intents
+    PRE_SUBMIT_ERROR): the final intent's market_event_id (the venue-event
+    identity the executor's pre-venue guard compares against the snapshot row)
+    comes from _executable_market_context_from_snapshot(<snapshot object>).
+    Hydrating that object ONLY inside the TAKER depth block left every MAKER
+    intent with market_event_id=None, so the intent fell back to the EDLI
+    opportunity event id and EVERY maker submit died
+    'FinalExecutionIntent event_id does not match executable snapshot'.
+    Relationship pinned: the context argument is the mode-independent
+    _snap_for_context, and its hydration is NOT gated on order_mode."""
+
+    def test_market_context_arg_is_mode_independent_snapshot(self):
+        import ast
+        import inspect
+
+        from src.engine import event_reactor_adapter as era
+
+        src = inspect.getsource(era._build_live_execution_command_certificates)
+        tree = ast.parse(src.lstrip())
+        context_args = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                if name == "_executable_market_context_from_snapshot":
+                    for arg in node.args:
+                        context_args.append(getattr(arg, "id", None))
+        assert context_args, "context builder call disappeared — re-audit the maker identity path"
+        assert all(a == "_snap_for_context" for a in context_args), (
+            f"market context must be built from the mode-independent _snap_for_context, "
+            f"got {context_args} — feeding the TAKER-only _snap_for_depth re-opens the "
+            "maker PRE_SUBMIT_ERROR wall"
+        )
+
+    def test_snap_for_context_hydration_not_gated_on_taker(self):
+        import inspect
+        import re
+
+        from src.engine import event_reactor_adapter as era
+
+        src = inspect.getsource(era._build_live_execution_command_certificates)
+        # The hydration assignment must appear BEFORE the TAKER conditional and
+        # be guarded only by trade_conn presence.
+        hydration = src.find("_snap_for_context = get_snapshot(")
+        taker_gate = src.find('if str(order_mode).strip().upper() == "TAKER"')
+        assert hydration != -1, "snapshot hydration for market context missing"
+        assert taker_gate != -1
+        assert hydration < taker_gate, (
+            "_snap_for_context hydration moved inside/after the TAKER gate — "
+            "maker intents lose market_event_id again"
+        )
+
+    def test_context_builder_carries_event_id(self):
+        from types import SimpleNamespace
+
+        from src.engine.event_reactor_adapter import _executable_market_context_from_snapshot
+
+        snap = SimpleNamespace(
+            event_id="highest-temperature-in-kuala-lumpur-on-june-13-2026",
+            event_slug="highest-temperature-in-kuala-lumpur-on-june-13-2026",
+            market_end_at="2026-06-13T16:00:00+00:00",
+            market_close_at=None,
+        )
+        context = _executable_market_context_from_snapshot(snap)
+        assert context is not None
+        assert context["event_id"] == "highest-temperature-in-kuala-lumpur-on-june-13-2026"
