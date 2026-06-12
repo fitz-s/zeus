@@ -1,22 +1,29 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-06-12
 # Authority basis: operator directive 2026-06-11 ~16:30Z — stale-decision-vs-fresh-book
 #   races were TERMINAL. Live evidence: Miami 16:22:35Z cleared EVERY gate and aborted at
 #   JIT recapture (SUBMIT_ABORTED_PRICE_MOVED: recaptured all-in 0.5136 > max 0.5025 +
 #   0.0100 tolerance) — terminally consumed though EV at the NEW price was still strongly
 #   positive (q_lcb 0.6776). NYC 16:22:33Z failed the certificate layer with
 #   "PreSubmitRevalidated requires would_cross_book=false" (maker flavor of the SAME race).
-#   Both now classify TRANSIENT → bounded requeue → next cycle RE-DECIDES with a fresh
+#   Both now classify TRANSIENT → requeue → next cycle RE-DECIDES with a fresh
 #   book (never resubmits the same envelope; no venue order was placed in either reason).
+#
+#   REWRITTEN 2026-06-12 (operator law "no caps"; "重试次数不是市场事实"): the old
+#   MAX_EXECUTABLE_SNAPSHOT_RETRIES=8 attempt-cap terminalization is DELETED. A
+#   transient requeues INDEFINITELY until an EVENT HORIZON fires (timeliness floor
+#   past / operator disarm), labeled MONEY_PATH_HORIZON_EXPIRED — never an attempt
+#   count. The cap-based tests below are rewritten to the horizon design; the
+#   classifier pins and the riskguard-requeue antibodies are preserved.
 """RELATIONSHIP tests across the boundary
 
     adapter submit receipt reason -> reactor._reject_or_retry_post_submit
-    -> _is_transient_money_path_reason -> requeue (bounded) vs terminal consume
+    -> _is_transient_money_path_reason -> requeue (horizon-bounded) vs terminal consume
 
 The cross-module invariant: a price-race abort (taker PRICE_MOVED / maker
 would_cross_book) must NOT terminally consume the opportunity — the event requeues
-(bounded by MAX_EXECUTABLE_SNAPSHOT_RETRIES → dead-letter) so the next cycle
-re-decides at the fresh price. Every OTHER certificate-build failure stays terminal.
+(NO attempt cap; only an EVENT HORIZON terminalizes) so the next cycle re-decides
+at the fresh price. Every OTHER certificate-build failure stays terminal.
 """
 from __future__ import annotations
 
@@ -26,7 +33,6 @@ from datetime import datetime, timezone
 from src.events.event_store import EventStore
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 from src.events.reactor import (
-    MAX_EXECUTABLE_SNAPSHOT_RETRIES,
     EventSubmissionReceipt,
     OpportunityEventReactor,
     _is_transient_money_path_reason,
@@ -166,6 +172,9 @@ def _status(conn, event_id: str) -> str:
 
 
 _DT = datetime(2026, 6, 4, 18, 10, tzinfo=timezone.utc)
+# Chicago 2026-06-05 strictly-past-in-tz boundary is 2026-06-06T05:00Z; this is
+# after it, so the timeliness horizon has expired for the test event.
+_DT_HORIZON_PAST = datetime(2026, 6, 7, 0, 0, tzinfo=timezone.utc)
 
 
 def test_price_moved_requeues_not_terminal():
@@ -212,43 +221,63 @@ def test_other_certificate_failure_stays_terminal():
     assert _status(conn, event.event_id) == "processed"
 
 
-def test_price_moved_retries_bounded_then_dead_letter():
-    """ANTIBODY (bound): the requeue is capped by MAX_EXECUTABLE_SNAPSHOT_RETRIES —
-    a persistently moving book dead-letters instead of retrying forever."""
+def test_price_moved_requeues_indefinitely_until_timeliness_horizon():
+    """ANTIBODY (operator law 2026-06-12, REWRITTEN from the cap test): a
+    persistently moving book is NOT terminalized by an attempt count. The event
+    requeues across many cycles (far past the old cap of 8) while it is still
+    timely, and only dead-letters when its EVENT HORIZON (timeliness floor) has
+    passed — labeled MONEY_PATH_HORIZON_EXPIRED, never an attempt count."""
     conn, store = _store()
-    event = _event("snap-cap")
+    event = _event("snap-horizon")
     store.insert_or_ignore(event)
     reactor = _reactor_with_reason(conn, store, _PRICE_MOVED_REASON)
 
-    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES + 2):
-        reactor.process_pending(decision_time=_DT, limit=10)
-        if _status(conn, event.event_id) == "dead_letter":
-            break
+    # 20 timely cycles (>2x the old cap): the event requeues, never dead-letters.
+    for i in range(20):
+        result = reactor.process_pending(decision_time=_DT, limit=10)
+        assert result.dead_lettered == 0, f"cycle {i}: a timely transient must never dead-letter by count"
+        assert _status(conn, event.event_id) == "pending", f"cycle {i}: still pending (no cap)"
 
-    assert _status(conn, event.event_id) == "dead_letter", (
-        f"after {MAX_EXECUTABLE_SNAPSHOT_RETRIES}+ attempts the event must dead-letter, "
-        "not retry unbounded"
+    # The timeliness horizon passes. Drive the requeue disposition at the past
+    # decision_time (in production fetch_pending's read floor + archive sweep also
+    # reclaim it; the explicit terminal here is the honest WHY label).
+    from src.events.reactor import ReactorResult
+
+    reactor._transient_requeue_reasons[event.event_id] = _PRICE_MOVED_REASON
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=_DT_HORIZON_PAST,
+        result=res,
     )
-    attempts = store.attempt_count(event.event_id)
-    assert attempts >= MAX_EXECUTABLE_SNAPSHOT_RETRIES
+    assert res.dead_lettered == 1
+    assert _status(conn, event.event_id) == "dead_letter"
 
 
-def test_transient_exhaustion_dead_letter_carries_honest_category():
-    """ANTIBODY (external review 2026-06-11): money-path transients share the
-    executable-snapshot retry disposition, so exhaustion used to dead-letter as
-    EXECUTABLE_SNAPSHOT_BLOCKED / 'snapshot not captured' — masking the actual
-    submit-race category and hiding the churn from the ledgers. The terminal
-    dead-letter row must carry the LAST transient reason; the generic snapshot
-    label is reserved for genuinely uncapturable snapshots."""
+def test_horizon_dead_letter_carries_honest_horizon_and_cause():
+    """ANTIBODY (REWRITTEN from the exhaustion-label test): when a transient
+    terminalizes at its EVENT HORIZON the dead-letter must carry the horizon
+    (TIMELINESS_FLOOR_PAST) AND the last honest transient cause — never an
+    EXECUTABLE_SNAPSHOT_BLOCKED mask and never an attempt count."""
     conn, store = _store()
     event = _event("snap-honest-label")
     store.insert_or_ignore(event)
     reactor = _reactor_with_reason(conn, store, _PRICE_MOVED_REASON)
 
-    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES + 2):
-        reactor.process_pending(decision_time=_DT, limit=10)
-        if _status(conn, event.event_id) == "dead_letter":
-            break
+    reactor.process_pending(decision_time=_DT, limit=10)  # one timely requeue
+    assert _status(conn, event.event_id) == "pending"
+
+    from src.events.reactor import ReactorResult
+
+    reactor._transient_requeue_reasons[event.event_id] = _PRICE_MOVED_REASON
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=_DT_HORIZON_PAST,
+        result=res,
+    )
 
     row = conn.execute(
         "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
@@ -256,13 +285,17 @@ def test_transient_exhaustion_dead_letter_carries_honest_category():
     ).fetchone()
     assert row is not None
     failure_stage, error_message = row[0], row[1]
-    assert failure_stage == "MONEY_PATH_TRANSIENT_EXHAUSTED", (
-        "transient exhaustion must NOT be labeled EXECUTABLE_SNAPSHOT_BLOCKED: "
-        f"got {failure_stage!r}"
+    assert failure_stage == "MONEY_PATH_HORIZON_EXPIRED", (
+        "horizon terminal must be labeled MONEY_PATH_HORIZON_EXPIRED, never the "
+        f"old count-based MONEY_PATH_TRANSIENT_EXHAUSTED: got {failure_stage!r}"
     )
+    assert "TIMELINESS_FLOOR_PAST" in (error_message or ""), error_message
     assert "SUBMIT_ABORTED_PRICE_MOVED" in (error_message or ""), (
-        "the dead-letter must carry the last transient reason: "
+        "the dead-letter must carry the last transient cause: "
         f"got {error_message!r}"
+    )
+    assert "attempt" not in (error_message or "").lower(), (
+        "no attempt count may appear in the terminal evidence"
     )
 
 
@@ -498,18 +531,36 @@ def test_riskguard_recovery_processes_requeued_event():
     assert _status(conn, event.event_id) == "processed"
 
 
-def test_riskguard_block_exhaustion_is_honest_terminal():
-    """A sustained genuine halt still terminates — with the riskguard cause."""
+def test_riskguard_block_requeues_indefinitely_then_horizon_terminal():
+    """A sustained genuine RED halt requeues with NO attempt cap (nothing submits
+    while blocked) and terminates only at the EVENT HORIZON — carrying the honest
+    riskguard cause in a MONEY_PATH_HORIZON_EXPIRED label, never an attempt count."""
     conn, store = _store()
     event = _event("snap-rg-3")
     store.insert_or_ignore(event)
     reactor = _reactor_with_riskguard(conn, store, lambda _e: False)
 
-    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES + 1):
-        reactor.process_pending(decision_time=_DT)
+    # 15 timely cycles (>old cap): requeues, never dead-letters by count.
+    for i in range(15):
+        result = reactor.process_pending(decision_time=_DT)
+        assert result.dead_lettered == 0, f"cycle {i}: a timely riskguard block must not dead-letter by count"
+        assert _status(conn, event.event_id) == "pending"
+
+    from src.events.reactor import ReactorResult
+
+    reactor._transient_requeue_reasons[event.event_id] = "RISK_GUARD_BLOCKED"
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=_DT_HORIZON_PAST,
+        result=res,
+    )
 
     assert _status(conn, event.event_id) == "dead_letter"
     row = conn.execute(
         "SELECT rejection_reason FROM no_trade_regret_events ORDER BY rowid DESC LIMIT 1"
     ).fetchone()
-    assert row[0] == "MONEY_PATH_TRANSIENT_EXHAUSTED:RISK_GUARD_BLOCKED"
+    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED:TIMELINESS_FLOOR_PAST:RISK_GUARD_BLOCKED", (
+        f"the riskguard cause must survive into the horizon label: got {row[0]!r}"
+    )

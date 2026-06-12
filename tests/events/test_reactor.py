@@ -268,8 +268,6 @@ def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_afte
     marked processed, so once the family's snapshots are captured a later cycle re-evaluates
     it instead of losing it. This is the #42b fix for the live reactor never running the kernel.
     """
-    from src.events.reactor import MAX_EXECUTABLE_SNAPSHOT_RETRIES
-
     conn, store = _store()
     event = _forecast_event()
     store.insert_or_ignore(event)
@@ -283,11 +281,14 @@ def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_afte
             (event.event_id,),
         ).fetchone()[0]
 
-    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES - 1):
+    # 12 timely cycles (well past the old cap of 8): the event requeues, never
+    # consumed by an attempt count (operator law 2026-06-12: no caps).
+    for _ in range(12):
         result = reactor.process_pending(decision_time=dt)
         assert result.processed == 0
+        assert result.dead_lettered == 0
         assert result.retried == 1
-        assert _status() == "pending"  # retryable, NOT consumed
+        assert _status() == "pending"  # retryable, NOT consumed, NO cap
 
     present["v"] = True
     result = reactor.process_pending(decision_time=dt)
@@ -295,9 +296,11 @@ def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_afte
     assert _status() == "processed"
 
 
-def test_executable_snapshot_block_dead_letters_after_max_retries():
-    from src.events.reactor import MAX_EXECUTABLE_SNAPSHOT_RETRIES
-
+def test_executable_snapshot_block_terminalizes_at_timeliness_horizon():
+    """REWRITTEN 2026-06-12 (operator law "no caps"): an uncapturable snapshot is
+    NOT dead-lettered by attempt count. While the event is timely it requeues
+    indefinitely; it terminalizes only when its EVENT HORIZON (timeliness floor)
+    has passed — labeled MONEY_PATH_HORIZON_EXPIRED."""
     conn, store = _store()
     event = _forecast_event()
     store.insert_or_ignore(event)
@@ -305,18 +308,37 @@ def test_executable_snapshot_block_dead_letters_after_max_retries():
     reactor = _retry_reactor(store, present)
     dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
 
-    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES + 2):
-        reactor.process_pending(decision_time=dt)
+    def _status():
+        return conn.execute(
+            "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()[0]
 
-    status = conn.execute(
-        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+    # Many timely cycles: never dead-letters by count.
+    for _ in range(12):
+        reactor.process_pending(decision_time=dt)
+        assert _status() == "pending"
+
+    # Timeliness horizon passes (Chicago 2026-05-24 boundary is 2026-05-25T05:00Z).
+    # Drive the requeue disposition at the past time to assert the explicit horizon
+    # terminal (in production the read floor + archive sweep also reclaim it).
+    from src.events.reactor import ReactorResult
+
+    horizon_past = datetime(2026, 5, 26, 0, 0, tzinfo=timezone.utc)
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=horizon_past,
+        result=res,
+    )
+    assert res.dead_lettered == 1
+    assert _status() == "dead_letter"
+    row = conn.execute(
+        "SELECT failure_stage FROM event_dead_letters WHERE event_id = ?",
         (event.event_id,),
-    ).fetchone()[0]
-    assert status == "dead_letter"
-    assert conn.execute(
-        "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
-        (event.event_id,),
-    ).fetchone()[0] == 1
+    ).fetchone()
+    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED"
 
 
 def test_source_captured_after_decision_time_is_retryable_not_consumed():

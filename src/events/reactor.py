@@ -87,6 +87,21 @@ def _cycle_budget_seconds() -> float | None:
     return budget if budget > 0 else None
 
 
+def _operator_disarm_active() -> bool:
+    """Horizon (c): operator env kill-switch for in-flight money-path transients.
+
+    Truthy ``ZEUS_REACTOR_TRANSIENT_DISARM`` => the operator has disarmed the
+    transient requeue lane; in-flight transients terminalize with an honest
+    OPERATOR_DISARM horizon instead of spinning. Unset/empty/"0"/"false"/"no"
+    => armed (normal indefinite requeue). A malformed value is treated as armed
+    (fail-open to requeue — a typo must never silently burn live events).
+    """
+    raw = os.environ.get(_TRANSIENT_DISARM_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({"SUBMIT_DISABLED", "NOT_SUBMITTED_DRY_RUN"})
 LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({
     "SUBMITTED",
@@ -276,14 +291,54 @@ class ReactorConfig:
 # An executable market snapshot for the family may simply not be captured yet on the cycle
 # the reactor reaches the event (the targeted refresh and the reactor share a cycle). That is
 # a TRANSIENT condition, not a terminal rejection: the event is requeued and retried on a later
-# cycle (after capture) rather than being consumed. After this many attempts without a snapshot
-# the event is dead-lettered as genuinely uncapturable.
+# cycle (after capture) rather than being consumed.
+#
+# EVENT-HORIZON TERMINALIZATION (operator law 2026-06-12, "no caps of any kind";
+# "重试次数不是市场事实" — a retry count is not a market fact). The retry loop is
+# NOT bounded by an attempt cap. An attempt cap burns a live-positive-EV event
+# because the SUBSTRATE was unlucky N times, while the EVENT itself is still
+# timely — a cap disguised as a safety check (external consult BLOCKER verdict).
+# A transient event requeues INDEFINITELY until an explicit SEMANTIC terminal
+# (a horizon) fires:
+#   (a) TIMELINESS_FLOOR_PAST — the event is no longer timely. Reuses the SINGLE
+#       existing timeliness authority (EventStore._is_timely / _strictly_past_in_tz):
+#       a forecast-decision event whose target LOCAL day has strictly ended can
+#       neither produce a receipt nor needs the reactor; it has crossed its
+#       market horizon. NO second clock is invented — the reactor asks the store
+#       the same question fetch_pending asks on the read floor. This same floor
+#       is ALSO why infinite requeue is safe and cannot leak: once the event is
+#       strictly-past, fetch_pending stops returning it (read-floor drop) and
+#       archive_expired_candidates sweeps it terminal; the explicit dead-letter
+#       here just labels WHY at the moment the reactor still holds the claim.
+#       (a) also subsumes the "market/family delisted/closed" horizon (b): the
+#       settlement-day-end floor IS the authoritative market-closed signal the
+#       reactor can read cheaply. We deliberately do NOT build a new venue/delist
+#       probe (operator no-new-probe guard) — if a cheaper authoritative delist
+#       signal is later surfaced, it joins this same horizon predicate.
+#   (c) OPERATOR_DISARM — the operator turned the lane off. The reactor_mode flip
+#       (REACTOR_NOT_LIVE) already consumes events in _process_one_pre_submit
+#       BEFORE retry; the explicit env disarm (ZEUS_REACTOR_TRANSIENT_DISARM)
+#       gives operations a kill-switch that terminalizes in-flight transients
+#       with an honest cause instead of letting them spin.
+#
+# When a horizon fires the dead-letter label says WHY
+# (MONEY_PATH_HORIZON_EXPIRED:<horizon>:<last_reason>), NEVER an attempt count.
 _EXECUTABLE_SNAPSHOT_RETRY = "RETRY_EXECUTABLE_SNAPSHOT_PENDING"
 
 # K2.1: once-per-process-per-base warning dedup for unregistered rejection-reason
 # bases (see _write_regret). Module-level so every reactor instance shares it.
 _UNREGISTERED_REJECTION_BASES_WARNED: set[str] = set()
-MAX_EXECUTABLE_SNAPSHOT_RETRIES = 8
+
+# Log hygiene only (NOT behavior): a perpetually-requeued event would log every
+# cycle. We log at attempt 1, then every Nth attempt — the requeue count is kept
+# solely to dedupe logs, never to terminalize.
+_TRANSIENT_REQUEUE_LOG_EVERY = 50
+
+# Operator-disarm env kill-switch (horizon (c)). When set truthy, every in-flight
+# money-path transient terminalizes with MONEY_PATH_HORIZON_EXPIRED:OPERATOR_DISARM
+# on its next cycle instead of requeueing. Unset/empty/"0"/"false" => armed
+# (normal indefinite requeue until a timeliness/operator horizon).
+_TRANSIENT_DISARM_ENV = "ZEUS_REACTOR_TRANSIENT_DISARM"
 # Sentinel returned by _process_one when a FORECAST_SNAPSHOT_READY event has been dead-lettered
 # due to non-live-eligible window authority. The dead-letter + reject writes are done inside
 # _process_one; process_pending must NOT double-count or attempt mark_processed on this path.
@@ -349,6 +404,12 @@ class OpportunityEventReactor:
         # restart the label degrades to the generic snapshot reason, never lies
         # about a cause it does not know.
         self._transient_requeue_reasons: dict[str, str] = {}
+        # Per-event requeue counter — LOG HYGIENE ONLY (operator law 2026-06-12:
+        # a retry count is not a market fact and MUST NOT terminalize). Used
+        # solely to dedupe the requeue log line (log at attempt 1, then every
+        # _TRANSIENT_REQUEUE_LOG_EVERY). In-memory; lost on restart (the count
+        # resets, the behavior does not — there is no cap to lose).
+        self._transient_requeue_counts: dict[str, int] = {}
         from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
         from src.decision_kernel.compiler import DecisionCompiler
         from src.decision_kernel.ledger import DecisionCertificateLedger
@@ -652,6 +713,88 @@ class OpportunityEventReactor:
         else:
             ledger.rollback(event_id)
 
+    def _transient_horizon_terminal(
+        self, event: OpportunityEvent, *, decision_time: datetime
+    ) -> tuple[str, str] | None:
+        """Return the EVENT-HORIZON terminal for a transient block, or None to requeue.
+
+        Operator law 2026-06-12 ("no caps"; "重试次数不是市场事实"): a transient
+        money-path block requeues INDEFINITELY until a SEMANTIC horizon fires.
+        This replaces the attempt-count terminalization. Returns
+        ``(horizon_label, detail)`` when a horizon has been crossed, else None.
+
+        Horizons (in precedence order):
+          (c) OPERATOR_DISARM — the operator env kill-switch is set. Checked first
+              so a disarm terminalizes everything in-flight immediately.
+          (a) TIMELINESS_FLOOR_PAST — the event is no longer timely. Delegates to
+              the SINGLE existing timeliness authority (EventStore._is_timely):
+              a forecast-decision event whose target LOCAL day is strictly past
+              has crossed its market horizon (it can neither produce a receipt nor
+              needs the reactor). This is the SAME predicate fetch_pending applies
+              on its read floor — no second clock, no new venue probe. (a) also
+              serves as the authoritative "market closed/settled" signal (horizon
+              (b)); the settlement-day-end floor IS the market-closed authority.
+
+        Non-forecast-decision events (no city+target_date) have no timeliness
+        floor of their own — for them only the operator disarm horizon applies;
+        absent that they requeue until consumed by another terminal path. They
+        cannot leak the queue: the cross-city round-robin in fetch_pending
+        interleaves fresh events fairly (see _note_transient_requeue docstring).
+        """
+        # (c) Operator disarm — highest precedence kill-switch.
+        if _operator_disarm_active():
+            return ("OPERATOR_DISARM", f"{_TRANSIENT_DISARM_ENV} set")
+
+        # (a) Timeliness floor — reuse the store's single authority. _is_timely
+        # returns True for non-forecast-decision events (no floor) and for any
+        # event still within its tradeable window; only a strictly-past
+        # forecast-decision event returns False -> horizon crossed. Fail-soft: if
+        # the authority is unavailable (legacy store) we requeue (no terminal),
+        # never burn the event on a missing predicate.
+        is_timely_fn = getattr(self._store, "_is_timely", None)
+        if callable(is_timely_fn):
+            try:
+                timely = is_timely_fn(event, decision_time.astimezone(UTC))
+            except Exception:
+                timely = True
+            if not timely:
+                return ("TIMELINESS_FLOOR_PAST", "target local day strictly past")
+        return None
+
+    def _note_transient_requeue(self, event: OpportunityEvent) -> None:
+        """Bump the per-event requeue counter and log with dedup (LOG HYGIENE ONLY).
+
+        The count NEVER terminalizes (operator law: a retry count is not a market
+        fact). It exists solely so a perpetually-requeued event does not log every
+        cycle: log at attempt 1, then every _TRANSIENT_REQUEUE_LOG_EVERY.
+
+        STARVATION GUARD (design note, verified in the test suite): infinite
+        requeue cannot let one event starve the queue. requeue_pending returns the
+        event to 'pending' WITHOUT resetting fetch_pending's ordering authority,
+        whose PRIMARY cross-city key is the per-(tier, city) round-robin rank
+        (_city_round): a budget of K reaches K DISTINCT cities per cycle, so a
+        single perpetually-transient city event can never preempt fresh events
+        from other cities. The retry-debt tiebreak (attempt_count>0 sorts ahead)
+        only applies WITHIN the same (target_date, available_at) across the same
+        round — it interleaves, it does not monopolize.
+        """
+        event_id = getattr(event, "event_id", None)
+        if event_id is None:
+            return
+        count = self._transient_requeue_counts.get(event_id, 0) + 1
+        self._transient_requeue_counts[event_id] = count
+        if count == 1 or (count % _TRANSIENT_REQUEUE_LOG_EVERY) == 0:
+            import logging as _logging
+
+            reason = self._transient_requeue_reasons.get(event_id, "EXECUTABLE_SNAPSHOT_PENDING")
+            _logging.getLogger("zeus.events.reactor").info(
+                "reactor: money-path transient requeued (no cap; horizon-bounded) "
+                "event_id=%s count=%d reason=%s",
+                event_id,
+                count,
+                reason,
+            )
+
     def _finalize_disposition(
         self,
         event: OpportunityEvent,
@@ -673,36 +816,40 @@ class OpportunityEventReactor:
             # Only release the savepoint; do NOT call mark_processed.
             return
         if disposition == _EXECUTABLE_SNAPSHOT_RETRY:
-            attempts = self._store.attempt_count(event.event_id)
-            if attempts >= MAX_EXECUTABLE_SNAPSHOT_RETRIES:
-                # Terminal after repeated cycles. HONEST CATEGORY LABEL (external
-                # review finding 2026-06-11): when the retries were money-path
-                # transients (price race / mode flip / would-cross), the terminal
-                # label carries that cause — EXECUTABLE_SNAPSHOT_BLOCKED is
-                # reserved for genuinely uncapturable snapshots.
+            horizon = self._transient_horizon_terminal(event, decision_time=decision_time)
+            if horizon is not None:
+                # EVENT-HORIZON TERMINAL (operator law 2026-06-12). The event is
+                # terminalized because a SEMANTIC horizon fired — the event is no
+                # longer timely (its market settled) or the operator disarmed the
+                # lane — NEVER because it was retried N times. The label carries
+                # the horizon AND the last honest transient cause; an attempt
+                # count never appears in the terminal evidence.
+                horizon_label, horizon_detail = horizon
                 last_transient = self._transient_requeue_reasons.pop(event.event_id, None)
-                if last_transient:
-                    stage_label = "MONEY_PATH_TRANSIENT_EXHAUSTED"
-                    reason_label = f"{stage_label}:{last_transient}"
-                    error_message = (
-                        f"money-path transient still unresolved after {attempts} attempts; "
-                        f"last reason: {last_transient}"
-                    )
-                else:
-                    stage_label = "EXECUTABLE_SNAPSHOT_BLOCKED"
-                    reason_label = "EXECUTABLE_SNAPSHOT_BLOCKED"
-                    error_message = f"executable snapshot not captured after {attempts} attempts"
-                self._reject_event(event, "EXECUTABLE_QUOTE", reason_label, result, decision_time=decision_time)
+                self._transient_requeue_counts.pop(event.event_id, None)
+                cause = last_transient or "EXECUTABLE_SNAPSHOT_PENDING"
+                reason_label = f"MONEY_PATH_HORIZON_EXPIRED:{horizon_label}:{cause}"
+                error_message = (
+                    f"money-path transient terminalized at event horizon "
+                    f"({horizon_label}{(': ' + horizon_detail) if horizon_detail else ''}); "
+                    f"last reason: {cause}"
+                )
+                self._reject_event(
+                    event, "EXECUTABLE_QUOTE", reason_label, result, decision_time=decision_time
+                )
                 self._store.mark_dead_letter(
                     event,
-                    failure_stage=stage_label,
+                    failure_stage="MONEY_PATH_HORIZON_EXPIRED",
                     error_message=error_message,
                     created_at=decision_time.astimezone(UTC).isoformat(),
                 )
                 result.dead_lettered += 1
             else:
-                # Transient block: requeue for retry next cycle (after capture completes).
-                # Do NOT consume the event the way mark_processed would.
+                # Transient block, NO horizon: requeue for retry next cycle
+                # (after capture completes / book settles / risk clears). Do NOT
+                # consume the event the way mark_processed would. There is NO
+                # attempt cap — the event requeues until a horizon terminal fires.
+                self._note_transient_requeue(event)
                 self._store.requeue_pending(event.event_id)
                 result.retried += 1
             return
@@ -711,6 +858,7 @@ class OpportunityEventReactor:
         # flow marked such drained-rejection events processed and counted them as
         # ``processed`` (the event is consumed, not retried). Preserve that exactly.
         self._transient_requeue_reasons.pop(event.event_id, None)
+        self._transient_requeue_counts.pop(event.event_id, None)
         self._store.mark_processed(event.event_id, processed_at=decision_time.astimezone(UTC).isoformat())
         result.processed += 1
 
@@ -1022,9 +1170,9 @@ class OpportunityEventReactor:
             # the event was terminally consumed as proof_accepted while the FRESH book
             # carried positive EV (Busan 17:30:20Z, q_lcb 0.828 vs fresh ask 0.77,
             # twice in one cycle). A transient-classified reason on a NO_SUBMIT receipt
-            # is the SAME stale-decision-vs-fresh-book race: requeue (bounded by
-            # MAX_EXECUTABLE_SNAPSHOT_RETRIES via the shared disposition) so the next
-            # cycle re-decides on the fresh book and prices the fresh mode from the
+            # is the SAME stale-decision-vs-fresh-book race: requeue (horizon-bounded
+            # via the shared disposition — no attempt cap) so the next cycle
+            # re-decides on the fresh book and prices the fresh mode from the
             # start. The receipt is NOT persisted for the aborted attempt — the requeued
             # decision writes its own honest receipt.
             if _is_transient_money_path_reason(receipt.reason):
@@ -1141,7 +1289,8 @@ class OpportunityEventReactor:
             # decision moment, or the selected executable price expired between
             # the pre-submit family identity gate and the adapter's JIT scoring.
             # Requeue for the next cycle instead of terminally consuming the
-            # opportunity (bounded by MAX_EXECUTABLE_SNAPSHOT_RETRIES).
+            # opportunity (horizon-bounded — no attempt cap; see
+            # _transient_horizon_terminal).
             self._transient_requeue_reasons[event.event_id] = str(reason)
             return _EXECUTABLE_SNAPSHOT_RETRY
         self._reject_event(event, stage, reason, result, receipt=receipt, decision_time=decision_time)
@@ -1543,54 +1692,185 @@ def _receipt_money_path_blocker(
     return None, ""
 
 
-def _is_transient_money_path_reason(reason: str | None) -> bool:
-    """Stale-decision-vs-fresh-book races and DB-lock blips are TRANSIENT: requeue
-    (bounded by MAX_EXECUTABLE_SNAPSHOT_RETRIES → dead-letter) so the next cycle
-    RE-DECIDES with a fresh book. The retry re-runs the full gate chain and
-    re-prices from scratch — it NEVER resubmits the same envelope, so the
-    no-verbatim-retry venue rule is untouched (and in every reason below the
-    venue order was never placed: PRICE_MOVED aborts pre-POST, would_cross_book
-    fails the pre-submit revalidation certificate).
+# ---------------------------------------------------------------------------
+# Money-path transient classifier — EXPLICIT reactor-owned table (operator law
+# 2026-06-12; replaces the string-contains classifier that rotted silently when
+# a reason was renamed). The contract for full typed-enum-at-emission is a named
+# follow-up (the adapter's emission sites are owned by another file); here the
+# reactor owns an exhaustive, enumerable table and fails OPEN to TRANSIENT on an
+# unknown reason with a LOUD log — a misspelled/renamed reason must NEVER
+# silently terminal-burn a live-positive-EV event; the loud log is the antibody
+# that gets the table updated.
+# ---------------------------------------------------------------------------
 
-    TRANSIENT (2026-06-11 live additions):
-      * SUBMIT_ABORTED_PRICE_MOVED — taker flavor: JIT recapture found the all-in
-        cost above max_acceptable_price + bounded tolerance. Live: Miami 16:22:35Z
-        cleared EVERY gate, aborted on a moved book, and was terminally consumed
-        even though EV at the NEW price was still strongly positive (q_lcb 0.6776
-        vs cost 0.5136). Same shape as EXECUTABLE_SNAPSHOT_STALE, which already
-        requeues.
-      * EDLI_LIVE_CERTIFICATE_BUILD_FAILED + would_cross_book — maker flavor of
-        the SAME race: a post-only limit crossed because the book moved between
-        decision and submit (NYC 16:22:33Z). Narrowed to the would_cross
-        sub-reason ONLY; every other certificate build failure stays terminal
-        (except the pre-existing db-lock transients).
-      * SUBMIT_ABORTED_MODE_FLIPPED — third flavor of the SAME race: the proof
-        priced a MAKER rest into an empty own-ask, and by final submit the book
-        had a live ask (fresh_mode=TAKER), so the P0-1 mode-intent authority
-        correctly refused the stale-mode plan. Live: 17:23:33Z four cities
-        (Chongqing/Wellington/Shanghai/Milan 06-13 buy_no, Kelly $9-35) were
-        terminally consumed while the FRESH ask carried +6..+19% conservative
-        EV. The requeue re-decides on the fresh book and prices TAKER from the
-        start — the abort itself proves the venue order was never placed.
+# A reason whose BASE (text before the first ':') is in this set is TRANSIENT
+# (stale-decision-vs-fresh-book races and source re-ingestion races). The retry
+# re-runs the full gate chain and re-prices from scratch — it NEVER resubmits the
+# same envelope (no-verbatim-retry venue rule untouched), and in every case the
+# venue order was never placed (PRICE_MOVED aborts pre-POST, MODE_FLIPPED refuses
+# the stale plan, would_cross_book fails the pre-submit revalidation certificate).
+TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
+    # Forecast-source re-ingested AFTER this cycle's decision moment.
+    "SOURCE_CAPTURED_AFTER_DECISION_TIME",
+    # Executable family snapshot not captured yet / went stale this cycle.
+    "EXECUTABLE_SNAPSHOT_STALE",
+    # Taker race: JIT recapture found all-in cost above max + bounded tolerance
+    # (Miami 16:22:35Z — EV at the NEW price still strongly positive).
+    "SUBMIT_ABORTED_PRICE_MOVED",
+    # Maker/taker mode race: proof priced a MAKER rest into an empty own-ask; by
+    # submit the book grew a live ask (fresh_mode=TAKER) and P0-1 refused the
+    # stale-mode plan (17:23:33Z four cities, fresh ask carried +6..+19% EV).
+    "SUBMIT_ABORTED_MODE_FLIPPED",
+})
+
+# A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
+# and must NOT requeue. Kept EXPLICIT and EXHAUSTIVE so the classifier never
+# fail-opens a KNOWN terminal into a requeue: every reason base that reaches
+# _reject_or_retry_post_submit today (the money-path blocker bases from
+# _receipt_money_path_blocker, the live-admission rejection bases, the no-submit
+# / execution-receipt certificate codes) is enumerated here. A base in NEITHER
+# table is genuinely novel and triggers the fail-open loud-log path — so a
+# RENAMED TRANSIENT race never silently terminal-burns, while a known terminal
+# stays terminal even though the default is fail-open.
+# Runtime-only terminal reason bases that are NOT registered RejectionReason
+# enum members but DO reach this classifier (reactor/admission/decision-kernel
+# internal reasons synthesized at the call site). Enumerated explicitly; unioned
+# below with the registry-derived terminals so the terminal set is complete.
+_RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
+    # --- _receipt_money_path_blocker terminal bases (reactor.py) ---
+    "EDLI_REAL_ORDER_SIDE_EFFECT_FORBIDDEN",
+    "EDLI_REAL_ORDER_SUBMIT_DISABLED",
+    "TRADE_SCORE_BLOCKED",
+    "EDLI_KELLY_PROOF_MISSING",
+    "EDLI_KELLY_COST_BASIS_MISSING",
+    "KELLY_TOO_SMALL",
+    "FINAL_INTENT_RECEIPT_MISSING",
+    # --- live-admission rejection bases (src/strategy/live_inference/live_admission.py) ---
+    "ADMISSION_WIN_RATE_FLOOR",
+    "ADMISSION_LCB_CONSISTENCY",
+    "ADMISSION_CAPITAL_EFFICIENCY",
+    "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE",
+    # --- no-submit / execution-receipt certificate codes (src/decision_kernel) ---
+    "NO_SUBMIT_PROOF_BUNDLE_REQUIRED",
+    "EXECUTION_RECEIPT_CERTIFICATE_REQUIRED",
+    "EVENT_PERSISTED_AFTER_DECISION_TIME",
+    "REPLAY_COUNTERFACTUAL_NOT_PROMOTABLE_TO_NO_SUBMIT",
+    # Execution-receipt FAILED-WITHOUT-SIDE-EFFECT terminals (routed via
+    # receipt.reason or the bare status when reason is empty).
+    "REJECTED",
+    "PRE_SUBMIT_ERROR",
+    # Receipt missing or not bound to this event (submit returned True / a
+    # non-matching receipt): a structural expressibility failure, not a race.
+    "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND",
+})
+
+
+def _registry_terminal_money_path_reasons() -> frozenset[str]:
+    """Terminal reason bases derived from the CANONICAL registry (single authority:
+    src.contracts.rejection_reasons.RejectionReason). A reason base is TERMINAL iff
+    it is a registered reason that is NOT in the transient set and NOT the
+    certificate-build family (which is sub-classified). Deriving the terminal set
+    from the registry — instead of hand-listing it — makes it complete-by-
+    construction: a newly-added RejectionReason is automatically terminal, so the
+    fail-open default never silently flips a registered terminal into a requeue.
+    Only genuinely UNREGISTERED, never-seen reasons fall to the fail-open path.
+
+    Fail-soft: if the registry import is unavailable (it imports only stdlib, so
+    this should never fail), the runtime terminal set alone still governs.
+    """
+    try:
+        from src.contracts.rejection_reasons import RejectionReason
+    except Exception:
+        return frozenset()
+    bases = {member.value for member in RejectionReason}
+    return frozenset(
+        bases
+        - TRANSIENT_MONEY_PATH_REASONS
+        - {"EDLI_LIVE_CERTIFICATE_BUILD_FAILED"}
+    )
+
+
+# The exhaustive terminal table: registry-derived terminals (complete by
+# construction) ∪ the runtime-only terminal bases above. A reason base in
+# NEITHER this set nor TRANSIENT_MONEY_PATH_REASONS is genuinely novel and
+# triggers the fail-open loud-log path — so a RENAMED TRANSIENT race never
+# silently terminal-burns, while every KNOWN terminal stays terminal.
+TERMINAL_MONEY_PATH_REASONS: frozenset[str] = (
+    _registry_terminal_money_path_reasons() | _RUNTIME_TERMINAL_MONEY_PATH_REASONS
+)
+
+
+def _money_path_reason_base(reason: str) -> str:
+    """The classifier key for a reason: text before the first ':' (the qualified
+    reason carries a human suffix, e.g. 'SUBMIT_ABORTED_PRICE_MOVED: recaptured
+    all-in cost ...'). Whitespace-stripped; never lexicographically compared."""
+    return reason.split(":", 1)[0].strip()
+
+
+def _certificate_build_failed_is_transient(reason: str) -> bool:
+    """EDLI_LIVE_CERTIFICATE_BUILD_FAILED is a reason FAMILY: the would_cross_book
+    sub-reason (maker flavor of the price race) and DB-lock blips are TRANSIENT;
+    every OTHER certificate build failure stays TERMINAL. This sub-discrimination
+    is intrinsic to the reason (the qualifier lives in the suffix), so it cannot
+    be a flat base-set entry — it is an explicit, named sub-classifier."""
+    suffix_lower = reason.lower()
+    return (
+        "would_cross_book" in suffix_lower
+        or "database is locked" in suffix_lower
+        or "database table is locked" in suffix_lower
+        or "database is busy" in suffix_lower
+    )
+
+
+def _is_transient_money_path_reason(reason: str | None) -> bool:
+    """Classify a money-path rejection reason as TRANSIENT (requeue) vs TERMINAL
+    (consume), via an EXPLICIT reactor-owned table — never substring soup.
+
+    Decision order:
+      1. Empty/None              -> TERMINAL (no reason to requeue).
+      2. ANY ':'-delimited segment in TRANSIENT_MONEY_PATH_REASONS -> TRANSIENT.
+         A reason can be a CHAIN where a transient cause is nested in a terminal-
+         looking wrapper, e.g.
+         "LIVE_INFERENCE_INPUTS_MISSING:...:SOURCE_CAPTURED_AFTER_DECISION_TIME":
+         a transient cause ANYWHERE in the chain means "re-decide on a fresh
+         substrate" and wins. This is an EXPLICIT segment membership check, not a
+         substring scan — each segment is matched against the closed transient set.
+      3. EDLI_LIVE_CERTIFICATE_BUILD_FAILED:* -> named sub-classifier
+         (would_cross_book / db-lock = TRANSIENT; else TERMINAL).
+      4. base in TERMINAL_MONEY_PATH_REASONS  -> TERMINAL.
+      5. UNKNOWN base -> LOUD log + default TRANSIENT (fail-open to requeue).
+         A renamed/misspelled reason must never silently terminal-burn a
+         live-positive-EV event; the loud log is the antibody that gets the
+         table fixed. The event still terminalizes correctly later via an
+         EVENT-HORIZON terminal (timeliness floor / operator disarm), so
+         fail-open does not leak — it just refuses to BURN on a string typo.
     """
     if not reason:
         return False
-    reason_lower = reason.lower()
-    return (
-        "SOURCE_CAPTURED_AFTER_DECISION_TIME" in reason
-        or "EXECUTABLE_SNAPSHOT_STALE" in reason
-        or "SUBMIT_ABORTED_PRICE_MOVED" in reason
-        or "SUBMIT_ABORTED_MODE_FLIPPED" in reason
-        or (
-            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:" in reason
-            and (
-                "database is locked" in reason_lower
-                or "database table is locked" in reason_lower
-                or "database is busy" in reason_lower
-                or "would_cross_book" in reason_lower
-            )
+    # (2) Any nested transient segment wins (explicit segment membership).
+    segments = [seg.strip() for seg in reason.split(":")]
+    if any(seg in TRANSIENT_MONEY_PATH_REASONS for seg in segments):
+        return True
+    base = _money_path_reason_base(reason)
+    if base == "EDLI_LIVE_CERTIFICATE_BUILD_FAILED":
+        return _certificate_build_failed_is_transient(reason)
+    if base in TERMINAL_MONEY_PATH_REASONS:
+        return False
+    # UNKNOWN reason base — fail open to TRANSIENT, loudly. Dedup per-base
+    # per-process (reuse the unregistered-base warn set so a flood of one renamed
+    # reason logs once, not every cycle).
+    if base not in _UNREGISTERED_REJECTION_BASES_WARNED:
+        _UNREGISTERED_REJECTION_BASES_WARNED.add(base)
+        import logging as _logging
+
+        _logging.getLogger("zeus.events.reactor").error(
+            "reactor: UNKNOWN money-path reason base %r not in the transient/terminal "
+            "table — defaulting TRANSIENT (fail-open requeue). Add it to "
+            "TRANSIENT_MONEY_PATH_REASONS or TERMINAL_MONEY_PATH_REASONS. Full reason: %s",
+            base,
+            reason,
         )
-    )
+    return True
 
 
 def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:
