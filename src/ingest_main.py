@@ -509,6 +509,15 @@ def _k2_obs_fast_tick():
             logger.info("K2 obs_fast_tick: no cities in active window, skipping")
             return
 
+        # Rotate the city order per tick: the fetch loop runs alphabetically and
+        # upstream rate limiting truncates the TAIL of every run, so a fixed
+        # order permanently starves the same tail cities (2026-06-12: two runs,
+        # both failed exactly the post-cutoff alphabetic tail; Denver among
+        # them on its settlement day). A 15-min rotation guarantees every city
+        # reaches the front of the queue within len/step ticks.
+        offset = (int(now_utc.timestamp()) // 900) % len(city_filter)
+        city_filter = city_filter[offset:] + city_filter[:offset]
+
         results = run_live_tick(
             days_back=1,
             city_filter=city_filter,
@@ -516,9 +525,12 @@ def _k2_obs_fast_tick():
         )
         written = sum(r.rows_written for r in results if not r.skipped_hko)
         failed = [r.city for r in results if r.failure_reason]
+        # Log the failure REASONS, not just names — two incident rounds were
+        # spent re-deriving "rate limited" because only city names were logged.
+        reasons = {r.city: str(r.failure_reason)[:80] for r in results if r.failure_reason}
         logger.info(
-            "K2 obs_fast_tick: cities=%d written=%d failed=%s",
-            len(city_filter), written, failed or "none",
+            "K2 obs_fast_tick: cities=%d written=%d failed=%s reasons=%s",
+            len(city_filter), written, failed or "none", reasons or "none",
         )
 
 

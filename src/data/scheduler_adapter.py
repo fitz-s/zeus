@@ -105,6 +105,15 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
         # Settlement is live-critical EXCEPT historical UMA, which is a backfill concern.
         if spec.source_id == "polymarket_uma_oo_v2":
             return "backfill_db"
+        # Replacement availability poll carries download + materialization work
+        # (cycle-advance reseeds ride it) that can run for HOURS on a backlog.
+        # Incident 2026-06-12: one long poll run monopolized the serial live_db
+        # lane 13:09->16:07 and starved every observation tick — Denver went
+        # blind for the whole settlement-day heating ramp. Materialization is
+        # derived-class work; the lane-separation rationale ("an ETL job can
+        # never starve live ingest") must apply to it too.
+        if spec.job_id == "ingest_replacement_availability_poll":
+            return "derived_db"
         return "live_db"
     if spec.role == "backfill":
         return "backfill_db"
