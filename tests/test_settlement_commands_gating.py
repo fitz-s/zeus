@@ -3,55 +3,57 @@
 # Authority basis: phase5_h_decision.md §10 attack-pattern 2 (P5-M1);
 #                  IMPLEMENTATION_PLAN Phase 5 pre-cutover patch M1
 
-"""Regression tests for P5-M1: submit_redeem on_chain_mutation gate enforcement.
+"""Regression tests for submit_redeem submission-boundary enforcement.
 
-Two mandatory tests per P5-M1 deliverable spec:
-  1. ZEUS_KILL_SWITCH=1 → gate_runtime.check raises BEFORE adapter.redeem is called.
-  2. AST-walk: @capability("on_chain_mutation") is present on submit_redeem.
+Updated 2026-06-12 (operator law 2026-06-10 ABSOLUTE — redeem submission FORBIDDEN):
+  1. submit_redeem raises REDEEM_SUBMISSION_FORBIDDEN UNCONDITIONALLY, before any
+     side effect — and before the kill-switch / on_chain_mutation gate is even
+     consulted (the forbidden-raise is now the first statement). adapter.redeem is
+     never reached.
+  2. AST-walk: @capability("on_chain_mutation") is still present on submit_redeem
+     (defense in depth — the decorator stays even though the body raises first).
 """
 
 from __future__ import annotations
 
 import ast
-import importlib
 import pathlib
 
 import pytest
+
+from src.execution.settlement_commands import (
+    assert_redeem_submission_allowed as _REAL_ASSERT_REDEEM,
+)
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 
 
 class TestSubmitRedeemGating:
-    """P5-M1: gate_runtime.check("on_chain_mutation") fires before adapter.redeem."""
+    """Operator law: submit_redeem refuses BEFORE adapter.redeem, unconditionally."""
 
-    def test_submit_redeem_gated_when_kill_switch_on(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    def test_submit_redeem_forbidden_before_adapter(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """With ZEUS_KILL_SWITCH=1, submit_redeem raises before adapter.redeem is reached."""
+        """submit_redeem raises REDEEM_SUBMISSION_FORBIDDEN before adapter.redeem,
+        regardless of kill-switch state (the forbidden-raise precedes the gate)."""
         monkeypatch.setenv("ZEUS_KILL_SWITCH", "1")
         monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
 
-        # Redirect ritual_signal writes to tmp dir.
-        monkeypatch.setattr(
-            "src.architecture.gate_runtime._RITUAL_SIGNAL_DIR",
-            tmp_path / "ritual_signal",
-        )
-        from src.architecture import gate_runtime
-        importlib.reload(gate_runtime)
-        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+        # Restore the REAL guard (conftest installs a session-wide no-op patch so
+        # accounting-setup suites can bootstrap via submit_redeem; _REAL_ASSERT_REDEEM
+        # was captured at import time, before any patch, so it is the genuine guard).
+        import src.execution.settlement_commands as sc
 
-        # Sentinel: adapter.redeem must never be called if gate fires first.
+        monkeypatch.setattr(sc, "assert_redeem_submission_allowed", _REAL_ASSERT_REDEEM)
+
+        # Sentinel: adapter.redeem must never be called.
         adapter_called = []
 
         class _SentinelAdapter:
             def redeem(self, condition_id: str, *, index_sets=None, **_ignored) -> None:
-                # PR-I.5.c kw-only signature; gate must fire BEFORE this is reached.
                 adapter_called.append(condition_id)
 
-        import src.execution.settlement_commands as sc
-        importlib.reload(sc)
-
-        with pytest.raises(RuntimeError, match="kill_switch_active"):
+        with pytest.raises(RuntimeError, match="REDEEM_SUBMISSION_FORBIDDEN"):
             sc.submit_redeem(
                 command_id="test-cmd-id",
                 adapter=_SentinelAdapter(),
@@ -59,7 +61,8 @@ class TestSubmitRedeemGating:
             )
 
         assert adapter_called == [], (
-            "adapter.redeem was called despite kill_switch_active — gate did not fire first"
+            "adapter.redeem was called despite REDEEM_SUBMISSION_FORBIDDEN — "
+            "the submission guard did not fire first"
         )
 
     def test_submit_redeem_decorator_present(self) -> None:

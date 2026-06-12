@@ -32,84 +32,51 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Antibody 1 — happy path: live mode + creds → adapter has signer + funder.
+# Updated 2026-06-12 (operator law 2026-06-10 — redeem submission FORBIDDEN):
+# the redeem-submitter cycle is now an UNCONDITIONAL no-op. It returns BEFORE
+# resolving credentials, constructing an adapter, or calling submit_redeem,
+# because redeem_submission_allowed() is always False. Antibodies 1 and 2
+# previously pinned the (now dead-by-law) credential-wiring / fail-closed
+# submitter machinery; they now pin that the cycle never reaches it.
 # ---------------------------------------------------------------------------
-def test_redeem_submitter_adapter_has_credentials_in_live_mode(monkeypatch):
-    """In live mode with creds resolved, the adapter is constructed with
-    non-empty signer_key and funder_address before submit_redeem is reached.
-    """
+def test_redeem_submitter_calm_skips_even_with_creds_in_live_mode(monkeypatch):
+    """Live mode + creds available → the cycle still calm-skips and never
+    constructs an adapter or resolves credentials (submission forbidden)."""
     from src import main as main_mod
 
-    captured: dict = {}
+    adapter_constructed = {"count": 0}
+    creds_resolved = {"count": 0}
 
-    fake_creds = {
-        "private_key": "0xprivkey-test",
-        "funder_address": "0xfunder-test",
-    }
-
-    class _FakeAdapter:
+    class _FakeAdapter:  # pragma: no cover - must never be constructed
         def __init__(self, **kwargs):
-            captured["kwargs"] = kwargs
+            adapter_constructed["count"] += 1
 
-        def redeem(self, condition_id, *, index_sets=None, **_ignored):  # pragma: no cover - not exercised here
-            return {"success": False, "errorCode": "STUB"}
-
-    # No submittable rows → cycle exits after row-fetch but AFTER the adapter
-    # is constructed. We want to capture the construction kwargs without
-    # exercising submit_redeem.
-    fake_conn = MagicMock()
-    fake_conn.execute.return_value.fetchall.return_value = [{"command_id": "c1"}]
-
-    fake_submit_result = MagicMock()
-    fake_submit_result.state.value = "REDEEM_SUBMITTED"
+    def _spy_resolve():  # pragma: no cover - must never be called
+        creds_resolved["count"] += 1
+        return {"private_key": "0xprivkey-test", "funder_address": "0xfunder-test"}
 
     monkeypatch.setattr(main_mod, "get_mode", lambda: "live")
     with patch(
         "src.data.polymarket_client.resolve_polymarket_credentials",
-        return_value=fake_creds,
+        side_effect=_spy_resolve,
     ), patch(
         "src.venue.polymarket_v2_adapter.PolymarketV2Adapter", _FakeAdapter
-    ), patch(
-        "src.state.db.get_trade_connection", return_value=fake_conn
-    ), patch(
-        "src.execution.settlement_commands.submit_redeem",
-        return_value=fake_submit_result,
-    ), patch(
-        "src.data.dual_run_lock.acquire_lock",
-    ) as mock_lock:
-        mock_lock.return_value.__enter__.return_value = True
-        mock_lock.return_value.__exit__.return_value = False
+    ):
+        assert main_mod._redeem_submitter_cycle.__wrapped__() is None
 
-        # Direct call to the wrapped target (the @_scheduler_job wrapper swallows
-        # exceptions; we want to assert against direct behavior).
-        main_mod._redeem_submitter_cycle.__wrapped__()
-
-    assert "kwargs" in captured, "PolymarketV2Adapter was never constructed"
-    kwargs = captured["kwargs"]
-    assert kwargs.get("signer_key"), (
-        f"signer_key missing or empty: {kwargs.get('signer_key')!r}"
+    assert adapter_constructed["count"] == 0, (
+        "redeem submission is FORBIDDEN — no adapter may be constructed"
     )
-    assert kwargs.get("funder_address"), (
-        f"funder_address missing or empty: {kwargs.get('funder_address')!r}"
+    assert creds_resolved["count"] == 0, (
+        "the cycle must calm-skip before resolving credentials"
     )
-    assert kwargs["signer_key"] == fake_creds["private_key"]
-    assert kwargs["funder_address"] == fake_creds["funder_address"]
 
 
-# ---------------------------------------------------------------------------
-# Antibody 2 — fail-closed: live mode + missing creds + work exists → raise
-#              before adapter construction and before submit_redeem.
-#
-# Codex P2 fix (PR #145): creds resolution moved to after empty-row check.
-# The prior assertion "DB must NOT be opened" was over-specified; a read-only
-# SELECT is not a write side effect. The real invariant is: no adapter
-# constructed and no submit_redeem called when creds missing AND work exists.
-# ---------------------------------------------------------------------------
-def test_redeem_submitter_fails_closed_when_creds_missing(monkeypatch):
-    """In live mode with submittable rows, if Keychain lookup fails the cycle
-    MUST raise before constructing the adapter or calling submit_redeem.
-    DB may be read (empty-row check) — that is not a side effect.
-    """
+# Antibody 2 — live mode + missing creds + work exists → cycle calm-skips
+#              before touching credentials or submit_redeem (NO raise: the
+#              unconditional forbidden-submission early return precedes the
+#              creds fail-closed path entirely).
+def test_redeem_submitter_calm_skips_before_creds_failclosed(monkeypatch):
     from src import main as main_mod
 
     adapter_constructed = {"count": 0}
@@ -122,33 +89,22 @@ def test_redeem_submitter_fails_closed_when_creds_missing(monkeypatch):
     def _spy_submit(*args, **kwargs):  # pragma: no cover
         submit_called["count"] += 1
 
-    fake_conn = MagicMock()
-    fake_conn.execute.return_value.fetchall.return_value = [{"command_id": "c1"}]
-
     monkeypatch.setattr(main_mod, "get_mode", lambda: "live")
     with patch(
         "src.data.polymarket_client.resolve_polymarket_credentials",
         side_effect=RuntimeError("Cannot resolve Polymarket credentials: keychain"),
     ), patch(
-        "src.state.db.get_trade_connection", return_value=fake_conn
-    ), patch(
         "src.venue.polymarket_v2_adapter.PolymarketV2Adapter", _SpyAdapter
     ), patch(
         "src.execution.settlement_commands.submit_redeem", side_effect=_spy_submit
-    ), patch(
-        "src.data.dual_run_lock.acquire_lock",
-    ) as mock_lock:
-        mock_lock.return_value.__enter__.return_value = True
-        mock_lock.return_value.__exit__.return_value = False
-
-        with pytest.raises(RuntimeError, match="credentials unavailable"):
-            main_mod._redeem_submitter_cycle.__wrapped__()
+    ):
+        assert main_mod._redeem_submitter_cycle.__wrapped__() is None
 
     assert adapter_constructed["count"] == 0, (
-        "PolymarketV2Adapter must NOT be constructed when creds missing"
+        "PolymarketV2Adapter must NOT be constructed (submission forbidden)"
     )
     assert submit_called["count"] == 0, (
-        "submit_redeem must NOT be called when creds missing"
+        "submit_redeem must NOT be called (submission forbidden)"
     )
 
 

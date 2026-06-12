@@ -1503,6 +1503,11 @@ def _wrap_proceeds_same_tick(creds: dict, adapter: Any) -> None:
             wconn.close()
 
 
+# One-shot guard so the redeem-submitter law banner logs once per process, not
+# every scheduler tick (operator law 2026-06-10 — redeem submission forbidden).
+_REDEEM_SUBMITTER_LAW_LOGGED = False
+
+
 @_scheduler_job("redeem_submitter")
 def _redeem_submitter_cycle() -> None:
     """Poll settlement_commands for ALL _SUBMITTABLE_STATES rows + submit_redeem.
@@ -1520,14 +1525,23 @@ def _redeem_submitter_cycle() -> None:
     are re-processed every tick AND any real adapter tx_hash is not durably
     anchored. Per-row commit gives partial-failure tolerance.
     """
-    # K3.6 REDEEM PIVOT (operator law 2026-06-10 "完全抛弃redeem"): the scheduler
-    # NEVER drives redeem submission. Calm skip (no FAILED-noise every tick);
-    # submit_redeem and adapter.redeem each hard-raise as deeper layers. The
-    # operator-only override env exists solely for a supervised manual redrive
-    # run OUTSIDE the daemon.
+    # REDEEM SUBMISSION FORBIDDEN (operator law 2026-06-10, ABSOLUTE): the
+    # scheduler NEVER drives redeem submission. redeem_submission_allowed() is
+    # now unconditionally False (the operator-override escape hatch was deleted),
+    # and submit_redeem / adapter.redeem each hard-raise REDEEM_SUBMISSION_FORBIDDEN
+    # as deeper defense layers. This cycle is a no-op that logs the law once per
+    # process so an operator scanning logs sees WHY redemption never runs here.
     from src.execution.settlement_commands import redeem_submission_allowed
 
     if not redeem_submission_allowed():
+        global _REDEEM_SUBMITTER_LAW_LOGGED
+        if not _REDEEM_SUBMITTER_LAW_LOGGED:
+            logger.info(
+                "redeem_submitter: SKIPPED — redeem submission FORBIDDEN (operator "
+                "law 2026-06-10). Redemption is EXTERNAL; Zeus books "
+                "EXTERNAL_REDEMPTION and never submits a redeem tx."
+            )
+            _REDEEM_SUBMITTER_LAW_LOGGED = True
         return
     from src.data.dual_run_lock import acquire_lock
     from src.data.polymarket_client import (

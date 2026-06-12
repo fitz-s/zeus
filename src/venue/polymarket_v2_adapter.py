@@ -1,5 +1,9 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-06-12
+# Authority basis (2026-06-12): operator law 2026-06-10 ABSOLUTE — redeem submission
+#   FORBIDDEN. redeem() now raises REDEEM_SUBMISSION_FORBIDDEN unconditionally; the
+#   autonomous web3 broadcast body (eth_sendRawTransaction EOA path) was DELETED.
+#   External deep-review finding 2026-06-12 (residual override + broadcast path).
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-06-04 M5 mutex-IO antibody: venue read entrypoints
@@ -873,339 +877,44 @@ class PolymarketV2Adapter:
         neg_risk: bool = False,
         amount_per_slot: int | None = None,
     ) -> dict[str, Any]:
-        """Redeem winning shares via the Polygon CTF or negRisk adapter.
+        """FORBIDDEN — Zeus never submits redeem transactions (operator law 2026-06-10).
 
-        PR-I.5.c (2026-05-18) Path A wire: eth_abi.encode + eth_utils.keccak
-        for calldata, eth_account.Account.sign_transaction for signing, and the
-        existing self._rpc_call (urllib JSON-RPC) for nonce/gas/broadcast.
-        No `web3` library dependency.
+        This method UNCONDITIONALLY raises ``RedeemSubmissionAbandonedError``
+        (a RuntimeError) before constructing anything. Redemption is EXTERNAL:
+        third-party auto-redeem owns the shared wallet; Zeus keeps only the
+        ACCOUNTING surfaces (reconcile_pending_redeems chain-receipt
+        classification, EXTERNAL_REDEMPTION booking, USDC.e->pUSD wrap of
+        proceeds). The former autonomous web3 broadcast body (calldata build,
+        signing, eth_sendRawTransaction) was DELETED — the redeem broadcast call
+        no longer exists in this entry point and cannot be re-armed by any env
+        var, flag, or override.
 
-        neg_risk: When True, routes to the NegRiskCtfAdapter
-        (POLYGON_NEGRISK_ADAPTER_ADDRESS) instead of the standard CTF. ALL
-        Polymarket daily-temperature markets are negRisk. The caller (typically
-        submit_redeem in settlement_commands) is responsible for deriving this
-        flag from the executable_market_snapshots table.
-
-        negRisk ABI: redeemPositions(bytes32 conditionId, uint256[] amounts)
-        amounts is always length-2 for binary markets. indexSet-to-slot mapping
-        (verified on-chain 2026-05-19 via Karachi eth_call probes):
-          indexSet=2 (YES won) → amounts=[amount, 0]  (slot 0 = YES)
-          indexSet=1 (NO won)  → amounts=[0, amount]  (slot 1 = NO)
-        Live proof tx: 0x4ce58f2683bd81f7f49b7dd19e35cc2db4fc137c2f841712876ace23afe39448
-
-        Kill switch: ZEUS_AUTONOMOUS_REDEEM_ENABLED env-var defaults OFF. When
-        OFF, returns the legacy REDEEM_DEFERRED_TO_R1 stub bytes-for-bytes so
-        settlement_commands.py:426 still routes to REDEEM_OPERATOR_REQUIRED
-        (operator CLI completes via scripts/operator_record_redeem.py).
-        Flipping ON enables autonomous web3 submission; do NOT do so without
-        a dry-run smoke test first (Karachi position c30f28a5-d4e is the first
-        live target).
-
-        index_sets: CTF redeemPositions indexSets — binary outcome wins as
-        [1]=NO or [2]=YES. Multi-bin (ranged) markets pass the union of winning
-        bins. None means caller did not derive the bin — adapter cannot guess
-        and returns the stub so operator CLI handles it.
+        The kw-only signature (condition_id, index_sets, neg_risk,
+        amount_per_slot) is retained so callers and tests still bind correctly
+        before the raise fires.
         """
 
-        # K3.6 REDEEM PIVOT (operator law 2026-06-10): second defense layer at
-        # the tx-broadcast boundary itself — Zeus never broadcasts a redeem
-        # unless the operator-only override token is hand-set. Raises before
-        # any RPC/signing work; the flag check below is now irrelevant to
-        # safety (a flag flip alone can never re-arm redemption).
+        # REDEEM SUBMISSION FORBIDDEN (operator law 2026-06-10, ABSOLUTE): the
+        # redeem-transaction broadcast path is UNCONSTRUCTABLE from Zeus. This
+        # raise is the first and only statement — no env, flag, or override
+        # reaches calldata construction, signing, or eth_sendRawTransaction.
+        # Redemption is EXTERNAL (third-party auto-redeem owns the shared
+        # wallet); Zeus keeps only ACCOUNTING (reconcile_pending_redeems,
+        # EXTERNAL_REDEMPTION booking, the wrap/sweep of proceeds).
         from src.execution.settlement_commands import (  # noqa: PLC0415 — lazy, avoids cycle
             assert_redeem_submission_allowed,
         )
 
         assert_redeem_submission_allowed("polymarket_v2_adapter.redeem")
-
-        # Karachi safety / Path A precedence: default OFF returns the stub
-        # verbatim. settlement_commands.py:426-454 already handles this
-        # errorCode by routing to REDEEM_OPERATOR_REQUIRED (NOT terminal;
-        # operator CLI exits the state).
-        autonomous_enabled = (
-            os.environ.get(AUTONOMOUS_REDEEM_ENABLED_ENV, "").strip().lower()
-            in {"1", "true", "yes", "on"}
+        # Unreachable past this point: assert_redeem_submission_allowed raises
+        # unconditionally. The legacy autonomous-broadcast body (calldata build,
+        # Safe-wrap routing, eth_sendRawTransaction) was deleted so the broadcast
+        # call no longer exists in this entry point. Retained helper methods
+        # (_redeem_via_safe / _redeem_via_negrisk_safe) are dead production code,
+        # kept only for their dry-run no-raw-tx-leak source-text antibody tests.
+        raise AssertionError(  # pragma: no cover — defense in depth
+            "unreachable: assert_redeem_submission_allowed must raise first"
         )
-        if not autonomous_enabled:
-            # Return verbatim legacy stub so settlement_commands.py:426 routes
-            # to REDEEM_OPERATOR_REQUIRED exactly as before this PR (errorCode
-            # AND errorMessage unchanged — byte-for-byte audited fallback).
-            return {
-                "success": False,
-                "errorCode": "REDEEM_DEFERRED_TO_R1",
-                "errorMessage": "R1 settlement command ledger must own pUSD redemption side effects",
-                "condition_id": condition_id,
-            }
-
-        if not index_sets:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_INDEX_SETS_MISSING",
-                "errorMessage": (
-                    "redeem() requires index_sets (e.g. [2] for YES win, [1] for NO win); "
-                    "harvester must populate winning_index_set in settlement_commands"
-                ),
-                "condition_id": condition_id,
-            }
-        # negRisk adapter requires the actual token balance (in micro-units).
-        # The standard CTF takes bitmask index_sets; negRisk takes slot amounts.
-        # Without the amount, calldata would be wrong — fail-closed here rather
-        # than silently encoding 0 or the index_set integer as the amount.
-        if neg_risk and amount_per_slot is None:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_NEGRISK_AMOUNT_MISSING",
-                "errorMessage": (
-                    "negRisk redeem requires amount_per_slot (token balance in micro-units); "
-                    "settlement_commands must derive from token_amounts_json before calling"
-                ),
-                "condition_id": condition_id,
-            }
-        if not self.polygon_rpc_url:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_URL_MISSING",
-                "errorMessage": "polygon_rpc_url required for autonomous redeem path",
-                "condition_id": condition_id,
-            }
-        if not self.signer_key or not self.funder_address:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_CREDENTIALS_MISSING",
-                "errorMessage": "signer_key and funder_address required for autonomous redeem",
-                "condition_id": condition_id,
-            }
-
-        # Fail-closed: Polygon-specific calldata must never be broadcast on
-        # another network.  Check chain_id BEFORE any path routing so the
-        # Safe branch cannot bypass this guard.
-        if int(self.chain_id) != 137:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_WRONG_CHAIN",
-                "errorMessage": (
-                    f"autonomous redeem only supported on Polygon mainnet (chain_id=137); "
-                    f"configured chain_id={self.chain_id}"
-                ),
-                "condition_id": condition_id,
-            }
-
-        # Derive the EOA that will sign/broadcast.  For the Safe wrap path
-        # (signature_type==2, EOA != funder) this is the signer EOA, not the
-        # Safe address.  Any other EOA/funder mismatch is a hard config error.
-        try:
-            from eth_account import Account as _Account
-
-            signer_eoa = _Account.from_key(self.signer_key).address
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_SIGNER_DERIVE_FAILED",
-                "errorMessage": f"cannot derive EOA from signer_key: {exc}",
-                "condition_id": condition_id,
-            }
-        # signature_type==2: funder is a Safe proxy (Zeus default deployment).
-        # When signer EOA != funder, enter the Safe execTransaction wrap path
-        # if and only if signature_type==2.  Any other type with a mismatch is
-        # still a hard fail (REDEEM_SIGNER_FUNDER_MISMATCH).
-        if signer_eoa.lower() != self.funder_address.lower():
-            if self.signature_type == 2:
-                # negRisk markets: route to negRisk adapter Safe wrap path.
-                # Standard CTF: route to existing CTF Safe wrap path.
-                if neg_risk:
-                    return self._redeem_via_negrisk_safe(
-                        condition_id=condition_id,
-                        index_sets=index_sets,
-                        signer_eoa=signer_eoa,
-                        amount=int(amount_per_slot),  # type: ignore[arg-type]
-                    )
-                # Delegate to Safe wrap path (returns a result dict directly).
-                return self._redeem_via_safe(
-                    condition_id=condition_id,
-                    index_sets=index_sets,
-                    signer_eoa=signer_eoa,
-                )
-            return {
-                "success": False,
-                "errorCode": "REDEEM_SIGNER_FUNDER_MISMATCH",
-                "errorMessage": (
-                    f"signer EOA {signer_eoa} != funder_address {self.funder_address}; "
-                    "autonomous redeem requires an EOA funder when signature_type != 2"
-                ),
-                "condition_id": condition_id,
-            }
-
-        # negRisk EOA path (signer_eoa == funder_address, neg_risk=True):
-        # use negRisk adapter address and negRisk calldata builder.
-        _to_address = POLYGON_CTF_ADDRESS
-        try:
-            if neg_risk:
-                calldata = _build_negrisk_redeem_calldata(
-                    condition_id, index_sets, int(amount_per_slot)  # type: ignore[arg-type]
-                )
-                _to_address = POLYGON_NEGRISK_ADAPTER_ADDRESS
-            else:
-                calldata = _build_redeem_calldata(condition_id, index_sets)
-        except Exception as exc:  # ABI-encode failure is a structural defect
-            return {
-                "success": False,
-                "errorCode": "REDEEM_CALLDATA_BUILD_FAILED",
-                "errorMessage": f"calldata build failed: {exc}",
-                "condition_id": condition_id,
-            }
-
-        # Nonce: 'pending' so a prior unconfirmed tx from this wallet does not
-        # collide. Gas price: eth_gasPrice RPC. Gas limit: eth_estimateGas with
-        # 1.2x buffer; if estimate reverts (e.g. already-redeemed), route to
-        # REVIEW_REQUIRED rather than RETRYING-loop forever.
-        try:
-            nonce_hex = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_getTransactionCount",
-                [self.funder_address, "pending"],
-            )
-            nonce = int(str(nonce_hex), 16)
-            gas_price_hex = self._rpc_call(
-                self.polygon_rpc_url, "eth_gasPrice", []
-            )
-            gas_price = int(str(gas_price_hex), 16)
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"nonce/gasPrice fetch failed: {exc}",
-                "condition_id": condition_id,
-            }
-
-        estimate_params = {
-            "from": self.funder_address,
-            "to": _to_address,
-            "data": calldata,
-        }
-        try:
-            gas_estimate_hex = self._rpc_call(
-                self.polygon_rpc_url, "eth_estimateGas", [estimate_params]
-            )
-            gas_estimate = int(str(gas_estimate_hex), 16)
-            # 1.2x buffer for variation; integer floor (conservative — always
-            # <= true 1.2x, never over-estimates gas).
-            gas_limit = (gas_estimate * 12) // 10
-        except V2AdapterError as exc:
-            # eth_estimateGas reverts when the call would fail on-chain
-            # (already-redeemed, wrong index_sets, no balance). Surface as a
-            # typed errorCode that settlement_commands routes to REVIEW_REQUIRED,
-            # NOT RETRYING — re-broadcasting won't change the on-chain truth.
-            return {
-                "success": False,
-                "errorCode": "REDEEM_GAS_ESTIMATE_REVERTED",
-                "errorMessage": f"eth_estimateGas reverted: {exc}",
-                "condition_id": condition_id,
-            }
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_RPC_PRECHECK_FAILED",
-                "errorMessage": f"eth_estimateGas failed: {exc}",
-                "condition_id": condition_id,
-            }
-
-        tx = {
-            "to": _to_address,
-            "data": calldata,
-            "value": 0,
-            "chainId": int(self.chain_id),
-            "nonce": nonce,
-            "gas": gas_limit,
-            "gasPrice": gas_price,
-        }
-
-        try:
-            from eth_account import Account
-
-            signed = Account.sign_transaction(tx, self.signer_key)
-            raw_hex = "0x" + signed.raw_transaction.hex().removeprefix("0x")
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_SIGN_FAILED",
-                "errorMessage": f"sign_transaction failed: {exc}",
-                "condition_id": condition_id,
-            }
-
-        # ── Dry-run gate (EOA path: standard CTF and negRisk EOA) ───────────────
-        # Thread 2 fix: EOA path (signer_eoa == funder_address) previously
-        # bypassed ZEUS_AUTONOMOUS_REDEEM_DRY_RUN and called eth_sendRawTransaction
-        # unconditionally. The Safe wrap paths (_redeem_via_safe,
-        # _redeem_via_negrisk_safe) already have this gate; this brings the EOA
-        # path into alignment so ALL broadcast sites respect the dry-run flag.
-        _eoa_dry_run = os.environ.get(AUTONOMOUS_REDEEM_DRY_RUN_ENV, "").lower() in (
-            "1", "true", "yes", "on",
-        )
-        if _eoa_dry_run:
-            import hashlib as _hashlib
-            import logging as _logging
-            _logger = _logging.getLogger(__name__)
-            # SECURITY: never log or return the signed raw_tx_hex. A signed
-            # raw transaction is a broadcastable payload; anyone with log or
-            # DB read access could broadcast it and bypass the no-side-effect
-            # gate. Log only non-sensitive metadata: tx-type label + calldata
-            # length + a short fingerprint (first 16 hex chars of SHA-256).
-            _dry_run_fingerprint = _hashlib.sha256(raw_hex.encode()).hexdigest()[:16]
-            _logger.warning(
-                "REDEEM_DRY_RUN_LOGGED funder_address=%s "
-                "condition_id=%s neg_risk=%s raw_tx_hex_len=%d "
-                "dry_run_fingerprint=%s tx_type=EOA",
-                self.funder_address, condition_id, neg_risk,
-                len(raw_hex), _dry_run_fingerprint,
-            )
-            return {
-                "success": False,
-                "errorCode": "REDEEM_DRY_RUN_LOGGED",
-                "errorMessage": "dry-run mode: raw tx built+signed but not broadcast (EOA path)",
-                "condition_id": condition_id,
-                "dry_run_fingerprint": _dry_run_fingerprint,
-                "neg_risk": neg_risk,
-            }
-
-        # ── Broadcast ────────────────────────────────────────────────────────
-        try:
-            tx_hash = self._rpc_call(
-                self.polygon_rpc_url,
-                "eth_sendRawTransaction",
-                [raw_hex],
-            )
-        except Exception as exc:
-            return {
-                "success": False,
-                "errorCode": "REDEEM_BROADCAST_FAILED",
-                "errorMessage": f"eth_sendRawTransaction failed: {exc}",
-                "condition_id": condition_id,
-            }
-
-        # Validate tx_hash before returning success: a null/malformed JSON-RPC
-        # result (result=null) would stringify to "None" and get persisted as
-        # REDEEM_TX_HASHED with an unreconcilable bogus hash.
-        tx_hash_str = str(tx_hash) if tx_hash is not None else None
-        import re as _re
-        if not tx_hash_str or not _re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash_str):
-            return {
-                "success": False,
-                "errorCode": "REDEEM_INVALID_TX_HASH",
-                "errorMessage": (
-                    f"eth_sendRawTransaction returned non-hash result: {tx_hash!r}"
-                ),
-                "condition_id": condition_id,
-            }
-
-        return {
-            "success": True,
-            "tx_hash": tx_hash_str,
-            "condition_id": condition_id,
-            "index_sets": list(index_sets),
-            "nonce": nonce,
-            "gas_price": gas_price,
-            "gas_limit": gas_limit,
-        }
 
     def get_negrisk_winning_position_balance(
         self,
