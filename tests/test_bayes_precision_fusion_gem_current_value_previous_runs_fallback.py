@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-11
 # Authority basis: K2 gem_global resolution 2026-06-09, curl-verified against the open-meteo
 #   single-runs API: cmc_gem_gdps_15km is NOT served there AT ALL (even cadence-valid 00z runs
 #   return modelRunUnavailable; verified 2026-06-09T18Z). gem_seamless would serve HRDPS/RDPS
@@ -9,16 +9,27 @@
 #   the SAME GDPS product the walk-forward de-bias history is fit on (MORE source-consistent
 #   than single_runs; the ECMWF anchor needs an ifs025->ifs9 bridge precisely because its
 #   history product != live product; gem now has NO such mismatch).
-"""K2 antibody: gem_global current value = previous_runs fallback, declared and scoped.
+#   SUPERSESSION (Task #32 follow-up, operator 2026-06-11): the gem-ONLY scoping is superseded
+#   by the generalized 没有新的就用老的 serving rule (replacement_current_value_serving) — ANY
+#   provider absent from single_runs at the selected cycle now serves its previous_runs row at
+#   the SAME natural key, BRANDED served_via="previous_runs" in the fusion provenance (the old
+#   law's "silent endpoint masking" objection is resolved by the branding: the substitution is
+#   loud-by-provenance, not silent). Live evidence: JMA publishes 00/12Z only, so at every
+#   06Z-cadence cycle jma_seamless could NEVER appear in single_runs (0/49 cities) and the
+#   fusion ran served=4/5 — dropping the provider instead of serving its freshest previous run.
+#   gem's behavior is BYTE-IDENTICAL under the generalized rule (pinned below).
+"""K2 antibody: previous_runs current-value serving — gem unchanged, rule generalized.
 
 Relationship being pinned (download lane -> materializer read boundary):
   - The single-runs API structurally cannot serve GDPS -> the download must NOT request the
     known-dead leg (no 51-cities-per-cycle fail-soft noise masquerading as transient).
   - The materializer's persisted-current read serves gem_global from the previous_runs row at
-    the SAME natural key (city, metric, target_date, source_cycle_time) — DECLARED exception,
-    single model. Any other model with a missing single_runs row stays missing (no silent
-    endpoint masking: a broken single_runs capture for gfs must stay LOUD, not be papered
-    over by previous_runs).
+    the SAME natural key (city, metric, target_date, source_cycle_time) — byte-identical to the
+    original edc598b440 behavior.
+  - GENERALIZED (2026-06-11): any other model missing its single_runs row at the cycle is now
+    served from its previous_runs row at the same natural key too — BRANDED in provenance
+    (served_via="previous_runs"), never silent. A model absent from BOTH endpoints stays
+    dropped; a different cycle's row never leaks (natural-key isolation preserved).
 """
 from __future__ import annotations
 
@@ -82,14 +93,27 @@ def test_gem_single_runs_row_wins_over_previous_runs_when_both_exist() -> None:
     assert out["gem_global"] == (19.9, 1)
 
 
-def test_non_gem_models_do_not_fall_back_to_previous_runs() -> None:
-    # No silent endpoint masking: a missing gfs single_runs capture must STAY missing/loud.
+def test_non_gem_previous_runs_substitution_is_served_and_branded() -> None:
+    # SUPERSEDED LAW (2026-06-11, Task #32 follow-up): the old pin here ("a missing gfs
+    # single_runs capture must STAY missing") dropped JMA from EVERY 06Z-cadence fusion (JMA
+    # publishes 00/12Z only — structurally absent from 06Z single_runs) and cost the whole city
+    # its conservative edge. The generalized rule serves the previous_runs row at the SAME
+    # natural key; "loud" is now delivered by PROVENANCE BRANDING (served_via="previous_runs"
+    # recorded per instrument), not by dropping the provider.
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+
     conn = _conn()
     _insert(conn, 1, "gfs_global", 21.0, "previous_runs")
     _insert(conn, 2, "icon_global", 20.5, "single_runs")
     out = _read(conn)
-    assert "gfs_global" not in out
-    assert set(out) == {"icon_global"}
+    assert out["gfs_global"] == (21.0, 1), "previous_runs row serves the current value"
+    assert set(out) == {"icon_global", "gfs_global"}
+    served = read_current_instrument_values(
+        conn, city="Amsterdam", metric="high", target_date="2026-06-10",
+        source_cycle_time_iso=CYCLE,
+    )
+    assert served["gfs_global"].served_via == "previous_runs"  # BRANDED, never silent
+    assert served["icon_global"].served_via == "single_runs"
 
 
 def test_gem_fallback_respects_natural_key_cycle() -> None:

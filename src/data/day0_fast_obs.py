@@ -437,10 +437,20 @@ def fast_obs_to_day0_observation(
         raise ValueError("fast-obs extremes carry no value for metric")
 
     observation_time = extremes.last_obs_time.astimezone(UTC).isoformat()
+    # PUBLICATION CLOCK (PR#404 operator review P2): observation_available_at is
+    # the SOURCE's publication time (feed receiptTime), never our fetch wall
+    # clock — mixing "when we parsed it" into "when the source published it" is
+    # a causality/evidence contamination. When the feed omits receiptTime the
+    # payload falls back to the observation valid time (a conservative lower
+    # bound that can never claim later-than-true availability) AND live
+    # authority is DENIED below (publication_clock MISSING -> the reactor
+    # hard-fact gate rejects live use; the value may still serve the monotone
+    # kill memo).
+    publication_clock_present = extremes.last_receipt_time is not None
     available_at = (
         extremes.last_receipt_time.astimezone(UTC).isoformat()
-        if extremes.last_receipt_time is not None
-        else datetime.now(UTC).isoformat()
+        if publication_clock_present
+        else observation_time
     )
     expected_station = str(getattr(city, "wu_station", "") or "").strip().upper()
     station_match = "MATCH" if expected_station and extremes.station_id == expected_station else "MISMATCH"
@@ -472,6 +482,7 @@ def fast_obs_to_day0_observation(
             source_authorized == "AUTHORIZED"
             and local_date_status == "MATCH"
             and dst_status == "UNAMBIGUOUS"
+            and publication_clock_present
         )
         else "NON_LIVE_AUTHORITY"
     )
@@ -503,71 +514,128 @@ def fast_obs_to_day0_observation(
     }
 
 
+#: Source freshness states for one fetch pass (PR#404 operator review P0-3).
+FETCH_FRESH = "fresh_fetch"                      # live fetch succeeded this pass
+FETCH_CACHE_HIT = "cache_hit"                    # cache younger than the fetch interval
+FETCH_STALE_AFTER_FAILURE = "stale_cache_after_failure"  # fetch failed; serving old cache
+FETCH_NO_DATA = "no_data"                        # fetch failed; no cache exists
+
+
+@dataclass(frozen=True)
+class FastObsPrefetch:
+    """Pure in-memory result of the HTTP phase (PR#404 operator review P0-2).
+
+    Produced OUTSIDE any DB write mutex by :meth:`Day0FastObsEmitter.prefetch`;
+    consumed INSIDE the mutex by :meth:`Day0FastObsEmitter.emit_prefetched`
+    (which performs only EventWriter writes — no network).
+    """
+
+    eligible: tuple  # tuple[(city, FastObsSource, local_target_date_iso), ...]
+    reports: tuple   # tuple[MetarReport, ...]
+    freshness_status: str
+    cache_age_s: Optional[float]
+    decision_time: datetime
+
+
 @dataclass
 class Day0FastObsEmitter:
-    """Stateful fast-lane emitter: fetch -> extremes -> emit-on-boundary-move.
+    """Stateful fast-lane emitter: prefetch (HTTP) -> emit (DB writes).
 
     Emission policy is MONOTONE: a (city, date, metric) emits only when the
     rounded running extreme moves in the absorbing direction (high: up,
     low: down) or on first sight. Re-emissions of the same report dedup at the
     event store via the idempotency key (available_at = feed receiptTime).
     In-process memo only — a daemon restart re-emits once and dedups.
+
+    SOURCE-FAILURE DISCIPLINE (PR#404 operator review P0-3):
+      - every fetch ATTEMPT (success or failure) arms the throttle — an API
+        outage can never produce a tight retry storm;
+      - a failed fetch serves the old cache with an explicit
+        ``stale_cache_after_failure`` status (never silently as fresh);
+      - stale-after-failure data older than the city's measured staleness
+        budget is NEVER emitted as a live-authority event — it may only
+        advance the monotone hard-fact kill memo (kill direction is
+        staleness-safe; entries are not).
     """
 
     fetcher: Callable[..., list[MetarReport]] = fetch_metar_reports
     min_fetch_interval_s: float = DEFAULT_MIN_FETCH_INTERVAL_S
-    _last_fetch_monotonic: float = field(default=0.0, init=False)
+    _last_attempt_monotonic: float = field(default=0.0, init=False)
+    _cache_fetched_monotonic: float = field(default=0.0, init=False)
     _cached_reports: list[MetarReport] = field(default_factory=list, init=False)
-    _last_emitted_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
+    # SPLIT MEMOS (PR#404 round-2 P0-1): the KILL memo (hard-fact exit source,
+    # advanced by any memo-safe value incl. stale-withheld ones) and the LIVE
+    # memo (emit moved-check, advanced ONLY by an INSERTED live event) were one
+    # dict — a stale-after-failure withholding advanced it without emitting, so
+    # a later FRESH confirmation of the same rounded extreme saw moved=False
+    # and the live event NEVER emitted (entry lane silently diverged from the
+    # exit lane's state). Two memos, two consumers, two update rules.
+    _last_kill_memo_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
+    _last_live_emitted_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
-    def _reports(self, stations: list[str]) -> list[MetarReport]:
+    def _reports_with_status(self, stations: list[str]) -> tuple[list[MetarReport], str, Optional[float]]:
+        """(reports, freshness_status, cache_age_s). Throttle covers FAILED
+        attempts too (failure-throttle, P0-3)."""
         now = time.monotonic()
         with self._lock:
-            if self._cached_reports and (now - self._last_fetch_monotonic) < self.min_fetch_interval_s:
-                return list(self._cached_reports)
-        reports = self.fetcher(stations)
+            cache_age = (now - self._cache_fetched_monotonic) if self._cached_reports else None
+            if cache_age is not None and cache_age < self.min_fetch_interval_s:
+                return list(self._cached_reports), FETCH_CACHE_HIT, cache_age
+            if (now - self._last_attempt_monotonic) < self.min_fetch_interval_s:
+                # throttled after a recent (failed) attempt: serve what exists
+                if self._cached_reports:
+                    return list(self._cached_reports), FETCH_STALE_AFTER_FAILURE, cache_age
+                return [], FETCH_NO_DATA, None
+            self._last_attempt_monotonic = now
+        try:
+            reports = self.fetcher(stations)
+        except Exception as exc:  # noqa: BLE001 — fetcher contract is fail-soft, belt+braces
+            logger.warning("DAY0_FAST_OBS_FETCH_RAISED exc=%s: %s", type(exc).__name__, exc)
+            reports = []
         with self._lock:
             if reports:
                 self._cached_reports = list(reports)
-                self._last_fetch_monotonic = now
-            return list(self._cached_reports)
+                self._cache_fetched_monotonic = time.monotonic()
+                return list(self._cached_reports), FETCH_FRESH, 0.0
+            cache_age = (
+                (time.monotonic() - self._cache_fetched_monotonic) if self._cached_reports else None
+            )
+            if self._cached_reports:
+                logger.warning(
+                    "DAY0_FAST_OBS_FETCH_FAILED serving stale cache age_s=%.0f (failure-throttled %ss)",
+                    cache_age or -1.0, self.min_fetch_interval_s,
+                )
+                return list(self._cached_reports), FETCH_STALE_AFTER_FAILURE, cache_age
+            return [], FETCH_NO_DATA, None
 
     def latest_rounded_extreme(
         self, city_name: str, target_date: str, metric: str
     ) -> Optional[int]:
-        """Latest EMITTED settlement-rounded extreme for (city, date, metric).
+        """Latest settlement-rounded extreme known to the fast lane for
+        (city, date, metric) — the hard-fact monotone KILL source.
 
-        Values here passed the full LIVE_AUTHORITY hard-fact statuses at
-        emission (settlement-faithful city, station match, local-date match,
-        unit law). Consumed by the day0 hard-fact exit lane
-        (src/execution/day0_hard_fact_exit.py) so held positions ride the same
-        ~3-9 min METAR freshness as entries. None when nothing emitted in this
-        process for the key (restart, lane disabled, city excluded).
+        Values here passed station/source/unit/local-date authorization at
+        observation-build time (publication-clock or fetch-staleness may have
+        been degraded — monotone kills are safe under staleness; entries are
+        gated separately). Consumed by src/execution/day0_hard_fact_exit.py.
+        Reads the KILL memo (round-2 P0-1 split: independent of whether a live
+        event was emitted). None when nothing recorded in this process
+        (restart, lane disabled, city excluded).
         """
         with self._lock:
-            return self._last_emitted_rounded.get((str(city_name), str(target_date), str(metric)))
+            return self._last_kill_memo_rounded.get((str(city_name), str(target_date), str(metric)))
 
-    def emit_events(
+    def prefetch(
         self,
         *,
-        world_conn,
         cities: list[Any],
         decision_time: datetime,
-        received_at: str,
-        limit: int = 50,
         anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], None]] = None,
-    ) -> int:
-        """Emit DAY0_EXTREME_UPDATED events from the fast METAR lane.
-
-        cities: runtime City objects. Only cities with a fast-lane source AND a
-        day0 target (local today at decision_time) are polled. Fail-soft per
-        city; fail-closed per field (hard-fact statuses).
-        """
-        from src.events.event_writer import EventWriter
-        from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
-        from src.contracts.settlement_semantics import SettlementSemantics
-
+    ) -> FastObsPrefetch:
+        """HTTP phase: resolve eligible cities, fetch METAR (throttled), run the
+        (WU-HTTP) anomaly cross-check. NO DB writes — safe to run OUTSIDE the
+        world-write mutex (P0-2). Fail-soft everywhere."""
         eligible: list[tuple[Any, FastObsSource, str]] = []
         for city in cities:
             source = fast_obs_source_for_city(city)
@@ -580,64 +648,183 @@ class Day0FastObsEmitter:
             local_today = decision_time.astimezone(tz).date().isoformat()
             eligible.append((city, source, local_today))
         if not eligible:
-            return 0
+            return FastObsPrefetch((), (), FETCH_NO_DATA, None, decision_time)
 
-        reports = self._reports([source.station_id for _, source, _ in eligible])
-        if not reports:
-            return 0
+        reports, status, cache_age = self._reports_with_status(
+            [source.station_id for _, source, _ in eligible]
+        )
+        # ANOMALY-CHECK FRESHNESS GATE (PR#404 round-2 P0-2A): the WU-vs-METAR
+        # cross-check must never CONCLUDE from a stale METAR cache — a METAR
+        # outage plus a fresh WU update would read as divergence and falsely
+        # pause the family (the pause gates entry q, hard-fact exits, AND the
+        # cancel sweep). Only a fresh fetch or an in-interval cache hit may
+        # feed the detector; stale/no-data passes are loudly skipped.
+        anomaly_input_ok = status in (FETCH_FRESH, FETCH_CACHE_HIT)
+        if reports and anomaly_check is not None and not anomaly_input_ok:
+            logger.warning(
+                "DAY0_ORACLE_ANOMALY_CHECK_SKIPPED_METAR_CACHE_STALE status=%s cache_age_s=%s "
+                "(divergence cannot be concluded from a stale METAR window)",
+                status, cache_age,
+            )
+        if reports and anomaly_check is not None and anomaly_input_ok:
+            for city, _source, target_date in eligible:
+                try:
+                    extremes = running_extremes_for_local_day(
+                        reports, city=city, target_date=target_date,
+                        as_of=decision_time.astimezone(UTC),
+                    )
+                    if extremes.sample_count:
+                        anomaly_check(city, extremes, reports)
+                except Exception as exc:  # noqa: BLE001 — detector must never block the lane
+                    logger.warning(
+                        "DAY0_FAST_OBS_ANOMALY_CHECK_FAILED city=%s exc=%s: %s",
+                        getattr(city, "name", "?"), type(exc).__name__, exc,
+                    )
+        return FastObsPrefetch(tuple(eligible), tuple(reports), status, cache_age, decision_time)
 
-        trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
+    def emit_prefetched(
+        self,
+        *,
+        world_conn,
+        prefetch: FastObsPrefetch,
+        received_at: str,
+        limit: int = 50,
+        day0_is_tradeable: bool = True,
+    ) -> int:
+        """DB-write phase: emit DAY0_EXTREME_UPDATED events from a prefetch.
+
+        Performs NO network IO (mutex-safe, P0-2). Live-authority emission is
+        DENIED for stale-after-failure data older than the city's staleness
+        budget and for observations without live authority (publication clock
+        missing, etc.) — those may only advance the monotone kill memo (P0-3).
+
+        ``day0_is_tradeable`` (default True) flows to the trigger so day0 events
+        emitted under day0_shadow carry the lower PRIORITY_DAY0_SHADOW sub-sort
+        (2026-06-11 anti-starvation; the scope-aware claim tier in fetch_pending
+        is the cross-tier authority).
+        """
+        from src.events.event_writer import EventWriter
+        from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
+        from src.contracts.settlement_semantics import SettlementSemantics
+        from src.signal.day0_obs_latency import staleness_budget_minutes
+
+        if not prefetch.eligible or not prefetch.reports:
+            return 0
+        reports = list(prefetch.reports)
+        decision_time = prefetch.decision_time
+        trigger = Day0ExtremeUpdatedTrigger(
+            EventWriter(world_conn), day0_is_tradeable=day0_is_tradeable
+        )
         emitted = 0
-        for city, source, target_date in eligible:
+        for city, source, target_date in prefetch.eligible:
             if emitted >= max(1, int(limit)):
                 break
             try:
                 extremes = running_extremes_for_local_day(
-                    reports, city=city, target_date=target_date, as_of=decision_time.astimezone(UTC)
+                    reports, city=city, target_date=target_date,
+                    as_of=decision_time.astimezone(UTC),
                 )
                 if extremes.sample_count == 0:
                     continue
-                if anomaly_check is not None:
-                    try:
-                        anomaly_check(city, extremes, reports)
-                    except Exception as exc:  # noqa: BLE001 — detector must never block emission
-                        logger.warning(
-                            "DAY0_FAST_OBS_ANOMALY_CHECK_FAILED city=%s exc=%s: %s",
-                            getattr(city, "name", "?"), type(exc).__name__, exc,
-                        )
+                city_name = str(getattr(city, "name", ""))
+                stale_blocked = False
+                if prefetch.freshness_status == FETCH_STALE_AFTER_FAILURE:
+                    budget_s = staleness_budget_minutes(city_name) * 60.0
+                    if prefetch.cache_age_s is None or prefetch.cache_age_s > budget_s:
+                        stale_blocked = True
                 semantics = SettlementSemantics.for_city(city)
                 for metric in ("high", "low"):
                     value = extremes.high_so_far if metric == "high" else extremes.low_so_far
                     if value is None:
                         continue
                     rounded = int(semantics.round_single(float(value)))
-                    key = (str(getattr(city, "name", "")), target_date, metric)
-                    previous = self._last_emitted_rounded.get(key)
-                    moved = (
-                        previous is None
-                        or (metric == "high" and rounded > previous)
-                        or (metric == "low" and rounded < previous)
-                    )
-                    if not moved:
+                    key = (city_name, target_date, metric)
+                    # SPLIT MEMO movement checks (round-2 P0-1): the live emit
+                    # decision compares against the LIVE memo (last INSERTED
+                    # event), never the kill memo — a kill-memo-only update
+                    # from a withheld pass must not suppress the later live
+                    # event for the same rounded extreme.
+                    with self._lock:
+                        kill_previous = self._last_kill_memo_rounded.get(key)
+                        live_previous = self._last_live_emitted_rounded.get(key)
+
+                    def _moved(previous: Optional[int]) -> bool:
+                        return (
+                            previous is None
+                            or (metric == "high" and rounded > previous)
+                            or (metric == "low" and rounded < previous)
+                        )
+
+                    kill_moved = _moved(kill_previous)
+                    live_moved = _moved(live_previous)
+                    if not kill_moved and not live_moved:
                         continue
                     observation = fast_obs_to_day0_observation(
                         city=city, extremes=extremes, metric=metric, source=source
                     )
+                    # KILL-MEMO SAFETY: only station/source/unit/local-date
+                    # authorized values may advance the monotone kill memo
+                    # (a wrong-day or wrong-station value must never kill bins).
+                    memo_safe = (
+                        observation["source_authorized_status"] == "AUTHORIZED"
+                        and observation["local_date_status"] == "MATCH"
+                        and observation["dst_status"] == "UNAMBIGUOUS"
+                    )
+                    live_ok = (
+                        observation["live_authority_status"] == "LIVE_AUTHORITY"
+                        and not stale_blocked
+                    )
+                    if memo_safe and kill_moved:
+                        with self._lock:
+                            self._last_kill_memo_rounded[key] = rounded
+                    if not live_ok:
+                        if memo_safe and kill_moved:
+                            logger.warning(
+                                "DAY0_FAST_OBS_LIVE_AUTHORITY_WITHHELD city=%s date=%s metric=%s "
+                                "rounded=%s freshness=%s cache_age_s=%s authority=%s "
+                                "(kill memo updated; no live event emitted; live memo untouched)",
+                                city_name, target_date, metric, rounded,
+                                prefetch.freshness_status, prefetch.cache_age_s,
+                                observation["live_authority_status"],
+                            )
+                        continue
+                    if not live_moved:
+                        continue
                     result = trigger.emit_from_observation(
                         observation=observation,
                         settlement_semantics=semantics,
                         decision_time=decision_time,
                         received_at=received_at,
                     )
-                    self._last_emitted_rounded[key] = rounded
+                    if result.inserted or result.duplicate:
+                        # A PERSISTED live event advances the live memo. `inserted`
+                        # is the normal path; `duplicate` is the restart/dedup path
+                        # where the immutable event already exists in world DB. If a
+                        # duplicate did not advance the in-process live memo, the
+                        # restarted daemon would re-attempt the same INSERT OR IGNORE
+                        # every cycle until the next rounded movement. That is not a
+                        # trading error, but it is not live-stable behavior either.
+                        with self._lock:
+                            self._last_live_emitted_rounded[key] = rounded
+                            if memo_safe and _moved(self._last_kill_memo_rounded.get(key)):
+                                self._last_kill_memo_rounded[key] = rounded
                     if result.inserted:
                         emitted += 1
                         logger.info(
                             "DAY0_FAST_OBS_EMIT city=%s date=%s metric=%s rounded=%s "
-                            "obs_time=%s available_at=%s samples=%d skipped_unit_law=%d",
-                            key[0], target_date, metric, rounded,
+                            "obs_time=%s available_at=%s samples=%d skipped_unit_law=%d freshness=%s",
+                            city_name, target_date, metric, rounded,
                             observation["observation_time"], observation["observation_available_at"],
                             extremes.sample_count, extremes.skipped_unit_law,
+                            prefetch.freshness_status,
+                        )
+                    elif result.duplicate:
+                        logger.debug(
+                            "DAY0_FAST_OBS_EMIT_DUPLICATE city=%s date=%s metric=%s rounded=%s "
+                            "obs_time=%s available_at=%s freshness=%s (live memo advanced)",
+                            city_name, target_date, metric, rounded,
+                            observation["observation_time"], observation["observation_available_at"],
+                            prefetch.freshness_status,
                         )
             except Exception as exc:  # noqa: BLE001 — one city must not kill the lane
                 logger.warning(
@@ -645,6 +832,28 @@ class Day0FastObsEmitter:
                     getattr(city, "name", "?"), type(exc).__name__, exc,
                 )
         return emitted
+
+    def emit_events(
+        self,
+        *,
+        world_conn,
+        cities: list[Any],
+        decision_time: datetime,
+        received_at: str,
+        limit: int = 50,
+        anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], None]] = None,
+    ) -> int:
+        """Compatibility wrapper: prefetch (HTTP) + emit (DB) in one call.
+
+        Live wiring MUST use the split form (prefetch outside the world-write
+        mutex, emit_prefetched inside) — see main._edli_event_reactor_cycle.
+        """
+        prefetch = self.prefetch(
+            cities=cities, decision_time=decision_time, anomaly_check=anomaly_check
+        )
+        return self.emit_prefetched(
+            world_conn=world_conn, prefetch=prefetch, received_at=received_at, limit=limit
+        )
 
 
 _EMITTER_SINGLETON: Day0FastObsEmitter | None = None

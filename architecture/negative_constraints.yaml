@@ -54,9 +54,40 @@ constraints:
         - zeus-no-default-unit-fallback
   - id: NC-09
     statement: No ad hoc probability complements across architecture boundaries when semantic contracts exist.
+    scope: |
+      The ban is on PROBABILITY/BELIEF derivation: a Polymarket NO-side win
+      probability, edge, q_lcb, or fill assumption may NEVER be derived as
+      1 - <YES belief> (YES/NO are independent executable assets; a complement
+      price is a microstructure fiction, not a real quote — treating it as one
+      manufactures phantom-liquidity edges). The conservative bound
+      no_lcb = 1 - q_ucb_yes is the ONE allowed probability-space complement
+      (exact per-sample identity, certified, math-isolated in the q-construction
+      seam); 1 - q_lcb_yes stays forbidden (overstates NO win-mass, breaches the
+      conservative-q_lcb iron rule).
+    carve_out: |
+      CARVE-OUT (2026-06-10, maker-quote lane, complement_law_verdict): a
+      complement value (1 - complement_best_bid - tick) MAY bound ORDER PLACEMENT
+      against the venue mint boundary. It may NEVER price an entry, an edge, a
+      q_lcb, or a fill assumption. Venue truth licensing this bound: Polymarket
+      CLOB mint-matches complementary BUY orders — "someone places a limit order
+      to buy No at the complementary price (e.g. $0.40)... Since $0.60 + $0.40 =
+      $1.00, the orders match... $1.00 is converted into 1 Yes token and 1 No
+      token" (docs.polymarket.com/concepts/prices-orderbook). A resting NO bid at
+      p is therefore matched by YES buyers at >= 1-p via complete-set mint, so the
+      complement is a REAL non-crossing boundary, not a fictitious quote. The bound
+      is admissible ONLY as a min() cap that LOWERS the resting limit
+      (complementary_maker_quote_reservation: reservation = min(q_lcb - penalty,
+      1 - comp_bid - tick)); the EDGE is still q_fill_adj - OUR_quote_limit
+      (native-NO q_lcb minus the price WE rest at), and a candidate whose edge is
+      positive ONLY under a complement-priced entry has non-positive maker EV and
+      REJECTS at the trade-score gate. Relationship test pinning the dead category:
+      tests/engine/test_maker_quote_empty_no_ask.py::test_quote_edge_non_positive_still_rejects.
     enforced_by:
       semgrep_rule_ids:
         - zeus-no-ad-hoc-probability-complement
+      tests:
+        - tests/engine/test_maker_quote_empty_no_ask.py::test_quote_edge_non_positive_still_rejects
+        - tests/test_probability_complement_ast_guard.py::test_decision_core_never_builds_no_from_the_overconfident_q_lcb_complement
   - id: NC-10
     statement: No new shadow persistence surface without deletion or demotion plan.
     enforced_by:

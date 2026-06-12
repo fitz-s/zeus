@@ -18,6 +18,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -51,19 +53,26 @@ def _safe_name(value: str) -> str:
 
 
 def _parse_cycle(value: str | None, *, now: datetime, release_lag_hours: float) -> datetime:
-    if value:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
-            raise ValueError("--cycle must be timezone-aware")
-        cycle = parsed.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
-        if cycle.hour not in {0, 6, 12, 18}:
-            raise ValueError("--cycle hour must be 00, 06, 12, or 18 UTC")
-        return cycle
-    cutoff = now.astimezone(UTC) - timedelta(hours=release_lag_hours)
-    candidate = cutoff.replace(minute=0, second=0, microsecond=0)
-    while candidate.hour not in {0, 6, 12, 18}:
-        candidate -= timedelta(hours=1)
-    return candidate
+    """Parse an EXPLICIT cycle string. The ``value=None`` guess path is DEAD (2026-06-11).
+
+    The old fallback floored ``now − release_lag`` to a cycle hour — a guessed clock that
+    requested unpublished 12Z/18Z runs every night; the rung-2 meta guard refused them and
+    the refusal aborted the whole download→materialize cycle. Run selection without an
+    explicit operator cycle goes through the probe-resolved single authority
+    (``src.data.replacement_forecast_production._probe_resolved_available_cycle``); this
+    function refuses to guess so the dead path is unconstructable."""
+    if not value:
+        raise ValueError(
+            "cycle must be explicit or probe-resolved; the now-minus-release-lag guess "
+            "is dead (2026-06-11 run-selection single authority)"
+        )
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("--cycle must be timezone-aware")
+    cycle = parsed.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+    if cycle.hour not in {0, 6, 12, 18}:
+        raise ValueError("--cycle hour must be 00, 06, 12, or 18 UTC")
+    return cycle
 
 
 def _source_available_at(cycle: datetime, *, release_lag_hours: float) -> datetime:
@@ -144,6 +153,174 @@ def _write_manifest_file(output_dir: Path, manifest: RawForecastArtifactManifest
     return target
 
 
+def _try_bucket_rung_three(
+    *,
+    request,
+    city: str,
+    target_date: str,
+    timezone_name: str,
+    meta_refusal: Exception,
+    single_runs_exc: Exception,
+) -> tuple[dict, dict]:
+    """Rung-3 admission gate: serve from the S3 data_spatial bucket, or re-raise rung-2.
+
+    Strict preconditions (ALL must hold, else the rung-2 ValueError is re-raised UNCHANGED
+    so its refusal semantics are never masked):
+      1. the bucket's in-progress/latest.json declares EXACTLY the wanted run;
+      2. every needed local-day hourly timestep is present in that manifest's valid_times
+         (partial-run admission — no extrapolation / gap-fill);
+      3. the city is on the cross-check-VERIFIED whitelist (coastal/terrain cities differ
+         from the API's downscaled point series; only ≤0.05C-verified cities are served).
+    Returns ``(payload, provenance)`` on admission."""
+    from datetime import date as _date
+
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
+        BucketTransportNotAdmissible,
+        capture_city_target_elevation,
+        fetch_bucket_anchor_payload,
+        fetch_bucket_anchor_payload_downscaled,
+        fetch_bucket_run_manifest,
+        local_day_hourly_valid_times,
+        resolve_bucket_serve_method,
+        select_declaring_manifest,
+    )
+
+    manifests = fetch_bucket_run_manifest()
+    manifest = select_declaring_manifest(manifests, wanted_run=request.run)
+    if manifest is None:
+        # condition 1 fails: bucket does not declare the wanted run. No transport can serve
+        # this city this cycle — signal a skippable non-admission (carries the rung-2 reason).
+        raise BucketTransportNotAdmissible(
+            f"bucket does not declare wanted run {request.run.isoformat()} "
+            f"(rung-2 refusal: {meta_refusal})"
+        )
+    # condition 3: HOW may the bucket serve this city — "raw" (nearest-gridpoint read verified)
+    # OR "downscaled" (terrain land-cell + lapse-rate read verified) OR None (quarantined).
+    # A city verified by NEITHER class stays quarantined and falls to rungs 1-2 (honest; the
+    # 0.1C cross-check tolerance is never weakened — coastal/terrain cities the downscaling
+    # cannot reproduce do not get served).
+    serve_method = resolve_bucket_serve_method(city)
+    if serve_method is None:
+        raise BucketTransportNotAdmissible(
+            f"city {city} not on bucket cross-check whitelist (raw or downscaled) "
+            f"(rung-2 refusal: {meta_refusal})"
+        )
+    needed = local_day_hourly_valid_times(
+        run=request.run,
+        city_timezone=timezone_name,
+        target_local_date=_date.fromisoformat(target_date),
+        forecast_hours=request.forecast_hours,
+    )
+    try:
+        if serve_method == "downscaled":
+            # target elevation = the API-reported 90m-DEM elevation (captured once per city,
+            # cached with provenance). This is the SAME authority that VERIFIED the city.
+            target_elev = capture_city_target_elevation(
+                city, request.latitude, request.longitude
+            )
+            result = fetch_bucket_anchor_payload_downscaled(  # re-checks admission internally
+                latitude=request.latitude,
+                longitude=request.longitude,
+                target_elevation_m=target_elev,
+                run=request.run,
+                timezone_name=timezone_name,
+                needed_valid_times=needed,
+                manifest=manifest,
+            )
+        else:  # "raw"
+            result = fetch_bucket_anchor_payload(  # re-checks admission (condition 2) internally
+                latitude=request.latitude,
+                longitude=request.longitude,
+                run=request.run,
+                timezone_name=timezone_name,
+                needed_valid_times=needed,
+                manifest=manifest,
+            )
+    except ValueError as admission_exc:
+        # condition 2 fails: a needed local-day timestep is not yet written. Skip this city
+        # this cycle (no extrapolation) — it falls to a higher rung next tick.
+        raise BucketTransportNotAdmissible(
+            f"city {city} partial-run admission failed: {admission_exc}"
+        ) from admission_exc
+    provenance = dict(result.provenance)
+    provenance["single_runs_fallback_reason"] = (
+        f"HTTP 400 run not yet served: {str(single_runs_exc)[:120]}"
+    )
+    provenance["meta_stamped_fallback_reason"] = (
+        f"rung-2 could not serve: {str(meta_refusal)[:120]}"
+    )
+    return result.payload, provenance
+
+
+def _resolve_anchor_payload(
+    *,
+    request,
+    city: str,
+    target_date: str,
+    timezone_name: str,
+) -> tuple[dict, dict]:
+    """Resolve one city's anchor payload through the full transport ladder.
+
+    Rung 1 (run-pinned single-runs) → rung 2 (meta-stamped standard) → rung 3 (S3 bucket
+    partial-run). Returns ``(payload, transport_provenance)``. Raises
+    ``BucketTransportNotAdmissible`` only when NO rung can serve this city THIS cycle (so the
+    caller skips the city, never the batch). Genuine defects still raise loudly:
+      * rung 1: only HTTP 400 (run-not-yet-served) degrades to rung 2; any other single-runs
+        status (auth, 4xx, schema) re-raises.
+      * rung 2: three outcomes degrade to rung 3 — the meta REFUSAL (ValueError: provider
+        declares an older run; never weakened), a transport error (provider unreachable), and
+        a 5xx (provider server-side unavailability, e.g. intermittent 502 on meta.json). A 4xx
+        on meta is a client-side defect and re-raises.
+      * rung 3: serves only cross-check-whitelisted cities for the bucket-declared wanted run
+        with every needed timestep present; otherwise BucketTransportNotAdmissible.
+    """
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped,
+    )
+
+    # Rung 1: run-pinned single-runs (strongest provenance).
+    single_runs_exc: Exception
+    try:
+        payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request)
+        return payload, {
+            "openmeteo_endpoint": "single_runs_api",
+            "run_authority": "run_pinned_single_runs",
+        }
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 400:
+            raise  # only run-not-yet-served (400) degrades; everything else is loud
+        # `except ... as` unbinds the name at block exit; persist it for rungs 2/3.
+        single_runs_exc = exc
+
+    # Rung 2: meta-stamped standard API (provider-declared run + atomicity).
+    try:
+        payload, meta_provenance = fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(request)
+        provenance = dict(meta_provenance)
+        provenance["single_runs_fallback_reason"] = (
+            f"HTTP 400 run not yet served: {str(single_runs_exc)[:160]}"
+        )
+        return payload, provenance
+    except httpx.HTTPStatusError as meta_status_exc:
+        # 5xx = provider server-side unavailability (degrade to rung 3); 4xx = our defect (raise).
+        if meta_status_exc.response.status_code < 500:
+            raise
+        rung2_reason: Exception = meta_status_exc
+    except (ValueError, httpx.TransportError) as meta_exc:
+        # ValueError = meta REFUSAL (older run; never weakened); TransportError = provider
+        # unreachable. Both degrade to rung 3 (the bucket is independent infrastructure).
+        rung2_reason = meta_exc
+
+    # Rung 3: S3 bucket partial-run (whitelisted cities only).
+    return _try_bucket_rung_three(
+        request=request,
+        city=city,
+        target_date=target_date,
+        timezone_name=timezone_name,
+        meta_refusal=rung2_reason,
+        single_runs_exc=single_runs_exc,
+    )
+
+
 def download_current_target_raw_inputs(
     *,
     forecast_db: Path,
@@ -180,8 +357,18 @@ def download_current_target_raw_inputs(
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
     raw_dir.mkdir(parents=True, exist_ok=True)
     captured_at = datetime.now(tz=UTC)
-    source_available = _source_available_at(cycle, release_lag_hours=release_lag_hours)
+    # PROOF-OF-POSSESSION bound (2026-06-11, Fitz #4): probe-resolved run selection fetches
+    # runs the moment a transport serves them — routinely BEFORE the nominal cycle+lag
+    # publication model. Possessing the data at captured_at PROVES it was available by then,
+    # so source_available_at = min(captured_at, nominal). Stamping the nominal future time
+    # would hide the freshly fetched manifest from seed discovery (which admits only
+    # source_available_at <= now) until the lag caught up — defeating the early fetch.
+    # When capture happens after the nominal lag (backfill), the nominal model stands.
+    source_available = min(
+        captured_at, _source_available_at(cycle, release_lag_hours=release_lag_hours)
+    )
     manifests: list[RawForecastArtifactManifest] = []
+    skipped_cities: list[dict[str, object]] = []
     downloaded: dict[str, object] = {
         "aifs_grib": None,
         "openmeteo_payload_count": 0,
@@ -246,6 +433,8 @@ def download_current_target_raw_inputs(
             )
 
     if not skip_openmeteo:
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import BucketTransportNotAdmissible
+
         for target in targets:
             city_config = cities_by_name.get(target.city)
             if city_config is None:
@@ -259,19 +448,60 @@ def download_current_target_raw_inputs(
                 timezone_name=city_config.timezone,
                 forecast_hours=120,
             )
+            anchor_transport_provenance: dict[str, object] = {
+                "openmeteo_endpoint": "single_runs_api",
+                "run_authority": "run_pinned_single_runs",
+            }
+            # Per-city fault isolation (2026-06-11): one city for which NO rung can serve this
+            # cycle (BucketTransportNotAdmissible — single-runs 400 + meta older-run + (bucket
+            # un-declared OR city not whitelisted OR a step unwritten)) must NOT abort the
+            # whole batch. The city is recorded as skipped and the loop continues; it falls to
+            # a higher rung next tick. This preserves — never weakens — the rung-2 refusal:
+            # a non-admissible city simply gets no artifact this cycle.
             if not payload_path.exists():
-                payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request)
+                # Transport ladder (operator directive 2026-06-11, K4.0b(f)): rung 1 run-pinned
+                # single-runs → rung 2 meta-stamped standard → rung 3 S3 bucket partial-run.
+                # _resolve_anchor_payload encapsulates the whole ladder and returns
+                # (payload, provenance), or raises BucketTransportNotAdmissible when NO rung can
+                # serve this city this cycle (so the city is skipped, not the batch aborted).
+                try:
+                    payload, anchor_transport_provenance = _resolve_anchor_payload(
+                        request=request,
+                        city=target.city,
+                        target_date=target.target_date,
+                        timezone_name=city_config.timezone,
+                    )
+                except BucketTransportNotAdmissible as not_admissible:
+                    skipped_cities.append(
+                        {
+                            "city": target.city,
+                            "target_date": target.target_date,
+                            "metric": target.temperature_metric,
+                            "reason": str(not_admissible)[:200],
+                        }
+                    )
+                    continue
                 _write_json(payload_path, payload)
             _write_json(precision_path, _precision_metadata(target.city, target.target_date, anchor_sigma_c=anchor_sigma_c))
             downloaded["openmeteo_payload_count"] = int(downloaded["openmeteo_payload_count"]) + 1
             downloaded["precision_metadata_count"] = int(downloaded["precision_metadata_count"]) + 1
+            # source_available_at semantics by transport (Fitz #4): the API release-lag
+            # (cycle + ~14h) models when single-runs/standard PUBLISH a run. The S3 bucket
+            # serves a run's steps the moment they are WRITTEN — hours BEFORE that lag (the
+            # whole point of rung 3). Tagging a bucket artifact with the API lag would push its
+            # source_available_at into the future and hide it from seed discovery's
+            # availability filter (it admits only manifests with source_available_at <= now),
+            # so the early data would never materialize. For a bucket read the data is
+            # available at capture time; for rungs 1-2 keep the API release-lag.
+            is_bucket = str(anchor_transport_provenance.get("run_authority", "")).startswith("bucket_partial_run")
+            effective_source_available = captured_at if is_bucket else source_available
             manifests.append(
                 build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
                     payload_path,
                     request=request,
                     metric=target.temperature_metric,
-                    source_available_at=source_available.isoformat(),
-                    captured_at=max(captured_at, source_available).isoformat(),
+                    source_available_at=effective_source_available.isoformat(),
+                    captured_at=max(captured_at, effective_source_available).isoformat(),
                     product_metadata={
                         "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
                         "city": target.city,
@@ -285,6 +515,7 @@ def download_current_target_raw_inputs(
                         ),
                         "openmeteo_payload_json": str(payload_path),
                         "precision_metadata_json": str(precision_path),
+                        **anchor_transport_provenance,
                     },
                 )
             )
@@ -324,6 +555,8 @@ def download_current_target_raw_inputs(
         "write_db": write_db,
         "db_artifact_ids": db_artifact_ids,
         "downloaded": downloaded,
+        "skipped_city_count": len(skipped_cities),
+        "skipped_cities": skipped_cities,
         "coverage_before": plan.as_dict(),
     }
 
@@ -332,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Download current replacement forecast raw inputs")
     parser.add_argument("--forecast-db", type=Path, default=ROOT / "state" / "zeus-forecasts.db")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "state" / "replacement_forecast_shadow" / "raw_manifests")
-    parser.add_argument("--cycle", help="UTC cycle datetime; default latest 00/06/12/18 cycle older than release lag")
+    parser.add_argument("--cycle", help="UTC cycle datetime; default = probe-resolved newest published pair-complete cycle")
     parser.add_argument("--release-lag-hours", type=float, default=14.0)
     parser.add_argument("--anchor-sigma-c", type=float, default=3.0)
     parser.add_argument("--limit", type=int)
@@ -343,7 +576,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--stdout", action="store_true")
     args = parser.parse_args(argv)
-    cycle = _parse_cycle(args.cycle, now=datetime.now(tz=UTC), release_lag_hours=args.release_lag_hours)
+    if args.cycle:
+        cycle = _parse_cycle(args.cycle, now=datetime.now(tz=UTC), release_lag_hours=args.release_lag_hours)
+    else:
+        # Run-selection single authority (2026-06-11): no explicit cycle → the probe-resolved
+        # newest pair-complete published cycle, same as the production jobs. Never a guess.
+        from src.data.replacement_forecast_production import _probe_resolved_available_cycle
+
+        maybe_cycle = _probe_resolved_available_cycle()
+        if maybe_cycle is None:
+            print(
+                json.dumps({"status": "CYCLE_PROBE_UNRESOLVED", "detail": "no pair-complete cycle provable by provider probes; pass --cycle to override"}),
+                file=sys.stderr,
+            )
+            return 2
+        cycle = maybe_cycle
     try:
         result = download_current_target_raw_inputs(
             forecast_db=args.forecast_db,

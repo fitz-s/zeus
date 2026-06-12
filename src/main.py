@@ -1442,6 +1442,55 @@ def _settlement_guard_report_tick() -> None:
     run_settlement_guard_report()
 
 
+@_scheduler_job("shadow_comparator")
+def _shadow_comparator_tick() -> None:
+    """Daily standing shadow-vs-live comparator (operator-approved, K<<N organ).
+
+    The ONE comparator every promotion uses instead of a bespoke harness. For
+    each registered shadow candidate (immediate customer: day0_remaining_day_q),
+    it READS the persisted shadow + live q for each settled cohort cell, grades
+    both against the VERIFIED settlement via grade_receipt (the ONE Direction-Law
+    truth function — never recomputes domain logic), and emits a running
+    scoreboard with a PROMOTE_SUPPORTED | LIVE_BETTER | INSUFFICIENT_N verdict:
+      - state/shadow_comparator.json (machine)
+      - docs/evidence/shadow_comparisons/<date>_shadow_comparison.md (human)
+    plus a one-line INFO verdict per candidate in this daemon's log.
+
+    Co-located with the settlement-guard tick (same WORLD+forecasts read shape,
+    same daily cadence). Read-only; honest absence (INSUFFICIENT_N) when a
+    candidate's shadow lane is not yet persisting a comparable q — never a
+    fabricated cohort. Import is local to keep src.main import-light.
+    """
+    from src.analysis.shadow_comparator import run_shadow_comparator_job
+
+    report = run_shadow_comparator_job()
+    for cand in report.get("candidates", []):
+        logger.info("shadow_comparator[%s]: %s", cand["name"], cand["verdict_line"])
+
+
+@_scheduler_job("day0_shadow_enrichment")
+def _day0_shadow_enrichment_tick() -> None:
+    """Grade SETTLED candidate-bearing day0 shadow receipts against VERIFIED truth.
+
+    Closes the day0-evidence gap (operator 2026-06-11): later_outcome /
+    would_have_won were 0% populated on the day0 lane because no writer existed.
+    This tick joins no_trade_regret_events (day0 shadow rows carrying
+    direction + bin_label) to VERIFIED forecasts.settlement_outcomes, grades each
+    through the canonical grade_receipt (Direction Law + HK preimage), and writes
+    the outcome via NoTradeRegretLedger.enrich_after_settlement. PURE-DB (no
+    network) and NEVER-SUBMIT / NEVER-FABRICATE: only already-candidate-bearing
+    receipts with a VERIFIED settlement are graded. Co-located with the
+    shadow-comparator tick (same WORLD+forecasts read shape, same cadence).
+    """
+    from src.analysis.day0_shadow_enrichment import run_day0_shadow_enrichment_job
+
+    report = run_day0_shadow_enrichment_job()
+    logger.info(
+        "day0_shadow_enrichment: status=%s enriched=%s",
+        report.get("status"), report.get("enriched", report.get("error")),
+    )
+
+
 # ---------------------------------------------------------------------------
 # F14 + F16 cascade-liveness pollers (2026-05-16, SCAFFOLD §K v5)
 # ---------------------------------------------------------------------------
@@ -1478,8 +1527,13 @@ def _wrap_proceeds_same_tick(creds: dict, adapter: Any) -> None:
     wrap_proceeds_now. Fail-soft: any failure logs and defers to the periodic
     wrap jobs (which remain as the resume/backstop path).
 
-    Takes the wrap_submitter dual-run lock so it can never double-submit a Safe
-    tx against the periodic _wrap_submitter_cycle.
+    P0-2 (d) shared logical lock: takes the single `wrap_state_machine` lock
+    shared by _wrap_intent_creator_cycle / _wrap_submitter_cycle /
+    _wrap_reconciler_cycle / this same-tick path. With ONE lock, no two of them
+    ever submit a Safe tx or transition a wrap row concurrently — so a stale
+    snapshot can never drive a duplicate on-chain tx (burned gas) against a row
+    another worker is advancing. The CAS in _transition is the structural
+    anti-reversion guard; this lock is the duplicate-submission guard.
     """
     from src.data.dual_run_lock import acquire_lock
     from src.execution.wrap_unwrap_commands import wrap_proceeds_now
@@ -1491,7 +1545,7 @@ def _wrap_proceeds_same_tick(creds: dict, adapter: Any) -> None:
     except Exception as exc:  # noqa: BLE001 — fail-soft
         logger.warning("wrap_proceeds_same_tick: signer derivation failed: %s", exc)
         return
-    with acquire_lock("wrap_submitter") as acquired:
+    with acquire_lock("wrap_state_machine") as acquired:
         if not acquired:
             logger.info("wrap_proceeds_same_tick skipped_lock_held")
             return
@@ -1531,6 +1585,15 @@ def _redeem_submitter_cycle() -> None:
     are re-processed every tick AND any real adapter tx_hash is not durably
     anchored. Per-row commit gives partial-failure tolerance.
     """
+    # K3.6 REDEEM PIVOT (operator law 2026-06-10 "完全抛弃redeem"): the scheduler
+    # NEVER drives redeem submission. Calm skip (no FAILED-noise every tick);
+    # submit_redeem and adapter.redeem each hard-raise as deeper layers. The
+    # operator-only override env exists solely for a supervised manual redrive
+    # run OUTSIDE the daemon.
+    from src.execution.settlement_commands import redeem_submission_allowed
+
+    if not redeem_submission_allowed():
+        return
     from src.data.dual_run_lock import acquire_lock
     from src.data.polymarket_client import (
         resolve_polymarket_credentials,
@@ -1823,7 +1886,8 @@ def _wrap_intent_creator_cycle() -> None:
         logger.info("wrap_intent_creator skipped_non_live mode=%s", get_mode())
         return
 
-    with acquire_lock("wrap_intent_creator") as acquired:
+    # P0-2 (d): single shared wrap state-machine lock (was "wrap_intent_creator").
+    with acquire_lock("wrap_state_machine") as acquired:
         if not acquired:
             logger.info("wrap_intent_creator skipped_lock_held")
             return
@@ -1892,7 +1956,8 @@ def _wrap_submitter_cycle() -> None:
         logger.info("wrap_submitter skipped_non_live mode=%s", get_mode())
         return
 
-    with acquire_lock("wrap_submitter") as acquired:
+    # P0-2 (d): single shared wrap state-machine lock (was "wrap_submitter").
+    with acquire_lock("wrap_state_machine") as acquired:
         if not acquired:
             logger.info("wrap_submitter skipped_lock_held")
             return
@@ -2029,7 +2094,8 @@ def _wrap_reconciler_cycle() -> None:
         logger.info("wrap_reconciler skipped_non_live mode=%s", get_mode())
         return
 
-    with acquire_lock("wrap_reconciler") as acquired:
+    # P0-2 (d): single shared wrap state-machine lock (was "wrap_reconciler").
+    with acquire_lock("wrap_state_machine") as acquired:
         if not acquired:
             logger.info("wrap_reconciler skipped_lock_held")
             return
@@ -3605,8 +3671,19 @@ def _refresh_pending_family_snapshots(
             gamma_slug_failed = 0
             gamma_slug_invalid = 0
             gamma_slug_timebox_unattempted = 0
-            gamma_attempted_family_keys: set[tuple[str, str, str]] = set()
             gamma_empty_family_keys: set[tuple[str, str, str]] = set()
+            # FDR-GATE PARSE INCIDENT FIX (2026-06-10): track HARVESTED (result
+            # actually read), not merely SUBMITTED. A future cancelled / not drained
+            # at the gamma time-box — whose HTTP often lands ~140ms LATER, since
+            # `future.cancel()` cannot stop an already-running thread — was previously
+            # counted as "attempted" yet never harvested. The match loop then reported
+            # that transient timing miss as a permanent "did not parse — bin identity
+            # unknown" verdict, pinning real families at the FDR gate forever. The
+            # terminal verdict is now restricted to keys in this set; everything else
+            # (submitted-but-un-harvested) is reported RETRYABLE so the next cycle
+            # re-fetches it. Fail-closed is preserved: a harvested-but-unmatched family
+            # still stays terminal.
+            gamma_harvested_family_keys: set[tuple[str, str, str]] = set()
 
             gamma_jobs: list[dict] = []
             for fam_city, fam_date, fam_metric in gamma_refresh_families:
@@ -3677,8 +3754,35 @@ def _refresh_pending_family_snapshots(
                     job = gamma_jobs[next_job_index]
                     next_job_index += 1
                     gamma_slug_attempted += 1
-                    gamma_attempted_family_keys.add(job["family_key"])
                     pending_futures[executor.submit(_fetch_gamma_slug, job)] = job
+
+            def _harvest_gamma_result(result: dict) -> None:
+                """Record a Gamma future's RESULT (not its mere submission).
+
+                Marking the family_key harvested here is what lets the downstream
+                match loop distinguish "we read a response and it did not match this
+                pending family" (terminal: stay at FDR gate, fail-closed) from "we
+                never got to read a response" (retryable). Without this the two were
+                conflated and every time-boxed family was reported as a hard parse
+                failure.
+                """
+                nonlocal gamma_slug_http_non_200, gamma_slug_empty
+                gamma_harvested_family_keys.add(result["family_key"])
+                if result["status"] == "http_non_200":
+                    gamma_slug_http_non_200 += 1
+                    logger.debug(
+                        "refresh_pending_family_snapshots: Gamma %s -> HTTP %s",
+                        result["slug"], result.get("status_code"),
+                    )
+                elif result["status"] == "empty":
+                    gamma_slug_empty += 1
+                    gamma_empty_family_keys.add(result["family_key"])
+                else:
+                    for event in result["events"]:
+                        event_id = event.get("id") or event.get("slug")
+                        if event_id and event_id not in raw_events_seen:
+                            raw_events_seen.add(event_id)
+                            raw_events_collected.append(event)
 
             if gamma_jobs:
                 with ThreadPoolExecutor(
@@ -3690,18 +3794,23 @@ def _refresh_pending_family_snapshots(
                         remaining = gamma_deadline - time.monotonic()
                         if remaining <= 0.0:
                             gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
-                            for future in pending_futures:
-                                future.cancel()
                             logger.info(
                                 "refresh_pending_family_snapshots: Gamma time-box %.0fs hit after %d/%d "
-                                "submitted families; reserving %.1fs for CLOB capture",
+                                "submitted families; draining %d in-flight, reserving %.1fs for CLOB capture",
                                 max(0.1, gamma_deadline - (refresh_deadline - refresh_budget_s)),
                                 gamma_slug_attempted,
                                 len(gamma_jobs),
+                                len(pending_futures),
                                 snapshot_reserve_s,
                             )
                             next_job_index = len(gamma_jobs)
-                            pending_futures.clear()
+                            # FDR-GATE PARSE INCIDENT FIX (2026-06-10): break WITHOUT
+                            # cancel/clear here. The post-loop drain below harvests any
+                            # futures whose HTTP lands within the bounded grace window
+                            # (live: ~140ms after the time-box) so their bin identity is
+                            # NOT discarded and mislabeled "did not parse". Whatever is
+                            # still pending after the grace is then cancelled and left
+                            # retryable (never harvested -> never terminal).
                             break
                         try:
                             future = next(
@@ -3723,22 +3832,71 @@ def _refresh_pending_family_snapshots(
                             )
                             _submit_gamma_jobs(executor)
                             continue
-                        if result["status"] == "http_non_200":
-                            gamma_slug_http_non_200 += 1
-                            logger.debug(
-                                "refresh_pending_family_snapshots: Gamma %s -> HTTP %s",
-                                result["slug"], result.get("status_code"),
-                            )
-                        elif result["status"] == "empty":
-                            gamma_slug_empty += 1
-                            gamma_empty_family_keys.add(result["family_key"])
-                        else:
-                            for event in result["events"]:
-                                event_id = event.get("id") or event.get("slug")
-                                if event_id and event_id not in raw_events_seen:
-                                    raw_events_seen.add(event_id)
-                                    raw_events_collected.append(event)
+                        _harvest_gamma_result(result)
                         _submit_gamma_jobs(executor)
+
+                    # FDR-GATE PARSE INCIDENT FIX (2026-06-10): drain futures that are
+                    # ALREADY done but were left in pending_futures when the loop exited
+                    # via the time-box. `future.cancel()` returns False for a running
+                    # future — its worker thread keeps going and the HTTP completes a
+                    # short moment after the time-box. The prior code cleared
+                    # pending_futures without reading those landed results, discarding
+                    # perfectly parseable responses and reporting them as parse failures.
+                    # A small bounded grace lets the near-complete fetches land so their
+                    # bin identity is harvested instead of thrown away. Bounded so the
+                    # CLOB capture reserve is never consumed.
+                    if pending_futures:
+                        # 2.0s (was 1.5s): slice 2.0 + grace must clear the measured
+                        # Gamma /events p95 (2.516s) x 1.5 = 3.774s effective recovery
+                        # window; 1.5s left it at 3.5s — 0.27s short, the same miss
+                        # class that pinned families at the FDR gate on 2026-06-10.
+                        # Relation enforced by tests/test_time_semantics_relations.py.
+                        grace_s = max(
+                            0.0,
+                            float(os.environ.get("ZEUS_REACTOR_GAMMA_DRAIN_GRACE_SECONDS", "2.0")),
+                        )
+                        # Cap the grace at the absolute refresh deadline so draining
+                        # near-complete fetches never overruns the cycle's total
+                        # wall-clock budget; this only borrows otherwise-idle wait time.
+                        grace_deadline = min(
+                            time.monotonic() + grace_s,
+                            refresh_deadline,
+                        )
+                        # Harvest in COMPLETION order so the futures whose HTTP lands
+                        # first (live: ~140ms after the time-box) are recovered before
+                        # the grace runs out, regardless of dict iteration order.
+                        while pending_futures:
+                            remaining_grace = grace_deadline - time.monotonic()
+                            if remaining_grace <= 0.0:
+                                break
+                            try:
+                                future = next(
+                                    as_completed(
+                                        tuple(pending_futures),
+                                        timeout=remaining_grace,
+                                    )
+                                )
+                            except FuturesTimeoutError:
+                                break
+                            job = pending_futures.pop(future)
+                            try:
+                                result = future.result()
+                            except Exception as _exc:
+                                # Future raised (e.g. network error). Not harvested, so
+                                # it stays retryable next cycle.
+                                gamma_slug_failed += 1
+                                logger.debug(
+                                    "refresh_pending_family_snapshots: Gamma drain fetch failed for %s: %s",
+                                    job["slug"], _exc,
+                                )
+                                continue
+                            _harvest_gamma_result(result)
+                        # Anything still unharvested after the grace is genuinely
+                        # unresolved this cycle; cancel and leave it RETRYABLE (its
+                        # key was never added to gamma_harvested_family_keys).
+                        for future in pending_futures:
+                            future.cancel()
+                        pending_futures.clear()
 
             gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
 
@@ -3789,7 +3947,14 @@ def _refresh_pending_family_snapshots(
             key = _refresh_family_key(city, target_date, metric)
             ev = gamma_by_family.get(key)
             if ev is None:
-                if key in gamma_attempted_family_keys:
+                # FDR-GATE PARSE INCIDENT FIX (2026-06-10): gate the TERMINAL "did not
+                # parse — stay at FDR gate" verdict on whether the family's Gamma
+                # future was actually HARVESTED (its result read), not merely
+                # submitted. A family whose future was cancelled / not drained at the
+                # time-box was "attempted" but never harvested; reporting it as a hard
+                # parse failure pinned real families at the gate forever. Such families
+                # are now reported RETRYABLE so the next cycle re-fetches them.
+                if key in gamma_harvested_family_keys:
                     skipped_not_found += 1
                     if key in gamma_empty_family_keys:
                         logger.warning(
@@ -3805,7 +3970,7 @@ def _refresh_pending_family_snapshots(
                         )
                 else:
                     logger.info(
-                        "refresh_pending_family_snapshots: Gamma not attempted before time-box for "
+                        "refresh_pending_family_snapshots: Gamma fetch not harvested before time-box for "
                         "%s/%s/%s — family remains retryable",
                         city, target_date, metric,
                     )
@@ -4158,30 +4323,56 @@ def _new_listing_scout_cycle() -> None:
         except Exception as exc:
             logger.warning("new_listing_scout: persist new events failed (non-fatal): %r", exc)
 
-        # (b) POSTERIOR FAST-LANE: enqueue shadow materialization for each new family
+        # (b) POSTERIOR FAST-LANE: stage a scout INTENT for each new family.
+        #
+        # CONTRACT FIX (2026-06-10): scout intents are condition_id-only stubs
+        # {source, condition_id, enqueued_at, reason}. They are NOT fully-resolved
+        # materialization request payloads (which require city, temperature_metric,
+        # target_date, source_cycle_time, aifs input, ...). Writing stubs directly into
+        # the materializer requests/ dir crashed the subprocess (KeyError) on every cycle
+        # and starved ALL legitimate posterior production (772 stubs / 4 posteriors/h on
+        # 2026-06-10 — see /tmp/materializer_collapse_report.md). Stage intents in the
+        # non-queue scout_intents/ directory instead.
+        #
+        # CONSUMED-BY TODO: the seed→request builder pipeline
+        # (src.data.replacement_forecast_seed_discovery.discover_replacement_forecast_materialization_seeds
+        # / build_replacement_forecast_current_target_plan) does NOT yet read scout_intents/.
+        # Until that consumption side is wired (resolve condition_id → city+metric+target_date
+        # via executable_market_snapshots/topology, include as a scope hint in the next seed
+        # build, then delete the consumed intent), this directory is WRITE-ONLY staging and
+        # the fast-lane latency benefit degrades gracefully to the normal 00Z/12Z wave cadence.
         try:
             from src.data.replacement_forecast_production import (
                 _replacement_forecast_shadow_materialization_queue_config,
             )
             from src.data.replacement_forecast_shadow_materialization_queue import _write_request
+            from src.contracts.replacement_pipeline_files import validate_scout_intent
             from pathlib import Path
 
             queue_cfg = _replacement_forecast_shadow_materialization_queue_config()
             request_dir = queue_cfg.get("request_dir")
             if request_dir is not None:
-                request_dir = Path(str(request_dir))
-                request_dir.mkdir(parents=True, exist_ok=True)
+                # scout_intents/ is a sibling staging dir of requests/ — never the queue's input.
+                intents_dir = Path(str(request_dir)).parent / "scout_intents"
+                intents_dir.mkdir(parents=True, exist_ok=True)
                 for cid in sorted(new_cids):
-                    req_path = request_dir / f"new_listing_scout_{cid}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-                    _write_request(req_path, {
+                    intent_path = intents_dir / f"new_listing_scout_{cid}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+                    # BOUNDARY CONTRACT (2026-06-10): validate the intent stub against the
+                    # SCOUT_INTENT schema before writing. This is the producer half of the
+                    # contract that prevents the 2026-06-10 starvation category: the scout
+                    # can only emit a well-formed intent, and the intent shape is explicitly
+                    # distinct from a materialization REQUEST (the REQUEST validator rejects
+                    # exactly this shape). Authority basis: pipeline-contract project.
+                    intent = validate_scout_intent({
                         "source": "new_listing_scout",
                         "condition_id": cid,
                         "enqueued_at": datetime.now(timezone.utc).isoformat(),
                         "reason": "NEW_LISTING_FAST_LANE",
                     })
-                    logger.info("new_listing_scout: enqueued materialization for %s → %s", cid, req_path.name)
+                    _write_request(intent_path, intent.to_dict())
+                    logger.info("new_listing_scout: staged intent for %s → scout_intents/%s", cid, intent_path.name)
         except Exception as exc:
-            logger.warning("new_listing_scout: materialization enqueue failed (non-fatal): %r", exc)
+            logger.warning("new_listing_scout: intent staging failed (non-fatal): %r", exc)
 
         # (c) WARMER PRIORITY: mark new condition_ids for head-of-rotation in next warm cycle
         _NEW_FAMILY_CONDITION_IDS.update(new_cids)
@@ -5336,6 +5527,7 @@ def _edli_event_reactor_cycle() -> None:
         riskguard_allows_new_entries,
     )
     from src.engine.event_bound_final_intent import submit_event_bound_final_intent_via_existing_executor
+    from src.events.event_priority import day0_is_tradeable_for_scope
     from src.events.event_store import EventStore
     from src.events.reactor import OpportunityEventReactor, ReactorConfig
     from src.riskguard.riskguard import get_current_level
@@ -5414,6 +5606,21 @@ def _edli_event_reactor_cycle() -> None:
             edli_cfg, "no_submit_proof_limit", default=10, maximum=400
         )
         store = EventStore(conn)
+        #
+        # PR#404 P0-2 (operator merge blocker): the day0 fast lane's network IO
+        # (aviationweather METAR fetch, WU anomaly cross-check, open-meteo
+        # hourly-vector refresh) MUST happen BEFORE the mutex is acquired —
+        # the world-write mutex exists for WAL writer exclusion and must never
+        # span an external HTTP call (a slow venue/API response would serialize
+        # every world writer: ingestor, collateral heartbeat, reactor drain).
+        # The prefetch returns a pure in-memory snapshot; only EventWriter
+        # writes happen inside the mutex.
+        _day0_fast_prefetch = None
+        if (
+            edli_cfg.get("day0_extreme_trigger_enabled")
+            and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
+        ):
+            _day0_fast_prefetch = _edli_prefetch_day0_fast_obs(decision_time=now)
         # EDLI live-canary contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
         # in-process with the market-channel ingestor. Serialize the whole
@@ -5512,6 +5719,15 @@ def _edli_event_reactor_cycle() -> None:
                         decision_time=now,
                         received_at=received_at,
                         limit=day0_emit_limit,
+                        # PR#404 P0-2: HTTP was prefetched OUTSIDE the mutex
+                        # (_day0_fast_prefetch above, before acquire); this call
+                        # is the pure write phase.
+                        fast_prefetch=_day0_fast_prefetch,
+                        # 2026-06-11 anti-starvation: stamp the scope-aware emission
+                        # priority so day0_shadow events sub-sort below tradeable FSR.
+                        day0_is_tradeable=day0_is_tradeable_for_scope(
+                            str(edli_cfg.get("edli_live_scope") or "forecast_only")
+                        ),
                     )
                 finally:
                     _day0_trade_conn.close()
@@ -5614,6 +5830,16 @@ def _edli_event_reactor_cycle() -> None:
         # EVERY real submit (canary included) at the EDLI boundary by TYPE. The mainline
         # executor never constructs this adapter, so the 293-order mainline is untouched.
         operator_arm = require_operator_arm(edli_cfg)
+        # Decision-triggered targeted family snapshot refresher (zero-order wall fix
+        # 2026-06-11): when the adapter is about to decide and the SELECTED bin's
+        # elected snapshot row is price-stale, it captures FRESH books for THAT family
+        # NOW through the sanctioned warm-job capture path, then re-elects the latest
+        # row. Synchronizes the warm-job's ~5.4min per-family cadence with the 30s
+        # decision price-freshness window at the only point that matters. Topology
+        # authority = forecasts_conn (owns market_events); snapshot WRITE = zeus_trades.
+        _decision_family_snapshot_refresher = _edli_decision_family_snapshot_refresher(
+            forecasts_conn
+        )
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -5661,6 +5887,7 @@ def _edli_event_reactor_cycle() -> None:
                 # FIX-3 (P1): pass scope so the adapter can enforce
                 # DAY0_SCOPE_SHADOW_ONLY at the final submit boundary.
                 edli_live_scope=edli_live_scope,
+                family_snapshot_refresher=_decision_family_snapshot_refresher,
             )
             if (live_submit_effective and operator_arm is not None)
             else event_bound_no_submit_adapter_from_trade_conn(
@@ -5678,6 +5905,7 @@ def _edli_event_reactor_cycle() -> None:
                 replacement_forecast_refit_decision=replacement_forecast_refit_decision,
                 replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
                 replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+                family_snapshot_refresher=_decision_family_snapshot_refresher,
             )
         )
 
@@ -5701,6 +5929,12 @@ def _edli_event_reactor_cycle() -> None:
                 # config/settings.json; this reads it without writing it).
                 edge_zone_admission_enabled=bool(edli_cfg.get("edge_zone_admission_enabled", False)),
                 edge_zone_min_ev_per_dollar=float(edli_cfg.get("edge_zone_min_ev_per_dollar", 0.0)),
+                # Scope-aware claim tier (2026-06-11 anti-starvation): under
+                # day0_shadow a DAY0_EXTREME_UPDATED event can only ever produce a
+                # DAY0_SCOPE_SHADOW_ONLY receipt, so it must NOT outrank tradeable
+                # FORECAST_SNAPSHOT_READY in the reactor claim. day0_is_tradeable
+                # is True ONLY for the forecast_plus_day0 (day0-submittable) lane.
+                day0_is_tradeable=day0_is_tradeable_for_scope(edli_live_scope),
             ),
         )
         _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
@@ -5712,8 +5946,15 @@ def _edli_event_reactor_cycle() -> None:
         # adapter and any legacy adapter do not, so getattr returns [0] for both
         # → live_submit_attempts=0 and live_venue_acks=0 (correct for no-submit
         # cycles).
+        # FAIL-SOFT counter read (Copilot PR#404): honor the FIX-4 closure
+        # counter when it has the expected 1-element-list shape; any other
+        # shape (legacy adapter, int, empty list, None) reads as 0 instead of
+        # crashing the status-pulse write.
         _live_submit_count_ref = getattr(submit_adapter, "_live_submit_count", [0])
-        _live_submit_attempts = int(_live_submit_count_ref[0])
+        try:
+            _live_submit_attempts = int(_live_submit_count_ref[0])
+        except (TypeError, IndexError, KeyError, ValueError):
+            _live_submit_attempts = 0
         _live_ack_count_ref = getattr(submit_adapter, "_live_ack_count", [0])
         _live_venue_acks = int(_live_ack_count_ref[0])
         try:
@@ -5742,8 +5983,10 @@ def _edli_event_reactor_cycle() -> None:
                 exc_info=True,
             )
         logger.info(
-            "EDLI reactor cycle result: processed=%d proof_accepted=%d rejected=%d retried=%d dead=%d reasons=%r",
-            _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered, _rr.rejection_reasons[:8],
+            "EDLI reactor cycle result: processed=%d proof_accepted=%d rejected=%d retried=%d dead=%d "
+            "claim_lock_bounces=%d reasons=%r",
+            _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered,
+            getattr(_rr, "claim_lock_bounces", 0), _rr.rejection_reasons[:8],
         )
         conn.commit()
     finally:
@@ -5808,6 +6051,77 @@ def _edli_bankroll_warm_cycle() -> None:
             "EDLI bankroll warm: current() returned None — on-chain wallet fetch is "
             "failing; cached() will fail closed (KELLY_PROOF_MISSING) until it recovers."
         )
+
+
+@_scheduler_job("edli_command_recovery")
+def _edli_command_recovery_cycle() -> None:
+    """Unresolved venue-command reconcile sweep for the EDLI lane (#28c).
+
+    INCIDENT (2026-06-10 22:54Z): command 84fb2c4c lost its submit ack and sat
+    SUBMITTING for 8+ minutes while the order had FILLED on-chain at 22:55:13 —
+    invisible exposure. reconcile_unresolved_commands (INV-31) previously ran
+    ONLY inside the legacy cycle_runner loop; the EDLI event-driven lane had NO
+    scheduled owner for unresolved side-effect states. This job gives the sweep
+    a 3-minute cadence independent of which lane is live. The sweep itself is
+    unchanged (venue lookup per in-flight command; REVIEW_REQUIRED handoff for
+    ack-lost rows without an order id).
+    """
+    edli_cfg = _settings_section("edli", {})
+    if not edli_cfg.get("enabled"):
+        return
+    if get_mode() != "live":
+        return
+    from src.execution.command_recovery import reconcile_unresolved_commands
+
+    summary = reconcile_unresolved_commands()
+    if summary.get("scanned"):
+        logger.info("edli_command_recovery: %s", summary)
+
+
+@_scheduler_job("maker_rest_escalation")
+def _maker_rest_escalation_cycle() -> None:
+    """K4.0 REST-THEN-CROSS deadline owner (consolidated overhaul 2026-06-11).
+
+    Cancels post_only GTC ENTRY rests older than the measured escalation
+    deadline (maker_rest_escalation_deadline, 2.0h MEASURED — KM hazard curve
+    on n=108 resting facts). GTC rests have NO other TTL owner. The job is
+    deliberately dumb: cancel only. The next reactor cycle re-certifies the
+    family through the FULL standard pipeline; _family_rest_state then sees the
+    cancelled-unfilled >= deadline rest in venue truth and licenses the
+    policy's TAKER_ESCALATED_AFTER_REST cross. Edge decayed -> no candidate ->
+    the standard regret receipt records the decay (free rest-cost measurement).
+
+    Read-only on the DB; venue cancels only; fail-soft per order.
+    """
+    edli_cfg = _settings_section("edli", {})
+    if not edli_cfg.get("enabled"):
+        return
+    if get_mode() != "live":
+        return
+    from src.data.polymarket_client import PolymarketClient
+    from src.execution.maker_rest_escalation import (
+        find_expired_resting_entries,
+        run_cancels_for_expired_rests,
+    )
+    from src.state.db import get_trade_connection_read_only
+
+    # Clean shape (dependency_db_locked antibody, 2026-06-11): SNAPSHOT the
+    # expired-rest candidates on a short read-only connection and CLOSE it before
+    # any venue cancel. The read-only connection never takes a WAL write lock, so
+    # holding it across cancels could not have caused the incident — but
+    # close-before-network is the structural shape this lane should still follow,
+    # so a future edit cannot silently turn this into a write-conn-across-network
+    # regression. The cancel loop holds no connection.
+    conn = get_trade_connection_read_only()
+    try:
+        expired = find_expired_resting_entries(conn, now=datetime.now(timezone.utc))
+    finally:
+        conn.close()
+
+    clob = PolymarketClient()
+    stats = run_cancels_for_expired_rests(expired, clob)
+    if stats["scanned"]:
+        logger.info("maker_rest_escalation: %s", stats)
 
 
 @_scheduler_job("edli_market_substrate_warm")
@@ -6188,25 +6502,49 @@ def _edli_pending_entity_keys(world_conn) -> set[str]:
 
     Passed as ``already_pending_keys`` to the continuous re-decision emit so families with a
     re-decision event already queued are not re-emitted (bounds the pending queue; the rate
-    self-regulates to families the reactor has already drained)."""
+    self-regulates to families the reactor has already drained).
+
+    CLAIM-STORM ROOT CAUSE (2026-06-11 17:51Z incident): this helper used to run
+    ``PRAGMA busy_timeout = 250`` on ``world_conn`` WITHOUT RESTORING IT. PRAGMA
+    busy_timeout is CONNECTION-WIDE and PERMANENT — and ``world_conn`` here is the
+    SAME connection the EventStore wraps for the reactor's ``claim()`` writes. One
+    cycle after the first emit pass, every claim on the shared conn waited at most
+    250 ms (instead of the configured 30 s) before raising "database is locked":
+    measured live as 44-250 claim bounces per cycle (processed=0 retried=250)
+    whenever any of the in-process world writers (collateral/venue heartbeat 2 s,
+    market-channel ingestor, wrap reconciler 30 s, user-channel reconcile 60 s)
+    overlapped a 250 ms window. The downgrade is now SCOPED: saved, applied for
+    this single WAL read only, and restored in ``finally`` — a read helper's
+    defensive timeout must never leak into the shared connection's WRITE path.
+    """
+    saved_busy_timeout_ms: int | None = None
     try:
         try:
+            row = world_conn.execute("PRAGMA busy_timeout").fetchone()
+            saved_busy_timeout_ms = int(row[0]) if row is not None else None
             world_conn.execute("PRAGMA busy_timeout = 250")
         except Exception:  # noqa: BLE001
-            pass
-        rows = world_conn.execute(
+            saved_busy_timeout_ms = None
+        try:
+            rows = world_conn.execute(
+                """
+                SELECT DISTINCT e.entity_key
+                FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+                JOIN opportunity_events e ON e.event_id = p.event_id
+                WHERE p.consumer_name = 'edli_reactor_v1'
+                  AND p.processing_status IN ('pending', 'processing', 'claimed')
+                  AND e.event_type = 'FORECAST_SNAPSHOT_READY'
             """
-            SELECT DISTINCT e.entity_key
-            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-            JOIN opportunity_events e ON e.event_id = p.event_id
-            WHERE p.consumer_name = 'edli_reactor_v1'
-              AND p.processing_status IN ('pending', 'processing', 'claimed')
-              AND e.event_type = 'FORECAST_SNAPSHOT_READY'
-        """
-        ).fetchall()
-    except Exception:  # noqa: BLE001 — fail-open: no skip set (cap still bounds)
-        return set()
-    return {str(r[0]) for r in rows}
+            ).fetchall()
+        except Exception:  # noqa: BLE001 — fail-open: no skip set (cap still bounds)
+            return set()
+        return {str(r[0]) for r in rows}
+    finally:
+        if saved_busy_timeout_ms is not None:
+            try:
+                world_conn.execute("PRAGMA busy_timeout = %d" % saved_busy_timeout_ms)
+            except Exception:  # noqa: BLE001 — restore best-effort; next get_world_connection reapplies
+                pass
 
 
 _EDLI_LAST_PRUNE_MONOTONIC: float | None = None
@@ -6333,6 +6671,55 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         )
 
 
+def _edli_day0_fast_lane_enabled() -> bool:
+    try:
+        edli_cfg = settings.get("edli", {}) if hasattr(settings, "get") else settings["edli"]
+        return bool(edli_cfg.get("day0_fast_obs_lane_enabled", True))
+    except Exception:
+        return True
+
+
+def _edli_prefetch_day0_fast_obs(*, decision_time: datetime):
+    """HTTP PHASE of the day0 fast lane (PR#404 operator review P0-2).
+
+    Runs OUTSIDE the world-write mutex: METAR batch fetch, WU anomaly
+    cross-check, and the open-meteo hourly-vector refresh (which writes the
+    FORECASTS db under its own writer lock — never the world WAL). Returns a
+    pure in-memory FastObsPrefetch (or None) for the mutex-held write phase.
+    decision_time is captured HERE so event identity uses the prefetch clock,
+    not a lock-held clock. Fail-soft: any error returns None.
+    """
+    if not _edli_day0_fast_lane_enabled():
+        return None
+    prefetch = None
+    try:
+        from src.config import runtime_cities
+        from src.data.day0_fast_obs import get_fast_obs_emitter
+        from src.data.day0_oracle_anomaly import wu_metar_anomaly_check
+
+        prefetch = get_fast_obs_emitter().prefetch(
+            cities=runtime_cities(),
+            decision_time=decision_time,
+            anomaly_check=wu_metar_anomaly_check,
+        )
+    except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive
+        logger.warning(
+            "EDLI day0 fast obs prefetch failed (non-fatal, catch-up lanes continue): %r",
+            _fast_exc,
+        )
+    try:
+        # High-res hourly vector refresh (30-min throttle per city inside the
+        # module; ~17 in-domain cities). open-meteo HTTP + forecasts-DB write —
+        # both forbidden under the world-write mutex, so it lives here.
+        from src.config import runtime_cities as _rc
+        from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
+
+        maybe_refresh_day0_hourly_vectors(_rc(), decision_time=decision_time)
+    except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
+        logger.warning("EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc)
+    return prefetch
+
+
 def _edli_emit_day0_extreme_events(
     world_conn,
     trade_conn,
@@ -6340,59 +6727,44 @@ def _edli_emit_day0_extreme_events(
     decision_time: datetime,
     received_at: str,
     limit: int,
+    fast_prefetch=None,
+    day0_is_tradeable: bool = True,
 ) -> int:
     """Emit EDLI Day0 extreme events from live observation truth surfaces.
 
-    Three lanes, freshest first (day0 first-principles review 2026-06-10):
-      1. FAST LANE — free METAR feed (aviationweather.gov, ~3-5 min behind the
-         station) emitting on running-extreme MOVES; carries the WU-vs-METAR
-         oracle-anomaly cross-check (Paris-CDG class, fail-closed pause).
-      2/3. CATCH-UP — the persisted settlement_day_observation_authority and
-         observation_instants scanners (reboot/coverage; hourly-grade
-         staleness, bounded by the stale-obs boundary guard downstream).
+    WRITE PHASE ONLY (PR#404 P0-2): performs NO network IO — safe to call
+    while holding the world-write mutex. The fast lane's HTTP results arrive
+    via ``fast_prefetch`` (built by _edli_prefetch_day0_fast_obs OUTSIDE the
+    mutex); the catch-up scanners below are DB-only by construction.
+
+    Returns the TOTAL emitted across all three lanes (PR#404 P2: the fast-lane
+    count was previously dropped from the return value).
     """
 
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
 
     fast_emitted = 0
-    try:
-        edli_cfg = settings.get("edli", {}) if hasattr(settings, "get") else settings["edli"]
-        fast_lane_enabled = bool(edli_cfg.get("day0_fast_obs_lane_enabled", True))
-    except Exception:
-        fast_lane_enabled = True
-    if fast_lane_enabled:
+    if fast_prefetch is not None:
         try:
-            from src.config import runtime_cities
             from src.data.day0_fast_obs import get_fast_obs_emitter
-            from src.data.day0_oracle_anomaly import wu_metar_anomaly_check
 
-            fast_emitted = get_fast_obs_emitter().emit_events(
+            fast_emitted = get_fast_obs_emitter().emit_prefetched(
                 world_conn=world_conn,
-                cities=runtime_cities(),
-                decision_time=decision_time,
+                prefetch=fast_prefetch,
                 received_at=received_at,
                 limit=limit,
-                anomaly_check=wu_metar_anomaly_check,
+                day0_is_tradeable=day0_is_tradeable,
             )
         except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive; never block catch-up
             logger.warning(
-                "EDLI day0 fast obs lane failed (non-fatal, catch-up lanes continue): %r",
+                "EDLI day0 fast obs emit failed (non-fatal, catch-up lanes continue): %r",
                 _fast_exc,
             )
-        try:
-            # High-res hourly vector refresh (review item B persistence lane;
-            # 30-min throttle per city inside the module; ~17 in-domain cities).
-            from src.config import runtime_cities as _rc
-            from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
 
-            maybe_refresh_day0_hourly_vectors(_rc(), decision_time=decision_time)
-        except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
-            logger.warning(
-                "EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc
-            )
-
-    trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
+    trigger = Day0ExtremeUpdatedTrigger(
+        EventWriter(world_conn), day0_is_tradeable=day0_is_tradeable
+    )
     authority_results = trigger.scan_authority_rows(
         observation_conn=trade_conn,
         settlement_semantics=_edli_day0_settlement_semantics,
@@ -6406,6 +6778,12 @@ def _edli_emit_day0_extreme_events(
         decision_time=decision_time,
         received_at=received_at,
         limit=limit,
+    )
+    # Structured per-lane counters (PR#404 P2 observability fix).
+    logger.info(
+        "EDLI day0 emit: day0_fast_emitted=%d day0_authority_emitted=%d "
+        "day0_observation_instants_emitted=%d",
+        fast_emitted, len(authority_results), len(observation_results),
     )
     return fast_emitted + len(authority_results) + len(observation_results)
 
@@ -6528,6 +6906,100 @@ def _edli_pre_submit_jit_book_quote_provider():
             return clob.get_orderbook_snapshot(token_id)
 
     return _fetch
+
+
+def _edli_decision_family_snapshot_refresher(topology_conn):
+    """Build the decision-triggered targeted family snapshot refresher (zero-order
+    wall fix 2026-06-11).
+
+    The substrate warm job refreshes ``executable_market_snapshots`` on a fair
+    rotating cursor whose per-family cadence (~5.4 min live) is far slower than the
+    30s price-freshness window the decision path enforces on the SELECTED bin. On
+    that cadence any family is decidable only ~9% of wall-clock time and every
+    transient requeue lands price-stale → the built maker final intents dead-letter
+    MONEY_PATH_TRANSIENT_EXHAUSTED. This callable lets the adapter, AT decision time
+    when the elected row is stale, capture FRESH books for THAT family NOW through
+    the SANCTIONED warm-job capture path (topology reconstruct + CLOB /book +
+    ``snapshot_repo.insert_snapshot``), scoped to ONE family.
+
+    Built in main.py (the CLOB client lives here) and injected into the adapter as a
+    plain callable, so the adapter never imports venue code (architecture ban,
+    tests/engine/test_event_reactor_no_bypass.py).
+
+    LOCK LAW (#95 / INV-37 / three-phase venue-sync): the refresher opens its OWN
+    short-lived write trade connection; the adapter has ALREADY dropped its trade-DB
+    read snapshot (``trade_conn.commit()``) before calling this, so the [NET] /book
+    fetch is never wrapped by an open trade-DB txn — same posture as the submit-time
+    JIT witness /book fetch. ``topology_conn`` (forecasts DB, read-only here) owns
+    ``market_events``; the snapshot WRITE targets zeus_trades only.
+
+    Returns True if it captured/persisted fresh rows, False on a fail-soft skip; the
+    caller re-elects the latest row and the freshness gate still fail-closes if the
+    re-elected row remains stale.
+    """
+
+    def _refresh(*, city, target_date, metric, condition_ids=(), selected_token_id=None):
+        from src.data.market_scanner import (
+            reconstruct_weather_market_from_static_topology,
+            refresh_executable_market_substrate_snapshots,
+        )
+        from src.data.polymarket_client import PolymarketClient
+        from src.engine.event_reactor_adapter import _event_family_market_topology_rows
+        from src.state.db import get_trade_connection
+
+        payload = {"city": city, "target_date": target_date, "metric": metric}
+        try:
+            topology_rows = _event_family_market_topology_rows(topology_conn, payload)
+        except Exception as exc:  # noqa: BLE001 — fail-soft: stale rejection stands
+            logger.warning(
+                "decision family refresh: topology lookup failed for %s/%s/%s: %s",
+                city, target_date, metric, exc,
+            )
+            return False
+        if not topology_rows:
+            return False
+
+        _clob_timeout = max(
+            1.0,
+            float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
+        )
+        write_conn = get_trade_connection(write_class="live")
+        try:
+            market = reconstruct_weather_market_from_static_topology(
+                write_conn,
+                topology_rows=topology_rows,
+                now_utc=datetime.now(timezone.utc),
+            )
+            if market is None:
+                # Static topology cannot reconstruct the full token map (a sibling
+                # lost executable identity). The warm-job Gamma slug path owns that
+                # recovery; the decision-time fast path does NOT do a Gamma fetch.
+                return False
+            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+                summary = refresh_executable_market_substrate_snapshots(
+                    write_conn,
+                    markets=[market],
+                    clob=clob,
+                    captured_at=datetime.now(timezone.utc),
+                    scan_authority="VERIFIED",
+                    refresh_reason="decision_triggered_targeted_refresh",
+                    # UNLIMITED: capture EVERY bin of THIS family (siblings feed the
+                    # FDR full-family proof + capital-efficiency economics; refreshing
+                    # only the selected bin would leave stale sibling prices in q/FDR).
+                    max_outcomes=0,
+                )
+            write_conn.commit()
+            return int(summary.get("inserted", 0) or 0) > 0
+        except Exception as exc:  # noqa: BLE001 — fail-soft: never block the decision
+            logger.warning(
+                "decision family refresh: capture failed for %s/%s/%s: %s",
+                city, target_date, metric, exc,
+            )
+            return False
+        finally:
+            write_conn.close()
+
+    return _refresh
 
 
 def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
@@ -7241,9 +7713,26 @@ def _edli_user_channel_reconcile_cycle() -> None:
                 payload=fact.get("payload") if isinstance(fact.get("payload"), dict) else None,
             )
             reconcile_count += 1
-        from src.events.edli_trade_fact_bridge import append_confirmed_trade_facts_to_edli
+        from src.events.edli_trade_fact_bridge import (
+            append_confirmed_trade_facts_to_edli,
+            append_rest_filled_orphan_trade_facts_to_edli,
+        )
 
         reconcile_count += append_confirmed_trade_facts_to_edli(conn, now=now)
+        # Fill-orphan recovery (HK 30C 2026-06-12 incident): a venue fill whose
+        # WS_USER CONFIRMED message was lost to a user-channel dropout exists
+        # only as a REST trade fact and can never reach FILL_CONFIRMED through
+        # the bridge above — the position is never materialised and the P&L is
+        # never booked. The recovery lane asserts fill truth under the explicit
+        # RECONCILE_SOURCE authority (cmd terminal FILLED/PARTIAL + REST fact +
+        # grace window for the user channel), with full provenance in payload.
+        if bool(_settings_section("edli", {}).get("edli_rest_filled_bridge_enabled", True)):
+            try:
+                reconcile_count += append_rest_filled_orphan_trade_facts_to_edli(conn, now=now)
+            except Exception as exc:  # noqa: BLE001 — recovery lane must not break WS truth path
+                logger.error(
+                    "EDLI rest-filled orphan bridge failed (non-fatal): %s", exc, exc_info=True
+                )
         conn.commit()
     finally:
         conn.close()
@@ -8238,6 +8727,31 @@ def main():
             max_instances=1,
             coalesce=True,
         )
+        # K4.0 REST-THEN-CROSS deadline owner: cancels GTC maker entry rests older
+        # than the measured escalation deadline (2.0h). 5-min cadence is well inside
+        # the deadline's 60-min derivation slack (taker_immediate_event_end_floor
+        # relation in the time-semantics registry). Cancel-only; never submits.
+        scheduler.add_job(
+            _maker_rest_escalation_cycle,
+            "interval",
+            minutes=5,
+            id="maker_rest_escalation",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # #28c: unresolved-command reconcile sweep with its own cadence — the
+        # EDLI lane previously had NO owner for stuck SUBMITTING/UNKNOWN rows
+        # (the INV-31 sweep only ran inside the legacy cycle_runner loop).
+        scheduler.add_job(
+            _edli_command_recovery_cycle,
+            "interval",
+            minutes=3,
+            id="edli_command_recovery",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 60.0),
+            max_instances=1,
+            coalesce=True,
+        )
         # THROUGHPUT + FRESHNESS STRUCTURAL FIX: dedicated executable-snapshot substrate
         # warmer, DECOUPLED from the reactor decision cycle. It must run inside the
         # 30s executable-price freshness window and start before the first reactor tick;
@@ -8460,8 +8974,14 @@ def main():
         _wrap_submitter_cycle, "interval", minutes=2,
         id="wrap_submitter", max_instances=1, coalesce=True,
     )
+    # P0-3: fast conditional cadence (30s). The reconciler early-exits cheaply
+    # (a single state-count query, BEFORE any credential resolution or adapter
+    # construction) when no *_TX_HASHED row exists — so the expensive RPC path
+    # only fires when there is in-flight wrap work to finalize. The same-tick
+    # path now leaves freshly-submitted txs in a TX_HASHED state for THIS job to
+    # confirm within ~30s, instead of synchronously blocking the redeem ticks.
     scheduler.add_job(
-        _wrap_reconciler_cycle, "interval", minutes=2,
+        _wrap_reconciler_cycle, "interval", seconds=30,
         id="wrap_reconciler", max_instances=1, coalesce=True,
     )
     # PR-S6: deployment freshness gate — runs every 60s, fail-closed at 24h uptime.
@@ -8482,6 +9002,25 @@ def main():
     scheduler.add_job(
         _settlement_guard_report_tick, "cron", hour=9, minute=15,
         id="settlement_guard_report", max_instances=1, coalesce=True,
+    )
+    # Standing shadow-vs-live comparator — 09:20 UTC, just after the settlement-
+    # guard tick (same WORLD+forecasts read shape, settlement truth already
+    # landed). Read-only; writes state/shadow_comparator.json +
+    # docs/evidence/shadow_comparisons/<date>.md + a one-line verdict per
+    # candidate. INSUFFICIENT_N (honest absence) until a shadow lane persists a
+    # comparable q.
+    scheduler.add_job(
+        _shadow_comparator_tick, "cron", hour=9, minute=20,
+        id="shadow_comparator", max_instances=1, coalesce=True,
+    )
+    # Day0 shadow-receipt outcome enrichment — 09:25 UTC, after the shadow
+    # comparator (settlement truth already landed). Grades SETTLED candidate-bearing
+    # day0 receipts (later_outcome / would_have_won) against VERIFIED truth via the
+    # canonical grade_receipt. PURE-DB, idempotent, never-submit/never-fabricate.
+    # Closes the 0%-populated day0 grading layer (operator 2026-06-11).
+    scheduler.add_job(
+        _day0_shadow_enrichment_tick, "cron", hour=9, minute=25,
+        id="day0_shadow_enrichment", max_instances=1, coalesce=True,
     )
 
     # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER

@@ -2321,6 +2321,70 @@ scripts:
     required_tests:
       - tests/test_settlement_unit_trigger_deployment_2026_06_03.py
 
+  measure_wu_obs_latency.py:
+    class: diagnostic_read
+    status: active
+    lifecycle: long_lived
+    authority_scope: day0_obs_latency_measure
+    dangerous_if_run: false
+    dry_run_default: false
+    apply_flag: null
+    target_db: null
+    read_targets: [state/zeus-world.db, state/zeus_trades.db]
+    write_targets: [config/wu_obs_latency.json, docs/evidence/2026_06_10_day0_first_principles/wu_obs_latency_table.md]
+    canonical_command: "python scripts/measure_wu_obs_latency.py"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Re-run to refresh per-city WU station cadence + publication/pipeline latency
+      (the staleness budgets consumed by src/signal/day0_obs_latency.py and the
+      day0 stale-obs boundary guard) after coverage or cadence changes.
+    do_not_use_when: >
+      Not a live lane. Do not point at non-state DB copies; budgets must be
+      measured from the canonical observation_instants surface.
+    promotion_barrier: >
+      Read-only over the DBs (file:...?mode=ro URIs; SQLITE_CONNECT_ALLOWLIST
+      registered). Writes only the config artifact + evidence markdown.
+    unguarded_write_rationale: >
+      No DB writes. Artifact/doc outputs only.
+    required_helpers: []
+    required_tests:
+      - tests/test_day0_first_principles_antibodies.py
+
+  measure_wu_metar_divergence.py:
+    class: diagnostic_read
+    status: active
+    lifecycle: long_lived
+    authority_scope: day0_oracle_anomaly_calibration
+    dangerous_if_run: false
+    dry_run_default: false
+    apply_flag: null
+    target_db: null
+    read_targets: [state/zeus-world.db]
+    write_targets: [config/wu_metar_divergence.json, docs/evidence/2026_06_10_day0_first_principles/wu_metar_divergence_table.md]
+    canonical_command: "python scripts/measure_wu_metar_divergence.py --days 30"
+    external_inputs: [mesonet.agron.iastate.edu IEM ASOS archive (free, paced + cached)]
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Re-run to extend city coverage or refresh the per-city empirical WU-vs-METAR
+      divergence thresholds + settlement-faithfulness verdicts consumed by
+      src/data/day0_oracle_anomaly.py and the fast-lane registry. METAR side is
+      ALWAYS fetched as tmpc and converted at full precision (the tmpf display
+      rounding manufactured a false Denver divergence).
+    do_not_use_when: >
+      Do not derive thresholds from windows shorter than ~30 days or fewer than
+      ~100 matched pairs per city (threshold_provenance stays thin_sample).
+    promotion_barrier: >
+      Read-only over the world DB (mode=ro URI; SQLITE_CONNECT_ALLOWLIST
+      registered). Writes only the config artifact + evidence markdown.
+    unguarded_write_rationale: >
+      No DB writes. Artifact/doc outputs only; IEM responses cached under /tmp.
+    required_helpers:
+      - src/data/day0_oracle_anomaly.py::divergence_threshold_for_city
+      - src/data/day0_oracle_anomaly.py::city_metar_settlement_faithful
+    required_tests:
+      - tests/test_day0_fast_obs_lane.py
+
   measure_arm_gate_settlement.py:
     class: diagnostic_read
     status: active

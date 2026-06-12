@@ -867,8 +867,11 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
     # Low trade_score + p_fill_lcb keeps EV boundary False → MAKER (post_only=True).
     # With limit_price ~0.4 and witness ask=0.39, would_cross=True → verifier raises.
+    # P0 mode-authority: declare the PROVEN maker mode so the fresh-book validator (which
+    # also computes MAKER from the low EV) confirms it and proceeds to the would_cross verifier
+    # check, rather than aborting on a proof/fresh mode disagreement.
     accepted = replace(
-        _accepted_receipt(event),
+        _accepted_receipt(event, execution_mode_intent="MAKER", maker_limit_price=0.40),
         trade_score=0.0,
         p_fill_lcb=0.0,
     )
@@ -887,8 +890,15 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
         )
 
 
-def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
-    from src.decision_kernel import claims
+def test_fresh_pre_submit_book_aborts_mode_flip_for_proven_maker_that_would_cross():
+    # P0 mode-authority (operator review 2026-06-10) — RE-PURPOSED from the former
+    # "promotes_stale_maker_candidate_to_taker" test. The final command builder may NOT
+    # promote a proven-MAKER candidate to TAKER on a fresh book that makes crossing newly
+    # attractive: that was the validator-bypassing late EV-override flip (a maker that never
+    # cleared TAKER recapture full-fee/PRICE_MOVED entering the taker submit path). The fresh
+    # tight book (bid 0.39 / ask 0.40) now makes _select_edli_order_mode return TAKER, so a
+    # PROVEN-MAKER proof must ABORT SUBMIT_ABORTED_MODE_FLIPPED — NO order built, defer to a
+    # full re-rank next cycle.
     from src.engine import event_reactor_adapter as adapter
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
@@ -896,8 +906,9 @@ def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
     conn.row_factory = sqlite3.Row
     event = _forecast_event()
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    # PROVEN MAKER (stale wide book at eval), large edge (q_live 0.7 vs reservation 0.4).
     accepted = replace(
-        _accepted_receipt(event),
+        _accepted_receipt(event, execution_mode_intent="MAKER", maker_limit_price=0.39),
         trade_score=0.015,
         p_fill_lcb=0.10,
     )
@@ -916,41 +927,20 @@ def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
     )
     accepted = replace(accepted, decision_proof_bundle=proof_bundle)
 
-    certs = adapter._build_live_execution_command_certificates(
-        event=event,
-        receipt=accepted,
-        decision_time=decision_time,
-        live_cap_conn=conn,
-        pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
-            current_best_bid=0.39,
-            current_best_ask=0.40,
-        ),
-        taker_fok_fak_live_enabled=True,
-    )
-
-    final_intent = next(c for c in certs if getattr(c, "certificate_type", None) == claims.FINAL_INTENT)
-    pre_submit = next(c for c in certs if getattr(c, "certificate_type", None) == claims.PRE_SUBMIT_REVALIDATION)
-
-    assert final_intent.payload["order_mode"] == "TAKER"
-    assert final_intent.payload["post_only"] is False
-    assert final_intent.payload["time_in_force"] in {"FOK", "FAK"}
-    assert final_intent.payload["limit_price"] == pytest.approx(0.40)
-    assert final_intent.payload["city"] == "Chicago"
-    assert final_intent.payload["target_date"] == "2026-05-24"
-    assert final_intent.payload["metric"] == "high"
-    assert final_intent.payload["temperature_metric"] == "high"
-    assert final_intent.payload["bin_label"] == "80-82"
-    assert final_intent.payload["outcome_label"] == "YES"
-    assert final_intent.payload["unit"] == "F"
-    assert pre_submit.payload["would_cross_book"] is True
-    assert pre_submit.payload["post_only"] is False
-    assert pre_submit.payload["city"] == "Chicago"
-    assert pre_submit.payload["target_date"] == "2026-05-24"
-    assert pre_submit.payload["metric"] == "high"
-    assert pre_submit.payload["temperature_metric"] == "high"
-    assert pre_submit.payload["bin_label"] == "80-82"
-    assert pre_submit.payload["outcome_label"] == "YES"
-    assert pre_submit.payload["unit"] == "F"
+    # The fresh tight book makes crossing attractive (EV boundary favors cross) → fresh mode
+    # TAKER vs proven MAKER → mode flip → typed abort, NO certificates built.
+    with pytest.raises(adapter._SubmitAbortedModeFlipped, match="SUBMIT_ABORTED_MODE_FLIPPED"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
+                current_best_bid=0.39,
+                current_best_ask=0.40,
+            ),
+            taker_fok_fak_live_enabled=True,
+        )
 
 
 def test_live_command_reuses_single_pre_submit_authority_witness():
@@ -1846,7 +1836,16 @@ def test_main_pre_submit_authority_provider_blocks_venue_connectivity_failure(mo
         provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
 
 
-def _accepted_receipt(event):
+def _accepted_receipt(event, *, execution_mode_intent="TAKER", maker_limit_price=None):
+    # P0 mode-authority (operator review 2026-06-10): a real accepted receipt that
+    # reaches the FINAL command builder ALWAYS carries the selected proof's PROVEN
+    # execution_mode_intent (the live path writes it from proof.execution_mode_intent).
+    # The fixture declares it so the final-stage validator (_validate_final_order_mode_or_abort)
+    # confirms the proven mode against the fresh book instead of failing closed on a missing
+    # mode. Default TAKER: this fixture's economics (q_live 0.7 vs reservation 0.4 — a large
+    # edge — on the tight fresh book bid 0.39 / ask 0.40) make _select_edli_order_mode's EV
+    # boundary favor crossing, so the proven mode IS TAKER. A maker-proof test passes
+    # execution_mode_intent="MAKER" (and a non-crossing book) to declare the proven maker mode.
     from src.events.reactor import EventSubmissionReceipt
 
     return EventSubmissionReceipt(
@@ -1886,6 +1885,8 @@ def _accepted_receipt(event):
         risk_decision_id="risk-1",
         final_intent_id="intent-1",
         q_source="emos",
+        execution_mode_intent=execution_mode_intent,
+        maker_limit_price=maker_limit_price,
         opportunity_book={
             "selected_candidate_id": "candidate-1",
             "actual_receipt_selected_candidate_id": "candidate-1",

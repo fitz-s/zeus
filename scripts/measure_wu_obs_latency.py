@@ -1,4 +1,7 @@
 # Created: 2026-06-10
+# Lifecycle: created=2026-06-10; last_reviewed=2026-06-10; last_reused=2026-06-10
+# Purpose: Offline measurement: per-city WU station cadence + publication/pipeline latency -> config/wu_obs_latency.json + evidence table.
+# Reuse: Re-run to refresh the staleness budgets after coverage or cadence changes; read-only (mode=ro URIs), writes config/docs artifacts only.
 # Last reused or audited: 2026-06-10
 # Authority basis: day0 first-principles review 2026-06-10 (operator charge #1:
 #   WU publication latency is city-specific and large; measure it from our own

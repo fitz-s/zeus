@@ -204,6 +204,16 @@ def _cached_keychain_creds() -> tuple[str, str]:
     return (private_key, funder_address)
 
 
+def resolve_funder_address() -> str:
+    """Public funder (proxy wallet) address from the single Keychain authority.
+
+    Address-only accessor for callers that need the wallet identity but must
+    never touch the private key (e.g. the exit chain-truth gate's CTF balance
+    probe). Raises RuntimeError when the Keychain entries are absent.
+    """
+    return _cached_keychain_creds()[1]
+
+
 def _resolve_credentials() -> dict:
     """Resolve Polymarket credentials from macOS Keychain.
 

@@ -748,7 +748,9 @@ class TestExecutor:
 
         assert result.status == "rejected"
         assert result.reason.startswith("invalid_submit_amount_precision:")
-        assert "maker amount must be cents-aligned" in result.reason
+        # SDK-faithful maker model (2026-06-10): the venue rejects a >2-decimal
+        # market-buy maker. round_down(6.98,2)*0.15 = 1.047 (3 decimals).
+        assert "maker amount (SDK-built) exceeds 2 decimal places" in result.reason
         assert captured == {}
         assert (
             _TEST_CONN.execute(

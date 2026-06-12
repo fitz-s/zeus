@@ -25,6 +25,24 @@ def _completed(returncode: int, *, stdout: str = "", stderr: str = "") -> subpro
     return subprocess.CompletedProcess(args=["materialize"], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+def _minimal_valid_request() -> str:
+    """A request payload carrying the minimal keys the poison-pill gate requires.
+
+    These dispatch-plumbing tests use a stub runner, so the payload need only satisfy
+    _validate_request_payload (temperature_metric, target_date, source_cycle_time, and an
+    AIFS input selector) — the stub runner never reads the file. A bare ``{}`` would now
+    be rejected pre-spawn by the antibody, so dispatch tests must use a valid-shaped stub.
+    """
+    return json.dumps(
+        {
+            "temperature_metric": "high",
+            "target_date": "2026-06-07",
+            "source_cycle_time": "2026-06-06T00:00:00+00:00",
+            "aifs_samples_json": "aifs_samples.json",
+        }
+    )
+
+
 def _write_seed_inputs(tmp_path: Path, *, future_dependency: bool = False) -> dict[str, object]:
     (tmp_path / "aifs_samples.json").write_text(
         json.dumps(
@@ -132,8 +150,8 @@ def test_materialization_queue_absent_or_empty_is_noop(tmp_path) -> None:
 def test_materialization_queue_processes_success_and_failure_with_receipts(tmp_path) -> None:
     request_dir = tmp_path / "requests"
     request_dir.mkdir()
-    (request_dir / "a.json").write_text("{}", encoding="utf-8")
-    (request_dir / "b.json").write_text("{}", encoding="utf-8")
+    (request_dir / "a.json").write_text(_minimal_valid_request(), encoding="utf-8")
+    (request_dir / "b.json").write_text(_minimal_valid_request(), encoding="utf-8")
     calls: list[tuple[str, ...]] = []
 
     def runner(argv):
@@ -166,7 +184,7 @@ def test_materialization_queue_respects_per_cycle_limit(tmp_path) -> None:
     request_dir = tmp_path / "requests"
     request_dir.mkdir()
     for index in range(3):
-        (request_dir / f"{index}.json").write_text("{}", encoding="utf-8")
+        (request_dir / f"{index}.json").write_text(_minimal_valid_request(), encoding="utf-8")
 
     report = process_replacement_forecast_shadow_materialization_queue(
         request_dir=request_dir,
@@ -186,8 +204,11 @@ def test_materialization_queue_respects_per_cycle_limit(tmp_path) -> None:
 def test_materialization_queue_lock_blocks_parallel_processor(tmp_path) -> None:
     request_dir = tmp_path / "requests"
     request_dir.mkdir()
-    (request_dir / "a.json").write_text("{}", encoding="utf-8")
-    (tmp_path / ".materialization_queue.lock").write_text("pid=already-running", encoding="utf-8")
+    (request_dir / "a.json").write_text(_minimal_valid_request(), encoding="utf-8")
+    # Use the current process PID — the stale-lock self-heal only steals a lock whose holder
+    # is dead.  A LIVE pid (this test process) keeps the lock live and must trigger LOCKED.
+    import os as _os
+    (tmp_path / ".materialization_queue.lock").write_text(f"pid={_os.getpid()} acquired_at=fake", encoding="utf-8")
     calls: list[tuple[str, ...]] = []
 
     report = process_replacement_forecast_shadow_materialization_queue(
@@ -484,6 +505,14 @@ def test_main_shadow_materialization_cycle_processes_configured_queue_when_enabl
 
 
 def test_main_shadow_materialization_cycle_downloads_missing_current_targets(monkeypatch, tmp_path) -> None:
+    """Operator directive 2026-06-08/2026-06-11: downloads are a SEPARATE job
+    (_replacement_forecast_download_cycle on the download lane in forecast_live_daemon).
+    The materialize cycle (_replacement_forecast_shadow_materialize_cycle) only runs
+    seed_discovery→seed→materialize on already-downloaded manifests — it NEVER triggers
+    a download itself.  This test verifies that the queue is invoked with the correct
+    config kwargs including forecast_db and raw_manifest_dir, which proves the cycle
+    passes those parameters through even when manifests are missing (the download job
+    handles the missing-manifest case independently)."""
     flags = dict(main_module.settings["feature_flags"])
     flags[SHADOW_FLAG] = True
     monkeypatch.setitem(main_module.settings._data, "feature_flags", flags)
@@ -509,28 +538,7 @@ def test_main_shadow_materialization_cycle_downloads_missing_current_targets(mon
             "materialization_limit_per_cycle": 3,
         },
     )
-
-    class _Plan:
-        ready = False
-        missing_aifs_manifest_count = 1
-        missing_openmeteo_manifest_count = 1
-
-        def as_dict(self):
-            return {"status": "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE"}
-
-    captured_download: dict[str, object] = {}
-
-    def fake_plan(path):
-        captured_download["plan_path"] = path
-        return _Plan()
-
-    def fake_parse_cycle(value, *, now, release_lag_hours):
-        captured_download["release_lag_hours"] = release_lag_hours
-        return now
-
-    def fake_download(**kwargs):
-        captured_download.update(kwargs)
-        return {"status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"}
+    captured_queue: dict[str, object] = {}
 
     class _Report:
         failed_count = 0
@@ -539,29 +547,22 @@ def test_main_shadow_materialization_cycle_downloads_missing_current_targets(mon
         def as_dict(self):
             return {"status": "NO_REQUESTS"}
 
-    monkeypatch.setattr(
-        "src.data.replacement_forecast_current_target_plan.build_replacement_forecast_current_target_plan",
-        fake_plan,
-    )
-    monkeypatch.setattr("scripts.download_replacement_forecast_current_targets._parse_cycle", fake_parse_cycle)
-    monkeypatch.setattr(
-        "scripts.download_replacement_forecast_current_targets.download_current_target_raw_inputs",
-        fake_download,
-    )
+    def fake_process(**kwargs):
+        captured_queue.update(kwargs)
+        return _Report()
+
     monkeypatch.setattr(
         "src.data.replacement_forecast_shadow_materialization_queue.process_replacement_forecast_shadow_materialization_queue",
-        lambda **kwargs: _Report(),
+        fake_process,
     )
 
     main_module._replacement_forecast_shadow_materialize_cycle.__wrapped__()
 
-    assert captured_download["forecast_db"] == forecast_db
-    assert captured_download["output_dir"] == raw_dir
-    assert captured_download["limit"] == 7
-    assert captured_download["write_db"] is True
-    assert captured_download["release_lag_hours"] == 11.0
-    assert captured_download["anchor_sigma_c"] == 2.5
-    assert captured_download["aifs_retries"] == 2
+    # The materialize cycle must pass through the forecast_db and raw_manifest_dir config
+    # so seed_discovery can locate manifests, even when downloads are outstanding.
+    assert captured_queue["forecast_db"] == forecast_db
+    assert captured_queue["raw_manifest_dir"] == raw_dir
+    assert captured_queue["limit"] == 3
 
 
 def test_main_shadow_materialization_cycle_roots_relative_config_paths(monkeypatch) -> None:
@@ -613,3 +614,171 @@ def test_main_shadow_materialization_cycle_roots_relative_config_paths(monkeypat
     assert captured["forecast_db"] == root / "state/zeus-forecasts.db"
     assert captured["raw_manifest_dir"] == root / "state/replacement_forecast_shadow/raw_manifests"
     assert captured["limit"] == 3
+
+
+# ---------------------------------------------------------------------------
+# POISON-PILL IMMUNITY relationship tests
+# Created: 2026-06-10
+# Last reused/audited: 2026-06-10
+# Authority basis: materializer queue starvation incident 2026-06-10,
+#   report /tmp/materializer_collapse_report.md
+#
+# RELATIONSHIP under test (cross-module invariant): when new_listing_scout's output
+# (a condition_id-only intent stub) flows into the materializer queue's input contract
+# (fully-resolved request payload), the queue must NEVER let the malformed file crash-and-
+# stay. It is rejected pre-spawn, consumes its slot at most once, and a co-located valid
+# request in the same cycle is still processed. This is the antibody that makes the
+# "772 stubs starve all production" CATEGORY unconstructable.
+# ---------------------------------------------------------------------------
+
+
+def _scout_stub() -> str:
+    """The exact shape new_listing_scout writes — a condition_id intent, NOT a request."""
+    return json.dumps(
+        {
+            "source": "new_listing_scout",
+            "condition_id": "0xdeadbeef",
+            "enqueued_at": "2026-06-10T02:54:00+00:00",
+            "reason": "NEW_LISTING_FAST_LANE",
+        }
+    )
+
+
+def test_scout_stub_request_is_failed_pre_spawn_without_crash(tmp_path) -> None:
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    (request_dir / "new_listing_scout_0xdeadbeef.json").write_text(_scout_stub(), encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+
+    report = process_replacement_forecast_shadow_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        runner=lambda argv: calls.append(tuple(argv)) or _completed(0),
+    )
+
+    # The materializer subprocess is NEVER spawned for the stub (no KeyError crash path).
+    assert calls == []
+    # The stub leaves requests/ exactly once, into failed/.
+    assert report.failed_count == 1
+    assert not list(request_dir.glob("*.json"))
+    failed = [p for p in (tmp_path / "failed").glob("*.json") if not p.name.endswith(".receipt.json")]
+    assert len(failed) == 1
+    receipt = json.loads(failed[0].with_suffix(failed[0].suffix + ".receipt.json").read_text())
+    assert receipt["subprocess_spawned"] is False
+    assert receipt["returncode"] is None
+    assert receipt["reason_codes"] == ["REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MISSING_REQUIRED_KEYS"]
+
+
+def test_scout_stub_does_not_starve_a_valid_request_in_same_cycle(tmp_path) -> None:
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    # Stub sorts BEFORE the valid file by filename; without the antibody the stub would
+    # crash and remain, re-failing every cycle and starving the valid seed forever.
+    (request_dir / "00_new_listing_scout_0xdeadbeef.json").write_text(_scout_stub(), encoding="utf-8")
+    (request_dir / "99_valid.json").write_text(_minimal_valid_request(), encoding="utf-8")
+    spawned: list[str] = []
+
+    def runner(argv):
+        spawned.append(next(str(p) for p in argv if str(p).endswith(".json")))
+        return _completed(0, stdout='{"status":"SHADOW_ONLY"}')
+
+    report = process_replacement_forecast_shadow_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        runner=runner,
+    )
+
+    # Exactly one subprocess spawned — for the VALID file, not the stub.
+    assert len(spawned) == 1
+    assert spawned[0].endswith("99_valid.json")
+    assert report.processed_count == 1
+    assert report.failed_count == 1
+    assert not list(request_dir.glob("*.json"))
+    processed = [p for p in (tmp_path / "processed").glob("*.json") if not p.name.endswith(".receipt.json")]
+    assert len(processed) == 1 and processed[0].name.startswith("99_valid")
+
+
+def test_valid_request_still_processed_normally_regression(tmp_path) -> None:
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    (request_dir / "valid.json").write_text(_minimal_valid_request(), encoding="utf-8")
+    spawned: list[tuple[str, ...]] = []
+
+    report = process_replacement_forecast_shadow_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        runner=lambda argv: spawned.append(tuple(argv)) or _completed(0, stdout='{"status":"SHADOW_ONLY"}'),
+    )
+
+    assert len(spawned) == 1
+    assert report.processed_count == 1
+    assert report.failed_count == 0
+    assert not list(request_dir.glob("*.json"))
+
+
+# ---------------------------------------------------------------------------
+# SCOUT INTENT-STAGING relationship test
+# Created: 2026-06-10
+# Last reused/audited: 2026-06-10
+# Authority basis: materializer queue starvation incident 2026-06-10,
+#   report /tmp/materializer_collapse_report.md
+#
+# RELATIONSHIP under test: new_listing_scout's enqueue write must land in the non-queue
+# scout_intents/ staging dir, NEVER in the materializer requests/ dir. requests/ is the
+# fully-resolved-payload contract; an intent stub there is poison (see poison-pill tests).
+# ---------------------------------------------------------------------------
+
+
+class _FakeGammaResp:
+    status_code = 200
+
+    def __init__(self, events):
+        self._events = events
+
+    def json(self):
+        return self._events
+
+
+def test_new_listing_scout_writes_intent_not_request(tmp_path, monkeypatch) -> None:
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    intents_dir = tmp_path / "scout_intents"
+    new_cid = "0xnewlisting000000000000000000000000000000000000000000000000000001"
+
+    # Enable the EDLI gate so the scout body runs.
+    edli_cfg = dict(main_module._settings_section("edli", {}) or {})
+    edli_cfg["enabled"] = True
+    monkeypatch.setitem(main_module.settings._data, "edli", edli_cfg)
+
+    # Pre-seed the known-set with a DIFFERENT cid so the DB-init branch is skipped and
+    # new_cid is detected as brand-new.
+    monkeypatch.setattr(main_module, "_SCOUT_KNOWN_CONDITION_IDS", {"0xexisting"})
+    monkeypatch.setattr(main_module, "_NEW_FAMILY_CONDITION_IDS", set())
+
+    monkeypatch.setattr(
+        "src.data.market_scanner._gamma_get",
+        lambda *a, **k: _FakeGammaResp([{"markets": [{"conditionId": new_cid}]}]),
+    )
+    # Persist path touches the DB / network — stub it out; not under test here.
+    monkeypatch.setattr("src.data.market_scanner.find_weather_markets_or_raise", lambda **k: [])
+    monkeypatch.setattr("src.data.market_scanner._persist_market_events_to_db", lambda *a, **k: None)
+
+    # Point the queue config's request_dir at our tmp requests/ so scout_intents/ is its sibling.
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_production._replacement_forecast_shadow_materialization_queue_config",
+        lambda: {"request_dir": request_dir},
+    )
+
+    main_module._new_listing_scout_cycle()
+
+    # The intent stub lands in scout_intents/, NEVER in the queue's requests/ dir.
+    assert not list(request_dir.glob("*.json")), "scout must NOT write into the materializer requests/ dir"
+    staged = list(intents_dir.glob("new_listing_scout_*.json"))
+    assert len(staged) == 1
+    payload = json.loads(staged[0].read_text())
+    assert payload["condition_id"] == new_cid
+    assert payload["source"] == "new_listing_scout"
+    assert payload["reason"] == "NEW_LISTING_FAST_LANE"

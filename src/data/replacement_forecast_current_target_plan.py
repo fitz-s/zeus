@@ -262,10 +262,13 @@ def build_replacement_forecast_current_target_plan(
     """Return current market targets and the replacement artifacts needed for them."""
 
     db_path = Path(forecast_db)
+    # Use now_utc as the reference clock when min_target_date is not explicit — avoids
+    # wall-clock drift against fixtures or callers that pass a fixed now_utc.
+    _ref_clock = (now_utc or datetime.now(tz=timezone.utc)).astimezone(timezone.utc)
     minimum_target_date = (
         min_target_date.isoformat()
         if isinstance(min_target_date, date)
-        else str(min_target_date or datetime.now(tz=timezone.utc).date().isoformat())
+        else str(min_target_date or _ref_clock.date().isoformat())
     )
     if not db_path.exists():
         return ReplacementForecastCurrentTargetPlan(
@@ -323,6 +326,17 @@ def build_replacement_forecast_current_target_plan(
         posterior_source_run_clause = ""
         readiness_source_run_clause = ""
         readiness_status_clause = ""
+        # TRADEABLE-GRADE COVERAGE (2026-06-11, second site of the 2026-06-10 K-decision):
+        # a covering posterior must carry q_lcb_json NOT NULL. The mask-and-starve antibody
+        # was applied to the queue's _already_covered but NOT here — so a capture-missing
+        # (NULL-q_lcb) materialization marked its scope covered at PLAN level and blocked
+        # its own fusion repair (observed 2026-06-11: Atlanta/Austin/Beijing 00Z NULL rows
+        # self-masked one tick after materializing; discovery skipped them while the
+        # reactor rejected their scopes BAYES_PRECISION_FUSION_CAPTURE_MISSING). Schema-conditional like the
+        # queue clause: a stripped table without the column simply omits the bound.
+        posterior_tradeable_grade_clause = (
+            "AND p.q_lcb_json IS NOT NULL" if "q_lcb_json" in posterior_columns else ""
+        )
         if source_run_targets and "dependency_source_run_ids_json" not in posterior_columns:
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_SOURCE_RUN_DEPENDENCY_SCHEMA_MISSING")
         if source_run_targets and "dependency_json" not in readiness_columns:
@@ -424,6 +438,7 @@ def build_replacement_forecast_current_target_plan(
                           AND p.city = targets.city
                           AND p.target_date = targets.target_date
                           AND p.temperature_metric = targets.temperature_metric
+                          {posterior_tradeable_grade_clause}
                           {posterior_source_run_clause}
                     ) AS posterior_count,
                     (
@@ -468,6 +483,7 @@ def build_replacement_forecast_current_target_plan(
                     WHERE source_id = ?
                       AND training_allowed = 0
                       AND trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                      {posterior_tradeable_grade_clause.replace("p.q_lcb_json", "q_lcb_json")}
                     GROUP BY city, target_date, temperature_metric
                 ),
                 readiness AS (

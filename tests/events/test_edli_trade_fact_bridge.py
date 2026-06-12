@@ -259,3 +259,107 @@ def _pre_submit_payload() -> dict:
         "balance_allowance_authority_id": "wallet",
         "balance_allowance_checked_at": NOW.isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Fill-orphan recovery lane (HK 30C 2026-06-12 incident antibodies).
+# A venue fill whose WS_USER CONFIRMED message was lost to a user-channel
+# dropout exists only as a REST trade fact under a terminal FILLED command.
+# The WS bridge can never promote it; the recovery lane must — with explicit
+# RECONCILE_SOURCE provenance — and must NEVER fire inside the grace window
+# or when the WS truth already exists.
+# ---------------------------------------------------------------------------
+from datetime import timedelta
+
+from src.events.edli_trade_fact_bridge import append_rest_filled_orphan_trade_facts_to_edli
+
+
+def _insert_rest_only_fill(conn, *, observed_at, trade_id="trade-orphan"):
+    append_trade_fact(
+        conn,
+        trade_id=trade_id,
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="MATCHED",
+        filled_size="5",
+        fill_price="0.72",
+        source="REST",
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        raw_payload_hash="e" * 64,
+        raw_payload_json="{}",
+    )
+
+
+def test_rest_orphan_past_grace_is_recovered_with_reconcile_provenance():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    _insert_command(conn)
+    _insert_rest_only_fill(conn, observed_at=NOW + timedelta(minutes=1))
+
+    assert append_rest_filled_orphan_trade_facts_to_edli(conn, now=NOW + timedelta(hours=3)) == 1
+    projection = ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "USER_TRADE_OBSERVED"
+    row = conn.execute(
+        "SELECT payload_json FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert payload["fill_authority_state"] == "FILL_CONFIRMED"
+    assert payload["source_authority"] == "venue_reconcile"
+    assert payload["source_trade_fact_authority"] == "venue_trade_facts:REST:MATCHED"
+    assert payload["venue_command_state"] == "FILLED"
+    assert "ws_user_confirmed_missing_after_grace" in payload["recovery_basis"]
+
+    # Idempotent: the UserTradeObserved row now exists for this trade_id.
+    assert append_rest_filled_orphan_trade_facts_to_edli(conn, now=NOW + timedelta(hours=3)) == 0
+
+
+def test_rest_orphan_inside_grace_window_is_left_for_the_user_channel():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    _insert_command(conn)
+    _insert_rest_only_fill(conn, observed_at=NOW + timedelta(minutes=1))
+
+    assert append_rest_filled_orphan_trade_facts_to_edli(conn, now=NOW + timedelta(minutes=6)) == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
+    ).fetchone()[0] == 0
+
+
+def test_rest_orphan_with_ws_confirmed_sibling_never_double_recovers():
+    """When the user channel DID deliver for this trade, the WS bridge owns it
+    — the recovery lane must not produce a second authority."""
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    _insert_command(conn)
+    _insert_rest_only_fill(conn, observed_at=NOW + timedelta(minutes=1), trade_id="trade-1")
+    append_trade_fact(
+        conn,
+        trade_id="trade-1",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="5",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW + timedelta(minutes=1),
+        venue_timestamp=NOW + timedelta(minutes=1),
+        raw_payload_hash="f" * 64,
+        raw_payload_json="{}",
+    )
+
+    assert append_rest_filled_orphan_trade_facts_to_edli(conn, now=NOW + timedelta(hours=3)) == 0
+
+
+def test_rest_orphan_under_non_terminal_command_is_not_recovered():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    _insert_command(conn)
+    conn.execute("UPDATE venue_commands SET state='ACKED' WHERE command_id='cmd-1'")
+    _insert_rest_only_fill(conn, observed_at=NOW + timedelta(minutes=1))
+
+    assert append_rest_filled_orphan_trade_facts_to_edli(conn, now=NOW + timedelta(hours=3)) == 0

@@ -659,6 +659,10 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/main.py",                  # read_only_ro_uri: live boot verifies zeus-forecasts.db user_version with mode=ro + query_only
         "src/data/replacement_forecast_live_dry_run.py",  # read_only_ro_uri: replacement switch dry-run inventory opens forecasts DB mode=ro + query_only; SELECT-only
         "src/observability/status_summary.py",  # RO: status dashboard read-only
+        "src/engine/position_belief.py",  # read_only_ro_uri: K1 single belief authority — held-position belief reads forecast_posteriors mode=ro, short-lived, SELECT-only (settlement-losses incident 2026-06-12)
+        "src/execution/exchange_reconcile.py",  # read_only_ro_uri: settled-external absorber reads canonical market_events (zeus-forecasts) mode=ro, short-lived, SELECT-only — docs/evidence/settlement_guard/2026-06-11_settled_external_absorber_plan.md
+        "scripts/verify_e2e_money_path.py",  # read_only_ro_uri: e2e money-path walker opens every DB mode=ro, SELECT-only (operator-demanded full-chain diagnostic, 2026-06-11)
+        "scripts/query_decision_provenance.py",  # read_only_ro_uri: decision-provenance query opens zeus-world.db mode=ro, SELECT-only over regret/no_submit receipts — operator "一切可被溯源" query entry 2026-06-11 (docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md)
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
         # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
@@ -673,6 +677,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/fit_settlement_sigma_floor.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over settlement_outcomes(VERIFIED); writes settlement_sigma_floor.json only; EMPIRICAL σ-floor offline fit (q1000 2026-06-05)
         "scripts/measure_wu_obs_latency.py",  # read_only_ro_uri: opens world+trades DBs via file:...?mode=ro uri; SELECT-only over observation_instants + settlement_day_observation_authority; writes config/wu_obs_latency.json + evidence md only (day0 first-principles 2026-06-10)
         "scripts/measure_wu_metar_divergence.py",  # read_only_ro_uri: opens world DB via file:...?mode=ro uri; SELECT-only over observation_instants; writes config/wu_metar_divergence.json + evidence md only (anomaly-threshold calibration 2026-06-10)
+        # --- 06/18Z cycle-phase offline qualification study (2026-06-11, operator-directed) ---
+        "scripts/cycle_phase_offline_study.py",  # offline study: 4x connect to its own SCRATCH db (state/cycle_phase_study*.db, created+owned by the script) + 1x trades DB via file:...?mode=ro uri (settlement truth reads only); never touches live forecasts/world DBs for write; report + scratch artifacts only
         "scripts/calibration_bakeoff.py",   # read_only: scores calibrators vs settlements VERIFIED; writes JSON/txt only
         "scripts/backfill_settlement_outcomes_canonical_2026_06_02.py",  # RO dry-run default; RW settlement_outcomes only with --execute, atomic SAVEPOINT (zeus-forecasts.db)
         "scripts/backfill_settlement_unit_2026_06_03.py",  # operator_invoked: RO dry-run default; RW settlement_outcomes.settlement_unit only with --commit, atomic SAVEPOINT (zeus-forecasts.db, W2)
@@ -842,6 +848,9 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/purge_partial_fsr_events.py",  # operator_invoked: drops/restores no_delete+no_update triggers; DELETE PARTIAL FSR rows only; ran once 2026-05-31 (941 rows); idempotent
         # --- ThePath P1 (2026-06-07): activate the Day0 nowcast lane / start the obs-timing clock ---
         "scripts/persist_day0_horizon_identity_fit.py",  # operator_invoked + already_guarded: the LIVE write goes through write_platt_fit -> get_forecasts_connection(LIVE) under db_writer_lock(LIVE); the bare sqlite3.connect() sites are ONLY the read-back/--verify (file:...?mode=ro uri, SELECT-only) and the --dry-run TEMP copy (throwaway file, never a canonical DB); persists a documented CONSERVATIVE/IDENTITY HorizonPlattFit (zero claimed skill)
+        # --- e2e fill verification script (2026-06-10) ---
+        "scripts/verify_fill_e2e.py",  # read_only_ro_uri: opens trades+world DBs with mode=ro uri; SELECT-only; operator diagnostic; never daemon path
+        "scripts/verify_pipeline_liveness.py",  # read_only_ro_uri: data-supply e2e liveness check (forecasts+world, mode=ro, SELECT-only); antibody for the 2026-06-10 10h download dead-zone incident
     }
 )
 

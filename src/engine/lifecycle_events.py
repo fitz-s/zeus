@@ -206,6 +206,11 @@ def build_position_current_projection(position: Any) -> dict:
         "entry_price": getattr(position, "entry_price", 0.0),
         "p_posterior": getattr(position, "p_posterior", 0.0),
         "entry_ci_width": getattr(position, "entry_ci_width", 0.0),
+        # Exit-retry persistence (2026-06-12): without these the chain-truth
+        # gate's bounded backoff reset to zero on every load_portfolio() and
+        # exit_pending_missing retried forever.
+        "exit_retry_count": int(getattr(position, "exit_retry_count", 0) or 0),
+        "next_exit_retry_at": _nullable(getattr(position, "next_exit_retry_at", None)),
         "last_monitor_prob": _nullable(getattr(position, "last_monitor_prob", None)),
         "last_monitor_edge": _nullable(getattr(position, "last_monitor_edge", None)),
         "last_monitor_market_price": _nullable(getattr(position, "last_monitor_market_price", None)),

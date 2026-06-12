@@ -27,8 +27,48 @@ REQUIRED_FORECAST_VALIDATIONS = frozenset(
     }
 )
 IDENTITY_FALLBACK_CALIBRATION_AUTHORITY = "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
+# CERT BRIDGE (2026-06-10, funnel #1 unlock) — first-class replacement-chain calibration
+# authority: fused-center bootstrap bounds (q_lcb_basis=fused_center_bootstrap_p05) licensed
+# by the settlement-backward coverage verdict. A live-admissible authority (the live gate
+# _assert_event_bound_calibration_live_admitted lets it through), so the certificate must
+# round-trip it through verification. Its UNEVALUATED sibling
+# (FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED) is INTENTIONALLY excluded — like IDENTITY_FALLBACK
+# it is evidence-only and the live gate rejects it; it is not minted onto an admitted live
+# certificate, so it is not in the approved set.
+FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
+# K1.3 (consolidated overhaul 2026-06-11): the ALT-credential carve-out is ONE constant +
+# ONE predicate, consumed by BOTH the verifier and the compiler. History: the carve-out
+# existed as two independent tuples (verifier + compiler); when FUSED_BOOTSTRAP was added
+# to the verifier only, every replacement-chain certificate was falsely rejected at compile
+# time with "maturity_level too low" (53/h). Pinned by
+# tests/decision_kernel/test_k1_shared_authority_predicates.py.
+ALT_CREDENTIAL_CALIBRATION_AUTHORITIES = frozenset(
+    {
+        IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+        FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+    }
+)
+
+
+def calibration_maturity_too_low(maturity: int, authority: object) -> bool:
+    """ONE shared maturity rule (K1.3). True = reject.
+
+    The maturity_level>3 guard protects REAL Platt models (a placeholder maturity means
+    the model never matured past fitting). IDENTITY_FALLBACK and FUSED_BOOTSTRAP are
+    alternative calibration authorities whose q never passes through Platt; they carry
+    maturity_level=4 as a placeholder, so the guard must not apply to them.
+    """
+    return int(maturity) > 3 and str(authority) not in ALT_CREDENTIAL_CALIBRATION_AUTHORITIES
+
+
 APPROVED_CALIBRATION_AUTHORITIES = frozenset(
-    {"VERIFIED", "LIVE", "APPROVED", IDENTITY_FALLBACK_CALIBRATION_AUTHORITY}
+    {
+        "VERIFIED",
+        "LIVE",
+        "APPROVED",
+        IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+        FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+    }
 )
 ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})
 ALLOWED_QUOTE_SOURCE_KINDS = frozenset({"executable_market_snapshot_native_book"})
@@ -559,12 +599,22 @@ def _verify_final_intent_payload(
     # unconditionally now that the tiny_live cap-enabled flag is deleted — it is a
     # cert-chain consistency check (order size matches the reservation), not a
     # dollar limit.
+    #
+    # FLOAT ROUND-TRIP TOLERANCE (live 2026-06-11, Amsterdam 20:26/20:56Z +
+    # Lucknow 21:38Z dead-letters): the maker share sizing is
+    # size = reserved/price (desired_shares_for_reserved_notional, float
+    # contract) and the intent notional is size*price — IEEE754 makes
+    # (r/p)*p exceed r by ~1 ULP (~1e-15 relative) for a large fraction of
+    # (r, p) pairs, so the strict > comparison hard-killed correctly-sized
+    # maker intents at random. The guard's intent is "order matches the
+    # reservation", not "bit-exact float equality": a relative 1e-9 tolerance
+    # (six orders of magnitude above the ULP noise, ~$1e-8 on a $15 order)
+    # passes the round-trip artifact while any MATERIAL excess still raises.
     reserved_notional = actionable.get("live_cap_reserved_notional_usd")
-    if (
-        reserved_notional is not None
-        and notional > _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd")
-    ):
-        raise CertificateVerificationError("final intent notional_usd exceeds live cap reserved notional")
+    if reserved_notional is not None:
+        reserved_f = _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd")
+        if notional > reserved_f * (1.0 + 1e-9) + 1e-12:
+            raise CertificateVerificationError("final intent notional_usd exceeds live cap reserved notional")
     _assert_order_type_tuple_coherent(payload, surface="final intent")
     if payload.get("source") != "existing_final_intent_builder":
         raise CertificateVerificationError("final intent source must be existing_final_intent_builder")
@@ -926,7 +976,8 @@ def _validate_calibration_payload(
     maturity = calibration.get("maturity_level")
     if maturity in (None, ""):
         raise CertificateVerificationError("calibration.maturity_level missing")
-    if int(maturity) > 3 and authority != IDENTITY_FALLBACK_CALIBRATION_AUTHORITY:
+    # K1.3: ONE shared maturity rule — see calibration_maturity_too_low (module level).
+    if calibration_maturity_too_low(int(maturity), authority):
         raise CertificateVerificationError("calibration.maturity_level too low for live/no-submit")
     input_space = calibration.get("input_space")
     expected_input_space = model_config.get("calibration_input_space")

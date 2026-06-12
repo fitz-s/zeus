@@ -81,6 +81,9 @@ class NoTradeRegretEvent:
     hypothetical_fill_price: float | None = None
     causal_snapshot_id: str | None = None
     executable_snapshot_id: str | None = None
+    # DecisionProvenanceEnvelope (operator law 2026-06-11): the complete decision-time provenance
+    # blob (canonical JSON). None on legacy / un-enriched rejections; column stays NULL.
+    envelope_json: str | None = None
     later_outcome: str | None = None
     would_have_won: bool | None = None
     would_have_filled: bool | None = None
@@ -109,9 +112,9 @@ class NoTradeRegretLedger:
                 q_live, q_lcb_5pct, c_fee_adjusted, c_cost_95pct, p_fill_lcb, trade_score,
                 native_quote_available, source_status, family_complete,
                 hypothetical_order_type, hypothetical_fill_status, hypothetical_fill_price,
-                causal_snapshot_id, executable_snapshot_id,
+                causal_snapshot_id, executable_snapshot_id, envelope_json,
                 later_outcome, would_have_won, would_have_filled, created_at, schema_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 regret_event_id,
@@ -144,6 +147,7 @@ class NoTradeRegretLedger:
                 event.hypothetical_fill_price,
                 event.causal_snapshot_id,
                 event.executable_snapshot_id,
+                event.envelope_json,
                 event.later_outcome,
                 None if event.would_have_won is None else int(event.would_have_won),
                 None if event.would_have_filled is None else int(event.would_have_filled),

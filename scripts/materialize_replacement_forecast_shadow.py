@@ -256,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
             anchor_weight=float(payload.get("anchor_weight", 0.80)),
             anchor_sigma_c=float(payload.get("anchor_sigma_c", 3.00)),
             settlement_step_c=float(payload.get("settlement_step_c", 1.0)),
+            # Task #32: honest re-materialization provenance carried by a fusion-upgrade-trigger
+            # request. None for a normal first materialization (default), so behaviour is unchanged.
+            upgrade_trigger=(str(payload["upgrade_trigger"]) if payload.get("upgrade_trigger") else None),
         )
         from src.state.db import _create_readiness_state, get_forecasts_connection
         from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema

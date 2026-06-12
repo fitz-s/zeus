@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import math
 import sqlite3
 from dataclasses import dataclass
@@ -11,6 +12,13 @@ from datetime import date, datetime, timezone
 from typing import Any, Mapping
 
 from src.config import cities_by_name
+from src.data.replacement_forecast_cycle_policy import (
+    CYCLE_PHASE_INTERMEDIATE,
+    REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT,
+    classify_cycle_phase,
+    cycle_age_exceeds_bound,
+    replacement_source_cycle_max_age_hours,
+)
 from src.data.replacement_forecast_readiness import (
     PRODUCT_ID,
     READY_STATUS,
@@ -23,27 +31,55 @@ HIGH_DATA_VERSION = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1"
 LOW_DATA_VERSION = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_low_v1"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
+# Operator clobber-category directive 2026-06-10 — TRADEABLE-LATEST read semantics.
+# The bounds-less clobber: a NEWER model cycle that has anchor manifests but no fusion
+# instruments yet materializes a bounds-less posterior (q_lcb_json NULL,
+# replacement_q_mode=BAYES_PRECISION_FUSION_CAPTURE_MISSING — a SHADOW row by design, with shadow value). The
+# absolute-latest read semantics (ORDER BY computed_at DESC) then SERVE that shadow row over
+# the still-current tradeable-grade FUSED row, collapsing live eligibility for the whole scope.
+# This is the THIRD recurrence; the seed-coverage antibody only fixed the masking side.
+#
+# A posterior is TRADEABLE-GRADE (live-eligible) iff it carries certified bounds (q_lcb_json
+# NOT NULL) AND its provenance.replacement_q_mode is one of the fused-Normal modes. This is the
+# EXACT predicate the live gate enforces (event_reactor_adapter._replacement_q_mode_live_eligibility)
+# and the seed-coverage antibody uses (shadow_materialization_queue: q_lcb_json IS NOT NULL).
+# Mirrored here so LIVE selection can prefer the latest tradeable row WITHOUT importing the
+# adapter (no cycle); the constant set is asserted equal in a relationship test.
+_REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset({"FUSED_NORMAL_FULL", "FUSED_NORMAL_PARTIAL"})
+
 # H3 (REAUDIT_0_1.md §2): fail-closed staleness horizon. ``readiness.expires_at``
 # was loaded but NEVER compared to decision_time; a forecast cycle this many hours
-# (or older) before the decision is treated as DEAD and refused live authority.
-# Conservative default; operator-tunable via the env override below. The gate
-# lives in the ONE bundle reader so the live 0.1 path AND the legacy hook inherit
-# a single freshness gate (no second per-path gate).
-REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT = 30.0
+# (or older) before the decision is treated as DEAD and refused live authority. The
+# horizon + its env override now live in src/data/replacement_forecast_cycle_policy.py
+# (single source of truth shared with the materialization-side fail-closed gate).
+# Re-exported here for backward compatibility with existing imports.
+_replacement_source_cycle_max_age_hours = replacement_source_cycle_max_age_hours
 
 
-def _replacement_source_cycle_max_age_hours() -> float:
-    import os
+# Operator cycle-physics directive 2026-06-10: a posterior sourced from an intermediate
+# (06/18Z) model cycle carries provenance_json.cycle_phase == "intermediate". The de-bias
+# + fusion weights were trained on ~99% 00Z-cycle history, so an intermediate-phase
+# posterior is produced + readiness-stamped (keeping production alive in the dead zones)
+# but is held to SHADOW-ONLY for LIVE admission by default until a settlement-graded
+# comparison licenses it. Flag default OFF = shadow-only (never weaken a gate).
+logger = logging.getLogger("zeus.replacement_forecast_bundle_reader")
 
-    raw = os.environ.get("ZEUS_REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS")
-    if raw is None or not raw.strip():
-        return REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
+_REPLACEMENT_INTERMEDIATE_CYCLE_LIVE_FLAG = "replacement_0_1_intermediate_cycle_live_admission_enabled"
+
+
+def _replacement_intermediate_cycle_live_admission_enabled() -> bool:
+    """Whether intermediate-phase (06/18Z) posteriors may be admitted LIVE. Default FALSE.
+
+    Fail-closed: any config error -> False (intermediate phase stays shadow-only). The
+    operator promotes this only after a settlement-graded synoptic-vs-intermediate skill
+    comparison; until then 06/18Z posteriors keep production alive without trading live.
+    """
     try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
-    # Fail-closed: a non-positive horizon would disable the gate; ignore it.
-    return value if value > 0.0 else REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
+        from src.config import settings  # noqa: PLC0415
+
+        return bool(settings["edli"].get(_REPLACEMENT_INTERMEDIATE_CYCLE_LIVE_FLAG, False))
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True)
@@ -202,6 +238,23 @@ def _parse_utc(value: str, *, field_name: str) -> datetime:
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _row_is_tradeable_grade(row_map: Mapping[str, Any]) -> bool:
+    """A posterior row is tradeable-grade (live-eligible) iff it has certified bounds AND a
+    fused-Normal q-mode. NULL bounds OR a non-fused mode (BAYES_PRECISION_FUSION_CAPTURE_MISSING,
+    FUSED_NORMAL_BOUNDS_MISSING, SOFT_ANCHOR_FALLBACK, ...) => SHADOW-only, never live.
+
+    This is the read-side mirror of the live gate's eligibility predicate; it is what makes a
+    newer bounds-less SHADOW row NOT clobber an older tradeable row on the LIVE path.
+    """
+    if not row_map.get("q_lcb_json"):
+        return False
+    provenance = _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
+    mode = provenance.get("replacement_q_mode")
+    if not isinstance(mode, str) or not mode:
+        return False
+    return mode in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE
 
 
 def _canonical_json(value: object) -> str:
@@ -460,17 +513,43 @@ def read_replacement_forecast_bundle(
         raise ValueError("decision_time must be timezone-aware")
     decision_utc = decision_utc.astimezone(timezone.utc)
 
-    # H3 (REAUDIT_0_1.md §2) — HARD staleness gate, fail-closed. readiness.expires_at
-    # was previously loaded but never compared. A READY posterior whose expiry is at
-    # or before decision_time is DEAD; binding it as live authority is the inverse of
-    # the zero-trade fault (trading a stale forecast as live). This gate is in the
-    # ONE bundle reader so both the live 0.1 path and the legacy hook inherit it.
+    # SERVE-FRESHEST-AVAILABLE (operator law, stated three times, last 2026-06-11
+    # "没有新的就用老的" — plan: docs/evidence/settlement_guard/
+    # 2026-06-11_serve_freshest_available_plan.md). The former H3 HARD block here turned
+    # whole scopes DARK at the staleness bound even when nothing fresher existed anywhere
+    # (2026-06-11T12:00Z: every bucket-whitelist-excluded city died hours before its 00Z
+    # replacement could structurally exist). The bound's job is to PURSUE fresher data
+    # (downloads / polls / re-seeds key off it, unchanged) and to BRAND age honestly —
+    # never to refuse the freshest row that exists. Expiry is recorded as a provenance
+    # staleness violation on the served bundle (observable, alarm-able) instead of a
+    # block. Selection below serves the freshest tradeable-grade row by construction, so
+    # the served row is always the best available.
+    staleness_violations: list[str] = []
     if readiness.expires_at is not None and readiness.expires_at <= decision_utc:
-        return ReplacementForecastBundleReadResult(
-            "BLOCKED", "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
+        staleness_violations.append(
+            "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED:"
+            f"expires_at={readiness.expires_at.isoformat()}"
+        )
+        logger.warning(
+            "serve-freshest-available: readiness expired for %s %s %s "
+            "(expires_at=%s <= decision=%s) — serving freshest tradeable row with "
+            "staleness brand instead of going dark",
+            city,
+            target_date_text,
+            metric,
+            readiness.expires_at.isoformat(),
+            decision_utc.isoformat(),
         )
 
-    row = conn.execute(
+    # TRADEABLE-LATEST read semantics (operator clobber-category directive 2026-06-10).
+    # Fetch the scope's posterior rows newest-first, then prefer the latest TRADEABLE-GRADE
+    # row over a newer bounds-less SHADOW row. A newer cycle that has anchor manifests but no
+    # fusion instruments writes a bounds-less BAYES_PRECISION_FUSION_CAPTURE_MISSING row by design; absolute-latest
+    # selection would serve it and collapse live eligibility. The newer bounds-less row stays
+    # visible for shadow/telemetry (it is still in the table); the LIVE bundle just does not
+    # bind to it. Bound the scan to a small recent window — a healthy scope has 1-3 rows per
+    # cycle, and the staleness gate below caps how far back a served row may sit anyway.
+    candidate_rows = conn.execute(
         """
         SELECT * FROM forecast_posteriors
         WHERE city = ?
@@ -482,13 +561,39 @@ def read_replacement_forecast_bundle(
           AND training_allowed = 0
           AND trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
         ORDER BY computed_at DESC, posterior_id DESC
-        LIMIT 1
+        LIMIT 16
         """,
         (city, target_date_text, metric, SOURCE_ID, PRODUCT_ID, data_version),
-    ).fetchone()
-    if row is None:
+    ).fetchall()
+    if not candidate_rows:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_MISSING")
-    row_map = dict(row)
+    latest_row_map = dict(candidate_rows[0])
+    tradeable_row_map: dict | None = None
+    for candidate in candidate_rows:
+        candidate_map = dict(candidate)
+        if _row_is_tradeable_grade(candidate_map):
+            tradeable_row_map = candidate_map
+            break
+    # Serve the latest tradeable-grade row when one exists; otherwise fall through with the
+    # absolute-latest row so a scope that has ONLY a bounds-less/non-eligible row still flows
+    # through the downstream gates and is BLOCKED with its honest reason (never silently dropped).
+    if tradeable_row_map is not None:
+        row_map = tradeable_row_map
+    else:
+        row_map = latest_row_map
+    # Fallback case: we are serving an OLDER tradeable row because a NEWER non-tradeable shadow
+    # row sits on top. The scope readiness (per-scope upsert) now points at that newer shadow
+    # row, so the readiness/dependency-agreement gates below must be re-anchored to the SERVED
+    # row's OWN intrinsic provenance (immutable, validated at its materialization) rather than
+    # to the overwritten scope readiness. We still enforce EVERY intrinsic-integrity gate on the
+    # served row (staleness, intermediate-cycle, topology-to-current-market, identity hashes).
+    _served_via_tradeable_fallback = (
+        tradeable_row_map is not None
+        and int(row_map["posterior_id"]) != int(latest_row_map["posterior_id"])
+    )
+    _newer_shadow_posterior_id = (
+        int(latest_row_map["posterior_id"]) if _served_via_tradeable_fallback else None
+    )
     if _parse_utc(str(row_map["source_available_at"]), field_name="source_available_at") > decision_utc:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_AFTER_DECISION_TIME")
     if _parse_utc(str(row_map["computed_at"]), field_name="computed_at") > decision_utc:
@@ -497,24 +602,74 @@ def read_replacement_forecast_bundle(
     # The reader already rejects FUTURE posteriors; this adds the missing STALE
     # bound: a source_cycle_time older than the fail-closed horizon means the data
     # the posterior was built on is too old to trade as live, even if expires_at is
-    # still in the future. Same single-gate location, inherited by both paths.
+    # still in the future. Same single-gate location, inherited by both paths. The
+    # horizon is the SAME constant the materialization-side fail-closed gate uses
+    # (src/data/replacement_forecast_cycle_policy.py) so the two gates can never drift.
     _source_cycle_utc = _parse_utc(str(row_map["source_cycle_time"]), field_name="source_cycle_time")
-    _max_age_hours = _replacement_source_cycle_max_age_hours()
-    if (decision_utc - _source_cycle_utc).total_seconds() > _max_age_hours * 3600.0:
-        return ReplacementForecastBundleReadResult(
-            "BLOCKED", "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
+    if cycle_age_exceeds_bound(decision_utc, _source_cycle_utc):
+        # SERVE-FRESHEST-AVAILABLE (operator law — see the readiness-expiry brand above):
+        # the selected row IS the freshest tradeable row that exists for this scope; an
+        # over-bound age becomes a provenance brand + WARN, never darkness. The bound
+        # keeps driving the download/re-seed pursuit unchanged.
+        _age_hours = (decision_utc - _source_cycle_utc).total_seconds() / 3600.0
+        staleness_violations.append(
+            "REPLACEMENT_0_1_LIVE_AUTHORITY_CYCLE_AGE_EXCEEDS_BOUND:"
+            f"source_cycle={_source_cycle_utc.isoformat()}:age_hours={_age_hours:.1f}"
+        )
+        logger.warning(
+            "serve-freshest-available: %s %s %s serving cycle %s aged %.1fh beyond the "
+            "staleness bound — freshest tradeable row that exists; branded, not blocked",
+            city,
+            target_date_text,
+            metric,
+            _source_cycle_utc.isoformat(),
+            _age_hours,
         )
 
-    posterior_dependency = _readiness_dependency_by_role(readiness, "soft_anchor_posterior")
-    if posterior_dependency is None or int(posterior_dependency.get("posterior_id") or -1) != int(row_map["posterior_id"]):
-        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH")
-    baseline_dependency = _readiness_dependency_by_role(readiness, "baseline_b0")
-    if baseline_dependency is None or baseline_dependency.get("source_run_id") != baseline_run_id:
-        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_BASELINE_READINESS_MISMATCH")
+    # Operator cycle-physics directive 2026-06-10 — intermediate-cycle (06/18Z) live gate.
+    # The de-bias + fusion weights were trained on ~99% 00Z-cycle history, so a posterior
+    # built on an intermediate cycle applies a bias correction across cycle phase. Such a
+    # posterior is still PRODUCED + readiness-stamped (production stays alive in dead zones)
+    # but is admitted LIVE only when the operator flag is on (default OFF = shadow-only).
+    # We prefer the explicit provenance tag (recorded at materialization), falling back to
+    # the source_cycle_time hour so a pre-tag posterior is still classified fail-closed.
+    _phase_provenance = _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
+    _cycle_phase = str(_phase_provenance.get("cycle_phase") or "").strip().lower()
+    if not _cycle_phase:
+        _cycle_phase = classify_cycle_phase(_source_cycle_utc)
+    if (
+        _cycle_phase == CYCLE_PHASE_INTERMEDIATE
+        and not _replacement_intermediate_cycle_live_admission_enabled()
+    ):
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED", "REPLACEMENT_0_1_LIVE_AUTHORITY_INTERMEDIATE_CYCLE_SHADOW_ONLY"
+        )
 
     dependency_json = _json_mapping(row_map["dependency_source_run_ids_json"], field_name="dependency_source_run_ids_json")
-    if _dependency_source_run_mismatch(readiness=readiness, posterior_dependency_json=dependency_json):
-        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_DEPENDENCY_SOURCE_RUN_MISMATCH")
+    if _served_via_tradeable_fallback:
+        # Re-anchor the certification to the SERVED tradeable row's intrinsic provenance. The
+        # scope readiness was overwritten in place by the newer shadow cycle's materialization
+        # (readiness_state upserts on scope_key — no cycle in the key), so it no longer points at
+        # this row. The served row is self-certifying: it was materialized WITH its own READY
+        # readiness (a BAYES_PRECISION_FUSION/bounds-less row is never tradeable-grade), and it carries its own
+        # immutable dependency_source_run_ids_json + identity hashes. We bind the bundle's
+        # baseline_source_run_id to the served row's intrinsic baseline (not the overwritten
+        # readiness's), and we DO NOT require the scope readiness to point at this posterior.
+        # Every intrinsic-integrity gate (staleness, intermediate-cycle, topology-to-market,
+        # identity-hash presence) has already run / still runs against this served row, so the
+        # no-bypass guarantee is preserved — only the (stale) readiness pointer is relaxed.
+        intrinsic_baseline = dependency_json.get("baseline_b0")
+        if isinstance(intrinsic_baseline, str) and intrinsic_baseline:
+            baseline_run_id = intrinsic_baseline
+    else:
+        posterior_dependency = _readiness_dependency_by_role(readiness, "soft_anchor_posterior")
+        if posterior_dependency is None or int(posterior_dependency.get("posterior_id") or -1) != int(row_map["posterior_id"]):
+            return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH")
+        baseline_dependency = _readiness_dependency_by_role(readiness, "baseline_b0")
+        if baseline_dependency is None or baseline_dependency.get("source_run_id") != baseline_run_id:
+            return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_BASELINE_READINESS_MISMATCH")
+        if _dependency_source_run_mismatch(readiness=readiness, posterior_dependency_json=dependency_json):
+            return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_DEPENDENCY_SOURCE_RUN_MISMATCH")
 
     q = _normalize_probability_map(_json_mapping(row_map["q_json"], field_name="q_json"), field_name="q")
     q_lcb_raw = _json_mapping(row_map["q_lcb_json"], field_name="q_lcb_json") if row_map.get("q_lcb_json") else None
@@ -540,6 +695,24 @@ def read_replacement_forecast_bundle(
     for field_name in ("posterior_identity_hash", "dependency_hash", "posterior_config_hash"):
         if not str(row_map.get(field_name) or "").strip():
             return ReplacementForecastBundleReadResult("BLOCKED", f"REPLACEMENT_POSTERIOR_{field_name.upper()}_MISSING")
+    if _served_via_tradeable_fallback:
+        # Record a provenance note (telemetry-visible) that the LIVE bundle fell back to an
+        # older tradeable row because a newer bounds-less shadow row clobbered the latest slot.
+        provenance = {
+            **provenance,
+            "tradeable_latest_selection": {
+                "served_posterior_id": int(row_map["posterior_id"]),
+                "newer_shadow_posterior_id": _newer_shadow_posterior_id,
+                "reason": "newer_row_not_tradeable_grade_served_older_certified_bounds",
+            },
+        }
+    if staleness_violations:
+        # SERVE-FRESHEST-AVAILABLE brand: the served bundle carries its staleness
+        # violations in provenance (telemetry/alarm surface; receipts inherit it).
+        provenance = {
+            **provenance,
+            "staleness_violations": list(staleness_violations),
+        }
     bundle = ReplacementForecastPosteriorBundle(
         posterior_id=int(row_map["posterior_id"]),
         city=str(row_map["city"]),

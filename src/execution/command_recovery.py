@@ -1,8 +1,12 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-11
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + 2026-06-11 dependency_db_locked incident: the scheduled EDLI lane
+#                    (conn is None) now runs the per-pass short-connection three-phase
+#                    flow (src/execution/venue_sync_contract.py) so no DB connection is
+#                    held across venue REST I/O. Legacy caller-owned-conn path unchanged.
 """Command recovery loop — INV-31.
 
 At cycle start, scans venue_commands for rows in IN_FLIGHT_STATES and
@@ -6394,13 +6398,24 @@ def reconcile_unresolved_commands(
     fallback.
 
     PolymarketClient: if client is None, lazily constructed here.
-    """
-    own_conn = False
-    if conn is None:
-        from src.state.db import get_trade_connection_with_world_required
-        conn = get_trade_connection_with_world_required(write_class="live")
-        own_conn = True
 
+    CONNECTION TOPOLOGY (dependency_db_locked antibody, 2026-06-11):
+
+      * ``conn`` PROVIDED (legacy cycle_runner lane + all INV-31 anchor tests):
+        the caller owns the connection lifetime and threads its own per-cycle
+        trade/world connection through every pass — the historical shape. This
+        path is byte-identical to before.
+
+      * ``conn is None`` (the EDLI scheduled-job lane, #28c): runs the
+        per-pass SHORT-CONNECTION three-phase flow via
+        ``src.execution.venue_sync_contract``. No single connection is held
+        across venue REST I/O, and no connection spans more than one pass — so
+        the sweep can never again pin the zeus_trades WAL write lock across a
+        multi-minute venue-read sweep and starve other writers into the
+        DATA_DEGRADED / RISK_GUARD_BLOCKED cascade observed since ~03:36Z on
+        2026-06-11. Reconciliation SEMANTICS are unchanged: each pass body runs
+        verbatim against a venue snapshot captured off-lock.
+    """
     if client is None:
         from src.data.polymarket_client import PolymarketClient
         client = PolymarketClient()
@@ -6408,7 +6423,38 @@ def reconcile_unresolved_commands(
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     started_at = _now_iso()
 
-    try:
+    if conn is None:
+        # Scheduled-job lane: per-pass short connections, no conn across network.
+        _reconcile_passes_short_conn(client, summary, started_at)
+        logger.info(
+            "recovery: scanned=%d advanced=%d stayed=%d errors=%d",
+            summary["scanned"], summary["advanced"], summary["stayed"], summary["errors"],
+        )
+        return summary
+
+    # Legacy caller-owned-connection lane (unchanged).
+    _reconcile_passes_inline(conn, client, summary, started_at)
+    logger.info(
+        "recovery: scanned=%d advanced=%d stayed=%d errors=%d",
+        summary["scanned"], summary["advanced"], summary["stayed"], summary["errors"],
+    )
+    return summary
+
+
+def _reconcile_passes_inline(
+    conn: sqlite3.Connection,
+    client,
+    summary: dict,
+    started_at: str,
+) -> None:
+    """Legacy caller-owned-connection pass sequence (BYTE-IDENTICAL to pre-2026-06-11).
+
+    The caller (cycle_runner or an INV-31 anchor test) owns ``conn`` and threads
+    it through every pass exactly as before. No behavioural change; extracted
+    verbatim from the old ``reconcile_unresolved_commands`` body so the scheduled
+    lane can take the short-connection path without disturbing this one.
+    """
+    if True:  # preserve original indentation of the extracted body verbatim
         edli_confirmed_command_summary = reconcile_edli_confirmed_legacy_command_repairs(conn)
         summary["edli_confirmed_legacy_command_repair"] = edli_confirmed_command_summary
         summary["advanced"] += edli_confirmed_command_summary["advanced"]
@@ -6535,12 +6581,244 @@ def reconcile_unresolved_commands(
         summary["advanced"] += maker_fill_summary["corrected"]
         summary["errors"] += maker_fill_summary["errors"]
 
-    finally:
-        if own_conn:
-            conn.close()
 
-    logger.info(
-        "recovery: scanned=%d advanced=%d stayed=%d errors=%d",
-        summary["scanned"], summary["advanced"], summary["stayed"], summary["errors"],
+def _accumulate(
+    summary: dict,
+    key: str,
+    pass_summary: dict,
+    *,
+    advanced_key: str = "advanced",
+    fold_stayed: bool = True,
+) -> None:
+    """Fold a pass summary into the running total exactly as the legacy body did.
+
+    ``fold_stayed`` mirrors the legacy asymmetry: every pass folded ``stayed``
+    EXCEPT the final ``reconcile_recorded_maker_fill_economics`` pass, which only
+    contributed ``corrected`` -> advanced and ``errors``.
+    """
+    summary[key] = pass_summary
+    summary["advanced"] += pass_summary[advanced_key]
+    if fold_stayed:
+        summary["stayed"] += pass_summary.get("stayed", 0)
+    summary["errors"] += pass_summary["errors"]
+
+
+def _collect_recovery_priming_keys(conn: sqlite3.Connection) -> dict:
+    """SNAPSHOT phase helper: gather every venue-read key the apply passes will need.
+
+    Runs only read queries (the per-pass candidate selects + the in-flight scan)
+    on a short-lived connection and returns the union of venue_order_ids,
+    idempotency keys, and condition ids. Over-collection is safe; the apply-phase
+    venue snapshot raises a located ``SnapshotMissError`` only if a needed key was
+    NOT collected here.
+    """
+    order_ids: set[str] = set()
+    idem_keys: set[str] = set()
+    condition_ids: set[str] = set()
+
+    def _harvest(rows) -> None:
+        for row in rows or []:
+            mapping = row if isinstance(row, dict) else _dict_row(row)
+            for col in ("venue_order_id", "order_fact_venue_order_id"):
+                val = str(mapping.get(col) or "").strip()
+                if val:
+                    order_ids.add(val)
+            idem = str(mapping.get("idempotency_key") or "").strip()
+            if idem:
+                idem_keys.add(idem)
+            for col in ("env_condition_id", "snapshot_condition_id"):
+                cid = str(mapping.get(col) or "").strip()
+                if cid:
+                    condition_ids.add(cid)
+
+    # The in-flight scan (per-row _reconcile_row venue lookups).
+    try:
+        _harvest(find_unresolved_commands(conn))
+    except Exception:  # noqa: BLE001 — a missing table just means no candidates
+        logger.debug("recovery: priming scan find_unresolved_commands failed", exc_info=True)
+    # Each client-taking pass's candidate query.
+    for candidate_fn in (
+        _local_orphan_no_fill_candidates,
+        _terminal_point_order_candidates,
+        _latest_matched_order_fact_candidates,
+        _latest_unprojected_live_entry_candidates,
+        _latest_unprojected_filled_entry_candidates,
+    ):
+        try:
+            _harvest(candidate_fn(conn))
+        except Exception:  # noqa: BLE001
+            logger.debug("recovery: priming candidate %s failed", candidate_fn.__name__, exc_info=True)
+    try:
+        _harvest(_partial_remainder_candidates(conn, updated_before=None))
+    except Exception:  # noqa: BLE001
+        logger.debug("recovery: priming candidate _partial_remainder_candidates failed", exc_info=True)
+
+    return {
+        "order_ids": order_ids,
+        "idempotency_keys": idem_keys,
+        "condition_ids": condition_ids,
+    }
+
+
+def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None:
+    """Scheduled-job lane: per-pass short connections, no connection across network.
+
+    Three structural phases (``src.execution.venue_sync_contract``):
+
+      1. SNAPSHOT  — one short read connection collects every venue-read key the
+         client-taking passes will need (candidate order ids, idempotency keys,
+         condition ids), then closes.
+      2. NETWORK   — with NO connection in scope, capture the venue read surface
+         (open orders, trades, per-order point reads) into an immutable
+         ``VenueReadSnapshot``. This is where ALL blocking venue REST I/O happens.
+      3. APPLY     — every pass runs on its OWN short-lived connection inside one
+         bounded ``BEGIN IMMEDIATE ... COMMIT``. Client-taking passes receive the
+         venue SNAPSHOT (zero live network), so the write lock is held only for
+         that pass's writes and released the instant the pass returns.
+
+    Each pass body is the SAME function the legacy lane calls — reconciliation
+    grammar, REVIEW_REQUIRED handoffs, INV-31 invariants and savepoint discipline
+    are byte-for-byte unchanged. Only the connection topology differs.
+    """
+    from src.execution.venue_sync_contract import (
+        assert_no_open_connection,
+        capture_venue_read_snapshot,
+        default_trade_conn_factory,
+        open_tracked,
+        run_db_only_pass,
+        run_three_phase,
     )
-    return summary
+
+    conn_factory = default_trade_conn_factory
+
+    def _client_pass(
+        label, pass_fn, summary_key, *,
+        advanced_key="advanced", fold_stayed=True, client_kw=False, **pass_kwargs,
+    ):
+        """Run a client-taking pass as snapshot -> (shared) network -> apply.
+
+        ``client_kw=True`` passes the venue snapshot as the ``client=`` keyword
+        (the projection-repair passes' signature), else positionally.
+        """
+
+        def _snapshot(conn):
+            # The candidate rows the apply pass re-queries are already primed in
+            # the shared venue snapshot; this phase satisfies the contract's
+            # open/close discipline and confirms no conn leaks into the network.
+            return None
+
+        def _network(_snap):
+            return venue_snapshot
+
+        def _apply(conn, snap_client):
+            if client_kw:
+                ps = pass_fn(conn, client=snap_client, **pass_kwargs)
+            else:
+                ps = pass_fn(conn, snap_client, **pass_kwargs)
+            _accumulate(summary, summary_key, ps, advanced_key=advanced_key, fold_stayed=fold_stayed)
+            return ps
+
+        run_three_phase(
+            _snapshot, _network, _apply,
+            conn_factory=conn_factory, label=f"recovery.{label}",
+        )
+
+    def _db_pass(label, pass_fn, summary_key, *, advanced_key="advanced", fold_stayed=True, **pass_kwargs):
+        def _apply(conn):
+            ps = pass_fn(conn, **pass_kwargs)
+            _accumulate(summary, summary_key, ps, advanced_key=advanced_key, fold_stayed=fold_stayed)
+            return ps
+
+        run_db_only_pass(_apply, conn_factory=conn_factory, label=f"recovery.{label}")
+
+    # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
+    with open_tracked(conn_factory, label="recovery.priming:snapshot") as conn:
+        priming = _collect_recovery_priming_keys(conn)
+
+    # -- PHASE 2: NETWORK (no connection in scope) -----------------------------
+    assert_no_open_connection("recovery.capture_venue_snapshot")
+    venue_snapshot = capture_venue_read_snapshot(
+        client,
+        order_ids=priming["order_ids"],
+        idempotency_keys=priming["idempotency_keys"],
+        condition_ids=priming["condition_ids"],
+    )
+
+    # -- PHASE 3: APPLY (each pass on its own short bounded write connection) ---
+    # Order mirrors the legacy inline body exactly.
+    _db_pass("edli_confirmed_legacy_command_repair",
+             reconcile_edli_confirmed_legacy_command_repairs,
+             "edli_confirmed_legacy_command_repair")
+
+    # In-flight per-row scan (find_unresolved_commands + _reconcile_row).
+    def _scan_inflight(conn, snap_client):
+        ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        rows = find_unresolved_commands(conn)
+        ps["scanned"] = len(rows)
+        for row in rows:
+            try:
+                cmd = VenueCommand.from_row(row)
+            except Exception as exc:
+                logger.error(
+                    "recovery: malformed row (command_id=%r): %s; skipping",
+                    row.get("command_id"), exc,
+                )
+                ps["errors"] += 1
+                continue
+            outcome = _reconcile_row(conn, cmd, snap_client)
+            if outcome == "advanced":
+                ps["advanced"] += 1
+            elif outcome == "stayed":
+                ps["stayed"] += 1
+            else:
+                ps["errors"] += 1
+        return ps
+
+    def _apply_inflight(conn, snap_client):
+        ps = _scan_inflight(conn, snap_client)
+        summary["scanned"] = ps["scanned"]
+        summary["advanced"] += ps["advanced"]
+        summary["stayed"] += ps["stayed"]
+        summary["errors"] += ps["errors"]
+        return ps
+
+    run_three_phase(
+        lambda conn: None,
+        lambda _snap: venue_snapshot,
+        _apply_inflight,
+        conn_factory=conn_factory, label="recovery.inflight_scan",
+    )
+
+    _client_pass("local_orphan_no_fill_findings",
+                 reconcile_local_orphan_no_fill_findings, "local_orphan_no_fill_findings")
+    _client_pass("terminal_point_orders",
+                 reconcile_terminal_point_orders, "terminal_point_orders")
+    _db_pass("terminal_order_facts", reconcile_terminal_order_facts, "terminal_order_facts")
+    _db_pass("stale_terminal_no_fill_findings",
+             reconcile_stale_terminal_no_fill_findings, "stale_terminal_no_fill_findings")
+    _client_pass("matched_order_facts", reconcile_matched_order_facts, "matched_order_facts")
+    _db_pass("completed_partial_order_facts",
+             reconcile_completed_partial_order_facts, "completed_partial_order_facts")
+    _db_pass("edli_pre_venue_unknown_thresholds",
+             _reconcile_edli_pre_venue_unknown_thresholds, "edli_pre_venue_unknown_thresholds")
+    _client_pass("live_entry_projection_repair",
+                 reconcile_live_entry_projection_repairs, "live_entry_projection_repair", client_kw=True)
+    _client_pass("filled_entry_projection_repair",
+                 reconcile_filled_entry_projection_repairs, "filled_entry_projection_repair", client_kw=True)
+    _db_pass("filled_entry_position_lot_repair",
+             reconcile_filled_entry_position_lot_repairs, "filled_entry_position_lot_repair")
+    _db_pass("filled_entry_execution_fact_repair",
+             reconcile_filled_entry_execution_fact_repairs, "filled_entry_execution_fact_repair")
+    _db_pass("exit_pending_projections",
+             reconcile_exit_pending_projections, "exit_pending_projections")
+    _db_pass("spurious_model_divergence_pending_exit_repair",
+             repair_spurious_model_divergence_pending_exits,
+             "spurious_model_divergence_pending_exit_repair")
+    _client_pass("partial_remainders",
+                 reconcile_partial_remainders, "partial_remainders", updated_before=started_at)
+
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+
+    _db_pass("recorded_maker_fill_economics",
+             reconcile_recorded_maker_fill_economics, "recorded_maker_fill_economics",
+             advanced_key="corrected", fold_stayed=False, observed_at=started_at)

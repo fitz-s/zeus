@@ -281,6 +281,15 @@ test_trust_policy:
     tests/test_center_buy_repair.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_cross_module_invariants.py: {created: "2026-03-30", last_used: "2026-04-23"}
     tests/test_day0_exit_gate.py: {created: "2026-04-07", last_used: "2026-04-23"}
+    tests/test_day0_exposure_cap_kernel.py: {created: "2026-06-10", last_used: "2026-06-10"}
+    tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-06-10"}
+    tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-06-10"}
+    tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
+    tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-06-10"}
+    tests/test_day0_shadow_scope_no_submit.py: {created: "2026-06-09", last_used: "2026-06-10"}
+    tests/test_diurnal_peak_prob_monotone.py: {created: "2026-06-10", last_used: "2026-06-10"}
+    tests/test_edli_status_pulse_submit_counter.py: {created: "2026-06-09", last_used: "2026-06-10"}
+    tests/test_stake_min_order_not_edge_reversed.py: {created: "2026-06-09", last_used: "2026-06-10"}
     tests/test_decision_evidence_entry_emission.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_decision_evidence_persistence.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_diurnal.py: {created: "pre-Phase-0", last_used: "2026-05-08"}

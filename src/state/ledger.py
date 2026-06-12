@@ -212,6 +212,15 @@ def _ensure_position_current_authority_columns(conn: sqlite3.Connection) -> None
         # survive daemon restarts so CI-separated exits do not degrade to a
         # point-estimate gate.
         ("entry_ci_width", "REAL"),
+        # Exit-retry persistence (2026-06-12 infinite-loop incident): the
+        # chain-truth gate's _mark_exit_retry incremented exit_retry_count
+        # ONLY in memory — every load_portfolio() reset it to 0, so the
+        # MAX_EXIT_RETRIES → backoff_exhausted terminal was unreachable and
+        # exit_pending_missing positions retried forever (HK 06-09: 724
+        # identical EXIT_ORDER_REJECTED events). Persisted so the bounded
+        # backoff design actually bounds.
+        ("exit_retry_count", "INTEGER"),
+        ("next_exit_retry_at", "TEXT"),
     )
     with conn:
         for col_name, col_type in additions:

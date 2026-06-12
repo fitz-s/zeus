@@ -125,6 +125,19 @@ class MonitorOneCalibratorQ:
     q_vector: np.ndarray
     q_source: str
     bootstrap_probability_sampler: object | None
+    # PARITY PROVENANCE (P1 review finding 2026-06-09): settlement sigma-floor coherence.
+    # settlement_sigma_floor_applied — True when the empirical settlement σ-floor was
+    #   looked up and found for this (city, season, metric) cell AND actually widened sigma.
+    #   False when floor_enabled=False, or floor cell absent, or not applied (model σ already
+    #   >= floor).
+    # settlement_sigma_floor_required — mirror of the edli_settlement_sigma_floor_required
+    #   config flag at monitor time; recorded for audit.
+    # floor_missing_reason — non-None when floor_enabled=True but the cell lookup failed.
+    #   The caller uses this to detect entry-parity violations (entry had floor, monitor does
+    #   not → mark NOT FRESH; same fail-closed semantics as the day0 panic-sell hold fix).
+    settlement_sigma_floor_applied: bool = False
+    settlement_sigma_floor_required: bool = False
+    floor_missing_reason: str | None = None
 
 
 def _monitor_emos_regime_enabled() -> bool:
@@ -163,6 +176,30 @@ def _monitor_normal_bootstrap_sampler(mu_native: float, sigma_native: float):
     return _sampler
 
 
+def _probe_monitor_settlement_floor(
+    city_name: str,
+    season: str,
+    metric: str,
+) -> tuple[bool, str | None]:
+    """Probe the settlement sigma-floor table for (city, season, metric) without raising.
+
+    Returns (floor_found, floor_missing_reason):
+      floor_found=True  — a positive floor value exists for this cell.
+      floor_found=False — cell absent or table unavailable; floor_missing_reason explains why.
+
+    PARITY RULE (P1 review finding 2026-06-09): called only when apply_settlement_floor=True so
+    callers can determine whether the entry q's floor was obtainable at monitor time.
+    """
+    try:
+        from src.calibration.emos import settlement_sigma_floor  # noqa: PLC0415
+        floor_val = settlement_sigma_floor(city_name, season, str(metric).lower(), required=False)
+        if floor_val is not None and float(floor_val) > 0.0:
+            return True, None
+        return False, f"floor_cell_absent_or_non_positive:{city_name}|{season}|{str(metric).lower()}"
+    except Exception as exc:  # fail-closed: treat as missing, never crash the monitor path
+        return False, f"floor_probe_error:{type(exc).__name__}:{exc}"
+
+
 def _build_monitor_one_calibrator_q(
     *,
     city,
@@ -173,7 +210,15 @@ def _build_monitor_one_calibrator_q(
     semantics: SettlementSemantics,
     all_bins: list,
 ) -> MonitorOneCalibratorQ:
-    """Mirror the live entry EMOS/honest-raw q seam for non-Day0 monitor refresh."""
+    """Mirror the live entry EMOS/honest-raw q seam for non-Day0 monitor refresh.
+
+    PARITY PROVENANCE (P1 review finding 2026-06-09): when the settlement sigma-floor flag is
+    enabled, this function probes the floor table and records floor provenance on the returned
+    MonitorOneCalibratorQ. The caller uses floor_missing_reason to detect parity violations:
+    if the entry q had the floor applied (same flag on, same cell) but the monitor cannot
+    obtain it → the caller marks the monitor probability NOT FRESH so exit decisions do not
+    fire on the degraded (narrower) probability.
+    """
 
     from src.calibration.emos import SettlementSigmaFloorError
     from src.calibration.emos_q_builder import build_emos_q, build_honest_raw_q
@@ -186,6 +231,16 @@ def _build_monitor_one_calibrator_q(
     require_settlement_floor = bool(
         settings["edli"].get("edli_settlement_sigma_floor_required", True)
     )
+
+    # PARITY: probe floor availability when the flag is on. Probed ONCE here (not twice) and
+    # shared to both the emos and honest-raw branches below so the probe cost is minimal.
+    _floor_found: bool = False
+    _floor_missing_reason: str | None = None
+    if apply_settlement_floor:
+        _floor_found, _floor_missing_reason = _probe_monitor_settlement_floor(
+            city.name, season, metric
+        )
+
     q_result = None
     try:
         q_result = build_emos_q(
@@ -221,6 +276,9 @@ def _build_monitor_one_calibrator_q(
                 mu_native,
                 sigma_native,
             ),
+            settlement_sigma_floor_applied=_floor_found,
+            settlement_sigma_floor_required=require_settlement_floor,
+            floor_missing_reason=_floor_missing_reason,
         )
 
     honest_raw = None
@@ -258,6 +316,9 @@ def _build_monitor_one_calibrator_q(
                 mu_native,
                 sigma_native,
             ),
+            settlement_sigma_floor_applied=_floor_found,
+            settlement_sigma_floor_required=require_settlement_floor,
+            floor_missing_reason=_floor_missing_reason,
         )
 
     raw_q = p_raw_vector_from_maxes(
@@ -271,11 +332,48 @@ def _build_monitor_one_calibrator_q(
         q_vector=np.asarray(raw_q, dtype=float),
         q_source="raw_honest",
         bootstrap_probability_sampler=None,
+        settlement_sigma_floor_applied=False,
+        settlement_sigma_floor_required=require_settlement_floor,
+        floor_missing_reason=_floor_missing_reason,
     )
 
 
 def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
     setattr(position, _MONITOR_PROBABILITY_FRESH_ATTR, is_fresh)
+
+
+# K6 stage-1 belief-dead watchdog (2026-06-12). A fail-closed hold on missing
+# probability authority is correct for one cycle and a silent catastrophe for
+# 719 (the Karachi position was monitored its whole life with stale belief and
+# nothing escalated). Track consecutive stale-belief cycles per position WHILE
+# the market price stays fresh; at the threshold, brand the monitor event and
+# log at ERROR so the condition is loud in both the event payload and the log.
+_BELIEF_STALE_FAULT_THRESHOLD = 3
+_belief_stale_cycles: dict[str, int] = {}
+
+
+def _track_belief_staleness(pos: Position) -> None:
+    key = str(getattr(pos, "trade_id", "") or id(pos))
+    if getattr(pos, "last_monitor_prob_is_fresh", False):
+        _belief_stale_cycles.pop(key, None)
+        return
+    if not getattr(pos, "last_monitor_market_price_is_fresh", False):
+        return
+    count = _belief_stale_cycles.get(key, 0) + 1
+    _belief_stale_cycles[key] = count
+    _append_monitor_validation(pos, f"belief_stale_cycles={count}")
+    if count >= _BELIEF_STALE_FAULT_THRESHOLD:
+        _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
+        logger.error(
+            "BELIEF_AUTHORITY_FAULT: position %s (%s %s %s) has had stale belief "
+            "for %d consecutive monitor cycles while the market price is fresh — "
+            "the exit organ is blind on a live position",
+            getattr(pos, "trade_id", "?"),
+            getattr(pos, "city", "?"),
+            getattr(pos, "target_date", "?"),
+            getattr(pos, "direction", "?"),
+            count,
+        )
 
 
 def _record_nowcast_write_success() -> None:
@@ -867,6 +965,32 @@ def _refresh_ens_member_counting(
                     "period_extrema_members_adapter",
                     f"monitor_emos_sole_calibrator_failed:{type(exc).__name__}",
                 ]
+            # PARITY RULE (P1 review finding 2026-06-09): if the floor was enabled at monitor
+            # time but the cell is absent, the monitor q is narrower than the entry q was
+            # (entry ran with floor applied; monitor silently dropped it). Mark NOT FRESH so
+            # exit decisions do not fire on the degraded posterior — same fail-closed semantics
+            # as the day0 panic-sell hold fix ("Exit authority incomplete").
+            if _monitor_q.floor_missing_reason is not None:
+                logger.warning(
+                    "MONITOR_FLOOR_PARITY_VIOLATION cell=%s|%s|%s "
+                    "floor_applied=%s floor_missing_reason=%s — "
+                    "monitor q narrower than entry q; marking NOT FRESH (no exit trigger)",
+                    city.name,
+                    _monitor_emos_season(target_d),
+                    _position_metric_str,
+                    _monitor_q.settlement_sigma_floor_applied,
+                    _monitor_q.floor_missing_reason,
+                )
+                _set_monitor_probability_fresh(position, False)
+                return position.p_posterior, [
+                    "fresh_ens_fetch",
+                    *forecast_source_validations,
+                    "entry_forecast_reader",
+                    "period_extrema_members_adapter",
+                    "monitor_emos_sole_calibrator",
+                    "monitor_floor_parity_violation",
+                    f"floor_missing_reason:{_monitor_q.floor_missing_reason}",
+                ]
             p_raw_vector = _monitor_q.q_vector
             p_cal_full = np.asarray(_monitor_q.q_vector, dtype=float)
             p_cal_yes = float(p_cal_full[held_idx])
@@ -879,6 +1003,7 @@ def _refresh_ens_member_counting(
                 "period_extrema_members_adapter",
                 "monitor_emos_sole_calibrator",
                 f"q_source:{_monitor_q_source}",
+                f"settlement_sigma_floor_applied:{_monitor_q.settlement_sigma_floor_applied}",
             ]
         else:
             # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row is served.
@@ -976,6 +1101,27 @@ def _refresh_ens_member_counting(
                     *forecast_source_validations,
                     f"monitor_emos_sole_calibrator_failed:{type(exc).__name__}",
                 ]
+            # PARITY RULE (P1 review finding 2026-06-09): mirror of the period-extrema branch
+            # above — floor enabled but cell absent → monitor q narrower than entry q → NOT FRESH.
+            if _monitor_q.floor_missing_reason is not None:
+                logger.warning(
+                    "MONITOR_FLOOR_PARITY_VIOLATION cell=%s|%s|%s "
+                    "floor_applied=%s floor_missing_reason=%s — "
+                    "monitor q narrower than entry q; marking NOT FRESH (no exit trigger)",
+                    city.name,
+                    _monitor_emos_season(target_d),
+                    _position_metric_str,
+                    _monitor_q.settlement_sigma_floor_applied,
+                    _monitor_q.floor_missing_reason,
+                )
+                _set_monitor_probability_fresh(position, False)
+                return position.p_posterior, [
+                    "fresh_ens_fetch",
+                    *forecast_source_validations,
+                    "monitor_emos_sole_calibrator",
+                    "monitor_floor_parity_violation",
+                    f"floor_missing_reason:{_monitor_q.floor_missing_reason}",
+                ]
             p_raw_vector = _monitor_q.q_vector
             p_cal_full = np.asarray(_monitor_q.q_vector, dtype=float)
             p_cal_yes = float(p_cal_full[held_idx])
@@ -986,6 +1132,7 @@ def _refresh_ens_member_counting(
                 *forecast_source_validations,
                 "monitor_emos_sole_calibrator",
                 f"q_source:{_monitor_q_source}",
+                f"settlement_sigma_floor_applied:{_monitor_q.settlement_sigma_floor_applied}",
             ]
         else:
             # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row is served.
@@ -2122,7 +2269,53 @@ def monitor_probability_refresh(
     city,
     target_d,
 ) -> tuple[float, Position, bool | None]:
-    """Refresh held-side posterior without consuming the held-token quote."""
+    """Refresh held-side posterior without consuming the held-token quote.
+
+    PRIMARY AUTHORITY (K1 single belief authority, 2026-06-12): the
+    replacement-chain posterior (``forecast_posteriors``) — the SAME authority
+    the entry decision used. The legacy ens/day0 refreshers below remain as
+    explicit fallback telemetry only; they cannot be the freshness authority
+    while a fresh replacement row exists. This kills the entry-belief vs
+    exit-belief twin-authority that left every held position with
+    ``last_monitor_prob_is_fresh=False`` for its entire lifetime (719/719
+    stale refreshes on the Karachi 2026-06-12 position) while the entry
+    posterior had already re-ranked the held bin to family top.
+    """
+    from src.engine.position_belief import (
+        SELECTED_METHOD_REPLACEMENT_POSTERIOR,
+        load_replacement_belief,
+        monitor_belief_max_age_hours,
+    )
+
+    try:
+        belief = load_replacement_belief(
+            city=pos.city,
+            target_date=pos.target_date,
+            temperature_metric=str(getattr(pos, "temperature_metric", "high")),
+            bin_label=pos.bin_label,
+            direction=str(getattr(pos.direction, "value", pos.direction)),
+            max_age_hours=monitor_belief_max_age_hours(),
+        )
+    except Exception as exc:  # noqa: BLE001 — belief read must not kill the monitor
+        belief = None
+        logger.warning(
+            "monitor_probability_refresh: replacement belief read failed for %s: %s",
+            pos.trade_id,
+            exc,
+        )
+    if belief is not None and belief.fresh:
+        fresh_pos = replace(pos)
+        setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(fresh_pos, SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(fresh_pos, belief.freshness_validation())
+        _set_monitor_probability_fresh(fresh_pos, True)
+        return float(belief.held_side_prob), fresh_pos, True
+    if belief is not None:
+        _append_monitor_validation(
+            pos, f"replacement_posterior_stale;age_h={belief.age_hours:.2f}"
+        )
+    else:
+        _append_monitor_validation(pos, "replacement_posterior_missing")
 
     registry = {
         EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
@@ -2264,6 +2457,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         current_p_posterior = float("nan")
         pos.last_monitor_edge = float("nan")
         _append_monitor_validation(pos, "monitor_probability_refresh_failed")
+
+    _track_belief_staleness(pos)
 
     pos.last_monitor_whale_toxicity = _detect_whale_toxicity_from_orderbook(
         conn,

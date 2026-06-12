@@ -201,6 +201,15 @@ def _candidate_targets(
     tables = _table_names(conn)
     skip_covered_sql = ""
     if _coverage_skip_schema_ready(conn, tables):
+        # TRADEABLE-GRADE COVERAGE (2026-06-11, third site of the 2026-06-10 K-decision):
+        # only a q_lcb-bearing posterior counts as coverage. A capture-missing (NULL
+        # q_lcb) row otherwise masks its own fusion repair (the mask-and-starve
+        # category) — same clause as the queue antibody and the plan builder.
+        _tradeable = (
+            "AND p.q_lcb_json IS NOT NULL"
+            if "q_lcb_json" in _columns(conn, "forecast_posteriors")
+            else ""
+        )
         skip_covered_sql = f"""
           AND (
               NOT EXISTS (
@@ -212,6 +221,7 @@ def _candidate_targets(
                     AND p.temperature_metric = c.temperature_metric
                     AND p.training_allowed = 0
                     AND p.trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                    {_tradeable}
                     AND json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = c.source_run_id
               )
               OR NOT EXISTS (
@@ -328,9 +338,29 @@ def discover_replacement_forecast_materialization_seeds(
                 "temperature_metric": row.temperature_metric,
                 "baseline_source_run_id": row.baseline_source_run_id,
             }
-            for row in target_plan.rows
-            if row.can_seed
-        )[:limit]
+            # SEED-BUDGET STARVATION KILL (2026-06-11): two coupled defects froze the
+            # tradeable scopes behind permanently-failing far-date targets.
+            #   1. Far-date-first: the plan's order put day-2 shadow scopes (06-13) ahead
+            #      of the tradeable day0/day1 scopes. Nearest target date = the money —
+            #      sort target_date ASC.
+            #   2. Head-of-line budget burn: [:limit] sliced BEFORE the per-target
+            #      manifest check, so the SAME ten manifest-missing targets (cities the
+            #      rung-3 bucket whitelist cannot serve at the fresh cycle) consumed the
+            #      WHOLE per-tick budget every tick and seedable scopes behind them were
+            #      never reached (observed 2026-06-11: every 5-min tick = the same 10
+            #      06-13 failures, zero seeds written, fusion-grade 06-11/06-12 starved).
+            #      The budget now counts only WRITTEN seeds (enforced in the loop below);
+            #      manifest-missing targets are recorded as failures for observability
+            #      but consume no budget.
+            for row in sorted(
+                (row for row in target_plan.rows if row.can_seed),
+                key=lambda row: (
+                    str(row.target_date),
+                    str(row.city),
+                    str(row.temperature_metric),
+                ),
+            )
+        )
         if not targets:
             return ReplacementForecastSeedDiscoveryReport(
                 status="NO_ELIGIBLE_TARGETS",
@@ -343,6 +373,8 @@ def discover_replacement_forecast_materialization_seeds(
         failed: list[str] = []
         reasons: list[str] = []
         for target in targets:
+            if len(written) >= max(1, int(limit)):
+                break
             city = str(target["city"])
             target_date = str(target["target_date"])
             metric = str(target["temperature_metric"])

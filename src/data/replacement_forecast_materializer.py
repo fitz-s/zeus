@@ -1,7 +1,7 @@
 """Materialize replacement forecast shadow posterior rows into forecast DB.
 
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-10
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md (the probability chain
 #   §1d-§1e fused-N-direct + settlement sigma floor); FIX 1/FIX 2/FIX 5 (operator-reviewed
 #   2026-06-09): explicit replacement_q_mode authority, settlement-sigma-floor coherence in the
@@ -31,6 +31,11 @@ from src.data.ecmwf_aifs_sampled_2t_localday import (
     AifsSampledLocalDayExtraction,
 )
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
+from src.data.replacement_forecast_cycle_policy import (
+    classify_cycle_phase,
+    cycle_age_exceeds_bound,
+    replacement_source_cycle_max_age_hours,
+)
 from src.data.openmeteo_ecmwf_ifs9_anchor import (
     HIGH_DATA_VERSION as ANCHOR_HIGH_DATA_VERSION,
     LOW_DATA_VERSION as ANCHOR_LOW_DATA_VERSION,
@@ -73,6 +78,13 @@ REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
 REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK = "SOFT_ANCHOR_FALLBACK"
 REPLACEMENT_Q_MODE_BAYES_PRECISION_FUSION_CAPTURE_MISSING = "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED = "FUSED_Q_BUILD_FAILED"
+# PR#403 FIX (2026-06-09) — fused-q succeeded but the bounds failed. DISTINCT from
+# FUSED_Q_BUILD_FAILED (the point q is fine; only the bounds are absent). The fused-Normal
+# q point is STILL written to the DB (shadow materialization completes for accrual), but
+# live eligibility is killed. Without this a FULL/PARTIAL row with NULL q_lcb_json would be
+# live-eligible, letting buy_yes fall back to Wilson-over-AIFS-votes — exactly the two-measures
+# disease (fused-Normal q point + legacy LCB authority) that the Milan incident root-caused.
+REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING = "FUSED_NORMAL_BOUNDS_MISSING"
 
 # FIX 5 — capture-status provenance (recording only; the live gate enforces via q_mode).
 REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT = "FULL_CURRENT"
@@ -107,6 +119,12 @@ class ReplacementForecastMaterializeRequest:
     anchor_weight: float = 0.80
     anchor_sigma_c: float = 3.00
     settlement_step_c: float = 1.0
+    # Task #32 honest provenance: set to "instrument_set_expansion" when this materialization was
+    # enqueued by the fusion-upgrade trigger (a re-materialization because a strictly-larger
+    # decorrelated-provider set became capturable at the same cycle). None for a normal first
+    # materialization. Threaded verbatim into provenance_json so the re-materialized posterior
+    # records WHY it was produced.
+    upgrade_trigger: str | None = None
 
 
 @dataclass(frozen=True)
@@ -335,6 +353,17 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         reasons.append("REPLACEMENT_MATERIALIZATION_DEPENDENCY_AFTER_COMPUTED_AT")
     if request.expires_at is not None and _to_utc(request.expires_at, field_name="expires_at") <= computed_at:
         reasons.append("REPLACEMENT_MATERIALIZATION_EXPIRY_NOT_AFTER_COMPUTED_AT")
+    # BOUNDED STALENESS (operator directive 2026-06-10) — fail-closed at materialization.
+    # Re-materializing the SAME persisted source cycle re-stamps computed_at and grants a
+    # fresh 3h readiness TTL. Unbounded, that launders an arbitrarily-old cycle into "current"
+    # trading inputs forever (exactly what the manual 12Z recovery does ONCE — it must not be
+    # repeatable indefinitely). Cap (computed_at - source_cycle_time) at the SAME horizon the
+    # live-admission belt-and-suspenders gate uses (replacement_forecast_cycle_policy: 30h,
+    # within the empirical max healthy cycle age of 28.8h). Expired-but-rematerializable: the
+    # SAME cycle is allowed only WHILE within this bound. Refusing here means a too-stale cycle
+    # never even gets re-stamped, so the live gate is never the sole line of defence.
+    if cycle_age_exceeds_bound(computed_at, request_source_cycle_time):
+        reasons.append("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_TOO_STALE")
     return tuple(reasons)
 
 
@@ -383,6 +412,10 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
         "trade_authority_status": "SHADOW_ONLY",
         "training_allowed": False,
     }
+    # Task #32: honest re-materialization provenance. Recorded ONLY when the trigger set it, so a
+    # normal first materialization's provenance_json is byte-identical to before this change.
+    if request.upgrade_trigger:
+        provenance["upgrade_trigger"] = str(request.upgrade_trigger)
     anchor_identity_hash = _json_hash(
         {
             "source_id": ANCHOR_SOURCE_ID,
@@ -714,6 +747,12 @@ class _BayesPrecisionFusionFusionOverride:
     # CURRENT value entered the fused set for this cell, and the count expected (5). Recording only.
     decorrelated_providers_served: int = 0
     decorrelated_providers_expected: int = 5
+    # Task #32 follow-up (brand law): per-instrument serving provenance for every model that
+    # entered the fused set — which endpoint served its CURRENT value (served_via), the served
+    # row id/cycle/capture stamp/age, and its lead bucket. A previous_runs substitution (a
+    # provider whose selected cycle has no single_runs row, e.g. JMA at 06Z-cadence cycles) is
+    # therefore RECORDED in the posterior provenance, never silent.
+    current_value_serving: Mapping[str, Mapping[str, object]] | None = None
 
 
 def _read_persisted_current_capture(
@@ -725,82 +764,34 @@ def _read_persisted_current_capture(
     lead_days: int,
     source_cycle_time_iso: str,
 ) -> dict[str, tuple[float, int]]:
-    """BLOCKER 5 — read the PERSISTED current single_runs rows for this cycle.
+    """BLOCKER 5 — read the PERSISTED current rows for this cycle ({model: (value_c, rid)}).
 
-    Returns {model: (forecast_value_c, raw_model_forecast_id)} for the single_runs rows the
-    download job persisted for THIS (city, metric, target_date, source_cycle_time). The q path
-    consumes THESE rows (never a network fetch), so the traded q is reconstructable to the exact
-    persisted inputs (model, params, url hash, source_available_at). Empty dict -> the current
-    capture is missing for this cycle (the caller blocks / falls back with a reason).
-    Fail-soft: any DB error -> empty dict (treated as missing capture, never raises).
+    SHAPE ADAPTER ONLY (Task #32 follow-up, 2026-06-11): the serving RULE — which endpoint
+    serves each model's current value — lives in the SINGLE authority
+    ``replacement_current_value_serving.read_current_instrument_values`` (registry member #10).
+    The old gem_global-only previous_runs exception (edc598b440) is now one instance of the
+    generalized 没有新的就用老的 rule: a provider absent from single_runs at the selected cycle
+    (JMA at every 06Z-cadence cycle — it publishes 00/12Z only; gfs during an HTTP-400 outage)
+    serves its previous_runs row at the SAME natural key, BRANDED served_via="previous_runs" in
+    the fusion provenance, instead of being dropped. The substituted value is the SAME physical
+    product the model's walk-forward de-bias history is fit on, so the lead-bucket residual
+    variance already prices the older run — no manual down-weighting anywhere.
 
-    LEAD_DAYS IS NOT A FILTER (2026-06-09 fix): (city, metric, target_date, source_cycle_time)
-    already uniquely identifies the forecast, and lead_days is a DERIVED field = target - cycle.
-    The download persists lead_days on the cycle/UTC calendar; this reader previously re-derived
-    it from ``computed_at`` on the CITY-LOCAL calendar (BLOCKER 6) — a different reference time
-    AND a different calendar — so the leads disagreed (e.g. Wuhan: download lead=2 from cycle
-    06-08, reader lead=1 from computed_at 06-09 local) and this read returned EMPTY for ~all live
-    cells, silently disabling the ENTIRE multi-model fusion (0/598 posteriors fused -> cold
-    soft-anchor fallback). Matching on the natural key (no lead filter) makes that
-    download/materialize lead-calendar mismatch unconstructable. ``lead_days`` is retained as a
-    parameter for call-site compatibility but is no longer used to filter.
-
-    K2 gem_global DECLARED EXCEPTION (2026-06-09, curl-verified): the open-meteo single-runs API
-    does not serve cmc_gem_gdps_15km AT ALL (even cadence-valid 00z runs return
-    modelRunUnavailable), so gem_global can never have a single_runs row. Its current value is
-    served from its previous_runs row at the SAME natural key — the SAME GDPS product its
-    walk-forward de-bias history is fit on (source-identical; the ECMWF anchor needs an
-    ifs025->ifs9 bridge precisely because its history product != live product — gem has no such
-    mismatch). The exception is scoped to gem_global ONLY: any other model missing its
-    single_runs row stays missing/LOUD (no silent endpoint masking of a broken capture).
+    LEAD_DAYS IS NOT A FILTER (2026-06-09 fix, preserved in the authority): the natural key
+    (city, metric, target_date, source_cycle_time) uniquely identifies the forecast; lead_days
+    is retained as a parameter for call-site compatibility only. Fail-soft: any DB error ->
+    empty dict (missing capture; the caller falls back with a logged reason).
     """
-    try:
-        rows = conn.execute(
-            """
-            SELECT raw_model_forecast_id, model, forecast_value_c
-            FROM raw_model_forecasts
-            WHERE city = ? AND metric = ? AND target_date = ?
-              AND source_cycle_time = ? AND endpoint = 'single_runs'
-            ORDER BY model, lead_days, raw_model_forecast_id
-            """,
-            (city, metric, target_date, source_cycle_time_iso),
-        ).fetchall()
-    except Exception:
-        return {}
-    out: dict[str, tuple[float, int]] = {}
-    for row in rows:
-        try:
-            rid = int(row[0] if not isinstance(row, sqlite3.Row) else row["raw_model_forecast_id"])
-            model = row[1] if not isinstance(row, sqlite3.Row) else row["model"]
-            value = float(row[2] if not isinstance(row, sqlite3.Row) else row["forecast_value_c"])
-        except Exception:
-            continue
-        # First row per model wins (deterministic ORDER BY); a model is captured once per cycle.
-        out.setdefault(model, (value, rid))
-    if "gem_global" not in out:
-        try:
-            gem_rows = conn.execute(
-                """
-                SELECT raw_model_forecast_id, forecast_value_c
-                FROM raw_model_forecasts
-                WHERE city = ? AND metric = ? AND target_date = ?
-                  AND source_cycle_time = ? AND endpoint = 'previous_runs'
-                  AND model = 'gem_global'
-                ORDER BY lead_days, raw_model_forecast_id
-                """,
-                (city, metric, target_date, source_cycle_time_iso),
-            ).fetchall()
-        except Exception:
-            gem_rows = []
-        for row in gem_rows:
-            try:
-                rid = int(row[0] if not isinstance(row, sqlite3.Row) else row["raw_model_forecast_id"])
-                value = float(row[1] if not isinstance(row, sqlite3.Row) else row["forecast_value_c"])
-            except Exception:
-                continue
-            out["gem_global"] = (value, rid)
-            break
-    return out
+    del lead_days  # not a filter (2026-06-09); kept for call-site/test compatibility
+    from src.data.replacement_current_value_serving import (  # noqa: PLC0415
+        read_current_instrument_values,
+    )
+
+    served = read_current_instrument_values(
+        conn, city=city, metric=metric, target_date=target_date,
+        source_cycle_time_iso=source_cycle_time_iso,
+    )
+    return {m: (s.value_c, s.raw_model_forecast_id) for m, s in served.items()}
 
 
 def _bayes_precision_fusion_city_local_lead_days(
@@ -903,12 +894,24 @@ def _replacement_bayes_precision_fusion_override(
         source_cycle_iso = _to_utc(
             request.source_cycle_time, field_name="source_cycle_time"
         ).isoformat()
+        # SINGLE-AUTHORITY current-value serving (Task #32 follow-up): the rich serving map
+        # carries per-instrument served_via/served_cycle/age provenance (brand law — a
+        # previous_runs substitution is recorded, never silent); persisted_current is its
+        # (value, rid) view for the fetch seam below.
+        from src.data.replacement_current_value_serving import (  # noqa: PLC0415
+            read_current_instrument_values,
+        )
+
+        served_current: dict[str, object] = {}
         persisted_current: dict[str, tuple[float, int]] = {}
         if conn is not None:
-            persisted_current = _read_persisted_current_capture(
+            served_current = read_current_instrument_values(
                 conn, city=request.city, metric=metric, target_date=target_date,
-                lead_days=lead_days, source_cycle_time_iso=source_cycle_iso,
+                source_cycle_time_iso=source_cycle_iso,
             )
+            persisted_current = {
+                m: (s.value_c, s.raw_model_forecast_id) for m, s in served_current.items()
+            }
 
         # An explicitly-assigned _live_fetch is honored ONLY as a per-model override seam for
         # models WITHOUT a persisted current row (legacy/test injection). It is never consulted
@@ -981,29 +984,29 @@ def _replacement_bayes_precision_fusion_override(
         # icon_global) / CMC(gem) / JMA(jma). gem_global's single_runs is unavailable at 06z/18z
         # cycles (12h cadence) so the ensemble silently ran as 3 -> a permanently-unservable model
         # must never masquerade as a transient drop. Log expected-vs-served providers per cell.
-        _missing_providers = []
-        # 2026-06-09 promotion: provider families are rep-based — NBM is the NCEP rep in-CONUS
-        # (replacing gfs_global) and the UKV 2km nest is the UKMO rep in the UK, so each family
-        # check accepts ANY of its members. 5 declared decorrelated providers since the
-        # ukmo_global promotion.
-        if not any(m in used_models for m in ("gfs_global", "ncep_nbm_conus")):
-            _missing_providers.append("NCEP/gfs_global|nbm")
-        if not any(m in used_models for m in ("icon_d2", "icon_eu", "icon_global")):
-            _missing_providers.append("DWD/icon")
-        if "gem_global" not in used_models:
-            _missing_providers.append("CMC/gem_global")
-        if "jma_seamless" not in used_models:
-            _missing_providers.append("JMA/jma_seamless")
-        if not any(
-            m in used_models
-            for m in ("ukmo_global_deterministic_10km", "ukmo_uk_deterministic_2km")
-        ):
-            _missing_providers.append("UKMO/global|uk2km")
+        # SINGLE-AUTHORITY provider-family mapping (Task #32): the model->decorrelated-provider
+        # family map lives in replacement_fusion_upgrade_trigger.DECORRELATED_PROVIDER_FAMILIES so
+        # the fusion's served/missing determination and the upgrade trigger's served/capturable
+        # comparison can never drift on what counts as a provider. 2026-06-09 promotion: families
+        # are rep-based — NBM is the NCEP rep in-CONUS, the UKV 2km nest the UKMO rep in the UK —
+        # so each family is served when ANY of its members is in used_models.
+        from src.data.replacement_fusion_upgrade_trigger import (  # noqa: PLC0415
+            DECORRELATED_PROVIDER_FAMILIES,
+            EXPECTED_DECORRELATED_PROVIDER_COUNT,
+            decorrelated_provider_families_of,
+        )
+
+        _served_families = decorrelated_provider_families_of(set(used_models))
+        _missing_providers = [
+            f"{fam}/{'|'.join(DECORRELATED_PROVIDER_FAMILIES[fam])}"
+            for fam in DECORRELATED_PROVIDER_FAMILIES
+            if fam not in _served_families
+        ]
         # FIX 1/FIX 5 (2026-06-09): the SINGLE K3 completeness verdict reused by the q-mode +
         # capture-status provenance. 5 declared decorrelated providers; served = 5 - missing.
         # This is the ONLY provider-count determination — the q-mode FULL/PARTIAL split and the
         # FIX-5 capture_status both read it (no parallel re-derivation).
-        _decorrelated_expected = 5
+        _decorrelated_expected = EXPECTED_DECORRELATED_PROVIDER_COUNT
         _decorrelated_served = _decorrelated_expected - len(_missing_providers)
         _decorrelated_complete = not _missing_providers
         if _missing_providers:
@@ -1072,6 +1075,16 @@ def _replacement_bayes_precision_fusion_override(
                     _sigma_resid = 1.5
         predictive_sigma_c = max(1.0, (float(fused.sd) ** 2 + _sigma_resid ** 2) ** 0.5)
 
+        # Task #32 follow-up (brand law): per-instrument serving provenance for the FUSED set.
+        # served_current is the single-authority serving map (read_current_instrument_values);
+        # restricting to used_models keeps the record scoped to what actually entered the q. A
+        # previous_runs substitution surfaces here as served_via="previous_runs" — never silent.
+        _current_value_serving = {
+            m: served_current[m].as_provenance()  # type: ignore[union-attr]
+            for m in used_models
+            if m in served_current
+        } or None
+
         return _BayesPrecisionFusionFusionOverride(
             anchor_value_c=float(fused.mu),
             anchor_sigma_c=float(fused.sd),
@@ -1089,6 +1102,7 @@ def _replacement_bayes_precision_fusion_override(
             decorrelated_providers_complete=_decorrelated_complete,
             decorrelated_providers_served=_decorrelated_served,
             decorrelated_providers_expected=_decorrelated_expected,
+            current_value_serving=_current_value_serving,
         )
     except Exception as exc:  # fail-soft: never break shadow materialization
         try:
@@ -1137,6 +1151,24 @@ _QLCB_BASIS = "fused_center_bootstrap_p05"
 _QLCB_SEED = 0x5EED_F09  # deterministic per-posterior rng (provenance-stable bounds)
 
 
+def _family_rounding_rule(bins: Sequence["AifsTemperatureBin"]) -> str:
+    """Return the single settlement rounding rule shared by a bin family.
+
+    The market bin family is constructed with ONE rounding rule (the seed builder
+    sets oracle_truncate for HKO, wmo_half_up otherwise, on every bin).  A mixed
+    family is a provenance error — the q-integration preimage is a per-CITY
+    property, not per-bin, so all bins MUST agree.  Fail loud rather than silently
+    integrating part of a family under the wrong preimage.
+    """
+    rules = {str(getattr(b, "rounding_rule", "wmo_half_up")) for b in bins}
+    if len(rules) != 1:
+        raise ValueError(
+            f"bin family mixes settlement rounding rules {sorted(rules)} — the "
+            f"settlement preimage is a per-city property and must be uniform"
+        )
+    return next(iter(rules))
+
+
 def _build_fused_q_bounds(
     *,
     mu_star: float,
@@ -1146,6 +1178,7 @@ def _build_fused_q_bounds(
     half_step: float,
     q_point: Mapping[str, float],
     n_draws: int = _QLCB_BOOTSTRAP_DRAWS,
+    rounding_rule: str = "wmo_half_up",
 ) -> tuple[dict[str, float], dict[str, float]]:
     """Vectorized fused-center parameter-uncertainty bootstrap for per-bin q_lcb / q_ucb.
 
@@ -1179,14 +1212,20 @@ def _build_fused_q_bounds(
     mu_draws = rng.normal(loc=float(mu_star), scale=float(center_sigma_c), size=int(n_draws))  # (N,)
     sigma = float(predictive_sigma_c)
 
-    # Per-bin integration bounds in absolute Celsius (preimage expansion by ±half_step), matching
-    # bin_probability_settlement exactly. None shoulder -> -inf / +inf via cdf 0.0 / 1.0.
+    # Per-bin integration bounds in absolute Celsius via the SETTLEMENT PREIMAGE of the
+    # declared rounding rule (the SAME single contract source bin_probability_settlement uses).
+    # wmo_half_up -> symmetric (-half_step, +half_step) [standard cities, byte-identical to the
+    # historical path]; oracle_truncate/floor -> asymmetric (0, +2·half_step) [Hong Kong]. None
+    # shoulder -> -inf / +inf via cdf 0.0 / 1.0.
+    from src.contracts.settlement_semantics import settlement_preimage_offsets  # noqa: PLC0415
+
+    _low_off, _high_off = settlement_preimage_offsets(rounding_rule, half_step=half_step)
     lows = np.array(
-        [(-np.inf if b.lower_c is None else float(b.lower_c) - half_step) for b in bins],
+        [(-np.inf if b.lower_c is None else float(b.lower_c) + _low_off) for b in bins],
         dtype=float,
     )  # (M,)
     highs = np.array(
-        [(np.inf if b.upper_c is None else float(b.upper_c) + half_step) for b in bins],
+        [(np.inf if b.upper_c is None else float(b.upper_c) + _high_off) for b in bins],
         dtype=float,
     )  # (M,)
 
@@ -1278,6 +1317,11 @@ def _insert_posterior(
     settlement_sigma_floor_c: float | None = None
     floor_unavailable_reason: str | None = None
     replacement_sigma_basis: str | None = None
+    # Catch-all (open-ended bin) sigma-floor exemption (2026-06-10, Paris >=26C incident). Records
+    # which open-ended bins had their floored mass capped at the un-floored predictive-sigma mass
+    # so the floor could not inflate the tail. Empty tuple when no cap bit (no floor / no open-ended
+    # bin away from center). Defaults defined here so the fail-closed / flag-off paths stay coherent.
+    settlement_sigma_floor_catchall_capped: tuple[str, ...] = ()
     # Q_LCB / Q_UCB bootstrap outputs (NULL unless a fused-q is built AND the bound construction
     # succeeds). FAIL-SOFT: any failure leaves these None -> q_lcb_json/q_ucb_json written as NULL,
     # which the live side treats exactly as today (Wilson fallback) -> never WORSE than status quo.
@@ -1296,6 +1340,11 @@ def _insert_posterior(
             from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
 
             _half_step = float(request.settlement_step_c) / 2.0
+            # Per-city settlement preimage: the bins declare the rounding rule (oracle_truncate
+            # for Hong Kong, wmo_half_up otherwise). The integrator MUST consume it so HK's
+            # asymmetric floor() preimage is used instead of the symmetric WMO one. Uniform
+            # across the family (fail-loud if mixed).
+            _rounding_rule = _family_rounding_rule(request.bins)
             # FIX 2 — settlement sigma floor coherence in the fused-q path. The EMOS path floors
             # sigma at the empirical settlement dispersion floor (edli_settlement_sigma_floor_enabled);
             # the fused-q path previously did NOT consult it, so "floor enabled" silently did not
@@ -1316,16 +1365,52 @@ def _insert_posterior(
                     settlement_sigma_floor_applied = True
                 else:
                     floor_unavailable_reason = _floor_reason
-            _fused_q = {
-                b.bin_id: bin_probability_settlement(
+            # CATCH-ALL EXEMPTION (2026-06-10, Paris >=26C incident /tmp/deep_verify_report.md
+            # Verification A). The settlement sigma floor is calibrated on INTERIOR-bin settlement
+            # dispersion and its contract is "max() only WIDENS -> flatter q -> fewer overconfident
+            # bets". That contract HOLDS for interior bins (widening pulls mass AWAY from the modal
+            # bin) but is VIOLATED on an OPEN-ENDED catch-all on the far side of the center: widening
+            # dumps the whole outward Gaussian tail into the single open-ended bin, INFLATING its
+            # mass (Paris >=26: 0.252 at predictive sigma 1.906 -> 0.384 at floored 4.326 — the exact
+            # over-mass bin the wrong trade bought). RELATIONSHIP INVARIANT: a floor that may only
+            # FLATTEN must never INCREASE any bin's mass. For open-ended (catch-all) bins we therefore
+            # cap the floored mass at the UN-floored (predictive-sigma) mass: min(floored, unfloored).
+            # This is monotone-conservative by construction and makes the inflation category
+            # unconstructable regardless of the floor's magnitude. Interior / distinct-endpoint bins
+            # keep the floored mass (the floor's intended interior flattening). When the floor did NOT
+            # widen sigma (_sigma_used == _sigma_pred) the cap is a no-op (both masses identical).
+            _catchall_capped_bins: list[str] = []
+
+            def _bin_mass(_b) -> float:
+                _lo = None if _b.lower_c is None else float(_b.lower_c)
+                _hi = None if _b.upper_c is None else float(_b.upper_c)
+                _m = bin_probability_settlement(
                     mu=float(bayes_precision_fusion_override.anchor_value_c),
                     sigma=_sigma_used,
-                    bin_low=(None if b.lower_c is None else float(b.lower_c)),
-                    bin_high=(None if b.upper_c is None else float(b.upper_c)),
+                    bin_low=_lo,
+                    bin_high=_hi,
                     half_step=_half_step,
+                    rounding_rule=_rounding_rule,
                 )
-                for b in request.bins
-            }
+                # Open-ended catch-all bin: exactly one bound is None. Cap floored mass at the
+                # un-floored (predictive-sigma) mass so the floor can never inflate the tail.
+                _is_open_ended = (_lo is None) != (_hi is None)
+                if _is_open_ended and _sigma_used > _sigma_pred:
+                    _m_unfloored = bin_probability_settlement(
+                        mu=float(bayes_precision_fusion_override.anchor_value_c),
+                        sigma=_sigma_pred,
+                        bin_low=_lo,
+                        bin_high=_hi,
+                        half_step=_half_step,
+                        rounding_rule=_rounding_rule,
+                    )
+                    if _m_unfloored < _m:
+                        _catchall_capped_bins.append(_b.bin_id)
+                        _m = _m_unfloored
+                return _m
+
+            _fused_q = {b.bin_id: _bin_mass(b) for b in request.bins}
+            settlement_sigma_floor_catchall_capped = tuple(_catchall_capped_bins)
             if set(_fused_q) != set(q):
                 raise ValueError(
                     f"fused-q bin keys != soft-anchor q keys ({sorted(_fused_q)[:3]}... vs "
@@ -1351,6 +1436,7 @@ def _insert_posterior(
                     bins=request.bins,
                     half_step=_half_step,
                     q_point=q,
+                    rounding_rule=_rounding_rule,
                 )
                 q_lcb_map = _lcb_map
                 q_ucb_map = _ucb_map
@@ -1377,7 +1463,14 @@ def _insert_posterior(
             _floor_required_but_missing = (
                 _edli_settlement_sigma_floor_required() and not settlement_sigma_floor_applied
             )
-            if bayes_precision_fusion_override.decorrelated_providers_complete and not _floor_required_but_missing:
+            # PR#403 FIX (2026-06-09): bounds required for live eligibility. FUSED_NORMAL_FULL/PARTIAL
+            # now REQUIRES both q_lcb_map and q_ucb_map successfully built. Bounds failure degrades
+            # to FUSED_NORMAL_BOUNDS_MISSING — the point q is fine (shadow accrual continues) but the
+            # live gate will reject this mode. This kills the two-measures disease: fused-Normal q
+            # point + Wilson LCB authority = two incompatible regimes, exactly the Milan root cause.
+            if q_lcb_map is None or q_ucb_map is None:
+                replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING
+            elif bayes_precision_fusion_override.decorrelated_providers_complete and not _floor_required_but_missing:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL
             else:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL
@@ -1390,6 +1483,7 @@ def _insert_posterior(
             settlement_sigma_floor_applied = False
             settlement_sigma_floor_c = None
             replacement_sigma_basis = None
+            settlement_sigma_floor_catchall_capped = ()
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
@@ -1447,10 +1541,20 @@ def _insert_posterior(
         capture_status = REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT
     else:
         capture_status = REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT
+    # CYCLE-PHASE PROVENANCE (operator cycle-physics directive 2026-06-10). 00/12Z are the
+    # full synoptic cycles; 06/18Z are intermediate cycles whose skill/bias differ. The
+    # de-bias + fusion weights are trained on ~99% 00Z-cycle history, so an intermediate-cycle
+    # posterior applies a synoptic-fit bias correction across cycle phase. We TAG the phase so
+    # the live bundle reader can hold intermediate-phase posteriors to shadow-only by default
+    # (production stays alive in dead zones; live trading waits for a settlement-graded license).
+    cycle_phase = classify_cycle_phase(_to_utc(request.source_cycle_time, field_name="source_cycle_time"))
     provenance_payload = {
         "anchor_weight": request.anchor_weight,
         "anchor_sigma_c": request.anchor_sigma_c,
         "anchor_value_c": result.anchor_value_c,
+        # Synoptic (00/12Z) vs intermediate (06/18Z) model-cycle phase. The live gate reads
+        # THIS tag (fail-closed to the source_cycle_time hour when absent on legacy rows).
+        "cycle_phase": cycle_phase,
         "aifs_artifact_id": request.aifs_artifact_id,
         "aifs_identity": {
             "identity_decision_valid": request.aifs_extraction.identity_decision_valid,
@@ -1476,6 +1580,9 @@ def _insert_posterior(
         "settlement_sigma_floor_c": settlement_sigma_floor_c,
         "settlement_sigma_floor_unavailable_reason": floor_unavailable_reason,
         "replacement_sigma_basis": replacement_sigma_basis,
+        # Catch-all exemption (2026-06-10): open-ended bins whose floored mass was capped at the
+        # un-floored predictive-sigma mass (the floor may only flatten, never inflate a catch-all).
+        "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),
         # FIX 5 (2026-06-09): capture-status provenance (recording only).
         "capture_status": capture_status,
         # Q_LCB / Q_UCB provenance (2026-06-09). When the fused-center bootstrap succeeded these
@@ -1504,6 +1611,12 @@ def _insert_posterior(
         "trade_authority_status": "SHADOW_ONLY",
         "training_allowed": False,
     }
+    # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
+    # placed this only on the anchor provenance dict — but the anchor INSERT is OR-IGNOREd on a
+    # same-cycle re-materialization (the existing anchor row wins), so the note never surfaced.
+    # The posterior row is the artifact the upgrade actually produces; the note belongs here.
+    if request.upgrade_trigger:
+        provenance_payload["upgrade_trigger"] = str(request.upgrade_trigger)
     if bayes_precision_fusion_override is not None:
         provenance_payload["bayes_precision_fusion"] = {
             "method": bayes_precision_fusion_override.method,
@@ -1529,6 +1642,16 @@ def _insert_posterior(
             "decorrelated_providers_complete": bool(bayes_precision_fusion_override.decorrelated_providers_complete),
             "decorrelated_providers_served": int(bayes_precision_fusion_override.decorrelated_providers_served),
             "decorrelated_providers_expected": int(bayes_precision_fusion_override.decorrelated_providers_expected),
+            # Task #32 follow-up (brand law): per-instrument serving record — which endpoint
+            # served each fused model's CURRENT value (served_via), the served row id / cycle /
+            # capture stamp / age_hours, and its lead bucket. A previous_runs substitution (a
+            # provider structurally unpublished on this cycle's single_runs, e.g. JMA at 06Z)
+            # is RECORDED here, never silent.
+            "current_value_serving": (
+                {m: dict(v) for m, v in bayes_precision_fusion_override.current_value_serving.items()}
+                if bayes_precision_fusion_override.current_value_serving
+                else None
+            ),
             "fusion_authority": "SHADOW_ONLY",
         }
     posterior_identity_hash = _json_hash(
@@ -1614,10 +1737,19 @@ def _build_readiness(
 ):
     expected = expected_replacement_dependency_identity_by_role(metric)
     computed_at = _to_utc(request.computed_at, field_name="computed_at")
+    # SINGLE freshness authority (operator directive 2026-06-11, RULE-1 twin-clock
+    # incident): readiness expiry derives from the cycle's staleness bound, never a
+    # second guessed clock (the old computed_at+3h killed lawful 26h-old data live).
+    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+        replacement_readiness_expires_at,
+    )
+
     expires_at = (
         _to_utc(request.expires_at, field_name="expires_at")
         if request.expires_at is not None
-        else computed_at + timedelta(hours=3)
+        else replacement_readiness_expires_at(
+            _to_utc(request.source_cycle_time, field_name="source_cycle_time")
+        )
     )
     return build_replacement_forecast_readiness(
         city=request.city,

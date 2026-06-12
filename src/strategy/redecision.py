@@ -1,5 +1,11 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-10
+# Audit note 2026-06-10 (P0 mode-authority): added SUBMIT_ABORTED_MODE_FLIPPED
+#   lifecycle state + MODE_FLIPPED reversal reason. The final command builder must
+#   NOT re-decide maker/taker mode; the proven proof execution_mode_intent flows to
+#   the final intent and any final-stage mode change (incl. missing/unknown mode,
+#   fail-closed) aborts SUBMIT_ABORTED_MODE_FLIPPED for a full re-rank next cycle.
+#   Authority basis: operator review 2026-06-10 P0 mode-authority.
 # Audit note 2026-06-10: GATE 2 PRICE_MOVED is now a TAKER-only protection +
 #   bounded slippage tolerance. A resting MAKER order pays its own admitted limit
 #   and never chases the recaptured ask, so RecaptureInputs.order_rests_at_admitted_price
@@ -116,6 +122,26 @@ class CandidateLifecycleState(StrEnum):
     # with real edge that we declined for sizing reasons must never be recorded as
     # "edge reversed". Antibody for the 2026-06-09 false-EDGE_REVERSED regression.
     SUBMIT_ABORTED_BELOW_MIN_ORDER = auto()
+    # DAY0 exposure-cap aborts (PR#404 P0-1: the per-family day0 notional cap
+    # lives INSIDE the sizing kernel's feasible region). EXHAUSTED: the family
+    # already carries the cap. BELOW_MIN_ORDER: positive headroom but smaller
+    # than the SELECTED market's real venue min-order notional (min_order_size
+    # x all-in price — NOT a $1 constant), so no admissible stake exists within
+    # the cap. Both are sizing/cap aborts, never edge verdicts.
+    SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED = auto()
+    SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER = auto()
+    # Final-submit maker/taker mode authority (operator review 2026-06-10 P0
+    # mode-authority). The selected proof's execution_mode_intent (MAKER/TAKER)
+    # is PROVEN through submit recapture under that mode's economics (a MAKER
+    # rests at the admitted limit with zero taker fee and skips the PRICE_MOVED
+    # ceiling; a TAKER pays full fee under the bounded ceiling). The final command
+    # builder may NOT re-decide the mode: if the fresh book / governor / canary /
+    # EV boundary would change it, the proven economics are stale and the submit
+    # must ABORT and defer to a full re-rank next cycle. Fail-closed: a missing /
+    # unknown mode at the final stage is treated as unproven and also aborts here
+    # (NEVER a default taker submit). DISTINCT from FAMILY_REVERSED (rank changed)
+    # and PRICE_MOVED (cost ceiling): this is the order-TYPE proof going stale.
+    SUBMIT_ABORTED_MODE_FLIPPED = auto()
 
     SUBMITTED = auto()
     ACKED = auto()
@@ -140,6 +166,9 @@ SUBMIT_ABORT_STATES: frozenset[CandidateLifecycleState] = frozenset(
         CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED,
         CandidateLifecycleState.SUBMIT_ABORTED_FAMILY_REVERSED,
         CandidateLifecycleState.SUBMIT_ABORTED_BELOW_MIN_ORDER,
+        CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED,
+        CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER,
+        CandidateLifecycleState.SUBMIT_ABORTED_MODE_FLIPPED,
     }
 )
 
@@ -162,6 +191,16 @@ class ReversalReason(StrEnum):
         MIN_ORDER    — edge positive at min order but the sized stake could not clear
                        the venue floor within the bankroll cap (sizing abort, NOT an
                        edge reversal). Keeps EDGE distinct from venue-floor declines.
+        DAY0_CAP     — the per-family day0 notional cap bounded the feasible stake
+                       region (exhausted, or below the venue min order). Cap decline,
+                       not an edge reversal (PR#404 P0-1).
+        MODE_FLIPPED — the selected proof's maker/taker execution_mode_intent was
+                       PROVEN through submit recapture under that mode's economics,
+                       but the final command builder's fresh book / governor / canary
+                       / EV boundary would change the mode. The proven economics are
+                       stale; the submit aborts and defers to a full re-rank. Order-TYPE
+                       authority going stale, NOT an edge / rank / price reversal
+                       (operator review 2026-06-10 P0 mode-authority).
     """
 
     FORECAST = auto()
@@ -173,6 +212,16 @@ class ReversalReason(StrEnum):
     SUBMIT = auto()
     PORTFOLIO = auto()
     MIN_ORDER = auto()
+    # MODE_FLIPPED — the final-submit maker/taker mode no longer matches the proven
+    # proof mode (operator review 2026-06-10 P0 mode-authority). A first-class
+    # order-TYPE reversal, distinct from FAMILY_RANK (which leg) / EDGE (sign of
+    # utility) / PRICE (cost ceiling). Both flip directions (MAKER->TAKER and
+    # TAKER->MAKER) and a missing/unknown final mode map here (fail-closed).
+    MODE_FLIPPED = auto()
+    # DAY0_CAP — the per-family day0 notional cap (PR#404 P0-1) bounded the
+    # feasible stake region: exhausted headroom, or headroom below the selected
+    # market's venue min-order notional. A cap/sizing decline, never "no edge".
+    DAY0_CAP = auto()
 
 
 # ---------------------------------------------------------------------------

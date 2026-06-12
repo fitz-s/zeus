@@ -88,9 +88,12 @@ def _wire(monkeypatch, *, plan: _PlanStub, calls: list):
     monkeypatch.setattr(
         plan_mod, "build_replacement_forecast_current_target_plan", lambda _db: plan
     )
+    # Run-selection single authority (2026-06-11): the production job resolves the
+    # available cycle via provider probes, never the dead now-minus-lag guess.
+    import src.data.replacement_forecast_production as production
+
     monkeypatch.setattr(
-        dl, "_parse_cycle",
-        lambda value, *, now, release_lag_hours: AVAILABLE_CYCLE if value is None else value,
+        production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE
     )
 
     def _fake_download(**kwargs):

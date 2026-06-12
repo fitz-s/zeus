@@ -14,8 +14,9 @@ from src.decision_kernel.certificates.no_submit import build_no_submit_decision_
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.ledger import CompileFailure
 from src.decision_kernel.verifier import (
+    ALT_CREDENTIAL_CALIBRATION_AUTHORITIES,
     APPROVED_CALIBRATION_AUTHORITIES,
-    IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+    calibration_maturity_too_low,
 )
 from src.events.opportunity_event import OpportunityEvent
 
@@ -579,7 +580,10 @@ def _validate_calibration_payload(
     maturity = _optional_int(calibration.get("maturity_level"))
     if maturity is None:
         raise ValueError("calibration.maturity_level missing")
-    if maturity > 3 and str(authority) != IDENTITY_FALLBACK_CALIBRATION_AUTHORITY:
+    # K1.3: ONE shared maturity rule — calibration_maturity_too_low from the verifier
+    # module (single constant + single predicate; the divergent-twin-tuple incident
+    # CERT BRIDGE 2026-06-10 is the reason this must never be a local formula again).
+    if calibration_maturity_too_low(maturity, authority):
         raise ValueError("calibration.maturity_level too low")
     input_space = calibration.get("input_space")
     expected_input_space = model_config.get("calibration_input_space")

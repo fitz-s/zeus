@@ -9597,6 +9597,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         "chain_seen_at",
         "chain_absence_at",
         "entry_ci_width",
+        "exit_retry_count",
+        "next_exit_retry_at",
     )
     authority_select_expr = ", ".join(
         c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
@@ -9667,6 +9669,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "execution_fact_filled_at": fill_economics["execution_fact_filled_at"],
                 "p_posterior": row["p_posterior"],
                 "entry_ci_width": row["entry_ci_width"],
+                "exit_retry_count": row["exit_retry_count"],
+                "next_exit_retry_at": row["next_exit_retry_at"],
                 "last_monitor_prob": _finite_float_or_none(row["last_monitor_prob"]),
                 "last_monitor_edge": _finite_float_or_none(row["last_monitor_edge"]),
                 "last_monitor_market_price": row["last_monitor_market_price"],

@@ -2269,6 +2269,53 @@ def harvest_settlement(
     return count
 
 
+def _resolve_condition_id_from_token_map(conn, pos) -> str:
+    """Backfill a position's condition_id from the token->market mapping.
+
+    PEF-2026-05-27-D2 sibling defect (operator redeem directive 2026-06-10 — $19
+    stuck): a legacy/projection-gap position can carry its YES/NO token_ids while
+    condition_id is NULL (e.g. London 2026-05-19 trade 3a6f0728-c50). Without a
+    condition_id the harvester logs "no condition_id for redeem command" and
+    skips settlement close forever, so a winning position is never claimed.
+
+    Resolution: executable_market_snapshots maps yes_token_id / no_token_id ->
+    condition_id (canonically owned by zeus_trades.db, the connection
+    _settle_positions already holds). Query by whichever token the position
+    carries. Returns the resolved condition_id (str) or "" when unresolvable —
+    the caller keeps the loud skip in that case (fail-closed, never guesses).
+    """
+    token_candidates = [
+        ("yes_token_id", str(getattr(pos, "token_id", "") or "")),
+        ("no_token_id", str(getattr(pos, "no_token_id", "") or "")),
+    ]
+    for column, token_id in token_candidates:
+        if not token_id:
+            continue
+        try:
+            row = conn.execute(
+                f"""
+                SELECT condition_id
+                  FROM executable_market_snapshots
+                 WHERE {column} = ?
+                   AND condition_id IS NOT NULL
+                 ORDER BY captured_at DESC
+                 LIMIT 1
+                """,
+                (token_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            logger.warning(
+                "condition_id backfill query failed for %s via %s: %s",
+                getattr(pos, "trade_id", "?"), column, exc,
+            )
+            return ""
+        if row is not None:
+            resolved = str((row["condition_id"] if hasattr(row, "keys") else row[0]) or "")
+            if resolved:
+                return resolved
+    return ""
+
+
 def _settle_positions(
     conn, portfolio: PortfolioState,
     city: str, target_date: str, winning_label: str,
@@ -2412,9 +2459,24 @@ def _settle_positions(
         # Winning positions are claimable inventory. Do not mark them settled
         # unless the durable redeem command is present or successfully queued.
         if exit_price > 0:
-            if not pos.condition_id:
+            redeem_condition_id = str(getattr(pos, "condition_id", "") or "")
+            if not redeem_condition_id:
+                # Legacy/projection-gap position: token_ids present but
+                # condition_id NULL. Backfill from the token->market mapping
+                # before skipping (operator redeem directive 2026-06-10).
+                redeem_condition_id = _resolve_condition_id_from_token_map(conn, pos)
+                if redeem_condition_id:
+                    pos.condition_id = redeem_condition_id
+                    logger.info(
+                        "Backfilled condition_id=%s for %s from token->market map; "
+                        "settlement close proceeds.",
+                        redeem_condition_id, pos.trade_id,
+                    )
+            if not redeem_condition_id:
                 logger.error(
-                    "Skipping settlement close for %s: winning position has no condition_id for redeem command",
+                    "Skipping settlement close for %s: winning position has no "
+                    "condition_id for redeem command and token->market backfill "
+                    "found no mapping",
                     pos.trade_id,
                 )
                 continue

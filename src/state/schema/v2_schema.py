@@ -601,6 +601,33 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             ON raw_model_forecast_request_conflicts(model, city, target_date, metric,
                                                     source_cycle_time, endpoint)
     """)
+    # Task #32 (PARTIAL-fusion upgrade trigger) idempotency marker. When the fusion-upgrade
+    # trigger (src/data/replacement_fusion_upgrade_trigger.py) detects that a scope's latest
+    # posterior was fused from a STRICTLY SMALLER decorrelated-provider family set than is now
+    # capturable at the SAME source_cycle_time, it enqueues ONE re-materialization seed and writes
+    # one row here. The UNIQUE index on (city, target_date, metric, source_cycle_time,
+    # capturable_family_set) is the bound: a scope is re-enqueued AT MOST ONCE per
+    # (cycle, capturable-family-superset) transition, so a still-missing 5th provider (gfs HTTP
+    # 400, jma off the 06Z single_runs cadence) can never loop the queue. SHADOW research surface
+    # only — never an order/training truth table.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fusion_upgrade_enqueues (
+            enqueue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            enqueued_at TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            served_family_set TEXT NOT NULL,
+            capturable_family_set TEXT NOT NULL,
+            seed_file TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_fusion_upgrade_enqueues_scope_cycle_superset
+            ON fusion_upgrade_enqueues(city, target_date, metric, source_cycle_time,
+                                       capturable_family_set)
+    """)
 
 
 def _create_calibration_pairs(conn: sqlite3.Connection) -> None:

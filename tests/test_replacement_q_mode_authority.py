@@ -1,13 +1,17 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-06-09
-# Authority basis: FIX 1/FIX 2/FIX 5 (operator-reviewed 2026-06-09) on the replacement chain
-#   (docs/authority/replacement_final_form_2026_06_09.md). Relationship tests for the cross-module
-#   boundary: the materializer DERIVES an explicit replacement_q_mode into provenance_json, and the
-#   EDLI live seam (event_reactor_adapter._replacement_q_mode_live_eligibility) ADMITS real submit
-#   ONLY for the fused-Normal modes. Category killed: a posterior that silently fell back to the
-#   legacy member-vote soft-anchor q (fusion None / fused-q build failed / flag off) sizing live
-#   Kelly under a different probability regime than the release evidence assumes — distinguishable
-#   now ONLY by a data-class label the live gate enforces, not by a WARNING log.
+# Last reused or audited: 2026-06-10
+# Authority basis: FIX 1/FIX 2/FIX 5 (operator-reviewed 2026-06-09) + P0 grandfather-revoked
+#   (operator directive 2026-06-10). Relationship tests for the cross-module boundary: the
+#   materializer DERIVES an explicit replacement_q_mode into provenance_json, and the EDLI live
+#   seam (event_reactor_adapter._replacement_q_mode_live_eligibility) ADMITS real submit ONLY for
+#   the fused-Normal modes. Category killed: a posterior that silently fell back to the legacy
+#   member-vote soft-anchor q (fusion None / fused-q build failed / flag off) sizing live Kelly
+#   under a different probability regime than the release evidence assumes — distinguishable now
+#   ONLY by a data-class label the live gate enforces, not by a WARNING log.
+#   P0 grandfather-revoked: old DB rows with q_shape="fused_normal_direct" and no explicit
+#   replacement_q_mode key are no longer live-eligible (FUSED_NORMAL_GRANDFATHER_REVOKED). They
+#   carry no q_lcb/q_ucb bounds and would mix fused-Normal q with Wilson/AIFS q_lcb — the
+#   two-measures disease that caused the Milan wrong order. Rematerialization required.
 """Relationship tests: replacement q-mode authority + settlement-sigma-floor coherence.
 
 These verify the INVARIANT that holds across the materializer -> live-gate boundary:
@@ -172,13 +176,16 @@ def test_partial_mode_gate_admits(monkeypatch) -> None:
     assert mode == "FUSED_NORMAL_PARTIAL"
 
 
-def test_grandfathered_fused_row_without_mode_key_admitted() -> None:
-    """A pre-change live row (q_shape == fused_normal_direct, NO replacement_q_mode key) is
-    grandfathered as a fused-Normal mode so this change does not brick the 67 existing live rows."""
+def test_grandfathered_fused_row_without_mode_key_rejected() -> None:
+    """P0 grandfather-revoked (operator directive 2026-06-10): a pre-change DB row with
+    q_shape="fused_normal_direct" and NO replacement_q_mode key is NO LONGER live-eligible.
+    These rows have no q_lcb/q_ucb bounds and would size Kelly under fused-Normal q +
+    Wilson/AIFS q_lcb — the two-measures disease. FUSED_NORMAL_GRANDFATHER_REVOKED is the
+    rejection reason; rows must rematerialize to get proper bounds and be admitted."""
     grandfathered = {"q_shape": "fused_normal_direct"}  # no replacement_q_mode key
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(grandfathered))
-    assert eligible is True
-    assert mode == "FUSED_NORMAL_GRANDFATHERED"
+    assert eligible is False
+    assert mode == "FUSED_NORMAL_GRANDFATHER_REVOKED"
 
 
 def test_legacy_non_fused_row_without_mode_key_rejected() -> None:
@@ -290,3 +297,154 @@ def test_floor_required_but_absent_degrades_to_partial(monkeypatch) -> None:
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
     assert eligible is True  # PARTIAL is still live-eligible
     assert mode == "FUSED_NORMAL_PARTIAL"
+
+
+# =====================================================================================
+# PR#403 FIX — bounds required for live eligibility (both seams)
+# =====================================================================================
+
+from src.engine.event_reactor_adapter import _replacement_q_mode_live_eligibility as _q_mode_elig
+
+
+class _BundleStubWithBounds:
+    """Extends _BundleStub with q_lcb/q_ucb attributes for the second-gate bound-presence check."""
+
+    def __init__(
+        self,
+        provenance_json: dict,
+        *,
+        q_lcb: object = None,
+        q_ucb: object = None,
+    ) -> None:
+        self.provenance_json = provenance_json
+        self.q_lcb = q_lcb
+        self.q_ucb = q_ucb
+
+
+def _check_live_gate(bundle) -> tuple[bool, str]:
+    """Exercise the full live-gate seam: q_mode eligibility + bounds-presence check.
+
+    Mirrors the two-check sequence in _replacement_authority_probability_and_fdr_proof:
+      1. _replacement_q_mode_live_eligibility
+      2. bounds presence / basis check (only reached for live-eligible modes)
+    Returns (eligible, rejection_reason) — True/"OK" on pass.
+
+    NOTE: grandfathered rows (q_shape=fused_normal_direct, no mode key) are rejected by the
+    FIRST gate (FUSED_NORMAL_GRANDFATHER_REVOKED) — the grandfather branch is deleted. The
+    second bounds check is only reached for rows that passed the first gate (FULL/PARTIAL).
+    """
+    from typing import Mapping
+    eligible, q_mode = _replacement_q_mode_live_eligibility(bundle)
+    if not eligible:
+        return False, f"REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#{q_mode}"
+    prov = getattr(bundle, "provenance_json", None) or {}
+    q_shape = str(prov.get("q_shape") if isinstance(prov, Mapping) else "")
+    # Second gate: bounds required for fused_normal_direct shape rows that passed the first gate.
+    needs_bounds = q_shape == "fused_normal_direct"
+    if needs_bounds:
+        qlcb = getattr(bundle, "q_lcb", None) or {}
+        qucb = getattr(bundle, "q_ucb", None) or {}
+        lcb_basis = prov.get("q_lcb_basis") if isinstance(prov, Mapping) else None
+        bounds_ok = (
+            isinstance(qlcb, Mapping) and bool(qlcb)
+            and isinstance(qucb, Mapping) and bool(qucb)
+            and lcb_basis == "fused_center_bootstrap_p05"
+        )
+        if not bounds_ok:
+            return False, (
+                f"REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#FUSED_NORMAL_BOUNDS_MISSING"
+                f":q_shape={q_shape}:q_mode={q_mode}:lcb_basis={lcb_basis}"
+            )
+    return True, "OK"
+
+
+def test_bounds_failure_materializes_fused_normal_bounds_missing_mode(monkeypatch) -> None:
+    """PR#403: when the fused-q point succeeds but _build_fused_q_bounds raises, the mode MUST
+    be FUSED_NORMAL_BOUNDS_MISSING (NOT FULL/PARTIAL). Shadow row still materializes (point q intact).
+    Category killed: a FULL/PARTIAL row with NULL q_lcb_json was live-eligible before this fix,
+    letting buy_yes fall back to Wilson — the two-measures disease (fused-Normal q + legacy LCB)."""
+    _disable_other_layers(monkeypatch)
+    _enable_fusion(monkeypatch)
+    _enable_fused_shape(monkeypatch)
+
+    def _boom(**_kw):
+        raise RuntimeError("bootstrap exploded")
+
+    monkeypatch.setattr(mod, "_build_fused_q_bounds", _boom)
+    conn = _conn()
+    _seed_history(conn, decision=date(2026, 6, 7), models=_FULL_MODELS)
+    _seed_current_single_runs(conn, values=_full_live_values())
+
+    prov = _materialize_provenance(conn)  # must NOT raise — shadow accrual preserved
+
+    # Point q shape is intact (the fused-Normal shape gain is not regressed).
+    assert prov["q_shape"] == "fused_normal_direct", (
+        "bounds failure must NOT roll back the fused q point"
+    )
+    # Mode is FUSED_NORMAL_BOUNDS_MISSING — distinct from FUSED_Q_BUILD_FAILED.
+    assert prov["replacement_q_mode"] == "FUSED_NORMAL_BOUNDS_MISSING", (
+        "bounds failure must produce FUSED_NORMAL_BOUNDS_MISSING, not FULL/PARTIAL"
+    )
+    assert prov["q_lcb_basis"] is None
+    assert prov["q_lcb_json_role"] == "absent_no_calibrated_lcb_available"
+
+    # Live gate (first check only — q_mode) rejects this mode.
+    eligible, mode = _q_mode_elig(_BundleStub(prov))
+    assert eligible is False
+    assert mode == "FUSED_NORMAL_BOUNDS_MISSING"
+
+
+def test_prefixed_row_full_mode_null_bounds_rejected_by_second_gate() -> None:
+    """PR#403 belt-and-braces: a row materialized BEFORE the fix has mode=FUSED_NORMAL_FULL
+    but NULL q_lcb_json (bundle q_lcb/q_ucb empty). The second gate catches this and rejects
+    with FUSED_NORMAL_BOUNDS_MISSING. No code path may write FULL/PARTIAL and NULL bounds now,
+    but any rows already in the DB before the fix must be caught here."""
+    pre_fix_prov = {
+        "q_shape": "fused_normal_direct",
+        "replacement_q_mode": "FUSED_NORMAL_FULL",
+        "q_lcb_basis": None,  # NULL — bounds not yet materialized
+        "q_lcb_json_role": "absent_no_calibrated_lcb_available",
+    }
+    # q_mode gate passes (FULL is live-eligible), but the second check must catch absent bounds.
+    bundle = _BundleStubWithBounds(pre_fix_prov, q_lcb=None, q_ucb=None)
+    eligible, reason = _check_live_gate(bundle)
+    assert eligible is False
+    assert "FUSED_NORMAL_BOUNDS_MISSING" in reason
+
+
+def test_grandfathered_row_rejected_by_first_gate() -> None:
+    """P0 grandfather-revoked (operator directive 2026-06-10): a grandfathered row (pre-key,
+    q_shape=fused_normal_direct, no mode key) is rejected by the FIRST gate with
+    FUSED_NORMAL_GRANDFATHER_REVOKED — the grandfather branch has been deleted. The second
+    gate is never reached. The next materialization will write proper bounds and mode key."""
+    grandfathered_prov = {
+        "q_shape": "fused_normal_direct",
+        # No replacement_q_mode key (pre FIX-1 materialization).
+        "q_lcb_basis": None,
+    }
+    bundle = _BundleStubWithBounds(grandfathered_prov, q_lcb=None, q_ucb=None)
+    # First gate now rejects: FUSED_NORMAL_GRANDFATHER_REVOKED (not eligible).
+    eligible_mode, mode = _q_mode_elig(_BundleStub(grandfathered_prov))
+    assert eligible_mode is False
+    assert mode == "FUSED_NORMAL_GRANDFATHER_REVOKED"
+    # Full gate path also rejects, reason contains the mode tag.
+    eligible, reason = _check_live_gate(bundle)
+    assert eligible is False
+    assert "FUSED_NORMAL_GRANDFATHER_REVOKED" in reason
+
+
+def test_happy_path_full_mode_with_bounds_passes_both_gates() -> None:
+    """PR#403 happy-path confirmation: FUSED_NORMAL_FULL + proper bounds + correct basis passes
+    both gates. Ensures the fix does not regress the working flow."""
+    happy_prov = {
+        "q_shape": "fused_normal_direct",
+        "replacement_q_mode": "FUSED_NORMAL_FULL",
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+        "q_lcb_json_role": "fused_center_bootstrap_lcb",
+    }
+    q_lcb = {"bin_25": 0.12, "bin_26": 0.18, "bin_27": 0.10}
+    q_ucb = {"bin_25": 0.22, "bin_26": 0.25, "bin_27": 0.20}
+    bundle = _BundleStubWithBounds(happy_prov, q_lcb=q_lcb, q_ucb=q_ucb)
+    eligible, reason = _check_live_gate(bundle)
+    assert eligible is True
+    assert reason == "OK"

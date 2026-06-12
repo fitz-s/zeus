@@ -703,6 +703,14 @@ tables:
     created_by: init_schema
     pk_col: null
 
+  - name: day0_oracle_anomaly_flags
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: runtime_module
+    pk_col: "[city, target_date]"
+    notes: "DB-backed day0 anomaly pause registry (PR#404 round-2: persisted ttl_hours authority; TTL'd negative-miss cache). Created lazily by src/data/day0_oracle_anomaly.py _FLAGS_TABLE_DDL (CREATE IF NOT EXISTS) on first flag write, not by init_schema — registered 2026-06-10 after boot assert flagged the runtime-created table."
+
   - name: decision_log
     db: world
     schema_class: world_class

@@ -102,6 +102,27 @@ ALLOWLIST: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 GRANDFATHER: frozenset[str] = frozenset(
     {
+        # --- Carried in from base (fix/opportunity-book-selector) at the PR#405 merge
+        #     2026-06-12. These internal _v[0-9] tokens were introduced by base commits
+        #     AFTER this PR was cut; they are NOT this rename's churn and are the SAME
+        #     two deferred categories the rest of GRANDFATHER documents:
+        #       * C-dead table-name refs in frozen one-shot drop/audit scripts
+        #         (scripts/task_2026-06-09_drop_dead_tables.py) — the live tables are gone.
+        #       * D-category provenance / hash / authority identities stored in DATA
+        #         (d0hv_req_v1 request-hash prefix, fused_bootstrap_settlement_coverage_v1
+        #         hash prefix, settlement_sigma_floor_v2_residual authority string) — a
+        #         paused-daemon data-retag, not a code edit. Must shrink to zero via the
+        #         operator-gated migration, never grow.
+        "calibration_pairs_v2_archived_2026_05_11",
+        "d0hv_req_v1",
+        "ensemble_snapshots_v2_archived_2026_05_11",
+        "fused_bootstrap_settlement_coverage_v1",
+        "historical_forecasts_v2",
+        "market_events_v2_archived_2026_05_11",
+        "rescue_events_v2",
+        "settlement_sigma_floor_v2_residual",
+        "settlements_v2_archived_2026_05_11",
+        # --- end PR#405 merge carry-in ---
         "C_canonical_v1",
         "F_canonical_v1",
         "OOS_BRIER_DIFF_v1",
@@ -307,7 +328,6 @@ GRANDFATHER: frozenset[str] = frozenset(
         "replacement_forecast_shadow_veto_switch_receipt_v1",
         "replacement_product_keyed_v1",
         "replacement_soft_anchor_finetune_artifact_v1",
-        "settlement_sigma_floor_v1",
         "settlements_v2",
         "settlements_v2_distribution",
         "sp_obs_v2_insert_rows_",

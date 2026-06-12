@@ -295,6 +295,10 @@ class _FakeClob:
 
 
 def _orders_conn():
+    """PRODUCTION-LIKE topology (PR#404 P1): market_events stores ONLY the YES
+    token and NO temperature_metric column (the trades-DB shape);
+    executable_market_snapshots carries yes_token_id/no_token_id;
+    market_topology_state carries the TYPED temperature_metric."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -303,26 +307,39 @@ def _orders_conn():
             condition_id TEXT, token_id TEXT, range_label TEXT,
             range_low REAL, range_high REAL, outcome TEXT, created_at TEXT)"""
     )
-    rows = [
-        # dead 25-bin YES token (extreme 26): MUST cancel
-        ("highest-temperature-in-tokyo-on-june-10", "Tokyo", "2026-06-10",
-         "c1", "tok-dead-yes", "25°C", 25.0, 25.0, "Yes"),
-        # alive 27-bin YES token: keep
-        ("highest-temperature-in-tokyo-on-june-10", "Tokyo", "2026-06-10",
-         "c2", "tok-alive-yes", "27°C", 27.0, 27.0, "Yes"),
-        # dead 25-bin NO token: structural WIN — keep resting
-        ("highest-temperature-in-tokyo-on-june-10", "Tokyo", "2026-06-10",
-         "c1", "tok-dead-no", "25°C", 25.0, 25.0, "No"),
-        # non-day0 date: keep
-        ("highest-temperature-in-tokyo-on-june-11", "Tokyo", "2026-06-11",
-         "c3", "tok-tomorrow", "25°C", 25.0, 25.0, "Yes"),
+    conn.execute(
+        """CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT, condition_id TEXT, yes_token_id TEXT,
+            no_token_id TEXT, captured_at TEXT)"""
+    )
+    conn.execute(
+        """CREATE TABLE market_topology_state (
+            condition_id TEXT, temperature_metric TEXT, city_id TEXT,
+            target_local_date TEXT, recorded_at TEXT)"""
+    )
+    families = [
+        # (cond, yes_token, no_token, city, date, lo, hi)
+        ("c1", "tok-dead-yes", "tok-dead-no", "Tokyo", "2026-06-10", 25.0, 25.0),
+        ("c2", "tok-alive-yes", "tok-alive-no", "Tokyo", "2026-06-10", 27.0, 27.0),
+        ("c3", "tok-tomorrow", "tok-tomorrow-no", "Tokyo", "2026-06-11", 25.0, 25.0),
+        # the buy_no death-ride family: open-high shoulder ('27 or higher')
+        ("c4", "tok-shoulder-yes", "tok-shoulder-no", "Tokyo", "2026-06-10", 27.0, None),
     ]
-    for r in rows:
+    for cond, yes_t, no_t, city, date, lo, hi in families:
         conn.execute(
             "INSERT INTO market_events (market_slug, city, target_date, condition_id,"
             " token_id, range_label, range_low, range_high, outcome, created_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,'')",
-            r,
+            (f"highest-temperature-in-tokyo-on-{date}", city, date, cond, yes_t,
+             "bin", lo, hi, ""),
+        )
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?)",
+            (f"ems-{cond}", cond, yes_t, no_t, "2026-06-10T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO market_topology_state VALUES (?,?,?,?,?)",
+            (cond, "high", city, date, "2026-06-10T00:00:00+00:00"),
         )
     return conn
 
@@ -374,6 +391,43 @@ class TestRestingOrderCancel:
             cities_by_name={"Tokyo": _tokyo()}, now=self.NOW_TOKYO_DAY,
         )
         assert n == 0  # no successful cancel, no exception
+
+    def test_no_token_resolves_via_ems_and_shoulder_no_order_is_cancelled(self, monkeypatch):
+        """PR#404 P1 production-topology case: the open order's asset is the
+        NO token, which exists ONLY in executable_market_snapshots.no_token_id
+        (market_events stores the YES token). The shoulder family (27-or-
+        higher) with extreme 27 means buy_no is structurally DEAD -> the
+        resting BUY-NO entry on the shoulder must be found AND cancelled,
+        while the dead-bin NO order (structural WIN) is kept."""
+        _set_metar_memo(monkeypatch, 27)
+        clob = _FakeClob([
+            {"orderID": "oN1", "asset_id": "tok-shoulder-no", "side": "BUY"},  # NO lost -> cancel
+            {"orderID": "oN2", "asset_id": "tok-dead-no", "side": "BUY"},      # NO won -> keep
+            {"orderID": "oN3", "asset_id": "tok-alive-no", "side": "BUY"},     # alive -> keep
+        ])
+        n = cancel_day0_dead_bin_resting_entries(
+            clob=clob, conn=_orders_conn(),
+            cities_by_name={"Tokyo": _tokyo()}, now=self.NOW_TOKYO_DAY,
+        )
+        assert n == 1
+        assert clob.cancelled == ["oN1"]
+
+    def test_metric_is_typed_never_slug_guessed(self):
+        """The metric comes from market_topology_state.temperature_metric /
+        market_events.temperature_metric — never from slug substrings. A token
+        whose metric cannot be typed is SKIPPED (no wrong-direction cancel)."""
+        from src.execution.day0_hard_fact_exit import _resolve_order_bin_identity
+
+        conn = _orders_conn()
+        identity = _resolve_order_bin_identity(conn, "tok-shoulder-no")
+        assert identity is not None
+        assert identity["metric"] == "high" and identity["direction"] == "buy_no"
+        # drop the typed-metric authority -> resolution refuses (None), even
+        # though the slug contains 'highest'
+        conn.execute("DELETE FROM market_topology_state")
+        assert _resolve_order_bin_identity(conn, "tok-shoulder-no") is None
+        source = open("src/execution/day0_hard_fact_exit.py", encoding="utf-8").read()
+        assert '"lowest" in market_slug' not in source
 
 
 # ===========================================================================
@@ -437,28 +491,10 @@ class TestPlausibilityBound:
 # ===========================================================================
 
 class TestDay0ExposureCap:
-    def test_reduce_only_clamp(self):
-        from src.engine.event_reactor_adapter import _apply_day0_exposure_cap
-
-        assert _apply_day0_exposure_cap(
-            stake_usd=40.0, existing_family_usd=10.0, cap_usd=25.0, family_id="f",
-        ) == pytest.approx(15.0)
-        # under the cap: unchanged
-        assert _apply_day0_exposure_cap(
-            stake_usd=5.0, existing_family_usd=10.0, cap_usd=25.0, family_id="f",
-        ) == pytest.approx(5.0)
-        # disabled cap: unchanged
-        assert _apply_day0_exposure_cap(
-            stake_usd=500.0, existing_family_usd=0.0, cap_usd=None, family_id="f",
-        ) == pytest.approx(500.0)
-
-    def test_exhausted_headroom_raises_deterministic_no_submit(self):
-        from src.engine.event_reactor_adapter import _apply_day0_exposure_cap
-
-        with pytest.raises(ValueError, match="DAY0_EXPOSURE_CAP_EXHAUSTED"):
-            _apply_day0_exposure_cap(
-                stake_usd=10.0, existing_family_usd=24.5, cap_usd=25.0, family_id="f",
-            )
+    """PR#404 P0-1: post-hoc _apply_day0_exposure_cap removed; cap is now a
+    kernel feasible-region bound.  Full relationship tests live in
+    tests/test_day0_exposure_cap_kernel.py.  These three tests verify the
+    surviving configuration symbols and that the tombstoned function is gone."""
 
     def test_default_cap_is_modest_and_configurable(self):
         from src.engine.event_reactor_adapter import (
@@ -469,3 +505,436 @@ class TestDay0ExposureCap:
         assert 0.0 < _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD <= 100.0
         cap = _day0_family_notional_cap_usd()
         assert cap is None or cap > 0.0
+
+    def test_apply_day0_exposure_cap_is_removed(self):
+        """The post-hoc clamp must not exist; importing it should fail."""
+        import importlib
+        import src.engine.event_reactor_adapter as era
+        assert not hasattr(era, "_apply_day0_exposure_cap"), (
+            "_apply_day0_exposure_cap must be removed (PR#404 P0-1 tombstone)"
+        )
+
+    def test_kernel_cap_states_in_abort_states(self):
+        from src.strategy.redecision import SUBMIT_ABORT_STATES, CandidateLifecycleState
+        assert CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED in SUBMIT_ABORT_STATES
+        assert CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER in SUBMIT_ABORT_STATES
+
+
+# ===========================================================================
+# R20 — hard-fact exit survives monitor canonical-write failure (PR#404 P0-4)
+# ===========================================================================
+
+class TestHardFactExitDespiteCanonicalWriteFailure:
+    """Operator merge blocker 4: the hard-fact lane is settlement-authority
+    evidence — a monitor telemetry/canonical-event write failure must not
+    `continue` past it and hold a structurally dead leg another cycle."""
+
+    def _run_phase(self, monkeypatch, *, hard_fact_verdict):
+        import logging as _logging
+
+        import numpy as np
+
+        from src.contracts import EdgeContext, EntryMethod
+        from src.engine import cycle_runtime
+        from src.state.portfolio import Position, PortfolioState
+
+        monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
+        pos = Position(
+            trade_id="hf_p04_001", market_id="mkt_hf", city="Tokyo",
+            cluster="East Asia", target_date="2026-06-10",
+            bin_label="25°C on June 10?", direction="buy_yes",
+            size_usd=10.0, entry_price=0.40, p_posterior=0.55, edge=0.15,
+            shares=25.0, cost_basis_usd=10.0, state="day0_window",
+            token_id="tok_yes_hf", no_token_id="tok_no_hf", unit="C", env="live",
+        )
+        portfolio = PortfolioState(positions=[pos])
+
+        class LiveClob:
+            def get_best_bid_ask(self, token_id):
+                return 0.10, 0.12, 100.0, 100.0
+
+        class Tracker:
+            def record_exit(self, position):
+                pass
+
+        def mock_refresh(conn, clob, position):
+            return EdgeContext(
+                p_raw=np.array([]), p_cal=np.array([]),
+                p_market=np.array([position.entry_price]),
+                p_posterior=position.p_posterior,
+                forward_edge=0.0, alpha=0.0,
+                confidence_band_upper=0.0, confidence_band_lower=0.0,
+                entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+                decision_snapshot_id="snap1", n_edges_found=1, n_edges_after_fdr=1,
+                market_velocity_1h=0.0, divergence_score=0.0,
+            )
+
+        monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+        # THE P0-4 condition: the canonical MONITOR_REFRESHED write FAILS
+        monkeypatch.setattr(
+            cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
+            lambda conn, pos, *, deps: False,
+        )
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+            lambda *, position, city, now=None: hard_fact_verdict,
+        )
+
+        results = []
+
+        class Artifact:
+            def add_monitor_result(self, result):
+                results.append(result)
+
+        deps = type(
+            "Deps", (),
+            {
+                "MonitorResult": type(
+                    "MonitorResult", (),
+                    {"__init__": lambda self, **kw: self.__dict__.update(kw)},
+                ),
+                "logger": _logging.getLogger("test_hf_p04"),
+                "cities_by_name": {
+                    "Tokyo": type("City", (), {"timezone": "Asia/Tokyo"})()
+                },
+                "_utcnow": staticmethod(
+                    lambda: datetime(2026, 6, 10, 6, 0, tzinfo=UTC)
+                ),
+            },
+        )
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
+            deps=deps, exit_order_submit_enabled=False,
+        )
+        return results, summary
+
+    def test_dead_bin_exits_even_when_canonical_write_fails(self, monkeypatch):
+        verdict = HardFactVerdict(
+            action="EXIT_DEAD_BIN",
+            reason="running high extreme 26.0 beyond bin [25.0,25.0] — YES structurally dead",
+            metric="high", rounded_extreme=26.0, source="metar_fast_lane",
+        )
+        results, summary = self._run_phase(monkeypatch, hard_fact_verdict=verdict)
+        assert summary.get("day0_hard_fact_exits") == 1
+        assert summary.get("day0_hard_fact_exit_despite_canonical_write_failure") == 1
+        assert summary.get("monitor_canonical_write_failed") == 1
+        exits = [r for r in results if getattr(r, "should_exit", False)]
+        assert exits, "the dead-bin exit decision must be recorded despite the write failure"
+        assert any("DAY0_HARD_FACT_BIN_DEAD" in str(getattr(r, "exit_reason", "")) for r in exits)
+        assert summary.get("exits_suppressed_no_submit", 0) >= 1  # shadow mode: decision made, no real order
+
+    def test_no_hard_fact_keeps_the_existing_failure_continue(self, monkeypatch):
+        results, summary = self._run_phase(monkeypatch, hard_fact_verdict=None)
+        assert summary.get("monitor_canonical_write_failed") == 1
+        assert summary.get("day0_hard_fact_exits") is None
+        reasons = [str(getattr(r, "exit_reason", "")) for r in results]
+        assert any("MONITOR_CANONICAL_WRITE_FAILED" in reason for reason in reasons)
+        assert not any(getattr(r, "should_exit", False) for r in results)
+
+
+# ===========================================================================
+# BLOCKER 2 — HOLD_STRUCTURAL_WIN is a terminal hold: evaluate_exit + ORANGE
+#             must never sell a structurally-won position.
+# ===========================================================================
+
+class TestStructuralWinTerminalHold:
+    """PR#404 BLOCKER 2: HOLD_STRUCTURAL_WIN must produce a hard should_exit=False
+    decision that skips the estimator-evidence path AND the ORANGE favorable-exit
+    layer.  An ORANGE context that would otherwise trigger a favorable exit must
+    be held when a structural-win verdict is present.
+
+    Cross-module invariant: day0_hard_fact.action=HOLD_STRUCTURAL_WIN at
+    cycle_runtime.execute_monitoring_phase → should_exit=False regardless of
+    what pos.evaluate_exit() or the ORANGE gate would return.
+    """
+
+    def _run_structural_win_phase(
+        self, monkeypatch, *, evaluate_exit_says_exit: bool, summary_risk_level: str
+    ):
+        """Run one monitor cycle with:
+        - hard_fact.action=HOLD_STRUCTURAL_WIN
+        - evaluate_exit stubbed to return should_exit=evaluate_exit_says_exit
+        - _summary_risk_level stubbed to return summary_risk_level
+        """
+        import logging as _logging
+        import numpy as np
+
+        from src.contracts import EdgeContext, EntryMethod
+        from src.engine import cycle_runtime
+        from src.state.portfolio import ExitDecision as _ExitDecision, Position, PortfolioState
+
+        monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
+        pos = Position(
+            trade_id="sw_blocker2_001", market_id="mkt_sw", city="Tokyo",
+            cluster="East Asia", target_date="2026-06-10",
+            bin_label="25°C or higher", direction="buy_no",
+            size_usd=10.0, entry_price=0.70, p_posterior=0.80, edge=0.10,
+            shares=14.3, cost_basis_usd=10.0, state="day0_window",
+            token_id="tok_no_sw", no_token_id="tok_no_sw", unit="C", env="live",
+        )
+        portfolio = PortfolioState(positions=[pos])
+
+        class LiveClob:
+            def get_best_bid_ask(self, token_id):
+                return 0.60, 0.62, 100.0, 100.0
+
+        class Tracker:
+            def record_exit(self, position):
+                pass
+
+        def mock_refresh(conn, clob, position):
+            return EdgeContext(
+                p_raw=np.array([]), p_cal=np.array([]),
+                p_market=np.array([position.entry_price]),
+                p_posterior=position.p_posterior,
+                forward_edge=0.0, alpha=0.0,
+                confidence_band_upper=0.0, confidence_band_lower=0.0,
+                entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+                decision_snapshot_id="snap_sw", n_edges_found=1, n_edges_after_fdr=1,
+                market_velocity_1h=0.0, divergence_score=0.0,
+            )
+
+        monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+        monkeypatch.setattr(
+            cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
+            lambda conn, pos, *, deps: True,
+        )
+        # Stub hard-fact verdict: HOLD_STRUCTURAL_WIN (buy_no dead bin)
+        hold_verdict = HardFactVerdict(
+            action="HOLD_STRUCTURAL_WIN",
+            reason="buy_no on dead bin [25.0,25.0] — structural win",
+            metric="high", rounded_extreme=27.0, source="wu_icao",
+        )
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+            lambda *, position, city, now=None: hold_verdict,
+        )
+        # Stub evaluate_exit to return the requested should_exit value
+        monkeypatch.setattr(
+            pos,
+            "evaluate_exit",
+            lambda ctx: _ExitDecision(
+                evaluate_exit_says_exit,
+                "STUB_EXIT_FROM_ESTIMATOR",
+                trigger="STUB_ESTIMATOR_EXIT",
+                selected_method=pos.selected_method or pos.entry_method,
+            ),
+        )
+        # Stub _summary_risk_level to simulate ORANGE context
+        monkeypatch.setattr(
+            cycle_runtime, "_summary_risk_level",
+            lambda summary: summary_risk_level,
+        )
+
+        results = []
+
+        class Artifact:
+            def add_monitor_result(self, result):
+                results.append(result)
+
+        deps = type(
+            "Deps", (),
+            {
+                "MonitorResult": type(
+                    "MonitorResult", (),
+                    {"__init__": lambda self, **kw: self.__dict__.update(kw)},
+                ),
+                "logger": _logging.getLogger("test_sw_blocker2"),
+                "cities_by_name": {
+                    "Tokyo": type("City", (), {"timezone": "Asia/Tokyo"})()
+                },
+                "_utcnow": staticmethod(
+                    lambda: datetime(2026, 6, 10, 6, 0, tzinfo=UTC)
+                ),
+            },
+        )
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
+            deps=deps, exit_order_submit_enabled=False,
+        )
+        return results, summary
+
+    def test_structural_win_held_even_when_evaluate_exit_says_exit(self, monkeypatch):
+        """The key invariant: evaluate_exit stub returns should_exit=True, but
+        HOLD_STRUCTURAL_WIN must produce should_exit=False — the structural hold
+        is a terminal decision that skips the estimator-evidence path."""
+        results, summary = self._run_structural_win_phase(
+            monkeypatch, evaluate_exit_says_exit=True, summary_risk_level="GREEN",
+        )
+        assert summary.get("day0_hard_fact_structural_win_holds") == 1
+        assert summary.get("day0_hard_fact_exits") is None
+        assert not any(getattr(r, "should_exit", False) for r in results), (
+            "structural-win hold must block the estimator exit (should_exit must be False)"
+        )
+        # Trigger should be the structural-win hold, not the estimator
+        triggers = [str(getattr(r, "exit_trigger", getattr(r, "exit_reason", ""))) for r in results]
+        assert any("STRUCTURAL_WIN_HOLD" in t for t in triggers), (
+            f"expected DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD trigger, got: {triggers}"
+        )
+
+    def test_orange_favorable_exit_cannot_override_structural_win_hold(self, monkeypatch):
+        """ORANGE context + HOLD_STRUCTURAL_WIN → still held. The ORANGE gate must
+        be skipped entirely when a structural-win verdict is present, so a
+        favorable ORANGE exit cannot sell a structurally won buy_no position."""
+        results, summary = self._run_structural_win_phase(
+            monkeypatch, evaluate_exit_says_exit=False, summary_risk_level="ORANGE",
+        )
+        assert summary.get("day0_hard_fact_structural_win_holds") == 1
+        assert not any(getattr(r, "should_exit", False) for r in results), (
+            "ORANGE gate must not override a structural-win hold"
+        )
+        # ORANGE favorable-exit counter must NOT be incremented
+        assert summary.get("risk_orange_favorable_exits", 0) == 0, (
+            "ORANGE favorable_exits counter must be 0 for a structural-win hold"
+        )
+
+    def test_kill_switch_via_exit_dead_bin_overrides_structural_win(self, monkeypatch):
+        """Separately named: EXIT_DEAD_BIN (kill-switch / manual reduce-only) CAN
+        override the structural hold — it is a stronger verdict on the same axis."""
+        import logging as _logging
+        import numpy as np
+        from src.contracts import EdgeContext, EntryMethod
+        from src.engine import cycle_runtime
+        from src.state.portfolio import Position, PortfolioState
+
+        monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
+        pos = Position(
+            trade_id="sw_ks_001", market_id="mkt_ks", city="Tokyo",
+            cluster="East Asia", target_date="2026-06-10",
+            bin_label="25°C or higher", direction="buy_no",
+            size_usd=10.0, entry_price=0.70, p_posterior=0.80, edge=0.10,
+            shares=14.3, cost_basis_usd=10.0, state="day0_window",
+            token_id="tok_no_ks", no_token_id="tok_no_ks", unit="C", env="live",
+        )
+        portfolio = PortfolioState(positions=[pos])
+
+        class LiveClob:
+            def get_best_bid_ask(self, token_id):
+                return 0.60, 0.62, 100.0, 100.0
+
+        class Tracker:
+            def record_exit(self, position):
+                pass
+
+        def mock_refresh(conn, clob, position):
+            return EdgeContext(
+                p_raw=np.array([]), p_cal=np.array([]),
+                p_market=np.array([position.entry_price]),
+                p_posterior=position.p_posterior,
+                forward_edge=0.0, alpha=0.0,
+                confidence_band_upper=0.0, confidence_band_lower=0.0,
+                entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+                decision_snapshot_id="snap_ks", n_edges_found=1, n_edges_after_fdr=1,
+                market_velocity_1h=0.0, divergence_score=0.0,
+            )
+
+        monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+        monkeypatch.setattr(
+            cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
+            lambda conn, pos, *, deps: True,
+        )
+        exit_verdict = HardFactVerdict(
+            action="EXIT_DEAD_BIN",
+            reason="manual reduce-only override — buy_no exited",
+            metric="high", rounded_extreme=27.0, source="wu_icao",
+        )
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+            lambda *, position, city, now=None: exit_verdict,
+        )
+
+        results = []
+
+        class Artifact:
+            def add_monitor_result(self, result):
+                results.append(result)
+
+        deps = type(
+            "Deps", (),
+            {
+                "MonitorResult": type(
+                    "MonitorResult", (),
+                    {"__init__": lambda self, **kw: self.__dict__.update(kw)},
+                ),
+                "logger": _logging.getLogger("test_ks"),
+                "cities_by_name": {
+                    "Tokyo": type("City", (), {"timezone": "Asia/Tokyo"})()
+                },
+                "_utcnow": staticmethod(
+                    lambda: datetime(2026, 6, 10, 6, 0, tzinfo=UTC)
+                ),
+            },
+        )
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
+            deps=deps, exit_order_submit_enabled=False,
+        )
+        assert summary.get("day0_hard_fact_exits") == 1
+        exits = [r for r in results if getattr(r, "should_exit", False)]
+        assert exits, "EXIT_DEAD_BIN verdict must override and produce should_exit=True"
+
+
+# ===========================================================================
+# R25 — PR#404 ROUND-2 P1-B: topology resolver is row-factory-agnostic
+# ===========================================================================
+
+class TestTupleConnectionTopology:
+    """The resolver must not depend on sqlite3.Row being installed — a default
+    tuple connection previously yielded an EMPTY identity dict and the
+    dead-bin resting order silently escaped cancellation."""
+
+    def _tuple_conn(self):
+        # SAME schema/rows as _orders_conn but with NO row_factory (tuples).
+        rows_conn = _orders_conn()
+        rows_conn.commit()  # backup() busy-loops forever on a pending write txn
+        raw = sqlite3.connect(":memory:")  # default: tuple rows
+        rows_conn.backup(raw)
+        rows_conn.close()
+        assert raw.row_factory is None
+        return raw
+
+    def test_resolver_works_on_tuple_rows(self):
+        from src.execution.day0_hard_fact_exit import _resolve_order_bin_identity
+
+        conn = self._tuple_conn()
+        identity = _resolve_order_bin_identity(conn, "tok-dead-yes")
+        assert identity is not None
+        assert identity["city"] == "Tokyo"
+        assert identity["target_date"] == "2026-06-10"
+        assert identity["metric"] == "high"
+        assert identity["direction"] == "buy_yes"
+        assert float(identity["range_high"]) == 25.0
+        # NO token via EMS on tuples too
+        identity_no = _resolve_order_bin_identity(conn, "tok-shoulder-no")
+        assert identity_no is not None and identity_no["direction"] == "buy_no"
+
+    def test_dead_bin_cancel_fires_on_tuple_connection(self, monkeypatch):
+        """End-to-end: the risk-reduction sweep cancels the dead-bin order even
+        when the monitor's connection lacks a Row factory."""
+        _set_metar_memo(monkeypatch, 26)
+        clob = _FakeClob([
+            {"orderID": "o1", "asset_id": "tok-dead-yes", "side": "BUY"},
+            {"orderID": "o2", "asset_id": "tok-alive-yes", "side": "BUY"},
+        ])
+        n = cancel_day0_dead_bin_resting_entries(
+            clob=clob, conn=self._tuple_conn(),
+            cities_by_name={"Tokyo": _tokyo()},
+            now=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
+        )
+        assert n == 1
+        assert clob.cancelled == ["o1"]
+
+    def test_legacy_schema_without_metric_column_falls_through_to_typed_authority(self):
+        """Two-query fallback: a market_events without temperature_metric (the
+        trades-DB legacy shape, as in the fixture) resolves the metric from
+        market_topology_state — and refuses when no typed authority exists."""
+        from src.execution.day0_hard_fact_exit import _resolve_order_bin_identity
+
+        conn = self._tuple_conn()
+        identity = _resolve_order_bin_identity(conn, "tok-dead-yes")
+        assert identity is not None and identity["metric"] == "high"
+        conn.execute("DELETE FROM market_topology_state")
+        assert _resolve_order_bin_identity(conn, "tok-dead-yes") is None

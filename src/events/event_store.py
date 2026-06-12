@@ -1,7 +1,11 @@
 # Created: 2026-06-04
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-06-11
 # Authority basis: Operator P1 2026-06-04 — channel-sweep keeper query index-back
-#                  (category-kill of 85s json_extract full-scan); Step-3 batch UPDATE
+#                  (category-kill of 85s json_extract full-scan); Step-3 batch UPDATE.
+#                  2026-06-11 operator throughput/fairness directive — fetch_pending
+#                  per-city round-robin claim order (anti-starvation under a bounded
+#                  per-cycle decision budget); see fetch_pending docstring + the
+#                  tests/events/test_fetch_pending_city_fairness.py antibodies.
 """World-DB event store for EDLI opportunity events."""
 
 from __future__ import annotations
@@ -81,8 +85,19 @@ class EventStore:
             )
         return inserted
 
-    def fetch_pending(self, *, decision_time: str, limit: int = 100) -> list[OpportunityEvent]:
+    def fetch_pending(
+        self, *, decision_time: str, limit: int = 100, day0_is_tradeable: bool = True
+    ) -> list[OpportunityEvent]:
         """Fetch pending events in deterministic replay/inference order.
+
+        ``day0_is_tradeable`` (default True = historical behaviour) controls the
+        scope-aware claim tier: under ``edli_live_scope='day0_shadow'`` a
+        DAY0_EXTREME_UPDATED event can only ever produce DAY0_SCOPE_SHADOW_ONLY,
+        so the caller passes False to DEMOTE day0 below tradeable
+        FORECAST_SNAPSHOT_READY and stop the shadow flood from starving tradeable
+        forecast families (2026-06-11 live incident). The tier authority lives in
+        ``src.events.event_priority.claim_tier_case_sql`` — one ordering law,
+        shared with the emit-priority constants, never a magic number here.
 
         STEP 3 timeliness fix (consolidated timeliness/tradeability design):
 
@@ -106,69 +121,151 @@ class EventStore:
         """
 
         self._require_world_event_tables()
+        from src.events.event_priority import claim_tier_expr_sql
+
         parsed_decision_time = _parse_utc(decision_time)
         stale_processing_before = (
             parsed_decision_time - timedelta(seconds=self.processing_lease_seconds)
         ).isoformat()
+        # Scope-aware claim tier (ONE ordering authority, shared with the emit
+        # constants). day0_is_tradeable=False omits the DAY0_EXTREME_UPDATED Tier-0
+        # clause so shadow-only day0 events fall to Tier 2 — strictly below the
+        # tradeable FORECAST_SNAPSHOT_READY Tier 1 (2026-06-11 live anti-starvation).
+        # The bare tier CASE expression (no ASC) — used as a SELECT column so the
+        # per-city round-robin window can PARTITION by tier, and reused as the
+        # outer ORDER BY tier key. One authority (claim_tier_expr_sql); the legacy
+        # ORDER-BY-only form (claim_tier_case_sql) appends ASC to this same string.
+        _claim_tier_expr = claim_tier_expr_sql(day0_is_tradeable=day0_is_tradeable)
+        # PER-CITY ROUND-ROBIN FAIRNESS (2026-06-11 live throughput incident).
+        #
+        # THE CATEGORY THIS MAKES UNCONSTRUCTABLE
+        # ---------------------------------------
+        # A per-cycle decision budget (K events) combined with a STRICTLY
+        # freshness-ordered queue (target_date DESC, available_at DESC) is a
+        # starvation engine: the few cities whose forecast snapshots refresh with
+        # the newest available_at win the first K slots EVERY cycle, so the tail
+        # cities (whose available_at is older within the same target window) are
+        # never reached before the budget is spent. Measured live 2026-06-11: a
+        # 28x city imbalance (Shanghai 309 decisions/h vs Toronto 11/h), and during
+        # slow-cadence windows the budget only cleared ~21 of ~50 cities so 18+
+        # cities went undecided for hours despite fresh pending FSR.
+        #
+        # THE STRUCTURAL DECISION
+        # -----------------------
+        # Freshness is the RIGHT order WITHIN a city, but the WRONG primary order
+        # ACROSS cities under a bounded budget. We compute a per-(tier, city)
+        # occurrence rank — each city's freshest event is rank 1, its second
+        # freshest rank 2, ... — and make that rank the PRIMARY sort key within a
+        # tier. The queue then returns "every city's freshest, then every city's
+        # second freshest, ..." so a budget of K reaches K DISTINCT cities per
+        # cycle and every one of N cities is reached within ceil(N/K) cycles.
+        # Decision semantics are UNCHANGED: same events, same tiers, same
+        # admissibility, same WITHIN-city freshness order — only the CROSS-city
+        # interleaving changes from "drain one city fully" to "one per city, fair".
+        #
+        # The city key is the leading entity_key segment ("Chicago|2026-06-12|..."),
+        # so no per-row json_extract is needed for the partition. Events without a
+        # '|' (or with an empty/NULL entity_key) fall back to the whole entity_key
+        # then the event_type, so non-city lanes form their own buckets and never
+        # fragment the city round-robin.
         rows = self.conn.execute(
-            """
-            SELECT e.*
-            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-            JOIN opportunity_events e
-              ON e.event_id = p.event_id
-            WHERE p.consumer_name = ?
-              AND (
-                    p.processing_status = 'pending'
-                 OR (
-                    p.processing_status = 'processing'
-                    AND p.claimed_at IS NOT NULL
-                    AND p.claimed_at <= ?
-                 )
-              )
-              AND e.available_at <= ?
-              AND e.received_at <= ?
-              AND (e.expires_at IS NULL OR e.expires_at > ?)
-              AND e.event_type NOT IN (
-                    'BEST_BID_ASK_CHANGED',
-                    'BOOK_SNAPSHOT',
-                    'NEW_MARKET_DISCOVERED'
-              )
+            f"""
+            WITH candidates AS (
+              SELECT
+                e.*,
+                p.attempt_count AS _p_attempt_count,
+                ({_claim_tier_expr}) AS _claim_tier,
+                COALESCE(
+                  NULLIF(
+                    CASE
+                      WHEN instr(e.entity_key, '|') > 0
+                      THEN substr(e.entity_key, 1, instr(e.entity_key, '|') - 1)
+                      ELSE e.entity_key
+                    END,
+                    ''
+                  ),
+                  e.event_type
+                ) AS _city_key
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+              WHERE p.consumer_name = ?
+                AND (
+                      p.processing_status = 'pending'
+                   OR (
+                      p.processing_status = 'processing'
+                      AND p.claimed_at IS NOT NULL
+                      AND p.claimed_at <= ?
+                   )
+                )
+                AND e.available_at <= ?
+                AND e.received_at <= ?
+                AND (e.expires_at IS NULL OR e.expires_at > ?)
+                AND e.event_type NOT IN (
+                      'BEST_BID_ASK_CHANGED',
+                      'BOOK_SNAPSHOT',
+                      'NEW_MARKET_DISCOVERED'
+                )
+            )
+            SELECT
+              -- Project EXACTLY the opportunity_events columns (in table order) so
+              -- _event_from_row receives only its expected keys — the helper
+              -- columns (_claim_tier/_city_key/_p_attempt_count/_city_round) drive
+              -- ordering but must NOT reach OpportunityEvent(**row).
+              c.event_id, c.event_type, c.entity_key, c.source,
+              c.observed_at, c.available_at, c.received_at,
+              c.causal_snapshot_id, c.payload_hash, c.idempotency_key,
+              c.priority, c.expires_at, c.payload_json, c.schema_version,
+              c.created_at,
+              c._claim_tier,
+              -- Per-(tier, city) occurrence rank. The window ORDER is the EXACT
+              -- intra-city freshness order the legacy query used as its tail sort,
+              -- so each city's rank-1 event is still its freshest. Ranking inside
+              -- the tier partition keeps cross-tier dominance intact (a Tier-2
+              -- rank-1 can never jump a Tier-1 rank-2).
+              ROW_NUMBER() OVER (
+                PARTITION BY c._claim_tier, c._city_key
+                ORDER BY
+                  json_extract(c.payload_json, '$.target_date') DESC,
+                  c.available_at DESC,
+                  CASE WHEN c._p_attempt_count > 0 THEN 0 ELSE 1 END ASC,
+                  c.received_at DESC,
+                  c.event_id ASC
+              ) AS _city_round
+            FROM candidates c
             ORDER BY
               -- Tier 0: DAY0_EXTREME_UPDATED hard facts — realized observations are the freshest
-              --         actionable alpha source and must not sit behind forecast redecision backlog.
+              --         actionable alpha source, BUT ONLY while day0 is a tradeable lane. Under
+              --         day0_shadow (day0_is_tradeable=False) the Tier-0 clause is omitted and
+              --         day0 falls to Tier 2 so shadow-only events never starve tradeable FSR.
               -- Tier 1: window-complete FORECAST_SNAPSHOT_READY — direct receipt candidates.
               --         Run-level PARTIAL can still carry a COMPLETE/LIVE_ELIGIBLE
               --         target window, so source_run completeness is not the queue authority.
-              -- Tier 2: Other decision-trigger events — still actionable or cheaply
-              --         dead-letterable; must not be starved by market-channel.
+              -- Tier 2: Other decision-trigger events (incl. shadow-only day0) — still actionable
+              --         or cheaply dead-letterable; must not be starved by market-channel.
               -- Tier 3: Market-channel cache-hydration events (BEST_BID_ASK_CHANGED, BOOK_SNAPSHOT,
               --         NEW_MARKET_DISCOVERED) — they get rejected NO_DIRECT_STALE_TRADE immediately
               --         but can accumulate to 300k+; without explicit demotion they starve all FSR.
-              CASE
-                WHEN e.event_type = 'DAY0_EXTREME_UPDATED'
-                THEN 0
-                WHEN e.event_type = 'FORECAST_SNAPSHOT_READY'
-                 AND json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
-                 AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
-                THEN 1
-                WHEN e.event_type IN ('BEST_BID_ASK_CHANGED', 'BOOK_SNAPSHOT', 'NEW_MARKET_DISCOVERED')
-                THEN 3
-                ELSE 2
-              END ASC,
-              e.priority DESC,
-              -- FRESHEST-TARGET-FIRST: reach fresh candidates before the per-cycle
-              -- budget is spent on stale ones. NULL target_date (non-forecast
-              -- events) sorts last within its tier (json_extract → NULL → last
-              -- under DESC in SQLite, which orders NULLs first for ASC / last for
-              -- DESC). Newer available_at wins before retry debt because it is
-              -- fresher evidence. For the SAME target_date + available_at, retry
-              -- debt wins before zero-attempt redecision rows so transiently
-              -- blocked events cannot be starved forever by same-evidence rows.
-              json_extract(e.payload_json, '$.target_date') DESC,
-              e.available_at DESC,
-              CASE WHEN p.attempt_count > 0 THEN 0 ELSE 1 END ASC,
-              e.received_at DESC,
-              e.event_id ASC
+              c._claim_tier ASC,
+              -- FAIRNESS (primary cross-city key): one event per city before any
+              -- city's second event. A budget of K reaches K distinct cities/cycle;
+              -- every city is reached within ceil(N/K) cycles (anti-starvation).
+              -- _city_round is the outer SELECT's window alias (no table prefix).
+              _city_round ASC,
+              c.priority DESC,
+              -- FRESHEST-TARGET-FIRST tiebreak (now SECONDARY to fairness): within
+              -- the same round across cities, the fresher target/available wins.
+              -- NULL target_date (non-forecast events) sorts last within its tier
+              -- (json_extract → NULL → last under DESC in SQLite). Newer available_at
+              -- wins before retry debt because it is fresher evidence; for SAME
+              -- target_date + available_at, retry debt wins before zero-attempt
+              -- redecision rows so transiently blocked events cannot be starved
+              -- forever by same-evidence rows.
+              json_extract(c.payload_json, '$.target_date') DESC,
+              c.available_at DESC,
+              CASE WHEN c._p_attempt_count > 0 THEN 0 ELSE 1 END ASC,
+              c.received_at DESC,
+              c.event_id ASC
             LIMIT ?
             """,
             (
@@ -880,28 +977,38 @@ class EventStore:
             )
 
 
+# The canonical opportunity_events column order. A SELECTed row may carry EXTRA
+# trailing columns — fetch_pending's per-city round-robin appends the ordering
+# helpers _claim_tier and _city_round so the budget-bounded queue can interleave
+# cities fairly — which are NOT OpportunityEvent fields. Projecting to exactly
+# these keys keeps OpportunityEvent(**data) from receiving an unexpected kwarg.
+_EVENT_ROW_KEYS: tuple[str, ...] = (
+    "event_id",
+    "event_type",
+    "entity_key",
+    "source",
+    "observed_at",
+    "available_at",
+    "received_at",
+    "causal_snapshot_id",
+    "payload_hash",
+    "idempotency_key",
+    "priority",
+    "expires_at",
+    "payload_json",
+    "schema_version",
+    "created_at",
+)
+
+
 def _event_from_row(row: sqlite3.Row | tuple) -> OpportunityEvent:
     if isinstance(row, sqlite3.Row):
-        data = dict(row)
+        full = dict(row)
+        data = {key: full[key] for key in _EVENT_ROW_KEYS}
     else:
-        keys = [
-            "event_id",
-            "event_type",
-            "entity_key",
-            "source",
-            "observed_at",
-            "available_at",
-            "received_at",
-            "causal_snapshot_id",
-            "payload_hash",
-            "idempotency_key",
-            "priority",
-            "expires_at",
-            "payload_json",
-            "schema_version",
-            "created_at",
-        ]
-        data = dict(zip(keys, row))
+        # Positional rows must lead with the event columns in table order; any
+        # trailing ordering-helper columns are dropped by the zip truncation.
+        data = dict(zip(_EVENT_ROW_KEYS, row))
     return OpportunityEvent(**data)
 
 
