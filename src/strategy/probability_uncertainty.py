@@ -289,6 +289,14 @@ def probability_uncertainty_from_samples(
     # zero-penalty lower quantile can drift a hair above the sample mean
     # (rare with continuous samples, possible with tied/degenerate vectors).
     q_lcb = min(q_lcb, q_point)
+    # Symmetric guard for q_point <= q_ucb: with sparse tail bins (>95% of
+    # bootstrap samples exactly 0.0, a few small positives) the 95th
+    # percentile is 0.0 while the mean is positive -- q_ucb < q_point by
+    # construction, which raised in __post_init__ and collapsed the WHOLE
+    # family proof (live regret storm LIVE_INFERENCE_INPUTS_MISSING:q_ucb,
+    # 2026-06-12). The mean is the tightest honest upper bound available
+    # when the upper quantile degenerates below it.
+    q_ucb = max(q_ucb, q_point)
 
     return ProbabilityUncertainty(
         q_point=q_point,

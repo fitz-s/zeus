@@ -167,6 +167,36 @@ def test_q_lcb_le_q_point_invariant():
 
 
 # ── ONE sample-producing path (no parallel mechanism) ────────────────────────
+def test_sparse_tail_bin_q_ucb_never_below_q_point():
+    """Sparse-tail antibody (live regret storm 2026-06-12): when >95% of the
+    bootstrap samples are exactly 0.0 and a few are small positives, the 95th
+    percentile degenerates to 0.0 while the mean is positive. The factory must
+    clamp q_ucb up to q_point instead of constructing an inverted bound that
+    raises in __post_init__ and collapses the whole family proof
+    (LIVE_INFERENCE_INPUTS_MISSING:q_ucb (0.0) < q_point)."""
+    import numpy as np
+
+    from src.strategy.probability_uncertainty import (
+        no_side_samples,
+        probability_uncertainty_from_samples,
+    )
+
+    # 97% zeros, 3% at 0.02 -> mean ~6e-4, p95 = 0.0 (the live failure shape).
+    samples = np.zeros(4000)
+    samples[:120] = 0.02
+    pu = probability_uncertainty_from_samples(samples)
+    assert pu.q_ucb >= pu.q_point - 1e-12
+    assert pu.q_lcb <= pu.q_point
+
+    # NO side of the same sparse bin (mass near 1.0) must also construct.
+    pu_no = probability_uncertainty_from_samples(no_side_samples(samples))
+    assert pu_no.q_ucb >= pu_no.q_point - 1e-12
+
+    # All-zero degenerate vector constructs too (q_point == q_ucb == 0).
+    pu0 = probability_uncertainty_from_samples(np.zeros(1000))
+    assert pu0.q_point == pu0.q_ucb == 0.0
+
+
 def test_q_lcb_and_edge_ci_share_one_sample_path():
     """The FDR edge CI (_bootstrap_bin) and the q_lcb authority consume the SAME
     per-bin YES probability samples — one producer, not two.
