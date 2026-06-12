@@ -738,6 +738,7 @@ test_trust_policy:
     # PR #400 compliance additions — operator-directed TDD tests (2026-06-08)
     tests/test_no_internal_version_suffixes.py: {created: "2026-06-11", last_used: "2026-06-12", note: "PR#405 rename ban-test: no internal _v[0-9] suffixes (allowlist external SDK names; grandfather shrinks only); u0r=0 occurrences pin"}
     tests/test_ops_scripts_smoke.py: {created: "2026-06-12", last_used: "2026-06-12", note: "PR#407 ops scripts smoke: zeus_status/deploy_live/generate_schema_cheatsheet fail-soft + read-only contracts"}
+    tests/test_cotenant_staging_guard.py: {created: "2026-06-12", last_used: "2026-06-12", note: "BLOCKING cotenant hook antibody: broad-add forms block, inline/env bypass honored, git -C worktree exemption (external review 2026-06-12)"}
     tests/test_preflight_restart_check_reads_edli_flags.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 1 RT: preflight_restart_check.py reads flags from correct scope (edli_v1/feature_flags), not top-level cfg dict"}
     tests/test_bayes_precision_fusion_covariance_uses_common_target_dates_only.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: covariance rows aligned by target_date not positional index — the critical date-alignment stat bug"}
     tests/test_bayes_precision_fusion_covariance_rejects_equal_length_misaligned_histories.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: equal-length but fully date-misaligned histories must not yield a learned off-diagonal covariance"}

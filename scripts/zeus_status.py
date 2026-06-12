@@ -366,10 +366,14 @@ def _screen_edges(fc: sqlite3.Connection, tr: sqlite3.Connection, today: str) ->
             qlcb = json.loads(f["q_lcb_json"])
         except (json.JSONDecodeError, TypeError):
             continue
+        # temperature_metric filter: same city/date carries both HIGH and LOW
+        # markets — joining a HIGH posterior to LOW condition_ids (or vice
+        # versa) reports edge for the wrong market family (external review
+        # 2026-06-12).
         bins = fc.execute(
             "SELECT range_label, condition_id FROM market_events "
-            "WHERE city=? AND target_date=?",
-            (f["city"], f["target_date"]),
+            "WHERE city=? AND target_date=? AND temperature_metric=?",
+            (f["city"], f["target_date"], f["temperature_metric"]),
         ).fetchall()
         for b in bins:
             cond = b["condition_id"]

@@ -71,8 +71,16 @@ def _canonical_event(position_id: str, event_type: str = "ENTRY_ORDER_POSTED",
 
 
 def _canonical_projection(position_id: str) -> dict:
-    """Minimal canonical projection payload covering CANONICAL_POSITION_CURRENT_COLUMNS."""
-    return {
+    """Minimal canonical projection payload covering CANONICAL_POSITION_CURRENT_COLUMNS.
+
+    Derives the full key set from the canonical column tuple (None default),
+    then overrides the semantically-load-bearing values — so column additions
+    (e.g. K3 exit_retry_count) can never silently break this fixture again.
+    """
+    from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
+
+    payload = {column: None for column in CANONICAL_POSITION_CURRENT_COLUMNS}
+    payload.update({
         "position_id": position_id,
         "phase": "pending_entry",
         "trade_id": f"{position_id}-trade",
@@ -104,7 +112,9 @@ def _canonical_projection(position_id: str) -> dict:
         "order_status": None,
         "updated_at": "2026-04-23T00:00:00Z",
         "temperature_metric": "high",
-    }
+        "exit_retry_count": 0,
+    })
+    return payload
 
 
 def _setup(tmp_path) -> sqlite3.Connection:

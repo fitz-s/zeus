@@ -3958,6 +3958,20 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
         post_peak_confidence=0.0,
         current_utc_timestamp=datetime(2026, 6, 7, 15, 10, tzinfo=timezone.utc),
     ))
+    # Freeze the staleness gate's wall-clock to the fixture's frame: the obs
+    # fast-lane gate (task #49) added a 1.0h max observation age measured
+    # against real now, which rotted this fixed-date fixture (obs 2026-06-07
+    # looked 100+ hours old). Real gate logic still runs — only the clock is
+    # injected.
+    _orig_quality_gate = monitor_refresh._day0_observation_quality_rejection_reason
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_observation_quality_rejection_reason",
+        lambda city, obs, metric, decision_time=None: _orig_quality_gate(
+            city, obs, metric,
+            decision_time=datetime(2026, 6, 7, 15, 10, tzinfo=timezone.utc),
+        ),
+    )
     monkeypatch.setattr(
         monitor_refresh,
         "remaining_member_extrema_for_day0",

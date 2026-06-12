@@ -70,7 +70,10 @@ DAEMONS = {
 }
 
 # Runtime surface whose dirtiness must block a restart (per the incident).
-RUNTIME_PATHSPECS = ["src/", "config/"]
+# scripts/ is included because daemon plists and operator flows execute
+# scripts/*.py from the live checkout (external review 2026-06-12). docs/ and
+# tests/ are deliberately outside the gate.
+RUNTIME_PATHSPECS = ["src/", "config/", "scripts/"]
 
 
 def _git(*args: str, repo: str | None = None) -> subprocess.CompletedProcess:
@@ -99,8 +102,18 @@ def dirty_runtime_files() -> list[str]:
 
 
 def unpushed_state(branch: str) -> tuple[bool, str]:
-    """(is_unpushed, detail). True when HEAD != origin/<branch> or no upstream."""
+    """(is_unpushed, detail). True when HEAD != origin/<branch> or no upstream.
+
+    Fail-closed freshness: fetches origin/<branch> first so the comparison is
+    against the REMOTE's current state, not a stale local remote-tracking ref
+    (external review 2026-06-12 — a stale origin/<branch> made the gate approve
+    a checkout that was behind the actual remote). A failed fetch blocks.
+    """
     local = _git("rev-parse", "HEAD").stdout.strip()
+    fetch_res = _git("fetch", "--quiet", "origin", branch)
+    if fetch_res.returncode != 0:
+        detail = (fetch_res.stderr or fetch_res.stdout).strip().splitlines()
+        return True, f"fetch origin/{branch} failed (fail-closed): {detail[-1] if detail else 'unknown'}"
     remote_res = _git("rev-parse", f"origin/{branch}")
     if remote_res.returncode != 0:
         return True, f"no origin/{branch} ref (never pushed)"

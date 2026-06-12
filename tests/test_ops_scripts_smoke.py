@@ -94,6 +94,61 @@ def test_zeus_status_classifier():
     assert zs.classify_block("TRADE_SCORE", "TRADE_SCORE_NON_POSITIVE") == "economic"
 
 
+def test_zeus_status_screen_edges_filters_temperature_metric(tmp_path):
+    """HIGH posterior must never join LOW market condition_ids (external review
+    2026-06-12): same city/date carries both metrics; an unfiltered join counts
+    edge against the wrong market family."""
+    zs = _load("zeus_status_smoke_metric", "zeus_status.py")
+    fdb = tmp_path / "f.db"
+    tdb = tmp_path / "t.db"
+    fc = sqlite3.connect(str(fdb))
+    fc.execute(
+        "CREATE TABLE forecast_posteriors (city TEXT, target_date TEXT, "
+        "temperature_metric TEXT, q_lcb_json TEXT, computed_at TEXT)"
+    )
+    fc.execute(
+        "CREATE TABLE market_events (city TEXT, target_date TEXT, "
+        "temperature_metric TEXT, range_label TEXT, condition_id TEXT)"
+    )
+    # HIGH posterior says label '30-31' has q_lcb 0.90.
+    fc.execute(
+        "INSERT INTO forecast_posteriors VALUES "
+        "('seoul', '2026-06-12', 'high', '{\"30-31\": 0.90}', '2026-06-12T00:00:00')"
+    )
+    # Same label exists in BOTH metric families with different condition ids.
+    fc.execute(
+        "INSERT INTO market_events VALUES "
+        "('seoul', '2026-06-12', 'high', '30-31', 'cond-high')"
+    )
+    fc.execute(
+        "INSERT INTO market_events VALUES "
+        "('seoul', '2026-06-12', 'low', '30-31', 'cond-low')"
+    )
+    fc.commit()
+    tr = sqlite3.connect(str(tdb))
+    tr.execute(
+        "CREATE TABLE executable_market_snapshots (condition_id TEXT, "
+        "outcome_label TEXT, orderbook_top_ask REAL, captured_at TEXT)"
+    )
+    # Only the LOW market has a cheap ask — a metric-blind join would count
+    # phantom edge here. The HIGH market's ask leaves no edge.
+    tr.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('cond-low', 'YES', 0.10, '2026-06-12T00:00:00')"
+    )
+    tr.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('cond-high', 'YES', 0.95, '2026-06-12T00:00:00')"
+    )
+    tr.commit()
+    tr.row_factory = sqlite3.Row
+    fc.row_factory = sqlite3.Row
+    e3, e5 = zs._screen_edges(fc, tr, "2026-06-12")
+    assert (e3, e5) == (0, 0)  # cond-low's phantom 0.80 edge must NOT count
+    fc.close()
+    tr.close()
+
+
 def test_zeus_status_age_str():
     zs = _load("zeus_status_smoke4", "zeus_status.py")
     assert zs.age_str(None) == "-"
@@ -109,8 +164,13 @@ def test_zeus_status_age_str():
 # deploy_live
 # --------------------------------------------------------------------------
 def test_deploy_live_status_runs(capsys):
-    """status runs against the real (clean) live checkout and prints structured output."""
+    """status runs against this checkout and prints structured output.
+
+    LIVE_REPO is repointed at the test's own repo root so the test is
+    meaningful on CI (the hardcoded operator path does not exist there).
+    """
     dl = _load("deploy_live_smoke", "deploy_live.py")
+    dl.LIVE_REPO = str(_REPO)
     rc = dl.main(["status"])
     assert rc == 0
     out = capsys.readouterr().out

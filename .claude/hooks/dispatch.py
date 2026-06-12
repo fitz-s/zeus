@@ -213,22 +213,41 @@ def _run_advisory_check_cotenant_staging_guard(
     # Match flags ONLY within the `git add ...` segment (up to the next command
     # separator) — matching the whole command string false-positived on
     # `git push -u origin ...` in a compound command (2026-06-12).
-    add_match = re.search(r"\bgit\s+add\b([^;&|]*)", command)
+    # Tolerate git global options between `git` and `add` (`git -C <path> add`,
+    # `git -c k=v add`, `--git-dir=`/`--work-tree=`) — external review 2026-06-12
+    # found those forms slipped past the bare `git\s+add` matcher.
+    add_match = re.search(
+        r"\bgit((?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+))*)"
+        r"\s+add\b([^;&|]*)",
+        command,
+    )
     if not add_match:
         return None
-    add_args = add_match.group(1)
-    if not re.search(r"(\s-A\b|\s--all\b|\s-u\b|\s\.\s*$)", add_args):
+    git_opts = add_match.group(1) or ""
+    add_args = add_match.group(2)
+    # Broad-staging forms: -A/--all, -u/--update, and repo-/dir-wide pathspecs
+    # (`.`, `./`, `:/`) at the end of the add segment.
+    if not re.search(
+        r"(\s-A\b|\s--all\b|\s-u\b|\s--update\b|\s(?:\.|\./|:/)\s*$)", add_args
+    ):
         return None
+    # Evaluate the worktree the add actually targets: honor `git -C <path>`.
+    c_match = re.search(r"-C\s+(\S+)", git_opts)
+    target_cwd = c_match.group(1).strip("'\"") if c_match else REPO_ROOT
     try:
         gd = subprocess.run(
             ["git", "rev-parse", "--git-dir"],
-            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+            capture_output=True, text=True, timeout=5, cwd=target_cwd,
         )
         if "/worktrees/" in gd.stdout:
             return None  # linked worktree -- isolated index, safe
     except (subprocess.TimeoutExpired, OSError):
         pass
-    if os.environ.get("COTENANT_GUARD_BYPASS", "").strip() == "1":
+    # Bypass: hook process env OR inline assignment in the command itself —
+    # `COTENANT_GUARD_BYPASS=1 git add -A` puts the assignment in the command
+    # string, not the hook's environment (external review 2026-06-12).
+    inline_bypass = re.search(r"\bCOTENANT_GUARD_BYPASS=1\b", command) is not None
+    if inline_bypass or os.environ.get("COTENANT_GUARD_BYPASS", "").strip() == "1":
         return (
             "ADVISORY (COTENANT_GUARD_BYPASS=1): broad `git add` in main "
             "worktree allowed by explicit bypass. Verify `git status` shows "
