@@ -3,7 +3,7 @@
 **Status:** LIVE_AUTHORITY (flag-only, operator directive 2026-06-08).  
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-06-09  
+**Last audited:** 2026-06-12 (1e-bis addendum. fitted k,w artifact; per-cell floor; anchor permanent; single q authority — baseline cap deleted)  
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 + four experiments `docs/evidence/2026_06_09_final_form/aifs_replacement_experiment.md`, `docs/evidence/2026_06_09_final_form/inverted_blend_experiment.md`, `docs/evidence/2026_06_09_final_form/uncovered_cities_regional_report.md`, `docs/evidence/2026_06_09_final_form/universality_sweep.md`.
 
 ---
@@ -77,6 +77,35 @@ q_shape provenance = "fused_normal_direct"
 ```
 
 `src/calibration/emos.bin_probability_settlement` (lines 427–485) is the single settlement integrator — preimage math, Celsius bounds, half_step=0.5 for precision=1. `src/data/replacement_forecast_materializer.py:1040–1062`.
+
+### 1e-bis. Post-2026-06-12 q corrections (ADDENDUM — fitted artifacts + single authority)
+
+The q chain gained three operator-ratified corrections on 2026-06-12; all are
+fitted-artifact-driven or per-cell-data-driven, never settings numbers
+(no-unsupported-hardcoded-values law):
+
+1. **Fitted σ-scale + uniform mixture** (`state/sigma_scale_fit.json`, sole writer
+   `scripts/fit_sigma_scale.py`, weekly refit): `q_adj = (1−w)·N(σ_impl·k) + w·(1/n_bins)`,
+   joint MLE on settled Bernoulli outcomes. First fit (provenance 20c6040cb39dc327):
+   C k=1.5833 [1.32,1.88], w=0.2811 [0.17,0.41], n=215; families with n<60 refuse
+   (F refused at n=47, stays identity). Provenance fields `sigma_scale_k_applied`,
+   `uniform_mixture_w_applied` on every posterior. Cure for the C3 ring-bin
+   over-peaking (mode-bin calibration ratio 0.514→0.961).
+2. **Settlement σ-shape floor = per-cell data availability** (Wave-2 item 6, commit
+   479cb34446): the floor applies whenever the fitted floor cell exists, inert when
+   absent. No flags. A missing cell no longer degrades q-mode.
+3. **Market-anchor q_lcb cap = permanent constraint** (verdict INTERNALIZE,
+   `docs/evidence/sigma_scale/2026-06-12_anchor_cap_overlap.md`): orthogonal to the
+   σ fit (bind rate rises post-fit); one-sided, only lowers q_lcb_no against the
+   α=0.4 model/market blend. OPEN: α is hardcoded; fitted basis is a registered
+   follow-up.
+
+**Single q authority (U1, `docs/authority/regime_unification_2026-06-12.md`):** the
+legacy baseline LCB cap on the live path is DELETED (commit 479cb34446) — the
+former `min(baseline, replacement)` joins are gone; the baseline is receipt
+diagnostics (`baseline_q_lcb_reference`). The honest no-replacement-data →
+baseline fallback for genuinely-baseline strategies remains. The settlement-refuted
+EB bias correction and the bias_treatment_v2 branches are deleted with their code.
 
 **Evidence for shape replacement** (`docs/evidence/2026_06_09_final_form/aifs_replacement_experiment.md`, n=39, target 2026-06-08):
 

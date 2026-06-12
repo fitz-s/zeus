@@ -15,15 +15,20 @@ The replacement chain is the strategy of record (authority:
 fusion over 5 decorrelated providers + in-domain regional experts (weights = inverse
 walk-forward residual variance, Ledoit-Wolf shrunk Σ; provider families ICON/NCEP/UKMO are
 single-rep, most-specific-first) -> μ*, then σ_pred = sqrt(V* + walk-forward fused-center
-residual var, floor 1.0°C) -> q = settlement-preimage bin integration of N(μ*, σ_pred)
-(emos.bin_probability_settlement; q_shape=fused_normal_direct) -> q_lcb conservative floor ->
-Edge -> Fractional Kelly -> Position Size`
+residual var, floor 1.0°C) -> settlement σ-shape floor (per-cell fitted data, no flag) ->
+q = settlement-preimage bin integration of N(μ*, σ_pred·k) mixed (1−w)/w with uniform
+(fitted artifact state/sigma_scale_fit.json: C k=1.5833 w=0.2811, MLE on settled outcomes;
+emos.bin_probability_settlement; q_shape=fused_normal_direct) -> q_lcb conservative floor
++ market-anchor cap (permanent, one-sided) -> Edge -> Fractional Kelly -> Position Size`
 Key theorems/results backing it (all settlement-graded): prior-label is algebraically
 irrelevant under diagonal Σ (n=4492 inversion experiment); precision weights beat equal
 weights by 12× SE; the legacy AIFS member-vote shape put ZERO probability on the winning bin
 in 28% of settled cells and is replaced (LogLoss 11.07→1.51, n=39).
 
-The LEGACY BASELINE chain (still live as the independent baseline / LCB cap):
+The LEGACY BASELINE chain (diagnostics-only since 2026-06-12 — the LCB-cap join on the
+live path is DELETED per the single-q-authority cut, commit 479cb34446; baseline carried
+as baseline_q_lcb_reference receipt provenance; regime law
+docs/authority/regime_unification_2026-06-12.md U1):
 `51 ENS members -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> α-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly -> Position Size`
 
 **TOPOLOGY NAVIGATION:**

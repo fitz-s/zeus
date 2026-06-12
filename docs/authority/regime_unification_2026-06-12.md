@@ -62,8 +62,9 @@ budgets) migrate to fitted artifacts on touch.
 
 ## U5 — Execution order
 
-1. (in flight) Wave-2 batch: baseline-cap exit, mode-string two-state, σ-floor merge,
-   refuted-branch deletion, taker fold.
+1. ✅ DONE 2026-06-12 (commit 479cb34446): Wave-2 batch — baseline-cap exit (single q
+   authority), mode-string two-state (edli_live), σ-floor per-cell (no flags),
+   refuted-branch deletion (code + keys), taker fold. Deployed all daemons 18:09Z.
 2. Exit-staleness root fix: held-family targeted re-materialization + derived freshness
    budget; THEN retire the legacy monitor fallback + unify flag + full_transport monitor
    path in one cut.
