@@ -433,6 +433,95 @@ def _k2_obs_tick():
         logger.info("K2 obs_tick: written=%d failed=%s", written, failed or "none")
 
 
+def _active_window_cities(now_utc: "datetime | None" = None) -> list[str]:
+    """Return city names whose local time is in the intraday active window.
+
+    Active window: local time is between 00:00 and peak_hour+6h (inclusive).
+    This covers the entire period during which the running extreme can move
+    and during which the day0 entry/monitor gate may query fresh observations.
+    Cities outside this window (local middle of night) are skipped so the
+    15-min fast tick does not issue unnecessary HTTP calls.
+
+    Option-C per day0_obs_fastlane_plan §4.3.
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
+    from src.config import cities_by_name as _cbn
+
+    ref = (now_utc or _dt.now(__import__("datetime").timezone.utc))
+    active: list[str] = []
+    for city in _cbn.values():
+        if not city.timezone:
+            continue
+        try:
+            local_now = ref.astimezone(_ZI(city.timezone))
+            local_hour = local_now.hour + local_now.minute / 60.0
+            # Active window: [0, peak_hour + 6] local time.
+            window_end = float(getattr(city, "historical_peak_hour", 14.0) or 14.0) + 6.0
+            if 0.0 <= local_hour <= window_end:
+                active.append(city.name)
+        except Exception:
+            continue
+    return active
+
+
+@_scheduler_job("ingest_k2_obs_fast_tick")
+def _k2_obs_fast_tick():
+    """15-min fast ingest tick for observation_instants (Option C, day0_obs_fastlane_plan §4.3).
+
+    Runs every 15 minutes (at :02/:17/:32/:47) — 4× finer than the hourly
+    obs tick — for cities in the intraday active window (local time 00:00 to
+    peak_hour+6h). Reduces observation_instants ingest lag from 50–135 min
+    median to ~40–55 min by shrinking the polling-grid component from ±60 min
+    to ±15 min. The WU 40-min publication floor remains (this tick does NOT
+    beat the WU floor; only Option B's METAR fast lane does that).
+
+    Connection discipline (three-phase law): run_live_tick opens its own
+    db_writer_lock connection and closes it before returning. This tick holds
+    no DB connection across the HTTP fetch loop.
+
+    Advisory lock "obs_fast": separate from "obs" (hourly tick) to avoid
+    starving it. If the hourly tick is running when the fast tick fires the
+    fast tick skips silently (not an error — the hourly tick is a superset).
+
+    Boot-guard lockstep: decorator id "ingest_k2_obs_fast_tick",
+    add_job id (spec) "ingest_k2_obs_fast_tick", no new db_table_ownership.yaml
+    entry needed (supplemental writer to the existing observation_instants
+    table whose daemon_writer is already ingest_k2_obs_tick).
+    """
+    from src.data.dual_run_lock import acquire_lock
+    from pathlib import Path
+    from datetime import datetime as _dt, timezone as _tz
+
+    with acquire_lock("obs_fast") as acquired:
+        if not acquired:
+            logger.info("ingest k2_obs_fast_tick skipped_lock_held")
+            return
+        import sys as _sys
+        _REPO_ROOT = Path(__file__).resolve().parent.parent
+        if str(_REPO_ROOT) not in _sys.path:
+            _sys.path.insert(0, str(_REPO_ROOT))
+        from scripts.obs_live_tick import run_live_tick
+
+        now_utc = _dt.now(_tz.utc)
+        city_filter = _active_window_cities(now_utc)
+        if not city_filter:
+            logger.info("K2 obs_fast_tick: no cities in active window, skipping")
+            return
+
+        results = run_live_tick(
+            days_back=1,
+            city_filter=city_filter,
+            db_path=_REPO_ROOT / "state" / "zeus-world.db",
+        )
+        written = sum(r.rows_written for r in results if not r.skipped_hko)
+        failed = [r.city for r in results if r.failure_reason]
+        logger.info(
+            "K2 obs_fast_tick: cities=%d written=%d failed=%s",
+            len(city_filter), written, failed or "none",
+        )
+
+
 @_scheduler_job("ingest_k2_hko_tick")
 def _k2_hko_tick():
     """HKO hourly accumulator fetch + v2 projection for Hong Kong.
@@ -1576,6 +1665,11 @@ def _ingest_main_job_specs() -> list[tuple]:
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
         (_k2_obs_tick, "cron", dict(minute=15, id="ingest_k2_obs",
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
+        # Option-C fast tick: every 15 min, active-window cities only (day0_obs_fastlane_plan §4.3).
+        # Supplemental writer for observation_instants; no new db_table_ownership.yaml entry
+        # needed (primary daemon_writer remains ingest_k2_obs_tick).
+        (_k2_obs_fast_tick, "interval", dict(minutes=15, id="ingest_k2_obs_fast_tick",
+            max_instances=1, coalesce=True, misfire_grace_time=300)),
         (_k2_hko_tick, "cron", dict(minute=30, id="ingest_k2_hko_tick",
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
         (_etl_recalibrate, "cron", dict(hour=6, minute=0, id="ingest_etl_recalibrate")),

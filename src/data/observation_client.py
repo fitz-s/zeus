@@ -267,6 +267,148 @@ def _parse_local_timestamp(raw_value, tz: ZoneInfo) -> datetime | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Option-B METAR fast-lane fallback helpers (day0_obs_fastlane_plan §4.2)
+# ---------------------------------------------------------------------------
+
+#: Age threshold (hours) above which a WU timeseries result is considered stale
+#: and the METAR fast-lane fallback fires.  Mirrors the evaluator's
+#: DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS constant; kept local to avoid
+#: importing evaluator inside the data layer (prevents circular imports).
+_WU_STALE_AGE_HOURS = 1.0
+
+
+def _wu_result_needs_fallback(
+    result: Optional["Day0ObservationContext"],
+    *,
+    reference_utc: datetime,
+) -> Optional[str]:
+    """Return a short reason string when ``result`` should be supplemented by
+    the METAR fast lane, or None when the WU result is good.
+
+    Cases that trigger the fallback:
+      1. None result (WU fetch failed / returned no data).
+      2. observation_time > _WU_STALE_AGE_HOURS ago.
+      3. coverage_status == "WINDOW_INCOMPLETE".
+    """
+    if result is None:
+        return "wu_result_none"
+    obs_time_raw = getattr(result, "observation_time", None)
+    if obs_time_raw is not None:
+        try:
+            obs_utc: Optional[datetime]
+            if isinstance(obs_time_raw, datetime):
+                obs_utc = obs_time_raw if obs_time_raw.tzinfo else obs_time_raw.replace(tzinfo=timezone.utc)
+            else:
+                raw_str = str(obs_time_raw).strip().replace("Z", "+00:00")
+                obs_utc = datetime.fromisoformat(raw_str)
+                if obs_utc.tzinfo is None:
+                    obs_utc = obs_utc.replace(tzinfo=timezone.utc)
+            age_hours = (reference_utc - obs_utc.astimezone(timezone.utc)).total_seconds() / 3600.0
+            if age_hours > _WU_STALE_AGE_HOURS:
+                return f"wu_stale_age_hours={age_hours:.2f}"
+        except (ValueError, TypeError, OSError, OverflowError):
+            pass  # unparseable timestamp; fall through to coverage check
+    coverage = str(getattr(result, "coverage_status", "") or "").strip().upper()
+    if coverage == "WINDOW_INCOMPLETE":
+        return "wu_coverage_window_incomplete"
+    return None
+
+
+def _fetch_metar_fast_lane_observation(
+    city: "City",
+    *,
+    target_day: date,
+    reference_utc: datetime,
+) -> Optional["Day0ObservationContext"]:
+    """Build a Day0ObservationContext from the METAR fast-lane in-process memo.
+
+    PROVENANCE CONTRACT: the returned context carries
+      source="metar_fast_lane" and
+      provider_reported_time = age annotation string (not a timestamp) so that
+      downstream receipts carry honest provenance. The annotation encodes both
+      the cache age and the fast-lane source identifier.
+
+    COVERAGE SEMANTICS: if the METAR data has first_obs_time within the local
+    day's 2-hour grace window (same rule as WU, from _compute_day0_coverage_status),
+    coverage_status reflects the METAR-computed value ("OK" or "LOW_COVERAGE").
+    If the METAR data's first_obs_time is OUTSIDE the grace window, the
+    coverage_status is "WINDOW_INCOMPLETE" — the fast lane does not fabricate
+    coverage (the plan §4.2 coverage semantics constraint).
+
+    Settlement-source integrity: the fast lane's fast_obs_source_for_city gate
+    (ICAO station identity + faithfulness check) is applied inside
+    latest_extremes() via fast_obs_source_for_city. Only wu_icao cities with a
+    matching settlement station pass. Non-wu_icao cities receive None here.
+
+    NO HTTP in this function — reads only the in-process memo.
+    """
+    try:
+        from src.data.day0_fast_obs import get_fast_obs_emitter
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        return None
+
+    try:
+        emitter = get_fast_obs_emitter()
+        extremes = emitter.latest_extremes(
+            city, target_day.isoformat(), as_of=reference_utc
+        )
+    except Exception as exc:
+        logger.warning(
+            "DAY0_FAST_LANE_FALLBACK_FAILED city=%s exc=%s: %s",
+            getattr(city, "name", "?"), type(exc).__name__, exc,
+        )
+        return None
+
+    if extremes is None:
+        return None
+
+    # Coverage computation from METAR first_obs_time (same window rule as WU).
+    if extremes.first_obs_time is not None:
+        tz = ZoneInfo(str(getattr(city, "timezone", "UTC") or "UTC"))
+        first_local = extremes.first_obs_time.astimezone(tz)
+        coverage_status = _compute_day0_coverage_status(first_local, extremes.sample_count)
+    else:
+        # No first_obs_time from METAR data — cannot prove coverage.
+        coverage_status = "WINDOW_INCOMPLETE"
+
+    obs_time_iso = extremes.last_obs_time.astimezone(timezone.utc).isoformat()
+    # observation_available_at: use feed receiptTime when present (honest
+    # publication clock); fall back to obs_time (conservative lower bound).
+    available_at = (
+        extremes.last_receipt_time.astimezone(timezone.utc).isoformat()
+        if extremes.last_receipt_time is not None
+        else obs_time_iso
+    )
+    # Encode provenance annotation as provider_reported_time field (not a real
+    # timestamp — a labelled string so receipts carry the source identity).
+    cache_age_s = (reference_utc - (extremes.last_receipt_time or extremes.last_obs_time).astimezone(timezone.utc)).total_seconds()
+    provenance_annotation = (
+        f"day0_obs_source=metar_fast_lane;station={extremes.station_id};"
+        f"age_s={max(0.0, cache_age_s):.0f};samples={extremes.sample_count}"
+    )
+
+    return Day0ObservationContext(
+        high_so_far=float(extremes.high_so_far) if extremes.high_so_far is not None else float(extremes.current_temp or 0),
+        low_so_far=float(extremes.low_so_far) if extremes.low_so_far is not None else float(extremes.current_temp or 0),
+        current_temp=float(extremes.current_temp),
+        source="metar_fast_lane",
+        observation_time=obs_time_iso,
+        unit=extremes.unit,
+        station_id=extremes.station_id,
+        sample_count=extremes.sample_count,
+        first_sample_time=(
+            extremes.first_obs_time.astimezone(timezone.utc).isoformat()
+            if extremes.first_obs_time is not None else None
+        ),
+        last_sample_time=obs_time_iso,
+        coverage_status=coverage_status,
+        observation_available_at=available_at,
+        provider_reported_time=provenance_annotation,
+    )
+
+
 def get_current_observation(
     city: City,
     target_date: date | str | None = None,
@@ -280,14 +422,49 @@ def get_current_observation(
     configured source class is unsupported here. Diagnostic callers may opt into
     non-settlement fallbacks, but those contexts must not be treated as
     executable source truth downstream.
+
+    For wu_icao cities: when the WU timeseries result is None, stale (>1 h
+    age), or coverage-incomplete, the implementation falls through to the
+    METAR fast lane in-process memo (Option B — no HTTP call; reads only the
+    in-process Day0FastObsEmitter cache). The fallback is gated by:
+      - city.settlement_source_type == "wu_icao" AND station match (identical
+        physical settlement station; faithfulness gate applied inside the fast
+        lane).
+      - fast lane cache ≤ FAST_LANE_ENTRY_MAX_CACHE_AGE_S old.
+      - fallback result carries source="metar_fast_lane" + provenance
+        annotation so receipts/payloads carry honest provenance.
+      - If the WU result is coverage-incomplete (WINDOW_INCOMPLETE) the
+        METAR fallback may satisfy the STALENESS gate but explicitly keeps
+        coverage_status="WINDOW_INCOMPLETE" when the METAR data does not have
+        first_obs_time within the local-day grace window. If the METAR fast
+        lane DOES have continuous coverage from local-day start
+        (first_obs_time within grace window) the coverage_status is set to
+        the coverage computed from METAR data.
     """
 
-    target_day, _, reference_local, tz = _resolve_observation_context(
+    target_day, reference_utc, reference_local, tz = _resolve_observation_context(
         city, target_date=target_date, reference_time=reference_time
     )
 
     if city.settlement_source_type == "wu_icao":
         result = _fetch_wu_observation(city, target_day=target_day, reference_local=reference_local, tz=tz)
+        # Option-B fast-lane fallback: fire when WU result is absent, stale,
+        # or coverage-incomplete (the three blocking failure modes identified in
+        # the day0_obs_fastlane_plan §1.4). No HTTP in this path.
+        wu_needs_fallback = _wu_result_needs_fallback(result, reference_utc=reference_utc)
+        if wu_needs_fallback:
+            fast_result = _fetch_metar_fast_lane_observation(
+                city, target_day=target_day, reference_utc=reference_utc
+            )
+            if fast_result is not None:
+                logger.info(
+                    "DAY0_OBS_FAST_LANE_FALLBACK city=%s target_date=%s "
+                    "wu_needs_fallback=%s metar_source=%s coverage=%s age_annotation=%s",
+                    city.name, target_day.isoformat(), wu_needs_fallback,
+                    fast_result.source, fast_result.coverage_status,
+                    fast_result.provider_reported_time or "none",
+                )
+                return fast_result
         if result is not None:
             return result
     elif not allow_non_settlement_fallback:

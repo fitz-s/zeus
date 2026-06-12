@@ -195,7 +195,11 @@ from src.types.temperature import TemperatureDelta
 logger = logging.getLogger(__name__)
 CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = 0.02
 DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
-    "wu_icao": frozenset({"wu_api"}),
+    # "metar_fast_lane": Option-B METAR fast-lane fallback (day0_obs_fastlane_plan §4.2).
+    # Same physical settlement station as WU (ICAO identity enforced by
+    # fast_obs_source_for_city + faithfulness gate in day0_fast_obs.py).
+    # Only fires when WU result is absent/stale/coverage-incomplete.
+    "wu_icao": frozenset({"wu_api", "metar_fast_lane"}),
 }
 DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
 DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0

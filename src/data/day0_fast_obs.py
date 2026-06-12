@@ -69,6 +69,12 @@ _T_GROUP_RE = re.compile(r"\bT\d{8}\b")
 #: the reactor cycle can be faster — do not hammer a free government API).
 DEFAULT_MIN_FETCH_INTERVAL_S = 90.0
 
+#: Maximum cache age (seconds) at which the fast lane may serve the ENTRY gate
+#: (monitor fallback — Option B). Kills are staleness-safe; entries are not.
+#: At 15 min the cache is still fresh enough that the running extreme it
+#: encodes is a valid local-day extreme for entry-probability computation.
+FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
+
 
 @dataclass(frozen=True)
 class FastObsSource:
@@ -625,6 +631,64 @@ class Day0FastObsEmitter:
         """
         with self._lock:
             return self._last_kill_memo_rounded.get((str(city_name), str(target_date), str(metric)))
+
+    def latest_extremes(
+        self,
+        city: Any,
+        target_date: str,
+        *,
+        as_of: Optional[datetime] = None,
+    ) -> Optional["FastObsExtremes"]:
+        """Return computed FastObsExtremes from the in-process METAR cache for
+        ``city`` on ``target_date`` (UTC date, ISO string).
+
+        This is the ENTRY-GATE source for Option-B monitor fallback (see
+        day0_obs_fastlane_plan.md §4.2). Unlike ``latest_rounded_extreme`` (the
+        monotone KILL memo), this method recomputes extremes LIVE from cached
+        reports — so ``first_obs_time`` and ``sample_count`` are accurate for
+        coverage-window evaluation.
+
+        CONTRACT:
+          - Returns None when the cache is empty (no fetch has succeeded in this
+            process), when the city is not eligible for the fast lane (non-wu_icao
+            or excluded by the faithfulness gate), or when no station-matching
+            reports exist for the target date.
+          - Does NOT perform any network I/O — reads only from ``_cached_reports``
+            (the in-process memo).
+          - ``as_of``: UTC instant cap passed to running_extremes_for_local_day;
+            defaults to now().
+
+        Consumed EXCLUSIVELY by observation_client._fetch_wu_observation fallback
+        (Option-B wiring). Do NOT call from hot paths outside the monitor lane.
+        """
+        source = fast_obs_source_for_city(city)
+        if source is None:
+            return None
+        with self._lock:
+            reports = list(self._cached_reports)
+            cache_monotonic = self._cache_fetched_monotonic
+        if not reports:
+            return None
+        # Freshness gate: cache must be ≤ FAST_LANE_ENTRY_MAX_CACHE_AGE_S old.
+        # Stale caches must not serve the entry gate (kills are staleness-safe;
+        # entries are not — see plan §4.2 "Freshness contract").
+        cache_age_s = time.monotonic() - cache_monotonic
+        if cache_age_s > FAST_LANE_ENTRY_MAX_CACHE_AGE_S:
+            return None
+        effective_as_of = (as_of or datetime.now(UTC)).astimezone(UTC)
+        try:
+            extremes = running_extremes_for_local_day(
+                reports, city=city, target_date=target_date, as_of=effective_as_of
+            )
+        except Exception as exc:
+            logger.warning(
+                "DAY0_FAST_OBS_LATEST_EXTREMES_FAILED city=%s exc=%s: %s",
+                getattr(city, "name", "?"), type(exc).__name__, exc,
+            )
+            return None
+        if extremes.sample_count == 0:
+            return None
+        return extremes
 
     def prefetch(
         self,
