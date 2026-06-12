@@ -4,7 +4,7 @@
 #                  BUG#92 tick-binding antibody (event_reactor_adapter.py:_required_bound_tick_size).
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
 
@@ -12,6 +12,22 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.compiler import AuthorityEvidence, EvidenceClock, NoSubmitProofBundle
 from src.events.opportunity_event import OpportunityEvent
+
+
+def _fixture_market_end_at(receipt: Any, decision_time: datetime) -> str:
+    """Pick a snapshot market_end_at consistent with the proof's intended mode.
+
+    Wave-1 2026-06-12 (canary force-taker deleted): the final-stage mode validator
+    re-derives the fresh mode from the deadline-aware rest-then-cross policy. A proof
+    that intends to TAKER must sit near the deadline (policy crosses); a MAKER/unknown
+    proof must sit far from it (policy rests) — otherwise the proof and the fresh
+    re-derivation disagree and every plan aborts MODE_FLIPPED.
+    """
+    mode = str(getattr(receipt, "execution_mode_intent", "") or "").strip().upper()
+    policy = str(getattr(receipt, "rest_then_cross_policy", "") or "").strip().upper()
+    is_taker = mode == "TAKER" or policy.startswith("TAKER")
+    delta = timedelta(minutes=5) if is_taker else timedelta(hours=12)
+    return (decision_time + delta).isoformat()
 
 
 def build_test_no_submit_proof_bundle(
@@ -242,6 +258,13 @@ def build_test_no_submit_proof_bundle(
                 # snapshot always does. Canonical Polymarket tick = "0.01".
                 "min_tick_size": "0.01",
                 "min_order_size": "1",
+                # Wave-1 2026-06-12: the canary force-taker knob is DELETED; a proof's mode
+                # is now validated against the deadline-aware rest-then-cross policy on the
+                # fresh book. To keep proof and fresh re-derivation CONSISTENT, derive the
+                # snapshot's market_end_at from the proof's intended mode: a TAKER proof gets
+                # a near-deadline (decision + 5 min) so the policy crosses (fresh=TAKER); a
+                # MAKER/unknown proof gets a far horizon so the policy rests (fresh=MAKER).
+                "market_end_at": _fixture_market_end_at(receipt, decision_time),
             },
             quote_clock,
             "test.executable_snapshot",

@@ -4,9 +4,10 @@
 #   re-run the UNCHANGED freshness gate — kills the warm-job-cadence vs 30s-window
 #   zero-order wall, MONEY_PATH_TRANSIENT_EXHAUSTED. Bug fix, no flag, fail-soft,
 #   lock-law preserved [#95/INV-37]. Authority basis: live evidence 2026-06-11 22:00-23:30Z)
-# Last reused or audited: 2026-06-11 (K=1 STAGE 1: persist fresh JIT /book (R8) as a
-#   first-class JIT_PRESUBMIT executable_market_snapshots row before consume; flag
-#   edli.k1_persist_presubmit_snapshot_enabled default OFF, fail-soft, dark-safe —
+# Last reused or audited: 2026-06-12 (K=1 STAGE 1: persist fresh JIT /book (R8) as a
+#   first-class JIT_PRESUBMIT executable_market_snapshots row before consume. Wave-1
+#   2026-06-12 deleted the edli.k1_persist_presubmit_snapshot_enabled flag — persist is
+#   now UNCONDITIONAL fail-soft (provenance substrate, not a throttle) —
 #   docs/operations/k1_final_snapshot_authority_plan_2026-06-11.md §4)
 # Last reused or audited: 2026-06-10 (P0 mode-authority, operator review 2026-06-10):
 #   the FINAL command builder no longer re-selects maker/taker mode. The selected proof's
@@ -390,11 +391,11 @@ class PreSubmitAuthorityWitness:
 # the fresh submit-time JIT /book fetch (R8) is today ephemeral (witness only).
 # Stage 1 gives it a durable, first-class executable_market_snapshots identity so
 # the receipt can prove the economics it submitted under. Pure additive
-# persistence + provenance — ZERO behavior change (the witness ALSO still flows
-# through the existing R9-R15 path untouched). Gated by
-# edli.k1_persist_presubmit_snapshot_enabled (default OFF => no write).
+# persistence + provenance — the witness ALSO still flows through the existing
+# R9-R15 path untouched. Wave-1 2026-06-12: the former
+# k1_persist_presubmit_snapshot_enabled flag is DELETED; the persist is now
+# UNCONDITIONAL fail-soft (provenance substrate, never a throttle).
 JIT_PRESUBMIT_PROVENANCE_SOURCE = "JIT_PRESUBMIT"
-_K1_PERSIST_PRESUBMIT_FLAG = "k1_persist_presubmit_snapshot_enabled"
 # The fresh JIT book carries the SAME price freshness window as the elected DB
 # row's executable window: captured_at + the snapshot freshness window. We mirror
 # the elected row's own window rather than fabricate a new constant.
@@ -483,14 +484,19 @@ def persist_presubmit_jit_snapshot(
     *,
     witness: PreSubmitAuthorityWitness,
     decision_time: datetime,
-    enabled: bool,
+    enabled: bool = True,
 ) -> str | None:
-    """Persist exactly ONE JIT-presubmit snapshot row, fail-soft and flag-gated.
+    """Persist exactly ONE JIT-presubmit snapshot row, fail-soft and UNCONDITIONAL.
 
-    Returns the new snapshot_id on a successful write, or ``None`` when the flag is
-    OFF, inputs are missing, or the write fails. A failed persist MUST NEVER block
-    or delay the submit (§4 Stage 1 fail-soft): the persist is observability /
-    Stage-2 substrate, not a gate.
+    Wave-1 2026-06-12: the ``k1_persist_presubmit_snapshot_enabled`` flag is DELETED —
+    this persistence is the receipt's provenance substrate (pure additive, fail-soft),
+    not a throttle, so it now ALWAYS runs. The vestigial ``enabled`` param defaults True
+    and is retained only for call-site/test compatibility; passing False still skips
+    (a caller's explicit opt-out), but the live path never sets it.
+
+    Returns the new snapshot_id on a successful write, or ``None`` when inputs are
+    missing or the write fails. A failed persist MUST NEVER block or delay the submit
+    (§4 Stage 1 fail-soft): the persist is observability / Stage-2 substrate, not a gate.
 
     §5.2 SQLite discipline: the JIT /book fetch [NET] has ALREADY happened by the
     time this is called (the witness is built from it); this only opens the
@@ -1280,11 +1286,9 @@ def event_bound_live_adapter_from_trade_conn(
     replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
     replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
     real_order_submit_enabled: bool = False,
-    live_canary_enabled: bool = False,
     executor_submit: Callable[[DecisionCertificate, DecisionCertificate], EventBoundExecutorSubmitResult] | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     durable_submit_outbox_enabled: bool = False,
-    canary_force_taker_provider: Callable[[], bool] | None = None,
     taker_fok_fak_live_enabled: bool = False,
     operator_arm: "OperatorArm | None" = None,
     edli_live_scope: str = "forecast_only",
@@ -1531,14 +1535,11 @@ def event_bound_live_adapter_from_trade_conn(
             )
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
-        if real_order_submit_enabled and not live_canary_enabled:
-            return EventSubmissionReceipt(
-                False,
-                event.event_id,
-                event.causal_snapshot_id,
-                reason="LIVE_CANARY_DISABLED",
-                proof_accepted=False,
-            )
+        # Wave-1 2026-06-12: the LIVE_CANARY_DISABLED gate (real_order_submit_enabled AND
+        # NOT live_canary_enabled -> refuse submit) is DELETED. The canary on/off knob was
+        # an artificial throttle; the real gates remain the operator arm + real-submit flag
+        # + durable outbox + executor boundary below. Live submit now proceeds whenever
+        # those are present (byte-identical to the prior canary-enabled live behaviour).
         if real_order_submit_enabled and not durable_submit_outbox_enabled:
             return EventSubmissionReceipt(
                 False,
@@ -1579,19 +1580,10 @@ def event_bound_live_adapter_from_trade_conn(
         # computed + annotated on the receipt for the operator's ARM review only; it can
         # never change a decision. This makes "mainstream changes a decision"
         # UNCONSTRUCTABLE (not merely flag-OFF). The dead config key is left inert.
-        # Canary knob (§7): force the taker branch (bypassing the governor's
-        # maker/taker CHOICE, never its NO_TRADE/risk gates) while the canary is
-        # active and below its min fill count. main.py owns the count gate via
-        # ``canary_force_taker_provider``; absent a provider, the canary stage
-        # flag itself drives the force (the count gate lives upstream in the
-        # stage-readiness check).
-        if canary_force_taker_provider is not None:
-            try:
-                canary_force_taker = bool(canary_force_taker_provider())
-            except Exception:
-                canary_force_taker = bool(live_canary_enabled)
-        else:
-            canary_force_taker = bool(live_canary_enabled)
+        # Wave-1 2026-06-12: the canary force-taker KNOB is DELETED entirely (twin-authority
+        # disease: a knob that force-flips the proof's mode to TAKER competes with the single
+        # mode authority). The proof's execution_mode_intent (REST-then-cross policy) is the
+        # SOLE mode authority; the build chain no longer carries a force-taker override.
         try:
             if real_order_submit_enabled:
                 build_conn = live_cap_conn or trade_conn
@@ -1604,7 +1596,6 @@ def event_bound_live_adapter_from_trade_conn(
                         live_cap_conn=build_conn,
                         trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
-                        canary_force_taker=canary_force_taker,
                         taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
                     ),
                 )
@@ -1665,7 +1656,6 @@ def event_bound_live_adapter_from_trade_conn(
                         live_cap_conn=build_conn,
                         trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
-                        canary_force_taker=canary_force_taker,
                         taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
                     ),
                 )
@@ -2740,28 +2730,11 @@ def _build_event_bound_no_submit_receipt_core(
         # records WHY the stake equals the venue floor (the fractional-Kelly risk intent
         # was preserved — min order is << the bankroll cap). Empty on the normal path.
         _stake_floor_provenance: dict[str, object] = {}
-        # DAY0 EXPOSURE CAP (PR#404 operator review P0-1: the cap is part of the
-        # SIZING KERNEL'S feasible region, never a post-hoc clamp). The family
-        # headroom — cap minus existing family exposure — is computed HERE
-        # (where the exposure map lives) and threaded INTO the recapture/sizing
-        # kernel as an upper bound on the optimizer's max_stake. The kernel
-        # therefore: re-optimizes within [min_order, min(headroom, fractional
-        # cap, concentration ceiling)], reprices the CHOSEN stake on the same
-        # curve (price/cost-basis consistent by construction), and aborts
-        # first-class when headroom is exhausted or below the SELECTED curve's
-        # REAL venue min order (DAY0_EXPOSURE_CAP_EXHAUSTED /
-        # DAY0_EXPOSURE_CAP_BELOW_MIN_ORDER — the old post-clamp's 'headroom <
-        # $1' constant was a wrong risk boundary: real min orders range $0.15
-        # to $30+). Invariant (asserted in the kernel): final stake +
-        # existing_family_notional <= cap + epsilon.
-        _day0_headroom_usd: float | None = None
-        if event.event_type == "DAY0_EXTREME_UPDATED":
-            _day0_cap = _day0_family_notional_cap_usd()
-            if _day0_cap is not None:
-                _existing_family_usd = float(
-                    sum(float(v) for v in (_recapture_exposure or {}).values())
-                )
-                _day0_headroom_usd = float(_day0_cap) - max(0.0, _existing_family_usd)
+        # Wave-1 2026-06-12: the DAY0 family NOTIONAL CAP ($25) is DELETED (operator
+        # no-caps law: "不允许设置任何的cap"). Day0 sizing is now governed SOLELY by the
+        # same q_lcb + fractional-Kelly + free-cash + concentration machinery as every
+        # other lane — no day0-specific notional clamp / headroom bound is computed or
+        # threaded into the sizing kernel.
         # Maker/taker fill semantics for the S6 PRICE_MOVED ceiling (2026-06-10).
         # A resting maker order rests at the admitted limit and never chases the
         # recaptured ask, so the price-moved ceiling must NOT abort it (it was
@@ -2793,7 +2766,6 @@ def _build_event_bound_no_submit_receipt_core(
                 # leg scoped OUT of selection falsely reverses the chosen leg.
                 locked_opportunity_conn=locked_opportunity_conn,
                 stake_floor_out=_stake_floor_provenance,
-                day0_headroom_usd=_day0_headroom_usd,
                 free_cash_usd=free_cash_usd,
             )
         )
@@ -3394,7 +3366,6 @@ def _build_submit_disabled_live_certificates(
     live_cap_conn: sqlite3.Connection | None = None,
     trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
-    canary_force_taker: bool = False,
     taker_fok_fak_live_enabled: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
     command_certificates = _build_live_execution_command_certificates(
@@ -3404,7 +3375,6 @@ def _build_submit_disabled_live_certificates(
         live_cap_conn=live_cap_conn,
         trade_conn=trade_conn,
         pre_submit_authority_provider=pre_submit_authority_provider,
-        canary_force_taker=canary_force_taker,
         taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
     )
     command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
@@ -3567,7 +3537,6 @@ def _build_live_execution_command_certificates(
     live_cap_conn: sqlite3.Connection | None = None,
     trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
-    canary_force_taker: bool = False,
     taker_fok_fak_live_enabled: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
     _assert_event_bound_strategy_live_admitted(
@@ -3649,12 +3618,13 @@ def _build_live_execution_command_certificates(
         # witness provider) as ONE first-class executable_market_snapshots row tagged
         # source=JIT_PRESUBMIT, BEFORE it is consumed below. Pure additive persistence
         # + provenance; the witness STILL flows through the existing R9-R15 path
-        # untouched. Gated by edli.k1_persist_presubmit_snapshot_enabled (default
-        # OFF => no write, byte-identical). Fail-soft: a failed persist never blocks
-        # submit. §5.2 SQLite discipline: the [NET] fetch is done; this opens a
-        # short-lived zeus_trades write+commit only — the trade WAL lock is never held
-        # across the fetch, and zeus-world (#95 mutex) is untouched.
-        if bool(settings["edli"].get(_K1_PERSIST_PRESUBMIT_FLAG, False)) and trade_conn is not None:
+        # untouched. Wave-1 2026-06-12: the k1_persist_presubmit_snapshot_enabled flag is
+        # DELETED — this is the receipt's provenance substrate, not a throttle, so it now
+        # ALWAYS runs (fail-soft: a failed persist never blocks submit). §5.2 SQLite
+        # discipline: the [NET] fetch is done; this opens a short-lived zeus_trades
+        # write+commit only — the trade WAL lock is never held across the fetch, and
+        # zeus-world (#95 mutex) is untouched.
+        if trade_conn is not None:
             _k1_elected_id = str(
                 executable_snapshot.payload.get("identity")
                 or executable_snapshot.payload.get("selected_snapshot_id")
@@ -3671,7 +3641,6 @@ def _build_live_execution_command_certificates(
                 _k1_elected_snapshot,
                 witness=authority_witness,
                 decision_time=decision_time,
-                enabled=True,
             )
         best_bid = _optional_float(quote_payload.get("best_bid"))
         best_ask = _optional_float(quote_payload.get("best_ask"))
@@ -3701,28 +3670,17 @@ def _build_live_execution_command_certificates(
         # REST_DEFAULT/MAKER for the whole licensed class while the legacy
         # governor+EV-override re-derivation here still said TAKER — a 100%
         # flip rate that silently requeued the entire day-ahead lane to the
-        # retry cap. The canary force-taker knob keeps its legacy bypass via
-        # _select_edli_order_mode (operator knob, default off).
-        if canary_force_taker:
-            _fresh_mode = _select_edli_order_mode(
-                actionable_payload=actionable.payload,
-                quote_payload=quote_payload,
-                best_bid=best_bid,
-                best_ask=best_ask,
-                executable_snapshot=executable_snapshot,
-                canary_force_taker=canary_force_taker,
-                fresh_best_bid=fresh_best_bid,
-                fresh_best_ask=fresh_best_ask,
-            )
-        else:
-            _fresh_mode = _fresh_rest_then_cross_mode(
-                actionable_payload=actionable.payload,
-                executable_snapshot=executable_snapshot,
-                fresh_best_bid=fresh_best_bid,
-                fresh_best_ask=fresh_best_ask,
-                tick_size=float(provisional_final_intent.payload["tick_size"]),
-                decision_time=decision_time,
-            )
+        # retry cap. Wave-1 2026-06-12: the canary force-taker bypass is DELETED —
+        # the fresh mode comes UNCONDITIONALLY from the same rest-then-cross policy
+        # as the proof, so the two doctrines can never disagree by construction.
+        _fresh_mode = _fresh_rest_then_cross_mode(
+            actionable_payload=actionable.payload,
+            executable_snapshot=executable_snapshot,
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
+            tick_size=float(provisional_final_intent.payload["tick_size"]),
+            decision_time=decision_time,
+        )
         order_mode = _validate_final_order_mode_or_abort(
             proof_mode=str(actionable.payload.get("proof_execution_mode_intent") or "") or None,
             fresh_mode=_fresh_mode,
@@ -5124,23 +5082,18 @@ def _select_edli_order_mode(
     best_bid: float | None,
     best_ask: float | None,
     executable_snapshot: DecisionCertificate,
-    canary_force_taker: bool = False,
-    canary_edge_floor: float | None = None,
     fresh_best_bid: float | None = None,
     fresh_best_ask: float | None = None,
 ) -> str:
-    """Select MAKER/TAKER for the entry per design §1-§2 (governor + EV override).
+    """Select MAKER/TAKER for the entry per design §1-§2 (governor + REST-then-cross policy).
 
-    Authority order (Fitz #4 provenance):
-      1. Canary knob (§7): when ``canary_force_taker`` and the post-cross edge
-         clears the 5c floor, FORCE taker. This bypasses the governor's
-         maker/taker CHOICE but never its NO_TRADE/risk gates (those gate the
-         candidate upstream before this point and remain in force).
-      2. Governor (§1): consult ``maker_or_taker`` when a global governor is
+    Wave-1 2026-06-12: the canary force-taker knob is DELETED — the proof's
+    rest_then_cross_policy is the single mode authority. Authority order:
+      1. Governor (§1): consult ``maker_or_taker`` when a global governor is
          configured. NO_TRADE is impossible here (the candidate already cleared
          the gates) but is mapped to MAKER (the conservative resting default).
-      3. EV override (§2): even when the governor says MAKER, cross if the
-         economic boundary ``e*(1-P_fill) >= s/2*(1+P_fill) + f - A`` holds.
+      2. K4.0 REST-THEN-CROSS policy (§2): the proof-side policy verdict travels on
+         the actionable payload; TAKER_* -> TAKER, else MAKER.
 
     Defaults to MAKER (the pre-change passive law) whenever inputs are missing —
     a partial/uncertain signal must never silently produce a taker cross.
@@ -5151,7 +5104,7 @@ def _select_edli_order_mode(
     # --- 0. RELATIVE-SPREAD PARTICIPATION GUARD (FIX C; incident
     # 0b5c305e26524042: 56% relative spread crossed as an instant FOK taker).
     # When (ask - bid)/mid exceeds the threshold — or the two-sided book is
-    # unmeasurable — taker crossing is FORBIDDEN regardless of edge, canary, or
+    # unmeasurable — taker crossing is FORBIDDEN regardless of edge or
     # governor: a wide spread IS the illiquidity signal, and every "edge" that
     # wants to cross it is measured with the same model q the market is
     # disputing. Maker resting remains allowed (the conservative default).
@@ -5167,17 +5120,7 @@ def _select_edli_order_mode(
     if spread_guard_reason is not None:
         return "MAKER"
 
-    # --- 1. Canary force-taker (with 5c post-cross edge floor) ---
-    if canary_force_taker:
-        floor = 0.05 if canary_edge_floor is None else float(canary_edge_floor)
-        post_cross_edge = _post_cross_edge(
-            actionable_payload=actionable_payload, best_bid=best_bid, best_ask=best_ask, side=side
-        )
-        if post_cross_edge is not None and post_cross_edge >= floor:
-            return "TAKER"
-        # Floor not met: fall through to governor/EV (do NOT force a sub-floor cross).
-
-    # --- 2. Governor maker_or_taker ---
+    # --- 1. Governor maker_or_taker ---
     governor_mode = _governor_mode_for_snapshot(executable_snapshot)
     if governor_mode == "TAKER":
         return "TAKER"
@@ -5283,25 +5226,8 @@ def _proof_order_rests_at_admitted_price(proof: "_CandidateProof") -> bool:
     return mode == "MAKER"
 
 
-def _post_cross_edge(
-    *,
-    actionable_payload: Mapping[str, object],
-    best_bid: float | None,
-    best_ask: float | None,
-    side: str,
-) -> float | None:
-    """q_posterior - far_touch - fee  (the §7 canary edge floor numerator)."""
-    q = _optional_float(actionable_payload.get("q_live"))
-    fee = _optional_float(actionable_payload.get("fee_rate")) or 0.0
-    if q is None:
-        return None
-    if side == "BUY":
-        if best_ask is None:
-            return None
-        return q - best_ask - fee
-    if best_bid is None:
-        return None
-    return best_bid - q - fee
+# Wave-1 2026-06-12: _post_cross_edge (the §7 canary edge-floor numerator) is DELETED
+# with the canary force-taker knob — it had no remaining caller.
 
 
 def _ev_boundary_favors_cross(
@@ -8088,25 +8014,8 @@ class _StakeBelowMinOrder(RuntimeError):
     """
 
 
-class _Day0CapExhausted(RuntimeError):
-    """DAY0 family notional headroom is exhausted (PR#404 P0-1).
-
-    Raised by the sizing kernel when ``day0_headroom_usd <= 0`` — the family
-    already carries the configured day0 notional cap. First-class abort
-    (``SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED`` -> receipt reason
-    ``DAY0_EXPOSURE_CAP_EXHAUSTED``), never an edge verdict.
-    """
-
-
-class _Day0CapBelowMinOrder(RuntimeError):
-    """DAY0 family headroom is positive but below the SELECTED curve's REAL
-    venue min-order notional (PR#404 P0-1 — the boundary the old post-hoc
-    clamp got wrong with its 'headroom < $1' constant; real min orders range
-    ~$0.15 to $30+ depending on min_order_size x all-in price). First-class
-    abort (``SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER`` -> receipt reason
-    ``DAY0_EXPOSURE_CAP_BELOW_MIN_ORDER``); the kernel must never emit a
-    stake below the venue floor.
-    """
+# Wave-1 2026-06-12: the _Day0CapExhausted / _Day0CapBelowMinOrder exception classes
+# are DELETED with the day0 family notional cap (operator no-caps law).
 
 
 # Operator guard on the auto-bump-to-min-order action (2026-06-09 fix). When the
@@ -8128,7 +8037,6 @@ def _robust_marginal_utility_stake_and_price(
     bankroll_usd: float,
     kelly_multiplier: float,
     stake_floor_out: dict[str, object] | None = None,
-    day0_headroom_usd: float | None = None,
     free_cash_usd: float | None = None,
 ) -> tuple[float, ExecutionPrice | None]:
     """Chosen FRACTIONAL-Kelly stake AND its typed chosen-stake price (spec §5.3 / §14.10).
@@ -8253,19 +8161,9 @@ def _robust_marginal_utility_stake_and_price(
         max_stake = min(_fractional_cap, _concentration_ceiling)
     else:
         max_stake = _fractional_cap
-    # DAY0 EXPOSURE CAP as a KERNEL bound (PR#404 P0-1): the family headroom is
-    # one more upper bound in the same feasible region as the fractional-Kelly
-    # budget and the concentration ceiling — the chosen stake (and therefore
-    # the chosen-stake execution price below) is optimized WITHIN it, never
-    # post-clamped. Exhausted headroom is a first-class abort here.
-    if day0_headroom_usd is not None:
-        _day0_headroom = Decimal(str(day0_headroom_usd))
-        if _day0_headroom <= Decimal("0"):
-            raise _Day0CapExhausted(
-                f"day0 family notional headroom exhausted: headroom="
-                f"{float(_day0_headroom):.6f} USD (cap minus existing family exposure)"
-            )
-        max_stake = min(max_stake, _day0_headroom)
+    # Wave-1 2026-06-12: the DAY0 EXPOSURE CAP kernel bound is DELETED (operator no-caps
+    # law). max_stake is governed by the fractional-Kelly budget + concentration ceiling +
+    # free-cash bound ONLY — no day0-specific notional clamp.
     scored, proof_by_hypothesis = _score_family_candidates_by_robust_marginal_utility(
         executable=list(all_proofs),
         family_key=family_key,
@@ -8354,20 +8252,7 @@ def _robust_marginal_utility_stake_and_price(
         # ranker used (utility_ranker records it on the score), so the min-order edge is
         # robust-consistent, never a looser point estimate.
         min_order_usd = Decimal(str(score.min_order_notional_usd))
-        # DAY0 cap vs REAL venue floor (PR#404 P0-1): when the day0 headroom
-        # cannot even cover the SELECTED curve's min-order notional, no
-        # admissible stake exists — first-class DAY0_CAP_BELOW_MIN_ORDER abort
-        # (the min-order bump below must never bump THROUGH the cap).
-        if (
-            day0_headroom_usd is not None
-            and min_order_usd > Decimal("0")
-            and Decimal(str(day0_headroom_usd)) < min_order_usd
-        ):
-            raise _Day0CapBelowMinOrder(
-                f"day0 family headroom {float(day0_headroom_usd):.6f} USD below the "
-                f"selected market's venue min-order notional "
-                f"{float(min_order_usd):.6f} USD — no admissible stake within the cap"
-            )
+        # Wave-1 2026-06-12: the DAY0 cap-vs-venue-floor abort is DELETED with the cap.
         if min_order_usd > Decimal("0") and chosen < min_order_usd:
             delta_u_at_min = float(score.delta_u_at_min_order)
             bankroll_cap = Decimal(str(_MIN_ORDER_BUMP_MAX_BANKROLL_PCT)) * Decimal(
@@ -8419,15 +8304,7 @@ def _robust_marginal_utility_stake_and_price(
             # Arithmetic/contract fault on the boundary -> no priced stake (fail closed,
             # §13). Genuinely unexpected; keep the conservative no-trade behavior.
             return 0.0, None
-        # DAY0 cap INVARIANT (PR#404 P0-1): final stake + existing family
-        # notional <= cap + epsilon, by construction (chosen <= max_stake <=
-        # headroom). Asserted so any future re-ordering of the bounds above
-        # fails loudly instead of leaking notional past the cap.
-        if day0_headroom_usd is not None:
-            assert float(chosen) <= float(day0_headroom_usd) + 1e-6, (
-                f"DAY0 exposure-cap invariant violated: chosen stake {float(chosen):.6f} "
-                f"USD exceeds family headroom {float(day0_headroom_usd):.6f} USD"
-            )
+        # Wave-1 2026-06-12: the DAY0 cap invariant assertion is DELETED with the cap.
         return float(chosen), price
     return 0.0, None
 
@@ -8531,7 +8408,6 @@ def _evaluate_submit_recapture_for_selected(
     locked_opportunity_conn: sqlite3.Connection | None = None,
     stake_floor_out: dict[str, object] | None = None,
     order_rests_at_admitted_price: bool = False,
-    day0_headroom_usd: float | None = None,
     free_cash_usd: float | None = None,
 ) -> tuple[SubmitRecaptureDecision, float, ExecutionPrice | None]:
     """THE single fail-closed submit-recapture gate (spec §5 / §7 / §14.9 / §14.10).
@@ -8654,38 +8530,10 @@ def _evaluate_submit_recapture_for_selected(
             bankroll_usd=bankroll_usd,
             kelly_multiplier=kelly_multiplier,
             stake_floor_out=stake_floor_out,
-            day0_headroom_usd=day0_headroom_usd,
             free_cash_usd=free_cash_usd,
         )
-    except _Day0CapExhausted as exc:
-        # DAY0 cap GATE (PR#404 P0-1): family notional headroom exhausted —
-        # first-class abort, never an edge verdict, never a post-hoc clamp.
-        return (
-            SubmitRecaptureDecision(
-                state=CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED,
-                may_submit=False,
-                reversal_reason=ReversalReason.DAY0_CAP,
-                detail=str(exc),
-            ),
-            0.0,
-            None,
-        )
-    except _Day0CapBelowMinOrder as exc:
-        # DAY0 cap vs REAL venue floor (PR#404 P0-1): positive headroom that
-        # cannot cover the selected market's min-order notional — no admissible
-        # stake exists within the cap. Distinct from BELOW_MIN_ORDER (which is
-        # the bankroll-cap guard) so the regret ledger separates "cap full" from
-        # "venue floor above sizing intent".
-        return (
-            SubmitRecaptureDecision(
-                state=CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER,
-                may_submit=False,
-                reversal_reason=ReversalReason.DAY0_CAP,
-                detail=str(exc),
-            ),
-            0.0,
-            None,
-        )
+    # Wave-1 2026-06-12: the DAY0 cap-exhausted / cap-below-min-order except handlers are
+    # DELETED with the cap (the sizing kernel no longer raises those).
     except _StakeBelowMinOrder as exc:
         # GATE 3b (BELOW_MIN_ORDER, 2026-06-09 antibody). Edge is positive at min order
         # but the sized stake could not clear the venue floor within the bankroll cap.
@@ -10414,10 +10262,11 @@ def _canonical_probability_and_fdr_proof(
             pass
 
     # MAINSTREAM AGREEMENT ANNOTATION (#135 / operator directive 2026-06-04 #2):
-    # ALWAYS compute + annotate the per-candidate mainstream/bias agreement value, DECOUPLED
-    # from the reference flag (mainstream_agreement_reference_enabled). The operator wants the
-    # number SHOWN ("数值显示") on every receipt without flipping the foreign config — so the
-    # evaluation is UNCONDITIONAL here. It is purely OBSERVATIONAL: verdicts are stored in the
+    # ALWAYS compute + annotate the per-candidate mainstream/bias agreement value. The
+    # operator wants the number SHOWN ("数值显示") on every receipt — so the evaluation is
+    # UNCONDITIONAL here. (Wave-1 2026-06-12: the vestigial mainstream_agreement_reference_enabled
+    # config key — already fully decoupled, no code read — is DELETED.) It is purely
+    # OBSERVATIONAL: verdicts are stored in the
     # payload for receipt annotation only; they do NOT filter / exclude candidates in
     # _selected_candidate_proof, and (post-2026-06-04) there is NO submit-time enforce branch.
     # WARM-CACHE-ONLY: the eval helper below reads read_mainstream_point_cached
@@ -10944,13 +10793,12 @@ def _market_analysis_from_event_snapshot(
                 return static_p_cal
 
             sampler = _static_sampler
-    # K1 — ForecastSharpnessEvidence (Phase-2, REQUIRED ctor param). Day0/imminent
-    # paths are exempt (the realized observation replaces the forecast, so forecast
-    # sharpness is moot). Otherwise load the settlement MAE for (city, unit, lead)
-    # from forecast_skill. The BEHAVIOR (edge suppression) is flag-gated OFF
-    # (edli.forecast_sharpness_gate_enabled) so this evidence is inert on live emit
-    # today; only the TYPE is load-bearing now. Any load failure -> fail-closed
-    # `missing` evidence (also inert while the flag is OFF).
+    # Wave-1 2026-06-12: the forecast-sharpness EDGE-SUPPRESSION GATE is DELETED (it was
+    # a 50/54-city zero-trade veto). The ForecastSharpnessEvidence is now a purely inert,
+    # unit-checked provenance carrier — it suppresses nothing. We still build it (the
+    # MarketAnalysis ctor's B6 unit-leak guard validates it when present) but it can never
+    # veto an edge. Day0/imminent paths stay exempt; any load failure -> `missing`. If
+    # sharpness ever matters again it must be rebuilt inside calibrated q, never as a veto.
     forecast_sharpness = _edli_forecast_sharpness_evidence(
         snapshot=snapshot, family=family, payload=payload, unit=unit, bins=bins,
         day0_exempt=is_day0,
@@ -10977,7 +10825,7 @@ def _market_analysis_from_event_snapshot(
         bootstrap_probability_sampler=sampler,
         bootstrap_signal_type="edli_event_bound_day0" if is_day0 else "edli_event_bound_forecast",
         representativeness_sigma=representativeness_sigma,  # iron rule 6: honest q_lcb widening on corrected domain
-        forecast_sharpness=forecast_sharpness,  # K1: required sharpness contract
+        forecast_sharpness=forecast_sharpness,  # Wave-1: inert provenance carrier (gate deleted)
     )
 
 
@@ -12651,35 +12499,15 @@ def _day0_stale_obs_boundary_guard_enabled() -> bool:
         return True
 
 
-#: DAY0 per-family notional cap default (USD) — adversarial review fix 5.
-#: Interim risk bound while the day0 flip/exit machinery is young; modest by
-#: design, operator-overridable via edli.day0_family_notional_cap_usd
-#: (set <= 0 to disable once forward evidence exists).
-_DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD = 25.0
+# Wave-1 2026-06-12: the DAY0 per-family $25 notional cap (_DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD
+# + _day0_family_notional_cap_usd) is DELETED (operator no-caps law "不允许设置任何的cap").
+# Day0 sizing is governed by q_lcb + fractional Kelly + free-cash + concentration ONLY.
 
 
-def _day0_family_notional_cap_usd() -> float | None:
-    """Per-family day0 notional cap in USD, or None when disabled (<= 0)."""
-    try:
-        raw = settings["edli"].get(
-            "day0_family_notional_cap_usd", _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD
-        )
-        value = float(raw)
-    except Exception:
-        return _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD
-    if not (value > 0.0):
-        return None
-    return value
-
-
-# _apply_day0_exposure_cap REMOVED (PR#404 P0-1): the post-hoc clamp bypassed
-# the min-order-aware sizing kernel's semantics ('headroom < $1' was a wrong
-# risk boundary — real venue min orders range ~$0.15 to $30+) and could emit a
-# stake below the selected market's real venue floor that downstream receipts /
-# cost basis / live-cap reservations would treat as sizing-proven. The cap now
-# lives INSIDE _robust_marginal_utility_stake_and_price as a feasible-region
-# bound (day0_headroom_usd), with first-class aborts
-# SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED / SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER.
+# DAY0 EXPOSURE CAP fully REMOVED (Wave-1 2026-06-12, operator no-caps law). First the
+# post-hoc clamp was folded into the sizing kernel (PR#404 P0-1); now the kernel bound
+# itself ($25 family notional headroom) is DELETED. Day0 sizing = q_lcb + fractional
+# Kelly + free-cash + concentration, identical to every other lane — no day0 clamp.
 
 
 def _day0_remaining_day_q_enabled() -> bool:

@@ -258,7 +258,6 @@ class TestModeFlipGuard:
             best_bid=0.009,
             best_ask=0.016,
             executable_snapshot=types.SimpleNamespace(payload={}),
-            canary_force_taker=False,
             fresh_best_bid=0.009,
             fresh_best_ask=0.016,
         )

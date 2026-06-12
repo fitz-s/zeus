@@ -491,33 +491,33 @@ class TestPlausibilityBound:
 # ===========================================================================
 
 class TestDay0ExposureCap:
-    """PR#404 P0-1: post-hoc _apply_day0_exposure_cap removed; cap is now a
-    kernel feasible-region bound.  Full relationship tests live in
-    tests/test_day0_exposure_cap_kernel.py.  These three tests verify the
-    surviving configuration symbols and that the tombstoned function is gone."""
+    """Wave-1 2026-06-12: the DAY0 family notional cap ($25) is DELETED ENTIRELY
+    (operator no-caps law). These antibody tests verify the cap symbols and the
+    sizing-kernel headroom bound are gone — day0 sizing is now q_lcb + fractional
+    Kelly + free-cash + concentration ONLY, identical to every other lane."""
 
-    def test_default_cap_is_modest_and_configurable(self):
-        from src.engine.event_reactor_adapter import (
-            _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD,
-            _day0_family_notional_cap_usd,
+    def test_day0_notional_cap_symbols_are_deleted(self):
+        import src.engine.event_reactor_adapter as era
+
+        assert not hasattr(era, "_DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD"), (
+            "the $25 day0 family notional cap default must be deleted (no-caps law)"
         )
-
-        assert 0.0 < _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD <= 100.0
-        cap = _day0_family_notional_cap_usd()
-        assert cap is None or cap > 0.0
+        assert not hasattr(era, "_day0_family_notional_cap_usd"), (
+            "the day0 family notional cap reader must be deleted (no-caps law)"
+        )
 
     def test_apply_day0_exposure_cap_is_removed(self):
         """The post-hoc clamp must not exist; importing it should fail."""
-        import importlib
         import src.engine.event_reactor_adapter as era
         assert not hasattr(era, "_apply_day0_exposure_cap"), (
             "_apply_day0_exposure_cap must be removed (PR#404 P0-1 tombstone)"
         )
 
-    def test_kernel_cap_states_in_abort_states(self):
-        from src.strategy.redecision import SUBMIT_ABORT_STATES, CandidateLifecycleState
-        assert CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED in SUBMIT_ABORT_STATES
-        assert CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER in SUBMIT_ABORT_STATES
+    def test_day0_cap_exception_classes_are_deleted(self):
+        """The cap-abort exception classes must be gone with the cap."""
+        import src.engine.event_reactor_adapter as era
+        assert not hasattr(era, "_Day0CapExhausted")
+        assert not hasattr(era, "_Day0CapBelowMinOrder")
 
 
 # ===========================================================================

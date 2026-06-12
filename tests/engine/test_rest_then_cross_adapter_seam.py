@@ -187,7 +187,6 @@ class TestFreshSeamSubordination:
             best_bid=0.58,
             best_ask=0.66,
             executable_snapshot=SimpleNamespace(payload={}),
-            canary_force_taker=False,
             fresh_best_bid=0.58,
             fresh_best_ask=0.66,
         )
@@ -223,7 +222,6 @@ class TestFreshSeamSubordination:
             best_bid=0.10,
             best_ask=0.40,
             executable_snapshot=SimpleNamespace(payload={}),
-            canary_force_taker=False,
             fresh_best_bid=0.10,
             fresh_best_ask=0.40,
         )

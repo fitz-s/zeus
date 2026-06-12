@@ -46,6 +46,28 @@ K structural decisions (consult Section A, locally endorsed):
 | Receipt second-brain merge (_receipt_money_path_blocker re-checks trade score/Kelly/FDR/LCB/capital-efficiency) | reactor.py:1484 | Big refactor: final intent cannot exist unless invariants hold; reactor checks identity + side-effect legality only. Multi-day. |
 | taker_fok_fak_live_enabled (true) | flag | Fold taker law into final-intent policy, delete flag? |
 
+## Wave 1 additions (second consult extraction, operator-pasted; verified locally)
+
+| Item | Location (verified) | Action |
+|---|---|---|
+| day0 family notional cap $25 | adapter:12658-12671 (_DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD=25.0, consumed ~2761) | DELETE — direct no-caps-law violation; sizing = q_lcb + Kelly + portfolio only. Added to Wave1B scope. |
+| canary_force_taker | adapter:1292 param + ~1590 call chain | DELETE — mode-authority bypass; proof rest_then_cross is the single mode authority. Added to Wave1B scope. |
+
+## Follow-ups (next wave, not in flight)
+
+- _transient_requeue_reasons is in-memory (reactor): restart loses transient reason/class. Persist
+  disposition+reason on the event row (consult K3 "EventProcessingDisposition"). Schema change —
+  sequence after Wave1A lands.
+- edli_live_scope full deletion (forecast_only/day0_shadow branches die; admission = event type +
+  source truth). The 13:25Z regret rows show DAY0_SCOPE_SHADOW_ONLY rejections right up to the flip —
+  the scope string is a standing purgatory.
+- Micro-position hold <$1 hardcoded (portfolio exit) → venue min-order truth.
+- pre_submit_balance_allowance_check_enabled / durable_submit_outbox_enabled / edli_source_run_dual_chain_enabled:
+  delete flag, behavior always-on (venue reality is not optional).
+- no_submit_visible_depth_fill_lcb second fill-LCB bar → merge into one executable cost/fill model (Wave 2 K1/K6).
+- Boot quarantine conversions detail per consult: frozen_as_of fatal → cell-level calibration quarantine;
+  venue heartbeat raise → unhealthy mark + continue; stage-file staleness → WAITING readiness.
+
 ## Honest gates that STAY (consult concurs)
 FSR structural completeness; day0 hard-fact source/station/DST/rounding eligibility;
 source_truth_gate narrowed to structural identity; COMMAND_CREATED-in-no-submit invariant;

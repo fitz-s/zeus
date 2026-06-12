@@ -78,7 +78,6 @@ def _build_submit(monkeypatch, event, *, mainstream_agreement_pass, called):
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=True,
-        live_canary_enabled=True,
         durable_submit_outbox_enabled=True,
         executor_submit=_executor,
     )

@@ -67,7 +67,7 @@ def _isolate_edli_settings(monkeypatch):
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
 
 
-def _live_adapter(conn, *, edli_live_scope, executor_submit, real_order_submit_enabled, live_canary_enabled):
+def _live_adapter(conn, *, edli_live_scope, executor_submit, real_order_submit_enabled):
     from src.engine import event_reactor_adapter as adapter
     from src.main import require_operator_arm
 
@@ -79,7 +79,6 @@ def _live_adapter(conn, *, edli_live_scope, executor_submit, real_order_submit_e
         calibration_conn=conn,
         bankroll_usd_provider=lambda: 10000.0,
         real_order_submit_enabled=real_order_submit_enabled,
-        live_canary_enabled=live_canary_enabled,
         durable_submit_outbox_enabled=True,
         executor_submit=executor_submit,
         operator_arm=require_operator_arm({"edli_live_operator_authorized": True}),
@@ -108,7 +107,6 @@ def test_day0_shadow_day0_lane_carries_full_decision_content_no_submit():
         edli_live_scope="day0_shadow",
         executor_submit=_executor,
         real_order_submit_enabled=True,
-        live_canary_enabled=True,
     )
 
     receipt = submit(event, _DT)
@@ -145,7 +143,6 @@ def test_day0_shadow_enriched_fields_match_underlying_build_proof():
         edli_live_scope="day0_shadow",
         executor_submit=lambda *_: (_ for _ in ()).throw(AssertionError("no submit")),
         real_order_submit_enabled=False,
-        live_canary_enabled=False,
     )
     shadow = submit(event, _DT)
 
@@ -180,7 +177,6 @@ def test_day0_shadow_never_submits_even_with_real_submit_and_canary():
         edli_live_scope="day0_shadow",
         executor_submit=_executor,
         real_order_submit_enabled=True,
-        live_canary_enabled=True,
     )
 
     receipt = submit(event, _DT)
@@ -204,7 +200,6 @@ def test_day0_shadow_forecast_lane_event_is_not_shadow_forced():
         edli_live_scope="day0_shadow",
         executor_submit=lambda *_: (_ for _ in ()).throw(AssertionError("no submit in this path")),
         real_order_submit_enabled=False,
-        live_canary_enabled=False,
     )
 
     receipt = submit(event, _nb.DECISION_TIME)
@@ -226,7 +221,6 @@ def test_forecast_only_day0_event_unchanged_bare_rejection():
         edli_live_scope="forecast_only",
         executor_submit=lambda *_: (_ for _ in ()).throw(AssertionError("no submit")),
         real_order_submit_enabled=True,
-        live_canary_enabled=True,
     )
 
     receipt = submit(event, _DT)
@@ -254,12 +248,15 @@ def test_day0_shadow_forced_receipt_leaks_no_reservation():
         edli_live_scope="day0_shadow",
         executor_submit=lambda *_: (_ for _ in ()).throw(AssertionError("no submit")),
         real_order_submit_enabled=False,
-        live_canary_enabled=False,
     )
 
     # Sanity: this fixture's candidate IS viable (it provisionally reserves), so the rollback
-    # is actually exercised (not vacuously empty).
-    direct = _nb._receipt(event, conn, decision_time=_DT, bankroll_usd_provider=lambda: 10000.0)
+    # is actually exercised (not vacuously empty). Wave-1 2026-06-12: with the $25 day0 cap
+    # DELETED, sizing is bounded by the fixture book's real DEPTH (size=100 @ 0.40 -> ~$40
+    # notional). A $500 bankroll's fractional-Kelly stake (~$31) fits that depth honestly,
+    # so the candidate stays viable without any artificial cap. (At $10k the uncapped stake
+    # would exceed the thin fixture book — that is the honest depth gate, not a regression.)
+    direct = _nb._receipt(event, conn, decision_time=_DT, bankroll_usd_provider=lambda: 500.0)
     assert direct.proof_accepted is True
     assert direct.kelly_size_usd > 0.0
 
@@ -307,7 +304,6 @@ def test_shadow_receipt_persists_non_null_decision_columns_to_regret_table():
         edli_live_scope="day0_shadow",
         executor_submit=lambda *_: (_ for _ in ()).throw(AssertionError("no submit")),
         real_order_submit_enabled=False,
-        live_canary_enabled=False,
     )
     receipt = submit(event, _DT)
     assert receipt.reason == "DAY0_SCOPE_SHADOW_ONLY"

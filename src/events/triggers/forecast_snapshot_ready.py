@@ -66,25 +66,6 @@ def _intake_phase_filter_enabled() -> bool:
         return False
 
 
-def _coverage_fairness_emit_enabled() -> bool:
-    """Read edli.coverage_fairness_emit_enabled (default OFF — shadow-safe).
-
-    Phase-2 B4. FAIL-OPEN on any config error → False (legacy ORDER BY).
-    When OFF, scan_committed_snapshots uses the legacy
-    ``ORDER BY LIVE_ELIGIBLE, computed_at DESC, snapshot_id DESC LIMIT ?``
-    exactly as before this commit — byte-identical behaviour.
-    When ON, selection is keyed by a CoverageFairnessRequest that deduplicates
-    to ≤1 row per (city, target_date, metric) per cycle and round-robins so no
-    city is starved beyond ceil(N/LIMIT) cycles.
-    """
-    try:
-        from src.config import settings
-
-        return bool(settings["edli"].get("coverage_fairness_emit_enabled", False))
-    except Exception:  # noqa: BLE001 — config glitch must never dark all cities
-        return False
-
-
 def _replacement_trade_authority_enabled() -> bool:
     """True when live FSR probability authority is the 0.1 replacement posterior.
 
@@ -193,10 +174,20 @@ class CoverageFairnessRequest:
                 seen_keys.add(key)
                 ordered_keys.append(key)
 
-        # Step 3: round-robin window.
-        start = self.cycle_index * self.limit
-        end = start + self.limit
-        window_keys = ordered_keys[start:end]
+        # Step 3: round-robin window — WRAPPING (Wave-1 2026-06-12 fair-cursor fix).
+        # The cursor advances by ``limit`` each cycle and WRAPS modulo the family count,
+        # so it cycles through every family indefinitely and the window is NEVER empty
+        # while families exist. The prior non-wrapping slice (ordered_keys[start:end])
+        # silently emitted NOTHING once cycle_index*limit ran past the list end —
+        # dropping the whole tail until the in-process cycle counter happened to reset.
+        # With wrapping, full coverage is guaranteed within ceil(N/limit) cycles and no
+        # family is ever silently dropped.
+        n = len(ordered_keys)
+        if n == 0:
+            return []
+        take = min(self.limit, n)
+        start = (self.cycle_index * self.limit) % n
+        window_keys = [ordered_keys[(start + i) % n] for i in range(take)]
 
         return [best[k] for k in window_keys if k in best]
 
@@ -520,15 +511,15 @@ class ForecastSnapshotReadyTrigger:
                     " AND fp.source_available_at <= ?"
                     " AND fp.computed_at <= ?)"
                 )
-        # B4 coverage-fairness contract (Phase-2, shadow-gated).
-        # When flag ON: fetch ALL candidates (no SQL LIMIT) then apply
-        # CoverageFairnessRequest.select_rows() which deduplicates to ≤1 row per
-        # (city, target_date, metric) per cycle and round-robins so no city is
-        # starved beyond ceil(N/LIMIT) cycles.
-        # When flag OFF: use the legacy LIMIT ? in SQL — byte-identical behaviour.
-        _fairness_on = _coverage_fairness_emit_enabled()
+        # Coverage-fairness contract (Wave-1 2026-06-12: now UNCONDITIONAL).
+        # Fetch ALL candidates (no SQL LIMIT) then apply CoverageFairnessRequest
+        # .select_rows() which deduplicates to ≤1 row per (city, target_date, metric)
+        # per cycle and round-robins so no city is starved beyond ceil(N/LIMIT) cycles.
+        # The former coverage_fairness_emit_enabled flag (and its legacy ORDER-BY/SQL-LIMIT
+        # OFF branch that monopolised the alphabetic tail and darkened ~35 cities) is
+        # DELETED — fairness is the only honest coverage behaviour.
         _cycle_index = 0
-        if _fairness_on and source is not None:
+        if source is not None:
             # Derive cycle index from source string "cycle-N" (continuous re-decision).
             try:
                 _cycle_index = int(source.split("-")[-1])
@@ -545,47 +536,10 @@ class ForecastSnapshotReadyTrigger:
                    AND s2.temperature_metric = c.temperature_metric
              )
         """
+        # Wave-1 2026-06-12: the legacy (non-fairness) ORDER-BY/LIMIT select is DELETED.
+        # The coverage-fairness CTE (≤1 row per (city,target,metric), round-robined) is
+        # now the SOLE selection path — no city is monopolised/starved.
         _select_sql_base = f"""
-            SELECT
-                c.*,
-                sr.source_cycle_time AS sr_source_cycle_time,
-                sr.source_issue_time AS sr_source_issue_time,
-                sr.source_release_time AS sr_source_release_time,
-                sr.source_available_at AS sr_source_available_at,
-                sr.fetch_started_at AS sr_fetch_started_at,
-                sr.fetch_finished_at AS sr_fetch_finished_at,
-                sr.captured_at AS sr_captured_at,
-                sr.status AS sr_status,
-                sr.completeness_status AS sr_completeness_status,
-                sr.expected_steps_json AS sr_expected_steps_json,
-                sr.observed_steps_json AS sr_observed_steps_json,
-                sr.expected_members AS sr_expected_members,
-                sr.observed_members AS sr_observed_members,
-                s.snapshot_id,
-                s.city AS snapshot_city,
-                s.target_date AS snapshot_target_date,
-                s.temperature_metric AS snapshot_temperature_metric,
-                s.available_at AS snapshot_available_at,
-                s.fetch_time AS snapshot_fetch_time,
-                s.manifest_hash AS snapshot_manifest_hash,
-                s.members_json AS snapshot_members_json
-            FROM source_run_coverage c
-            JOIN source_run sr ON sr.source_run_id = c.source_run_id
-            JOIN ensemble_snapshots s
-              ON s.source_run_id = c.source_run_id
-             AND s.city = c.city
-             AND s.target_date = c.target_local_date
-             AND s.temperature_metric = c.temperature_metric
-             {_snapshot_latest_join}
-            WHERE COALESCE(s.available_at, sr.source_available_at, c.computed_at) <= ?
-              AND (sr.source_available_at IS NULL OR sr.source_available_at <= ?)
-              AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}{replacement_filter}
-            ORDER BY
-                CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
-                c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
-        """
-        if _fairness_on:
-            _select_sql_base = f"""
             WITH ranked_coverage AS (
                 SELECT
                     c0.*,
@@ -644,53 +598,29 @@ class ForecastSnapshotReadyTrigger:
             if _replacement_trade_authority_enabled() and _table_exists(forecasts_conn, "forecast_posteriors")
             else ()
         )
-        if _fairness_on:
-            # Fetch all candidates (no LIMIT); fairness contract applies LIMIT per cycle.
-            rows = _dict_rows(
-                forecasts_conn,
-                _select_sql_base,
-                (
-                    _decision_iso,
-                    _decision_iso,
-                    _decision_iso,
-                    _decision_iso,
-                    *_replacement_params,
-                ),
-            )
-            if rows:
-                # ``limit=None`` means no cap on the number of city families, not
-                # "emit every historical source_run for each family."  Fairness owns
-                # the one-row-per-(city,target,metric) contract in both capped and
-                # unbounded modes.
-                rows = CoverageFairnessRequest(
-                    limit=max(1, len(rows) if limit is None else int(limit)),
-                    cycle_index=0 if limit is None else _cycle_index,
-                ).select_rows(rows)
-        else:
-            if limit is None:
-                rows = _dict_rows(
-                    forecasts_conn,
-                    _select_sql_base,
-                    (
-                        _decision_iso,
-                        _decision_iso,
-                        _decision_iso,
-                        *_replacement_params,
-                    ),
-                )
-            else:
-                # Legacy path: SQL LIMIT keeps behaviour byte-identical to pre-B4.
-                rows = _dict_rows(
-                    forecasts_conn,
-                    _select_sql_base + "\n            LIMIT ?",
-                    (
-                        _decision_iso,
-                        _decision_iso,
-                        _decision_iso,
-                        *_replacement_params,
-                        max(1, int(limit)),
-                    ),
-                )
+        # Fetch all candidates (no SQL LIMIT); the fairness contract applies the per-cycle
+        # LIMIT and round-robin. The CTE's family-rank predicate needs the extra leading
+        # _decision_iso param (4 total before replacement params).
+        rows = _dict_rows(
+            forecasts_conn,
+            _select_sql_base,
+            (
+                _decision_iso,
+                _decision_iso,
+                _decision_iso,
+                _decision_iso,
+                *_replacement_params,
+            ),
+        )
+        if rows:
+            # ``limit=None`` means no cap on the number of city families, not
+            # "emit every historical source_run for each family."  Fairness owns
+            # the one-row-per-(city,target,metric) contract in both capped and
+            # unbounded modes.
+            rows = CoverageFairnessRequest(
+                limit=max(1, len(rows) if limit is None else int(limit)),
+                cycle_index=0 if limit is None else _cycle_index,
+            ).select_rows(rows)
         # WAVE-1 W1-T1 intake phase filter. For one-shot catch-up this remains
         # gated by edli.edli_intake_phase_filter_enabled (default OFF). For
         # continuous re-decision (source is per-cycle) it is mandatory: same-day

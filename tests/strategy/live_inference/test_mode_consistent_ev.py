@@ -188,10 +188,11 @@ class TestModeSelection:
 
 
 # ---------------------------------------------------------------------------
-# Submit-seam antibody: the spread guard dominates the canary force-taker and
-# the governor — the LANE is guarded, not the callers.
+# Submit-seam antibody: the spread guard dominates the governor and the proof
+# policy — a wide/unmeasurable book rests MAKER regardless. (Wave-1 2026-06-12:
+# the canary force-taker knob is DELETED; the spread guard is unconditional.)
 # ---------------------------------------------------------------------------
-def _order_mode(*, bid, ask, canary=True):
+def _order_mode(*, bid, ask):
     import types
 
     from src.engine.event_reactor_adapter import _select_edli_order_mode
@@ -202,6 +203,9 @@ def _order_mode(*, bid, ask, canary=True):
         "c_fee_adjusted": ask + 0.0008 if ask else 0.02,
         "p_fill_lcb": 0.999,
         "trade_score": 0.06,
+        # A TAKER_* policy would route taker on a healthy book; the spread guard
+        # must still dominate it on a blown-out / unmeasurable book.
+        "rest_then_cross_policy": "TAKER_FLEETING_EDGE",
     }
     return _select_edli_order_mode(
         actionable_payload=actionable_payload,
@@ -209,25 +213,24 @@ def _order_mode(*, bid, ask, canary=True):
         best_bid=bid,
         best_ask=ask,
         executable_snapshot=types.SimpleNamespace(payload={}),
-        canary_force_taker=canary,
         fresh_best_bid=bid,
         fresh_best_ask=ask,
     )
 
 
-def test_submit_seam_wide_spread_forbids_taker_even_under_canary_force():
-    """THE incident lane: canary_force_taker with a 7.5c post-cross edge on a
-    56% relative spread MUST rest as maker, never cross."""
-    assert _order_mode(bid=0.009, ask=0.016, canary=True) == "MAKER"
+def test_submit_seam_wide_spread_forbids_taker():
+    """THE incident lane: a TAKER policy on a 56% relative spread MUST rest as
+    maker, never cross — the spread guard dominates the proof policy."""
+    assert _order_mode(bid=0.009, ask=0.016) == "MAKER"
 
 
 def test_submit_seam_unmeasurable_book_forbids_taker():
-    assert _order_mode(bid=None, ask=0.016, canary=True) == "MAKER"
+    assert _order_mode(bid=None, ask=0.016) == "MAKER"
 
 
-def test_submit_seam_tight_spread_canary_can_still_cross():
-    """Maker-vs-taker stays a numbers decision where the spread is healthy: the
-    canary's 5c post-cross edge floor still routes taker on a tight book."""
+def test_submit_seam_tight_spread_taker_policy_crosses():
+    """Maker-vs-taker stays a numbers decision where the spread is healthy: a
+    TAKER_* proof policy routes taker on a tight book (the spread guard does not fire)."""
     import types
 
     from src.engine.event_reactor_adapter import _select_edli_order_mode
@@ -238,6 +241,7 @@ def test_submit_seam_tight_spread_canary_can_still_cross():
         "c_fee_adjusted": 0.51,
         "p_fill_lcb": 0.999,
         "trade_score": 0.06,
+        "rest_then_cross_policy": "TAKER_FLEETING_EDGE",
     }
     mode = _select_edli_order_mode(
         actionable_payload=actionable_payload,
@@ -245,11 +249,10 @@ def test_submit_seam_tight_spread_canary_can_still_cross():
         best_bid=0.48,
         best_ask=0.50,
         executable_snapshot=types.SimpleNamespace(payload={}),
-        canary_force_taker=True,
         fresh_best_bid=0.48,
         fresh_best_ask=0.50,
     )
-    # post_cross_edge = 0.56 - 0.50 = 0.06 >= 0.05 floor, spread 4% < 25%.
+    # Spread 4% < 25% guard threshold; proof policy is TAKER_* -> cross.
     assert mode == "TAKER"
 
 

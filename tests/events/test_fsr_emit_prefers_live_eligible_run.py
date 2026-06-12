@@ -39,10 +39,7 @@ def _hermetic_flags(monkeypatch: Any) -> None:
     """Pin the two live-config-dependent toggles: fairness election ON (the live
     posture under test) and the replacement posterior filter OFF (fixtures carry
     no forecast_posteriors; the filter is orthogonal to the election law)."""
-    monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._coverage_fairness_emit_enabled",
-        lambda: True,
-    )
+    # Wave-1 2026-06-12: coverage fairness is unconditional (flag deleted) — no patch needed.
     monkeypatch.setattr(
         "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
         lambda: False,

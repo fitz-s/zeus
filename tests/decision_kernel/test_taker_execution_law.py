@@ -442,69 +442,16 @@ def test_maker_inside_spread_price_capped_by_reservation():
 
 
 # --------------------------------------------------------------------------
-# CANARY branch: force taker FOK at the >=5c edge floor
+# Wave-1 2026-06-12: the CANARY force-taker branch of _select_edli_order_mode is
+# DELETED (twin-authority disease: a knob that force-flips the proof's mode to
+# TAKER competes with the single rest-then-cross policy authority). The two former
+# canary-force tests (force taker at >=5c floor; no force below floor) are removed.
+# Mode is now driven by the spread guard, the governor, and the proof's
+# rest_then_cross_policy ONLY.
 # --------------------------------------------------------------------------
-def test_canary_forces_taker_fok_when_edge_clears_5c_floor():
-    """canary_force_taker + (q_posterior - best_ask - f) >= 0.05 -> FOK taker."""
-    from src.engine.event_reactor_adapter import _select_edli_order_mode
-
-    actionable_payload = {
-        "direction": "buy_yes",
-        "q_live": 0.55,  # q - best_ask(0.45) - fee(0) = 0.10 >= 0.05 floor
-        "c_fee_adjusted": 0.50,
-        "p_fill_lcb": 0.10,
-        "trade_score": 0.05,
-        "fee_rate": 0.0,
-    }
-    quote_payload = {"best_bid": 0.40, "best_ask": 0.45, "visible_depth": 8.0}
-
-    class _Snap:
-        payload = {}
-
-    mode = _select_edli_order_mode(
-        actionable_payload=actionable_payload,
-        quote_payload=quote_payload,
-        best_bid=0.40,
-        best_ask=0.45,
-        executable_snapshot=_Snap(),
-        canary_force_taker=True,
-        canary_edge_floor=0.05,
-    )
-    assert mode == "TAKER"
-
-
-def test_canary_does_not_force_taker_below_5c_floor():
-    """Sub-floor canary candidate falls through to governor/EV (no forced cross)."""
-    from src.engine.event_reactor_adapter import _select_edli_order_mode
-
-    actionable_payload = {
-        "direction": "buy_yes",
-        "q_live": 0.47,  # q - best_ask(0.45) - 0 = 0.02 < 0.05 floor
-        "c_fee_adjusted": 0.50,
-        "p_fill_lcb": 0.70,  # deep-book modest edge -> EV says rest
-        "trade_score": 0.02,
-        "fee_rate": 0.0,
-    }
-    quote_payload = {"best_bid": 0.44, "best_ask": 0.45, "visible_depth": 500.0}
-
-    class _Snap:
-        payload = {}
-
-    mode = _select_edli_order_mode(
-        actionable_payload=actionable_payload,
-        quote_payload=quote_payload,
-        best_bid=0.44,
-        best_ask=0.45,
-        executable_snapshot=_Snap(),
-        canary_force_taker=True,
-        canary_edge_floor=0.05,
-    )
-    # Floor not met + governor unconfigured (MAKER) + EV modest -> rest as maker.
-    assert mode == "MAKER"
-
-
-def test_ev_boundary_crosses_on_thin_book_large_edge():
-    """§2: high edge + low P_fill (thin book) -> TAKER even without canary."""
+def test_proof_policy_drives_taker_on_healthy_book():
+    """A TAKER_* proof policy on a healthy (tight-spread) book routes TAKER; the
+    canary force-taker knob is gone, so the proof policy is the sole mode authority."""
     from src.engine.event_reactor_adapter import _select_edli_order_mode
 
     actionable_payload = {
@@ -514,6 +461,39 @@ def test_ev_boundary_crosses_on_thin_book_large_edge():
         "trade_score": 0.06,  # e
         "p_fill_lcb": 0.15,   # thin
         "fee_rate": 0.0,
+        "rest_then_cross_policy": "TAKER_FLEETING_EDGE",
+    }
+    quote_payload = {"best_bid": 0.48, "best_ask": 0.50, "visible_depth": 6.0}
+
+    class _Snap:
+        payload = {}
+
+    mode = _select_edli_order_mode(
+        actionable_payload=actionable_payload,
+        quote_payload=quote_payload,
+        best_bid=0.48,
+        best_ask=0.50,
+        executable_snapshot=_Snap(),
+        fresh_best_bid=0.48,
+        fresh_best_ask=0.50,
+    )
+    assert mode == "TAKER"
+
+
+def test_rest_policy_rests_maker_on_thin_book_large_edge():
+    """§2: with NO TAKER_* proof policy, the fresh-mode witness rests MAKER even on a
+    thin book with a large edge — the escalation lane owns any later cross, never an
+    inline one. (Replaces the deleted §2 EV-override / canary force-taker behaviour.)"""
+    from src.engine.event_reactor_adapter import _select_edli_order_mode
+
+    actionable_payload = {
+        "direction": "buy_yes",
+        "q_live": 0.56,
+        "c_fee_adjusted": 0.50,
+        "trade_score": 0.06,  # e
+        "p_fill_lcb": 0.15,   # thin
+        "fee_rate": 0.0,
+        # No rest_then_cross_policy -> REST/MAKER witness.
     }
     quote_payload = {"best_bid": 0.40, "best_ask": 0.50, "visible_depth": 6.0}
 
@@ -526,11 +506,9 @@ def test_ev_boundary_crosses_on_thin_book_large_edge():
         best_bid=0.40,
         best_ask=0.50,
         executable_snapshot=_Snap(),
-        canary_force_taker=False,
     )
-    # e*(1-Pfill)=0.06*0.85=0.051 >= s/2*(1+Pfill)=0.05*1.15=0.0575? No -> need check.
-    # spread=0.10 -> rhs=0.0575; lhs=0.051 -> rests. Adjust expectation: deep spread.
-    # This documents the boundary is real; with s=0.10 it rests.
+    # No TAKER_* policy on the payload -> the rest-then-cross witness is MAKER, regardless
+    # of the thin book / large edge. The escalation lane owns any later cross.
     assert mode == "MAKER"
 
 

@@ -64,7 +64,7 @@ def _isolate_edli_settings(monkeypatch):
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
 
 
-def _live_adapter(conn, *, edli_live_scope, executor_submit, real_order_submit_enabled=False, live_canary_enabled=False):
+def _live_adapter(conn, *, edli_live_scope, executor_submit, real_order_submit_enabled=False):
     from src.engine import event_reactor_adapter as adapter
     from src.main import require_operator_arm
 
@@ -76,7 +76,6 @@ def _live_adapter(conn, *, edli_live_scope, executor_submit, real_order_submit_e
         calibration_conn=conn,
         bankroll_usd_provider=lambda: 10000.0,
         real_order_submit_enabled=real_order_submit_enabled,
-        live_canary_enabled=live_canary_enabled,
         durable_submit_outbox_enabled=True,
         executor_submit=executor_submit,
         operator_arm=require_operator_arm({"edli_live_operator_authorized": True}),
@@ -148,7 +147,6 @@ def test_day0_shadow_dual_persist_never_submits_even_with_real_submit_enabled():
         edli_live_scope="day0_shadow",
         executor_submit=_executor,
         real_order_submit_enabled=True,
-        live_canary_enabled=True,
     )
     receipt = submit(event, _DT)
 

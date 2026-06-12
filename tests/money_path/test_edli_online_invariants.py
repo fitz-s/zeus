@@ -60,13 +60,15 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["no_trade_regret_enabled"] is True
     assert edli["reports_enabled"] is True
     assert edli["forecast_snapshot_emit_limit"] is False
-    assert edli["coverage_fairness_emit_enabled"] is True
+    # Wave-1 2026-06-12: coverage_fairness_emit_enabled flag DELETED — fairness is now
+    # unconditional, so the key is ABSENT (the OFF branch no longer exists).
+    assert "coverage_fairness_emit_enabled" not in edli
     assert edli["day0_catchup_emit_limit"] <= 20
-    # Re-pinned 2026-06-09: these emit/decision caps moved from unbounded (False) to
-    # concrete bounds per the throughput audit (config note _redecision_cap_note_2026_06_09:
-    # redecision cap raised to the code ceiling 200; emit/proof limits given finite bounds).
-    assert edli["no_submit_proof_limit"] is False or int(edli["no_submit_proof_limit"]) > 0
-    assert edli["redecision_max_per_cycle"] is False or int(edli["redecision_max_per_cycle"]) > 0
+    # Wave-1 2026-06-12: no_submit_proof_limit + redecision_max_per_cycle caps DELETED —
+    # proofs are unbounded and the fair round-robin cursor governs re-decision coverage.
+    # The keys must be ABSENT so a future cap reintroduction is caught.
+    assert "no_submit_proof_limit" not in edli
+    assert "redecision_max_per_cycle" not in edli
     assert edli["market_channel_refresh_max_actions_per_window"] <= 5
     assert edli["market_channel_refresh_window_seconds"] >= 1
     assert edli["no_submit_visible_depth_fill_lcb"] < 1.0
@@ -84,10 +86,11 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert real_submit is True
     assert taker_live is True
     assert operator_authorized is True
-    assert edli["edli_live_promotion_artifact_required"] is False
-    assert edli["edli_live_min_canary_count"] == 0
-    assert edli["edli_live_max_unresolved_unknowns"] == 0
-    assert edli["edli_live_min_realized_edge_bps"] == 0
+    # Wave-1 2026-06-12: the promotion-artifact + canary-count + live_canary gate flags
+    # are DELETED (the operator arm is the sole gate). Keys must be ABSENT.
+    assert "edli_live_promotion_artifact_required" not in edli
+    assert "edli_live_min_canary_count" not in edli
+    assert "live_canary_enabled" not in edli
 
 
 def test_tiny_live_mechanism_is_fully_deleted_no_cap_replacement():
@@ -215,9 +218,10 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "submit_existing_cycle_for_event" not in source
     assert 'edli_cfg.get("real_order_submit_enabled", False)' in source
     assert "real_order_submit_enabled=real_order_submit_enabled" in source
-    assert 'edli_cfg.get("live_canary_enabled", False)' in source
+    # Wave-1 2026-06-12: the canary on/off flag and no_submit_proof_limit cap reads are DELETED.
+    assert 'edli_cfg.get("live_canary_enabled"' not in source
+    assert 'edli_cfg.get("no_submit_proof_limit"' not in source
     assert "forecast_snapshot_emit_limit" in source
-    assert "no_submit_proof_limit" in source
     assert "process_pending_decision_time = datetime.now(timezone.utc)" in source
     assert "reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)" in source
     assert "reactor.process_pending(decision_time=now, limit=proof_limit)" not in source
@@ -522,8 +526,11 @@ def test_submit_disabled_bridge_requires_lifecycle_authorities(monkeypatch):
         )
 
 
-def test_live_canary_requires_submit_and_canary_flags(monkeypatch):
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_REQUIRES_REAL_ORDER_SUBMIT_ENABLED_AND_LIVE_CANARY_ENABLED"):
+def test_live_canary_requires_submit_flag(monkeypatch):
+    # Wave-1 2026-06-12: live_canary_enabled is DELETED from the live-mode require-list;
+    # real_order_submit_enabled remains a required flag. With it False, boot still fails
+    # closed on REAL_ORDER_SUBMIT_ENABLED (the canary token in the error name is gone).
+    with pytest.raises(RuntimeError, match="REAL_ORDER_SUBMIT_ENABLED"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
@@ -535,7 +542,6 @@ def test_live_canary_requires_submit_and_canary_flags(monkeypatch):
                 "market_channel_ingestor_enabled": True,
                 "edli_user_channel_reconcile_enabled": True,
                 "real_order_submit_enabled": False,
-                "live_canary_enabled": False,
             },
         )
 
@@ -899,165 +905,38 @@ def test_edli_live_requires_operator_authorized_flag(monkeypatch):
         )
 
 
-def test_edli_live_requires_promotion_artifact(monkeypatch):
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(edli_live_promotion_artifact_path=""),
-        )
+# ---------------------------------------------------------------------------
+# Wave-1 2026-06-12: the EDLI-live PROMOTION-ARTIFACT and ARM-GATE-ARTIFACT
+# verification gates are DELETED (operator no-overengineering law: they were
+# promotion bureaucracy / a "circular promotion proof" — an artifact file proving
+# a min canary fill count, a capital-weighted-EV measurement, a commit-sha binding).
+# The operator ARM (edli_live_operator_authorized) is now the SOLE boot gate. The
+# former RED tests (boot MUST raise on missing/invalid/negative-EV/sha-mismatch
+# artifacts) are deleted; replaced by deletion-antibody tests proving boot proceeds
+# WITHOUT any artifact, and that the dead requirement keys are gone.
+# ---------------------------------------------------------------------------
 
 
-def _arm_gate_artifact_updates(tmp_path, **overrides):
-    """Stage a VALID ARM-gate evidence artifact and turn the boot requirement ON.
+def test_edli_live_promotion_and_arm_gate_artifacts_no_longer_required(monkeypatch):
+    """Antibody: edli_live arms with the operator authorization ONLY — no artifact
+    files, no canary-fill-count proof, no EV/sha measurement. The deleted gate
+    functions are now intentional no-ops; boot must NOT raise on their absence."""
+    import src.main as main
 
-    The harness pins ``_capture_boot_state`` to sha="abc123", so the artifact's
-    commit_sha must match that for the SHA binding to pass.
-    """
-    art_path = tmp_path / "arm_gate_artifact.json"
-    art = {
-        "schema": "edli_arm_gate_v1",
-        "commit_sha": "abc123",
-        "measurement_cmd_hash": "f" * 64,
-        "capital_weighted_ev": 0.012,
-        "production_n": 40,
-        "gate_pass_n": 40,
-        "per_city_n": {"shanghai": 6, "singapore": 7},
-        "ev_sigma": 2.1,
-        "date_coverage": ["2026-06-01", "2026-06-02"],
-        "coverage_licensed": True,
-    }
-    art.update(overrides)
-    art_path.write_text(json.dumps(art))
-    return {
-        "edli_arm_gate_artifact_required": True,
-        "edli_arm_gate_artifact_path": str(art_path),
-    }
+    # The gate asserters survive as no-ops (callable, never raise on a missing artifact).
+    main._assert_edli_live_promotion_artifact({"edli_live_operator_authorized": True})
+    main._assert_edli_arm_gate_artifact({"edli_live_operator_authorized": True})
+    # The only honest gate left: operator authorization. Absent it, boot still fails closed.
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_EDLI_LIVE_OPERATOR_AUTHORIZED"):
+        main._assert_edli_live_promotion_artifact({"edli_live_operator_authorized": False})
 
 
-def test_live_boot_fails_without_arm_artifact(monkeypatch, tmp_path):
-    # PR-2 (A) RED: with the ARM-gate requirement ON but NO artifact on disk,
-    # arming the live daemon is a BOOT FAILURE, not a runtime path. A
-    # well-formed positive promotion artifact is staged so the failure is
-    # ATTRIBUTABLE to the missing ARM artifact (not the promotion gate).
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.01)
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_MISSING"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(
-                edli_live_promotion_artifact_path=str(artifact),
-                **_stage_evidence_updates(tmp_path),
-                edli_arm_gate_artifact_required=True,
-                edli_arm_gate_artifact_path=str(tmp_path / "does-not-exist.json"),
-            ),
-            world_db_path=db_path,
-        )
-
-
-def test_capital_weighted_arm_denial_blocks_boot(monkeypatch, tmp_path):
-    # PR-2 (A) RED: an ARM artifact that exists and matches HEAD but reports a
-    # NON-POSITIVE capital-weighted EV must DENY the boot. The capital-weighted
-    # edge is THE arm criterion; a zero/negative one cannot arm.
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.01)
-    arm_updates = _arm_gate_artifact_updates(tmp_path, capital_weighted_ev=0.0)
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARM_GATE_EV_NOT_POSITIVE"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(
-                edli_live_promotion_artifact_path=str(artifact),
-                **_stage_evidence_updates(tmp_path),
-                **arm_updates,
-            ),
-            world_db_path=db_path,
-        )
-
-
-def test_arm_artifact_sha_mismatch_blocks_boot(monkeypatch, tmp_path):
-    # PR-2 (A): a stale ARM artifact (measured on a DIFFERENT commit) cannot arm
-    # the current code — SHA binding makes "armed on unproven code" unconstructable.
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.01)
-    arm_updates = _arm_gate_artifact_updates(tmp_path, commit_sha="deadbeefdeadbeef")
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARM_GATE_COMMIT_SHA_MISMATCH"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(
-                edli_live_promotion_artifact_path=str(artifact),
-                **_stage_evidence_updates(tmp_path),
-                **arm_updates,
-            ),
-            world_db_path=db_path,
-        )
-
-
-def test_live_boot_accepts_valid_arm_artifact(monkeypatch, tmp_path):
-    # PR-2 (A) GREEN: a valid, HEAD-bound, positive-EV, coverage-licensed ARM
-    # artifact lets the armed boot proceed (alongside the promotion artifact).
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.000001)
-    arm_updates = _arm_gate_artifact_updates(tmp_path)
-
-    scheduler, settings_copy = _run_main_with_fake_scheduler(
-        monkeypatch,
-        _edli_live_updates(
-            edli_live_promotion_artifact_path=str(artifact),
-            **_stage_evidence_updates(tmp_path),
-            **arm_updates,
-        ),
-        world_db_path=db_path,
-    )
-
-    assert scheduler.started is True
-    assert "edli_event_reactor" in {job.id for job in scheduler.jobs}
-    assert settings_copy["edli"]["edli_arm_gate_artifact_required"] is True
-
-
-def test_edli_live_blocks_unresolved_unknowns(monkeypatch, tmp_path):
-    artifact, db_path = _write_db_backed_promotion_artifact(
-        tmp_path,
-        realized_edge=0.01,
-        audit_state="POST_SUBMIT_UNKNOWN",
-    )
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_UNRESOLVED_UNKNOWN"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
-            world_db_path=db_path,
-        )
-
-
-def test_edli_live_blocks_non_positive_realized_edge(monkeypatch, tmp_path):
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=-0.01)
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
-            world_db_path=db_path,
-        )
-
-
-def test_edli_live_blocks_scalar_promotion_artifact_without_db_proof(monkeypatch, tmp_path):
-    artifact = tmp_path / "promotion.json"
-    artifact.write_text(json.dumps({"canary_count": 1, "unresolved_unknowns": 0, "realized_edge_bps": 1}))
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARTIFACT_SCHEMA_INVALID"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
-        )
-
-
-def test_edli_live_blocks_exact_zero_realized_edge(monkeypatch, tmp_path):
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.0)
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
-            world_db_path=db_path,
-        )
+def test_edli_live_artifact_gate_settings_keys_are_deleted():
+    """Antibody: the promotion/arm-gate REQUIREMENT toggles are removed from config."""
+    edli = json.loads(Path("config/settings.json").read_text())["edli"]
+    assert "edli_live_promotion_artifact_required" not in edli
+    assert "edli_arm_gate_artifact_required" not in edli
+    assert "edli_live_min_canary_count" not in edli
 
 
 def test_edli_live_accepts_positive_promotion_artifact(monkeypatch, tmp_path):

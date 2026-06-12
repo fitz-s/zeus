@@ -591,47 +591,15 @@ def _validate_boot(settings_path=None) -> int:
 
 
 def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
-    # F1 rename (PR-2 B): edli_live_scaleout_enabled -> edli_live_operator_authorized.
-    # The flag's real semantic is the operator ARM kill-switch for edli_live, not a
-    # scale-out knob. Renamed so the name matches the control it actually performs.
+    # The operator ARM kill-switch for edli_live (edli_live_operator_authorized) is the
+    # ONLY honest gate here and is kept fail-closed.
     if not bool(edli_cfg.get("edli_live_operator_authorized", False)):
         raise RuntimeError("EDLI_LIVE_REQUIRES_EDLI_LIVE_OPERATOR_AUTHORIZED")
-    # OPERATOR DIRECTIVE (2026-06-08): promotion-artifact/canary gate is
-    # promotion bureaucracy. When edli_live_promotion_artifact_required is
-    # False, bypass the rest of this function (artifact file + canary checks).
-    # edli_live_operator_authorized above is the operator ARM switch — kept.
-    if not bool(edli_cfg.get("edli_live_promotion_artifact_required", True)):
-        return
-
-    artifact_path = str(edli_cfg.get("edli_live_promotion_artifact_path") or "").strip()
-    if not artifact_path:
-        raise RuntimeError("EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT")
-    try:
-        artifact = json.loads(Path(artifact_path).read_text())
-    except FileNotFoundError as exc:
-        raise RuntimeError("EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("EDLI_LIVE_PROMOTION_ARTIFACT_INVALID_JSON") from exc
-
-    min_canary_count = int(edli_cfg.get("edli_live_min_canary_count", 1))
-    max_unresolved_unknowns = int(edli_cfg.get("edli_live_max_unresolved_unknowns", 0))
-    min_realized_edge_bps = float(edli_cfg.get("edli_live_min_realized_edge_bps", 0.0))
-
-    from src.events.live_profit_audit import verify_edli_live_promotion_artifact
-
-    conn = get_world_connection_read_only()
-    try:
-        verified = verify_edli_live_promotion_artifact(
-            conn,
-            artifact,
-            min_canary_count=min_canary_count,
-            max_unresolved_unknowns=max_unresolved_unknowns,
-            min_realized_edge_bps=min_realized_edge_bps,
-        )
-    finally:
-        conn.close()
-    if not verified.ok:
-        raise RuntimeError(verified.reason)
+    # Wave-1 2026-06-12: the promotion-artifact + canary-fill-count verification that used
+    # to run here is DELETED. It was promotion bureaucracy (an artifact file proving a
+    # min canary fill count) the operator had already disabled via
+    # edli_live_promotion_artifact_required=false. The operator arm above is the sole gate.
+    return
 
 
 @dataclass(frozen=True)
@@ -669,48 +637,17 @@ def require_operator_arm(edli_cfg: dict) -> "OperatorArm | None":
 
 
 def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
-    """PR-2 (A) / F1 Option C: bind full live ARM to settlement-grounded evidence.
+    """Wave-1 2026-06-12: the full-live ARM-gate ARTIFACT requirement is DELETED.
 
-    Whenever the daemon is about to promote to full ``edli_live``, it MUST find a
-    state/edli_arm_gate_artifact.json proving — on THIS commit (commit_sha ==
-    booted HEAD) — a positive capital-weighted after-cost settlement EV with
-    coverage licensed. The artifact is produced by
-    scripts/measure_arm_gate_settlement.py (PR-1). Here we ENFORCE it.
-
-    ``edli_live_canary`` deliberately does not consume this artifact: the first
-    tiny-cap real fill is the qualifying event that creates promotion evidence.
-    Canary is guarded by stage readiness, user/exchange reconciliation, tiny live
-    caps, and submit-chain certainty instead of a circular promotion proof.
-
-    ANTIBODY: flipping ``real_order_submit_enabled=true`` without that artifact is now a
-    BOOT FAILURE (RuntimeError ``EDLI_LIVE_PROMOTION_ARM_GATE_*``), not a silent runtime
-    path. The whole category "armed without proven edge" becomes unconstructable at boot.
-
-    Fail-closed: ``edli_arm_gate_artifact_required`` defaults to True; a missing flag
-    still requires the artifact. Only the explicit literal False — set by an operator
-    who is knowingly de-binding — relaxes it, and even then the existing
-    promotion-artifact gate and live-cap ledger consistency checks remain in force.
+    This used to demand a state/edli_arm_gate_artifact.json proving a positive
+    settlement EV on the booted commit before edli_live. It was already de-bound by
+    the operator (edli_arm_gate_artifact_required=false), and the artifact-proof gate is
+    exactly the "circular promotion proof" bureaucracy the operator law forbids. The
+    honest gate is the operator arm (edli_live_operator_authorized, asserted in
+    _assert_edli_live_promotion_artifact) plus the runtime submit-chain proofs. This is
+    now an intentional no-op; the dead ``edli_arm_gate_artifact_required`` key is removed.
     """
-    if not bool(edli_cfg.get("edli_arm_gate_artifact_required", True)):
-        return
-
-    artifact_path = str(edli_cfg.get("edli_arm_gate_artifact_path") or "").strip()
-    if not artifact_path:
-        raise RuntimeError("EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_PATH_MISSING")
-    try:
-        artifact = json.loads(Path(artifact_path).read_text())
-    except FileNotFoundError as exc:
-        raise RuntimeError("EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_MISSING") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_INVALID_JSON") from exc
-
-    head_sha = str(_capture_boot_state().get("sha") or "").strip()
-
-    from src.events.live_profit_audit import verify_edli_arm_gate_artifact
-
-    verified = verify_edli_arm_gate_artifact(artifact, head_sha=head_sha)
-    if not verified.ok:
-        raise RuntimeError(verified.reason)
+    return
 
 
 # OPERATOR LAW (2026-06-04, Rule-4 antibody): the former
@@ -1249,7 +1186,6 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
                 "market_channel_ingestor_enabled",
                 "edli_user_channel_reconcile_enabled",
                 "real_order_submit_enabled",
-                "live_canary_enabled",
                 "taker_fok_fak_live_enabled",
                 "durable_submit_outbox_enabled",
             ),
@@ -2662,6 +2598,12 @@ import time as _time
 
 _edli_redecision_boot_token: str = f"{int(_time.time())}{os.getpid()}"
 _edli_redecision_cycle_index: int = 0
+# Wave-1 2026-06-12: fixed per-cycle re-decision/screen batch fed to the WRAPPING fair
+# cursor (CoverageFairnessRequest.select_rows). Replaces the deleted redecision_max_per_cycle
+# settings cap. The cursor wraps modulo the family count, so this batch reaches EVERY family
+# within ceil(N/batch) cycles and never silently drops the tail. Sized to sweep the full live
+# family universe (~108 city×metric families) within ~2 cycles at the ~60-90s reactor cadence.
+_EDLI_REDECISION_FAIR_BATCH: int = 60
 
 
 def _edli_next_redecision_source() -> str:
@@ -5626,9 +5568,15 @@ def _edli_event_reactor_cycle() -> None:
         # remains the real safety bound on cycle length; this ceiling just stops
         # truncating the admissible queue below the live family count. Economic
         # gates (q_lcb, cost floor, Kelly, depth) are untouched.
-        proof_limit = _edli_positive_int_or_unbounded(
-            edli_cfg, "no_submit_proof_limit", default=10, maximum=400
-        )
+        # Wave-1 2026-06-12: the no_submit_proof_limit production cap is DELETED. It
+        # truncated how many pending families the reactor processed per cycle — and thus
+        # how many no-submit proofs/receipts were persisted — which silently dropped the
+        # tail of the admissible queue (an artificial throttle the operator law forbids).
+        # proof_limit is now UNBOUNDED (None): every pending family is processed and every
+        # proof persists. The reactor's own 30s wall-clock budget
+        # (ZEUS_REACTOR_CYCLE_BUDGET_SECONDS, reactor.py) remains the real, honest safety
+        # bound on cycle length; any family not reached this cycle requeues for the next.
+        proof_limit = None
         store = EventStore(conn)
         #
         # PR#404 P0-2 (operator merge blocker): the day0 fast lane's network IO
@@ -5666,23 +5614,14 @@ def _edli_event_reactor_cycle() -> None:
                 # candidates already queued from prior cycles. Catch ONLY the transient lock
                 # (narrow, by message) and continue; real schema/logic faults still propagate.
                 try:
-                    # COVERAGE-FAIRNESS (universe-collapse fix 2026-06-04): the emit is
-                    # ORDER BY ... snapshot_id DESC LIMIT N. Under one batch write all families
-                    # share computed_at, so snapshot_id-DESC deterministically emits only the
-                    # alphabetic TAIL (M-W) every cycle and starves A-L forever. The fairness
-                    # round-robin rotates the window by cycle_index, parsed from a monotonic
-                    # `cycle-N` source — so it must be FED that source here (the plain emit
-                    # previously passed none -> cycle_index frozen at 0 -> A-L permanently dark).
-                    # Bounded by `limit` per cycle; covers all 108 (city,metric) families in
-                    # ceil(108/limit) cycles. Gated by edli.coverage_fairness_emit_enabled.
-                    # source ONLY when fairness is ON: a per-cycle `cycle-N` source advances the
-                    # round-robin window AND makes the emit re-emit each cycle. Flag-OFF -> None ->
-                    # the original one-shot catch-up (byte-identical to pre-fix behavior).
-                    _fair_source = (
-                        _edli_next_redecision_source()
-                        if bool(edli_cfg.get("coverage_fairness_emit_enabled", False))
-                        else None
-                    )
+                    # COVERAGE-FAIRNESS (universe-collapse fix 2026-06-04; Wave-1 2026-06-12:
+                    # now UNCONDITIONAL). The fairness round-robin rotates the selection
+                    # window by cycle_index, parsed from a monotonic `cycle-N` source — fed
+                    # here so every cycle advances the window and re-emits. Covers all
+                    # (city,metric) families in ceil(N/limit) cycles. The former
+                    # coverage_fairness_emit_enabled flag (and the None-source one-shot OFF
+                    # path that left A-L permanently dark) is DELETED.
+                    _fair_source = _edli_next_redecision_source()
                     _edli_emit_forecast_snapshot_events(
                         conn,
                         decision_time=now,
@@ -5699,35 +5638,36 @@ def _edli_event_reactor_cycle() -> None:
                         )
                     else:
                         raise
-            # Continuous re-decision (DEFAULT OFF — redecision_continuous_enabled): re-emit
-            # FSR-equivalent events for committed market-backed families each cycle, with a per-cycle
-            # distinct source so they do NOT dedup to the consumed FSR. Routing through the pending path
-            # makes _refresh_pending_family_snapshots capture fresh prices just-in-time → the reactor
-            # re-decides every ~60s instead of once per 12h forecast. Fixes EDLI-mode "hours per order".
-            # already_pending skip + cap bound the queue. Non-fatal: never breaks the reactor cycle.
-            if bool(edli_cfg.get("redecision_continuous_enabled", False)):
+            # Continuous re-decision (Wave-1 2026-06-12: now UNCONDITIONAL when event writing
+            # is enabled — this is the fill-rate ORGAN, not an optional feature). Re-emit
+            # FSR-equivalent events for committed market-backed families each cycle, with a
+            # per-cycle distinct source so they do NOT dedup to the consumed FSR. Routing
+            # through the pending path makes _refresh_pending_family_snapshots capture fresh
+            # prices just-in-time → the reactor re-decides every ~60s instead of once per 12h
+            # forecast. The former redecision_continuous_enabled gate and redecision_max_per_cycle
+            # cap are DELETED. Coverage is governed by the WRAPPING fair cursor: a monotonic
+            # `cycle-N` source advances the round-robin window (which now wraps modulo the
+            # family count — see CoverageFairnessRequest.select_rows), so a fixed per-cycle
+            # batch reaches EVERY family within ceil(N/batch) cycles and NONE is ever dropped.
+            # already_pending skip avoids duplicate piling. Non-fatal: never breaks the cycle.
+            if True:
                 try:
-                    _rd_cap = _edli_positive_int_or_unbounded(
-                        edli_cfg, "redecision_max_per_cycle", default=50, maximum=200
-                    )
-                    # B4 (Phase-2): a monotonic `cycle-N` source so the coverage-fairness
-                    # round-robin (int(source.split('-')[-1])) advances its window each cycle
-                    # and reaches all cities within ceil(N/limit) cycles. Still distinct per
-                    # cycle (re-emit idempotency). The prior ISO-timestamp source raised
-                    # ValueError in the parse -> cycle_index frozen at 0 -> cities 21..N dark.
+                    # Fixed per-cycle batch fed to the wrapping fair cursor (no settings cap):
+                    # full coverage in ceil(N/batch) cycles, no silent tail drop.
+                    _rd_batch = _EDLI_REDECISION_FAIR_BATCH
                     _rd_source = _edli_next_redecision_source()
                     _rd_pending = _edli_pending_entity_keys(conn)
                     _rd_n = _edli_emit_forecast_snapshot_events(
                         conn,
                         decision_time=now,
                         received_at=received_at,
-                        limit=_rd_cap,
+                        limit=_rd_batch,
                         source=_rd_source,
                         already_pending_keys=_rd_pending,
                     )
                     logger.info(
-                        "edli_redecision: enqueued=%d cap=%s skipped_pending=%d",
-                        _rd_n, "unbounded" if _rd_cap is None else str(_rd_cap), len(_rd_pending),
+                        "edli_redecision: enqueued=%d batch=%d skipped_pending=%d (wrapping fair cursor)",
+                        _rd_n, _rd_batch, len(_rd_pending),
                     )
                 except Exception as _rd_exc:  # noqa: BLE001 — continuous re-decision is non-fatal
                     logger.warning("edli_redecision: enqueue failed (non-fatal): %r", _rd_exc)
@@ -5873,7 +5813,6 @@ def _edli_event_reactor_cycle() -> None:
                 get_current_level=get_current_level,
                 portfolio_state_provider=_portfolio_state_provider,
                 real_order_submit_enabled=real_submit_effective,
-                live_canary_enabled=bool(edli_cfg.get("live_canary_enabled", False)),
                 # In submit-disabled modes this is simulation authority only:
                 # build the would-trade taker certificate, but never call venue submit.
                 # Real submit/canary still requires the explicit config flag.
@@ -5888,7 +5827,6 @@ def _edli_event_reactor_cycle() -> None:
                 replacement_forecast_refit_decision=replacement_forecast_refit_decision,
                 replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
                 replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
-                canary_force_taker_provider=_edli_canary_force_taker_provider(conn, edli_cfg),
                 pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(
                     conn,
                     edli_cfg,
@@ -6261,12 +6199,19 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     flagged). ALSO screens OPEN maker rests (§4.5): a rest whose belief decayed on new evidence, or
     whose book moved/went stale, is pulled (re-decide at fresh price) — the fix for "submitted then
     abandoned" (Busan/Beijing). NO new HTTP: reads only what the warm/fast lanes already persisted;
-    the actual cancel reuses maker_rest_escalation's cancel path. DEFAULT OFF
-    (edli.redecision_screen_enabled). Fail-soft: never crashes the scheduler."""
+    the actual cancel reuses maker_rest_escalation's cancel path. Fail-soft: never crashes
+    the scheduler.
+
+    Wave-1 2026-06-12: the redecision_screen_enabled gate is DELETED. The screen is the
+    fill-rate ORGAN, not an optional feature — it now runs whenever the reactor is LIVE and
+    event writing is enabled (the same arm conditions that license the reactor itself). Data
+    + cancel only; no new submit authority of its own."""
     edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return
-    if not bool(edli_cfg.get("redecision_screen_enabled", False)):
+    # Live-armed condition (replaces the deleted redecision_screen_enabled flag): the reactor
+    # must be in live mode. In submit-disabled / shadow modes the screen organ stays dark.
+    if str(edli_cfg.get("reactor_mode", "live_no_submit")) != "live":
         return
     if not _edli_redecision_screen_lock.acquire(blocking=False):
         logger.info("edli_redecision_screen skipped: previous screen still running")
@@ -6290,9 +6235,9 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
         min_edge = float(edli_cfg.get("redecision_screen_min_edge", 0.01))
-        rd_cap = _edli_positive_int_or_unbounded(
-            edli_cfg, "redecision_max_per_cycle", default=50, maximum=200
-        )
+        # Wave-1 2026-06-12: redecision_max_per_cycle cap DELETED. The screen re-emit uses the
+        # fixed fair-cursor batch (wraps modulo family count → full coverage, no tail drop).
+        rd_cap = _EDLI_REDECISION_FAIR_BATCH
 
         # 1) ENTRY screen + rest screen on RO connections (pure read, no HTTP).
         world_ro = get_world_connection_read_only()
@@ -7120,46 +7065,6 @@ def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | 
         ):
             filtered.append(market)
     return filtered
-
-
-def _edli_canary_force_taker_provider(world_conn, edli_cfg):
-    """Build the canary force-taker gate: True iff canary-active AND fills < min.
-
-    Design §4 item 7: the canary FORCES the taker branch (bypassing the
-    governor's maker/taker CHOICE, never its NO_TRADE/risk gates) only while the
-    live-canary stage is enabled AND the proven canary fill count is still below
-    ``edli_live_min_canary_count``. Once the min fills land, the gate returns
-    False and order-type selection reverts to the governor + EV boundary (§1-§2).
-
-    The confirmed-fill count is sourced from the world DB EDLI live-order audit
-    (``edli_live_profit_audit`` / ``edli_live_order_events``, db: world). When the
-    count cannot be computed (tables absent at canary genesis, or a read error),
-    the gate fails OPEN to force-taker: the canary stage is, by definition, not
-    yet proven, so forcing the deterministic FOK proof is the conservative
-    canary-stage default (Fitz #4: do not infer "canary complete" from a missing
-    count).
-    """
-
-    if not bool(edli_cfg.get("live_canary_enabled", False)):
-        return lambda: False
-    min_canary_count = int(edli_cfg.get("edli_live_min_canary_count", 1))
-
-    def _provider() -> bool:
-        try:
-            from src.events.live_profit_audit import (
-                _canonical_promotion_rows,
-                _promotion_summary_from_rows,
-            )
-
-            rows = _canonical_promotion_rows(world_conn)
-            summary = _promotion_summary_from_rows(world_conn, rows)
-            confirmed = int(summary.confirmed_fill_count)
-        except Exception:
-            # Count unavailable -> canary not proven -> force the taker proof.
-            return True
-        return confirmed < min_canary_count
-
-    return _provider
 
 
 def _edli_pre_submit_clob_timeout_seconds() -> float:
@@ -9122,8 +9027,10 @@ def main():
         # between forecast cycles. Reads cached beliefs × freshest executable prices (RO, no HTTP),
         # enqueues EDLI_REDECISION_PENDING for families whose edge fired, and pulls/​re-decides
         # abandoned maker rests (§4.5). ~90s cadence (well inside the executable-price freshness
-        # window the substrate warmer maintains). DEFAULT OFF (edli.redecision_screen_enabled);
-        # data + cancel only, fail-soft. max_instances=1/coalesce so overlapping triggers skip.
+        # window the substrate warmer maintains). Wave-1 2026-06-12: always REGISTERED; the job
+        # body self-gates on live-armed conditions (reactor_mode == live + event_writer_enabled),
+        # the redecision_screen_enabled flag deleted. Data + cancel only, fail-soft.
+        # max_instances=1/coalesce so overlapping triggers skip.
         scheduler.add_job(
             _edli_continuous_redecision_screen_cycle,
             "interval",
@@ -9262,18 +9169,19 @@ def main():
         # failed EDLI_LIVE_CERTIFICATE_BUILD_FAILED:QUOTE_FEASIBILITY_BID_ASK_REQUIRED
         # (and intermittently EXECUTABLE_SNAPSHOT_BLOCKED) → proof_accepted=0.
         # market_discovery is a DATA-ONLY substrate writer: it submits no orders and
-        # touches no arming flags. Gated by market_substrate_refresh_enabled
-        # (default True) so the operator can disable without code change.
-        if edli_cfg.get("market_substrate_refresh_enabled", True):
-            scheduler.add_job(
-                _market_discovery_cycle,
-                "interval",
-                minutes=5,
-                id="market_discovery",
-                next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 90.0),
-                max_instances=1,
-                coalesce=True,
-            )
+        # touches no arming flags. Wave-1 2026-06-12: the market_substrate_refresh_enabled
+        # gate is DELETED — the EMS substrate refresh is structural plumbing the live cert
+        # build depends on (without it every cert build fails BID_ASK_REQUIRED), never an
+        # optional knob, so it is now ALWAYS registered.
+        scheduler.add_job(
+            _market_discovery_cycle,
+            "interval",
+            minutes=5,
+            id="market_discovery",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 90.0),
+            max_instances=1,
+            coalesce=True,
+        )
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("market_channel_ingestor_enabled"):
         scheduler.add_job(
             _edli_market_channel_ingestor_cycle,
