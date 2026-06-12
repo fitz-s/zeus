@@ -894,6 +894,23 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
         ]
         risk_reasons = [reason for reason in blocking if reason.startswith(EDLI_STAGE_RISK_REASON_PREFIXES)]
         if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} and blocking:
+            # BOOT CRASH-LOOP ANTIBODY (2026-06-12, 3 incidents same day): when
+            # the ONLY blockers are stuck post-submit unknowns + their cap
+            # reservations, run the operator-ratified authenticated-absence
+            # resolution automatically (same contract as the manual script —
+            # refuses on any real venue exposure) and re-evaluate ONCE
+            # (re-entry marker forbids a second attempt). Any other blocker,
+            # a refusal, or a venue-read failure falls through to the
+            # original fail-closed raise.
+            if not edli_cfg.get("_boot_auto_resolution_reentry"):
+                from src.execution.edli_absence_resolver import (
+                    boot_auto_resolve_stuck_unknowns,
+                )
+
+                if boot_auto_resolve_stuck_unknowns(list(blocking)):
+                    return _assert_edli_stage_readiness(
+                        {**edli_cfg, "_boot_auto_resolution_reentry": True}
+                    )
             raise RuntimeError("EDLI_LIVE_CANARY_READINESS_FAIL:" + ",".join(blocking or (report.status,)))
         if risk_reasons:
             raise RuntimeError("EDLI_LIVE_CANARY_READINESS_FAIL:" + ",".join(risk_reasons))
