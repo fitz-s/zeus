@@ -355,6 +355,7 @@ def build_forecast_snapshot_ready_event(
     min_members_floor: int = 40,
     live_eligibility_reader: LiveEligibilityReader | None = None,
     source: str | None = None,
+    event_type: str = "FORECAST_SNAPSHOT_READY",
 ) -> OpportunityEvent:
     classification = classify_forecast_snapshot(
         source_run=source_run,
@@ -404,7 +405,12 @@ def build_forecast_snapshot_ready_event(
     )
     entity_key = "|".join((payload.city, payload.target_date, payload.metric, payload.source_run_id))
     return make_opportunity_event(
-        event_type="FORECAST_SNAPSHOT_READY",
+        # event_type is parameterized for the continuous re-decision resurrection (2026-06-12): the
+        # P2 cheap-screen job emits EDLI_REDECISION_PENDING (a PRICE-driven re-decision) using the
+        # SAME committed-snapshot FSR payload machinery so the decision path binds the identical
+        # snapshot/q/FDR/Kelly cert — only the trigger label differs. Default keeps the FSR emit
+        # byte-identical.
+        event_type=event_type,
         entity_key=entity_key,
         # Per-cycle distinct source (continuous re-decision) → distinct idempotency_key → the same
         # committed family re-emits a fresh FSR-equivalent each reactor cycle instead of deduping to
@@ -445,6 +451,7 @@ class ForecastSnapshotReadyTrigger:
         decision_time: datetime,
         received_at: str,
         source: str | None = None,
+        event_type: str = "FORECAST_SNAPSHOT_READY",
     ) -> EventWriteResult:
         event = build_forecast_snapshot_ready_event(
             source_run=source_run,
@@ -455,6 +462,7 @@ class ForecastSnapshotReadyTrigger:
             min_members_floor=self._min_members_floor,
             live_eligibility_reader=self._live_eligibility_reader,
             source=source,
+            event_type=event_type,
         )
         return self._writer.write(event)
 
@@ -467,6 +475,8 @@ class ForecastSnapshotReadyTrigger:
         limit: int | None = 100,
         source: str | None = None,
         already_pending_keys: set[str] | None = None,
+        event_type: str = "FORECAST_SNAPSHOT_READY",
+        restrict_to_families: set[tuple[str, str, str]] | None = None,
     ) -> list[EventWriteResult]:
         """Catch up from committed source_run/source_run_coverage/snapshot rows.
 
@@ -710,6 +720,15 @@ class ForecastSnapshotReadyTrigger:
                 entity_key = "|".join((city, target_date, metric, source_run_id))
                 if entity_key in pending_skip:
                     continue
+            # CONTINUOUS RE-DECISION P2 (2026-06-12): when the caller restricts to a screened set of
+            # families (the cheap-screen edge fired for them), emit ONLY those — never the whole
+            # committed universe. None = emit all (the existing FSR re-emission behaviour).
+            if restrict_to_families is not None:
+                city = str(snapshot.get("city") or coverage.get("city") or "")
+                target_date = str(snapshot.get("target_date") or coverage.get("target_local_date") or "")
+                metric = str(snapshot.get("temperature_metric") or coverage.get("temperature_metric") or "")
+                if (city, target_date, metric) not in restrict_to_families:
+                    continue
             # STEP 2 emission floor S1 (UNCONDITIONAL, not flag-gated): never
             # manufacture an opportunity_event for a target whose LOCAL day is
             # already strictly PAST at decision_time. This is the highest-leverage
@@ -752,6 +771,7 @@ class ForecastSnapshotReadyTrigger:
                     decision_time=decision_time,
                     received_at=received_at,
                     source=source,
+                    event_type=event_type,
                 )
             )
         return results

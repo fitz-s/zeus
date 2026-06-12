@@ -97,6 +97,13 @@ LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({
 })
 EXECUTION_RECEIPT_TERMINAL_STATUSES = DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES | LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES
 EDLI_PROCESSING_REACTOR_MODES = frozenset({"live", "live_no_submit", "submit_disabled_live_bridge"})
+# Continuous re-decision resurrection (2026-06-12): the forecast decision lane includes the
+# price-driven re-decision type. Mirrors src.engine.event_reactor_adapter._FORECAST_DECISION_EVENT_TYPES
+# and src.events.continuous_redecision.REDECISION_EVENT_TYPE (literal here to avoid an import cycle:
+# continuous_redecision lazily imports the adapter which imports this module). An
+# EDLI_REDECISION_PENDING event carries the same FSR-shaped payload and gets the same structural
+# source-truth dead-letter treatment as a forecast snapshot event.
+_FORECAST_DECISION_EVENT_TYPES = frozenset({"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"})
 
 Gate = Callable[[OpportunityEvent], bool]
 ExecutableSnapshotGate = Callable[[OpportunityEvent, datetime], bool]
@@ -231,6 +238,13 @@ class EventSubmissionReceipt:
     # blob (canonical JSON) for this no-submit decision. None on legacy receipts (omit-when-None
     # from receipt_json keeps existing receipt_hash byte-stable). Observability only; never gates.
     envelope_json: str | None = None
+    # P1 BELIEF CACHE (continuous re-decision resurrection 2026-06-12): the family belief captured
+    # during decision (YES q-posterior + condition_id per bin + evidence snapshot identity). The
+    # reactor persists this through its OWN world conn inside the open SAVEPOINT (Window B) — the
+    # deadlock-free P1 write. compare=False + repr=False so it NEVER affects receipt equality or
+    # the receipt hash (it is internal plumbing, never serialized into receipt_json). None on every
+    # legacy / gate-reject receipt that never reached candidate-proof generation.
+    belief_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
@@ -762,6 +776,50 @@ class OpportunityEventReactor:
         if callable(commit):
             commit()
 
+    def _persist_belief_cache(
+        self,
+        receipt: "EventSubmissionReceipt | bool | None",
+        *,
+        decision_time: datetime,
+    ) -> None:
+        """P1 belief cache write — DEADLOCK-FREE (continuous re-decision resurrection 2026-06-12).
+
+        Writes the family belief captured during decision (receipt.belief_payload) through THIS
+        reactor's own world connection, inside the ALREADY-OPEN Window B SAVEPOINT. It opens NO new
+        connection and issues NO commit — the reactor's own _commit_event_unit releases the row with
+        the event's decision rows. This is the structural cure for the 2026-05-31 self-deadlock,
+        where persist_belief_live opened a SECOND world connection and committed while this conn held
+        the WAL write lock → SQLite hung process_pending.
+
+        Fail-soft: any error is swallowed (a belief-cache miss must never break the decision). The
+        write must NOT execute its own SAVEPOINT/commit — it is a bare INSERT on the open txn."""
+        if not isinstance(receipt, EventSubmissionReceipt):
+            return
+        belief = getattr(receipt, "belief_payload", None)
+        if not belief:
+            return
+        try:
+            from src.events.continuous_redecision import write_belief_row
+
+            write_belief_row(
+                self._store.conn,
+                family_id=str(belief.get("family_id") or ""),
+                city=str(belief.get("city") or ""),
+                target_date=str(belief.get("target_date") or ""),
+                snapshot_id=str(belief.get("snapshot_id") or ""),
+                calibrator_model_hash=str(belief.get("calibrator_model_hash") or "identity"),
+                bin_labels=list(belief.get("bin_labels") or []),
+                p_posterior_vec=list(belief.get("p_posterior_vec") or []),
+                recorded_at=decision_time.astimezone(UTC).isoformat(),
+                condition_ids=list(belief.get("condition_ids") or []),
+            )
+        except Exception:  # noqa: BLE001 — belief cache is non-critical; never break the decision
+            import logging as _logging
+
+            _logging.getLogger("zeus.events.reactor").debug(
+                "belief cache write failed (fail-soft)", exc_info=True
+            )
+
     def _process_one_pre_submit(
         self, event: OpportunityEvent, *, decision_time: datetime, result: ReactorResult
     ) -> tuple[str | None, bool]:
@@ -784,7 +842,9 @@ class OpportunityEventReactor:
         # stopped reaching this queue 2026-06-06 (upstream routing); the
         # adapter's final boundary scope gate fail-closes any straggler.
         # Antibody: tests/engine/test_event_reactor_no_bypass.py boundary test.
-        if event.event_type == "FORECAST_SNAPSHOT_READY":
+        if event.event_type in _FORECAST_DECISION_EVENT_TYPES:
+            # EDLI_REDECISION_PENDING (price-driven forecast re-decision) carries the same FSR-shaped
+            # payload and gets the same structural source-truth dead-letter treatment.
             # SERVE-FRESHEST-ELIGIBLE RECONCILIATION (2026-06-11, twin-authority #8).
             #
             # The event's coverage statuses describe the run the PRODUCER minted the
@@ -880,6 +940,13 @@ class OpportunityEventReactor:
         caller exactly as the legacy single-pass flow did.
         """
         receipt = _submission_receipt(event, submit_result)
+        # P1 BELIEF CACHE (continuous re-decision resurrection 2026-06-12): persist the family
+        # belief captured during decision THROUGH THIS conn, inside the already-open Window B
+        # SAVEPOINT — no second connection, no separate commit (that was the 2026-05-31 deadlock).
+        # The reactor's per-event _commit_event_unit releases it with the decision rows. Persisted
+        # regardless of accept/reject (the belief is what we believed, independent of the trade
+        # outcome). Best-effort + fail-soft: a cache-write hiccup must never break the decision.
+        self._persist_belief_cache(receipt, decision_time=decision_time)
         if receipt is None or not _receipt_matches_event(event, receipt):
             reason = receipt.reason if receipt is not None and receipt.reason else "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND"
             return self._reject_or_retry_post_submit(

@@ -1574,6 +1574,10 @@ def init_schema(
             prob_tail_mass_cal REAL,
             prob_tail_mass_market REAL,
             prob_tail_entropy REAL,
+            -- Continuous re-decision P1 belief cache (resurrection 2026-06-12): per-bin executable
+            -- condition_id (parallel to bin_labels_json) for the synthesized 'edli_belief:' rows.
+            -- NULL for every non-belief / legacy row.
+            condition_ids_json TEXT,
             recorded_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_probability_trace_city_target
@@ -2397,6 +2401,15 @@ def init_schema(
             "CREATE INDEX IF NOT EXISTS idx_probability_trace_phase_source "
             "ON probability_trace_fact(market_phase_source);"
         )
+    except sqlite3.OperationalError:
+        pass
+
+    # Continuous re-decision P1 belief cache (resurrection 2026-06-12): the synthesized
+    # 'edli_belief:' rows store the per-bin executable condition_id (parallel to bin_labels_json)
+    # so the P2 screen can join a cached belief to the freshest executable_market_snapshots row.
+    # Additive, NULL for every legacy row; column-subset-safe per assert_db_matches_registry.
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN condition_ids_json TEXT;")
     except sqlite3.OperationalError:
         pass
 

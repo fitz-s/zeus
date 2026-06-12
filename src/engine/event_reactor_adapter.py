@@ -248,6 +248,20 @@ from src.calibration.emos import (
 
 UTC = timezone.utc
 
+# Continuous re-decision resurrection (2026-06-12): EDLI_REDECISION_PENDING is a PRICE-DRIVEN
+# re-decision of a FORECAST family — it routes through the SAME forecast decision path (same
+# snapshot binding, same q/FDR/Kelly cert), differing only in trigger (a P2 cheap-screen edge,
+# not a forecast cadence). The DELIBERATE forecast-lane set is the single authority that every
+# forecast-dispatch site reads, so adding the redecision type can never be partially applied
+# (one missed site would fail-closed at the strategy classifier raise). Imported as the module's
+# canonical constant so the producer (continuous_redecision) and consumer (this adapter) cannot
+# drift apart.
+from src.events.continuous_redecision import REDECISION_EVENT_TYPE as _EDLI_REDECISION_EVENT_TYPE
+
+_FORECAST_DECISION_EVENT_TYPES: frozenset[str] = frozenset(
+    {"FORECAST_SNAPSHOT_READY", _EDLI_REDECISION_EVENT_TYPE}
+)
+
 
 # Decision-triggered targeted snapshot refresh (zero-order wall fix 2026-06-11).
 #
@@ -729,7 +743,9 @@ def _event_bound_strategy_key(
     normalized_metric = str(metric or "").strip().lower()
     if event_type == "DAY0_EXTREME_UPDATED":
         strategy = "settlement_capture"
-    elif event_type == "FORECAST_SNAPSHOT_READY":
+    elif event_type in _FORECAST_DECISION_EVENT_TYPES:
+        # EDLI_REDECISION_PENDING resolves to the forecast strategy (it re-decides a forecast
+        # family on a fresh price; the strategy is unchanged, only the trigger differs).
         strategy = "opening_inertia" if normalized_direction == "buy_no" else "center_buy"
     else:
         raise ValueError(f"EDLI_STRATEGY_UNSUPPORTED_EVENT_TYPE:{event_type}")
@@ -890,7 +906,9 @@ def edli_source_truth_gate(event: OpportunityEvent) -> bool:
     """Fail closed unless an EDLI event is source-eligible for a live cycle."""
 
     payload = _payload(event)
-    if event.event_type == "FORECAST_SNAPSHOT_READY":
+    if event.event_type in _FORECAST_DECISION_EVENT_TYPES:
+        # EDLI_REDECISION_PENDING carries the SAME FSR-shaped payload (it re-decides a forecast
+        # family on a fresh price) and is gated identically — structural identity only.
         # Coverage labels are ADVISORY at the event gate (serving-authority
         # ruling, incident 2026-06-11T16:33:51Z — see the FSR pass-through block
         # in src/events/reactor.py): the bundle the money path trades on is
@@ -994,7 +1012,7 @@ def edli_trade_score_gate(event: OpportunityEvent) -> bool:
     proof fields as event-authoritative payload data.
     """
 
-    return event.event_type in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}
+    return event.event_type in (_FORECAST_DECISION_EVENT_TYPES | {"DAY0_EXTREME_UPDATED"})
 
 
 def _resolve_replacement_forecast_adapter_hook(
@@ -1353,7 +1371,11 @@ def event_bound_live_adapter_from_trade_conn(
         import logging as _logging
 
         event_type = getattr(event, "event_type", None)
-        _FORECAST_LANE_EVENT_TYPES: frozenset[str] = frozenset({"FORECAST_SNAPSHOT_READY"})
+        # FINAL ADAPTER BOUNDARY SCOPE GATE forecast-lane set — DELIBERATELY includes
+        # EDLI_REDECISION_PENDING (continuous re-decision resurrection 2026-06-12): a price-driven
+        # re-decision of a forecast family is forecast-lane and may submit under forecast_only /
+        # forecast_plus_day0 exactly as an FSR does. Unknown types remain fail-closed below.
+        _FORECAST_LANE_EVENT_TYPES: frozenset[str] = _FORECAST_DECISION_EVENT_TYPES
         is_forecast_lane = event_type in _FORECAST_LANE_EVENT_TYPES
         is_day0_lane = event_type in _DAY0_LANE_EVENT_TYPES
 
@@ -2095,10 +2117,12 @@ def _build_event_bound_no_submit_receipt_core(
     # forecast_only market-phase admission gate (#98): reject families whose
     # target local day has begun or whose market has closed — forecast_only is
     # blind to the already-realizing/observed extremum (wrong-side risk, Paris
-    # 2026-06-01). Scoped to FORECAST_SNAPSHOT_READY; the day0 observation-aware
-    # scope owns same-day. Placed before scoring so closed families never reach
-    # q/FDR/Kelly and never re-fire through continuous re-decision.
-    if event.event_type == "FORECAST_SNAPSHOT_READY":
+    # 2026-06-01). Scoped to the forecast decision lane (FSR + EDLI_REDECISION_PENDING,
+    # which re-decides a forecast family); the day0 observation-aware scope owns same-day.
+    # Placed before scoring so closed families never reach q/FDR/Kelly. A redecision must
+    # obey the SAME phase gate (a redecision into an already-realizing day is the exact
+    # wrong-side risk the gate exists to stop).
+    if event.event_type in _FORECAST_DECISION_EVENT_TYPES:
         _phase_evidence = _edli_forecast_only_phase_evidence(
             city=family.city,
             target_date=family.target_date,
@@ -3203,6 +3227,14 @@ def build_event_bound_no_submit_receipt(
         provenance_capture=provenance_capture,
         family_snapshot_refresher=family_snapshot_refresher,
     )
+    # P1 BELIEF CACHE (continuous re-decision resurrection 2026-06-12): attach the family belief
+    # captured deep in the proof chain (provenance_capture["edli_belief"]) onto the receipt so the
+    # reactor can persist it through its OWN world conn in Window B (deadlock-free P1). Attached on
+    # EVERY return path below. belief_payload is compare=False/repr=False so it can never drift the
+    # receipt hash. Absent on gate-reject receipts that never reached candidate-proof generation.
+    _belief = provenance_capture.get("edli_belief")
+    if _belief is not None and receipt.belief_payload is None:
+        receipt = dataclass_replace(receipt, belief_payload=_belief)
     if receipt.envelope_json is not None:
         return receipt
     try:
@@ -6983,6 +7015,46 @@ def _generate_candidate_proofs(
         capital_objective_evidence=capital_objective_evidence,
         provenance_capture=provenance_capture,
     )
+    # P1 BELIEF CAPTURE (continuous re-decision resurrection 2026-06-12). Buffer this family's
+    # belief (YES q-posterior + condition_id per bin) into the per-call provenance_capture dict so
+    # the reactor can persist it through its OWN world conn inside the open SAVEPOINT — NO second
+    # connection, NO commit here (that was the 2026-05-31 self-deadlock). Covers BOTH the
+    # replacement (live) and canonical paths because both flow through this ONE seam. Best-effort:
+    # any capture error is swallowed — a belief-cache miss must never affect the decision. The
+    # snapshot identity is the evidence key the §4.5 anti-twitch screen reads: posterior_id on the
+    # replacement path, the bound snapshot_row's snapshot_id on the canonical path — both CHANGE
+    # only when new forecast/day0/obs evidence lands and stay stable within the same evidence.
+    if provenance_capture is not None:
+        try:
+            _bin_labels = [str(c.bin.label) for c in family.candidates]
+            _cond_ids = [str(c.condition_id or "") for c in family.candidates]
+            _posterior_vec = [
+                float(q_by_condition.get(str(c.condition_id or ""), 0.0)) for c in family.candidates
+            ]
+            _snap_row = provenance_capture.get("snapshot_row") or {}
+            _snap_id = (
+                str(probability_evidence.get("posterior_id"))
+                if probability_evidence.get("posterior_id") is not None
+                else str(_snap_row.get("snapshot_id") or event.causal_snapshot_id or "")
+            )
+            _calib_hash = str(
+                probability_evidence.get("probability_authority")
+                or probability_evidence.get("p_cal_vector_hash")
+                or "identity"
+            )
+            if _snap_id:
+                provenance_capture["edli_belief"] = {
+                    "family_id": str(family.family_id),
+                    "city": str(family.city),
+                    "target_date": str(family.target_date),
+                    "snapshot_id": _snap_id,
+                    "calibrator_model_hash": _calib_hash,
+                    "bin_labels": _bin_labels,
+                    "p_posterior_vec": _posterior_vec,
+                    "condition_ids": _cond_ids,
+                }
+        except Exception:  # noqa: BLE001 — belief capture is non-critical; never break the decision
+            pass
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
     # FIX A (direction law; incident 0b5c305e26524042, 2026-06-10 Milan-24C;
@@ -8948,7 +9020,9 @@ def _live_yes_probabilities(
     # 2026-05-30: canonical kernel reconstructed (snapshot fetch + MarketAnalysis assembly +
     # hypothesis-family scan + evaluate_live_bins). Gated by the acceptance suite in
     # tests/engine/test_event_reactor_no_bypass.py; SHADOW until #24 bias. See task Break-4.
-    if event.event_type == "FORECAST_SNAPSHOT_READY":
+    # EDLI_REDECISION_PENDING routes through the SAME replacement→canonical forecast dispatch
+    # (it is a fresh-price re-decision of a forecast family; the snapshot binding is identical).
+    if event.event_type in _FORECAST_DECISION_EVENT_TYPES:
         # FIX-1 Insertion A: thread the settlement-evidence objects (loaded once in
         # main.py, carried through the adapter closure) into the live 0.1 authority
         # builder so the shared gate runs on the path that is actually live.
@@ -14184,7 +14258,7 @@ def _forecast_snapshot_reader_block_reason(
     decision_time: datetime,
 ) -> tuple[str | None, str | None]:
     """Return ``(reason, elected_snapshot_id)`` — see _executable_forecast_reader_authority_block_reason."""
-    if event.event_type not in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}:
+    if event.event_type not in (_FORECAST_DECISION_EVENT_TYPES | {"DAY0_EXTREME_UPDATED"}):
         return None, None
     source_run_id = _nonnull(snapshot.get("source_run_id") or _payload(event).get("source_run_id"))
     if not source_run_id:

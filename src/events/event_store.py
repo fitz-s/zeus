@@ -17,6 +17,11 @@ from datetime import date, datetime, timedelta, timezone
 
 from src.events.opportunity_event import OpportunityEvent
 
+# Continuous re-decision resurrection (2026-06-12): the forecast decision lane. EDLI_REDECISION_PENDING
+# carries the same FSR-shaped city/target payload and gets the same timeliness floor. Literal here
+# (mirrors src.events.continuous_redecision.REDECISION_EVENT_TYPE) to avoid an import cycle.
+_FORECAST_DECISION_EVENT_TYPES = frozenset({"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"})
+
 
 class EventStoreSchemaError(RuntimeError):
     """Raised when a caller supplies a connection without EDLI world tables."""
@@ -789,8 +794,13 @@ class EventStore:
         Events with no city+target_date (market-channel/day0) are not
         phase-filtered here and pass through. Fail-closed on an unresolvable
         city/target → reject (cannot be timely-verified).
+
+        EDLI_REDECISION_PENDING (continuous re-decision resurrection 2026-06-12) carries the same
+        FSR-shaped city/target payload and re-decides a forecast family — it MUST get the same
+        strictly-past timeliness floor, or a price-driven redecision would re-fire on an
+        already-settled market (wrong-side risk). Hence the forecast-decision set, not == FSR.
         """
-        if event.event_type != "FORECAST_SNAPSHOT_READY":
+        if event.event_type not in _FORECAST_DECISION_EVENT_TYPES:
             return True
         try:
             payload = json.loads(event.payload_json)

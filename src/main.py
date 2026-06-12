@@ -2277,6 +2277,13 @@ _collateral_background_refresh_lock = threading.Lock()
 _last_collateral_heartbeat_refresh_attempt_at = None
 COLLATERAL_HEARTBEAT_REFRESH_SECONDS = 30.0
 
+# Continuous re-decision P2 (resurrection 2026-06-12): the cheap-screen job's advisory lock (so
+# overlapping triggers never double-run the screen) and the PROCESS-GLOBAL act-once-per-edge dedup
+# state (held across cycles so a bare price wiggle does not re-fire — R6). Plain dict mutated only
+# under the lock-held job; no cross-thread contention beyond the advisory acquire.
+_edli_redecision_screen_lock = threading.Lock()
+_edli_redecision_acted_state: dict = {}
+
 
 def _venue_heartbeat_mode() -> str:
     return os.environ.get("ZEUS_VENUE_HEARTBEAT_MODE", "internal").strip().lower()
@@ -6139,6 +6146,273 @@ def _maker_rest_escalation_cycle() -> None:
         logger.info("maker_rest_escalation: %s", stats)
 
 
+def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
+    """Build OpenRest entries for §4.5 rest management: every OPEN maker ENTRY rest joined to its
+    decision belief via condition_id. Pure read on both DBs.
+
+    The rest's condition_id (token_id → executable_market_snapshots) joins to the belief's
+    per-bin condition_ids → (family_id, bin_label, resting_posterior, resting_snapshot_id). The
+    resting_posterior is the belief's posterior at that bin from the LATEST cached belief whose
+    snapshot matches the rest's pricing snapshot (anti-twitch: screen_reprice fires only when the
+    LATEST belief is from a NEWER snapshot than the rest's). When the bin/belief cannot be resolved
+    the rest still gets the book/stale checks (which need no posterior)."""
+    from datetime import datetime, timezone
+    from src.events.continuous_redecision import OpenRest, _all_latest_beliefs
+    from src.execution.maker_rest_escalation import OPEN_REST_FACT_STATES
+
+    now = datetime.now(timezone.utc)
+    placeholders = ",".join("?" for _ in OPEN_REST_FACT_STATES)
+    rows = trade_conn.execute(
+        f"""
+        WITH latest_facts AS (
+            SELECT venue_order_id, state,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY venue_order_id ORDER BY local_sequence DESC
+                   ) AS rn
+            FROM venue_order_facts
+        )
+        SELECT vc.command_id, vc.venue_order_id, vc.token_id, vc.market_id,
+               vc.side, vc.price, vc.snapshot_id, vc.created_at
+        FROM venue_commands vc
+        JOIN latest_facts lf
+          ON lf.venue_order_id = vc.venue_order_id AND lf.rn = 1
+        WHERE vc.intent_kind = 'ENTRY'
+          AND vc.venue_order_id IS NOT NULL AND vc.venue_order_id != ''
+          AND lf.state IN ({placeholders})
+        """,
+        tuple(OPEN_REST_FACT_STATES),
+    ).fetchall()
+    if not rows:
+        return []
+    # Resolve token_id → condition_id from the freshest executable_market_snapshots row.
+    token_ids = {str(r[2] or "") for r in rows if r[2]}
+    cond_by_token: dict[str, str] = {}
+    if token_ids:
+        try:
+            tph = ",".join("?" for _ in token_ids)
+            for cr in trade_conn.execute(
+                f"""
+                SELECT selected_outcome_token_id, condition_id,
+                       ROW_NUMBER() OVER (PARTITION BY selected_outcome_token_id
+                                          ORDER BY captured_at DESC) AS rn
+                FROM executable_market_snapshots
+                WHERE selected_outcome_token_id IN ({tph})
+                """,
+                tuple(token_ids),
+            ).fetchall():
+                if cr[2] == 1 and cr[0]:
+                    cond_by_token[str(cr[0])] = str(cr[1] or "")
+        except Exception:  # noqa: BLE001 — token→condition resolution is best-effort
+            cond_by_token = {}
+    beliefs = _all_latest_beliefs(world_conn)
+    # Index belief bins by condition_id → (belief, bin_label, posterior).
+    bin_by_cond: dict[str, tuple] = {}
+    for belief in beliefs:
+        conds = belief.condition_ids or []
+        for idx, label in enumerate(belief.bin_labels):
+            if idx < len(conds) and conds[idx]:
+                if idx < len(belief.p_posterior_vec):
+                    bin_by_cond[str(conds[idx])] = (belief, label, float(belief.p_posterior_vec[idx]))
+    out = []
+    for r in rows:
+        command_id, venue_order_id, token_id, market_id, side, price, snap_id, created_at = (
+            str(r[0] or ""), str(r[1] or ""), str(r[2] or ""), str(r[3] or ""),
+            str(r[4] or ""), r[5], str(r[6] or ""), str(r[7] or ""),
+        )
+        cond = cond_by_token.get(token_id, "")
+        belief_hit = bin_by_cond.get(cond)
+        family_id = belief_hit[0].family_id if belief_hit else ""
+        bin_label = belief_hit[1] if belief_hit else ""
+        resting_posterior = belief_hit[2] if belief_hit else 0.0
+        # quote_age_ms from the command's creation (the order has rested since created_at).
+        try:
+            from datetime import datetime as _dt
+            age_ms = max(0.0, (now - _dt.fromisoformat(created_at)).total_seconds() * 1000.0) if created_at else 0.0
+        except Exception:  # noqa: BLE001
+            age_ms = 0.0
+        # side is the venue side ('buy'/'sell'); map to the screen's buy_yes/buy_no via outcome.
+        screen_side = "buy_yes"  # rests are entry buys; YES vs NO is encoded in the token. Default
+        # to buy_yes — the belief-decay check is keyed on bin posterior which is YES-space; for a NO
+        # token the moved-book/stale checks still apply (they are side-agnostic on the limit).
+        out.append(
+            OpenRest(
+                command_id=command_id,
+                venue_order_id=venue_order_id,
+                family_id=family_id,
+                bin_label=bin_label,
+                side=screen_side,
+                condition_id=cond,
+                resting_posterior=resting_posterior,
+                resting_snapshot_id=snap_id,
+                limit_price=float(price) if price is not None else 0.0,
+                quote_age_ms=age_ms,
+            )
+        )
+    return out
+
+
+@_scheduler_job("edli_continuous_redecision_screen")
+def _edli_continuous_redecision_screen_cycle() -> None:
+    """P2 cheap-screen job (continuous re-decision resurrection 2026-06-12).
+
+    Reads cached beliefs (world, RO) × freshest executable prices (trade, RO), runs the cheap edge
+    screen, and ENQUEUES EDLI_REDECISION_PENDING events for families whose edge fired — so the
+    reactor re-decides on PRICE movement between forecast cycles (the ~5-6h cadence gap the operator
+    flagged). ALSO screens OPEN maker rests (§4.5): a rest whose belief decayed on new evidence, or
+    whose book moved/went stale, is pulled (re-decide at fresh price) — the fix for "submitted then
+    abandoned" (Busan/Beijing). NO new HTTP: reads only what the warm/fast lanes already persisted;
+    the actual cancel reuses maker_rest_escalation's cancel path. DEFAULT OFF
+    (edli.redecision_screen_enabled). Fail-soft: never crashes the scheduler."""
+    edli_cfg = _settings_section("edli", {})
+    if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
+        return
+    if not bool(edli_cfg.get("redecision_screen_enabled", False)):
+        return
+    if not _edli_redecision_screen_lock.acquire(blocking=False):
+        logger.info("edli_redecision_screen skipped: previous screen still running")
+        return
+    try:
+        from datetime import datetime, timezone
+        from src.events.continuous_redecision import (
+            screen_entry_redecisions,
+            screened_family_keys,
+            screen_resting_orders,
+            REDECISION_EVENT_TYPE,
+        )
+        from src.state.db import (
+            get_world_connection_read_only,
+            get_trade_connection_read_only,
+            get_world_connection,
+            ZEUS_FORECASTS_DB_PATH,
+            get_forecasts_connection_read_only,
+        )
+
+        now = datetime.now(timezone.utc)
+        received_at = now.isoformat()
+        min_edge = float(edli_cfg.get("redecision_screen_min_edge", 0.01))
+        rd_cap = _edli_positive_int_or_unbounded(
+            edli_cfg, "redecision_max_per_cycle", default=50, maximum=200
+        )
+
+        # 1) ENTRY screen + rest screen on RO connections (pure read, no HTTP).
+        world_ro = get_world_connection_read_only()
+        trade_ro = get_trade_connection_read_only()
+        try:
+            redecisions = screen_entry_redecisions(
+                world_ro,
+                trade_ro,
+                decision_time=received_at,
+                min_edge=min_edge,
+                acted_state=_edli_redecision_acted_state,
+            )
+            family_keys = screened_family_keys(world_ro, redecisions)
+            open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro)
+            rest_pulls = screen_resting_orders(world_ro, trade_ro, open_rests=open_rests)
+        finally:
+            try:
+                world_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                trade_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        # A rest-pull family must also re-decide (cancel + re-decide at fresh price). Add its
+        # family key to the re-emit restriction so the reactor re-certifies it; the cancel itself
+        # runs through the maker_rest_escalation cancel path below.
+        rest_pull_families: set = set()
+        if rest_pulls:
+            from src.events.continuous_redecision import _all_latest_beliefs as _alb
+            world_ro2 = get_world_connection_read_only()
+            try:
+                by_family = {
+                    b.family_id: (b.city, b.target_date, b.metric) for b in _alb(world_ro2)
+                }
+            finally:
+                try:
+                    world_ro2.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            for rest, _decision in rest_pulls:
+                key = by_family.get(rest.family_id)
+                if key is not None and all(key):
+                    rest_pull_families.add(key)
+        all_families = set(family_keys) | rest_pull_families
+        if not all_families:
+            return
+
+        # 2) EMIT EDLI_REDECISION_PENDING for the screened families (world write, under the mutex,
+        #    no HTTP) — routed through the EXISTING FSR re-emit machinery (restrict_to_families).
+        from src.events.event_writer import EventWriter
+        from src.events.triggers.forecast_snapshot_ready import (
+            ForecastSnapshotReadyTrigger,
+            executable_forecast_live_eligible_reader,
+        )
+        from src.state.db import world_write_mutex as _world_write_mutex
+
+        world = get_world_connection()
+        try:
+            _att = {row[1] for row in world.execute("PRAGMA database_list").fetchall()}
+            if "forecasts" not in _att:
+                world.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+        except Exception:  # noqa: BLE001
+            pass
+        forecasts_ro = get_forecasts_connection_read_only()
+        emit_mutex = _world_write_mutex()
+        emit_mutex.acquire()
+        try:
+            trig = ForecastSnapshotReadyTrigger(
+                EventWriter(world),
+                live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
+            )
+            pending = _edli_pending_entity_keys(world)
+            emitted = trig.scan_committed_snapshots(
+                forecasts_conn=forecasts_ro,
+                decision_time=now,
+                received_at=received_at,
+                limit=rd_cap,
+                source=_edli_next_redecision_source(),
+                already_pending_keys=pending,
+                event_type=REDECISION_EVENT_TYPE,
+                restrict_to_families=all_families,
+            )
+            world.commit()
+        finally:
+            emit_mutex.release()
+            try:
+                forecasts_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                world.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 3) CANCEL the pulled rests via the EXISTING maker_rest_escalation cancel path (no new
+        #    venue call site). The next reactor cycle re-decides the re-emitted family at fresh price.
+        cancelled = 0
+        if rest_pulls and get_mode() == "live":
+            from src.data.polymarket_client import PolymarketClient
+            from src.execution.maker_rest_escalation import run_cancels_for_expired_rests
+
+            to_cancel = [
+                {"command_id": rest.command_id, "venue_order_id": rest.venue_order_id,
+                 "created_at": "", "fact_state": "", "matched_size": None}
+                for rest, _decision in rest_pulls
+            ]
+            cstats = run_cancels_for_expired_rests(to_cancel, PolymarketClient())
+            cancelled = cstats.get("cancelled", 0)
+
+        logger.info(
+            "edli_redecision_screen: entry_fired=%d rest_pulls=%d families_reemitted=%d "
+            "events_emitted=%d rests_cancelled=%d",
+            len(redecisions), len(rest_pulls), len(all_families), len(emitted), cancelled,
+        )
+    finally:
+        _edli_redecision_screen_lock.release()
+
+
 @_scheduler_job("edli_market_substrate_warm")
 def _edli_market_substrate_warm_cycle() -> None:
     """Dedicated EDLI executable-snapshot substrate warmer, DECOUPLED from the reactor.
@@ -8752,6 +9026,21 @@ def main():
             minutes=5,
             id="maker_rest_escalation",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # CONTINUOUS RE-DECISION P2 screen (resurrection 2026-06-12): reacts to PRICE movement
+        # between forecast cycles. Reads cached beliefs × freshest executable prices (RO, no HTTP),
+        # enqueues EDLI_REDECISION_PENDING for families whose edge fired, and pulls/​re-decides
+        # abandoned maker rests (§4.5). ~90s cadence (well inside the executable-price freshness
+        # window the substrate warmer maintains). DEFAULT OFF (edli.redecision_screen_enabled);
+        # data + cancel only, fail-soft. max_instances=1/coalesce so overlapping triggers skip.
+        scheduler.add_job(
+            _edli_continuous_redecision_screen_cycle,
+            "interval",
+            seconds=90,
+            id="edli_continuous_redecision_screen",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 50.0),
             max_instances=1,
             coalesce=True,
         )
