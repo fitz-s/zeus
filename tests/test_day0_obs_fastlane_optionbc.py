@@ -639,3 +639,116 @@ class TestObsFastTickSchedulerRegistration:
         assert hasattr(im, "_k2_obs_fast_tick"), (
             "_k2_obs_fast_tick function not found in ingest_main"
         )
+
+
+# ---------------------------------------------------------------------------
+# Prefix fusion: WU coverage-prover + METAR fresh tail (Denver 2026-06-12)
+# ---------------------------------------------------------------------------
+
+class TestWuPrefixMetarTailFusion:
+    """The process-lifetime METAR memo can never prove local-day coverage after
+    a daemon restart (WINDOW_INCOMPLETE forever) — the fused context must carry
+    WU's coverage claim with the union extremes and METAR's freshness clock."""
+
+    def _ctx(self, **kw):
+        from src.data.observation_client import Day0ObservationContext
+        base = dict(
+            current_temp=88.0, high_so_far=90.0, low_so_far=60.0,
+            source="wu_api", observation_time="2026-06-12T20:00:00+00:00",
+            unit="F", coverage_status="OK", sample_count=14,
+            first_sample_time="2026-06-12T06:10:00+00:00",
+            last_sample_time="2026-06-12T20:00:00+00:00",
+        )
+        base.update(kw)
+        return Day0ObservationContext(**base)
+
+    def test_fusion_unions_extremes_and_keeps_wu_coverage(self):
+        from src.data.observation_client import _fuse_wu_prefix_with_metar_tail
+        wu = self._ctx()  # stale tail, full prefix, max 90
+        metar = self._ctx(
+            source="metar_fast_lane", coverage_status="WINDOW_INCOMPLETE",
+            high_so_far=91.0, low_so_far=75.0, current_temp=91.0,
+            observation_time="2026-06-12T22:05:00+00:00", sample_count=8,
+            first_sample_time="2026-06-12T21:40:00+00:00",
+            provider_reported_time="day0_obs_source=metar_fast_lane;age_s=120",
+        )
+        fused = _fuse_wu_prefix_with_metar_tail(wu, metar)
+        assert fused is not None
+        assert fused.high_so_far == 91.0       # union max (METAR tail higher)
+        assert fused.low_so_far == 60.0        # union min (WU morning low)
+        assert fused.coverage_status == "OK"   # WU proves the prefix
+        assert fused.current_temp == 91.0      # METAR freshness
+        assert fused.observation_time == "2026-06-12T22:05:00+00:00"
+        assert fused.source == "metar_fast_lane"
+        assert "prefix=wu_api" in (fused.provider_reported_time or "")
+        assert fused.sample_count == 22
+
+    def test_no_fusion_when_wu_cannot_prove_prefix(self):
+        from src.data.observation_client import _fuse_wu_prefix_with_metar_tail
+        wu = self._ctx(coverage_status="WINDOW_INCOMPLETE")
+        metar = self._ctx(source="metar_fast_lane", coverage_status="WINDOW_INCOMPLETE")
+        assert _fuse_wu_prefix_with_metar_tail(wu, metar) is None
+
+    def test_no_fusion_on_unit_mismatch(self):
+        from src.data.observation_client import _fuse_wu_prefix_with_metar_tail
+        wu = self._ctx(unit="F")
+        metar = self._ctx(source="metar_fast_lane", unit="C",
+                          coverage_status="WINDOW_INCOMPLETE")
+        assert _fuse_wu_prefix_with_metar_tail(wu, metar) is None
+
+    def test_get_current_observation_returns_fused_context(self, monkeypatch):
+        """Integration: stale WU + incomplete METAR -> fused OK context, so the
+        day0 quality gate no longer starves the monitor on settlement day."""
+        import src.data.observation_client as oc
+        from types import SimpleNamespace
+
+        city = SimpleNamespace(
+            name="Denver", timezone="America/Denver",
+            settlement_source_type="wu_icao", settlement_unit="F",
+            wu_station="KDEN", country_code="US",
+        )
+        ref = datetime(2026, 6, 12, 22, 10, tzinfo=UTC)
+        wu = self._ctx()  # 20:00 obs -> 2.2h old (stale), coverage OK
+        metar = self._ctx(
+            source="metar_fast_lane", coverage_status="WINDOW_INCOMPLETE",
+            high_so_far=91.0, current_temp=91.0,
+            observation_time="2026-06-12T22:05:00+00:00",
+            provider_reported_time="day0_obs_source=metar_fast_lane;age_s=120",
+        )
+        monkeypatch.setattr(oc, "_fetch_wu_observation", lambda *a, **k: wu)
+        monkeypatch.setattr(
+            oc, "_fetch_metar_fast_lane_observation", lambda *a, **k: metar
+        )
+        out = oc.get_current_observation(city, target_date=date(2026, 6, 12),
+                                         reference_time=ref)
+        assert out.coverage_status == "OK"
+        assert out.high_so_far == 91.0
+        assert out.low_so_far == 60.0
+        assert "prefix=wu_api" in (out.provider_reported_time or "")
+
+
+class TestFastTickCityRotation:
+    """No-data-holes machinery (operator law 2026-06-12): rate-limit truncation
+    eats the tail of every run, so a FIXED city order permanently starves the
+    same tail cities. The 15-min slot rotation must put every city at the front
+    of the queue within len(cities) consecutive slots."""
+
+    def test_every_city_reaches_front_within_full_rotation(self):
+        cities = [f"c{i:02d}" for i in range(49)]
+        fronts = set()
+        base = 1_760_000_000  # any epoch
+        for slot in range(len(cities)):
+            ts = base + slot * 900
+            offset = (ts // 900) % len(cities)
+            rotated = cities[offset:] + cities[:offset]
+            fronts.add(rotated[0])
+            assert sorted(rotated) == sorted(cities)  # never drops a city
+        assert fronts == set(cities)
+
+    def test_rotation_formula_matches_ingest_main(self):
+        """Pin the formula actually used in _k2_obs_fast_tick."""
+        import inspect
+        import src.ingest_main as im
+        src_text = inspect.getsource(im._k2_obs_fast_tick)
+        assert "% len(city_filter)" in src_text
+        assert "city_filter[offset:] + city_filter[:offset]" in src_text

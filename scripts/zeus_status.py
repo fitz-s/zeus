@@ -506,6 +506,7 @@ def collect() -> dict:
         "events": section_events(),
         "blocks": section_blocks(),
         "surface": section_surface(),
+        "obs_holes": section_obs_holes(),
         "positions": section_positions(),
         "orders": section_orders(),
     }
@@ -597,6 +598,26 @@ def render_text(data: dict) -> str:
         )
     L.append("")
 
+    # OBS HOLES (data holes are not allowed — operator law 2026-06-12)
+    oh = data["obs_holes"]
+    if oh.get("error"):
+        L.append(f"OBS      ERR {oh['error']}")
+    else:
+        holes = oh.get("holes", [])
+        if holes:
+            names = ", ".join(f"{h['city']}({h['age']})" for h in holes[:10])
+            more = f" +{len(holes) - 10} more" if len(holes) > 10 else ""
+            L.append(
+                f"OBS      HOLES={len(holes)}/{oh.get('cities_total', '?')} "
+                f"(> {oh.get('stale_hours')}h): {names}{more}"
+            )
+        else:
+            L.append(
+                f"OBS      holes=0/{oh.get('cities_total', '?')} "
+                f"(all cities fresh within {oh.get('stale_hours')}h)"
+            )
+    L.append("")
+
     # POSITIONS
     p = data["positions"]
     if p.get("error"):
@@ -631,6 +652,55 @@ def render_text(data: dict) -> str:
                 f"sz={sz:<6} px={pr:<6} {(r['state'] or ''):<14} ({r['age']})"
             )
     return "\n".join(L)
+
+
+# --------------------------------------------------------------------------
+# Section: OBS HOLES (zeus-world.db observation_instants per-city freshness)
+# --------------------------------------------------------------------------
+OBS_HOLE_STALE_HOURS = 2.0
+
+
+def section_obs_holes() -> dict:
+    """Per-city observation freshness census — data holes are not allowed.
+
+    Operator law 2026-06-12: every city must have observation data; a city
+    whose freshest observation_instants row is older than OBS_HOLE_STALE_HOURS
+    is a HOLE (the Denver settlement-day blindness class). Display-only.
+    """
+    out: dict = {"stale_hours": OBS_HOLE_STALE_HOURS}
+    today = _now().strftime("%Y-%m-%d")
+    try:
+        w = ro(WORLD_DB)
+        try:
+            rows = w.execute(
+                "SELECT city, max(utc_timestamp) m FROM observation_instants "
+                "WHERE target_date >= ? GROUP BY city ORDER BY m ASC",
+                (today,),
+            ).fetchall()
+        finally:
+            w.close()
+    except sqlite3.Error as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+    holes = []
+    for r in rows:
+        age = age_str(r["m"])
+        # age_str renders h/d for old rows; classify via raw parse instead.
+        try:
+            ts = str(r["m"]).replace(" ", "T")
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            hours = (_now() - dt).total_seconds() / 3600.0
+        except (ValueError, TypeError):
+            hours = float("inf")
+        if hours > OBS_HOLE_STALE_HOURS:
+            holes.append({"city": r["city"], "age": age})
+    out["cities_total"] = len(rows)
+    out["holes"] = holes
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
