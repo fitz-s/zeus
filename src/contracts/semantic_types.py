@@ -55,6 +55,15 @@ class ChainState(str, Enum):
     # -> VenueVisibilityStatus(value)) constructs a valid member instead of raising
     # "not a valid ChainState" — writer-set MUST be a subset of this enum.
     EXTERNAL_OPERATOR_CLOSED = "external_operator_closed"
+    # Terminal closed-class: the exit chain-truth gate proved the on-chain CTF
+    # balance is ZERO and voided the position (exit_lifecycle.
+    # _void_chain_confirmed_zero, Fix A 2026-05-19). The writer existed for
+    # weeks but NEVER fired before 2026-06-12 (its funder-address env vars were
+    # absent, so the gate was silently bypassed); the first live firing wrote
+    # this value and every load_portfolio() — including the RiskGuard daemon's
+    # — crashed on enum coercion, killing risk attestations and fail-closing
+    # the entry gate to RED. Writer-set MUST be a subset of this enum.
+    CHAIN_CONFIRMED_ZERO = "chain_confirmed_zero"
 
 
 # Domain-specific alias (Finding 7 / PR B). Prefer this name in new code.

@@ -2495,13 +2495,30 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
             authority="degraded",
         )
 
-    positions = [
-        _position_from_projection_row(
-            row,
-            current_mode=current_mode,
-        )
-        for row in snapshot.get("positions", [])
-    ]
+    # POISON-ROW CONTAINMENT (2026-06-12): one row whose enum coercion fails
+    # must not kill the WHOLE portfolio load — the first live firing of the
+    # chain-truth void wrote a chain_state outside the then-current enum and
+    # every RiskGuard tick crashed here, stopping risk attestations entirely
+    # (stale -> RED -> 1100+ false RISK_GUARD_BLOCKED). A poison row is
+    # quarantined LOUDLY (ERROR log) and skipped; the healthy rest of the
+    # portfolio keeps risk management alive. This contains coercion defects,
+    # it never hides them: the log line carries the row identity and error.
+    positions = []
+    for row in snapshot.get("positions", []):
+        try:
+            positions.append(
+                _position_from_projection_row(row, current_mode=current_mode)
+            )
+        except Exception as exc:  # noqa: BLE001 — poison row, contained loudly
+            logger.error(
+                "load_portfolio: POISON projection row quarantined (position_id=%s "
+                "city=%s phase=%s chain_state=%s): %s",
+                row.get("position_id") or row.get("trade_id"),
+                row.get("city"),
+                row.get("phase"),
+                row.get("chain_state"),
+                exc,
+            )
     represented_tokens = {
         token
         for pos in positions
