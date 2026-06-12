@@ -87,12 +87,13 @@ class TestMarkSettled:
 
 class TestCanonicalExitFlag:
 
-    def test_flag_defaults_to_false(self):
-        """CANONICAL_EXIT_PATH defaults to False."""
+    def test_flag_is_on(self):
+        """CANONICAL_EXIT_PATH is ON (operator word 2026-06-12; replay verified
+        mark_settled wraps compute_settlement_close — identical P&L, pure
+        settlement-bookkeeping routing; docs/evidence/exit_path_replay/)."""
         from src.execution.harvester import _get_canonical_exit_flag
-        # The flag is false in config/settings.json
         result = _get_canonical_exit_flag()
-        assert result is False
+        assert result is True
 
     def test_flag_returns_true_when_set(self):
         """CANONICAL_EXIT_PATH returns True when explicitly enabled."""
