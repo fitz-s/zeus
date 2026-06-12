@@ -855,8 +855,19 @@ class OpportunityEventReactor:
             return _EXECUTABLE_SNAPSHOT_RETRY, False
         self._log_family_once(event)
         if not self._riskguard_gate(event):
-            self._reject_event(event, "RISK_GUARD", "RISK_GUARD_BLOCKED", result, decision_time=decision_time)
-            return None, False
+            # TRANSIENT REQUEUE, never terminal consumption (2026-06-12
+            # riskguard-storm incident): the gate fails closed to RED on a
+            # STALE/missing/locked risk_state read as well as on an honest risk
+            # halt. Terminally rejecting here let every transient writer gap
+            # (daemon-restart boot windows, the chain_state poison-row crash,
+            # dependency_db_locked) mass-consume the pending queue — 1100+
+            # events burned on 2026-06-12 while risk truth was GREEN. Requeue
+            # with the shared bounded disposition instead: NOTHING submits
+            # while blocked (the gate is not weakened), and exhaustion after
+            # MAX retries terminates with the honest RISK_GUARD_BLOCKED cause —
+            # a sustained genuine halt still ends in a terminal label.
+            self._transient_requeue_reasons[event.event_id] = "RISK_GUARD_BLOCKED"
+            return _EXECUTABLE_SNAPSHOT_RETRY, False
         return None, True
 
     def _process_one_post_submit(

@@ -439,3 +439,77 @@ def test_pre_submit_error_terminal_is_visible_rejection_not_silent_proof():
     assert row is not None, "the rejection must be visible in the regret ledger"
     assert row["rejection_stage"] == "EXECUTION_RECEIPT"
     assert "EXECUTOR_PRE_VENUE_REJECTED" in row["rejection_reason"]
+
+
+# ---------------------------------------------------------------------------
+# RiskGuard-block requeue antibodies (2026-06-12 riskguard-storm incident):
+# transient risk_state writer gaps (daemon-restart boot windows, the
+# chain_confirmed_zero poison-row crash, dependency_db_locked) fail the gate
+# closed to RED and used to TERMINALLY consume every pending event — 1100+
+# events burned in one day while risk truth was GREEN. A riskguard block must
+# requeue (nothing submits while blocked) and only exhaust to a terminal
+# label after the bounded retries.
+# ---------------------------------------------------------------------------
+
+def _reactor_with_riskguard(conn, store, gate) -> OpportunityEventReactor:
+    return OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=gate,
+        final_intent_submit=lambda _event, _dt: True,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+
+def test_riskguard_block_requeues_not_terminal():
+    conn, store = _store()
+    event = _event("snap-rg-1")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_riskguard(conn, store, lambda _e: False)
+
+    result = reactor.process_pending(decision_time=_DT)
+
+    assert result.retried == 1
+    assert result.rejected == 0
+    assert _status(conn, event.event_id) == "pending"
+    # No terminal regret row was written for the requeue.
+    n = conn.execute(
+        "SELECT COUNT(*) FROM no_trade_regret_events WHERE rejection_reason='RISK_GUARD_BLOCKED'"
+    ).fetchone()[0]
+    assert n == 0
+
+
+def test_riskguard_recovery_processes_requeued_event():
+    """A transient RED storm ends; the surviving event processes normally."""
+    conn, store = _store()
+    event = _event("snap-rg-2")
+    store.insert_or_ignore(event)
+    blocked = {"value": True}
+    reactor = _reactor_with_riskguard(conn, store, lambda _e: not blocked["value"])
+
+    reactor.process_pending(decision_time=_DT)
+    assert _status(conn, event.event_id) == "pending"
+
+    blocked["value"] = False
+    result = reactor.process_pending(decision_time=_DT)
+    assert result.processed == 1
+    assert _status(conn, event.event_id) == "processed"
+
+
+def test_riskguard_block_exhaustion_is_honest_terminal():
+    """A sustained genuine halt still terminates — with the riskguard cause."""
+    conn, store = _store()
+    event = _event("snap-rg-3")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_riskguard(conn, store, lambda _e: False)
+
+    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES + 1):
+        reactor.process_pending(decision_time=_DT)
+
+    assert _status(conn, event.event_id) == "dead_letter"
+    row = conn.execute(
+        "SELECT rejection_reason FROM no_trade_regret_events ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    assert row[0] == "MONEY_PATH_TRANSIENT_EXHAUSTED:RISK_GUARD_BLOCKED"
