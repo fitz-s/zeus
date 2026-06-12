@@ -845,6 +845,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/persist_day0_horizon_identity_fit.py",  # operator_invoked + already_guarded: the LIVE write goes through write_platt_fit -> get_forecasts_connection(LIVE) under db_writer_lock(LIVE); the bare sqlite3.connect() sites are ONLY the read-back/--verify (file:...?mode=ro uri, SELECT-only) and the --dry-run TEMP copy (throwaway file, never a canonical DB); persists a documented CONSERVATIVE/IDENTITY HorizonPlattFit (zero claimed skill)
         # --- big-direction ops file (2026-06-12): READ-ONLY money-funnel heartbeat ---
         "scripts/zeus_status.py",  # read_only_ro_uri: money-funnel heartbeat CLI; opens all 3 live DBs via file:...?mode=ro + PRAGMA query_only=ON; SELECT-only; never writes
+        # --- big-direction ops file (2026-06-12): deploy/dev split (no DB) ---
+        "scripts/deploy_live.py",  # no_db: never opens any DB (subprocess git/launchctl only); allowlisted defensively for the AST scan if a connect is ever added
     }
 )
 
