@@ -39,10 +39,16 @@ hooks:
     event: PreToolUse
     matcher: Bash
     intent: >
-      Warn on broad `git add` in main worktree (co-tenant absorption).
-      ADVISORY: emits context; never blocks.
-    blocked_when: []
-    severity: ADVISORY
+      BLOCK broad `git add` (-A/--all/-u/`git add .`) in the MAIN worktree
+      (co-tenant absorption). Re-promoted ADVISORY -> BLOCKING 2026-06-12:
+      while advisory it failed to prevent the exact incident class it names
+      — an orchestrator commit absorbed a concurrent agent's staged
+      deletions (commit 30ba237ef5 swept two test deletions staged by a
+      sibling). Linked worktrees keep an isolated index and stay exempt.
+      Bypass for a deliberate single-tenant batch: COTENANT_GUARD_BYPASS=1.
+    blocked_when:
+      - broad_git_add_in_main_worktree
+    severity: BLOCKING
     sunset_date: 2026-08-06
     telemetry:
       ritual_signal_emitted: true

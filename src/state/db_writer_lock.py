@@ -737,6 +737,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/ws_poll_reaction_weekly.py",           # read_only_ro_uri
         "scripts/probe_anchor_cap_overlap.py",          # read_only_ro_uri: opens zeus-forecasts.db + zeus_trades.db via file:...?mode=ro URI; SELECT-only over forecast_posteriors + executable_market_snapshots; writes docs/evidence/sigma_scale/ + /tmp/ only; anchor-cap vs sigma-scale overlap analysis (operator question 2026-06-12)
         "scripts/probe_favorite_capture.py",            # read_only_ro_uri: opens zeus-forecasts.db + zeus_trades.db via file:...?mode=ro URI; SELECT-only over forecast_posteriors + executable_market_snapshots + venue_commands + settlement_outcomes; writes docs/evidence/favorite_capture/ + /tmp/ only; favorite-capture miss quantification (operator critique 2026-06-12)
+        "scripts/probe_lib.py",                         # read_only_ro_uri: shared probe helper (ro() opens any live DB mode=ro; iso_cutoff/guarded-watch encode the T-separator + lock-false-positive laws; session retrospective 2026-06-12)
         # --- repro_antibodies.py: mixed; all sites verified safe ---
         "scripts/repro_antibodies.py",                  # already_guarded + read_only + in_memory_only
         # --- K1 migration scripts: operator-mediated, not runtime daemon ---

@@ -196,14 +196,23 @@ def _run_advisory_check_secrets_scan(
 def _run_advisory_check_cotenant_staging_guard(
     payload: dict[str, Any],
 ) -> str | None:
-    """Advisory: warn on broad git add in main worktree."""
+    """BLOCKING: broad git add in the MAIN worktree (co-tenant absorption).
+
+    Re-promoted ADVISORY -> BLOCKING 2026-06-12: while advisory it failed to
+    prevent the exact incident class it names — an orchestrator commit
+    (30ba237ef5) absorbed two test deletions staged by a concurrent agent,
+    and a later `git add -A` repeated the pattern. Linked worktrees keep an
+    isolated index and stay exempt. Bypass for a deliberate single-tenant
+    batch: COTENANT_GUARD_BYPASS=1 (degrades to advisory; intent documented
+    by the env var itself).
+    """
     command = _command_from_payload(payload)
     if not command:
         return None
     import re
     if not re.search(r"\bgit\s+add\b", command):
         return None
-    if not re.search(r"(\s-A|\s--all|\s\.\s*$|\s\.$)", command):
+    if not re.search(r"(\s-A\b|\s--all\b|\s-u\b|\s\.\s*($|&|;|\|))", command):
         return None
     try:
         gd = subprocess.run(
@@ -214,11 +223,22 @@ def _run_advisory_check_cotenant_staging_guard(
             return None  # linked worktree -- isolated index, safe
     except (subprocess.TimeoutExpired, OSError):
         pass
-    return (
-        "ADVISORY: broad `git add` in main worktree may absorb a co-tenant "
-        "agent's uncommitted changes. Prefer staging specific files: "
-        "`git add src/foo.py tests/test_foo.py`"
+    if os.environ.get("COTENANT_GUARD_BYPASS", "").strip() == "1":
+        return (
+            "ADVISORY (COTENANT_GUARD_BYPASS=1): broad `git add` in main "
+            "worktree allowed by explicit bypass. Verify `git status` shows "
+            "only YOUR files before committing."
+        )
+    print(
+        "BLOCKED [cotenant_staging_guard]: broad `git add` (-A/--all/-u/.) in "
+        "the MAIN worktree absorbs co-tenant agents' uncommitted work "
+        "(incident 2026-06-12, commit 30ba237ef5 swept a sibling's staged "
+        "deletions). Stage by explicit pathspec: `git add <file> <file>` — or "
+        "work in a linked worktree (isolated index). Deliberate single-tenant "
+        "batch: re-run with COTENANT_GUARD_BYPASS=1.",
+        file=sys.stderr,
     )
+    return _BLOCK_SENTINEL
 
 
 def _run_advisory_check_pre_checkout_uncommitted_overlap(
