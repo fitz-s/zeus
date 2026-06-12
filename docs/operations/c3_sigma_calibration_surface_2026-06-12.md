@@ -222,4 +222,56 @@ Evidence strength: **MEDIUM** — directionally clear but requires shape paramet
 
 ---
 
-*Report covers zeus-forecasts.db settlements + forecast_posteriors only. No code was modified.*
+## Implementation — FITTED artifact (operator law 2026-06-12, supersedes the hand-set k)
+
+OPERATOR LAW 2026-06-12 "没有一个人可以在没有数学支持下决定一个 hard coded value": the σ-scale factor
+must be FITTED by math, never operator-picked. The settings key `replacement_sigma_scale_k_c` was
+DELETED. The correction is now a fitted artifact:
+
+- **Estimator:** `scripts/fit_sigma_scale.py` — MLE of (k, w) for the mixture
+  `q_adj(bin) = (1−w)·Normal(σ_impl·k) + w·(1/n_bins)` over the Bernoulli win/loss of every settled
+  (cell, bin) pair. C and F families fit separately; profile-likelihood 95% CIs (or `--bootstrap N`
+  over cells). REFUSES a family with < 60 settled cells (writes `fitted:false`, k=1, w=0 → inert).
+- **Artifact:** `state/sigma_scale_fit.json` — `{families: {C|F: {fitted, k, w, ci, n_cells, ...}}}` +
+  provenance/source-query hashes + `data_window`. The fit script is its ONLY writer.
+- **Materializer:** `src/data/replacement_forecast_materializer.py` reads the artifact via
+  `_replacement_sigma_scale_lookup(unit)` (fail-soft → (1.0, 0.0) when missing / family unfitted).
+  σ-scale k applies before the settlement sigma floor (floor stays a lower bound); the uniform
+  mixture w applies to the final normalized q, with the catch-all coherence cap (an open-ended
+  bin is re-capped at its honest predictive-σ mass so neither the floor nor the mixture can inflate
+  it). Provenance: `sigma_scale_k_applied` + `uniform_mixture_w_applied`.
+- **Enabling:** there is no flag — *the artifact existing with the family fitted IS the enable.* F
+  refuses today (n=47 < 60) → inert automatically.
+- **Refit cadence (auditable):** re-run weekly (or as settlements accrue) so k tracks data growth —
+  `python scripts/fit_sigma_scale.py` (operator/scheduler-invoked; read-only over zeus-forecasts.db,
+  writes only the artifact). Every refit stamps `data_window` + `provenance_hash`, so any change in k
+  is traceable to the settled-cell window it was fit on. No daemon restart is required to pick up a
+  new artifact (the materializer reads it per-materialization).
+
+### First fit on real data (2026-06-12, window 2026-06-08..2026-06-11)
+
+| Family | fitted | k | w | n_cells | CI_k (95%) | CI_w (95%) |
+|--------|--------|------|------|---------|------------|------------|
+| C | yes | **1.58** | **0.28** | 215 | [1.32, 1.88] | [0.17, 0.41] |
+| F | **no (refused)** | 1.0 | 0.0 | 47 | — | — (n<60) |
+
+Per-distance calibration for C, before vs at the fitted (k, w) — the proof the fit works:
+
+```
+dist  n_bins  q@k1w0  realized  ratio_before   |   q@fit  ratio_at_fit
+0     200     0.428   0.220     0.514          |   0.229   0.961   <- mode overconfidence removed
+1     408     0.216   0.191     0.884          |   0.172   1.115
+2     390     0.052   0.133     2.572 (C3)     |   0.093   1.435   <- C3 undercount narrowed
+3     342     0.012   0.070     5.769          |   0.052   1.361
+>=4   595     0.002   0.019     9.162          |   0.031   0.593
+```
+
+The jointly-fitted k=1.58 is lower than the surface's hand-picked k=2.4 because the uniform mixture
+w=0.28 does part of the flattening — the ML joint optimum (proper scoring rule) over (k, w), not k
+alone under MSE. The math decides the correction entirely; there is no operator number to flip.
+
+---
+
+*Original report (above the Implementation section) covered zeus-forecasts.db settlements +
+forecast_posteriors only and modified no code. The Implementation section was added when the fitted
+artifact replaced the hand-set key (operator law 2026-06-12).*

@@ -674,35 +674,50 @@ def _replacement_settlement_sigma_floor_lookup(
         return None, f"SETTLEMENT_SIGMA_FLOOR_LOOKUP_ERROR:{type(exc).__name__}"
 
 
-def _replacement_sigma_scale_k_c() -> float:
-    """C3 calibration surface 2026-06-12 — σ_pred scale factor for C-unit cities.
+_SIGMA_SCALE_FIT_PATH = "state/sigma_scale_fit.json"
 
-    Returns the configured ``replacement_sigma_scale_k_c`` value (default 1.0 = inert).
-    When k > 1.0 AND the city's settlement unit is C, σ_pred is multiplied by k BEFORE
-    bin integration so the posterior is widened to match the empirically-observed realised
-    win-rate (mode-bin realized ~0.17 vs predicted ~0.44 → k ≈ 2.4).
 
-    Authority: ``docs/operations/c3_sigma_calibration_surface_2026-06-12.md`` (n=127 C-unit
-    cells, HIGH confidence, A_24h best_k=2.6, mode-only-fix k≈2.36; B_48h best_k=2.5,
-    mode-only-fix k≈2.51 → operator flip target k=2.4).  F cities: n=25 insufficient —
-    they keep the existing market-anchor cap as interim; this scale is NEVER applied to F.
+def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float]:
+    """C3 calibration surface 2026-06-12 — FITTED σ_pred scale (k) + uniform-mixture weight (w).
 
-    The scale applies BEFORE the settlement sigma floor so the floor remains a LOWER BOUND
-    on the scaled σ_pred (i.e. floor still enforced after scaling).
+    OPERATOR LAW (2026-06-12) "没有一个人可以在没有数学支持下决定一个 hard coded value": the σ-scale
+    factor must be FITTED by math, never operator-picked or hardcoded. This reads the fitted artifact
+    ``state/sigma_scale_fit.json`` (written ONLY by scripts/fit_sigma_scale.py — MLE over settled cells)
+    and returns ``(k, w)`` for the given settlement unit family ('C' / 'F'):
+      q_adjusted(bin) = (1 - w) · Normal(σ_pred · k) + w · uniform(1/n_bins).
 
-    FAIL-CLOSED: any config error / missing key / non-positive or non-finite value → 1.0
-    (inert, byte-identical to pre-scale behavior). Never raises.
+    Returns ``(k, w)`` where:
+      - artifact present AND family entry has fitted=True with finite k≥1, 0≤w≤1 → (k, w).
+      - artifact missing, malformed, family absent, or family fitted=False (REFUSED, e.g. F today,
+        n<60) → (1.0, 0.0) INERT (byte-identical to pre-scale behavior).
+
+    Precedent: the settlement sigma floor artifact (#20) is read the same fail-soft way. The fit
+    artifact's per-family ``fitted`` flag is the enable: a family is corrected ONLY when math licensed
+    it. FAIL-SOFT: any error → (1.0, 0.0). Never raises.
     """
     try:
-        from src.config import settings  # noqa: PLC0415
+        import os  # noqa: PLC0415
 
-        raw = settings["edli"].get("replacement_sigma_scale_k_c", 1.0)
-        k = float(raw)
+        path = _SIGMA_SCALE_FIT_PATH
+        if not os.path.isabs(path):
+            repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            path = os.path.join(repo, _SIGMA_SCALE_FIT_PATH)
+        if not os.path.exists(path):
+            return 1.0, 0.0
+        with open(path, "r", encoding="utf-8") as fh:
+            artifact = json.load(fh)
+        fam = (artifact.get("families") or {}).get(str(unit).upper())
+        if not isinstance(fam, dict) or not fam.get("fitted"):
+            return 1.0, 0.0
+        k = float(fam.get("k", 1.0))
+        w = float(fam.get("w", 0.0))
         if not (math.isfinite(k) and k > 0.0):
-            return 1.0
-        return k
+            k = 1.0
+        if not (math.isfinite(w) and 0.0 <= w <= 1.0):
+            w = 0.0
+        return k, w
     except Exception:
-        return 1.0
+        return 1.0, 0.0
 
 
 def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequest") -> str:
@@ -1365,9 +1380,13 @@ def _insert_posterior(
     settlement_sigma_floor_c: float | None = None
     floor_unavailable_reason: str | None = None
     replacement_sigma_basis: str | None = None
-    # C3 calibration surface 2026-06-12 — σ_pred scale provenance. None when scaling is not
-    # applied (k=1.0 / F-unit / flag-off path); float applied value when scaling fires.
+    # C3 calibration surface 2026-06-12 — FITTED σ_pred scale provenance. None when scaling is not
+    # applied (artifact missing / family unfitted / k=1.0); float applied value when scaling fires.
     sigma_scale_k_applied: float | None = None
+    # FITTED uniform-mixture weight provenance. None when no mixture applied (artifact missing /
+    # family unfitted / w=0.0); float applied w when the mixture fires. Both come from the SAME
+    # state/sigma_scale_fit.json family entry (MLE-fitted, operator law 2026-06-12).
+    uniform_mixture_w_applied: float | None = None
     # Catch-all (open-ended bin) sigma-floor exemption (2026-06-10, Paris >=26C incident). Records
     # which open-ended bins had their floored mass capped at the un-floored predictive-sigma mass
     # so the floor could not inflate the tail. Empty tuple when no cap bit (no floor / no open-ended
@@ -1405,16 +1424,23 @@ def _insert_posterior(
             _sigma_pred = float(bayes_precision_fusion_override.predictive_sigma_c)
             _sigma_used = _sigma_pred
             replacement_sigma_basis = "fused_center_residual_std"
-            # C3 CALIBRATION SURFACE (2026-06-12) — σ_pred scale for C-unit cities.
-            # Evidence: n=127 A_24h C-unit cells — mode-bin realized win rate 0.17 vs mean q
-            # 0.43-0.46 → posterior ~2.5× too peaked. Multiplying σ_pred by k≈2.4 before bin
-            # integration brings d=0 ratio to ~1.0 (see docs/operations/c3_sigma_calibration_surface_2026-06-12.md).
-            # Contract: scale BEFORE floor so floor remains a lower bound on the scaled σ_pred.
-            # F cities: n=25 insufficient — scale is explicitly disabled regardless of k value.
-            # FAIL-CLOSED: _replacement_sigma_scale_k_c() returns 1.0 on any config error.
-            _k = _replacement_sigma_scale_k_c()
+            # C3 CALIBRATION SURFACE (2026-06-12) — FITTED σ_pred scale (k) + uniform-mixture (w).
+            # OPERATOR LAW 2026-06-12: the correction factor must be FITTED by math, never hand-set.
+            # k and w are read from state/sigma_scale_fit.json (MLE over settled cells; only
+            # scripts/fit_sigma_scale.py writes it). The artifact is keyed by SETTLEMENT UNIT family;
+            # an unfitted family (e.g. F today, n=47<60) returns (1.0, 0.0) so the correction stays
+            # INERT for it automatically. Evidence: C n=215 settled cells, fitted k≈1.58 + w≈0.28 brings
+            # the mode-bin d=0 realized/expected ratio from ~0.51 to ~0.96 (see the calibration table in
+            # the artifact and docs/operations/c3_sigma_calibration_surface_2026-06-12.md).
+            # Contract: σ-scale applies BEFORE the floor (floor stays a lower bound on the scaled σ);
+            # the uniform mixture w is applied to the FINAL normalized q below (after integration).
+            # The C-only restriction is enforced by the artifact (F family unfitted → (1.0,0.0)); the
+            # explicit unit gate is kept as defense-in-depth so k can never touch an F family.
             _city_unit = _city_settlement_unit_from_bins(request)
-            if _k > 1.0 and _city_unit == "C":
+            _k, _uniform_w = _replacement_sigma_scale_lookup(_city_unit)
+            if _city_unit != "C":
+                _k, _uniform_w = 1.0, 0.0  # defense-in-depth: only C families are corrected today
+            if _k > 1.0:
                 _sigma_pred = _sigma_pred * _k
                 _sigma_used = _sigma_pred
                 sigma_scale_k_applied = _k
@@ -1445,6 +1471,14 @@ def _insert_posterior(
             # widen sigma (_sigma_used == _sigma_pred) the cap is a no-op (both masses identical).
             _catchall_capped_bins: list[str] = []
 
+            # Honest (un-floored, predictive-sigma) mass per OPEN-ENDED catch-all bin. This is the
+            # category-kill upper bound the catch-all must never exceed — for the floor AND, below,
+            # the uniform mixture. Computed once at sigma_pred (the honest spread before any widening).
+            _catchall_honest_mass: dict[str, float] = {}
+
+            def _is_open_ended_bin(_b) -> bool:
+                return (_b.lower_c is None) != (_b.upper_c is None)
+
             def _bin_mass(_b) -> float:
                 _lo = None if _b.lower_c is None else float(_b.lower_c)
                 _hi = None if _b.upper_c is None else float(_b.upper_c)
@@ -1458,8 +1492,7 @@ def _insert_posterior(
                 )
                 # Open-ended catch-all bin: exactly one bound is None. Cap floored mass at the
                 # un-floored (predictive-sigma) mass so the floor can never inflate the tail.
-                _is_open_ended = (_lo is None) != (_hi is None)
-                if _is_open_ended and _sigma_used > _sigma_pred:
+                if _is_open_ended_bin(_b):
                     _m_unfloored = bin_probability_settlement(
                         mu=float(bayes_precision_fusion_override.anchor_value_c),
                         sigma=_sigma_pred,
@@ -1468,7 +1501,8 @@ def _insert_posterior(
                         half_step=_half_step,
                         rounding_rule=_rounding_rule,
                     )
-                    if _m_unfloored < _m:
+                    _catchall_honest_mass[_b.bin_id] = float(_m_unfloored)
+                    if _sigma_used > _sigma_pred and _m_unfloored < _m:
                         _catchall_capped_bins.append(_b.bin_id)
                         _m = _m_unfloored
                 return _m
@@ -1484,6 +1518,36 @@ def _insert_posterior(
             if not (_total > 0.0 and math.isfinite(_total)):
                 raise ValueError(f"fused-q mass not positive-finite: {_total}")
             q = {key: float(value) / _total for key, value in _fused_q.items()}
+            # FITTED UNIFORM MIXTURE (2026-06-12, operator law) — applied at the SAME seam as k, to the
+            # final normalized q: q_adj = (1-w)·q_normal_rescaled + w·uniform(1/n_bins). w lifts the flat
+            # realized tails (d≥2) that a scaled Normal alone cannot match (the surface's flat d=0,1,2
+            # curve). w comes from the SAME artifact family entry as k. C-only via the same artifact gate.
+            # CATCH-ALL COHERENCE (relationship invariant, Paris >=26 incident): the SAME rule that bars
+            # the floor from inflating an open-ended catch-all bars the uniform mixture from doing so —
+            # after mixing, any open-ended catch-all is re-capped at its honest (predictive-sigma) mass
+            # in NORMALIZED space, so neither correction can recreate the far-catch-all inflation
+            # category. The mass removed by the cap is redistributed over the remaining bins (renorm).
+            if _uniform_w > 0.0 and _k >= 1.0 and _city_unit == "C":
+                _n_bins = len(q)
+                if _n_bins > 0:
+                    _u = 1.0 / _n_bins
+                    _mixed = {key: (1.0 - _uniform_w) * val + _uniform_w * _u for key, val in q.items()}
+                    _mtot = sum(_mixed.values())
+                    if _mtot > 0.0 and math.isfinite(_mtot):
+                        _q_mixed = {key: val / _mtot for key, val in _mixed.items()}
+                        # Re-cap open-ended catch-all bins at their honest normalized mass (the same
+                        # honest mass, normalized by the pre-mixture _total, that the floor cap used).
+                        for _bid, _honest in _catchall_honest_mass.items():
+                            _honest_norm = float(_honest) / _total
+                            if _q_mixed.get(_bid, 0.0) > _honest_norm:
+                                _q_mixed[_bid] = _honest_norm
+                                if _bid not in _catchall_capped_bins:
+                                    _catchall_capped_bins.append(_bid)
+                        _rtot = sum(_q_mixed.values())
+                        if _rtot > 0.0 and math.isfinite(_rtot):
+                            q = {key: val / _rtot for key, val in _q_mixed.items()}
+                            uniform_mixture_w_applied = _uniform_w
+                            settlement_sigma_floor_catchall_capped = tuple(_catchall_capped_bins)
             q_shape = "fused_normal_direct"
             # Q_LCB / Q_UCB (2026-06-09) — fused-center parameter-uncertainty bootstrap. INDEPENDENT
             # fail-soft: a bound-construction error must NOT roll back the fused q point (that would
@@ -1548,6 +1612,10 @@ def _insert_posterior(
             settlement_sigma_floor_c = None
             replacement_sigma_basis = None
             settlement_sigma_floor_catchall_capped = ()
+            # The fused-q (incl. any σ-scale / uniform-mixture) was discarded → soft-anchor q has
+            # neither applied. Reset both provenance fields so they cannot misreport on the fallback q.
+            sigma_scale_k_applied = None
+            uniform_mixture_w_applied = None
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
@@ -1644,10 +1712,12 @@ def _insert_posterior(
         "settlement_sigma_floor_c": settlement_sigma_floor_c,
         "settlement_sigma_floor_unavailable_reason": floor_unavailable_reason,
         "replacement_sigma_basis": replacement_sigma_basis,
-        # C3 calibration surface 2026-06-12 — σ scale provenance (一切可被溯源).
-        # None when k=1.0 (inert / F-unit / flag-off). Float applied k value when scaling fired.
+        # C3 calibration surface 2026-06-12 — FITTED σ scale + uniform-mixture provenance (一切可被溯源).
+        # Both None when inert (artifact missing / family unfitted / k=1.0,w=0.0). Float applied values
+        # when the correction fired. Source: state/sigma_scale_fit.json (MLE, operator law 2026-06-12).
         # Authority: docs/operations/c3_sigma_calibration_surface_2026-06-12.md
         "sigma_scale_k_applied": sigma_scale_k_applied,
+        "uniform_mixture_w_applied": uniform_mixture_w_applied,
         # Catch-all exemption (2026-06-10): open-ended bins whose floored mass was capped at the
         # un-floored predictive-sigma mass (the floor may only flatten, never inflate a catch-all).
         "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),
