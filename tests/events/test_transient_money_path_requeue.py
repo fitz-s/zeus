@@ -328,3 +328,114 @@ def test_mode_flipped_no_submit_state_requeues_not_consumed():
     assert _status(conn, event.event_id) == "pending"
     n_receipts = conn.execute("SELECT count(*) FROM edli_no_submit_receipts").fetchone()[0]
     assert n_receipts == 0, "the aborted attempt must not persist a receipt"
+
+
+def test_pre_submit_error_terminal_is_visible_rejection_not_silent_proof():
+    """ANTIBODY (live 2026-06-12 00:52-01:13Z): five maker final intents died
+    ExecutionReceipt status=PRE_SUBMIT_ERROR (executor pre-venue guard) and were
+    silently counted proof_accepted — no regret row, no dead letter; the wall
+    was only discoverable by reading certificate payloads. A failed-without-
+    side-effect terminal (REJECTED / PRE_SUBMIT_ERROR) must route through the
+    regret ledger with the executor's reason and never count as an accepted
+    proof. TIMEOUT/POST_SUBMIT_UNKNOWN stay proof_accepted (reconcile owns
+    possible live orders).
+
+    Scope: this pins the ROUTING relationship (terminal status -> regret, not
+    proof_accepted). Certificate-graph persistence/verification is owned by
+    tests/decision_kernel — the ledger here is a recorder so the fixture does
+    not have to reconstruct the full live certificate parent graph."""
+    from datetime import datetime, timezone
+
+    from src.decision_kernel import claims
+    from src.decision_kernel.certificate import build_certificate
+
+    now = datetime(2026, 6, 12, 1, 13, tzinfo=timezone.utc)
+    receipt_cert = build_certificate(
+        certificate_type=claims.EXECUTION_RECEIPT,
+        semantic_key="execution-receipt:evt-pse",
+        claim_type=claims.EXECUTION_RECEIPT,
+        mode="LIVE",
+        decision_time=now,
+        source_available_at=now,
+        agent_received_at=now,
+        persisted_at=now,
+        payload={"status": "PRE_SUBMIT_ERROR", "reason_code": "EXECUTOR_PRE_VENUE_REJECTED:test"},
+        parent_edges=(),
+        parent_certificates=(),
+        authority_id="test",
+        authority_version="v1",
+        algorithm_id="test",
+        algorithm_version="v1",
+    )
+
+    conn, store = _store()
+    event = _event("snap-pse")
+    store.insert_or_ignore(event)
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=True,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-06-05",
+            metric="high",
+            trade_score_positive=True,
+            fdr_pass=True,
+            fdr_family_id="fam-1",
+            fdr_hypothesis_count=22,
+            kelly_pass=True,
+            kelly_execution_price_type="ExecutionPrice",
+            kelly_price_fee_deducted=True,
+            kelly_size_usd=10.0,
+            kelly_cost_basis_id="cost_basis:abc",
+            final_intent_id="intent-1",
+            side_effect_status="PRE_SUBMIT_ERROR",
+            reason="EXECUTOR_PRE_VENUE_REJECTED:FinalExecutionIntent event_id does not match executable snapshot",
+            decision_proof_bundle=(receipt_cert,),
+        )
+
+    from src.events.reactor import ReactorConfig
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        # Live posture: with submit DISABLED an earlier expressibility check
+        # consumes LIVE terminal statuses; the silent-proof hole exists only on
+        # the real-submit path.
+        config=ReactorConfig(reactor_mode="live", real_order_submit_enabled=True),
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    class _RecorderLedger:
+        def __init__(self):
+            self.persisted = []
+
+        def persist_all(self, certificates):
+            self.persisted.extend(certificates)
+
+        def persist_failures(self, failures):
+            pass
+
+    recorder = _RecorderLedger()
+    reactor._decision_certificate_ledger = recorder
+
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert recorder.persisted, "the execution receipt certificates must still be persisted"
+
+    assert result.proof_accepted == 0, (
+        "a PRE_SUBMIT_ERROR terminal must NOT count as an accepted proof"
+    )
+    assert result.rejected >= 1
+    row = conn.execute(
+        "SELECT rejection_stage, rejection_reason FROM no_trade_regret_events LIMIT 1"
+    ).fetchone()
+    assert row is not None, "the rejection must be visible in the regret ledger"
+    assert row["rejection_stage"] == "EXECUTION_RECEIPT"
+    assert "EXECUTOR_PRE_VENUE_REJECTED" in row["rejection_reason"]

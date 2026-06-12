@@ -1003,6 +1003,25 @@ class OpportunityEventReactor:
                     dataclass_replace(receipt, side_effect_status="NO_SUBMIT"),
                     decision_time=decision_time,
                 )
+            # FAILED-WITHOUT-SIDE-EFFECT terminals are VISIBLE rejections
+            # (live 2026-06-12 00:52-01:13Z: five maker intents died
+            # status=PRE_SUBMIT_ERROR and were silently counted proof_accepted —
+            # no regret row, no dead letter; the wall was only discoverable by
+            # reading certificate payloads). REJECTED / PRE_SUBMIT_ERROR carry
+            # venue_call_started=False semantics (no live order), so they route
+            # through the regret ledger with the executor's reason.
+            # TIMEOUT_UNKNOWN / POST_SUBMIT_UNKNOWN stay proof_accepted — a
+            # venue order may exist and the reconcile sweep owns those.
+            if receipt.side_effect_status in {"REJECTED", "PRE_SUBMIT_ERROR"}:
+                self._reject_event(
+                    event,
+                    "EXECUTION_RECEIPT",
+                    receipt.reason or receipt.side_effect_status,
+                    result,
+                    receipt=receipt,
+                    decision_time=decision_time,
+                )
+                return None
         result.proof_accepted += 1
 
     def _reject_or_retry_post_submit(

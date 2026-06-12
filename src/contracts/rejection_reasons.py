@@ -120,6 +120,21 @@ class RejectionReason(str, Enum):
         RejectionCategory.HONEST_DATA,
         "Selected executable snapshot expired between decision and use.",
     )
+    MONEY_PATH_TRANSIENT_EXHAUSTED = (
+        "MONEY_PATH_TRANSIENT_EXHAUSTED",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "A money-path transient (price race / mode flip / stale snapshot) was still "
+        "unresolved after the bounded requeue cap; the terminal label carries the "
+        "last transient reason. Recurring volume here = a structural cadence or "
+        "race defect, never an honest market verdict.",
+    )
+    EXECUTOR_PRE_VENUE_REJECTED = (
+        "EXECUTOR_PRE_VENUE_REJECTED",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "The executor's pre-venue integrity guard refused the final intent before "
+        "any venue call (no side effect). Live 2026-06-12: maker intents carried "
+        "the EDLI event id where the venue-event identity was expected.",
+    )
     EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING = (
         "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING",
         RejectionCategory.HONEST_DATA,
