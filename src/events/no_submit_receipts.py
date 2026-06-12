@@ -24,6 +24,34 @@ class EdliNoSubmitReceiptLedger:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
+    def insert_shadow_idempotent(
+        self,
+        receipt: EventSubmissionReceipt,
+        *,
+        decision_time: datetime,
+        created_at: datetime | None = None,
+    ) -> str:
+        """Insert a DAY0_SCOPE_SHADOW_ONLY shadow receipt into edli_no_submit_receipts.
+
+        Shadow receipts carry proof_accepted=False (they are scope-rejected, not
+        pipeline-accepted) but MUST land in this table so the shadow comparator's
+        adapter (day0_remaining_day_adapter) can pair their q_live/direction/bin_label
+        against settled outcomes. The never-submit guarantee is preserved: the receipt
+        has side_effect_status="NO_SUBMIT" and the reactor still routes it through
+        _write_regret for no_trade_regret_events persistence.
+
+        Preconditions enforced here:
+          - side_effect_status == "NO_SUBMIT" (structural no-submit is still mandatory)
+          - reason == "DAY0_SCOPE_SHADOW_ONLY" (only the shadow reason bypasses proof_accepted)
+        """
+        if receipt.side_effect_status != "NO_SUBMIT":
+            raise ValueError("insert_shadow_idempotent only accepts NO_SUBMIT receipts")
+        if receipt.reason != "DAY0_SCOPE_SHADOW_ONLY":
+            raise ValueError(
+                "insert_shadow_idempotent only accepts DAY0_SCOPE_SHADOW_ONLY receipts"
+            )
+        return self._insert_impl(receipt, decision_time=decision_time, created_at=created_at)
+
     def insert_idempotent(
         self,
         receipt: EventSubmissionReceipt,
@@ -35,6 +63,15 @@ class EdliNoSubmitReceiptLedger:
             raise ValueError("edli_no_submit_receipts only accepts NO_SUBMIT receipts")
         if not receipt.proof_accepted:
             raise ValueError("edli_no_submit_receipts only accepts proof-accepted receipts")
+        return self._insert_impl(receipt, decision_time=decision_time, created_at=created_at)
+
+    def _insert_impl(
+        self,
+        receipt: EventSubmissionReceipt,
+        *,
+        decision_time: datetime,
+        created_at: datetime | None = None,
+    ) -> str:
         receipt_json = _receipt_json(receipt)
         receipt_hash = hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
         projection_hash = _projection_hash(receipt)

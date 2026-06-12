@@ -896,6 +896,36 @@ class OpportunityEventReactor:
                 receipt=receipt,
                 decision_time=decision_time,
             )
+        # DAY0-SHADOW-RECEIPT DUAL-PERSIST (day0-shadow-receipt-enrichment, 2026-06-10).
+        # A DAY0_SCOPE_SHADOW_ONLY receipt carries the full pipeline decision content
+        # (q_live, q_lcb_5pct, direction, bin_label, trade_score) but proof_accepted=False
+        # so _receipt_money_path_blocker (TRADE_SCORE branch) would route it exclusively to
+        # _write_regret / no_trade_regret_events — bypassing edli_no_submit_receipts.
+        # The shadow comparator (day0_remaining_day_adapter) reads edli_no_submit_receipts,
+        # so it can NEVER see the shadow decision content without this dual-persist.
+        #
+        # Fix: for DAY0_SCOPE_SHADOW_ONLY + NO_SUBMIT, persist to edli_no_submit_receipts
+        # via insert_shadow_idempotent (which skips the proof_accepted guard but enforces
+        # side_effect_status="NO_SUBMIT" + reason="DAY0_SCOPE_SHADOW_ONLY"), then let the
+        # normal money-path blocker route it through _write_regret for no_trade_regret_events.
+        # This is the ONLY place that bypasses proof_accepted; the structural no-submit
+        # guarantee (side_effect_status, reason, proof_accepted=False) is never relaxed.
+        if (
+            receipt.reason == "DAY0_SCOPE_SHADOW_ONLY"
+            and receipt.side_effect_status == "NO_SUBMIT"
+        ):
+            try:
+                self._no_submit_receipt_ledger.insert_shadow_idempotent(
+                    receipt, decision_time=decision_time
+                )
+            except Exception:  # noqa: BLE001 — fail-soft: shadow persist failure never blocks regret write
+                import logging as _logging
+
+                _logging.getLogger("zeus.events.reactor").warning(
+                    "DAY0_SCOPE_SHADOW_ONLY shadow receipt persist to edli_no_submit_receipts "
+                    "failed (fail-soft); regret write continues",
+                    exc_info=True,
+                )
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt, self._config)
         if proof_stage is not None:
             return self._reject_or_retry_post_submit(
