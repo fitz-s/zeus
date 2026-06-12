@@ -1332,6 +1332,38 @@ tables:
       Event-bound EDLI live realized-edge audit projection. Used by promotion
       gates to block scaleout when canary lifecycle or economics are not proven.
 
+  - name: settlement_attribution
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: attribution_id
+    required_columns:
+      - {name: attribution_id, type: TEXT, nullable: false}
+      - {name: position_id, type: TEXT, nullable: false}
+      - {name: category, type: TEXT, nullable: false}
+      - {name: won, type: INTEGER, nullable: false}
+      - {name: counts_as_skill_win, type: INTEGER, nullable: false}
+      - {name: graded_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Skill-vs-luck grade ledger (2026-06-12, operator skill-not-luck law). One
+      row per SETTLED position graded into a typed category (SKILL_WIN /
+      LUCKY_WIN / SKILL_LOSS / MISCALIBRATED_LOSS / STALE_DECISION) by comparing
+      our position + decision-time q + freshest settlement-eve data + the settled
+      outcome + market price. A LUCKY_WIN (won but our own freshest data
+      disagreed — the Denver-if-92 shape) counts as a MISS in skill accounting so
+      a lucky win can no longer masquerade as system health. The skill win-rate =
+      SKILL_WIN / (SKILL_WIN + LUCKY_WIN + SKILL_LOSS + MISCALIBRATED_LOSS).
+      Sole writer = src/analysis/settlement_skill_attribution.py (the daily
+      attribution job wired in src.main, runs after settlement harvesting,
+      idempotent per position via UNIQUE(position_id)). NO daemon_writer field:
+      the job runs in the trading daemon (src.main), not src.ingest_main, so it
+      is out of assert_writer_jobs_registered's ingest-only scope (same posture
+      as settlement_guard_report / shadow_comparator). Append/upsert-only audit
+      evidence; never a venue command, order truth, settlement truth, or
+      calibration training input.
+
   - name: outcome_fact
     db: world
     schema_class: legacy_archived

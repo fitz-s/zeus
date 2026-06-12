@@ -2894,6 +2894,12 @@ def init_schema(
     from src.state.schema.edli_live_profit_audit_schema import ensure_table as _ensure_edli_live_profit_audit_table
     _ensure_edli_live_profit_audit_table(conn)
 
+    # Settlement skill-attribution (2026-06-12): per-settled-position skill-vs-luck
+    # grade ledger (SKILL_WIN / LUCKY_WIN / SKILL_LOSS / MISCALIBRATED_LOSS /
+    # STALE_DECISION). Sole writer = src/analysis/settlement_skill_attribution.py.
+    from src.state.schema.settlement_attribution_schema import ensure_table as _ensure_settlement_attribution_table
+    _ensure_settlement_attribution_table(conn)
+
     # EDLI redemption (2026-05-25): proof-carrying decision certificate ledger.
     from src.state.schema.decision_certificates_schema import ensure_tables as _ensure_decision_certificate_tables
     _ensure_decision_certificate_tables(conn)

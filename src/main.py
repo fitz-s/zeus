@@ -1400,6 +1400,32 @@ def _day0_shadow_enrichment_tick() -> None:
     )
 
 
+@_scheduler_job("settlement_skill_attribution")
+def _settlement_skill_attribution_tick() -> None:
+    """Grade every SETTLED position into a skill category (operator 2026-06-12 law).
+
+    A profitable settlement is NOT proof of skill. This tick grades each settled
+    position into SKILL_WIN / LUCKY_WIN / SKILL_LOSS / MISCALIBRATED_LOSS /
+    STALE_DECISION by comparing our position + decision-time q + the freshest
+    settlement-eve posterior + the settled outcome + market price. A LUCKY_WIN
+    (won but our own freshest data disagreed — the Denver-if-92 shape) counts as a
+    MISS so a lucky win can no longer masquerade as system health. The skill
+    win-rate = SKILL_WIN / (SKILL_WIN + LUCKY_WIN + SKILL_LOSS + MISCALIBRATED_LOSS).
+
+    Runs after the settlement harvesting + day0 enrichment ticks (settlement truth
+    already landed). Idempotent per position (UNIQUE(position_id)); backfills every
+    historically-settled position on first run. Sole writer of
+    settlement_attribution. Import local to keep src.main import-light.
+    """
+    from src.analysis.settlement_skill_attribution import run_settlement_skill_attribution
+
+    stats = run_settlement_skill_attribution()
+    logger.info(
+        "settlement_skill_attribution: graded=%s skill_win_rate=%s by_category=%s",
+        stats.get("graded"), stats.get("skill_win_rate"), stats.get("by_category"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # F14 + F16 cascade-liveness pollers (2026-05-16, SCAFFOLD §K v5)
 # ---------------------------------------------------------------------------
@@ -9413,6 +9439,16 @@ def main():
     scheduler.add_job(
         _day0_shadow_enrichment_tick, "cron", hour=9, minute=25,
         id="day0_shadow_enrichment", max_instances=1, coalesce=True,
+    )
+    # Settlement skill-attribution — 09:30 UTC, after settlement harvesting +
+    # day0 enrichment (settlement truth already landed). Grades each settled
+    # position into a skill category (SKILL_WIN / LUCKY_WIN / SKILL_LOSS /
+    # MISCALIBRATED_LOSS / STALE_DECISION) so a lucky win can no longer fake
+    # system health (operator 2026-06-12 law). Idempotent per position; backfills
+    # history on first run. Sole writer of settlement_attribution.
+    scheduler.add_job(
+        _settlement_skill_attribution_tick, "cron", hour=9, minute=30,
+        id="settlement_skill_attribution", max_instances=1, coalesce=True,
     )
 
     # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER
