@@ -74,7 +74,6 @@ def test_buy_no_never_derives_lcb_from_yes_ucb_complement() -> None:
     value = _replacement_q_lcb_for_candidate(
         _Proof(),
         replacement_bundle=_bundle(q_ucb={"bin-a": 0.12}),
-        cap_to_baseline=False,
     )
 
     # Must NOT be the banned YES complement.
@@ -91,7 +90,6 @@ def test_buy_no_ignores_yes_ucb_even_with_native_no_lcb_present() -> None:
     value = _replacement_q_lcb_for_candidate(
         _Proof(),
         replacement_bundle=_bundle(q_lcb={"no:bin-a": 0.61}, q_ucb={"bin-a": 0.12}),
-        cap_to_baseline=False,
     )
 
     assert value == 0.61

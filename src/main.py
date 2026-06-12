@@ -99,18 +99,25 @@ _NEW_FAMILY_CONDITION_IDS: set[str] = set()
 # Condition_ids already known at last scout probe — used for diff.
 _SCOUT_KNOWN_CONDITION_IDS: set[str] = set()
 
+# Wave-2 item 5 (2026-06-12): the canary live mode is COLLAPSED. Canary
+# semantics (min-fill-count + promotion-artifact qualifying lane) were deleted
+# in 5e1e7efd76; "edli_live" is now the ONLY event-driven live mode. The old
+# "edli_live_canary" string is no longer an admissible config value — it is
+# mapped to "edli_live" at the read boundary (_live_execution_mode) so any
+# persisted rows/receipts carrying the historical string remain readable.
+_LEGACY_LIVE_EXECUTION_MODE_ALIASES = {
+    "edli_live_canary": "edli_live",
+}
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
     "edli_shadow_no_submit",
     "edli_submit_disabled_bridge",
-    "edli_live_canary",
     "edli_live",
     "disabled",
 }
 EDLI_EVENT_DRIVEN_MODES = {
     "edli_shadow_no_submit",
     "edli_submit_disabled_bridge",
-    "edli_live_canary",
     "edli_live",
 }
 REACTOR_MODE_BY_LIVE_STAGE = {
@@ -118,7 +125,6 @@ REACTOR_MODE_BY_LIVE_STAGE = {
     "disabled": "disabled",
     "edli_shadow_no_submit": "live_no_submit",
     "edli_submit_disabled_bridge": "submit_disabled_live_bridge",
-    "edli_live_canary": "live",
     "edli_live": "live",
 }
 # Admissible edli_live_scope values. `forecast_only` is the PR-332 scope (day0
@@ -160,17 +166,12 @@ _EDLI_SHADOW_DEFERRED_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
-_EDLI_LIVE_CANARY_BOOT_DEFERRED_REASON_PREFIXES = (
+_EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
 REQUIRED_STAGE_FILES_BY_MODE = {
     "edli_submit_disabled_bridge": (
-        "edli_stage_loaded_sha_file",
-        "edli_stage_source_health_json",
-        "edli_stage_status_json",
-    ),
-    "edli_live_canary": (
         "edli_stage_loaded_sha_file",
         "edli_stage_source_health_json",
         "edli_stage_status_json",
@@ -213,6 +214,10 @@ def _day0_first_delay_seconds(discovery: dict) -> float:
 
 def _live_execution_mode(edli_cfg: dict) -> str:
     mode = str(edli_cfg.get("live_execution_mode") or "legacy_cron")
+    # Wave-2 item 5: map the historical canary mode string to its collapsed
+    # successor so persisted config/receipt data carrying the old value remains
+    # readable instead of failing closed on UNSUPPORTED_LIVE_EXECUTION_MODE.
+    mode = _LEGACY_LIVE_EXECUTION_MODE_ALIASES.get(mode, mode)
     if mode not in LIVE_EXECUTION_MODES:
         raise ValueError(f"UNSUPPORTED_LIVE_EXECUTION_MODE:{mode}")
     return mode
@@ -224,7 +229,7 @@ def _harvester_should_register(live_execution_mode: str) -> bool:
 
     守護 blocker (2026-06-03): the harvester was gated to ``legacy_cron`` ONLY, so
     in EDLI event-driven modes (edli_shadow_no_submit, edli_submit_disabled_bridge,
-    edli_live_canary, edli_live) a FILLED position that rode to market settlement
+    edli_live) a FILLED position that rode to market settlement
     sat phase=active forever — the redeem pollers (its consumers) had nothing to
     consume, and capital stayed stuck on-chain (memory #56 "settled-target-still-
     active", reproducing on Shanghai cca68b44).
@@ -665,7 +670,6 @@ def evaluate_edli_stage_readiness(
     trade_db_path: str | None = None,
     forecasts_db_path: str | None = None,
     loaded_sha_file: str | None = None,
-    canary_artifact_path: str | None = None,
     promotion_artifact_path: str | None = None,
     source_health_json: str | None = None,
     status_json: str | None = None,
@@ -713,45 +717,6 @@ def evaluate_edli_stage_readiness(
                     now=now,
                 )
             )
-        if stage == "edli_live_canary":
-            from scripts.check_edli_live_canary_gate import (
-                CANARY_PROFIT_PASS,
-                CANARY_SAFETY_PASS,
-                FAIL,
-                WAITING_FOR_QUALIFYING_EVENT,
-                evaluate_canary_artifact,
-                load_canary_artifact,
-            )
-
-            artifact = load_canary_artifact(canary_artifact_path) if canary_artifact_path else None
-            canary = evaluate_canary_artifact(
-                artifact,
-                max_quote_age_ms=int(_settings_section("edli", {}).get("pre_submit_max_quote_age_ms", 1000)),
-                conn=conn if artifact is not None else None,
-            )
-            if canary.status == FAIL:
-                reasons.extend(f"EDLI_STAGE_CANARY_GATE:{reason}" for reason in canary.reasons)
-            elif canary.status == WAITING_FOR_QUALIFYING_EVENT:
-                if not reasons:
-                    return EdliStageReadiness(
-                        stage=stage,
-                        status=EDLI_STAGE_WAITING,
-                        live_entries_allowed=True,
-                        submit_allowed=True,
-                        scaleout_allowed=False,
-                        reasons=tuple(canary.reasons),
-                    )
-            elif canary.status not in {CANARY_SAFETY_PASS, CANARY_PROFIT_PASS}:
-                reasons.append(f"EDLI_STAGE_CANARY_GATE_UNSUPPORTED:{canary.status}")
-            elif not reasons:
-                return EdliStageReadiness(
-                    stage=stage,
-                    status=EDLI_STAGE_PASS,
-                    live_entries_allowed=True,
-                    submit_allowed=True,
-                    scaleout_allowed=False,
-                    reasons=(canary.status,),
-                )
     finally:
         conn.close()
 
@@ -761,14 +726,6 @@ def evaluate_edli_stage_readiness(
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
     if stage == "edli_shadow_no_submit":
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
-    if stage == "edli_live_canary":
-        return EdliStageReadiness(
-            stage=stage,
-            status=EDLI_STAGE_PASS,
-            live_entries_allowed=True,
-            submit_allowed=True,
-            scaleout_allowed=False,
-        )
     return EdliStageReadiness(
         stage=stage,
         status=EDLI_STAGE_PASS,
@@ -789,7 +746,6 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
         trade_db_path=str(_settings_section("state", {}).get("trade_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
         forecasts_db_path=str(_settings_section("state", {}).get("forecasts_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
         loaded_sha_file=str(edli_cfg.get("edli_stage_loaded_sha_file") or ""),
-        canary_artifact_path=str(edli_cfg.get("edli_live_canary_artifact_path") or ""),
         promotion_artifact_path=str(edli_cfg.get("edli_live_promotion_artifact_path") or ""),
         source_health_json=str(edli_cfg.get("edli_stage_source_health_json") or ""),
         status_json=str(edli_cfg.get("edli_stage_status_json") or ""),
@@ -820,14 +776,19 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
                     ", ".join(deferred),
                 )
         return report
-    if stage == "edli_live_canary":
+    if stage == "edli_live":
+        # Wave-2 item 5: the canary boot-resilience logic (crash-loop antibody +
+        # status-summary deferral) is the live-mode readiness path now that canary
+        # is collapsed into edli_live. Scaleout is unconditionally permitted for the
+        # single live mode (the canary scaleout=False qualifying-lane semantics are
+        # dead — operator arm is the sole submit gate).
         deferred = [
             reason for reason in (report.reasons or ())
-            if reason.startswith(_EDLI_LIVE_CANARY_BOOT_DEFERRED_REASON_PREFIXES)
+            if reason.startswith(_EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES)
         ]
         blocking = [
             reason for reason in (report.reasons or ())
-            if not reason.startswith(_EDLI_LIVE_CANARY_BOOT_DEFERRED_REASON_PREFIXES)
+            if not reason.startswith(_EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES)
         ]
         risk_reasons = [reason for reason in blocking if reason.startswith(EDLI_STAGE_RISK_REASON_PREFIXES)]
         if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} and blocking:
@@ -848,12 +809,12 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
                     return _assert_edli_stage_readiness(
                         {**edli_cfg, "_boot_auto_resolution_reentry": True}
                     )
-            raise RuntimeError("EDLI_LIVE_CANARY_READINESS_FAIL:" + ",".join(blocking or (report.status,)))
+            raise RuntimeError("EDLI_LIVE_READINESS_FAIL:" + ",".join(blocking or (report.status,)))
         if risk_reasons:
-            raise RuntimeError("EDLI_LIVE_CANARY_READINESS_FAIL:" + ",".join(risk_reasons))
+            raise RuntimeError("EDLI_LIVE_READINESS_FAIL:" + ",".join(risk_reasons))
         if deferred:
             logger.warning(
-                "EDLI live-canary boot: status_summary freshness is deferred "
+                "EDLI live boot: status_summary freshness is deferred "
                 "until the scheduler emits its first genuine cycle pulse: %s",
                 ", ".join(deferred),
             )
@@ -863,14 +824,14 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
                     status=EDLI_STAGE_WAITING,
                     live_entries_allowed=True,
                     submit_allowed=True,
-                    scaleout_allowed=False,
+                    scaleout_allowed=True,
                     reasons=tuple(deferred),
                 )
         if report.submit_allowed is not True:
-            raise RuntimeError("EDLI_LIVE_CANARY_SUBMIT_NOT_ALLOWED")
+            raise RuntimeError("EDLI_LIVE_SUBMIT_NOT_ALLOWED")
+        if report.status != EDLI_STAGE_PASS or report.scaleout_allowed is not True:
+            raise RuntimeError("EDLI_LIVE_SCALEOUT_READINESS_FAIL:" + ",".join(report.reasons or (report.status,)))
         return report
-    if stage == "edli_live" and (report.status != EDLI_STAGE_PASS or report.scaleout_allowed is not True):
-        raise RuntimeError("EDLI_LIVE_SCALEOUT_READINESS_FAIL:" + ",".join(report.reasons or (report.status,)))
     return report
 
 
@@ -1178,7 +1139,7 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
         _require_edli_flags(edli_cfg, mode, ("market_channel_ingestor_enabled", "edli_user_channel_reconcile_enabled"))
         if bool(edli_cfg.get("real_order_submit_enabled", False)):
             raise RuntimeError("EDLI_SUBMIT_DISABLED_BRIDGE_FORBIDS_REAL_ORDER_SUBMIT")
-    if mode in {"edli_live_canary", "edli_live"}:
+    if mode == "edli_live":
         _require_edli_flags(
             edli_cfg,
             mode,
@@ -1186,17 +1147,12 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
                 "market_channel_ingestor_enabled",
                 "edli_user_channel_reconcile_enabled",
                 "real_order_submit_enabled",
-                "taker_fok_fak_live_enabled",
                 "durable_submit_outbox_enabled",
             ),
         )
     if mode == "edli_live":
         _assert_edli_live_promotion_artifact(edli_cfg)
     if mode == "edli_live":
-        # PR-2 (A) / F1 Option C: full live promotion must carry the
-        # settlement-grounded ARM evidence artifact bound to THIS commit. Canary
-        # intentionally does not: it is the tiny-cap qualifying-event lane that
-        # produces promotion evidence rather than consuming it.
         _assert_edli_arm_gate_artifact(edli_cfg)
         # OPERATOR LAW (2026-06-04): the former two-key arm direction-gate guard is
         # DELETED — mainstream is observational/display-only and is NEVER a decision/arm
@@ -5593,7 +5549,7 @@ def _edli_event_reactor_cycle() -> None:
             and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
         ):
             _day0_fast_prefetch = _edli_prefetch_day0_fast_obs(decision_time=now)
-        # EDLI live-canary contention fix (2026-05-31): the FSR/Day0/redecision
+        # EDLI live contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
         # in-process with the market-channel ingestor. Serialize the whole
         # prune+emit+commit unit under the process-global world-DB write mutex so it
@@ -5724,7 +5680,6 @@ def _edli_event_reactor_cycle() -> None:
         submit_disabled_effective_mode = reactor_mode == "live_no_submit"
         live_bridge_mode = reactor_mode in {"live", "submit_disabled_live_bridge"}
         real_submit_effective = real_order_submit_enabled if reactor_mode == "live" else False
-        taker_fok_fak_effective = bool(edli_cfg.get("taker_fok_fak_live_enabled", False)) or not real_submit_effective
         # Configure the process-wide risk allocator/governor BEFORE the submit adapter is
         # built so the live submit path's select_global_order_type does not raise
         # AllocationDenied("allocator_not_configured"). The legacy discover cycle wires this
@@ -5848,10 +5803,6 @@ def _edli_event_reactor_cycle() -> None:
                 get_current_level=get_current_level,
                 portfolio_state_provider=_portfolio_state_provider,
                 real_order_submit_enabled=real_submit_effective,
-                # In submit-disabled modes this is simulation authority only:
-                # build the would-trade taker certificate, but never call venue submit.
-                # Real submit/canary still requires the explicit config flag.
-                taker_fok_fak_live_enabled=taker_fok_fak_effective,
                 durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
                 live_cap_conn=conn,
                 replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
@@ -5924,7 +5875,6 @@ def _edli_event_reactor_cycle() -> None:
             config=ReactorConfig(
                 reactor_mode=reactor_mode,
                 real_order_submit_enabled=real_order_submit_enabled,
-                taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
                 # Task #102 book-wide edge-zone admission. Absent key => default
                 # False => byte-identical legacy money-path (the operator owns
                 # config/settings.json; this reads it without writing it).
@@ -8524,7 +8474,7 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
     resolved regardless of which execution mode the daemon is in.
 
     In EDLI shadow/no-submit modes (edli_shadow_no_submit, edli_submit_disabled_bridge,
-    edli_live_canary, edli_live) this is the ONLY path that fires chain sync and exit
+    edli_live) this is the ONLY path that fires chain sync and exit
     monitoring — run_cycle() is never called in those modes.
 
     Shadow-mode safety: exit_order_submit_enabled is set to False when

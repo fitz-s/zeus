@@ -225,21 +225,18 @@ def _build_monitor_one_calibrator_q(
 
     season = _monitor_emos_season(target_d)
     unit = str(city.settlement_unit)
-    apply_settlement_floor = bool(
-        settings["edli"].get("edli_settlement_sigma_floor_enabled", False)
-    )
-    require_settlement_floor = bool(
-        settings["edli"].get("edli_settlement_sigma_floor_required", True)
-    )
+    # Wave-2 item 6 (2026-06-12): the settlement σ-floor is applied by PER-CELL DATA
+    # AVAILABILITY (no flag — edli_settlement_sigma_floor_enabled / _required deleted),
+    # in PARITY with the entry path. apply=True, required=False ⇒ floor when the fitted
+    # cell exists, no-op (never blocks) when absent.
+    apply_settlement_floor = True
+    require_settlement_floor = False
 
-    # PARITY: probe floor availability when the flag is on. Probed ONCE here (not twice) and
-    # shared to both the emos and honest-raw branches below so the probe cost is minimal.
-    _floor_found: bool = False
-    _floor_missing_reason: str | None = None
-    if apply_settlement_floor:
-        _floor_found, _floor_missing_reason = _probe_monitor_settlement_floor(
-            city.name, season, metric
-        )
+    # PARITY: probe floor availability and share to both the emos and honest-raw branches
+    # below so the probe cost is minimal (used for entry/monitor parity provenance).
+    _floor_found, _floor_missing_reason = _probe_monitor_settlement_floor(
+        city.name, season, metric
+    )
 
     q_result = None
     try:
@@ -965,12 +962,19 @@ def _refresh_ens_member_counting(
                     "period_extrema_members_adapter",
                     f"monitor_emos_sole_calibrator_failed:{type(exc).__name__}",
                 ]
-            # PARITY RULE (P1 review finding 2026-06-09): if the floor was enabled at monitor
-            # time but the cell is absent, the monitor q is narrower than the entry q was
-            # (entry ran with floor applied; monitor silently dropped it). Mark NOT FRESH so
-            # exit decisions do not fire on the degraded posterior — same fail-closed semantics
-            # as the day0 panic-sell hold fix ("Exit authority incomplete").
-            if _monitor_q.floor_missing_reason is not None:
+            # PARITY RULE (P1 review finding 2026-06-09; Wave-2 item 6 refinement 2026-06-12):
+            # the floor is applied by PER-CELL DATA AVAILABILITY on BOTH entry and monitor (same
+            # table, same cell). A genuinely ABSENT cell is SYMMETRIC — entry also applied no
+            # floor — so it is NOT a parity violation and must NOT newly block exits for the
+            # 44/54 cities that have no fitted floor cell. Only a TRANSIENT probe error
+            # (table read failed at monitor while entry may have obtained the floor) is a true
+            # asymmetry: mark NOT FRESH so exit decisions do not fire on a possibly-degraded
+            # (narrower) posterior — same fail-closed semantics as the day0 panic-sell hold fix.
+            _floor_probe_failed_transiently = (
+                _monitor_q.floor_missing_reason is not None
+                and str(_monitor_q.floor_missing_reason).startswith("floor_probe_error")
+            )
+            if _floor_probe_failed_transiently:
                 logger.warning(
                     "MONITOR_FLOOR_PARITY_VIOLATION cell=%s|%s|%s "
                     "floor_applied=%s floor_missing_reason=%s — "

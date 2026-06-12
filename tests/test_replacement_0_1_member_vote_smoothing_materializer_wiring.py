@@ -144,11 +144,11 @@ def _expected_q(*, alpha: float | None) -> dict:
 
 # NOTE: the full materialize path enforces strict prewrite gates the lightweight fixtures do not
 # satisfy; the smoothing lands in _insert_posterior, so the wiring is exercised directly there.
-# The EB-bias resolver is held at None in every test to isolate the smoothing effect.
+# Wave-2 item 7: the EB-bias layer is permanently deleted (center never shifted), so
+# the smoothing effect is already isolated without neutralizing the EB resolver.
 
 
 def test_flag_off_materialized_posterior_byte_identical_to_today(monkeypatch) -> None:
-    monkeypatch.setattr(mod, "_replacement_eb_bias_shift_c", lambda request, *, metric: None)
     monkeypatch.setattr(mod, "_replacement_member_vote_smoothing_alpha", lambda: None)
     conn = _conn()
     posterior_id = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
@@ -156,7 +156,6 @@ def test_flag_off_materialized_posterior_byte_identical_to_today(monkeypatch) ->
 
 
 def test_flag_on_materialized_posterior_matches_smoothed_construction(monkeypatch) -> None:
-    monkeypatch.setattr(mod, "_replacement_eb_bias_shift_c", lambda request, *, metric: None)
     monkeypatch.setattr(mod, "_replacement_member_vote_smoothing_alpha", lambda: MEMBER_VOTE_SMOOTHING_ALPHA)
     conn = _conn()
     posterior_id = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)

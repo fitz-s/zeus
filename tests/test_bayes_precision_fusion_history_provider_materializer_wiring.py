@@ -193,7 +193,8 @@ def _enable_capture(monkeypatch):
 
 
 def _disable_other_layers(monkeypatch):
-    monkeypatch.setattr(mod, "_replacement_eb_bias_shift_c", lambda request, *, metric: None)
+    # Wave-2 item 7: the EB-bias layer is permanently deleted (center never shifted),
+    # so only the member-vote smoothing layer remains to neutralize here.
     monkeypatch.setattr(mod, "_replacement_member_vote_smoothing_alpha", lambda: None)
 
 

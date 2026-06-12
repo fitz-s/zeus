@@ -91,7 +91,7 @@ ALLOWLIST: frozenset[str] = frozenset(
 #     comments — the live tables were already dropped/renamed to their bare names.
 #   * D-category: provenance / hash / config-flag identities (full_transport_v1,
 #     openmeteo_*_v1, ecmwf_*_v1, edli_*_v1, deid_v1_/dgid_v1_/nei_v1_ hash
-#     prefixes, *_event_id_v1_hash, bias_treatment_v2_enabled, ddd_v2_*,
+#     prefixes, *_event_id_v1_hash, ddd_v2_*,
 #     calibration_bin_source_v2_fit_enabled, canonical_v1/canonical_v2, ...) whose
 #     value is STORED IN DATA (decision rows, provenance_json, config). Renaming
 #     these is a data-retag on a paused-daemon window (Fitz #4), not a code edit,
@@ -133,7 +133,6 @@ GRANDFATHER: frozenset[str] = frozenset(
         "TIGGE_DOWNLOAD_SPEC_v3_2026_05_07",
         "_accumulator_rows_missing_from_v2",
         "_backfill_settlements_v2",
-        "_bias_treatment_v2_note",
         "_bin_source_v2",
         "_build_create_v2_sql",
         "_build_v2_row",
@@ -169,9 +168,6 @@ GRANDFATHER: frozenset[str] = frozenset(
         "audit_observation_instants_v2",
         "backfill_manifest_obs_v2",
         "backfill_v1",
-        "bias_exceeds_v2",
-        "bias_treatment_v2",
-        "bias_treatment_v2_enabled",
         "build_obs_v2_row_kwargs",
         "cal_v2_metric_violations",
         "calibration_bin_source_v2_fit_enabled",
@@ -344,7 +340,6 @@ GRANDFATHER: frozenset[str] = frozenset(
         "tigge_step024_v1_overnight_snapshot",
         "tigge_step024_v2_",
         "tigge_v3",
-        "treated_v2_no_haircut",
         "unknown_v0",
         "wu_daily_v2",
         "wu_icao_daily_backfill_v2",

@@ -58,7 +58,6 @@ _UNSET = object()
 
 def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None = None,
                  quote_overrides: dict | None = None, return_parents: bool = False,
-                 taker_fok_fak_live_enabled: bool = True,
                  passive_maker_context=_UNSET,
                  available_crossable_shares: float | None = None,
                  sweep_expected_fill_price: str | None = None):
@@ -190,7 +189,6 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         min_order_size=1.0,
         best_bid=float(quote_payload["best_bid"]),
         best_ask=float(quote_payload["best_ask"]),
-        taker_fok_fak_live_enabled=bool(taker_fok_fak_live_enabled),  # F1 kill-lever
         available_crossable_shares=available_crossable_shares,
         sweep_expected_fill_price=sweep_expected_fill_price,
     )
@@ -513,48 +511,41 @@ def test_rest_policy_rests_maker_on_thin_book_large_edge():
 
 
 # --------------------------------------------------------------------------
-# F1 kill-lever: taker_fok_fak_live_enabled must be in the cert payload and
-# event_bound_final_intent must honour it (fail-CLOSED when False).
+# Wave-2 item 8 (2026-06-12): taker FOK/FAK legality is UNCONDITIONAL. The
+# former taker_fok_fak_live_enabled kill-lever (config flag + cert payload field
+# + assert_taker_live_allowed OFF branch) is DELETED. The governor-decided taker
+# tuple (post_only False, maker_intent False, FOK/FAK) is the single authority.
 # --------------------------------------------------------------------------
-def test_taker_kill_lever_false_blocks_submission():
-    """taker_fok_fak_live_enabled=False in cert -> expressibility layer raises LiveInferenceBlocked.
+def test_taker_legality_is_unconditional_no_kill_lever():
+    """A governor-decided TAKER cert is submittable with NO config flag.
 
-    This is the load-bearing relationship test for F1: the flag must travel
-    execution.py -> cert payload -> event_bound_final_intent.py and actually deny.
-    A missing field (absent from payload) is equivalent to False (fail-closed default).
+    Relationship test for the fold: the taker tuple alone authorizes the taker
+    path at the expressibility boundary; there is no longer any payload flag or
+    OFF branch that can deny it. The flag field must be ABSENT from the payload.
     """
-    from src.strategy.live_inference.state import LiveInferenceBlocked
-
-    # Build a TAKER cert with the kill-lever OFF
-    _, _, final_intent = _taker_chain(order_mode="TAKER", taker_fok_fak_live_enabled=False)
-
-    # Confirm the flag landed in the payload as False (not absent/True)
-    assert final_intent.payload["taker_fok_fak_live_enabled"] is False
-
-    # The expressibility boundary MUST raise LiveInferenceBlocked — not silently allow
-    with pytest.raises(LiveInferenceBlocked, match="taker FOK/FAK live disabled"):
-        validate_final_intent_cert_for_existing_executor(final_intent)
-
-
-def test_taker_kill_lever_true_allows_submission():
-    """taker_fok_fak_live_enabled=True in cert -> expressibility layer passes.
-
-    Confirms the flag is the ONLY gate: same market, same order, only flag differs.
-    Also confirms maker path is unaffected (maker cert never calls assert_taker_live_allowed).
-    """
-    from src.strategy.live_inference.state import LiveInferenceBlocked
-
-    # TAKER cert with lever ON -> must pass
-    _, _, taker_intent = _taker_chain(order_mode="TAKER", taker_fok_fak_live_enabled=True)
-    assert taker_intent.payload["taker_fok_fak_live_enabled"] is True
+    _, _, taker_intent = _taker_chain(order_mode="TAKER")
+    # The deleted flag must not reappear in the cert payload.
+    assert "taker_fok_fak_live_enabled" not in taker_intent.payload
+    # Taker is authorized purely by the tuple: post_only False, maker_intent False.
+    assert taker_intent.payload["post_only"] is False
+    assert taker_intent.payload["maker_intent"] is False
     native_hash = validate_final_intent_cert_for_existing_executor(taker_intent)
     assert native_hash
 
-    # MAKER cert with lever False -> maker path never calls assert_taker_live_allowed
-    _, _, maker_intent = _taker_chain(order_mode="MAKER", taker_fok_fak_live_enabled=False)
-    assert maker_intent.payload["taker_fok_fak_live_enabled"] is False
+
+def test_assert_taker_live_allowed_is_deleted():
+    """The OFF-branch gate function must no longer exist on the trade_score module."""
+    import src.strategy.live_inference.trade_score as _ts
+
+    assert not hasattr(_ts, "assert_taker_live_allowed")
+
+
+def test_maker_path_unaffected_by_taker_fold():
+    """MAKER cert still passes the expressibility boundary (maker law untouched)."""
+    _, _, maker_intent = _taker_chain(order_mode="MAKER")
+    assert "taker_fok_fak_live_enabled" not in maker_intent.payload
     maker_hash = validate_final_intent_cert_for_existing_executor(maker_intent)
-    assert maker_hash  # maker unaffected — kill-lever does not touch the passive path
+    assert maker_hash
 
 
 # --------------------------------------------------------------------------

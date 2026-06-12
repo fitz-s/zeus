@@ -131,7 +131,6 @@ def test_chain_sync_exit_monitor_registered_in_edli_shadow_no_submit(monkeypatch
             "market_channel_ingestor_enabled": False,
             "edli_user_channel_reconcile_enabled": False,
             "real_order_submit_enabled": False,
-            "taker_fok_fak_live_enabled": False,
         },
     )
     job_ids = {job.id for job in scheduler.jobs}
@@ -160,7 +159,6 @@ def test_chain_sync_exit_monitor_registered_in_legacy_cron_no_regression(monkeyp
             "market_channel_ingestor_enabled": False,
             "edli_user_channel_reconcile_enabled": False,
             "real_order_submit_enabled": False,
-            "taker_fok_fak_live_enabled": False,
         },
     )
     job_ids = {job.id for job in scheduler.jobs}
@@ -180,7 +178,8 @@ def test_edli_event_driven_modes_set_includes_shadow_no_submit():
     import src.main as main
     assert "edli_shadow_no_submit" in main.EDLI_EVENT_DRIVEN_MODES
     assert "edli_submit_disabled_bridge" in main.EDLI_EVENT_DRIVEN_MODES
-    assert "edli_live_canary" in main.EDLI_EVENT_DRIVEN_MODES
+    # Wave-2 item 5: canary collapsed into edli_live (the only event-driven live mode).
+    assert "edli_live_canary" not in main.EDLI_EVENT_DRIVEN_MODES
     assert "edli_live" in main.EDLI_EVENT_DRIVEN_MODES
 
 

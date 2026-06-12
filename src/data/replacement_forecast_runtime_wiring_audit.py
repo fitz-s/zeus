@@ -42,7 +42,12 @@ REQUIRED_ADAPTER_ANCHORS = (
     "replacement_forecast_hook(proof, event, decision_time)",
     "REPLACEMENT_FORECAST_HOOK_BLOCKED",
     "REPLACEMENT_FORECAST_HOOK_DIRECTION_FLIP",
-    "effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)",
+    # Wave-2 item 1 (2026-06-12): the SHADOW_VETO path no longer joins the legacy baseline
+    # LCB via min(); the replacement hook's effective_q_lcb is the single q authority and the
+    # baseline is recorded diagnostics-only. Anchor the single-authority assignment + the
+    # diagnostics-only baseline reference stamp instead of the deleted min() join.
+    "effective_q_lcb = replacement_hook_result.effective_q_lcb",
+    '"baseline_q_lcb_reference": float(proof.q_lcb_5pct)',
     'raw_receipt["replacement_forecast"] = replacement_forecast_receipt_tag',
 )
 REQUIRED_HOOK_FACTORY_ANCHORS = (

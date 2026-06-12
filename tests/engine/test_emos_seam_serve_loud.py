@@ -88,7 +88,7 @@ def _costs(bins, no_price=0.75, yes_price=0.25):
 
 def _run_seam(*, monkeypatch, emos_serves: bool, city: str, mock_legacy_pcal: bool = False,
               emos_flag: bool = True, sigma_floor_flag: bool = False,
-              sigma_floor_required: bool = True):
+              sigma_floor_required: bool = False):
     """Drive the REAL seam with the EMOS flag (``emos_flag``) and a deterministic served/raw cell.
 
     Returns (payload, analysis). Always uses proper Bin objects (the live forecast shape),
@@ -113,8 +113,11 @@ def _run_seam(*, monkeypatch, emos_serves: bool, city: str, mock_legacy_pcal: bo
              "cells": {f"{city}|{season}|high": {**_SYNTH_CELL, "served": served}}}
     monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
     monkeypatch.setitem(settings["edli"], "edli_emos_sole_calibrator_enabled", emos_flag)
-    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_enabled", sigma_floor_flag)
-    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_required", sigma_floor_required)
+    # Wave-2 item 6 (2026-06-12): the settlement σ-floor flags are DELETED — the floor
+    # applies by PER-CELL DATA AVAILABILITY (apply=True, require=False). sigma_floor_flag
+    # / sigma_floor_required are retained as inert kwargs for call-site stability; the seam
+    # no longer reads any settings flag for the floor.
+    del sigma_floor_flag, sigma_floor_required
 
     if mock_legacy_pcal:
         def _fake_pcal(_cal, *, snapshot, family, bins, p_raw, payload, decision_time):
@@ -203,7 +206,11 @@ def test_emos_build_failure_is_loud_not_silent(monkeypatch, caplog):
     assert analysis is not None
 
 
-def test_sigma_floor_flag_on_missing_cell_fail_closed_at_seam(monkeypatch, caplog):
+def test_sigma_floor_missing_cell_is_inert_at_seam(monkeypatch):
+    # Wave-2 item 6 (2026-06-12): the settlement σ-floor applies by PER-CELL DATA
+    # AVAILABILITY (apply=True, require=False). A MISSING floor cell is now INERT — the
+    # floor simply is not applied and the EMOS serve succeeds (no fail-closed raise; the
+    # former required=True hard-fail path was never the live config and is deleted).
     city = _served_city_unit_c()
     monkeypatch.setattr(
         emos_mod,
@@ -212,19 +219,14 @@ def test_sigma_floor_flag_on_missing_cell_fail_closed_at_seam(monkeypatch, caplo
         raising=False,
     )
 
-    with caplog.at_level(logging.WARNING), pytest.raises(
-        emos_mod.SettlementSigmaFloorError, match="MISSING_CELL"
-    ):
-        _run_seam(
-            monkeypatch=monkeypatch,
-            emos_serves=True,
-            city=city,
-            sigma_floor_flag=True,
-        )
-
-    assert [r for r in caplog.records if "EMOS_SERVE_FAILED" in r.getMessage()], (
-        "strict settlement-floor failure must leave the same loud serve trail, then fail closed"
+    payload, analysis = _run_seam(
+        monkeypatch=monkeypatch,
+        emos_serves=True,
+        city=city,
     )
+
+    assert payload.get("_edli_q_source") == "emos"
+    assert analysis is not None
 
 
 def test_sigma_floor_flag_off_missing_cell_keeps_legacy_degrade(monkeypatch):
@@ -247,7 +249,10 @@ def test_sigma_floor_flag_off_missing_cell_keeps_legacy_degrade(monkeypatch):
     assert analysis is not None
 
 
-def test_sigma_floor_flag_on_served_raw_missing_cell_fail_closed_at_seam(monkeypatch, caplog):
+def test_sigma_floor_served_raw_missing_cell_is_inert_at_seam(monkeypatch):
+    # Wave-2 item 6: on the served=raw lane too, a MISSING settlement-floor cell is INERT
+    # (apply=True, require=False) — honest-raw serves with its existing emos_σ_model floor,
+    # no fail-closed raise.
     city = _served_city_unit_c()
     monkeypatch.setattr(
         emos_mod,
@@ -256,19 +261,14 @@ def test_sigma_floor_flag_on_served_raw_missing_cell_fail_closed_at_seam(monkeyp
         raising=False,
     )
 
-    with caplog.at_level(logging.WARNING), pytest.raises(
-        emos_mod.SettlementSigmaFloorError, match="MISSING_CELL"
-    ):
-        _run_seam(
-            monkeypatch=monkeypatch,
-            emos_serves=False,
-            city=city,
-            sigma_floor_flag=True,
-        )
-
-    assert [r for r in caplog.records if "HONEST_RAW_FLOOR_FAILED" in r.getMessage()], (
-        "served=raw strict settlement-floor failure must be logged, then fail closed"
+    payload, analysis = _run_seam(
+        monkeypatch=monkeypatch,
+        emos_serves=False,
+        city=city,
     )
+
+    assert payload.get("_edli_q_source") == "raw_honest"
+    assert analysis is not None
 
 
 # ---------------------------------------------------------------------------

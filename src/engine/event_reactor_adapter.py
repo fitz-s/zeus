@@ -1382,7 +1382,6 @@ def event_bound_live_adapter_from_trade_conn(
     executor_submit: Callable[[DecisionCertificate, DecisionCertificate], EventBoundExecutorSubmitResult] | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     durable_submit_outbox_enabled: bool = False,
-    taker_fok_fak_live_enabled: bool = False,
     operator_arm: "OperatorArm | None" = None,
     edli_live_scope: str = "forecast_only",
     family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
@@ -1689,7 +1688,6 @@ def event_bound_live_adapter_from_trade_conn(
                         live_cap_conn=build_conn,
                         trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
-                        taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
                     ),
                 )
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
@@ -1749,7 +1747,6 @@ def event_bound_live_adapter_from_trade_conn(
                         live_cap_conn=build_conn,
                         trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
-                        taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
                     ),
                 )
                 side_effect_status = "SUBMIT_DISABLED"
@@ -2474,7 +2471,21 @@ def _build_event_bound_no_submit_receipt_core(
                         family_complete=True,
                         replacement_forecast=replacement_forecast_receipt_tag,
                     )
-                effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)
+                # Wave-2 item 1 (2026-06-12): SINGLE q AUTHORITY. The replacement chain is the
+                # strategy of record and carries its own q_lcb; the legacy baseline LCB no longer
+                # JOINS as a cap. The replacement hook's effective_q_lcb is used directly. On the
+                # SHADOW_VETO path the veto artifact already guarantees effective_q_lcb <=
+                # baseline (it can only veto DOWN — ReplacementForecastVetoDecision invariant), so
+                # this is behavior-identical to the former min() here while removing the explicit
+                # baseline-cap join. The baseline value is retained DIAGNOSTICS-ONLY: it is already
+                # recorded in the replacement receipt provenance as baseline_q_lcb, and stamped
+                # here as baseline_q_lcb_reference. It NEVER joins min() against the live q.
+                effective_q_lcb = replacement_hook_result.effective_q_lcb
+                if isinstance(replacement_forecast_receipt_tag, dict):
+                    replacement_forecast_receipt_tag = {
+                        **replacement_forecast_receipt_tag,
+                        "baseline_q_lcb_reference": float(proof.q_lcb_5pct),
+                    }
                 effective_trade_score = _robust_trade_score_from_generated_inputs(
                     q_posterior=proof.q_posterior,
                     q_lcb_5pct=effective_q_lcb,
@@ -2485,7 +2496,7 @@ def _build_event_bound_no_submit_receipt_core(
                 proof = dataclass_replace(
                     proof,
                     q_lcb_5pct=effective_q_lcb,
-                    trade_score=min(proof.trade_score, effective_trade_score),
+                    trade_score=effective_trade_score,
                 )
             elif replacement_hook_result.status == "LIVE_AUTHORITY":
                 replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
@@ -3471,7 +3482,6 @@ def _build_submit_disabled_live_certificates(
     live_cap_conn: sqlite3.Connection | None = None,
     trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
-    taker_fok_fak_live_enabled: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
     command_certificates = _build_live_execution_command_certificates(
         event=event,
@@ -3480,7 +3490,6 @@ def _build_submit_disabled_live_certificates(
         live_cap_conn=live_cap_conn,
         trade_conn=trade_conn,
         pre_submit_authority_provider=pre_submit_authority_provider,
-        taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
     )
     command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
     receipt_cert = build_execution_receipt_certificate(
@@ -3642,7 +3651,6 @@ def _build_live_execution_command_certificates(
     live_cap_conn: sqlite3.Connection | None = None,
     trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
-    taker_fok_fak_live_enabled: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
     _assert_event_bound_strategy_live_admitted(
         strategy_key=receipt.strategy_key,
@@ -4036,7 +4044,6 @@ def _build_live_execution_command_certificates(
             min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
             best_bid=fresh_best_bid if str(order_mode).strip().upper() == "TAKER" else best_bid,
             best_ask=fresh_best_ask if str(order_mode).strip().upper() == "TAKER" else best_ask,
-            taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
             available_crossable_shares=available_crossable_shares,
             sweep_expected_fill_price=sweep_expected_fill_price,
             executable_market_context=executable_market_context,
@@ -4070,7 +4077,6 @@ def _build_live_execution_command_certificates(
         )
         if (
             not _rtc_policy_present
-            and taker_fok_fak_live_enabled
             and final_intent.payload.get("post_only") is True
             and _taker_spread_guard_reason(
                 fresh_best_bid,
@@ -9357,18 +9363,6 @@ def _replacement_authority_enabled() -> bool:
     return bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled", False))
 
 
-def _replacement_qlcb_settlement_sigma_floor_enabled() -> bool:
-    """QLCB_HONESTY.md FIX-C flag (default FALSE). When OFF the replacement q_lcb is
-    byte-identical to the raw Wilson/bundle value — the settlement σ-floor is NEVER
-    consulted, no DB/table read on this path. When ON the per-bin q_lcb is floored at
-    the realized-settlement residual (settlement_sigma_floor) so a tight member cluster
-    cannot manufacture an overconfident lower bound (iron rule #6)."""
-    try:
-        return bool(settings["edli"].get("replacement_qlcb_settlement_sigma_floor_enabled", False))
-    except Exception:
-        return False
-
-
 def _replacement_q_market_anchor_enabled() -> bool:
     """Market-anchor cap flag (objective-math audit 2026-06-11, default FALSE).
 
@@ -9398,111 +9392,6 @@ def _market_anchor_alpha() -> float:
         from src.strategy.live_inference.market_anchor import DEFAULT_FALLBACK_ALPHA
 
         return DEFAULT_FALLBACK_ALPHA
-
-
-def _replacement_settlement_grounded_lcb(
-    *,
-    mu_c: float,
-    sigma_floor_c: float,
-    sigma_model_c: float | None,
-    lower_c: float | None,
-    upper_c: float | None,
-) -> float:
-    """The settlement-grounded YES-bin q_lcb under ``N(mu_c, max(sigma_model_c, sigma_floor_c))``.
-
-    QLCB_HONESTY.md §2 Construction B root cause: the live replacement q_lcb is sized
-    from the ~0.67C member spread (Wilson over 51 AIFS votes), ignoring the ~3.2x
-    settlement underdispersion. This integrates the WMO settlement preimage of the bin
-    under a Gaussian whose σ is FLOORED at the per-(city,season,metric) realized residual
-    (settlement_sigma_floor, median 3.18C). The floor only WIDENS σ → LOWERS the q_lcb
-    (never tightens), so caller's ``min(raw_wilson, this)`` is ONLY-LOWERS by construction.
-
-    ``sigma_model_c`` (the AIFS member spread, when carried) participates via ``max`` so a
-    legitimately-wider model σ is preserved; ``None`` (the usual live case — provenance
-    carries vote frequencies, not a member std) means the floor is the effective σ. Uses
-    the SAME ``bin_probability_settlement`` (WMO round-half-up preimage) the canonical/EMOS
-    path uses, so the grounded mass matches the settlement grading semantics.
-    """
-    floor = float(sigma_floor_c)
-    if not (floor > 0.0):
-        # No usable floor — degrade to a non-binding ceiling (caller's min() keeps raw).
-        return 1.0
-    sigma_eff = floor if sigma_model_c is None else max(float(sigma_model_c), floor)
-    if not (sigma_eff > 0.0):
-        return 1.0
-    grounded = _bin_probability_settlement(float(mu_c), sigma_eff, lower_c, upper_c)
-    return float(min(max(grounded, 0.0), 1.0))
-
-
-# QLCB_HONESTY.md FIX-C honest reason code: a missing floor input on the LIVE replacement
-# q_lcb path. Surfaced as a ValueError so it propagates through _live_yes_probabilities ->
-# _generate_candidate_proofs, where the existing `except ValueError` (era.py:1388) converts
-# it into a LIVE_INFERENCE_INPUTS_MISSING no-submit receipt — i.e. the candidate is BLOCKED,
-# no order is placed. Module-level constant so the reason code is the single source of truth
-# for the production raiser AND its antibody tests.
-REPLACEMENT_QLCB_FLOOR_MISSING_LIVE_BLOCK = "REPLACEMENT_0_1_LIVE_AUTHORITY_QLCB_FLOOR_MISSING"
-
-
-def _resolve_replacement_settlement_floor_lcb(
-    *,
-    live_authority: bool,
-    city: str,
-    condition_id: str,
-    bin_id: str,
-    anchor_mu_c: float | None,
-    sigma_floor_c: float | None,
-    bounds: tuple[float | None, float | None] | None,
-) -> float | None:
-    """The per-bin settlement-grounded q_lcb ceiling, with the BLOCKER 7 mode split.
-
-    QLCB_HONESTY.md FIX-C exists because the raw Wilson q_lcb over the 51 AIFS votes ignores
-    the ~3.2x settlement underdispersion — it is an OVERCONFIDENT lower bound. The floor caps
-    it at the realized-settlement residual. When the floor is ENABLED (the caller only invokes
-    this helper in that case) but a floor input is MISSING — no anchor μ, no σ-floor cell, or
-    no bin topology — there is no settlement-grounded ceiling to compute. The mode then decides
-    the SEMANTICS of that miss (PR#400 the_path audit BLOCKER 7):
-
-      - ``live_authority=True`` (LIVE / authority / capital): degrading to the raw Wilson value
-        re-emits the exact overconfident bound the floor exists to fix, and that bound would
-        size real capital. That is UNSAFE. Raise ``ValueError`` so the candidate is BLOCKED
-        (the caller's ValueError handler turns it into a no-submit receipt). NEVER pass raw.
-
-      - ``live_authority=False`` (SHADOW / observation only, no capital at risk): keep the
-        current fail-soft behavior — emit a queryable raw-fallback log record and return
-        ``None`` so the caller keeps the raw bound for measurement.
-
-    Returns the grounded ceiling (a YES-bin probability in [0,1]) when all inputs are present,
-    in BOTH modes — the floor still floors; only the MISSING case is mode-dependent. ``None``
-    is returned ONLY in shadow mode on a missing input (live mode raises instead).
-    """
-    import logging as _logging  # module uses lazy per-fn logging imports
-    if anchor_mu_c is None or sigma_floor_c is None or bounds is None:
-        missing = (
-            "anchor_mu" if anchor_mu_c is None
-            else "sigma_floor_cell" if sigma_floor_c is None
-            else "bin_topology"
-        )
-        if live_authority:
-            # Iron rule #6 + BLOCKER 7: a missing floor on the live path BLOCKS the candidate;
-            # it must never leak the raw overconfident Wilson bound to capital sizing.
-            raise ValueError(
-                f"{REPLACEMENT_QLCB_FLOOR_MISSING_LIVE_BLOCK}:{condition_id}:bin={bin_id}:missing={missing}"
-            )
-        _logging.getLogger("zeus.replacement_qlcb_shadow").warning(
-            "replacement q_lcb floor missing (shadow: raw fallback kept) city=%s cond=%s "
-            "bin=%s missing=%s",
-            city, condition_id, bin_id, missing,
-        )
-        return None
-    return _replacement_settlement_grounded_lcb(
-        mu_c=float(anchor_mu_c),
-        sigma_floor_c=float(sigma_floor_c),
-        # AIFS member std is not carried in provenance (vote frequencies only); None → the
-        # floor IS the effective σ (not the tight, underdispersed member spread).
-        sigma_model_c=None,
-        lower_c=bounds[0],
-        upper_c=bounds[1],
-    )
 
 
 def _wilson_lower_bound(successes: float, trials: float, *, z: float = 1.645) -> float:
@@ -9563,33 +9452,6 @@ def _replacement_bound_to_c(value: object, *, unit: str) -> float | None:
     raise ValueError("replacement candidate bin unit must be C or F")
 
 
-def _replacement_bin_bounds_c(replacement_bundle: object, bin_id: str) -> tuple[float | None, float | None] | None:
-    """The (lower_c, upper_c) of ``bin_id`` from the bundle's bin_topology (°C).
-
-    ``None`` shoulders are open ends (e.g. an "X or below" floor bin has lower_c None);
-    the settlement-preimage integrator handles them. Returns ``None`` when the topology
-    is absent/malformed so the caller skips the floor (degrade, never crash the hot path).
-    """
-    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
-    if not isinstance(provenance, Mapping):
-        return None
-    topology = provenance.get("bin_topology")
-    if not isinstance(topology, list):
-        return None
-    for item in topology:
-        if not isinstance(item, Mapping):
-            continue
-        if str(item.get("bin_id") or "").strip() != bin_id:
-            continue
-        lower = item.get("lower_c")
-        upper = item.get("upper_c")
-        return (
-            None if lower is None else float(lower),
-            None if upper is None else float(upper),
-        )
-    return None
-
-
 def _replacement_anchor_mu_c(replacement_bundle: object) -> float | None:
     """The soft-anchor point estimate μ (°C) the bundle was built around.
 
@@ -9642,11 +9504,11 @@ def _replacement_yes_lcb_for_bin(
 ) -> float:
     """Raw replacement YES q_lcb (bundle q_lcb map, else Wilson over AIFS votes).
 
-    QLCB_HONESTY.md FIX-C: ``settlement_floor_lcb`` is the settlement-grounded ceiling
-    (``_replacement_settlement_grounded_lcb``); when supplied (flag ON) the returned
-    bound is ``min(raw, settlement_floor_lcb)`` so it ONLY-LOWERS — the floor can never
-    raise the q_lcb. ``None`` (the default, flag OFF) keeps the result byte-identical to
-    the pre-fix Wilson/bundle value.
+    ``settlement_floor_lcb`` is an optional ONLY-LOWERS ceiling: when supplied the
+    returned bound is ``min(raw, settlement_floor_lcb)`` (it can never raise the q_lcb);
+    ``None`` (the default) returns the raw Wilson/bundle value. Wave-2 item 6 (2026-06-12):
+    the live caller always passes ``None`` — the settlement-σ-grounded q_lcb floor (a
+    distinct, never-live correction) was deleted, so this param is currently inert.
     """
     def _apply_floor(raw: float) -> float:
         if settlement_floor_lcb is None:
@@ -9834,71 +9696,21 @@ def _replacement_authority_probability_and_fdr_proof(
     # A missing floor input must therefore BLOCK (never degrade to the raw, overconfident
     # Wilson bound) — both at family-setup time and per-bin. The block raises a ValueError
     # that the caller (_generate_candidate_proofs :1388) converts to a no-submit receipt.
-    floor_enabled = _replacement_qlcb_settlement_sigma_floor_enabled()
-    live_authority = True  # structural: see BLOCKER 7 note above (this is the live path).
-    anchor_mu_c: float | None = None
-    sigma_floor_c: float | None = None
-    if floor_enabled:
-        try:
-            anchor_mu_c = _replacement_anchor_mu_c(replacement_bundle)
-            from src.contracts.season import season_from_date
-
-            city_obj = runtime_cities_by_name().get(family.city)
-            lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
-            season = season_from_date(str(getattr(family, "target_date", "")), lat=lat)
-            sigma_floor_c = settlement_sigma_floor(
-                str(family.city), season, str(family.metric).lower()
-            )
-        except Exception as _floor_exc:  # noqa: BLE001
-            # BLOCKER 7: setup failure on the LIVE path is NOT fail-soft-to-raw — keeping the
-            # raw bound for every bin would size capital on the overconfident value the floor
-            # exists to fix. Block the whole family (no submit) via the floor-missing code.
-            _logging.getLogger("zeus.replacement_qlcb_shadow").warning(
-                "replacement q_lcb floor setup failed on LIVE path (blocking, not raw): %s",
-                _floor_exc,
-            )
-            raise ValueError(
-                f"{REPLACEMENT_QLCB_FLOOR_MISSING_LIVE_BLOCK}:setup:{family.city}:{_floor_exc}"
-            ) from _floor_exc
+    # Wave-2 item 6 (2026-06-12): the per-bin replacement q_lcb SETTLEMENT-σ-GROUNDED FLOOR
+    # (formerly gated by replacement_qlcb_settlement_sigma_floor_enabled, permanently FALSE)
+    # is a DISTINCT correction from the materializer's σ-SHAPE floor (item 6 merges only the
+    # latter, by per-cell data availability). This q_lcb-grounding correction was never live;
+    # activating it as a side effect of the flag cleanup would be a silent, unvalidated change
+    # to live sizing. Per the operator law it is DELETED, not activated — the live q_lcb keeps
+    # its current honest value (the certified fused-center bootstrap bound), unchanged.
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         bin_id = _candidate_replacement_bin_id(candidate, replacement_bundle)
         if not bin_id or bin_id not in q_map:
             raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BIN_BINDING_MISSING:{condition_id}")
         q_yes = min(max(float(q_map[bin_id]), 0.0), 1.0)
-        # FIX-C + BLOCKER 7: the settlement-grounded ceiling for THIS bin (flag ON only). The
-        # mode-aware resolver RAISES on a missing floor input when live_authority=True (here,
-        # always — block the candidate, never raw); it would log+return None only in shadow.
-        settlement_floor_lcb: float | None = None
-        if floor_enabled:
-            settlement_floor_lcb = _resolve_replacement_settlement_floor_lcb(
-                live_authority=live_authority,
-                city=str(family.city),
-                condition_id=condition_id,
-                bin_id=bin_id,
-                anchor_mu_c=anchor_mu_c,
-                sigma_floor_c=sigma_floor_c,
-                bounds=_replacement_bin_bounds_c(replacement_bundle, bin_id),
-            )
-        claimed_yes_lcb = _replacement_yes_lcb_for_bin(
-            replacement_bundle, bin_id=bin_id, q_yes=q_yes, settlement_floor_lcb=None
-        )
         yes_lcb = _replacement_yes_lcb_for_bin(
-            replacement_bundle,
-            bin_id=bin_id,
-            q_yes=q_yes,
-            settlement_floor_lcb=settlement_floor_lcb,
-        )
-        # ITEM 3 — shadow-log claimed -> floored on EVERY replacement q_lcb decision so
-        # live before/after validation data accrues from the next daemon run (the
-        # coverage-shrunk value, when licensed, is logged separately by the K3 helper).
-        _logging.getLogger("zeus.replacement_qlcb_shadow").info(
-            "replacement q_lcb floor city=%s cond=%s bin=%s claimed=%.6f floored=%.6f "
-            "floor_enabled=%s sigma_floor_c=%s anchor_mu_c=%s",
-            family.city, condition_id, bin_id, claimed_yes_lcb, yes_lcb,
-            floor_enabled,
-            "None" if sigma_floor_c is None else f"{sigma_floor_c:.4f}",
-            "None" if anchor_mu_c is None else f"{anchor_mu_c:.4f}",
+            replacement_bundle, bin_id=bin_id, q_yes=q_yes, settlement_floor_lcb=None
         )
         q_by_condition[condition_id] = q_yes
         _set_qlcb_provenance(
@@ -10674,24 +10486,20 @@ def _market_analysis_from_event_snapshot(
         _emos_season = ("DJF" if _emos_m in (12, 1, 2) else "MAM" if _emos_m in (3, 4, 5)
                         else "JJA" if _emos_m in (6, 7, 8) else "SON")
         # EMPIRICAL settlement σ-floor (loop-breaker, investigation 2026-06-05; iron rule 5:
-        # overconfidence = ruin). The q-builders are pure (no settings import); the SEAM reads the
-        # flag and passes an explicit bool. Default OFF ⇒ byte-identical to today. When ON, the
-        # builder floors σ at k·σ_settled (DETRENDED settlement std) — max() only WIDENS σ → lower
-        # q_lcb → fewer overconfident bets; can NEVER tighten or create a wrong-side trade.
-        _apply_settlement_floor = bool(
-            settings["edli"].get("edli_settlement_sigma_floor_enabled", False)
-        )
-        _require_settlement_floor = bool(
-            settings["edli"].get("edli_settlement_sigma_floor_required", True)
-        )
+        # overconfidence = ruin). Wave-2 item 6 (2026-06-12): the floor is now applied by PER-CELL
+        # DATA AVAILABILITY, not a global flag (edli_settlement_sigma_floor_enabled / _required
+        # merged + deleted). The q-builder floors σ at k·σ_settled (DETRENDED settlement std) when
+        # the fitted floor cell exists (required=False ⇒ a missing cell simply does not floor,
+        # never blocks) — max() only WIDENS σ → lower q_lcb → fewer overconfident bets; can NEVER
+        # tighten or create a wrong-side trade. One construction rule, no knob.
         try:
             from src.calibration.emos_q_builder import build_emos_q as _build_emos_q
             _emos_q = _build_emos_q(
                 city=city.name, season=_emos_season, metric=family.metric,
                 lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
                 members_native=raw_members, unit=unit, bins=bins,
-                apply_settlement_floor=_apply_settlement_floor,
-                require_settlement_floor=_require_settlement_floor,
+                apply_settlement_floor=True,
+                require_settlement_floor=False,
             )
         except Exception as _emos_exc:
             # DE-SILENCED ANTIBODY (#149 / live-diagnosis 2026-06-04): a bare
@@ -10743,15 +10551,15 @@ def _market_analysis_from_event_snapshot(
         _hr = None
         try:
             from src.calibration.emos_q_builder import build_honest_raw_q as _build_hr
-            # _apply_settlement_floor is defined in the `if _emos_regime:` block above (this elif is
-            # only reached when _emos_regime is True, so the block ran). Pass the same flag so the
-            # honest-raw path composes the EMPIRICAL settlement floor on top of the emos_σ_model floor.
+            # Wave-2 item 6: per-cell data-availability floor (no flag). The honest-raw path
+            # composes the EMPIRICAL settlement floor on top of the emos_σ_model floor whenever
+            # the fitted cell exists; required=False ⇒ a missing cell simply does not floor.
             _hr = _build_hr(
                 city=city.name, season=_emos_season, metric=family.metric,
                 lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
                 members_native=raw_members, unit=unit, bins=bins,
-                apply_settlement_floor=_apply_settlement_floor,
-                require_settlement_floor=_require_settlement_floor,
+                apply_settlement_floor=True,
+                require_settlement_floor=False,
             )
         except Exception as _hr_exc:  # noqa: BLE001 — best-effort floor; degrade to raw analytic, LOUD
             _hr = None
@@ -11141,32 +10949,9 @@ def _maybe_bias_decay_kelly_haircut(
         city = runtime_cities_by_name().get(family.city)
         if city is None:
             return kelly_multiplier, False, None, "no_city"
-        # Phase-2 K2+N1+#122 (task #167): corrected XOR haircut. When v2 is ON, consult the
-        # single typed BiasTreatment. If this (city,bucket) is on the CORRECT path the bias
-        # was already consumed by the p_raw shift — the haircut MUST NOT also fire on the
-        # same row (the N1 double penalty). The XOR invariant lives in BiasTreatment.
-        # kelly_factor(): a CORRECT treatment returns factor 1.0 (residual-after-correction
-        # is 0). Flag OFF -> this block is skipped -> legacy haircut byte-identical.
-        if bool(ev.get("bias_treatment_v2_enabled", False)):
-            _treatment = _edli_bias_treatment_for_bucket(family=family, city=city)
-            if _treatment is not None:
-                _unit = getattr(city, "settlement_unit", "C")
-                _thr = float(ev.get("bias_decay_threshold_f", 3.0)) if _unit == "F" else float(
-                    ev.get("bias_decay_threshold_c", 2.0)
-                )
-                _factor = float(ev.get("bias_decay_kelly_factor", 0.5))
-                _kf = _treatment.kelly_factor(threshold_native=_thr, haircut_factor=_factor)
-                if _kf < 1.0:
-                    logging.getLogger("zeus.edli_bias").info(
-                        "bias-decay haircut (v2 BiasTreatment) APPLIED city=%s residual=%.2f "
-                        "thr=%.2f factor=%.2f", family.city, _treatment.residual_native, _thr, _kf,
-                    )
-                    return kelly_multiplier * _kf, True, _treatment.residual_native, "bias_exceeds_v2"
-                # CORRECT path or within-threshold: NO haircut (XOR honoured).
-                return kelly_multiplier, False, _treatment.residual_native, "treated_v2_no_haircut"
-            # treatment is None: either no VERIFIED row, or correction flag OFF with no row.
-            # Fall through to the legacy fail-safe (data-absent -> conservative haircut),
-            # preserving the operator's data-insufficient-phase intent for uncovered buckets.
+        # Wave-2 item 7 (2026-06-12): the v2 typed-BiasTreatment XOR-haircut branch is
+        # DELETED (settlement-refuted; flag was permanently OFF). The legacy data-driven
+        # haircut below is the single unconditional path.
         unit = getattr(city, "settlement_unit", "C")
         metric = family.metric
         ldv = (
@@ -11263,123 +11048,6 @@ def _assert_single_temperature_mean_correction(
         )
 
 
-def _edli_bias_treatment_for_bucket(
-    *,
-    family,
-    city,
-    snapshot: dict[str, Any] | None = None,
-):
-    """Build the single typed ``BiasTreatment`` decision for a (city,bucket).
-
-    Phase-2 K2+N1+#122 (task #167). This is the ONE place the per-(city,bucket) bias is
-    turned into a decision; both the p_raw correction and the Kelly haircut consult it so a
-    bias is corrected XOR haircut, never both (kills the N1 double penalty). The fail-closed
-    BiasTreatment factory refuses NULL/non-VERIFIED authority (#122) and a training_cutoff
-    outside the target season (stale-fit gate). Returns ``None`` when:
-      * ``edli.bias_treatment_v2_enabled`` is OFF (legacy paths own the decision), OR
-      * no VERIFIED row / weight_live<=0 / effective_bias missing, OR
-      * the row fails the provenance or staleness gate (fail-closed).
-
-    The returned mode is CORRECT whenever the correction would be live for this bucket
-    (``edli.edli_bias_correction_enabled`` ON), else HAIRCUT — so the two consumers are
-    mutually exclusive by construction. Native unit: degC for C-cities, degF (x1.8) for
-    F-settled cities (matches the legacy member-array unit).
-    """
-    try:
-        ev = settings["edli"]
-        if not bool(ev.get("bias_treatment_v2_enabled", False)):
-            return None
-        import contextlib
-        from src.calibration.manager import season_from_date
-        from src.calibration.ens_bias_repo import read_bias_model
-        from src.state.db import get_world_connection
-        from src.contracts.bias_treatment import (
-            BiasProvenanceError,
-            BiasStaleError,
-            BiasTreatment,
-            BiasTreatmentMode,
-        )
-
-        metric = family.metric
-        ldv = (
-            "ecmwf_opendata_mx2t3_local_calendar_day_max"
-            if metric == "high"
-            else "ecmwf_opendata_mn2t3_local_calendar_day_min"
-        )
-        season = season_from_date(str(family.target_date), lat=city.lat)
-        month = int(str(family.target_date)[5:7])
-        with contextlib.closing(get_world_connection()) as conn:
-            try:
-                conn.row_factory = sqlite3.Row
-            except Exception:
-                pass
-            row = read_bias_model(
-                conn,
-                city=city.name,
-                season=season,
-                metric=metric,
-                live_data_version=ldv,
-                month=month,
-                target_month=month,
-                authority="VERIFIED",
-                error_model_family=_EDLI_BIAS_FAMILY,
-            )
-        if row is None:
-            return None
-        keys = set(row.keys())
-        eff = row["effective_bias_c"] if "effective_bias_c" in keys else None
-        wl = row["weight_live"] if "weight_live" in keys else 0.0
-        if eff is None or float(wl or 0.0) <= 0.0:
-            return None
-
-        unit = getattr(city, "settlement_unit", "C")
-        scale = 1.8 if unit == "F" else 1.0
-        eff_native = float(eff) * scale
-        resid_c = row["residual_sd_c"] if "residual_sd_c" in keys else None
-        resid_native = abs(float(resid_c)) * scale if resid_c is not None else 0.0
-        n_live = int(row["n_live"]) if ("n_live" in keys and row["n_live"] is not None) else 0
-        cs = row["correction_strength"] if "correction_strength" in keys else None
-        cs = float(cs) if cs is not None else 1.0
-        authority = row["authority"] if "authority" in keys else None
-        training_cutoff = row["training_cutoff"] if "training_cutoff" in keys else None
-
-        thr = float(ev.get("bias_decay_threshold_f", 3.0)) if unit == "F" else float(
-            ev.get("bias_decay_threshold_c", 2.0)
-        )
-        correction_on = bool(ev.get("edli_bias_correction_enabled", False))
-        mode = BiasTreatmentMode.CORRECT if correction_on else BiasTreatmentMode.HAIRCUT
-        try:
-            return BiasTreatment.from_row(
-                effective_bias_native=eff_native,
-                residual_sd_native=resid_native,
-                n_live=n_live,
-                correction_strength=cs,
-                authority=authority,
-                training_cutoff=training_cutoff,
-                target_date=str(family.target_date),
-                lat=float(city.lat),
-                threshold_native=thr,
-                mode=mode,
-            )
-        except (BiasProvenanceError, BiasStaleError) as exc:
-            # Fail closed: a NULL-authority or stale row never enters live q.
-            import logging
-            logging.getLogger("zeus.edli_bias").warning(
-                "BiasTreatment refused (fail-closed) city=%s metric=%s: %s",
-                getattr(city, "name", family.city), metric, exc,
-            )
-            return None
-    except Exception as exc:  # never break the live decision path
-        try:
-            import logging
-            logging.getLogger("zeus.edli_bias").warning(
-                "BiasTreatment build skipped (fail-closed): %s", exc
-            )
-        except Exception:
-            pass
-        return None
-
-
 def _maybe_apply_edli_bias_correction(
     members: np.ndarray,
     *,
@@ -11406,26 +11074,9 @@ def _maybe_apply_edli_bias_correction(
     try:
         if not bool(settings["edli"].get("edli_bias_correction_enabled", False)):
             return members, False
-        # Phase-2 K2+N1+#122 (task #167): when bias_treatment_v2_enabled is ON, the typed
-        # BiasTreatment gate is the single fail-closed decision. A NULL-authority (#122) or
-        # stale-cutoff row yields treatment=None -> NO correction (raw members), so an
-        # unverified/out-of-season bias never enters live q. The shift it applies is
-        # IDENTICAL to the legacy subtraction (eff_native = eff * (1.8 if F else 1)); only
-        # the fail-closed GATE is added. Flag OFF -> this block is skipped -> byte-identical.
-        if bool(settings["edli"].get("bias_treatment_v2_enabled", False)):
-            _treatment = _edli_bias_treatment_for_bucket(
-                family=family, city=city, snapshot=snapshot
-            )
-            if _treatment is None or not _treatment.is_correcting:
-                return members, False
-            corrected = np.asarray(members, dtype=float) - float(_treatment.shift_native)
-            import logging
-            logging.getLogger("zeus.edli_bias").info(
-                "EDLI bias correction (v2 BiasTreatment) city=%s metric=%s shift_native=%.3f "
-                "n_live=%d authority=%s", city.name, family.metric,
-                float(_treatment.shift_native), int(_treatment.n_live), _treatment.authority,
-            )
-            return corrected, True
+        # Wave-2 item 7 (2026-06-12): the v2 typed-BiasTreatment correction branch is
+        # DELETED (settlement-refuted; flag was permanently OFF). The legacy data-driven
+        # subtraction below is the single unconditional path.
         import contextlib
         from src.calibration.manager import season_from_date
         from src.calibration.ens_bias_repo import read_bias_model
@@ -11569,44 +11220,10 @@ def _edli_representativeness_sigma_native(
                     if resid_c is not None and float(resid_c) > 0.0 and np.isfinite(float(resid_c)):
                         chosen = max(chosen, float(resid_c))
                     sigma_native = chosen * _scale
-                    # Phase-2 K2 D4 (task #167): when bias_treatment_v2_enabled is ON and the
-                    # fit is low-n (n_live<20), fold the bias-MEAN standard error
-                    # (shift_se = residual_sd/sqrt(n)) into the representativeness σ IN
-                    # QUADRATURE so a low-n correction WIDENS q_lcb rather than applying a
-                    # hard point shift (iron rule 6).
-                    #
-                    # K2 D4 DOUBLE-COUNT FIX (2026-06-03, adversarial-verify finding #2):
-                    # the quadrature BASE must be the IN-SAMPLE residual_sd_c (= σ_resid),
-                    # NOT total_residual_sd_c. total_residual_sd_c = σ_resid·sqrt(1 + 1/n)
-                    # ALREADY contains the 1/n mean-estimation-drift term, so folding
-                    # shift_se² = σ_resid²/n onto total² gave σ_resid²·(1 + 2/n) — the 1/n is
-                    # counted TWICE (~6% over-wide q_lcb at n=7). Basing the fold on
-                    # residual_sd_c reconstructs exactly the intended predictive σ:
-                    #   sqrt(σ_resid² + σ_resid²/n) = σ_resid·sqrt(1 + 1/n) = total_residual_sd_c.
-                    # The fold therefore widens to the honest predictive σ once, never twice.
-                    # Flag OFF -> sigma_native returned unchanged (byte-identical legacy).
-                    try:
-                        if bool(settings["edli"].get("bias_treatment_v2_enabled", False)):
-                            import math as _math
-                            _n = (
-                                int(row["n_live"])
-                                if ("n_live" in keys and row["n_live"] is not None)
-                                else 0
-                            )
-                            if 0 < _n < 20 and resid_c is not None and float(resid_c) > 0.0:
-                                # IN-SAMPLE σ is the quadrature base (no 1/n term in it).
-                                in_sample_native = float(resid_c) * _scale
-                                shift_se_native = (float(resid_c) / _math.sqrt(_n)) * _scale
-                                folded = float(
-                                    _math.sqrt(in_sample_native ** 2 + shift_se_native ** 2)
-                                )
-                                # Defensive: never let the D4 fold TIGHTEN below the σ already
-                                # chosen (total_residual_sd_c floor). With honest producer
-                                # stamps folded == sigma_native; the max only guards a row
-                                # whose total < σ_resid·sqrt(1+1/n) (stale/legacy stamp).
-                                sigma_native = max(sigma_native, folded)
-                    except Exception:
-                        pass
+                    # Wave-2 item 7 (2026-06-12): the K2-D4 low-n bias-MEAN-SE σ-widening
+                    # fold (gated by the permanently-OFF typed bias-treatment flag) is
+                    # DELETED. The currently-OFF behavior is preserved: sigma_native is
+                    # returned unchanged, never folded.
                     return sigma_native
     except Exception as exc:
         try:

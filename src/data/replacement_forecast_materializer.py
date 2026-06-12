@@ -509,80 +509,6 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
     return int(row[0] if not isinstance(row, sqlite3.Row) else row["anchor_id"])
 
 
-def _replacement_eb_bias_shift_c(
-    request: ReplacementForecastMaterializeRequest,
-    *,
-    metric: str,
-) -> float | None:
-    """Flag-gated per-city EB bias shift (degC) for the replacement_0_1 center.
-
-    P2_BLEND.md §3,§4,§5. Returns the degC shift to subtract from the AIFS member votes
-    and the OM9 anchor center BEFORE the zero-prior veto, or None when the flag is OFF or
-    no VERIFIED promoted bias exists (FAIL-CLOSED). REUSES the already-built
-    zeus-world.model_bias_ens via src/calibration/replacement_eb_bias (ONE-BUILDER — no
-    parallel store). Self-calibrating: the shift is whatever the accruing per-city VERIFIED
-    residuals currently say (no hardcoded magnitude).
-
-    The bias row is keyed by the LIVE forecast product the bias was fit on
-    (model_bias_ens.live_data_version = the OpenData ECMWF ENS product, the same ECMWF
-    family as AIFS — P2_BLEND.md §1b), NOT the soft-anchor posterior data_version. The key
-    + the cell unit + season come from config so this surface holds no magic constants. Any
-    failure / missing config / missing row degrades to None (no correction). Never raises.
-    """
-    try:
-        from src.config import runtime_cities_by_name, settings  # noqa: PLC0415
-
-        edli_cfg = settings["edli"]
-        if not bool(edli_cfg.get("replacement_0_1_eb_bias_correction_enabled", False)):
-            return None
-
-        # live_data_version the promoted bias was fit on (OpenData ENS product family).
-        # Product-keyed (HIGH vs LOW); resolved from config, fail-closed if absent.
-        ldv_map = edli_cfg.get("replacement_0_1_eb_bias_live_data_version") or {}
-        bias_ldv = ldv_map.get(metric) if isinstance(ldv_map, dict) else None
-        if not bias_ldv:
-            return None
-
-        city_obj = runtime_cities_by_name().get(request.city)
-        if city_obj is None:
-            return None
-        lat = float(getattr(city_obj, "lat", 90.0))
-        settlement_unit = str(getattr(city_obj, "settlement_unit", "C"))
-
-        from src.contracts.season import season_from_date  # noqa: PLC0415
-
-        target_date = _date_text(request.target_date)
-        season = season_from_date(target_date, lat=lat)
-        month = int(str(target_date)[5:7])
-
-        from src.calibration.replacement_eb_bias import resolve_replacement_eb_bias_shift_c  # noqa: PLC0415
-        from src.state.db import get_world_connection  # noqa: PLC0415
-        import contextlib  # noqa: PLC0415
-
-        with contextlib.closing(get_world_connection()) as world_conn:
-            return resolve_replacement_eb_bias_shift_c(
-                world_conn,
-                city=request.city,
-                season=season,
-                month=month,
-                metric=metric,
-                live_data_version=str(bias_ldv),
-                settlement_unit=settlement_unit,
-                # ITEM 2 anti-lookahead self-gate: the resolver serves the row only if its
-                # training_cutoff is STRICTLY BEFORE this target_date (no external gate).
-                target_date=target_date,
-            )
-    except Exception as exc:  # fail-closed: never break shadow materialization
-        try:
-            import logging  # noqa: PLC0415
-            logging.getLogger("zeus.replacement_eb_bias").warning(
-                "replacement_0_1 EB bias wiring skipped (fail-closed): %s", exc
-            )
-        except Exception:
-            pass
-        return None
-
-
 def _replacement_fused_q_shape_enabled() -> bool:
     """Flag gate for the FUSED-Q SHAPE replacement (2026-06-09 AIFS-replacement experiment).
 
@@ -604,39 +530,6 @@ def _replacement_fused_q_shape_enabled() -> bool:
         return False
 
 
-def _edli_settlement_sigma_floor_enabled() -> bool:
-    """FIX 2 (2026-06-09) — flag gate for the settlement sigma floor in the FUSED-Q path.
-
-    Mirrors the EMOS path's `edli_settlement_sigma_floor_enabled`. When true the fused-q sigma is
-    floored at the SAME empirical settlement dispersion floor the EMOS path uses
-    (src/calibration/emos.settlement_sigma_floor) so the operator-facing "floor enabled" claim
-    actually protects the strategy of record. FAIL-CLOSED: any config error -> False (no floor).
-    """
-    try:
-        from src.config import settings  # noqa: PLC0415
-
-        return bool(settings["edli"].get("edli_settlement_sigma_floor_enabled", False))
-    except Exception:
-        return False
-
-
-def _edli_settlement_sigma_floor_required() -> bool:
-    """FIX 2 (2026-06-09) — whether an AVAILABLE settlement floor is REQUIRED to keep FULL mode.
-
-    Mirrors `edli_settlement_sigma_floor_required` (current config: false). When false a fused-N
-    q built WITHOUT an available floor stays FUSED_NORMAL_FULL (the floor only widens when present);
-    when true a missing floor degrades the q-mode to FUSED_NORMAL_PARTIAL (live gate still admits,
-    but the receipt shows the degraded mode). This NEVER invents a new blocking lane beyond the
-    flag semantics. FAIL-CLOSED: any config error -> False (do not require a floor).
-    """
-    try:
-        from src.config import settings  # noqa: PLC0415
-
-        return bool(settings["edli"].get("edli_settlement_sigma_floor_required", False))
-    except Exception:
-        return False
-
-
 def _replacement_settlement_sigma_floor_lookup(
     request: "ReplacementForecastMaterializeRequest",
     *,
@@ -652,7 +545,7 @@ def _replacement_settlement_sigma_floor_lookup(
     Single-builder: this calls src.calibration.emos.settlement_sigma_floor (the SAME lookup the
     EMOS q-builder uses, keyed city|season|metric via emos_cell_key), with required=False so a
     missing cell returns None rather than raising. Season is derived from target_date + the city's
-    config latitude (the same derivation _replacement_eb_bias_shift_c uses). FAIL-SOFT throughout.
+    config latitude (season_from_date(target_date, lat)). FAIL-SOFT throughout.
     """
     try:
         from src.config import runtime_cities_by_name  # noqa: PLC0415
@@ -1324,10 +1217,11 @@ def _insert_posterior(
     metric: str,
     anchor_id: int,
 ) -> int:
-    # P2_BLEND.md §3-§5: flag-gated per-city EB bias-correction of the center, applied
-    # BEFORE the soft-anchor zero-prior veto (inside build_openmeteo_ifs9_aifs_soft_anchor_result).
-    # None when flag OFF or no VERIFIED row -> byte-identical to today.
-    bias_shift_c = _replacement_eb_bias_shift_c(request, metric=metric)
+    # Wave-2 item 7 (2026-06-12): the per-city EB bias-correction of the center is
+    # DELETED — settlement-refuted as a wrong-set over-correction (2026-06-09 wiring
+    # audit, commit ff7f33dd5b). The center is never shifted by this layer; the
+    # zero-prior veto and downstream q_lcb floor are unchanged.
+    bias_shift_c = None
     # THE_PATH member-vote smoothing: flag-gated additive Laplace/Dirichlet alpha so the AIFS
     # member prior is strictly positive on every bin and the soft_anchor.py:197-198 zero-prior
     # -inf veto can never make a bin un-hittable. None when flag OFF -> byte-identical to today.
@@ -1415,12 +1309,14 @@ def _insert_posterior(
             # asymmetric floor() preimage is used instead of the symmetric WMO one. Uniform
             # across the family (fail-loud if mixed).
             _rounding_rule = _family_rounding_rule(request.bins)
-            # FIX 2 — settlement sigma floor coherence in the fused-q path. The EMOS path floors
-            # sigma at the empirical settlement dispersion floor (edli_settlement_sigma_floor_enabled);
-            # the fused-q path previously did NOT consult it, so "floor enabled" silently did not
-            # protect the strategy of record. Look up the SAME floor (city|season|metric) and widen:
-            # sigma_used = max(sigma_pred, floor). max() only WIDENS -> flatter q -> fewer overconfident
-            # bets (it can never tighten). Missing/malformed floor -> recorded, NEVER blocks shadow.
+            # Wave-2 item 6 (2026-06-12): the settlement σ-floor is applied by PER-CELL DATA
+            # AVAILABILITY, not a global flag (edli_settlement_sigma_floor_enabled / _required
+            # merged + deleted). Look up the SAME floor the EMOS path uses (city|season|metric)
+            # and widen: sigma_used = max(sigma_pred, floor). max() only WIDENS -> flatter q ->
+            # fewer overconfident bets (it can never tighten). When the fitted floor exists for
+            # the cell it applies; when it is absent/malformed for the cell the lookup returns
+            # None and the floor is simply not applied (recorded, NEVER blocks shadow). One
+            # construction rule, no knob.
             _sigma_pred = float(bayes_precision_fusion_override.predictive_sigma_c)
             _sigma_used = _sigma_pred
             replacement_sigma_basis = "fused_center_residual_std"
@@ -1444,17 +1340,16 @@ def _insert_posterior(
                 _sigma_pred = _sigma_pred * _k
                 _sigma_used = _sigma_pred
                 sigma_scale_k_applied = _k
-            if _edli_settlement_sigma_floor_enabled():
-                _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
-                    request, metric=metric
-                )
-                if _floor_c is not None:
-                    settlement_sigma_floor_c = float(_floor_c)
-                    if float(_floor_c) > _sigma_used:
-                        _sigma_used = float(_floor_c)
-                    settlement_sigma_floor_applied = True
-                else:
-                    floor_unavailable_reason = _floor_reason
+            _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
+                request, metric=metric
+            )
+            if _floor_c is not None:
+                settlement_sigma_floor_c = float(_floor_c)
+                if float(_floor_c) > _sigma_used:
+                    _sigma_used = float(_floor_c)
+                settlement_sigma_floor_applied = True
+            else:
+                floor_unavailable_reason = _floor_reason
             # CATCH-ALL EXEMPTION (2026-06-10, Paris >=26C incident /tmp/deep_verify_report.md
             # Verification A). The settlement sigma floor is calibrated on INTERIOR-bin settlement
             # dispersion and its contract is "max() only WIDENS -> flatter q -> fewer overconfident
@@ -1583,14 +1478,11 @@ def _insert_posterior(
                 except Exception:
                     pass
             # FIX 1 — FULL vs PARTIAL. The fused Normal is the constructed shape either way (so the
-            # live gate admits both); PARTIAL records a degraded fusion. PARTIAL when EITHER the K3
-            # decorrelated-provider set was INCOMPLETE (reuses the override's verdict, not a parallel
-            # check) OR (per flag semantics) a settlement floor was REQUIRED but unavailable for this
-            # cell. With the current config (edli_settlement_sigma_floor_required=false) a missing
-            # floor does NOT degrade the mode.
-            _floor_required_but_missing = (
-                _edli_settlement_sigma_floor_required() and not settlement_sigma_floor_applied
-            )
+            # live gate admits both); PARTIAL records a degraded fusion (the K3 decorrelated-provider
+            # set was INCOMPLETE — reuses the override's verdict, not a parallel check). Wave-2 item 6
+            # (2026-06-12): the former settlement-floor-REQUIRED mode-degrade (edli_settlement_sigma_
+            # floor_required, permanently false) is DELETED — a missing per-cell floor never degrades
+            # the mode; floor application is purely data-availability driven above.
             # PR#403 FIX (2026-06-09): bounds required for live eligibility. FUSED_NORMAL_FULL/PARTIAL
             # now REQUIRES both q_lcb_map and q_ucb_map successfully built. Bounds failure degrades
             # to FUSED_NORMAL_BOUNDS_MISSING — the point q is fine (shadow accrual continues) but the
@@ -1598,7 +1490,7 @@ def _insert_posterior(
             # point + Wilson LCB authority = two incompatible regimes, exactly the Milan root cause.
             if q_lcb_map is None or q_ucb_map is None:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING
-            elif bayes_precision_fusion_override.decorrelated_providers_complete and not _floor_required_but_missing:
+            elif bayes_precision_fusion_override.decorrelated_providers_complete:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL
             else:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL

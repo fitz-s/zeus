@@ -16,7 +16,7 @@
 # Relationship invariant (_assert_edli_stage_readiness -> daemon boot, cross-mode):
 #   When edli_shadow_no_submit is active and stage-surface files are absent/stale,
 #   _assert_edli_stage_readiness() MUST NOT raise — it logs a warning and returns.
-#   For edli_live_canary, the same absent surfaces MUST cause a RuntimeError.
+#   For edli_live, the same absent surfaces MUST cause a RuntimeError.
 
 import sqlite3
 import pytest
@@ -100,16 +100,17 @@ def test_shadow_boot_survives_stale_stage_surfaces(tmp_path):
     assert result.stage == "edli_shadow_no_submit"
 
 
-def test_canary_boot_blocks_on_absent_stage_surfaces(tmp_path):
-    """Gate must NOT be relaxed globally: edli_live_canary MUST raise when
-    stage surfaces are absent.  Only shadow gets the deferred-surface treatment."""
-    canary_cfg = {
-        "live_execution_mode": "edli_live_canary",
+def test_live_boot_blocks_on_absent_stage_surfaces(tmp_path):
+    """Gate must NOT be relaxed globally: edli_live MUST raise when stage surfaces
+    are absent. Only shadow gets the deferred-surface treatment. (Wave-2 item 5:
+    canary collapsed into edli_live — the boot-block readiness path is unchanged.)"""
+    live_cfg = {
+        "live_execution_mode": "edli_live",
         "edli_stage_loaded_sha_file": str(tmp_path / "loaded_sha.json"),
         "edli_stage_source_health_json": str(tmp_path / "source_health.json"),
         "edli_stage_status_json": str(tmp_path / "status_summary.json"),
-        "edli_live_canary_artifact_path": "",
+        "edli_live_promotion_artifact_path": str(tmp_path / "promotion.json"),
     }
     # No surfaces exist.
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_READINESS_FAIL"):
-        _assert_edli_stage_readiness(canary_cfg)
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_READINESS_FAIL"):
+        _assert_edli_stage_readiness(live_cfg)

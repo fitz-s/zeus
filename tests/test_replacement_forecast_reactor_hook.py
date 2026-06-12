@@ -451,25 +451,28 @@ def _proof(*, direction: str = "buy_yes:warm", q_lcb: float = 0.62, bin=None):
     )
 
 
-def test_hook_factory_caps_replacement_q_lcb_only_before_live_authority() -> None:
+def test_hook_factory_uses_replacement_q_lcb_uncapped_single_authority() -> None:
+    """Wave-2 item 1: the candidate q_lcb is the replacement value DIRECTLY, never capped
+    to the (lower) legacy baseline — single q authority, for EVERY policy status.
+
+    Relationship test: baseline q_lcb = 0.62 < replacement q_lcb = 0.65. The former code
+    capped the shadow view to 0.62 (min(replacement, baseline)). With the baseline cap
+    deleted, the candidate view carries the replacement's 0.65 regardless of policy status;
+    the SHADOW_VETO down-clamp (if it fires) lives later in the veto guardrail, not here.
+    """
     from src.engine.replacement_forecast_hook_factory import _candidate_view_from_proof
 
-    shadow_view = _candidate_view_from_proof(
+    view = _candidate_view_from_proof(
         _proof(q_lcb=0.62),
         _dt(4),
         replacement_bundle=_bundle(),
-        cap_replacement_q_lcb_to_baseline=True,
-    )
-    live_view = _candidate_view_from_proof(
-        _proof(q_lcb=0.62),
-        _dt(4),
-        replacement_bundle=_bundle(),
-        cap_replacement_q_lcb_to_baseline=False,
     )
 
-    assert shadow_view.candidate_q_lcb == pytest.approx(0.62)
-    assert live_view.candidate_q_posterior == pytest.approx(0.75)
-    assert live_view.candidate_q_lcb == pytest.approx(0.65)
+    # The candidate q_lcb is the replacement's 0.65 — NOT capped down to baseline 0.62.
+    assert view.candidate_q_lcb == pytest.approx(0.65)
+    assert view.candidate_q_posterior == pytest.approx(0.75)
+    # The baseline is still carried for diagnostics, never as a cap on the candidate.
+    assert view.baseline_q_lcb == pytest.approx(0.62)
 
 
 def _create_minimal_readiness_state(conn: sqlite3.Connection) -> None:

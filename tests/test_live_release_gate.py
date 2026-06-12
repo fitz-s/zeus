@@ -177,22 +177,21 @@ def _make_gate_args(
 
 
 def _settings_for_stage(stage: str, **overrides: object) -> dict[str, object]:
+    # Wave-2 item 5: canary collapsed into edli_live (the only event-driven live mode).
+    # The deleted live_canary_enabled / taker_fok_fak_live_enabled flags are NOT emitted.
     reactor = {
         "legacy_cron": "disabled",
         "edli_submit_disabled_bridge": "submit_disabled_live_bridge",
-        "edli_live_canary": "live",
         "edli_live": "live",
     }[stage]
     edli = {
         "enabled": stage != "legacy_cron",
         "live_execution_mode": stage,
         "reactor_mode": reactor,
-        "market_channel_ingestor_enabled": stage in {"edli_submit_disabled_bridge", "edli_live_canary", "edli_live"},
-        "edli_user_channel_reconcile_enabled": stage in {"edli_submit_disabled_bridge", "edli_live_canary", "edli_live"},
-        "real_order_submit_enabled": stage in {"edli_live_canary", "edli_live"},
-        "live_canary_enabled": stage in {"edli_live_canary", "edli_live"},
-        "taker_fok_fak_live_enabled": stage in {"edli_live_canary", "edli_live"},
-        "durable_submit_outbox_enabled": stage in {"edli_live_canary", "edli_live"},
+        "market_channel_ingestor_enabled": stage in {"edli_submit_disabled_bridge", "edli_live"},
+        "edli_user_channel_reconcile_enabled": stage in {"edli_submit_disabled_bridge", "edli_live"},
+        "real_order_submit_enabled": stage == "edli_live",
+        "durable_submit_outbox_enabled": stage == "edli_live",
         "edli_live_operator_authorized": stage == "edli_live",
     }
     edli.update(overrides)
@@ -223,19 +222,8 @@ def test_release_gate_is_stage_aware_for_edli_modes(tmp_path: Path) -> None:
     assert bridge.submit_allowed is False
     assert bridge.scaleout_allowed is False
 
-    canary_root = tmp_path / "canary"
-    canary_root.mkdir()
-    canary_args = _make_gate_args(canary_root)
-    canary_args.stage = "edli_live_canary"
-    canary = evaluate_release_gate(canary_args)
-    assert canary.status == PASS
-    assert canary.stage_status == "WAITING_FOR_QUALIFYING_EVENT"
-    assert canary.daemon_start_allowed is True
-    assert canary.deploy_ready is False
-    assert canary.live_entries_allowed is True
-    assert canary.submit_allowed is True
-    assert canary.scaleout_allowed is False
-
+    # Wave-2 item 5: canary collapsed into edli_live. The single live mode requires the
+    # verified promotion artifact for live entries; absent it, the gate fails closed.
     live_root = tmp_path / "live"
     live_root.mkdir()
     live_args = _make_gate_args(live_root)
@@ -251,11 +239,11 @@ def test_release_gate_is_stage_aware_for_edli_modes(tmp_path: Path) -> None:
     )
 
 
-def test_release_gate_canary_blocks_pending_reconcile(tmp_path: Path) -> None:
+def test_release_gate_live_blocks_pending_reconcile(tmp_path: Path) -> None:
     from src.state.schema.edli_live_order_events_schema import ensure_tables
 
     args = _make_gate_args(tmp_path)
-    args.stage = "edli_live_canary"
+    args.stage = "edli_live"
     conn = sqlite3.connect(str(args.world_db))
     try:
         ensure_tables(conn)
@@ -295,42 +283,9 @@ def test_release_gate_canary_blocks_pending_reconcile(tmp_path: Path) -> None:
     )
 
 
-def test_release_gate_canary_does_not_require_paper_live_unknown(tmp_path: Path) -> None:
-    args = _make_gate_args(tmp_path, live_eligibility="READY")
-    args.stage = "edli_live_canary"
-
-    report = evaluate_release_gate(args)
-
-    assert report.status == PASS
-    assert report.submit_allowed is True
-    assert all(result.name != "paper_money_path_proof" for result in report.results)
-
-
-def test_release_gate_canary_does_not_consume_arm_gate_artifact(tmp_path: Path) -> None:
-    args = _make_gate_args(tmp_path)
-    args.stage = "edli_live_canary"
-    args.arm_artifact_json.write_text(
-        json.dumps(
-            {
-                "schema": "edli_arm_gate_v1",
-                "commit_sha": "sha-a",
-                "measurement_cmd_hash": "test-measurement",
-                "capital_weighted_ev": 0.0,
-                "production_n": 0,
-                "per_city_n": {},
-                "ev_sigma": 0.0,
-                "date_coverage": {"n_pairs": 0, "pairs": []},
-                "coverage_licensed": False,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    report = evaluate_release_gate(args)
-
-    assert report.status == PASS
-    assert report.submit_allowed is True
-    assert all(result.name != "edli_arm_gate_artifact" for result in report.results)
+# Wave-2 item 5: the canary qualifying-lane exemptions (no paper proof, no arm-gate
+# artifact consumption) are DELETED with the canary mode. edli_live is the single live
+# mode and consumes the arm-gate + promotion artifacts — covered by the live tests below.
 
 
 def test_release_gate_live_still_requires_arm_gate_artifact(tmp_path: Path) -> None:
@@ -376,7 +331,7 @@ def test_release_gate_legacy_still_requires_paper_live_unknown(tmp_path: Path) -
 
 def test_release_gate_stage_settings_reject_stage_mismatch(tmp_path: Path) -> None:
     args = _make_gate_args(tmp_path, settings_payload=_settings_for_stage("legacy_cron"))
-    args.stage = "edli_live_canary"
+    args.stage = "edli_live"
 
     report = evaluate_release_gate(args)
 
@@ -388,9 +343,9 @@ def test_release_gate_stage_settings_reject_stage_mismatch(tmp_path: Path) -> No
 def test_release_gate_stage_settings_reject_reactor_mismatch(tmp_path: Path) -> None:
     args = _make_gate_args(
         tmp_path,
-        settings_payload=_settings_for_stage("edli_live_canary", reactor_mode="live_no_submit"),
+        settings_payload=_settings_for_stage("edli_live", reactor_mode="live_no_submit"),
     )
-    args.stage = "edli_live_canary"
+    args.stage = "edli_live"
 
     report = evaluate_release_gate(args)
 
@@ -412,31 +367,19 @@ def test_release_gate_stage_settings_reject_live_submit_disabled(tmp_path: Path)
     assert any(result.name == "stage_settings" and "real_order_submit_enabled=false" in result.detail for result in report.results)
 
 
-def test_release_gate_stage_settings_reject_live_taker_disabled(tmp_path: Path) -> None:
-    args = _make_gate_args(
-        tmp_path,
-        settings_payload=_settings_for_stage("edli_live_canary", taker_fok_fak_live_enabled=False),
-    )
-    args.stage = "edli_live_canary"
+# Wave-2 item 8: the taker_fok_fak_live_enabled stage-settings precondition is DELETED
+# (taker FOK/FAK legality is unconditional). The former reject-live-taker-disabled test
+# is therefore obsolete and removed.
+
+
+def test_release_gate_stage_settings_accept_matching_live_config(tmp_path: Path) -> None:
+    args = _make_gate_args(tmp_path, settings_payload=_settings_for_stage("edli_live"))
+    args.stage = "edli_live"
 
     report = evaluate_release_gate(args)
 
-    assert report.status == FAIL
-    assert report.submit_allowed is False
-    assert any(
-        result.name == "stage_settings" and "taker_fok_fak_live_enabled=false" in result.detail
-        for result in report.results
-    )
-
-
-def test_release_gate_stage_settings_accept_matching_canary_config(tmp_path: Path) -> None:
-    args = _make_gate_args(tmp_path, settings_payload=_settings_for_stage("edli_live_canary"))
-    args.stage = "edli_live_canary"
-
-    report = evaluate_release_gate(args)
-
-    assert report.status == PASS
-    assert report.submit_allowed is True
+    # The stage_settings sub-gate PASSes for a config that matches the edli_live stage
+    # (the overall gate may still require the promotion artifact, asserted elsewhere).
     assert any(result.name == "stage_settings" and result.status == PASS for result in report.results)
 
 

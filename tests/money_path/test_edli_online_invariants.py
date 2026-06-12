@@ -32,17 +32,16 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     # config note keys edli._edli_live_scope_note_2026_06_09 (operator directive
     # 2026-06-09 "全部打开 ... 把这些 gate 都删了": the shadow-only gate that blocked
     # real submit was removed) and edli._mass_enable_note_2026_06_09. Current law
-    # is live_execution_mode == "edli_live_canary" with real submit + taker live ON,
-    # subject to all OTHER arm/promotion/coverage proofs (enforced by the live-canary
-    # readiness tests below). The dead shadow-mode "must be OFF" assertions are gone;
-    # we pin the armed-canary posture as config truth instead.
-    # NB: the value is read into a local before asserting so this file never contains
-    # the literal substring guarded by the meta-test below.
+    # is live_execution_mode == "edli_live" (Wave-2 item 5: canary collapsed into the
+    # single live mode) with real submit ON, subject to all OTHER arm/promotion/coverage
+    # proofs (enforced by the live-readiness tests below). The dead shadow-mode "must be
+    # OFF" assertions are gone; we pin the armed-live posture as config truth instead.
+    # Wave-2 item 8: taker_fok_fak_live_enabled is DELETED (taker law unconditional), so
+    # it is no longer read here. NB: the value is read into a local before asserting so
+    # this file never contains the literal substring guarded by the meta-test below.
     real_submit = edli["real_order_submit_enabled"]
-    taker_live = edli["taker_fok_fak_live_enabled"]
-    assert real_submit is True, "ARMED: operator armed real order submission (live canary)"
-    assert taker_live is True, "ARMED: operator armed taker FOK/FAK (live canary)"
-    assert edli["live_execution_mode"] == "edli_live_canary", "ARMED: live-canary mode"
+    assert real_submit is True, "ARMED: operator armed real order submission (live)"
+    assert edli["live_execution_mode"] == "edli_live", "ARMED: edli_live mode"
     assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
     assert edli["day0_extreme_trigger_enabled"] is True
     assert edli["day0_authority_catchup_scanner_enabled"] is True
@@ -81,10 +80,8 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     # _mass_enable_note_2026_06_09 + _edli_live_scope_note_2026_06_09). Values read
     # into locals so this file never carries the substring guarded by the meta-test.
     real_submit = edli["real_order_submit_enabled"]
-    taker_live = edli["taker_fok_fak_live_enabled"]
     operator_authorized = edli["edli_live_operator_authorized"]
     assert real_submit is True
-    assert taker_live is True
     assert operator_authorized is True
     # Wave-1 2026-06-12: the promotion-artifact + canary-count + live_canary gate flags
     # are DELETED (the operator arm is the sole gate). Keys must be ABSENT.
@@ -149,9 +146,7 @@ def test_day0_scope_admits_day0_with_market_channel_armed():
     assert edli["day0_authority_catchup_scanner_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is True
     real_submit = edli["real_order_submit_enabled"]
-    taker_live = edli["taker_fok_fak_live_enabled"]
     assert real_submit is True
-    assert taker_live is True
 
 
 def test_pr_scope_document_matches_settings_flags():
@@ -168,10 +163,8 @@ def test_pr_scope_document_matches_settings_flags():
     spec = Path("docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md").read_text()
 
     real_submit = edli["real_order_submit_enabled"]
-    taker_live = edli["taker_fok_fak_live_enabled"]
-    assert real_submit is True, "ARMED: operator armed real order submission (live canary)"
-    assert taker_live is True, "ARMED: operator armed taker FOK/FAK (live canary)"
-    assert edli["live_execution_mode"] == "edli_live_canary", "ARMED: live-canary mode"
+    assert real_submit is True, "ARMED: operator armed real order submission (live)"
+    assert edli["live_execution_mode"] == "edli_live", "ARMED: edli_live mode"
     assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
     assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is True
@@ -211,7 +204,8 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "event_bound_live_adapter_from_trade_conn" in source
     assert 'submit_disabled_effective_mode = reactor_mode == "live_no_submit"' in source
     assert 'real_submit_effective = real_order_submit_enabled if reactor_mode == "live" else False' in source
-    assert "taker_fok_fak_effective" in source
+    # Wave-2 item 8: taker_fok_fak_effective deleted (taker law unconditional).
+    assert "taker_fok_fak_effective" not in source
     assert "live_submit_effective = live_bridge_mode or submit_disabled_effective_mode" in source
     assert "real submit disabled this cycle because portfolio_state_unavailable" in source
     assert "if real_submit_effective and _portfolio_state_provider is None" in source
@@ -235,7 +229,7 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "_assert_live_execution_mode_contract" in source
     assert "live_execution_mode == \"legacy_cron\"" in source
     assert "edli_submit_disabled_bridge" in source
-    assert "edli_live_canary" in source
+    assert "edli_live" in source
     assert "EDLI_EVENT_DRIVEN_MODES" in source
     for existing_job in ("opening_hunt", "day0_capture", "imminent_open_capture", "market_discovery", "harvester"):
         assert existing_job in source
@@ -255,7 +249,6 @@ def test_live_execution_mode_legacy_cron_does_not_register_edli_reactor(monkeypa
             "market_channel_ingestor_enabled": False,
             "edli_user_channel_reconcile_enabled": False,
             "real_order_submit_enabled": False,
-            "taker_fok_fak_live_enabled": False,
         },
     )
 
@@ -289,7 +282,6 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
             "market_channel_ingestor_enabled": True,
             "edli_user_channel_reconcile_enabled": True,
             "real_order_submit_enabled": False,
-            "taker_fok_fak_live_enabled": False,
             **_stage_evidence_updates(tmp_path),
         },
     )
@@ -342,7 +334,6 @@ def test_market_substrate_warm_cadence_stays_inside_executable_price_ttl(monkeyp
             "market_channel_ingestor_enabled": False,
             "edli_user_channel_reconcile_enabled": False,
             "real_order_submit_enabled": False,
-            "taker_fok_fak_live_enabled": False,
             **_stage_evidence_updates(tmp_path),
         },
     )
@@ -376,7 +367,6 @@ def test_shadow_no_submit_with_user_ws_registers_reconcile_job(monkeypatch, tmp_
             "market_channel_ingestor_enabled": False,
             "edli_user_channel_reconcile_enabled": False,
             "real_order_submit_enabled": False,
-            "taker_fok_fak_live_enabled": False,
             **_stage_evidence_updates(tmp_path),
         },
     )
@@ -449,19 +439,20 @@ def test_forecast_only_live_scope_rejects_day0_runtime(monkeypatch):
 
 
 def test_live_execution_mode_stage_requires_matching_reactor_mode(monkeypatch):
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_REQUIRES_REACTOR_MODE_LIVE"):
+    # Wave-2 item 5: canary collapsed into edli_live; the contract error is now
+    # EDLI_LIVE_REQUIRES_REACTOR_MODE_LIVE (mode.upper() = EDLI_LIVE).
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_REACTOR_MODE_LIVE"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
                 "enabled": True,
-                "live_execution_mode": "edli_live_canary",
+                "live_execution_mode": "edli_live",
                 "reactor_mode": "live_no_submit",
                 "event_writer_enabled": True,
                 "forecast_snapshot_trigger_enabled": True,
                 "market_channel_ingestor_enabled": True,
                 "edli_user_channel_reconcile_enabled": True,
                 "real_order_submit_enabled": True,
-                "live_canary_enabled": True,
             },
         )
 
@@ -535,7 +526,7 @@ def test_live_canary_requires_submit_flag(monkeypatch):
             monkeypatch,
             {
                 "enabled": True,
-                "live_execution_mode": "edli_live_canary",
+                "live_execution_mode": "edli_live",
                 "reactor_mode": "live",
                 "event_writer_enabled": True,
                 "forecast_snapshot_trigger_enabled": True,
@@ -573,37 +564,38 @@ def test_live_canary_requires_stage_evidence_file_paths(monkeypatch, tmp_path):
     # _require_stage_file_paths (config-key check) no longer raises.
     # evaluate_edli_stage_readiness (disk-existence check) raises instead:
     # absent files → STALE/MISSING reasons → FAIL status →
-    # _assert_edli_stage_readiness raises EDLI_LIVE_CANARY_READINESS_FAIL.
+    # _assert_edli_stage_readiness raises EDLI_LIVE_READINESS_FAIL (Wave-2 item 5:
+    # canary collapsed into edli_live; the boot-block readiness path is unchanged).
     # Boot is fail-CLOSED: guard is intact, source of raise shifted.
-    # RATIFIED 2026-06-03 (FIX-2 investigation). See also: src/main.py
-    # lines 370-426 (_require_stage_file_paths, evaluate_edli_stage_readiness).
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_READINESS_FAIL"):
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_READINESS_FAIL"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             _edli_live_canary_updates(
                 edli_stage_loaded_sha_file=str(tmp_path / "missing-loaded-sha.json"),
                 edli_stage_source_health_json=str(tmp_path / "missing-source-health.json"),
                 edli_stage_status_json=str(tmp_path / "missing-status-summary.json"),
+                edli_live_promotion_artifact_path=str(tmp_path / "missing-promotion.json"),
             ),
         )
 
 
 def test_edli_live_canary_stage_readiness_waits_on_clean_db(monkeypatch, tmp_path):
+    # Wave-2 item 5: canary collapsed into edli_live. On a clean DB with no stage-file
+    # blockers, edli_live readiness PASSes with full live allowance (the canary
+    # qualifying-event WAITING semantics + scaleout=False are dead). The canary artifact
+    # param is also deleted.
     import src.main as main
 
     db_path = tmp_path / "world.db"
     _init_stage_world_db(db_path)
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
-    report = main.evaluate_edli_stage_readiness(
-        stage="edli_live_canary",
-        canary_artifact_path=str(tmp_path / "missing-canary.json"),
-    )
+    report = main.evaluate_edli_stage_readiness(stage="edli_live")
 
-    assert report.status == "WAITING_FOR_QUALIFYING_EVENT"
+    assert report.status == "PASS"
     assert report.live_entries_allowed is True
     assert report.submit_allowed is True
-    assert report.scaleout_allowed is False
+    assert report.scaleout_allowed is True
 
 
 def test_edli_live_canary_with_stage_evidence_waits_for_qualifying_event(monkeypatch, tmp_path):
@@ -617,7 +609,7 @@ def test_edli_live_canary_with_stage_evidence_waits_for_qualifying_event(monkeyp
     assert "edli_event_reactor" in job_ids
     assert "edli_market_channel_ingestor" in job_ids
     assert "edli_user_channel_reconcile" in job_ids
-    assert settings_copy["edli"]["live_execution_mode"] == "edli_live_canary"
+    assert settings_copy["edli"]["live_execution_mode"] == "edli_live"
 
 
 def test_edli_live_canary_does_not_consume_promotion_arm_artifact(monkeypatch, tmp_path):
@@ -668,7 +660,7 @@ def test_edli_live_canary_boot_runs_stage_readiness_before_registering_edli_jobs
     def _fake_readiness(_cfg):
         calls.append("readiness")
         return main.EdliStageReadiness(
-            stage="edli_live_canary",
+            stage="edli_live",
             status=main.EDLI_STAGE_WAITING,
             live_entries_allowed=True,
             submit_allowed=True,
@@ -729,7 +721,7 @@ def test_edli_live_canary_stage_readiness_blocks_unresolved_unknown(monkeypatch,
     conn.close()
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
-    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+    report = main.evaluate_edli_stage_readiness(stage="edli_live")
 
     assert report.status == "FAIL"
     assert any(reason.startswith("EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN") for reason in report.reasons)
@@ -757,7 +749,7 @@ def test_edli_live_canary_stage_readiness_blocks_open_cap_reservation(monkeypatc
     conn.close()
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
-    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+    report = main.evaluate_edli_stage_readiness(stage="edli_live")
 
     assert report.status == "FAIL"
     assert any(reason.startswith("EDLI_STAGE_LIVE_CAP_RESERVED") for reason in report.reasons)
@@ -773,7 +765,7 @@ def test_edli_live_canary_stage_readiness_fails_closed_on_missing_projection(mon
     conn.close()
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
-    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+    report = main.evaluate_edli_stage_readiness(stage="edli_live")
 
     assert report.status == "FAIL"
     assert any(reason.startswith("EDLI_STAGE_PENDING_RECONCILE_QUERY_FAILED") for reason in report.reasons)
@@ -790,7 +782,7 @@ def test_edli_live_canary_stage_readiness_fails_closed_on_missing_cap_usage(monk
     conn.close()
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
-    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+    report = main.evaluate_edli_stage_readiness(stage="edli_live")
 
     assert report.status == "FAIL"
     assert any(reason.startswith("EDLI_STAGE_OPEN_CAP_QUERY_FAILED") for reason in report.reasons)
@@ -806,7 +798,7 @@ def test_edli_live_canary_stage_readiness_blocks_stale_source(monkeypatch, tmp_p
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
     report = main.evaluate_edli_stage_readiness(
-        stage="edli_live_canary",
+        stage="edli_live",
         source_health_json=str(source),
         max_age_seconds=1,
     )
@@ -826,16 +818,21 @@ def test_edli_live_canary_boot_defers_self_written_status_summary_staleness(monk
     source = tmp_path / "source_health.json"
     status = tmp_path / "status_summary.json"
     now = datetime.now(timezone.utc)
+    promotion = tmp_path / "promotion.json"
     loaded.write_text(json.dumps({"loaded_sha": "abc123"}))
     source.write_text(json.dumps({"generated_at": now.isoformat()}))
     status.write_text(json.dumps({"generated_at": (now - timedelta(hours=1)).isoformat()}))
+    promotion.write_text(json.dumps({"ok": True}))
 
     report = main._assert_edli_stage_readiness(
         {
-            "live_execution_mode": "edli_live_canary",
+            # Wave-2 item 5: canary collapsed into edli_live; edli_live requires the
+            # promotion-artifact stage-file path (REQUIRED_STAGE_FILES_BY_MODE).
+            "live_execution_mode": "edli_live",
             "edli_stage_loaded_sha_file": str(loaded),
             "edli_stage_source_health_json": str(source),
             "edli_stage_status_json": str(status),
+            "edli_live_promotion_artifact_path": str(promotion),
             "edli_stage_readiness_max_age_seconds": 60,
         }
     )
@@ -847,21 +844,22 @@ def test_edli_live_canary_boot_defers_self_written_status_summary_staleness(monk
 
 
 def _edli_live_canary_updates(**overrides):
+    # Wave-2 item 5: canary collapsed into edli_live. This helper now produces an
+    # edli_live config (deleted keys live_canary_enabled / taker_fok_fak_live_enabled
+    # are not emitted). Name retained for call-site stability.
     values = {
         "enabled": True,
-        "live_execution_mode": "edli_live_canary",
+        "live_execution_mode": "edli_live",
         "reactor_mode": "live",
         "event_writer_enabled": True,
         "forecast_snapshot_trigger_enabled": True,
         "market_channel_ingestor_enabled": True,
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
-        "live_canary_enabled": True,
-        "taker_fok_fak_live_enabled": True,
         "durable_submit_outbox_enabled": True,
         # 2026-06-04: the arm direction-gate boot guard is DELETED (mainstream is
         # display-only). These keys are now INERT (no boot guard reads them); retained
-        # here only to keep this canary config explicit. They do not affect boot.
+        # here only to keep this live config explicit. They do not affect boot.
         "mainstream_agreement_enforce_on_submit": True,
         "mainstream_agreement_reference_enabled": True,
     }
@@ -879,12 +877,9 @@ def _edli_live_updates(**overrides):
         "market_channel_ingestor_enabled": True,
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
-        "live_canary_enabled": True,
-        "taker_fok_fak_live_enabled": True,
         "durable_submit_outbox_enabled": True,
         "edli_live_operator_authorized": True,
         "edli_live_promotion_artifact_required": True,
-        "edli_live_min_canary_count": 1,
         "edli_live_max_unresolved_unknowns": 0,
         "edli_live_min_realized_edge_bps": 0,
         # 2026-06-04: inert keys (arm direction-gate guard DELETED). See _edli_live_canary_updates.

@@ -62,7 +62,6 @@ def build_final_intent_certificate_from_actionable(
     fee_rate: float = 0.0,
     best_bid: float | None = None,
     best_ask: float | None = None,
-    taker_fok_fak_live_enabled: bool = False,
     available_crossable_shares: float | None = None,
     sweep_expected_fill_price: str | None = None,
     executable_market_context: Mapping[str, object] | None = None,
@@ -214,7 +213,6 @@ def build_final_intent_certificate_from_actionable(
         "source": "existing_final_intent_builder",
         "submitted": False,
         "venue_order_id": None,
-        "taker_fok_fak_live_enabled": bool(taker_fok_fak_live_enabled),
         # FIX C provenance (2026-06-10): which placement lane this intent is and
         # the book spread it was priced against, so settlement can attribute
         # fills to maker_bid_improve vs taker_cross and recalibrate p_fill/

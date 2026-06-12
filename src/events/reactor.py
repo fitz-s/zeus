@@ -311,7 +311,6 @@ class LiveLaneDarkInvariantError(RuntimeError):
 class ReactorConfig:
     reactor_mode: str = "live_no_submit"
     real_order_submit_enabled: bool = False
-    taker_fok_fak_live_enabled: bool = False
     # Task #102 (BEST-ORDER SELECTION): book-wide edge-zone admission gate, the
     # LAST step in the money-path. DEFAULT FALSE => byte-identical to today (the
     # gate is computed only when this flag is True). When True, a candidate is

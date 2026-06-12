@@ -100,7 +100,7 @@ class PreVenueSubmitError(ValueError):
     Without this type, such pre-venue rejections were swept into the generic
     ``except Exception`` and mislabeled ``POST_SUBMIT_UNKNOWN`` (venue_call_started
     =True), leaving an unresolved-submit + held-cap that crash-loops boot at the
-    edli_live_canary readiness gate.
+    edli_live readiness gate.
     """
 
 
@@ -237,14 +237,12 @@ def _final_execution_intent_from_payload(final_payload: dict):
             ),
         )
     if is_taker:
-        # Taker path is authorized ONLY when the governor-decided cert carries the
-        # full taker tuple (post_only False, maker_intent False, FOK/FAK). The
-        # currently-dead config flag finally gates taker submission here.
-        from src.strategy.live_inference.trade_score import assert_taker_live_allowed
-
-        assert_taker_live_allowed(
-            taker_fok_fak_live_enabled=bool(final_payload.get("taker_fok_fak_live_enabled", False))
-        )
+        # Taker path is authorized when the governor-decided cert carries the full
+        # taker tuple (post_only False, maker_intent False, FOK/FAK). Wave-2 item 8
+        # (2026-06-12): the taker FOK/FAK law is verified and live — its legality is
+        # now UNCONDITIONAL inside final-intent construction. The governor cert's
+        # taker tuple is the single authority; the former config flag and its OFF
+        # branch are deleted.
         order_policy = "marketable_limit_depth_bound"
         post_only = False
     else:

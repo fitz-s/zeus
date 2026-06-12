@@ -201,15 +201,17 @@ def test_legacy_non_fused_row_without_mode_key_rejected() -> None:
 # =====================================================================================
 def test_floor_present_widens_sigma_q_flatter(monkeypatch) -> None:
     """Floor present AND greater than sigma_pred -> the persisted q is built from the WIDENED
-    sigma: strictly flatter (max-bin probability lower) than the same cell with the floor OFF.
-    Plus the provenance fields record the floor application."""
+    sigma: strictly flatter (max-bin probability lower) than the same cell with NO floor cell.
+    Plus the provenance fields record the floor application.
+
+    Wave-2 item 6 (2026-06-12): the floor is applied by PER-CELL DATA AVAILABILITY (no flag).
+    The unfloored comparison is now produced by making the floor cell ABSENT (lookup -> None),
+    not by toggling a deleted flag."""
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     _enable_fused_shape(monkeypatch)
-    from src.config import settings
 
-    # Floor ON (Paris JJA high has an empirical floor ~4.3C >> the ~1.x sigma_pred).
-    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_enabled", True)
+    # Floor cell PRESENT (Paris JJA high has an empirical floor ~4.3C >> the ~1.x sigma_pred).
     conn_on = _conn()
     _seed_history(conn_on, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn_on, values=_full_live_values())
@@ -225,8 +227,12 @@ def test_floor_present_widens_sigma_q_flatter(monkeypatch) -> None:
     # the recorded floor must exceed the raw predictive sigma (else max() is a no-op)
     assert prov_on["settlement_sigma_floor_c"] > prov_on["bayes_precision_fusion"]["predictive_sigma_c"]
 
-    # Floor OFF for the identical cell.
-    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_enabled", False)
+    # Floor cell ABSENT for the identical cell -> the floor is inert (no widening).
+    monkeypatch.setattr(
+        mod,
+        "_replacement_settlement_sigma_floor_lookup",
+        lambda request, *, metric: (None, "SETTLEMENT_SIGMA_FLOOR_ABSENT:test"),
+    )
     conn_off = _conn()
     _seed_history(conn_off, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn_off, values=_full_live_values())
@@ -269,17 +275,15 @@ def test_floor_absent_records_reason_does_not_block(monkeypatch) -> None:
     assert prov["replacement_q_mode"] == "FUSED_NORMAL_FULL"
 
 
-def test_floor_required_but_absent_degrades_to_partial(monkeypatch) -> None:
-    """When edli_settlement_sigma_floor_required is true, a fused-N built WITHOUT an available
-    floor degrades the mode to FUSED_NORMAL_PARTIAL (live gate still admits; receipt shows it).
-    This honors the flag semantics — no new blocking lane is invented."""
+def test_floor_absent_no_longer_degrades_to_partial(monkeypatch) -> None:
+    """Wave-2 item 6 (2026-06-12): the settlement-floor-REQUIRED mode-degrade
+    (edli_settlement_sigma_floor_required) is DELETED. A fused-N built WITHOUT an available
+    floor cell stays FUSED_NORMAL_FULL — a missing floor is data-availability-inert and never
+    degrades the q-mode. (The former required=True -> PARTIAL path is gone.)"""
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     _enable_fused_shape(monkeypatch)
-    from src.config import settings
 
-    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_enabled", True)
-    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_required", True)
     monkeypatch.setattr(
         mod,
         "_replacement_settlement_sigma_floor_lookup",
@@ -292,11 +296,12 @@ def test_floor_required_but_absent_degrades_to_partial(monkeypatch) -> None:
     prov = _materialize_provenance(conn)
     assert prov["q_shape"] == "fused_normal_direct"
     assert prov["settlement_sigma_floor_applied"] is False
-    assert prov["replacement_q_mode"] == "FUSED_NORMAL_PARTIAL"
+    # A missing floor no longer degrades the mode (the required-flag PARTIAL path is deleted).
+    assert prov["replacement_q_mode"] == "FUSED_NORMAL_FULL"
 
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
-    assert eligible is True  # PARTIAL is still live-eligible
-    assert mode == "FUSED_NORMAL_PARTIAL"
+    assert eligible is True
+    assert mode == "FUSED_NORMAL_FULL"
 
 
 # =====================================================================================
