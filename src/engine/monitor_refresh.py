@@ -342,6 +342,40 @@ def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
     setattr(position, _MONITOR_PROBABILITY_FRESH_ATTR, is_fresh)
 
 
+# K6 stage-1 belief-dead watchdog (2026-06-12). A fail-closed hold on missing
+# probability authority is correct for one cycle and a silent catastrophe for
+# 719 (the Karachi position was monitored its whole life with stale belief and
+# nothing escalated). Track consecutive stale-belief cycles per position WHILE
+# the market price stays fresh; at the threshold, brand the monitor event and
+# log at ERROR so the condition is loud in both the event payload and the log.
+_BELIEF_STALE_FAULT_THRESHOLD = 3
+_belief_stale_cycles: dict[str, int] = {}
+
+
+def _track_belief_staleness(pos: Position) -> None:
+    key = str(getattr(pos, "trade_id", "") or id(pos))
+    if getattr(pos, "last_monitor_prob_is_fresh", False):
+        _belief_stale_cycles.pop(key, None)
+        return
+    if not getattr(pos, "last_monitor_market_price_is_fresh", False):
+        return
+    count = _belief_stale_cycles.get(key, 0) + 1
+    _belief_stale_cycles[key] = count
+    _append_monitor_validation(pos, f"belief_stale_cycles={count}")
+    if count >= _BELIEF_STALE_FAULT_THRESHOLD:
+        _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
+        logger.error(
+            "BELIEF_AUTHORITY_FAULT: position %s (%s %s %s) has had stale belief "
+            "for %d consecutive monitor cycles while the market price is fresh — "
+            "the exit organ is blind on a live position",
+            getattr(pos, "trade_id", "?"),
+            getattr(pos, "city", "?"),
+            getattr(pos, "target_date", "?"),
+            getattr(pos, "direction", "?"),
+            count,
+        )
+
+
 def _record_nowcast_write_success() -> None:
     global _nowcast_consecutive_write_failures
     _nowcast_consecutive_write_failures = 0
@@ -2235,7 +2269,53 @@ def monitor_probability_refresh(
     city,
     target_d,
 ) -> tuple[float, Position, bool | None]:
-    """Refresh held-side posterior without consuming the held-token quote."""
+    """Refresh held-side posterior without consuming the held-token quote.
+
+    PRIMARY AUTHORITY (K1 single belief authority, 2026-06-12): the
+    replacement-chain posterior (``forecast_posteriors``) — the SAME authority
+    the entry decision used. The legacy ens/day0 refreshers below remain as
+    explicit fallback telemetry only; they cannot be the freshness authority
+    while a fresh replacement row exists. This kills the entry-belief vs
+    exit-belief twin-authority that left every held position with
+    ``last_monitor_prob_is_fresh=False`` for its entire lifetime (719/719
+    stale refreshes on the Karachi 2026-06-12 position) while the entry
+    posterior had already re-ranked the held bin to family top.
+    """
+    from src.engine.position_belief import (
+        SELECTED_METHOD_REPLACEMENT_POSTERIOR,
+        load_replacement_belief,
+        monitor_belief_max_age_hours,
+    )
+
+    try:
+        belief = load_replacement_belief(
+            city=pos.city,
+            target_date=pos.target_date,
+            temperature_metric=str(getattr(pos, "temperature_metric", "high")),
+            bin_label=pos.bin_label,
+            direction=str(pos.direction),
+            max_age_hours=monitor_belief_max_age_hours(),
+        )
+    except Exception as exc:  # noqa: BLE001 — belief read must not kill the monitor
+        belief = None
+        logger.warning(
+            "monitor_probability_refresh: replacement belief read failed for %s: %s",
+            pos.trade_id,
+            exc,
+        )
+    if belief is not None and belief.fresh:
+        fresh_pos = replace(pos)
+        setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(fresh_pos, SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(fresh_pos, belief.freshness_validation())
+        _set_monitor_probability_fresh(fresh_pos, True)
+        return float(belief.held_side_prob), fresh_pos, True
+    if belief is not None:
+        _append_monitor_validation(
+            pos, f"replacement_posterior_stale;age_h={belief.age_hours:.2f}"
+        )
+    else:
+        _append_monitor_validation(pos, "replacement_posterior_missing")
 
     registry = {
         EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
@@ -2377,6 +2457,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         current_p_posterior = float("nan")
         pos.last_monitor_edge = float("nan")
         _append_monitor_validation(pos, "monitor_probability_refresh_failed")
+
+    _track_belief_staleness(pos)
 
     pos.last_monitor_whale_toxicity = _detect_whale_toxicity_from_orderbook(
         conn,
