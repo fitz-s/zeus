@@ -210,9 +210,14 @@ def _run_advisory_check_cotenant_staging_guard(
     if not command:
         return None
     import re
-    if not re.search(r"\bgit\s+add\b", command):
+    # Match flags ONLY within the `git add ...` segment (up to the next command
+    # separator) — matching the whole command string false-positived on
+    # `git push -u origin ...` in a compound command (2026-06-12).
+    add_match = re.search(r"\bgit\s+add\b([^;&|]*)", command)
+    if not add_match:
         return None
-    if not re.search(r"(\s-A\b|\s--all\b|\s-u\b|\s\.\s*($|&|;|\|))", command):
+    add_args = add_match.group(1)
+    if not re.search(r"(\s-A\b|\s--all\b|\s-u\b|\s\.\s*$)", add_args):
         return None
     try:
         gd = subprocess.run(
