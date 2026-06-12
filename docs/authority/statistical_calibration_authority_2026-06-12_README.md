@@ -40,3 +40,17 @@ walk-forward gate passes locally; the gates themselves are specified in the text
 4. Class-conditional α_c blend (near-modal α likely → market).
 5. Posterior bounds + growth-fitted λ.
 6. Constants audit per the table (σ floor, z, radius, staleness, n-floors).
+
+## Cross-validation (2026-06-12, operator-run)
+
+An INDEPENDENT Fable 5 pass on the identical zero-context prompt converged on every
+load-bearing theorem (bias-absorption formula with the same delta/sigma ~1.21 implication,
+joint (b,k) likelihood with a second independent identifiability proof, mixture
+condemnation, Morris shrinkage, class-conditional blend, cap inadmissibility, the
+algebraically-identical fractional-Kelly shrinkage, N_eff). Divergences are
+implementation-choice level and are adjudicated by the walk-forward gates both answers
+specify. See statistical_calibration_crossvalidation_fable5_2026-06-12.md. Adopted from
+the Fable pass: sigma_min = bin_width/(2*sqrt(3)) rounding floor; hard Step-1 gates
+(k_new < 1.34, PIT uniformity, modal-q 0.22 -> 0.30-0.34 expectation); the Monte-Carlo
+k* formula verification; Step 2 implements BOTH tail families (Dirichlet-by-distance and
+Student-t) under one log-loss gate.
