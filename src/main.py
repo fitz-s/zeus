@@ -5944,8 +5944,6 @@ def _edli_event_reactor_cycle() -> None:
                 # Task #102 book-wide edge-zone admission. Absent key => default
                 # False => byte-identical legacy money-path (the operator owns
                 # config/settings.json; this reads it without writing it).
-                edge_zone_admission_enabled=bool(edli_cfg.get("edge_zone_admission_enabled", False)),
-                edge_zone_min_ev_per_dollar=float(edli_cfg.get("edge_zone_min_ev_per_dollar", 0.0)),
                 # Scope-aware claim tier (2026-06-11 anti-starvation): under
                 # day0_shadow a DAY0_EXTREME_UPDATED event can only ever produce a
                 # DAY0_SCOPE_SHADOW_ONLY receipt, so it must NOT outrank tradeable

@@ -616,7 +616,7 @@ class Day0FastObsEmitter:
             return [], FETCH_NO_DATA, None
 
     def latest_rounded_extreme(
-        self, city_name: str, target_date: str, metric: str
+        self, city_name: str, target_date: str, metric: str, *, world_conn: Any = None
     ) -> Optional[int]:
         """Latest settlement-rounded extreme known to the fast lane for
         (city, date, metric) — the hard-fact monotone KILL source.
@@ -626,11 +626,47 @@ class Day0FastObsEmitter:
         been degraded — monotone kills are safe under staleness; entries are
         gated separately). Consumed by src/execution/day0_hard_fact_exit.py.
         Reads the KILL memo (round-2 P0-1 split: independent of whether a live
-        event was emitted). None when nothing recorded in this process
-        (restart, lane disabled, city excluded).
+        event was emitted).
+
+        RESTART-SAFE RECOVERY (2026-06-12, critique Angle 1 Gap C): the in-process
+        kill memo is lost on daemon restart. Rather than persisting a NEW table,
+        we recover from the DAY0_EXTREME_UPDATED events that emit_prefetched
+        ALREADY persisted durably to opportunity_events (zeus-world.db). When the
+        in-process memo has no value, this reads the latest memo-safe (AUTHORIZED
+        + local-date MATCH + DST UNAMBIGUOUS) rounded extreme for the cell from
+        those events, applies the absorbing-direction reduction (high=max,
+        low=min), caches it into the in-process memo (so the live monotone emit
+        logic stays consistent post-restart), and returns it. Fail-soft: any DB
+        error leaves the memo untouched and returns None (the lane simply has no
+        recovered fact this call). ``world_conn`` is caller-supplied for tests;
+        when None a short read-only world connection is opened and closed here.
         """
+        key = (str(city_name), str(target_date), str(metric))
         with self._lock:
-            return self._last_kill_memo_rounded.get((str(city_name), str(target_date), str(metric)))
+            memo = self._last_kill_memo_rounded.get(key)
+        if memo is not None:
+            return memo
+        # In-process memo empty (restart / first call this process): recover from
+        # the durable event store before giving up.
+        recovered = _recover_kill_memo_from_events(
+            city_name=str(city_name),
+            target_date=str(target_date),
+            metric=str(metric),
+            world_conn=world_conn,
+        )
+        if recovered is None:
+            return None
+        with self._lock:
+            # Re-check under lock: a concurrent emit may have populated the memo;
+            # honor the absorbing direction so recovery never regresses it.
+            current = self._last_kill_memo_rounded.get(key)
+            if current is None or (
+                (metric == "high" and recovered > current)
+                or (metric == "low" and recovered < current)
+            ):
+                self._last_kill_memo_rounded[key] = recovered
+                return recovered
+            return current
 
     def latest_extremes(
         self,
@@ -918,6 +954,64 @@ class Day0FastObsEmitter:
         return self.emit_prefetched(
             world_conn=world_conn, prefetch=prefetch, received_at=received_at, limit=limit
         )
+
+
+def _recover_kill_memo_from_events(
+    *,
+    city_name: str,
+    target_date: str,
+    metric: str,
+    world_conn: Any = None,
+) -> Optional[int]:
+    """Recover the kill-memo rounded extreme from durably-persisted
+    DAY0_EXTREME_UPDATED events (restart-safe; no new table).
+
+    Reads opportunity_events (zeus-world.db) for the cell, keeps only memo-safe
+    rows (source_authorized_status=AUTHORIZED, local_date_status=MATCH,
+    dst_status=UNAMBIGUOUS — the SAME authorization the live kill memo required),
+    and reduces by the absorbing direction (high=MAX, low=MIN). None when no
+    recoverable row exists or on any error (fail-soft). ``world_conn`` is
+    caller-supplied for tests; when None a short read-only world connection is
+    opened and closed here.
+    """
+    own_conn = False
+    conn = world_conn
+    try:
+        if conn is None:
+            from src.state.db import get_world_connection_read_only
+
+            conn = get_world_connection_read_only()
+            own_conn = True
+        agg = "MAX" if metric == "high" else "MIN"
+        sql = f"""
+            SELECT {agg}(CAST(json_extract(payload_json, '$.rounded_value') AS INTEGER)) AS extreme
+            FROM opportunity_events
+            WHERE event_type = 'DAY0_EXTREME_UPDATED'
+              AND json_extract(payload_json, '$.city') = ?
+              AND json_extract(payload_json, '$.target_date') = ?
+              AND json_extract(payload_json, '$.metric') = ?
+              AND json_extract(payload_json, '$.source_authorized_status') = 'AUTHORIZED'
+              AND json_extract(payload_json, '$.local_date_status') = 'MATCH'
+              AND json_extract(payload_json, '$.dst_status') = 'UNAMBIGUOUS'
+              AND json_extract(payload_json, '$.rounded_value') IS NOT NULL
+        """
+        row = conn.execute(sql, (city_name, target_date, metric)).fetchone()
+        if row is None:
+            return None
+        value = row[0]
+        return int(value) if value is not None else None
+    except Exception as exc:  # noqa: BLE001 — recovery is best-effort, fail-soft
+        logger.debug(
+            "DAY0_KILL_MEMO_RECOVERY_FAILED city=%s date=%s metric=%s exc=%s: %s",
+            city_name, target_date, metric, type(exc).__name__, exc,
+        )
+        return None
+    finally:
+        if own_conn and conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 _EMITTER_SINGLETON: Day0FastObsEmitter | None = None

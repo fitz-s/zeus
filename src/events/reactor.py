@@ -249,13 +249,6 @@ class ReactorConfig:
     # LAST step in the money-path. DEFAULT FALSE => byte-identical to today (the
     # gate is computed only when this flag is True). When True, a candidate is
     # admitted ONLY if its honest (q_lcb-based) after-cost EV-per-dollar clears
-    # ``edge_zone_min_ev_per_dollar`` -- a TIGHTENING that demotes the confident
-    # tails (price>0.8 / price<0.5) where after-cost edge is absent and keeps the
-    # market-uncertain mid-range where settlement-grounded edge is real. Pure +
-    # order-independent: it can never admit a negative-EV order ahead of a
-    # positive one. See src/contracts/edge_zone_admission.py.
-    edge_zone_admission_enabled: bool = False
-    edge_zone_min_ev_per_dollar: float = 0.0
     # Scope-aware claim tier (2026-06-11 anti-starvation). True (default) =
     # historical behaviour: DAY0_EXTREME_UPDATED ranks at the top claim tier
     # (realized obs = freshest tradeable alpha). False = day0 is shadow-only
@@ -787,9 +780,10 @@ class OpportunityEventReactor:
         savepoint open) — none of these paths touch the network.
         """
         assert_available_for_decision(event, decision_time)
-        if event.event_type in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED", "NEW_MARKET_DISCOVERED"}:
-            self._reject_event(event, "EXECUTABLE_QUOTE", "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE", result, decision_time=decision_time)
-            return None, False
+        # DELETED 2026-06-12 (gate inventory D2): market-channel event types
+        # stopped reaching this queue 2026-06-06 (upstream routing); the
+        # adapter's final boundary scope gate fail-closes any straggler.
+        # Antibody: tests/engine/test_event_reactor_no_bypass.py boundary test.
         if event.event_type == "FORECAST_SNAPSHOT_READY":
             # SERVE-FRESHEST-ELIGIBLE RECONCILIATION (2026-06-11, twin-authority #8).
             #
@@ -1475,18 +1469,10 @@ def _receipt_money_path_blocker(
         if buy_no_conservative_reason is not None:
             return "TRADE_SCORE", buy_no_conservative_reason
     # Task #102 — optional book-wide edge-zone admission. The always-on live
-    # admission checks above own capital efficiency and conservative Buy-NO
-    # evidence. This flag remains a separate extra tightening over q_lcb-vs-cost.
-    if config is not None and getattr(config, "edge_zone_admission_enabled", False):
-        from src.contracts.edge_zone_admission import edge_zone_admits
-
-        verdict = edge_zone_admits(
-            q_lcb=receipt.q_lcb_5pct,
-            cost=receipt.c_fee_adjusted,
-            min_ev_per_dollar=float(getattr(config, "edge_zone_min_ev_per_dollar", 0.0)),
-        )
-        if not verdict.admits:
-            return "TRADE_SCORE", verdict.reason or "EDGE_ZONE_BLOCKED"
+    # DELETED 2026-06-12 (operator no-caps law; gate inventory D3): the
+    # edge_zone_admission "extra tightening" was a second, knob-configurable
+    # EV bar over the always-on capital-efficiency check — a cap-style
+    # throttle. Flag was OFF in live config since introduction.
     return None, ""
 
 

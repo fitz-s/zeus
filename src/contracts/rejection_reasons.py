@@ -92,11 +92,6 @@ class RejectionReason(str, Enum):
         "NATIVE_ASK_MISSING / bare SELECTED_CANDIDATE_MISSING label lie (2026-06-11) "
         "when the books were actually live two-sided.",
     )
-    OPENING_INERTIA_MARKET_TOO_OLD = (
-        "OPENING_INERTIA_MARKET_TOO_OLD",
-        RejectionCategory.HONEST_MARKET,
-        "Opening-inertia lane only trades young markets; this one aged out.",
-    )
     EVENT_BOUND_MARKET_TOPOLOGY_INVALID = (
         "EVENT_BOUND_MARKET_TOPOLOGY_INVALID",
         RejectionCategory.HONEST_MARKET,
@@ -314,6 +309,24 @@ class RejectionReason(str, Enum):
         "legacy_injected_test_submit",
         RejectionCategory.DESIGNED_GATE,
         "Test-only injected submit path marker (never a live reason).",
+    )
+
+    # ----- DESIGNED_GATE :: Day0 input-correctness (NOT a cap) -------------
+    # day0_multiangle_critique_2026-06-12 Blind spot C, re-scoped 2026-06-12 per
+    # operator anti-over-design directive (no caps, no trip-wires). This is an
+    # INPUT-ORDERING correctness check, not a configurable ban window: a day0
+    # decision's orderbook snapshot must be newer than the observation state that
+    # produced its probability. It fires ONLY when the ordering is genuinely
+    # violated (a stale book pricing an already-moved observation) — a real data
+    # error, not a throttle. DESIGNED_GATE because it is a deliberate, evidence-
+    # based refusal of an incoherent decision input.
+    DAY0_QUOTE_PRECEDES_OBSERVATION = (
+        "DAY0_QUOTE_PRECEDES_OBSERVATION",
+        RejectionCategory.DESIGNED_GATE,
+        "Day0 input-ordering violation: the orderbook snapshot used to price the "
+        "candidate was captured at/before the observation availability that produced "
+        "its probability. The quote prices a stale, pre-update book — an incoherent "
+        "decision input, refused on correctness grounds (NOT a time-window cap).",
     )
 
     # ----- ARTIFICIAL_SUSPECT ---------------------------------------------

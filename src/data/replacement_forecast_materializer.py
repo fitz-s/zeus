@@ -674,6 +674,54 @@ def _replacement_settlement_sigma_floor_lookup(
         return None, f"SETTLEMENT_SIGMA_FLOOR_LOOKUP_ERROR:{type(exc).__name__}"
 
 
+def _replacement_sigma_scale_k_c() -> float:
+    """C3 calibration surface 2026-06-12 — σ_pred scale factor for C-unit cities.
+
+    Returns the configured ``replacement_sigma_scale_k_c`` value (default 1.0 = inert).
+    When k > 1.0 AND the city's settlement unit is C, σ_pred is multiplied by k BEFORE
+    bin integration so the posterior is widened to match the empirically-observed realised
+    win-rate (mode-bin realized ~0.17 vs predicted ~0.44 → k ≈ 2.4).
+
+    Authority: ``docs/operations/c3_sigma_calibration_surface_2026-06-12.md`` (n=127 C-unit
+    cells, HIGH confidence, A_24h best_k=2.6, mode-only-fix k≈2.36; B_48h best_k=2.5,
+    mode-only-fix k≈2.51 → operator flip target k=2.4).  F cities: n=25 insufficient —
+    they keep the existing market-anchor cap as interim; this scale is NEVER applied to F.
+
+    The scale applies BEFORE the settlement sigma floor so the floor remains a LOWER BOUND
+    on the scaled σ_pred (i.e. floor still enforced after scaling).
+
+    FAIL-CLOSED: any config error / missing key / non-positive or non-finite value → 1.0
+    (inert, byte-identical to pre-scale behavior). Never raises.
+    """
+    try:
+        from src.config import settings  # noqa: PLC0415
+
+        raw = settings["edli"].get("replacement_sigma_scale_k_c", 1.0)
+        k = float(raw)
+        if not (math.isfinite(k) and k > 0.0):
+            return 1.0
+        return k
+    except Exception:
+        return 1.0
+
+
+def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequest") -> str:
+    """Return the settlement unit ('C' or 'F') for the city, derived from the request bins.
+
+    Uses the first bin's ``settlement_unit`` field (the family is uniform — the bin topology
+    validator enforces a single unit across all bins in a family). Falls back to 'C' on any
+    error so the scale gate is safe: the C scale is only applied when the unit is positively
+    identified as 'C', never speculatively.
+    """
+    try:
+        bins = request.bins
+        if bins:
+            return str(bins[0].settlement_unit)
+        return "C"
+    except Exception:
+        return "C"
+
+
 def _replacement_member_vote_smoothing_alpha() -> float | None:
     """Flag-gated additive (Laplace/Dirichlet) smoothing alpha for the AIFS member-vote prior.
 
@@ -1317,6 +1365,9 @@ def _insert_posterior(
     settlement_sigma_floor_c: float | None = None
     floor_unavailable_reason: str | None = None
     replacement_sigma_basis: str | None = None
+    # C3 calibration surface 2026-06-12 — σ_pred scale provenance. None when scaling is not
+    # applied (k=1.0 / F-unit / flag-off path); float applied value when scaling fires.
+    sigma_scale_k_applied: float | None = None
     # Catch-all (open-ended bin) sigma-floor exemption (2026-06-10, Paris >=26C incident). Records
     # which open-ended bins had their floored mass capped at the un-floored predictive-sigma mass
     # so the floor could not inflate the tail. Empty tuple when no cap bit (no floor / no open-ended
@@ -1354,6 +1405,19 @@ def _insert_posterior(
             _sigma_pred = float(bayes_precision_fusion_override.predictive_sigma_c)
             _sigma_used = _sigma_pred
             replacement_sigma_basis = "fused_center_residual_std"
+            # C3 CALIBRATION SURFACE (2026-06-12) — σ_pred scale for C-unit cities.
+            # Evidence: n=127 A_24h C-unit cells — mode-bin realized win rate 0.17 vs mean q
+            # 0.43-0.46 → posterior ~2.5× too peaked. Multiplying σ_pred by k≈2.4 before bin
+            # integration brings d=0 ratio to ~1.0 (see docs/operations/c3_sigma_calibration_surface_2026-06-12.md).
+            # Contract: scale BEFORE floor so floor remains a lower bound on the scaled σ_pred.
+            # F cities: n=25 insufficient — scale is explicitly disabled regardless of k value.
+            # FAIL-CLOSED: _replacement_sigma_scale_k_c() returns 1.0 on any config error.
+            _k = _replacement_sigma_scale_k_c()
+            _city_unit = _city_settlement_unit_from_bins(request)
+            if _k > 1.0 and _city_unit == "C":
+                _sigma_pred = _sigma_pred * _k
+                _sigma_used = _sigma_pred
+                sigma_scale_k_applied = _k
             if _edli_settlement_sigma_floor_enabled():
                 _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
                     request, metric=metric
@@ -1580,6 +1644,10 @@ def _insert_posterior(
         "settlement_sigma_floor_c": settlement_sigma_floor_c,
         "settlement_sigma_floor_unavailable_reason": floor_unavailable_reason,
         "replacement_sigma_basis": replacement_sigma_basis,
+        # C3 calibration surface 2026-06-12 — σ scale provenance (一切可被溯源).
+        # None when k=1.0 (inert / F-unit / flag-off). Float applied k value when scaling fired.
+        # Authority: docs/operations/c3_sigma_calibration_surface_2026-06-12.md
+        "sigma_scale_k_applied": sigma_scale_k_applied,
         # Catch-all exemption (2026-06-10): open-ended bins whose floored mass was capped at the
         # un-floored predictive-sigma mass (the floor may only flatten, never inflate a catch-all).
         "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),

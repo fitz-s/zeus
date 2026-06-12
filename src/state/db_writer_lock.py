@@ -663,6 +663,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/execution/exchange_reconcile.py",  # read_only_ro_uri: settled-external absorber reads canonical market_events (zeus-forecasts) mode=ro, short-lived, SELECT-only — docs/evidence/settlement_guard/2026-06-11_settled_external_absorber_plan.md
         "scripts/verify_e2e_money_path.py",  # read_only_ro_uri: e2e money-path walker opens every DB mode=ro, SELECT-only (operator-demanded full-chain diagnostic, 2026-06-11)
         "scripts/query_decision_provenance.py",  # read_only_ro_uri: decision-provenance query opens zeus-world.db mode=ro, SELECT-only over regret/no_submit receipts — operator "一切可被溯源" query entry 2026-06-11 (docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md)
+        "scripts/sigma_scale_before_after.py",  # read_only_ro_uri: sigma-scale before/after evidence table, opens forecasts/trades DBs mode=ro, SELECT-only (docs/operations/c3_sigma_calibration_surface_2026-06-12.md)
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
         # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
@@ -698,6 +699,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- additional read-only / ro-URI scripts ---
         "scripts/audit_observation_instants.py",         # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
         "scripts/audit_observation_instants_v2.py",     # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
+        "scripts/audit_day0_extreme_undercapture.py",    # read_only_ro_uri: opens world+forecasts DBs via file:...?mode=ro uri; SELECT-only over observation_instants + settlement_outcomes; writes evidence md only (day0 undercapture audit 2026-06-12)
         "scripts/build_ens_residual_evidence.py",        # read_only_ro_uri (T2/T3 residual-evidence ledger; mode=ro + query_only, refuses canonical DBs, writes CSV only)
         "scripts/capture_before_fixture.py",             # read_only (query_only=ON, SELECT-only; Phase-0 before/after baseline capture, TRIBUNAL 2026-05-29)
         "scripts/score_raw_vs_sd3_bins.py",              # read_only_ro_uri (sd3 validation Test B; mode=ro + query_only, SELECT-only, writes CSV only)

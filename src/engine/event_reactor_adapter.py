@@ -1456,6 +1456,49 @@ def event_bound_live_adapter_from_trade_conn(
             _rollback = getattr(portfolio_reservation, "rollback", None)
             if callable(_rollback):
                 _rollback(event.event_id)
+            # DAY0 INPUT-ORDERING CORRECTNESS (critique Blind spot C, re-scoped
+            # 2026-06-12: a correctness check, NOT a cap). The quote that prices
+            # the candidate (captured at decision_time) must be NEWER than the
+            # observation availability that produced its probability. In shadow
+            # the scope rejection still wins (never-submit unchanged); we record
+            # the input-ordering verdict as Stage-1 evidence. Fail-soft: any
+            # evaluation error is logged, never raised, never blocks the receipt.
+            try:
+                from src.strategy.live_inference.day0_input_correctness import (
+                    evaluate_quote_after_observation,
+                )
+
+                _payload = (
+                    json.loads(event.payload_json)
+                    if isinstance(getattr(event, "payload_json", None), str)
+                    else (getattr(event, "payload_json", None) or {})
+                )
+                _ordering = evaluate_quote_after_observation(
+                    quote_captured_at=decision_time,
+                    observation_available_at=(_payload or {}).get("observation_available_at"),
+                )
+                if _ordering.rejection_reason is not None:
+                    _logging.getLogger(__name__).warning(
+                        "DAY0_INPUT_ORDERING_VIOLATED event=%s city=%s reason=%s (%s) "
+                        "[shadow: recorded as evidence; scope rejection still wins]",
+                        event.event_id,
+                        getattr(no_submit_receipt, "city", None),
+                        _ordering.rejection_reason,
+                        _ordering.annotation,
+                    )
+                else:
+                    _logging.getLogger(__name__).debug(
+                        "DAY0_INPUT_ORDERING event=%s %s",
+                        event.event_id,
+                        _ordering.annotation,
+                    )
+            except Exception as _ordering_exc:  # noqa: BLE001 — fail-soft seam
+                _logging.getLogger(__name__).warning(
+                    "DAY0_INPUT_ORDERING_EVAL_ERROR event=%s exc=%s: %s",
+                    getattr(event, "event_id", "?"),
+                    type(_ordering_exc).__name__,
+                    _ordering_exc,
+                )
             return dataclass_replace(
                 no_submit_receipt,
                 submitted=False,
@@ -2028,33 +2071,11 @@ def _build_event_bound_no_submit_receipt_core(
             event.causal_snapshot_id,
             reason=selected_stale_reason,
         )
-    # Market-age gate for opening_inertia (EDLI path): restore legacy
-    # MODE_PARAMS[OPENING_HUNT]["max_hours_since_open"] = 24 semantics.
-    # Kelly's phase-aware multiplier sizes by opening-tick age; a mislabeled
-    # 30-day-old market receives wrong sizing.  Conservative: missing age →
-    # pass (do NOT reject without evidence).
-    # Placed before the decision engine so it fires even when forecast fields
-    # are absent (the decision engine would return NO_TRADE in those cases, but
-    # the age reason is more informative and fires cheaply first).
-    if event.event_type == "FORECAST_SNAPSHOT_READY" and str(payload.get("direction") or "").strip().lower() == "buy_no":
-        _oi_age_hours = _opening_inertia_market_age_hours(
-            snapshot_row=row,
-            topology_rows=family_topology_rows,
-            family_rows=family_rows,
-            decision_time=decision_time,
-        )
-        if _oi_age_hours is not None and _oi_age_hours >= 24.0:
-            return EventSubmissionReceipt(
-                False,
-                event.event_id,
-                event.causal_snapshot_id,
-                reason=f"OPENING_INERTIA_MARKET_TOO_OLD:{_oi_age_hours:.1f}h",
-                city=str(payload.get("city") or ""),
-                target_date=str(payload.get("target_date") or ""),
-                metric=str(payload.get("metric") or payload.get("temperature_metric") or ""),
-                source_status="MATCH",
-                family_complete=True,
-            )
+    # DELETED 2026-06-12 (operator no-caps law; gate inventory D1): the 24h
+    # market-age ban for buy_no had no truth basis — an aged market with
+    # positive conservative EV is still +EV. Fired 0x in 7 live days. Sizing
+    # by opening-tick age belongs to Kelly's phase-aware multiplier; EV
+    # admission belongs to TRADE_SCORE / capital-efficiency.
     decision = EventBoundDecisionEngine().evaluate(
         EventBoundDecisionRequest(
             event=event,
@@ -13765,43 +13786,6 @@ def _required_bound_tick_size(snap_for_depth, executable_snapshot_payload) -> st
         )
     # Already a canonical Decimal string from the evidence builder; normalise.
     return str(Decimal(str(payload_tick)))
-
-
-def _opening_inertia_market_age_hours(
-    *,
-    snapshot_row: dict[str, Any],
-    topology_rows: list[dict[str, Any]],
-    family_rows: list[dict[str, Any]],
-    decision_time: datetime,
-) -> float | None:
-    """Return market age in hours, or None if age cannot be determined.
-
-    Priority: snapshot market_start_at → topology created_at (Gamma createdAt) →
-    earliest family captured_at (proxy: first time we saw the market).
-    Returns None (conservative pass) when no usable timestamp found.
-    """
-    # 1) market_start_at from the selected snapshot row
-    raw = snapshot_row.get("market_start_at")
-    market_open = _parse_utc(raw) if isinstance(raw, str) else None
-    # 2) created_at from the first topology row (Gamma createdAt, most authoritative)
-    if market_open is None and topology_rows:
-        for trow in topology_rows:
-            market_open = _parse_utc(trow.get("created_at"))
-            if market_open is not None:
-                break
-    # 3) earliest captured_at across all family rows (proxy lower-bound on open time)
-    if market_open is None and family_rows:
-        earliest = None
-        for frow in family_rows:
-            ts = _parse_utc(frow.get("captured_at"))
-            if ts is not None and (earliest is None or ts < earliest):
-                earliest = ts
-        market_open = earliest
-    if market_open is None:
-        return None  # conservative: cannot determine age → allow through
-    decision_utc = decision_time.astimezone(UTC)
-    delta_seconds = (decision_utc - market_open).total_seconds()
-    return delta_seconds / 3600.0
 
 
 def _optional_bool(value: object) -> bool | None:
