@@ -3,16 +3,16 @@
 # Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=2026-05-24
 # Authority basis: ENS full_transport_v1 REFIT task 2026-05-24
 #   (docs/operations/ENS_REFIT_PLAN_2026-05-24.md).
-# Purpose: Drive rebuild_all_v2() against an isolated staging DB (never the shared
+# Purpose: Drive rebuild_all() against an isolated staging DB (never the shared
 #   world DB); supports --error-model flag for full_transport_v1 corrected rebuild.
 # Reuse: Run after seed_isolated_calibration_db.py; before run_offline_platt_refit.py.
-"""Offline driver: run rebuild_all_v2() against an ISOLATED staging DB.
+"""Offline driver: run rebuild_all() against an ISOLATED staging DB.
 
 `rebuild_calibration_pairs.py main()` wraps the rebuild in an operator
 promotion preflight (`_assert_rebuild_preflight_ready`) + bulk writer lock that
 guard the SHARED world DB. For an isolated, single-purpose staging rebuild
 (no promotion), this driver invokes the same library function
-(`rebuild_all_v2`) directly against an explicit isolated DB. It refuses the
+(`rebuild_all`) directly against an explicit isolated DB. It refuses the
 canonical shared world DB via the same guard the script uses.
 
 The rebuild SELECTs only `spec.allowed_data_version` (TIGGE archive); the
@@ -59,7 +59,7 @@ def main() -> int:
 
     from scripts.rebuild_calibration_pairs import (  # noqa: PLC0415
         _resolve_isolated_calibration_write_db_path,
-        rebuild_all_v2,
+        rebuild_all,
     )
     from src.state.db import init_schema  # noqa: PLC0415
     from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
@@ -75,7 +75,7 @@ def main() -> int:
     init_schema(conn)
     apply_canonical_schema(conn)
     try:
-        per_metric = rebuild_all_v2(
+        per_metric = rebuild_all(
             conn,
             dry_run=False,
             force=True,

@@ -34,7 +34,7 @@ _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 # Operator clobber-category directive 2026-06-10 — TRADEABLE-LATEST read semantics.
 # The bounds-less clobber: a NEWER model cycle that has anchor manifests but no fusion
 # instruments yet materializes a bounds-less posterior (q_lcb_json NULL,
-# replacement_q_mode=U0R_CAPTURE_MISSING — a SHADOW row by design, with shadow value). The
+# replacement_q_mode=BAYES_PRECISION_FUSION_CAPTURE_MISSING — a SHADOW row by design, with shadow value). The
 # absolute-latest read semantics (ORDER BY computed_at DESC) then SERVE that shadow row over
 # the still-current tradeable-grade FUSED row, collapsing live eligibility for the whole scope.
 # This is the THIRD recurrence; the seed-coverage antibody only fixed the masking side.
@@ -77,7 +77,7 @@ def _replacement_intermediate_cycle_live_admission_enabled() -> bool:
     try:
         from src.config import settings  # noqa: PLC0415
 
-        return bool(settings["edli_v1"].get(_REPLACEMENT_INTERMEDIATE_CYCLE_LIVE_FLAG, False))
+        return bool(settings["edli"].get(_REPLACEMENT_INTERMEDIATE_CYCLE_LIVE_FLAG, False))
     except Exception:
         return False
 
@@ -242,7 +242,7 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
 
 def _row_is_tradeable_grade(row_map: Mapping[str, Any]) -> bool:
     """A posterior row is tradeable-grade (live-eligible) iff it has certified bounds AND a
-    fused-Normal q-mode. NULL bounds OR a non-fused mode (U0R_CAPTURE_MISSING,
+    fused-Normal q-mode. NULL bounds OR a non-fused mode (BAYES_PRECISION_FUSION_CAPTURE_MISSING,
     FUSED_NORMAL_BOUNDS_MISSING, SOFT_ANCHOR_FALLBACK, ...) => SHADOW-only, never live.
 
     This is the read-side mirror of the live gate's eligibility predicate; it is what makes a
@@ -544,7 +544,7 @@ def read_replacement_forecast_bundle(
     # TRADEABLE-LATEST read semantics (operator clobber-category directive 2026-06-10).
     # Fetch the scope's posterior rows newest-first, then prefer the latest TRADEABLE-GRADE
     # row over a newer bounds-less SHADOW row. A newer cycle that has anchor manifests but no
-    # fusion instruments writes a bounds-less U0R_CAPTURE_MISSING row by design; absolute-latest
+    # fusion instruments writes a bounds-less BAYES_PRECISION_FUSION_CAPTURE_MISSING row by design; absolute-latest
     # selection would serve it and collapse live eligibility. The newer bounds-less row stays
     # visible for shadow/telemetry (it is still in the table); the LIVE bundle just does not
     # bind to it. Bound the scan to a small recent window — a healthy scope has 1-3 rows per
@@ -651,7 +651,7 @@ def read_replacement_forecast_bundle(
         # scope readiness was overwritten in place by the newer shadow cycle's materialization
         # (readiness_state upserts on scope_key — no cycle in the key), so it no longer points at
         # this row. The served row is self-certifying: it was materialized WITH its own READY
-        # readiness (a U0R/bounds-less row is never tradeable-grade), and it carries its own
+        # readiness (a BAYES_PRECISION_FUSION/bounds-less row is never tradeable-grade), and it carries its own
         # immutable dependency_source_run_ids_json + identity hashes. We bind the bundle's
         # baseline_source_run_id to the served row's intrinsic baseline (not the overwritten
         # readiness's), and we DO NOT require the scope readiness to point at this posterior.

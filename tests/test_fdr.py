@@ -78,7 +78,7 @@ def _seed_ensemble_snapshots_row(
     """S1.3 / T2.g helper: INSERT a minimal valid ensemble_snapshots row.
 
     Closes the "natural-empty-v2 bypass" in T2.d/e/f tests — when v2 is
-    empty, `_read_v2_snapshot_metadata` returns {} and
+    empty, `_read_snapshot_metadata` returns {} and
     `boundary_ambiguous_refuses_signal({})` returns False (no refusal).
     The DT7 gate passes but via dormant path. Post-T2.g, the gate runs
     against a REAL populated row and its boundary_ambiguous=0 is
@@ -222,7 +222,7 @@ class TestDT7ScemaPathActuallyRuns:
     trivial empty-table short-circuit.
 
     Without these two tests, a future refactor that silently breaks
-    `_read_v2_snapshot_metadata` (wrong column name, wrong WHERE clause,
+    `_read_snapshot_metadata` (wrong column name, wrong WHERE clause,
     swapped temperature_metric comparison) would leave the TestSelection-
     FamilySubstrate suite green because they all pass via the legacy
     empty-v2 bypass. These tests exercise the real schema path end-to-end
@@ -230,16 +230,16 @@ class TestDT7ScemaPathActuallyRuns:
 
     def test_T2g_read_metadata_returns_boundary_ambiguous_zero_from_real_row(self, tmp_path):
         """Seed a row with boundary_ambiguous=0 and verify
-        `_read_v2_snapshot_metadata` returns the correct dict against the
+        `_read_snapshot_metadata` returns the correct dict against the
         real schema path (not via the fall-through empty-row branch)."""
-        from src.engine.evaluator import _read_v2_snapshot_metadata
+        from src.engine.evaluator import _read_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_bambig_zero.db")
         _init_schema_with_forecast_authority(conn)
         snapshot_id = _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=0,
         )
-        meta = _read_v2_snapshot_metadata(
+        meta = _read_snapshot_metadata(
             conn, "Dallas", "2026-04-12", "high", snapshot_id=snapshot_id
         )
         assert meta, "meta must be non-empty — schema path must read the real row"
@@ -255,14 +255,14 @@ class TestDT7ScemaPathActuallyRuns:
         REJECTED_BOUNDARY_AMBIGUOUS per the CHECK constraint on that column)
         and verify the refusal-gate actually fires. This is the positive
         proof that DT7 is wired — not just dormant."""
-        from src.engine.evaluator import _read_v2_snapshot_metadata
+        from src.engine.evaluator import _read_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_bambig_one.db")
         _init_schema_with_forecast_authority(conn)
         snapshot_id = _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=1, causality_status="REJECTED_BOUNDARY_AMBIGUOUS",
         )
-        meta = _read_v2_snapshot_metadata(
+        meta = _read_snapshot_metadata(
             conn, "Dallas", "2026-04-12", "high", snapshot_id=snapshot_id
         )
         assert meta.get("boundary_ambiguous") == 1
@@ -278,14 +278,14 @@ class TestDT7ScemaPathActuallyRuns:
         The evaluator must not use the latest city/date/metric row as a proxy
         for the candidate's executable decision snapshot.
         """
-        from src.engine.evaluator import _read_v2_snapshot_metadata
+        from src.engine.evaluator import _read_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_exact_only.db")
         _init_schema_with_forecast_authority(conn)
         _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=1, causality_status="REJECTED_BOUNDARY_AMBIGUOUS",
         )
-        assert _read_v2_snapshot_metadata(conn, "Dallas", "2026-04-12", "high") == {}
+        assert _read_snapshot_metadata(conn, "Dallas", "2026-04-12", "high") == {}
 
 
 class TestSelectionFamilySubstrate:
@@ -1243,7 +1243,7 @@ class TestSelectionFamilySubstrate:
         # inputs.temperature_metric.is_low().
         #
         # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_canonical_schema which creates
-        # empty ensemble_snapshots; _read_v2_snapshot_metadata on empty
+        # empty ensemble_snapshots; _read_snapshot_metadata on empty
         # table naturally returns {} → boundary_ambiguous_refuses_signal
         # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
         # WILL replace this natural bypass with a real v2 fixture row
@@ -1471,7 +1471,7 @@ class TestSelectionFamilySubstrate:
         # inputs.temperature_metric.is_low().
         #
         # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_canonical_schema which creates
-        # empty ensemble_snapshots; _read_v2_snapshot_metadata on empty
+        # empty ensemble_snapshots; _read_snapshot_metadata on empty
         # table naturally returns {} → boundary_ambiguous_refuses_signal
         # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
         # WILL replace this natural bypass with a real v2 fixture row

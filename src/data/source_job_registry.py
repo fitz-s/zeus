@@ -124,7 +124,7 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   misfire_grace_time=240,
                   notes="operator directive 2026-06-11: weather downloading lives in ITS OWN "
                         "daemon (data-ingest), decoupled from forecast-live/trading restarts. "
-                        "Probe-resolved per-leg raw-input fetch + u0r extras; first fire "
+                        "Probe-resolved per-leg raw-input fetch + bayes_precision_fusion extras; first fire "
                         "IMMEDIATE at boot (next_run_time=now), then every 5min."),
     SourceJobSpec("ingest_opendata_daily_mx2t6", "ingest_main", "live", "default", True,
                   source_id="ecmwf_open_data", callable_ref="_opendata_mx2t6_cycle", owner_gated=True,

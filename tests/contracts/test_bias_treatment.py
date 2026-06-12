@@ -7,7 +7,7 @@
 """BiasTreatment type-level relationship tests.
 
 These test the TYPE in isolation (no DB, no reactor). The reactor-wiring tests live in
-tests/engine/test_bias_treatment_v2_wiring.py and gate on edli_v1.bias_treatment_v2_enabled.
+tests/engine/test_bias_treatment_v2_wiring.py and gate on edli.bias_treatment_v2_enabled.
 """
 from __future__ import annotations
 

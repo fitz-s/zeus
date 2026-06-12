@@ -332,7 +332,7 @@ def build_replacement_forecast_current_target_plan(
         # (NULL-q_lcb) materialization marked its scope covered at PLAN level and blocked
         # its own fusion repair (observed 2026-06-11: Atlanta/Austin/Beijing 00Z NULL rows
         # self-masked one tick after materializing; discovery skipped them while the
-        # reactor rejected their scopes U0R_CAPTURE_MISSING). Schema-conditional like the
+        # reactor rejected their scopes BAYES_PRECISION_FUSION_CAPTURE_MISSING). Schema-conditional like the
         # queue clause: a stripped table without the column simply omits the bound.
         posterior_tradeable_grade_clause = (
             "AND p.q_lcb_json IS NOT NULL" if "q_lcb_json" in posterior_columns else ""

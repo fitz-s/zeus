@@ -376,13 +376,13 @@ class MarketAnalysis:
         second sharpness check anywhere (no parallel-mechanism creep; the emit query
         reads the verdict, it does not re-derive it).
 
-        Flag-gated (SHADOW-safe): when ``edli_v1.forecast_sharpness_gate_enabled`` is
+        Flag-gated (SHADOW-safe): when ``edli.forecast_sharpness_gate_enabled`` is
         False (default), this ALWAYS returns False, so live emit is byte-identical to
         legacy regardless of the evidence carried.
         """
         from src.config import settings
 
-        ev = settings["edli_v1"]
+        ev = settings["edli"]
         if not bool(ev.get("forecast_sharpness_gate_enabled", False)):
             return False
         multiplier = float(ev.get("forecast_sharpness_mae_multiplier", 1.5))

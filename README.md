@@ -17,8 +17,8 @@ The live forecast→edge→size path is the **replacement_forecast** chain (auth
 ```text
 contract semantics
   → source truth (settlement provider, station, observation field)
-  → per-model walk-forward empirical-Bayes de-bias (u0r_bayes.eb_bias, λ=n/(n+8))
-  → T2 Bayesian precision fusion, Ledoit-Wolf Σ (u0r_bayes.fuse_u0r_posterior)
+  → per-model walk-forward empirical-Bayes de-bias (bayes_precision_fusion.eb_bias, λ=n/(n+8))
+  → T2 Bayesian precision fusion, Ledoit-Wolf Σ (bayes_precision_fusion.fuse_bayes_precision_posterior)
   → σ_pred = max(1.0°C, √(fused.sd²+σ_resid²))
   → settlement-preimage bin q (emos.bin_probability_settlement, q_shape fused_normal_direct)
   → q_lcb floor (Wilson z=1.645) → edge → BH FDR (per tested-family)

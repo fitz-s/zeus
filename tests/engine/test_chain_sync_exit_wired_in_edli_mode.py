@@ -39,7 +39,7 @@ import pytest
 
 
 def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
-    """Boot src/main.py with a FakeScheduler and patched edli_v1 settings.
+    """Boot src/main.py with a FakeScheduler and patched edli settings.
 
     Returns (scheduler_instance, settings_copy).
     """
@@ -47,7 +47,7 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
 
     settings_source = main.settings._data if hasattr(main.settings, "_data") else main.settings
     settings_copy = deepcopy(settings_source)
-    settings_copy["edli_v1"].update(edli_updates)
+    settings_copy["edli"].update(edli_updates)
     monkeypatch.setattr(main, "settings", settings_copy)
     monkeypatch.setattr(main, "get_mode", lambda: "live")
     monkeypatch.setattr(main.sys, "argv", ["src/main.py"])

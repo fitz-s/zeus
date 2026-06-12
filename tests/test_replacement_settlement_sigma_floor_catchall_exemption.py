@@ -34,7 +34,7 @@ import pytest
 import src.config as cfg
 import src.data.replacement_forecast_materializer as mod
 from src.calibration.emos import bin_probability_settlement
-from tests.test_u0r_history_provider_materializer_wiring import (  # reuse the proven harness
+from tests.test_bayes_precision_fusion_history_provider_materializer_wiring import (  # reuse the proven harness
     _conn,
     _disable_other_layers,
     _enable_fusion,
@@ -47,7 +47,7 @@ from tests.test_u0r_history_provider_materializer_wiring import (  # reuse the p
 
 
 def _enable_fused_shape(monkeypatch) -> None:
-    monkeypatch.setitem(cfg.settings["edli_v1"], "replacement_0_1_fused_q_shape_enabled", True)
+    monkeypatch.setitem(cfg.settings["edli"], "replacement_0_1_fused_q_shape_enabled", True)
 
 
 def _force_wide_floor(monkeypatch, floor_c: float) -> None:
@@ -55,7 +55,7 @@ def _force_wide_floor(monkeypatch, floor_c: float) -> None:
 
     Patches the materializer's floor lookup directly so the test does not depend on the live
     settlement_sigma_floor.json contents (which evolve as settlements arrive)."""
-    monkeypatch.setitem(cfg.settings["edli_v1"], "edli_settlement_sigma_floor_enabled", True)
+    monkeypatch.setitem(cfg.settings["edli"], "edli_settlement_sigma_floor_enabled", True)
     monkeypatch.setattr(
         mod,
         "_replacement_settlement_sigma_floor_lookup",
@@ -136,8 +136,8 @@ def test_materializer_open_ended_bin_not_inflated_by_floor(monkeypatch) -> None:
     prov = json.loads(row["provenance_json"])
     assert prov["q_shape"] == "fused_normal_direct"
     assert prov["settlement_sigma_floor_applied"] is True
-    center = float(prov["u0r_fusion"]["anchor_value_c"])
-    predictive_sigma = float(prov["u0r_fusion"]["predictive_sigma_c"])
+    center = float(prov["bayes_precision_fusion"]["anchor_value_c"])
+    predictive_sigma = float(prov["bayes_precision_fusion"]["predictive_sigma_c"])
     assert predictive_sigma < 4.326, "fixture sanity: the forced floor must exceed predictive sigma"
     q = json.loads(row["q_json"])
     assert sum(q.values()) == pytest.approx(1.0, abs=1e-9)

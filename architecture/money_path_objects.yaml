@@ -776,7 +776,7 @@ state_machines:
       - FUSED_NORMAL_BOUNDS_MISSING
       - FUSED_NORMAL_GRANDFATHER_REVOKED
       - SOFT_ANCHOR_FALLBACK
-      - U0R_CAPTURE_MISSING
+      - BAYES_PRECISION_FUSION_CAPTURE_MISSING
       - FUSED_Q_BUILD_FAILED
       - FULL_CURRENT
       - PARTIAL_CURRENT
@@ -829,27 +829,27 @@ state_machines:
     states:
       - ZEUS_RISKGUARD_DEP_LOCK_BACKOFF_BASE_S
 
-  u0r_fusion_method:
-    owner: src/forecast/u0r_bayes.py
+  bayes_precision_fusion_method:
+    owner: src/forecast/bayes_precision_fusion.py
     description: >
-      U0R-Bayes fusion-method labels (spec §4 fusion strategy). ANCHOR_FALLBACK
+      BAYES_PRECISION_FUSION-Bayes fusion-method labels (spec §4 fusion strategy). ANCHOR_FALLBACK
       means all extra models are absent so the posterior is the anchor prior.
       Not venue command states — these classify the in-memory fusion result
       before it is used for trade evaluation.
     states:
       - ANCHOR_FALLBACK
 
-  u0r_backfill_status:
-    owner: scripts/backfill_u0r_history_from_b0.py
+  bayes_precision_fusion_backfill_status:
+    owner: scripts/backfill_bayes_precision_fusion_history_from_b0.py
     description: >
       Status labels written to the backfill output manifest
-      (scripts/backfill_u0r_history_from_b0.py). U0R_BACKFILL_DRY_RUN is the
-      dry-run sentinel; U0R_BACKFILL_SEEDED confirms rows were committed.
+      (scripts/backfill_bayes_precision_fusion_history_from_b0.py). BAYES_PRECISION_FUSION_BACKFILL_DRY_RUN is the
+      dry-run sentinel; BAYES_PRECISION_FUSION_BACKFILL_SEEDED confirms rows were committed.
       Script-only, never on the live daemon path. Registered so the ACK
       substring match in the classifier does not reject them.
     states:
-      - U0R_BACKFILL_DRY_RUN
-      - U0R_BACKFILL_SEEDED
+      - BAYES_PRECISION_FUSION_BACKFILL_DRY_RUN
+      - BAYES_PRECISION_FUSION_BACKFILL_SEEDED
 
   autonomous_redeem_config_keys:
     owner: src/execution/settlement_commands.py

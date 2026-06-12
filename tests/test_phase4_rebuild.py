@@ -303,11 +303,11 @@ class TestCalibrationPairsV2IdentityFields:
 
 
 # ---------------------------------------------------------------------------
-# MAJOR-2: Pipeline integration test — rebuild_v2 end-to-end
+# MAJOR-2: Pipeline integration test — rebuild end-to-end
 # ---------------------------------------------------------------------------
 
 class TestRebuildV2PipelineIntegration:
-    """MAJOR-2 antibody: rebuild_v2() must produce calibration_pairs rows with correct
+    """MAJOR-2 antibody: rebuild() must produce calibration_pairs rows with correct
     identity fields when called end-to-end (not just add_calibration_pair in isolation).
 
     This is the test that would have caught CRITICAL-1 (phantom 'source' column in SELECT)
@@ -369,7 +369,7 @@ class TestRebuildV2PipelineIntegration:
         conn.commit()
 
     def test_rebuild_v2_writes_high_track_identity_fields(self):
-        """MAJOR-2: rebuild_v2() end-to-end must produce calibration_pairs rows with
+        """MAJOR-2: rebuild() end-to-end must produce calibration_pairs rows with
         temperature_metric='high', observation_field='high_temp',
         data_version='tigge_mx2t6_local_calendar_day_max', training_allowed=1.
 
@@ -379,7 +379,7 @@ class TestRebuildV2PipelineIntegration:
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-        from rebuild_calibration_pairs import METRIC_SPECS, rebuild_v2
+        from rebuild_calibration_pairs import METRIC_SPECS, rebuild
 
         conn = self._make_conn()
         self._insert_snapshot(conn)
@@ -387,18 +387,18 @@ class TestRebuildV2PipelineIntegration:
 
         import numpy as np
         rng = np.random.default_rng(42)
-        # Phase 7A: rebuild_v2 no longer defaults spec to HIGH; caller iterates METRIC_SPECS.
+        # Phase 7A: rebuild no longer defaults spec to HIGH; caller iterates METRIC_SPECS.
         # This Phase-4 regression test exercises only the HIGH track; pass HIGH spec explicitly.
-        stats = rebuild_v2(
+        stats = rebuild(
             conn, dry_run=False, force=True, n_mc=200, rng=rng,
             spec=METRIC_SPECS[0],
         )
 
         assert stats.pairs_written > 0, (
-            f"rebuild_v2 wrote 0 pairs — pipeline integration failed (MAJOR-2). "
+            f"rebuild wrote 0 pairs — pipeline integration failed (MAJOR-2). "
             f"Stats: {stats.as_dict()}"
         )
-        assert not stats.refused, f"rebuild_v2 refused: stats={stats.as_dict()}"
+        assert not stats.refused, f"rebuild refused: stats={stats.as_dict()}"
 
         rows = conn.execute(
             """SELECT temperature_metric, observation_field, dataset_id, training_allowed
@@ -408,7 +408,7 @@ class TestRebuildV2PipelineIntegration:
         ).fetchall()
 
         assert len(rows) > 0, (
-            "No calibration_pairs rows found for Atlanta/2025-06-15 after rebuild_v2 (MAJOR-2)"
+            "No calibration_pairs rows found for Atlanta/2025-06-15 after rebuild (MAJOR-2)"
         )
 
         for row in rows:

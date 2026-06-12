@@ -3,7 +3,7 @@
 # Reuse: Run with pytest; update if raw_model_forecasts schema or the product-identity column set changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §6 F1 raw capture + Fitz Constraint #4 (data provenance:
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 raw capture + Fitz Constraint #4 (data provenance:
 #   every data source needs source/authority; a forecast value that cannot prove its PHYSICAL
 #   PRODUCT — daily vs hourly-agg endpoint, cell_selection, elevation/downscaling, requested
 #   lat/lon, timezone, which ECMWF id — is UNVERIFIED provenance and must not silently train a

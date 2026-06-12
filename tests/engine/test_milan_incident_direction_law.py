@@ -7,7 +7,7 @@
 """Milan-incident replay: the proof seam rejects the traded candidate at DIRECTION_LAW.
 
 Relationship under test: posterior provenance (anchor_value_c /
-u0r_fusion.predictive_sigma_c) -> _live_yes_probabilities evidence ->
+bayes_precision_fusion.predictive_sigma_c) -> _live_yes_probabilities evidence ->
 _generate_candidate_proofs -> per-candidate DIRECTION_LAW_BIN_FORECAST_MISMATCH.
 The q_lcb pathology that produced the incident (q_lcb == q on far-left bins) is
 reproduced VERBATIM — the law must kill the trade anyway.

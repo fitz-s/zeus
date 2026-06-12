@@ -58,10 +58,10 @@ def _isolate_edli_settings(monkeypatch):
     canonical baseline path produces the fixture's q distribution."""
     from src.config import settings
 
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli["edli_emos_sole_calibrator_enabled"] = False
     edli["edli_bias_correction_enabled"] = False
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = False
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)

@@ -12,7 +12,7 @@ cross-module invariants are pinned, which together make the mask-and-starve cate
 unconstructible (Fitz: make the wrong state unrepresentable, not patch each instance):
 
   1. TRADEABLE-GRADE COVERAGE — a covering posterior must have q_lcb_json IS NOT NULL. A
-     NULL-bound posterior (U0R_CAPTURE_MISSING / FUSED_Q_BUILD_FAILED) is NOT live-eligible at
+     NULL-bound posterior (BAYES_PRECISION_FUSION_CAPTURE_MISSING / FUSED_Q_BUILD_FAILED) is NOT live-eligible at
      the bundle reader, so it must NOT count as coverage here — otherwise it masks the scope
      forever and the queue never re-materializes it to fusion grade.
 

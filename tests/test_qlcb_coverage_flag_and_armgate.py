@@ -1,6 +1,6 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
-# Authority basis: Phase-2 K3 SHADOW FLAG (edli_v1.q_lcb_settlement_coverage_gate_enabled,
+# Authority basis: Phase-2 K3 SHADOW FLAG (edli.q_lcb_settlement_coverage_gate_enabled,
 #   default FALSE) + ARM-gate coverage predicate. Rule-6 (overconfidence=ruin) made
 #   structural: the settlement-coverage SHRINK is HIGH risk, so it is gated OFF by
 #   default and the coverage table is computed-but-not-applied. With the flag OFF the

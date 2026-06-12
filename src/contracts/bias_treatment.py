@@ -52,7 +52,7 @@ rather than silently applying a point estimate as a hard shift.
 Backward-compatibility / shadow safety
 -------------------------------------
 This TYPE is introduced unconditionally; the BEHAVIOUR it gates (XOR composition, the
-SE-widening, NULL/stale refusal) is wired behind ``edli_v1.bias_treatment_v2_enabled``
+SE-widening, NULL/stale refusal) is wired behind ``edli.bias_treatment_v2_enabled``
 (default FALSE). With the flag OFF the live q is byte-identical to today: the legacy
 ``_maybe_apply_edli_bias_correction`` / ``_maybe_bias_decay_kelly_haircut`` shapes are
 preserved exactly and this type is not on the live path.

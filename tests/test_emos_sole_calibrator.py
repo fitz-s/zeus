@@ -222,7 +222,7 @@ def test_inv1_metric_keyed_no_crossing_and_low_serves(monkeypatch):
 #   DETRENDED trailing-window settlement std per (city, season, metric): σ_eff =
 #   max(model_σ, k·σ_settled_floor), k=0.8, applied UNIVERSALLY (EMOS-served AND raw-served).
 #   Flag-gated via the builders' apply_settlement_floor param (seam reads
-#   edli_v1.edli_settlement_sigma_floor_enabled). Flag OFF ⇒ byte-identical. max() only WIDENS σ →
+#   edli.edli_settlement_sigma_floor_enabled). Flag OFF ⇒ byte-identical. max() only WIDENS σ →
 #   lower q_lcb → fewer overconfident bets; can NEVER tighten or create a wrong-side trade (iron rule 5).
 # ----------------------------------------------------------------------------
 def _floor_cell(city, season, metric, sigma_floor_c, k=0.8):

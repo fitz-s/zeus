@@ -874,7 +874,7 @@ def _fit_bucket(
 
 @capability("script_repair_write", lease=False)
 @protects("INV-04")
-def refit_v2(
+def refit(
     conn: sqlite3.Connection,
     *,
     metric_identity: MetricIdentity,
@@ -1129,7 +1129,7 @@ def refit_v2(
     return stats
 
 
-def refit_all_v2(
+def refit_all(
     conn: sqlite3.Connection,
     *,
     dry_run: bool,
@@ -1159,7 +1159,7 @@ def refit_all_v2(
         if temperature_metric == "all" or spec.identity.temperature_metric == temperature_metric
     ]
     for spec in specs:
-        stats = refit_v2(
+        stats = refit(
             conn,
             metric_identity=spec.identity,
             dry_run=dry_run,
@@ -1291,7 +1291,7 @@ def main() -> int:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 600000")
         try:
-            per_metric = refit_all_v2(
+            per_metric = refit_all(
                 conn,
                 dry_run=args.dry_run,
                 force=args.force,
@@ -1327,7 +1327,7 @@ def main() -> int:
         apply_canonical_schema(conn)
 
         try:
-            per_metric = refit_all_v2(
+            per_metric = refit_all(
                 conn,
                 dry_run=args.dry_run,
                 force=args.force,

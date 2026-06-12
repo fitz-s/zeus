@@ -190,12 +190,12 @@ def test_monitor_refresh_emos_regime_skips_legacy_calibrators(monkeypatch):
         raise AssertionError("legacy calibrator path must not run under EMOS monitor regime")
 
     monkeypatch.setitem(
-        monitor_refresh.settings["edli_v1"],
+        monitor_refresh.settings["edli"],
         "edli_emos_sole_calibrator_enabled",
         True,
     )
     monkeypatch.setitem(
-        monitor_refresh.settings["edli_v1"],
+        monitor_refresh.settings["edli"],
         "edli_settlement_sigma_floor_enabled",
         False,
     )

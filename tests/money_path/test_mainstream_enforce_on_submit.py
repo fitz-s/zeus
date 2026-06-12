@@ -83,7 +83,7 @@ def _build_submit(monkeypatch, event, *, mainstream_agreement_pass, called):
 def test_mainstream_verdict_never_blocks_submit(monkeypatch, enforce_posture, verdict):
     """No mainstream verdict value, under any (inert) enforce_on_submit posture, may
     block the submit with MAINSTREAM_AGREEMENT_REQUIRED — the branch is deleted."""
-    monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_enforce_on_submit", enforce_posture)
+    monkeypatch.setitem(settings["edli"], "mainstream_agreement_enforce_on_submit", enforce_posture)
     event = _event()
     called = {"count": 0}
     submit, _ = _build_submit(monkeypatch, event, mainstream_agreement_pass=verdict, called=called)
@@ -99,7 +99,7 @@ def test_mainstream_verdict_never_blocks_submit(monkeypatch, enforce_posture, ve
 def test_failed_and_passing_verdict_reach_identical_decision(monkeypatch):
     """A FAILED verdict and a PASSING verdict reach the byte-identical submit decision:
     mainstream is inert at the submit boundary."""
-    monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_enforce_on_submit", True)
+    monkeypatch.setitem(settings["edli"], "mainstream_agreement_enforce_on_submit", True)
     reasons = {}
     for verdict in (True, False, None):
         event = _event()

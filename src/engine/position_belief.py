@@ -24,7 +24,7 @@ THE CONTRACT:
 - Held-side conversion happens here, exactly once:
   buy_yes -> q(bin), buy_no -> 1 - q(bin). Position space is always held-side.
 - Freshness is an explicit age budget (settings key
-  ``edli_v1.monitor_belief_max_age_hours``, default 9.0h ≈ fusion cycle
+  ``edli.monitor_belief_max_age_hours``, default 9.0h ≈ fusion cycle
   cadence + fanout slack). A stale or missing row NEVER silently borrows
   freshness from another source — callers may still run legacy refreshers for
   telemetry, but probability-authority freshness stays False.
@@ -196,7 +196,7 @@ def monitor_belief_max_age_hours() -> float:
     try:
         from src.config import settings
 
-        raw = (settings.get("edli_v1") or {}).get("monitor_belief_max_age_hours")
+        raw = (settings.get("edli") or {}).get("monitor_belief_max_age_hours")
         if raw is not None:
             value = float(raw)
             if value > 0:

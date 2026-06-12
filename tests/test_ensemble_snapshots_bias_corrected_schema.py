@@ -204,7 +204,7 @@ def test_store_snapshot_p_raw_uses_attached_forecasts_v2_without_legacy_projecti
 
 
 def test_read_v2_snapshot_metadata_prefers_attached_forecasts_schema():
-    from src.engine.evaluator import _read_v2_snapshot_metadata
+    from src.engine.evaluator import _read_snapshot_metadata
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -222,7 +222,7 @@ def test_read_v2_snapshot_metadata_prefers_attached_forecasts_schema():
     """)
     conn.commit()
 
-    meta = _read_v2_snapshot_metadata(
+    meta = _read_snapshot_metadata(
         conn,
         "London",
         "2026-05-17",

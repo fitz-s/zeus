@@ -137,7 +137,7 @@ IEM_BASE = "https://mesonet.agron.iastate.edu/json"
 # First sample must arrive within this many hours of local midnight for the
 # window to be considered full-day.  DST fall-back days have 25 local hours;
 # hours=23 WU request cannot capture the final 2h — callers that need the
-# full local day must use the DB reader (read_day0_observed_extrema_v2) when
+# full local day must use the DB reader (read_day0_observed_extrema) when
 # observation_instants has current rows (P2-1, deferred).
 _DAY0_COVERAGE_WINDOW_GRACE_HOURS = 2
 _DAY0_MIN_SAMPLE_COUNT = 4  # below this, coverage is LOW even if window is intact

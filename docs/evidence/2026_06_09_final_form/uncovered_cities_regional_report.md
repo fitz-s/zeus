@@ -87,7 +87,7 @@ All values in **°C**.
 
 **Anomaly — San Francisco icon_global:** MAE=2.926, bias=−2.415°C. ICON_global badly resolves the SFO coastal microclimate; NBM (1.262) and ECMWF (1.184) are substantially better. This is a known ICON limitation for coastal fog zones.
 
-**NBM CORRELATION CONCERN:** NBM is a statistical blend of NCEP models (GFS, NAM, HREF, etc.) — it is NOT decorrelated from GFS, which is already the `gfs_global` member in the current U0R ensemble. Adding NBM to the ensemble as a 5th decorrelated global would violate the decorrelation assumption. **Recommended role: anchor replacement only** (replace or supplement `ecmwf_ifs` as anchor for CONUS, not as an additive ensemble member), OR use as a standalone per-city signal post-Platt, not as a decorrelated fusion member.
+**NBM CORRELATION CONCERN:** NBM is a statistical blend of NCEP models (GFS, NAM, HREF, etc.) — it is NOT decorrelated from GFS, which is already the `gfs_global` member in the current BAYES_PRECISION_FUSION ensemble. Adding NBM to the ensemble as a 5th decorrelated global would violate the decorrelation assumption. **Recommended role: anchor replacement only** (replace or supplement `ecmwf_ifs` as anchor for CONUS, not as an additive ensemble member), OR use as a standalone per-city signal post-Platt, not as a decorrelated fusion member.
 
 ### 3.2 Canada: Toronto
 
@@ -216,7 +216,7 @@ These cities are covered by icon_eu but tested for sub-regional upgrades:
 - Domain polygon: approximately 23°N–50°N, 125°W–66°W (confirmed: covers all US cities including Toronto; fails for Beijing, Tokyo)
 - Max lead: Previous-runs API confirmed lead-1; live API supports longer leads
 
-**CRITICAL CONSTRAINT:** NBM is a statistical blend of NCEP models including GFS. Adding NBM as a decorrelated global violates U0R's decorrelation assumption (GFS already present as `gfs_global`). **Recommended deployment role:**
+**CRITICAL CONSTRAINT:** NBM is a statistical blend of NCEP models including GFS. Adding NBM as a decorrelated global violates BAYES_PRECISION_FUSION's decorrelation assumption (GFS already present as `gfs_global`). **Recommended deployment role:**
 1. **Anchor replacement for CONUS:** Substitute NBM for ECMWF IFS as the deterministic anchor on CONUS cities
 2. **OR:** Post-Platt as a separate channel signal, treating it as GFS-correlated
 3. **Do NOT add as a decorrelated fusion member** alongside gfs_global

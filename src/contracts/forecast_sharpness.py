@@ -31,7 +31,7 @@ Provenance / fail-closed rules (data-provenance law):
     realized observation replaces the forecast, so forecast sharpness is moot.
 
 The BEHAVIOR (edge rejection) is flag-gated OFF at the call site
-(``edli_v1.forecast_sharpness_gate_enabled``); this TYPE is always required so a
+(``edli.forecast_sharpness_gate_enabled``); this TYPE is always required so a
 construction without it is a TypeError regardless of the flag — the error
 category (forgetting to relate sharpness to the bin) is unconstructable.
 """

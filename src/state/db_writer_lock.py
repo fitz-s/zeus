@@ -680,11 +680,10 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- 06/18Z cycle-phase offline qualification study (2026-06-11, operator-directed) ---
         "scripts/cycle_phase_offline_study.py",  # offline study: 4x connect to its own SCRATCH db (state/cycle_phase_study*.db, created+owned by the script) + 1x trades DB via file:...?mode=ro uri (settlement truth reads only); never touches live forecasts/world DBs for write; report + scratch artifacts only
         "scripts/calibration_bakeoff.py",   # read_only: scores calibrators vs settlements VERIFIED; writes JSON/txt only
-        "scripts/calibration_bakeoff_v2.py",  # read_only: corrected bake-off (RAW on live-served vector, OOS-gated); writes JSON/txt only
         "scripts/backfill_settlement_outcomes_canonical_2026_06_02.py",  # RO dry-run default; RW settlement_outcomes only with --execute, atomic SAVEPOINT (zeus-forecasts.db)
         "scripts/backfill_settlement_unit_2026_06_03.py",  # operator_invoked: RO dry-run default; RW settlement_outcomes.settlement_unit only with --commit, atomic SAVEPOINT (zeus-forecasts.db, W2)
-        # --- U0R-Bayes walk-forward history seed (2026-06-08, operator-invoked offline) ---
-        "scripts/backfill_u0r_history_from_b0.py",  # operator_invoked: RW raw_model_forecasts (SHADOW_ONLY, training_allowed=0) only; INSERT OR IGNORE idempotent; never money-path; --db REQUIRED; B0 seed 2026-06-08
+        # --- BAYES_PRECISION_FUSION-Bayes walk-forward history seed (2026-06-08, operator-invoked offline) ---
+        "scripts/backfill_bayes_precision_fusion_history_from_b0.py",  # operator_invoked: RW raw_model_forecasts (SHADOW_ONLY, training_allowed=0) only; INSERT OR IGNORE idempotent; never money-path; --db REQUIRED; B0 seed 2026-06-08
         # --- read-only scripts: verified SELECT-only, named in PR #86 ---
         "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
         "scripts/audit_divergence_exit_counterfactual.py",  # read_only (PR #86)
@@ -759,7 +758,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/backfill_obs.py",                       # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_ogimet_metar.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_outcome_fact.py",                 # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/backfill_tigge_snapshot_p_raw_v2.py",      # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/backfill_tigge_snapshot_p_raw.py",      # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_wu_daily_all.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/cleanup_ghost_positions.py",               # already_guarded: writes under db_writer_lock(BULK)
         "scripts/fill_obs_dst_gaps.py",                  # already_guarded: writes under db_writer_lock(BULK) when not dry_run

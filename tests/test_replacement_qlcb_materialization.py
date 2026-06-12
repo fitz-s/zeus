@@ -33,7 +33,7 @@ import src.data.replacement_forecast_materializer as mod
 from src.data.replacement_forecast_materializer import _build_fused_q_bounds
 from src.calibration.emos import bin_probability_settlement
 from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin
-from tests.test_u0r_history_provider_materializer_wiring import (  # reuse the proven harness
+from tests.test_bayes_precision_fusion_history_provider_materializer_wiring import (  # reuse the proven harness
     _conn,
     _disable_other_layers,
     _enable_fusion,
@@ -49,7 +49,7 @@ _MODELS = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless
 def _enable_fused_shape(monkeypatch) -> None:
     from src.config import settings
 
-    monkeypatch.setitem(settings["edli_v1"], "replacement_0_1_fused_q_shape_enabled", True)
+    monkeypatch.setitem(settings["edli"], "replacement_0_1_fused_q_shape_enabled", True)
 
 
 def _materialize(conn):
@@ -220,7 +220,7 @@ def test_bound_construction_failure_fails_soft_to_null(monkeypatch) -> None:
     _seed_history(conn, decision=date(2026, 6, 7), models=_MODELS)
     _seed_current_single_runs(conn, values=_live_values())
 
-    with _capture_warning("zeus.replacement_u0r_fusion") as records:
+    with _capture_warning("zeus.replacement_bayes_precision_fusion") as records:
         pid = _materialize(conn)
     row = _bound_row(conn, pid)
     prov = json.loads(row["provenance_json"])

@@ -41,7 +41,7 @@ These tests lock:
     decision critical path).
   RED-before-fix #2 (decoupled job exists): a dedicated `_edli_market_substrate_warm_cycle`
     job exists and, when EDLI is enabled, DOES invoke the refresh exactly once.
-  Gate: when edli_v1 is disabled the warm job does no refresh.
+  Gate: when edli is disabled the warm job does no refresh.
   Fail-soft: a refresh that raises does NOT propagate out of the warm job.
 """
 
@@ -85,7 +85,7 @@ def _enable_edli_cfg(monkeypatch, *, enabled: bool = True) -> None:
         main_module,
         "_settings_section",
         lambda name, default=None: (
-            {"enabled": enabled} if name == "edli_v1" else (default if default is not None else {})
+            {"enabled": enabled} if name == "edli" else (default if default is not None else {})
         ),
     )
 
@@ -235,7 +235,7 @@ def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
 
 
 def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):
-    """Config gate: disabled edli_v1 → no refresh side effect."""
+    """Config gate: disabled edli → no refresh side effect."""
     calls: list[int] = []
     monkeypatch.setattr(
         main_module,
@@ -251,7 +251,7 @@ def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):
     _enable_edli_cfg(monkeypatch, enabled=False)
 
     main_module._edli_market_substrate_warm_cycle()
-    assert calls == [], "disabled edli_v1 must skip the refresh"
+    assert calls == [], "disabled edli must skip the refresh"
 
 
 def test_market_substrate_warm_cycle_failsoft_on_refresh_error(monkeypatch):
@@ -1225,7 +1225,7 @@ def test_mainstream_warm_cycle_uses_bounded_fresh_family_window(monkeypatch):
         "_settings_section",
         lambda name, default=None: (
             {"enabled": True, "mainstream_warm_max_families_per_cycle": 2}
-            if name == "edli_v1"
+            if name == "edli"
             else (default if default is not None else {})
         ),
     )

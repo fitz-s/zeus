@@ -136,9 +136,9 @@ def _city_timezone(city: str | None) -> str | None:
 
 def _fusion_instruments(provenance: Mapping[str, Any]) -> Any:
     """The F4 fusion selection (used / dropped / excluded), straight from the posterior prov."""
-    fusion = provenance.get("u0r_fusion")
+    fusion = provenance.get("bayes_precision_fusion")
     if not isinstance(fusion, Mapping):
-        return _unavailable("provenance.u0r_fusion absent (non-fused / capture-missing posterior)")
+        return _unavailable("provenance.bayes_precision_fusion absent (non-fused / capture-missing posterior)")
     return {
         "method": fusion.get("method"),
         "used_models": list(fusion.get("used_models") or []),

@@ -686,7 +686,7 @@ def test_market_discovery_defers_while_edli_pending_backlog(monkeypatch):
     import src.data.market_scanner as scanner_mod
 
     monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 650)
-    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli" else (default or {}))
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
     monkeypatch.setattr(main_mod, "_market_discovery_last_completed_monotonic", 100.0)
@@ -714,7 +714,7 @@ def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkey
     calls: list[dict] = []
     captured: list[dict] = []
     monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 650)
-    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli" else (default or {}))
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
     # STALE substrate: last full capture 400s ago (> 300s fairness window).
@@ -757,7 +757,7 @@ def test_market_discovery_defers_when_substrate_fresh_regardless_of_pending(monk
     import src.main as main_mod
 
     monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 650)
-    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli" else (default or {}))
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
     # FRESH substrate: last full capture 100s ago (< 300s fairness window).
@@ -777,7 +777,7 @@ def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):
     import src.data.market_scanner as scanner_mod
 
     calls: list[dict] = []
-    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli" else (default or {}))
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("no such table")))
 

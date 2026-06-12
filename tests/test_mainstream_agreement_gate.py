@@ -819,7 +819,7 @@ def test_mainstream_gate_is_reference_only_never_excludes_from_selection(monkeyp
 
     # Gate flag ON — under the OLD (excluding) contract this is exactly the
     # condition that dropped the failed proof. Reference-only must ignore it.
-    monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_reference_enabled", True)
+    monkeypatch.setitem(settings["edli"], "mainstream_agreement_reference_enabled", True)
 
     best_but_gate_failed = SimpleNamespace(
         token_id="tok-best",

@@ -107,7 +107,7 @@ def test_member_seed_budget_counts_written_only() -> None:
 #    never once-at-the-end. (Three whole-pass losses in one morning.)
 # ---------------------------------------------------------------------------------
 def test_member_chunked_durable_persist() -> None:
-    dl = _read("src/data/u0r_multimodel_download.py")
+    dl = _read("src/data/bayes_precision_fusion_download.py")
     assert "_persist_chunk_with_lock_retry" in dl
     assert dl.count("_persist_chunk_with_lock_retry(") >= 3  # def + per-target + final prune
 

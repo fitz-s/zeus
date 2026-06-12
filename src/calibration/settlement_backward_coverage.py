@@ -36,7 +36,7 @@ calibrate it, and return one of:
 
 The SHRINK is HIGH risk (it moves the live decision). It is applied to the live
 LCB ONLY through ``apply_settlement_coverage(..., enabled=<flag>)`` with the flag
-``edli_v1.q_lcb_settlement_coverage_gate_enabled`` (default FALSE). With the flag
+``edli.q_lcb_settlement_coverage_gate_enabled`` (default FALSE). With the flag
 OFF the verdict is computed but the LCB is byte-identical to today. The ARM gate
 (``arm_gate_coverage_blocks``) reads the verdict UNCONDITIONALLY — you cannot arm
 on an LCB the settled record refuses, even while the live shrink is shadowed OFF.

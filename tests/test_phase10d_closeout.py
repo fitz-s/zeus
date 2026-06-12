@@ -146,17 +146,17 @@ class TestRCYCausalityStatusWire:
         """R-CY.1: v2 row causality_status='N/A_CAUSAL_DAY_ALREADY_STARTED' reaches
         Day0SignalInputs (not overridden by 'OK' default).
 
-        B4 Phase 3 (2026-05-01): _read_v2_snapshot_metadata now requires snapshot_id
+        B4 Phase 3 (2026-05-01): _read_snapshot_metadata now requires snapshot_id
         per decision-time ordering rule (`src/engine/evaluator.py:233`); pass the
         autoincrement id of the seeded row.
         """
-        from src.engine.evaluator import _read_v2_snapshot_metadata
+        from src.engine.evaluator import _read_snapshot_metadata
 
         conn = _make_v2_snapshots_db(causality_status="N/A_CAUSAL_DAY_ALREADY_STARTED")
         snapshot_id = conn.execute(
             "SELECT snapshot_id FROM ensemble_snapshots WHERE city='NYC' LIMIT 1"
         ).fetchone()["snapshot_id"]
-        meta = _read_v2_snapshot_metadata(
+        meta = _read_snapshot_metadata(
             conn, "NYC", "2026-01-01", "low", snapshot_id=str(snapshot_id),
         )
 
@@ -167,7 +167,7 @@ class TestRCYCausalityStatusWire:
 
     def test_r_cy_2_missing_v2_row_fallback_ok(self):
         """R-CY.2: missing v2 row → causality_status fallback 'OK' (Golden Window)."""
-        from src.engine.evaluator import _read_v2_snapshot_metadata
+        from src.engine.evaluator import _read_snapshot_metadata
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -183,7 +183,7 @@ class TestRCYCausalityStatusWire:
         # Empty table — no rows
         conn.commit()
 
-        meta = _read_v2_snapshot_metadata(conn, "NYC", "2026-01-01", "low")
+        meta = _read_snapshot_metadata(conn, "NYC", "2026-01-01", "low")
 
         # Empty dict → get() with default "OK"
         causality = meta.get("causality_status", "OK")

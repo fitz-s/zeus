@@ -174,7 +174,7 @@ def _install_common_mocks(monkeypatch, now: datetime) -> None:
     # neutral and independent of fixture DB state.
     monkeypatch.setattr(
         evaluator_module,
-        "_read_v2_snapshot_metadata",
+        "_read_snapshot_metadata",
         lambda *args, **kwargs: {},
     )
     from src.signal.day0_extrema import RemainingMemberExtrema as _REM

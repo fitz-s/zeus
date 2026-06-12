@@ -435,11 +435,11 @@ class TestRCPV2RowCountSensor:
         }
 
     def test_r_cp_1_v2_row_counts_queries_actual_tables(self):
-        """R-CP.1: _get_v2_row_counts returns real table row signals."""
-        from src.observability.status_summary import _get_v2_row_counts
+        """R-CP.1: _get_row_counts returns real table row signals."""
+        from src.observability.status_summary import _get_row_counts
 
         empty_conn = self._make_empty_v2_conn()
-        counts_empty = _get_v2_row_counts(empty_conn)
+        counts_empty = _get_row_counts(empty_conn)
 
         assert set(counts_empty.keys()) == {
             "platt_models",
@@ -455,14 +455,14 @@ class TestRCPV2RowCountSensor:
 
         # Verify it actually queries — insert 1 row to platt_models
         populated_conn = self._make_populated_v2_conn()
-        counts_populated = _get_v2_row_counts(populated_conn)
+        counts_populated = _get_row_counts(populated_conn)
         assert counts_populated["platt_models"] == 1, (
-            "_get_v2_row_counts must return actual row count, not hardcoded 0"
+            "_get_row_counts must return actual row count, not hardcoded 0"
         )
 
     def test_r_cp_1b_prefers_attached_world_over_empty_trade_shadow(self, tmp_path):
         """F4: attached world data tables outrank empty trade shadow tables."""
-        from src.observability.status_summary import _V2_TABLES, _get_v2_row_counts
+        from src.observability.status_summary import _V2_TABLES, _get_row_counts
 
         trade_conn = self._make_empty_v2_conn()
         world_path = tmp_path / "world.db"
@@ -477,13 +477,13 @@ class TestRCPV2RowCountSensor:
         world_conn.close()
 
         trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
-        counts = _get_v2_row_counts(trade_conn)
+        counts = _get_row_counts(trade_conn)
 
         assert counts == expected_counts
 
     def test_r_cp_1e_forecast_owned_v2_tables_prefer_forecasts_schema(self, tmp_path):
         """K1 split: forecast-owned v2 tables report forecasts DB truth."""
-        from src.observability.status_summary import _get_v2_row_counts
+        from src.observability.status_summary import _get_row_counts
 
         trade_conn = self._make_empty_v2_conn()
         world_path = tmp_path / "world.db"
@@ -513,7 +513,7 @@ class TestRCPV2RowCountSensor:
 
         trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
         trade_conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_path),))
-        counts = _get_v2_row_counts(trade_conn)
+        counts = _get_row_counts(trade_conn)
 
         assert counts["platt_models"] == 2
         assert counts["historical_forecasts"] == 2
@@ -523,13 +523,13 @@ class TestRCPV2RowCountSensor:
 
     def test_r_cp_1d_v2_row_counts_avoid_full_table_count_scans(self):
         """F4 latency guard: status writes must not run COUNT(*) over large v2 tables."""
-        from src.observability.status_summary import _get_v2_row_counts
+        from src.observability.status_summary import _get_row_counts
 
         conn = self._make_populated_v2_conn()
         statements: list[str] = []
         conn.set_trace_callback(statements.append)
 
-        counts = _get_v2_row_counts(conn)
+        counts = _get_row_counts(conn)
 
         assert counts["platt_models"] == 1
         assert not any("COUNT(*)" in statement.upper() for statement in statements), (
@@ -538,7 +538,7 @@ class TestRCPV2RowCountSensor:
 
     def test_r_cp_1c_existing_empty_world_table_does_not_fallback_to_trade_shadow(self, tmp_path):
         """F4 pair-negative: an existing world table is the authority even if empty."""
-        from src.observability.status_summary import _V2_TABLES, _get_v2_row_counts
+        from src.observability.status_summary import _V2_TABLES, _get_row_counts
 
         trade_conn = self._make_populated_v2_conn()
         world_path = tmp_path / "world.db"
@@ -549,7 +549,7 @@ class TestRCPV2RowCountSensor:
         world_conn.close()
 
         trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
-        counts = _get_v2_row_counts(trade_conn)
+        counts = _get_row_counts(trade_conn)
 
         assert all(count == 0 for count in counts.values()), (
             "Present world v2 tables must be reported as world truth, not "
@@ -560,10 +560,10 @@ class TestRCPV2RowCountSensor:
         """R-CP.2: discrepancy flag 'v2_empty_despite_closure_claim' fires when
         dual_track_scaffold_claimed=True AND any v2 table has 0 rows.
         """
-        from src.observability.status_summary import _get_v2_row_counts
+        from src.observability.status_summary import _get_row_counts
 
         empty_conn = self._make_empty_v2_conn()
-        v2_counts = _get_v2_row_counts(empty_conn)
+        v2_counts = _get_row_counts(empty_conn)
 
         # Simulate the discrepancy flag logic directly
         dual_track_scaffold_claimed = True
@@ -580,10 +580,10 @@ class TestRCPV2RowCountSensor:
 
     def test_r_cp_2b_discrepancy_flag_absent_when_v2_populated(self):
         """R-CP.2 pair-negative: flag absent when v2 tables are populated."""
-        from src.observability.status_summary import _get_v2_row_counts
+        from src.observability.status_summary import _get_row_counts
 
         populated_conn = self._make_populated_v2_conn()
-        v2_counts = _get_v2_row_counts(populated_conn)
+        v2_counts = _get_row_counts(populated_conn)
 
         dual_track_scaffold_claimed = True
         discrepancy_flags: list[str] = []
@@ -599,11 +599,11 @@ class TestRCPV2RowCountSensor:
 
     def test_r_cp_1_missing_v2_table_returns_zero_not_error(self):
         """R-CP.1 resilience: missing v2 table returns 0, not an exception."""
-        from src.observability.status_summary import _get_v2_row_counts
+        from src.observability.status_summary import _get_row_counts
 
         # DB with NO v2 tables at all
         empty_conn = sqlite3.connect(":memory:")
-        counts = _get_v2_row_counts(empty_conn)
+        counts = _get_row_counts(empty_conn)
 
         assert all(v == 0 for v in counts.values()), (
             "Missing v2 table must return 0 count, not raise exception"
@@ -945,7 +945,7 @@ class TestRCPV2RowCountSensor:
             "query_strategy_health_snapshot",
             lambda conn, now=None: {"status": "fresh", "by_strategy": {}, "stale_strategy_keys": []},
         )
-        monkeypatch.setattr(status_summary_module, "_get_v2_row_counts", lambda conn: {})
+        monkeypatch.setattr(status_summary_module, "_get_row_counts", lambda conn: {})
         monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
         monkeypatch.setattr(status_summary_module, "is_entries_paused", lambda: False)
         monkeypatch.setattr(status_summary_module, "get_entries_pause_source", lambda: None)

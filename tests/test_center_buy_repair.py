@@ -202,7 +202,7 @@ def _patch_evaluator(
             metadata_conn_calls.append(args[0])
             return {}
 
-        monkeypatch.setattr(evaluator_module, "_read_v2_snapshot_metadata", _read_metadata)
+        monkeypatch.setattr(evaluator_module, "_read_snapshot_metadata", _read_metadata)
 
     if not real_snapshot_helpers:
         def _store_p_raw(*args, **kwargs):
@@ -618,7 +618,7 @@ def test_forecast_snapshot_real_helpers_round_trip_forecasts_db(monkeypatch, tmp
         assert row["target_date"] == "2026-04-03"
         assert row["temperature_metric"] == "high"
         assert json.loads(row["p_raw_json"]) == [0.6, 0.25, 0.15]
-        metadata = evaluator_module._read_v2_snapshot_metadata(
+        metadata = evaluator_module._read_snapshot_metadata(
             None,
             "NYC",
             "2026-04-03",

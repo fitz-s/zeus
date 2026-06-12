@@ -70,10 +70,10 @@ def _isolate_edli_settings(monkeypatch):
     """
     from src.config import settings
 
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli["edli_emos_sole_calibrator_enabled"] = False
     edli["edli_bias_correction_enabled"] = False
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = False
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
@@ -2708,9 +2708,9 @@ def test_opportunity_book_selector_is_default_on_for_requested_token(monkeypatch
     from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
 
     monkeypatch.delenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", raising=False)
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli.pop("opportunity_book_selector_enabled", None)
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
 
     # STALE_TEST update 2026-06-08: same complement-immunity buy_no admission gate as
     # test_token_redecision_refresh_scope_does_not_force_requested_token. Supply a
@@ -2781,7 +2781,7 @@ def test_opportunity_book_selector_is_default_on_for_requested_token(monkeypatch
 
 # REMOVED 2026-06-08 (operator directive; "bin selection.md" §14.7/§14.8): the
 # former test_opportunity_book_selector_settings_false_fails_closed asserted the
-# OFF behavior of the family-selector toggle (edli_v1.opportunity_book_selector_
+# OFF behavior of the family-selector toggle (edli.opportunity_book_selector_
 # enabled="false" -> _selected_candidate_proof returns None). That off-able gate
 # is ABOLISHED — the bin-selection ΔU ranker is the unconditional single live
 # decision surface, there is no disable path. A test pinning a forbidden toggle's

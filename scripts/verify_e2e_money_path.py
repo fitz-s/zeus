@@ -153,7 +153,7 @@ class Walker:
                 ).fetchone()[0]
                 self.add("3 instruments", "WARN",
                          f"0 instrument rows for cycle={cyc}; city high-water={any_cycle} "
-                         "(fusion falls to single-anchor -> U0R_CAPTURE_MISSING)")
+                         "(fusion falls to single-anchor -> BAYES_PRECISION_FUSION_CAPTURE_MISSING)")
             else:
                 self.add("3 instruments", "PASS", f"{len(models)} models: {','.join(models)}")
         except sqlite3.OperationalError as exc:
@@ -370,7 +370,7 @@ class Walker:
         try:
             from src.config import settings
 
-            edli = settings["edli_v1"]
+            edli = settings["edli"]
             details.append(f"scope={edli.get('edli_live_scope')}")
             details.append(
                 "intermediate_admission="
