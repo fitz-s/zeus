@@ -3024,6 +3024,25 @@ def _build_event_bound_no_submit_receipt_core(
                 "mainstream_fetched_at_utc": _mav.get("mainstream_fetched_at_utc"),
             }
         )
+    # WRONG-BOOK / IDENTITY WALL #5 (live incident 2026-06-12, Busan 27°C NO POST_ONLY
+    # 0.02 vs real book 0.63/0.65). `row` (= _selected_snapshot_row_for_event(family_rows,
+    # payload)) is keyed by the EVENT's *trigger* token (payload.token_id) — the bin that
+    # fired the opportunity event — NOT by the candidate the ΔU ranker actually selected
+    # (`proof`). When the winning leg is a DIFFERENT bin than the trigger bin (the normal
+    # case for a family scan), `row` is a SIBLING bin's snapshot. The replacement-forecast
+    # branch already re-binds `row = proof.row`; the canonical path never did, so the
+    # QUOTE_FEASIBILITY cert (which reads best_bid/best_ask off selected_snapshot_row)
+    # carried the wrong bin's book — e.g. the 30°C-YES book 0.018/0.035 — while the
+    # executable-snapshot cert (keyed off proof.executable_snapshot_id) was correct. The
+    # maker price then bid-improved that ghost 0.018 bid → a 0.02 limit that can never fill.
+    #
+    # ROOT FIX (same identity discipline as the executable snapshot: condition_id +
+    # selected_outcome_token_id): the proof-evidence bundle MUST describe the SELECTED
+    # candidate, so the quote book is the SELECTED proof's NATIVE row (`proof.row`, keyed
+    # at generation by (condition_id, direction)). A selected, priced proof ALWAYS has a
+    # native row (execution_price is derived from it); fail closed if it does not — never
+    # substitute the trigger-bin book.
+    selected_snapshot_row = _selected_proof_snapshot_row_or_raise(proof)
     try:
         proof_bundle = _build_no_submit_proof_bundle_from_adapter_evidence(
             event=event,
@@ -3032,7 +3051,7 @@ def _build_event_bound_no_submit_receipt_core(
             family=family,
             family_topology_rows=family_topology_rows,
             family_snapshot_rows=family_rows,
-            selected_snapshot_row=row,
+            selected_snapshot_row=selected_snapshot_row,
             trade_conn=trade_conn,
             forecast_conn=source_conn,
             calibration_conn=calibration_conn,
@@ -3702,6 +3721,22 @@ def _build_live_execution_command_certificates(
             if str(order_mode).strip().upper() == "MAKER"
             else None
         )
+        # WALL #5 PRICE-SEAM DEFENSE (K=1, 2026-06-12). The maker limit is derived from the
+        # quote-cert book (best_bid/best_ask). The pre-submit JIT witness (fresh_best_bid/ask)
+        # is the SAME selected candidate's book re-fetched at submit time. If the two books'
+        # mids disagree by more than a small tolerance the quote-cert book is not the
+        # candidate's live book (wrong-bin book, or a stale ghost) — fail closed rather than
+        # rest a maker order at a price the fresh book proves cannot fill. The root fix already
+        # binds the cert to proof.row; this is the independent second wall at the price seam so
+        # the 0.02-on-a-0.64-book intent is structurally unreachable even if the cert regresses.
+        if str(order_mode).strip().upper() == "MAKER":
+            _assert_maker_book_agrees_with_fresh_witness(
+                quote_best_bid=best_bid,
+                quote_best_ask=best_ask,
+                fresh_best_bid=fresh_best_bid,
+                fresh_best_ask=fresh_best_ask,
+                tick_size=float(provisional_final_intent.payload["tick_size"]),
+            )
         # SIZE-TO-DEPTH + SWEEP-VWAP (Wall B / Wall C, 2026-06-01):
         # For TAKER FOK orders, compute the crossable depth and sweep VWAP from
         # the elected snapshot's live book BEFORE building the cert.  This ensures:
@@ -4532,6 +4567,57 @@ def _require_pre_submit_authority_witness(
     return witness
 
 
+_MAKER_BOOK_FRESH_MID_TOLERANCE_TICKS = 10.0
+
+
+def _assert_maker_book_agrees_with_fresh_witness(
+    *,
+    quote_best_bid: float | None,
+    quote_best_ask: float | None,
+    fresh_best_bid: float | None,
+    fresh_best_ask: float | None,
+    tick_size: float,
+    tolerance_ticks: float = _MAKER_BOOK_FRESH_MID_TOLERANCE_TICKS,
+) -> None:
+    """Fail closed when the maker-priced book disagrees with the fresh submit-time book.
+
+    WALL #5 price-seam defense (2026-06-12). The maker limit is computed off the quote-cert
+    book; the pre-submit JIT witness is the SAME candidate's book re-observed at submit. A mid
+    divergence beyond ``tolerance_ticks`` means the quote book is not this candidate's live
+    book (wrong-bin or ghost). Fail closed with a typed
+    MAKER_BOOK_FRESH_WITNESS_DISAGREEMENT — the Busan incident's quote-mid (~0.0265) vs fresh
+    mid (~0.64) is ~37 ticks at a 0.01 tick, far past tolerance, so it would have been
+    rejected (or, post root-fix, priced off the right 0.64 book) and never rest at 0.02.
+    """
+    tick = max(float(tick_size), 0.0)
+    if tick <= 0.0:
+        # Without a positive tick the tolerance is undefined; the tick provenance guard
+        # upstream already fails closed on a missing tick, so do not invent a bound here.
+        return
+    quote_mid = _two_sided_mid(quote_best_bid, quote_best_ask)
+    fresh_mid = _two_sided_mid(fresh_best_bid, fresh_best_ask)
+    if quote_mid is None or fresh_mid is None:
+        # One side is single-sided/empty: the maker_limit_price / post-only crossing guards
+        # own that case. This seam only adjudicates two measurable two-sided books.
+        return
+    divergence_ticks = abs(quote_mid - fresh_mid) / tick
+    if divergence_ticks > float(tolerance_ticks):
+        raise ValueError(
+            "MAKER_BOOK_FRESH_WITNESS_DISAGREEMENT:"
+            f"quote_mid={quote_mid:.6f}:fresh_mid={fresh_mid:.6f}:"
+            f"divergence_ticks={divergence_ticks:.2f}:tolerance_ticks={float(tolerance_ticks):.2f}"
+        )
+
+
+def _two_sided_mid(best_bid: float | None, best_ask: float | None) -> float | None:
+    """Mid of a two-sided book, or None when either side is missing/non-positive."""
+    bid = _optional_float(best_bid)
+    ask = _optional_float(best_ask)
+    if bid is None or ask is None or bid <= 0.0 or ask <= 0.0:
+        return None
+    return (bid + ask) / 2.0
+
+
 def _would_cross_post_only_book(
     *,
     side: str,
@@ -4868,6 +4954,40 @@ def _append_submit_unknown_aggregate_event(
     return event.event_hash
 
 
+def _assert_quote_book_identity_matches_candidate(
+    *,
+    quote_payload: Mapping[str, object],
+    actionable_payload: Mapping[str, object],
+) -> None:
+    """Fail closed unless the quoted book belongs to the candidate the order is for.
+
+    WALL #5 antibody (2026-06-12). Compares the QUOTE_FEASIBILITY cert's book-source identity
+    (quote_book_condition_id / quote_book_token_id — stamped from the row the book came from)
+    against the actionable candidate's (condition_id / token_id). When the producer omits the
+    book-identity fields (legacy cert) the binding is absent and this is a no-op; the post-fix
+    producer always stamps them, so any sibling-bin book raises
+    QUOTE_FEASIBILITY_BOOK_IDENTITY_MISMATCH instead of pricing a maker order off a ghost book.
+    """
+    book_condition_id = _nonnull(quote_payload.get("quote_book_condition_id"))
+    book_token_id = _nonnull(quote_payload.get("quote_book_token_id"))
+    if not book_condition_id and not book_token_id:
+        # Legacy cert without the binding fields — cannot assert. (Post-fix producers
+        # always stamp them; the regression fixtures cover both stamped paths.)
+        return
+    candidate_condition_id = _nonnull(actionable_payload.get("condition_id"))
+    candidate_token_id = _nonnull(actionable_payload.get("token_id"))
+    if book_condition_id and candidate_condition_id and book_condition_id != candidate_condition_id:
+        raise ValueError(
+            "QUOTE_FEASIBILITY_BOOK_IDENTITY_MISMATCH:"
+            f"book_condition_id={book_condition_id}:candidate_condition_id={candidate_condition_id}"
+        )
+    if book_token_id and candidate_token_id and book_token_id != candidate_token_id:
+        raise ValueError(
+            "QUOTE_FEASIBILITY_BOOK_IDENTITY_MISMATCH:"
+            f"book_token_id={book_token_id}:candidate_token_id={candidate_token_id}"
+        )
+
+
 def _passive_maker_context_from_authorities(
     *,
     actionable: DecisionCertificate,
@@ -4876,6 +4996,16 @@ def _passive_maker_context_from_authorities(
     decision_time: datetime,
 ) -> dict[str, object]:
     quote_payload = quote_feasibility_cert.payload
+    # WALL #5 TYPE-LEVEL IDENTITY ASSERT (2026-06-12). The quote cert carries the identity
+    # of the row whose book it quoted (quote_book_condition_id / quote_book_token_id, stamped
+    # from selected_snapshot_row ITSELF). It MUST equal the candidate the maker order is for
+    # (actionable.condition_id / token_id). A mismatch means the cert quoted a sibling bin's
+    # book — the exact Busan 27°C-NO-vs-30°C-YES wrong-book incident — so fail closed with a
+    # typed reason rather than letting the maker price bid-improve a ghost book to ~0.02.
+    _assert_quote_book_identity_matches_candidate(
+        quote_payload=quote_payload,
+        actionable_payload=actionable.payload,
+    )
     best_bid = quote_payload.get("best_bid")
     best_ask = quote_payload.get("best_ask")
     if best_bid in (None, "") or best_ask in (None, ""):
@@ -5547,6 +5677,13 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 # newer than decision_time and no relaxed staleness bound is introduced here.
                 "best_bid": _optional_float(selected_snapshot_row.get("orderbook_top_bid")),
                 "best_ask": _optional_float(selected_snapshot_row.get("orderbook_top_ask")),
+                # WALL #5 TYPE-LEVEL BINDING (2026-06-12): the cert carries the IDENTITY of
+                # the row whose book it quoted, sourced from selected_snapshot_row ITSELF (not
+                # from raw_receipt/proof). The passive-maker consumer asserts these equal the
+                # candidate identity, so a book belonging to a sibling bin can never be quoted
+                # for this candidate without a typed QUOTE_FEASIBILITY_BOOK_IDENTITY_MISMATCH.
+                "quote_book_condition_id": _nonnull(selected_snapshot_row.get("condition_id")),
+                "quote_book_token_id": _native_token_id_for_snapshot_row(selected_snapshot_row, proof.direction),
                 "quote_depth_hash": _hash_jsonish(selected_snapshot_row.get("orderbook_depth_json") or selected_snapshot_row.get("orderbook_depth_jsonb")),
                 "p_fill_lcb_policy_id": "edli.no_submit_visible_depth_fill_lcb",
                 "native_quote_available": proof.native_quote_available,
@@ -12855,6 +12992,27 @@ def _latest_snapshot_rows_for_event_family(
     return rows
 
 
+def _selected_proof_snapshot_row_or_raise(proof: _CandidateProof) -> dict[str, Any]:
+    """The SELECTED candidate's own native snapshot row — the book its economics priced.
+
+    WRONG-BOOK / IDENTITY WALL #5 (2026-06-12). The proof-evidence bundle (and therefore
+    the QUOTE_FEASIBILITY top-of-book) MUST describe the candidate the ΔU ranker selected,
+    not the event's trigger bin. ``proof.row`` is bound at candidate generation by
+    ``(condition_id, direction)`` and is the SAME row that produced ``proof.execution_price``
+    and ``proof.executable_snapshot_id``. A selected, priced proof therefore always carries a
+    row; its absence is a provenance fault, not a market state — fail closed rather than
+    quote a sibling bin's book.
+    """
+    row = proof.row
+    if row is None:
+        raise ValueError(
+            "SELECTED_PROOF_SNAPSHOT_ROW_MISSING:"
+            f"token_id={proof.token_id}:direction={proof.direction}:"
+            f"condition_id={getattr(proof.candidate, 'condition_id', None)}"
+        )
+    return row
+
+
 def _selected_snapshot_row_for_event(
     rows: list[dict[str, Any]],
     payload: dict[str, object],
@@ -13879,6 +14037,21 @@ def _native_cost_source_for_direction(direction: str | None) -> str | None:
         return "native_orderbook_ask"
     if direction in {"sell_yes", "sell_no"}:
         return "native_orderbook_bid"
+    return None
+
+
+def _native_token_id_for_snapshot_row(row: Mapping[str, Any], direction: str | None) -> str | None:
+    """The token id on ``row`` that names the side the direction trades against.
+
+    WALL #5 identity binding (2026-06-12). YES directions name the row's yes_token_id;
+    NO directions name its no_token_id. This is the token whose book the QUOTE_FEASIBILITY
+    cert quotes — the consumer asserts it equals the candidate's selected token so a sibling
+    bin's book (a different condition/token) can never be priced for this candidate.
+    """
+    if direction in {"buy_yes", "sell_yes"}:
+        return _nonnull(row.get("yes_token_id")) or None
+    if direction in {"buy_no", "sell_no"}:
+        return _nonnull(row.get("no_token_id")) or None
     return None
 
 
