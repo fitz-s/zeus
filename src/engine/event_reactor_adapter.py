@@ -8226,14 +8226,13 @@ class _StakeBelowMinOrder(RuntimeError):
 # are DELETED with the day0 family notional cap (operator no-caps law).
 
 
-# Operator guard on the auto-bump-to-min-order action (2026-06-09 fix). When the
-# fractional-Kelly haircut shrinks the chosen stake below the venue min order but the
-# ROBUST (q_lcb-based) ΔU at the min-order notional is strictly positive, the sizing
-# path bumps the stake UP to min order — the fractional-Kelly risk intent is preserved
-# because a $0.05–$0.80 min order on a ~$900 wallet is well under this ceiling. The bump
-# is ALLOWED only when min_order_usd <= this fraction of the SIZING bankroll; above it,
-# the candidate aborts as SUBMIT_ABORTED_BELOW_MIN_ORDER rather than over-committing.
-_MIN_ORDER_BUMP_MAX_BANKROLL_PCT = 0.02
+# FINDING-E (external review 2026-06-12, NO-CAPS operator law): the former
+# _MIN_ORDER_BUMP_MAX_BANKROLL_PCT = 0.02 percentage cap on the auto-bump-to-min-order
+# action is DELETED. It refused any positive-EV candidate whose venue minimum exceeded
+# 2% of the wallet — an artificial throttle producing no-order states that are not honest
+# gates. The bump-to-venue-minimum admission is now the HONEST economics only: positive
+# q_lcb edge at the venue minimum AND the minimum fitting the free-cash bound (see
+# _robust_marginal_utility_stake_and_price). No percentage cap.
 
 
 def _robust_marginal_utility_stake_and_price(
@@ -8289,14 +8288,16 @@ def _robust_marginal_utility_stake_and_price(
     be priced. The selected proof is scored within the WHOLE family so the π /
     exposure / OUTSIDE geometry matches the ranking decision exactly.
 
-    MIN-ORDER FLOOR (2026-06-09 false-EDGE_REVERSED fix). When the fractional-Kelly
-    haircut shrinks the chosen stake below the venue min-order notional but the ROBUST
-    ΔU at min order is strictly positive AND min order is within the bankroll-cap guard
-    (``_MIN_ORDER_BUMP_MAX_BANKROLL_PCT``), the stake is BUMPED to min order and the
-    floor is recorded in ``stake_floor_out`` (if provided) as
-    ``stake_floor="VENUE_MIN_ORDER"``. When the bump is not admissible (bankroll cap
-    fails) it raises :class:`_StakeBelowMinOrder` — a DISTINCT sizing abort the decision
-    body maps to ``SUBMIT_ABORTED_BELOW_MIN_ORDER``, never EDGE_REVERSED. A genuinely
+    MIN-ORDER FLOOR (2026-06-09 false-EDGE_REVERSED fix; FINDING-E 2026-06-12 NO-CAPS).
+    When the fractional-Kelly haircut shrinks the chosen stake below the venue min-order
+    notional but the ROBUST q_lcb ΔU at min order is strictly positive AND the venue
+    minimum fits the FREE-CASH bound, the stake is BUMPED to min order and the floor is
+    recorded in ``stake_floor_out`` (if provided) as ``stake_floor="VENUE_MIN_ORDER"``.
+    The prior 2% bankroll percentage cap on this bump is DELETED (artificial throttle,
+    operator no-caps law). When the bump is not admissible (q_lcb EV non-positive at the
+    venue minimum, or the minimum exceeds the free-cash bound) it raises
+    :class:`_StakeBelowMinOrder` — a DISTINCT sizing abort the decision body maps to
+    ``SUBMIT_ABORTED_BELOW_MIN_ORDER``, never EDGE_REVERSED. A genuinely
     reversed candidate (no positive-ΔU stake at ANY admissible size incl. min order)
     still returns ``(0.0, None)`` -> EDGE_REVERSED.
 
@@ -8449,44 +8450,56 @@ def _robust_marginal_utility_stake_and_price(
         # low-probability bins the haircut stake can fall BELOW the venue min-order
         # notional even though the ROBUST (q_lcb-based) edge at min order is strictly
         # positive. Previously ``_chosen_stake_execution_price`` raised "below min
-        # order" and the generic except mapped it to (0.0, None) -> a FALSE
-        # EDGE_REVERSED. Now: if the haircut stake is below min order BUT ΔU at the
-        # min-order notional is strictly positive AND min order is within the operator
-        # bankroll-cap guard, BUMP the stake up to min order (the fractional-Kelly risk
-        # intent is preserved — a sub-$1 min order on a ~$900 wallet is << the cap) and
-        # record the floor in provenance. Otherwise raise ``_StakeBelowMinOrder`` so the
-        # decision body emits a DISTINCT SUBMIT_ABORTED_BELOW_MIN_ORDER (never
-        # EDGE_REVERSED). ΔU(min_order) is the SAME robust q_lcb-based π/exposure the
-        # ranker used (utility_ranker records it on the score), so the min-order edge is
-        # robust-consistent, never a looser point estimate.
+        # order" and the generic except mapped it to (0.0, None) -> a FALSE EDGE_REVERSED.
+        #
+        # FINDING-E FIX (external review 2026-06-12, NO-CAPS operator law). The prior
+        # admission test ALSO required ``min_order_usd <= 2% × bankroll`` — an ARTIFICIAL
+        # percentage cap that produced no-order states for any positive-EV candidate whose
+        # venue minimum happened to exceed 2% of the wallet. That is exactly the kind of
+        # artificial throttle the operator law forbids (caps are not honest gates). The
+        # 2% cap is DELETED. The admission is now the HONEST economics only:
+        #   (1) the robust q_lcb-based edge at the venue minimum is strictly positive
+        #       (ΔU(min_order) > 0 — the SAME robust π/exposure the ranker used), AND
+        #   (2) the venue minimum fits the FREE-CASH bound (it does not spend more than
+        #       the wallet's free BUY collateral; no bound when free cash is unknown).
+        # If both hold, trade the venue minimum. Otherwise raise ``_StakeBelowMinOrder``
+        # with the HONEST economic reason (EV non-positive at the venue minimum, or the
+        # cash bound) -> DISTINCT SUBMIT_ABORTED_BELOW_MIN_ORDER, never EDGE_REVERSED and
+        # never an artificial-cap reject.
         min_order_usd = Decimal(str(score.min_order_notional_usd))
-        # Wave-1 2026-06-12: the DAY0 cap-vs-venue-floor abort is DELETED with the cap.
         if min_order_usd > Decimal("0") and chosen < min_order_usd:
             delta_u_at_min = float(score.delta_u_at_min_order)
-            bankroll_cap = Decimal(str(_MIN_ORDER_BUMP_MAX_BANKROLL_PCT)) * Decimal(
-                str(bankroll_usd)
+            _ev_positive_at_min = delta_u_at_min > 0.0
+            _fits_free_cash = (
+                free_cash_usd is None
+                or min_order_usd <= Decimal(str(free_cash_usd))
             )
-            if delta_u_at_min > 0.0 and min_order_usd <= bankroll_cap:
-                # Edge is genuinely positive at min order and the floor is within the
-                # bankroll cap -> trade at the venue minimum.
+            if _ev_positive_at_min and _fits_free_cash:
+                # Edge is genuinely positive at the venue minimum and the minimum fits the
+                # free-cash bound -> trade at the venue minimum (no percentage cap).
                 chosen = min_order_usd
                 if stake_floor_out is not None:
                     stake_floor_out["stake_floor"] = "VENUE_MIN_ORDER"
                     stake_floor_out["stake_floor_min_order_usd"] = float(min_order_usd)
                     stake_floor_out["stake_floor_delta_u_at_min_order"] = delta_u_at_min
             else:
-                # Either ΔU(min_order) <= 0 (no admissible positive-edge stake — but the
-                # ranker already excluded that via is_no_trade above, so this arm is the
-                # bankroll-cap guard) or min order exceeds the bankroll cap. Distinct
-                # BELOW_MIN_ORDER abort — NOT an edge reversal.
+                # Honest economic rejection: either the q_lcb edge is non-positive at the
+                # venue minimum, or the venue minimum exceeds the free-cash bound. NOT an
+                # edge reversal and NOT an artificial cap.
+                _why = (
+                    "ev_non_positive_at_venue_minimum"
+                    if not _ev_positive_at_min
+                    else "venue_minimum_exceeds_free_cash_bound"
+                )
+                _free_cash_str = (
+                    f"{float(free_cash_usd):.6f}" if free_cash_usd is not None else "None"
+                )
                 raise _StakeBelowMinOrder(
                     f"chosen stake {float(chosen):.6f} USD below venue min order "
-                    f"{float(min_order_usd):.6f} USD; "
+                    f"{float(min_order_usd):.6f} USD; reason={_why}; "
                     f"delta_u_at_min_order={delta_u_at_min:.6g}, "
-                    f"min_order_usd/bankroll_cap={float(min_order_usd):.6f}/"
-                    f"{float(bankroll_cap):.6f} "
-                    f"(positive edge at min order but stake floor not admissible; "
-                    f"NOT an edge reversal)"
+                    f"free_cash_usd={_free_cash_str} "
+                    f"(honest economic block at venue minimum; NOT an edge reversal)"
                 )
 
         # S5 boundary: reprice the SELECTED leg at the CHOSEN stake on its OWN curve
@@ -8649,10 +8662,12 @@ def _evaluate_submit_recapture_for_selected(
       3. stake <= 0 (no positive-utility stake at ANY admissible size INCLUDING min
          order on the fresh curve) -> EDGE_REVERSED (utility nonpositive, §5 ``if
          utility <= 0: Abort``);
-      3b. positive edge at min order but the fractional-Kelly haircut stake is below
-         the venue min order and cannot be bumped within the bankroll cap ->
-         BELOW_MIN_ORDER (a DISTINCT sizing abort, NOT an edge reversal — 2026-06-09
-         antibody; the regret ledger records the true cause);
+      3b. the fractional-Kelly haircut stake is below the venue min order and the venue
+         minimum is not honestly tradeable (q_lcb EV non-positive at the minimum, or the
+         minimum exceeds the free-cash bound) -> BELOW_MIN_ORDER (a DISTINCT sizing abort,
+         NOT an edge reversal — 2026-06-09 antibody; FINDING-E 2026-06-12 deleted the 2%
+         bankroll percentage cap that previously gated this bump; the regret ledger
+         records the true cause);
       4. recaptured all-in cost > ``max_acceptable_price`` -> PRICE_MOVED;
       5. ``edge_lcb = q_lcb - all_in_cost <= 0`` or forecast not current -> EDGE_REVERSED.
 
