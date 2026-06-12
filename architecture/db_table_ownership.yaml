@@ -703,6 +703,14 @@ tables:
     created_by: init_schema
     pk_col: null
 
+  - name: edli_fill_bridge_dispositions
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: runtime_module
+    pk_col: null
+    notes: "Runtime-created by the fill-bridge disposition lane (2026-06-11/12 work). Registered 2026-06-12 after boot assert flagged the runtime-created table (same category as day0_oracle_anomaly_flags 2026-06-10). CATEGORY NOTE: every CREATE TABLE IF NOT EXISTS at runtime MUST ship with its registry entry in the same commit - third instance of this class."
+
   - name: day0_oracle_anomaly_flags
     db: world
     schema_class: world_class
