@@ -2898,6 +2898,11 @@ def init_schema(
     from src.state.schema.decision_certificates_schema import ensure_tables as _ensure_decision_certificate_tables
     _ensure_decision_certificate_tables(conn)
 
+    # fill-bridge retry-spiral fix (2026-06-12): per-aggregate terminal disposition table.
+    # Prevents settled-market infinite retry and quarantines persistently-failing aggregates.
+    from src.state.schema.edli_fill_bridge_dispositions_schema import ensure_table as _ensure_edli_fill_bridge_dispositions_table
+    _ensure_edli_fill_bridge_dispositions_table(conn)
+
     # 2026-05-21 live authority follow-up: decision_events CHECK constraints
     # must admit shadow_decision / unknown_legacy before PRAGMA user_version is
     # stamped current. CREATE TABLE IF NOT EXISTS cannot upgrade stale CHECKs.

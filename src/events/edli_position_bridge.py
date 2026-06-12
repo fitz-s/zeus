@@ -651,6 +651,216 @@ def _posterior_id_for_final_intent(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Settled-market routing + quarantine disposition helpers
+# ---------------------------------------------------------------------------
+
+# Number of consecutive bridge failures before an aggregate is quarantined.
+_QUARANTINE_THRESHOLD = 10
+
+# Disposition constants — must match the CHECK in edli_fill_bridge_dispositions_schema.py
+DISPOSITION_SETTLED_MARKET = "SETTLED_MARKET_FILL_BOOKED"
+DISPOSITION_QUARANTINED = "QUARANTINED_BRIDGE_FAILURE"
+
+
+def _dispositions_table(conn: sqlite3.Connection) -> str:
+    """Resolve the schema-qualified name of the disposition table (ATTACHed world or local)."""
+    try:
+        attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+    except sqlite3.Error:
+        attached = set()
+    if "world" in attached:
+        row = conn.execute(
+            "SELECT 1 FROM world.sqlite_master WHERE type='table' AND name='edli_fill_bridge_dispositions'"
+        ).fetchone()
+        if row is not None:
+            return "world.edli_fill_bridge_dispositions"
+    try:
+        conn.execute("SELECT 1 FROM edli_fill_bridge_dispositions LIMIT 1")
+        return "edli_fill_bridge_dispositions"
+    except sqlite3.Error:
+        return "edli_fill_bridge_dispositions"
+
+
+def get_fill_bridge_disposition(conn: sqlite3.Connection, aggregate_id: str) -> str | None:
+    """Return the terminal disposition for an aggregate, or None if not yet disposed.
+
+    Returns None when:
+    - no row exists for the aggregate,
+    - the row exists but disposition is NULL (accumulating failure count, not yet terminal).
+    Returns DISPOSITION_SETTLED_MARKET or DISPOSITION_QUARANTINED for terminal rows.
+    """
+    table = _dispositions_table(conn)
+    try:
+        row = conn.execute(
+            f"SELECT disposition FROM {table} WHERE aggregate_id = ? LIMIT 1",
+            (aggregate_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    val = row[0] if not isinstance(row, sqlite3.Row) else row["disposition"]
+    # SQL NULL → Python None (accumulating row, not yet terminal)
+    if val is None:
+        return None
+    return str(val)
+
+
+def _record_settled_disposition(
+    conn: sqlite3.Connection,
+    aggregate_id: str,
+    reason: str,
+    now_str: str,
+) -> None:
+    """Persist SETTLED_MARKET_FILL_BOOKED, idempotent (INSERT OR IGNORE)."""
+    table = _dispositions_table(conn)
+    try:
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {table}
+                (aggregate_id, disposition, reason, attempt_count, created_at, updated_at)
+            VALUES (?, ?, ?, 0, ?, ?)
+            """,
+            (aggregate_id, DISPOSITION_SETTLED_MARKET, reason, now_str, now_str),
+        )
+    except sqlite3.Error as exc:
+        logger.warning("fill-bridge: could not persist settled disposition for %s: %s", aggregate_id, exc)
+
+
+def _increment_failure_count(
+    conn: sqlite3.Connection,
+    aggregate_id: str,
+    error_str: str,
+    now_str: str,
+) -> int:
+    """Increment attempt_count for an aggregate, inserting the row if absent.
+
+    Returns the NEW attempt_count after the increment.
+    Quarantine transition (disposition=QUARANTINED_BRIDGE_FAILURE) is handled by
+    the caller after inspecting the returned count.
+    """
+    table = _dispositions_table(conn)
+    try:
+        # Upsert: insert with NULL disposition (accumulating, not yet terminal) on first
+        # failure; increment attempt_count on subsequent failures. The WHERE guard prevents
+        # incrementing a row that already has a terminal disposition (QUARANTINED written by
+        # _quarantine_aggregate or SETTLED written by _record_settled_disposition).
+        conn.execute(
+            f"""
+            INSERT INTO {table}
+                (aggregate_id, disposition, reason, attempt_count, last_error, created_at, updated_at)
+            VALUES (?, NULL, 'bridge_failure_accumulating', 1, ?, ?, ?)
+            ON CONFLICT(aggregate_id) DO UPDATE SET
+                attempt_count = attempt_count + 1,
+                last_error = excluded.last_error,
+                updated_at = excluded.updated_at
+            WHERE disposition IS NULL
+            """,
+            (
+                aggregate_id,
+                error_str[:2000],
+                now_str,
+                now_str,
+            ),
+        )
+        row = conn.execute(
+            f"SELECT attempt_count FROM {table} WHERE aggregate_id = ? LIMIT 1",
+            (aggregate_id,),
+        ).fetchone()
+        if row is None:
+            return 1
+        return int(row[0] if not isinstance(row, sqlite3.Row) else row["attempt_count"])
+    except sqlite3.Error as exc:
+        logger.warning("fill-bridge: could not update failure count for %s: %s", aggregate_id, exc)
+        return 1
+
+
+def _quarantine_aggregate(
+    conn: sqlite3.Connection,
+    aggregate_id: str,
+    error_str: str,
+    attempt_count: int,
+    now_str: str,
+) -> None:
+    """Transition an aggregate to QUARANTINED_BRIDGE_FAILURE (idempotent UPDATE OR IGNORE)."""
+    table = _dispositions_table(conn)
+    try:
+        conn.execute(
+            f"""
+            UPDATE {table}
+            SET disposition = ?,
+                reason = ?,
+                last_error = ?,
+                attempt_count = ?,
+                updated_at = ?
+            WHERE aggregate_id = ?
+            """,
+            (
+                DISPOSITION_QUARANTINED,
+                f"quarantined after {attempt_count} consecutive failures",
+                error_str[:2000],
+                attempt_count,
+                now_str,
+                aggregate_id,
+            ),
+        )
+    except sqlite3.Error as exc:
+        logger.warning("fill-bridge: could not quarantine aggregate %s: %s", aggregate_id, exc)
+
+
+def _market_is_settled(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    today_utc: str,
+) -> tuple[bool, str]:
+    """Check whether a weather market is already settled.
+
+    Returns (is_settled, evidence_string).
+
+    Authority order:
+    1. settlements table with authority='VERIFIED' — definitive settlement record.
+    2. Conservative fallback: target_date strictly older than today_utc (daily weather
+       market; if target_date < today it has settled by definition even without a DB row).
+
+    The fallback is conservative: target_date = today is NOT declared settled (could still
+    be trading during the day). Target_date < today (strictly) on a daily market means
+    settlement is structurally over.
+    """
+    if city and target_date and temperature_metric:
+        # Primary: settlements table — check ATTACHed world or local.
+        settlements_table = _resolved_table(conn, "settlements")
+        try:
+            row = conn.execute(
+                f"""
+                SELECT 1 FROM {settlements_table}
+                WHERE city = ?
+                  AND target_date = ?
+                  AND temperature_metric = ?
+                  AND authority = 'VERIFIED'
+                LIMIT 1
+                """,
+                (city, target_date, temperature_metric),
+            ).fetchone()
+            if row is not None:
+                return True, f"settlements.authority=VERIFIED city={city} target_date={target_date} metric={temperature_metric}"
+        except sqlite3.Error:
+            pass  # Table absent (test conn) — fall through to date fallback
+
+    # Fallback: date comparison (UTC).
+    if target_date and today_utc:
+        try:
+            if target_date < today_utc[:10]:  # ISO date prefix comparison: "2026-06-06" < "2026-06-12"
+                return True, f"target_date={target_date} < today_utc={today_utc[:10]} (conservative date fallback)"
+        except (TypeError, ValueError):
+            pass
+
+    return False, ""
+
+
 def materialize_position_current_from_edli_fill(
     conn: sqlite3.Connection,
     aggregate_id: str,

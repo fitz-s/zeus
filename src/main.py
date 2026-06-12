@@ -7777,11 +7777,26 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
     Returns the number of orphaned fills bridged this pass.
     """
     from src.events.edli_position_bridge import (
+        DISPOSITION_QUARANTINED,
+        DISPOSITION_SETTLED_MARKET,
+        _QUARANTINE_THRESHOLD,
+        _aggregate_event_rows,
         _edli_events_table,
+        _has_confirmed_fill,
+        _increment_failure_count,
+        _latest_payload,
+        _market_is_settled,
+        _quarantine_aggregate,
+        _record_settled_disposition,
         edli_bridge_position_id,
         edli_bridge_position_id_legacy,
+        get_fill_bridge_disposition,
         materialize_position_current_from_edli_fill,
     )
+
+    now = now or datetime.now(timezone.utc)
+    now_str = now.isoformat()
+    today_utc = now_str[:10]
 
     table = _edli_events_table(conn)
     try:
@@ -7817,7 +7832,7 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
         return 0
 
     bridged = 0
-    orphaned_seen = 0
+    new_fills_seen = 0  # counts only aggregates that need bridging (limit gate)
     for row in candidate_rows:
         aggregate_id = str(_row_get(row, "aggregate_id"))
         position_id = edli_bridge_position_id(aggregate_id)
@@ -7834,9 +7849,58 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
         if existing is not None:
             # Already bridged (wide or legacy id) — idempotent skip.
             continue
-        if orphaned_seen >= max(0, limit):
+
+        # Disposition check: skip terminally routed aggregates (settled or quarantined).
+        # These do NOT count against the new-fill budget.
+        prior_disposition = get_fill_bridge_disposition(conn, aggregate_id)
+        if prior_disposition in (DISPOSITION_SETTLED_MARKET, DISPOSITION_QUARANTINED):
+            continue
+
+        # --- Settled-market routing (category-kill 1) ---
+        # Before attempting to bridge, check whether the market has settled.
+        # Read the PreSubmitRevalidated payload to get identity fields; if the
+        # aggregate lacks one or the EDLI events are absent, fall through to normal
+        # bridge logic (which will raise/fail on its own terms).
+        try:
+            events = _aggregate_event_rows(conn, aggregate_id)
+            if events and _has_confirmed_fill(events):
+                pre_submit = _latest_payload(events, "PreSubmitRevalidated") or {}
+                city = str(pre_submit.get("city") or "").strip()
+                target_date = str(pre_submit.get("target_date") or "").strip()
+                metric = str(pre_submit.get("metric") or pre_submit.get("temperature_metric") or "").strip().lower()
+                if target_date:  # only run settled check when we have a target_date
+                    is_settled, evidence = _market_is_settled(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        temperature_metric=metric,
+                        today_utc=today_utc,
+                    )
+                    if is_settled:
+                        logger.warning(
+                            "EDLI fill-bridge: SETTLED_MARKET_FILL_BOOKED — "
+                            "aggregate=%s market already settled (%s); "
+                            "booked for accounting, no position_current row created",
+                            aggregate_id,
+                            evidence,
+                        )
+                        _record_settled_disposition(conn, aggregate_id, evidence, now_str)
+                        continue  # does NOT count against new_fills_seen budget
+        except Exception as _settle_exc:  # noqa: BLE001
+            # Settlement check is best-effort. If it fails, fall through to normal bridge
+            # logic (which will handle the failure via quarantine path below).
+            logger.debug(
+                "EDLI fill-bridge: settled-market check failed for %s (non-fatal): %s",
+                aggregate_id,
+                _settle_exc,
+            )
+
+        # --- New-fill budget gate (applied AFTER skipping disposed/settled aggregates) ---
+        # This ensures persistent failures do not starve new real fills in the budget.
+        if new_fills_seen >= max(0, limit):
             break
-        orphaned_seen += 1
+        new_fills_seen += 1
+
         try:
             result = materialize_position_current_from_edli_fill(
                 conn, aggregate_id, now=now
@@ -7852,15 +7916,40 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
                     result.get("cost_basis_usd"),
                 )
         except Exception as exc:  # noqa: BLE001
-            # One bad aggregate must not block healing the rest. The EDLI events
-            # persist; the next scan retries this aggregate.
-            logger.error(
-                "EDLI durable fill-bridge: failed to bridge aggregate %s "
-                "(non-fatal; EDLI events persist, next scan retries): %s",
-                aggregate_id,
-                exc,
-                exc_info=True,
-            )
+            # --- Bounded-retry quarantine (category-kill 2) ---
+            # Track consecutive failures; quarantine after _QUARANTINE_THRESHOLD attempts.
+            # Transient faults will clear on the next cycle (attempt_count resets on success
+            # would require extra state; here we accept that count is monotone — the category
+            # of interest is aggregates that NEVER succeed, not those that occasionally fail).
+            error_str = str(exc)
+            try:
+                attempt_count = _increment_failure_count(conn, aggregate_id, error_str, now_str)
+            except Exception:  # noqa: BLE001
+                attempt_count = 1
+
+            if attempt_count >= _QUARANTINE_THRESHOLD:
+                logger.error(
+                    "EDLI fill-bridge: QUARANTINED aggregate=%s after %d consecutive failures "
+                    "(excluded from future scans); last_error=%s",
+                    aggregate_id,
+                    attempt_count,
+                    error_str[:500],
+                )
+                try:
+                    _quarantine_aggregate(conn, aggregate_id, error_str, attempt_count, now_str)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                # Still within retry window — log at error level but don't quarantine yet.
+                logger.error(
+                    "EDLI durable fill-bridge: failed to bridge aggregate %s "
+                    "(attempt %d/%d; EDLI events persist, next scan retries): %s",
+                    aggregate_id,
+                    attempt_count,
+                    _QUARANTINE_THRESHOLD,
+                    exc,
+                    exc_info=True,
+                )
     return bridged
 
 
