@@ -302,3 +302,40 @@ class TestBeliefDeadWatchdog:
         for _ in range(5):
             mr._track_belief_staleness(pos)
         assert "BELIEF_AUTHORITY_FAULT" not in pos.applied_validations
+
+
+class TestLiveEnumDirectionIntegration:
+    """UNMOCKED path: a real Position (whose direction is the coerced
+    Direction enum, str() == 'Direction.NO') through the real loader against
+    a real fixture DB. The mocked wiring tests above swallowed exactly this
+    bug on 2026-06-12: every live monitor cycle passed str(Direction.NO) and
+    the loader fail-closed to 'replacement_posterior_missing'."""
+
+    def test_enum_direction_position_gets_fresh_belief(self, forecasts_db, monkeypatch):
+        from datetime import datetime, timezone
+
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+        from src.state.portfolio import Position
+
+        _insert(forecasts_db, posterior_id="p-live",
+                computed_at=datetime.now(timezone.utc).isoformat(),
+                q={BIN: 0.242})
+        real_loader = pb.load_replacement_belief
+        monkeypatch.setattr(
+            pb, "load_replacement_belief",
+            lambda **kw: real_loader(**{**kw, "db_path": forecasts_db}),
+        )
+        pos = Position(
+            trade_id="t-enum-1", market_id="m1", city="Karachi",
+            cluster="Karachi", target_date="2026-06-12", bin_label=BIN,
+            direction="buy_no",  # __post_init__ coerces to Direction.NO
+            unit="C", temperature_metric="high",
+            entry_method="ens_member_counting", entry_price=0.66,
+            p_posterior=0.855,
+        )
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos, conn=None, city=object(), target_d=None,
+        )
+        assert is_fresh is True, refresh_pos.applied_validations
+        assert prob == pytest.approx(1.0 - 0.242)

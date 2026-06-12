@@ -124,6 +124,11 @@ def load_replacement_belief(
     A row that matches but is older than ``max_age_hours`` is RETURNED with
     ``fresh=False`` — staleness is information, absence is not.
     """
+    # Direction arrives as the coerced Direction enum on live Position objects;
+    # str(Direction.NO) is "Direction.NO" (not a str-mixin), which silently
+    # failed this guard on every live monitor cycle (2026-06-12, caught in
+    # post-restart verification). Normalize via .value first.
+    direction = str(getattr(direction, "value", direction))
     if direction not in ("buy_yes", "buy_no"):
         return None
     if db_path is None:

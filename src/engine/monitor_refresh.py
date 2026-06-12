@@ -2293,7 +2293,7 @@ def monitor_probability_refresh(
             target_date=pos.target_date,
             temperature_metric=str(getattr(pos, "temperature_metric", "high")),
             bin_label=pos.bin_label,
-            direction=str(pos.direction),
+            direction=str(getattr(pos.direction, "value", pos.direction)),
             max_age_hours=monitor_belief_max_age_hours(),
         )
     except Exception as exc:  # noqa: BLE001 — belief read must not kill the monitor
