@@ -157,8 +157,8 @@ OPENMETEO_PREVIOUS_RUNS_MODEL_SOURCE_MAP: dict[str, str] = {
     "ecmwf_ifs025": "ecmwf_previous_runs",
     "icon_global": "icon_previous_runs",
     "ukmo_global_deterministic_10km": "ukmo_previous_runs",
-    # U0R-Bayes F1 decorrelated globals + in-domain regionals (2026-06-08, SPEC §3/§6).
-    # OM previous-runs API supports these model ids; the U0R fixed-lead walk-forward train
+    # BAYES_PRECISION_FUSION-Bayes F1 decorrelated globals + in-domain regionals (2026-06-08, SPEC §3/§6).
+    # OM previous-runs API supports these model ids; the BAYES_PRECISION_FUSION fixed-lead walk-forward train
     # reads them via the temperature_2m_previous_dayN hourly var. icon_eu has NO previous-runs
     # entry: it is dedup-folded to icon_d2 in-EU / icon_global out (SPEC §3 alias dedup).
     "gem_global": "gem_previous_runs",
@@ -217,9 +217,9 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         model_name="icon_global",
         allowed_roles=("diagnostic",),
     ),
-    # U0R-Bayes F1 decorrelated globals + in-domain regionals (2026-06-08, SPEC §3/§6 F0/F1).
+    # BAYES_PRECISION_FUSION-Bayes F1 decorrelated globals + in-domain regionals (2026-06-08, SPEC §3/§6 F0/F1).
     # diagnostic-only (SHADOW capture train): these feed the fixed-lead walk-forward history
-    # for u0r_bayes fusion, never a live serve path on their own.
+    # for bayes_precision_fusion fusion, never a live serve path on their own.
     "gem_previous_runs": ForecastSourceSpec(
         source_id="gem_previous_runs",
         tier="secondary",
@@ -354,12 +354,12 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         allowed_roles=("diagnostic",),
         degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
     ),
-    # ---- The Path U0R-Bayes fusion sources (F0) -------------------------------------
-    # Authority: U0R_BAYES_SPEC.md §6 F0 (source registry); U0R_PROOF_RESULT.md (core
+    # ---- The Path BAYES_PRECISION_FUSION-Bayes fusion sources (F0) -------------------------------------
+    # Authority: BAYES_PRECISION_FUSION_SPEC.md §6 F0 (source registry); BAYES_PRECISION_FUSION_PROOF_RESULT.md (core
     # PROMOTE, regionals SHADOW-ONLY/DEFER). These are Open-Meteo previous-runs /
-    # single-runs decorrelated globals + in-domain regional experts that feed the U0R
-    # multi-model posterior. They are DISABLED plumbing rows until the U0R fusion flag
-    # (replacement_0_1_u0r_fusion_enabled, default-OFF) AND an ingest path activate them;
+    # single-runs decorrelated globals + in-domain regional experts that feed the BAYES_PRECISION_FUSION
+    # multi-model posterior. They are DISABLED plumbing rows until the BAYES_PRECISION_FUSION fusion flag
+    # (replacement_0_1_bayes_precision_fusion_enabled, default-OFF) AND an ingest path activate them;
     # the per-model live capture is fail-soft (a missing source is simply dropped).
     "openmeteo_gfs_global": ForecastSourceSpec(
         source_id="openmeteo_gfs_global",
@@ -417,13 +417,13 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
     ),
     # The fused derived posterior product (replaces the single-anchor center/spread when
-    # the U0R flag is ON; shadow-only until settlement evidence promotes it).
-    "the_path_u0r_fusion": ForecastSourceSpec(
-        source_id="the_path_u0r_fusion",
+    # the BAYES_PRECISION_FUSION flag is ON; shadow-only until settlement evidence promotes it).
+    "the_path_bayes_precision_fusion": ForecastSourceSpec(
+        source_id="the_path_bayes_precision_fusion",
         tier="disabled",
         kind="derived_posterior",
         enabled_by_default=False,
-        model_name="the_path_u0r_fusion",
+        model_name="the_path_bayes_precision_fusion",
         allowed_roles=("diagnostic",),
         degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
     ),

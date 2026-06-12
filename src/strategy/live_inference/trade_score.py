@@ -97,11 +97,6 @@ def assert_available_for_trade(*, available_at: datetime, decision_time: datetim
         raise LiveInferenceBlocked("available_at after decision_time")
 
 
-def assert_taker_live_allowed(*, taker_fok_fak_live_enabled: bool) -> None:
-    if not taker_fok_fak_live_enabled:
-        raise LiveInferenceBlocked("taker FOK/FAK live disabled by execution policy")
-
-
 def assert_passive_post_only_gate(*, passive_fill_lcb: float, min_passive_fill_lcb: float) -> None:
     if passive_fill_lcb < min_passive_fill_lcb:
         raise LiveInferenceBlocked("passive post-only fill gate blocks live trade")

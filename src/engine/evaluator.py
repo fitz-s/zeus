@@ -195,7 +195,11 @@ from src.types.temperature import TemperatureDelta
 logger = logging.getLogger(__name__)
 CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = 0.02
 DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
-    "wu_icao": frozenset({"wu_api"}),
+    # "metar_fast_lane": Option-B METAR fast-lane fallback (day0_obs_fastlane_plan §4.2).
+    # Same physical settlement station as WU (ICAO identity enforced by
+    # fast_obs_source_for_city + faithfulness gate in day0_fast_obs.py).
+    # Only fires when WU result is absent/stale/coverage-incomplete.
+    "wu_icao": frozenset({"wu_api", "metar_fast_lane"}),
 }
 DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
 DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0
@@ -776,7 +780,7 @@ def _make_rejection_decision(
     )
 
 
-def _read_v2_snapshot_metadata(
+def _read_snapshot_metadata(
     conn, city_name: str, target_date: str, temperature_metric: str,
     snapshot_id: str | None = None,
 ) -> dict:
@@ -809,7 +813,7 @@ def _read_v2_snapshot_metadata(
 
         forecasts_conn = get_forecasts_connection_read_only()
         try:
-            return _read_v2_snapshot_metadata(
+            return _read_snapshot_metadata(
                 forecasts_conn,
                 city_name,
                 target_date,
@@ -4433,7 +4437,7 @@ def evaluate_candidate(
             rejection_reason_detail="ENS snapshot persistence failed: decision_snapshot_id unavailable",
         )]
 
-    v2_snapshot_meta = _read_v2_snapshot_metadata(
+    v2_snapshot_meta = _read_snapshot_metadata(
         snapshot_persistence_conn,
         city.name,
         target_date,

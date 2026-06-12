@@ -2,7 +2,7 @@
 # Purpose: Structural completeness tests for onboard_cities.py pipeline steps.
 #          Verify PIPELINE_STEPS covers all OBTAINABLE-NOW parity steps, that
 #          calibration_pairs is NOT dry-run / NOT optional, that
-#          _verification_tables() uses V2 table names, that deferred artifacts
+#          _verification_tables() uses canonical (bare) table names, that deferred artifacts
 #          are recorded-pending (not hard-failed), and that the precondition
 #          check raises on unregistered cities.
 # Reuse: Inspect onboard_cities.py + naming_conventions.yaml before running;
@@ -99,39 +99,57 @@ def test_calibration_pairs_not_optional():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# T3 – _verification_tables() must use V2 table names
+# T3 – _verification_tables() must use the CANONICAL (bare) table names
+#
+# Version-drop 2026-06-10: the prior contract pinned _v2 table names
+# (observation_instants_v2, settlements_v2, market_events_v2, calibration_pairs_v2)
+# that the B3/B3cont collapse renamed to their bare canonical forms. Those
+# _v2 tables are GONE from all three live DBs (verified on zeus-forecasts.db),
+# so the verification COUNT(*) queries silently reported "(table missing)".
+# This test now asserts the live-correct contract: canonical bare names IN, any
+# _v[0-9]-suffixed name OUT. (The old V2_REQUIRED/V1_BANNED sets were also
+# internally contradictory — they required AND banned calibration_pairs — which
+# made the suite un-passable; that contradiction is removed here.)
 # ──────────────────────────────────────────────────────────────────────────────
 
-V2_REQUIRED_TABLES = {
-    "observation_instants_v2",
-    "calibration_pairs",
-    "ensemble_snapshots",
-    "model_bias_ens",
-}
-
-V1_BANNED_TABLES = {
+# Canonical (bare) names that _verification_tables() MUST surface so the
+# onboarding COUNT(*) verification hits live tables.
+CANONICAL_REQUIRED_TABLES = {
     "observation_instants",
     "calibration_pairs",
     "ensemble_snapshots",
-    "model_bias",
+    "settlement_outcomes",
+    "market_events",
 }
 
 
-def test_verification_tables_use_v2_names():
-    """_verification_tables() must include the V2 table names."""
-    tables = set(onboard_cities._verification_tables())
-    missing = V2_REQUIRED_TABLES - tables
+def test_verification_tables_use_canonical_names():
+    """_verification_tables() must include the canonical (bare) table names."""
+    world, forecast = onboard_cities._verification_tables()
+    tables = set(world) | set(forecast)
+    missing = CANONICAL_REQUIRED_TABLES - tables
     assert not missing, (
-        f"_verification_tables() missing V2 tables: {sorted(missing)}"
+        f"_verification_tables() missing canonical tables: {sorted(missing)}"
     )
 
 
-def test_verification_tables_exclude_v1_names():
-    """_verification_tables() must not include superseded V1 table names."""
-    tables = set(onboard_cities._verification_tables())
-    found_v1 = V1_BANNED_TABLES & tables
-    assert not found_v1, (
-        f"_verification_tables() still contains obsolete V1 tables: {sorted(found_v1)}"
+def test_verification_tables_have_no_version_suffix():
+    """_verification_tables() must not emit any _v[0-9]-suffixed table name.
+
+    The version-drop antibody (tests/test_no_internal_version_suffixes.py) bans
+    new _v[0-9] tokens; this is its onboarding-verification counterpart — a
+    renamed table must be referenced by its live bare name, never the dropped
+    _v2 shell.
+    """
+    import re as _re
+
+    world, forecast = onboard_cities._verification_tables()
+    versioned = sorted(
+        t for t in (set(world) | set(forecast)) if _re.search(r"_v[0-9]", t)
+    )
+    assert not versioned, (
+        "_verification_tables() still emits _v[0-9] table names (the live tables "
+        f"use bare canonical names): {versioned}"
     )
 
 

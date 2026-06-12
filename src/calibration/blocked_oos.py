@@ -153,7 +153,7 @@ def evaluate_blocked_oos_calibration(
     test_end: str,
     run_id: str | None = None,
     model_name: str = "extended_platt",
-    model_artifact_id: str = "blocked_oos_v1",
+    model_artifact_id: str = "blocked_oos",
     write: bool = True,  # retained for API compat; no longer writes to DB
     created_at: str | None = None,
 ) -> dict:
@@ -264,7 +264,7 @@ def recommend_calibration_promotion(
         "shadow_only": True,
         "promotion_id": f"promotion:{report.get('run_id')}",
         "model_name": report.get("model_name", "extended_platt"),
-        "model_version": report.get("model_version", "blocked_oos_v1"),
+        "model_version": report.get("model_version", "blocked_oos"),
         "task_name": "calibration",
         "status": status,
         "eval_run_id": report.get("run_id"),

@@ -970,3 +970,119 @@ def test_forecast_live_daemon_has_no_trading_imports() -> None:
         module for module in imports
         if module == "src.main" or module.startswith(banned_prefixes)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Replacement-forecast download cron schedule (10h production dead-zone fix)
+#
+# Created: 2026-06-10
+# Last reused/audited: 2026-06-10
+# Authority basis: 10h production dead-zone incident 2026-06-10,
+#   /tmp/production_recovery_report.md (K1: download cron only fired for the
+#   00Z/12Z cycles, leaving a ~12h dead zone where readiness 3h TTL expired).
+# Relationship under test: the publish-cron schedule (producer) must cover ALL
+#   FOUR model cycles so there is no window longer than the cycle cadence (6h)
+#   without a scheduled download — otherwise readiness expires faster than it is
+#   refreshed and the live engine starves. This is the cross-boundary invariant
+#   (schedule cadence <= readiness TTL refresh need), not just a return-value check.
+# ---------------------------------------------------------------------------
+
+
+def test_replacement_publish_cron_covers_all_four_model_cycles() -> None:
+    """All four AIFS-ENS cycles {00Z,06Z,12Z,18Z} are scheduled for download.
+
+    With the default 14h release lag the available-at hours are
+    (0+14, 6+14, 12+14, 18+14) % 24 = {14, 20, 2, 8}. Before the dead-zone fix
+    only {14, 2} (00Z+12Z) were scheduled, so the 06Z/18Z raw inputs never
+    downloaded in steady state."""
+    import src.ingest.forecast_live_daemon as forecast_live_daemon
+
+    hours = forecast_live_daemon._replacement_forecast_publish_cron_hours()
+    assert set(hours) == {14, 20, 2, 8}
+    assert len(hours) == 4
+
+
+def test_replacement_publish_cron_gaps_never_exceed_cycle_cadence() -> None:
+    """RELATIONSHIP INVARIANT: no gap between consecutive scheduled download fires
+    exceeds 6h (the model cycle cadence). A gap > 6h is the dead-zone bug — readiness
+    (3h TTL) would expire before the next download could refresh it. Property holds
+    for ANY release lag, so sweep all 24 lags."""
+    import src.ingest.forecast_live_daemon as forecast_live_daemon
+
+    for lag in range(24):
+        monkey_cfg = {"download_release_lag_hours": float(lag)}
+        original = forecast_live_daemon._replacement_forecast_shadow_cfg
+        forecast_live_daemon._replacement_forecast_shadow_cfg = lambda: monkey_cfg  # type: ignore[assignment]
+        try:
+            hours = forecast_live_daemon._replacement_forecast_publish_cron_hours()
+        finally:
+            forecast_live_daemon._replacement_forecast_shadow_cfg = original  # type: ignore[assignment]
+        ordered = sorted(hours)
+        # Gaps between consecutive fire times on a 24h wraparound clock.
+        gaps = [
+            (ordered[(i + 1) % len(ordered)] - ordered[i]) % 24
+            for i in range(len(ordered))
+        ]
+        gaps = [g if g != 0 else 24 for g in gaps]
+        assert max(gaps) <= 6, f"lag={lag}: gap {max(gaps)}h > 6h cadence (dead zone)"
+
+
+def test_replacement_publish_cron_applies_release_lag(monkeypatch) -> None:
+    """Each scheduled hour is (cycle_hour + release_lag) % 24 for the configured lag
+    (all four cycles share one publication lag)."""
+    import src.ingest.forecast_live_daemon as forecast_live_daemon
+
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_replacement_forecast_shadow_cfg",
+        lambda: {"download_release_lag_hours": 9.0},
+    )
+    hours = forecast_live_daemon._replacement_forecast_publish_cron_hours()
+    assert set(hours) == {(0 + 9) % 24, (6 + 9) % 24, (12 + 9) % 24, (18 + 9) % 24}
+    assert set(hours) == {9, 15, 21, 3}
+
+
+def test_premature_cron_fire_cannot_request_a_guessed_cycle() -> None:
+    """SAFETY GUARD (rewritten 2026-06-11, run-selection single authority).
+
+    The old guard pinned the now-minus-release-lag floor as the resolver of "newest
+    available cycle". That guessed clock requested unpublished 12Z/18Z runs every night;
+    the rung-2 meta guard refused them and the refusal aborted the whole
+    download->materialize cycle. The guess path is now DEAD: ``_parse_cycle(None, ...)``
+    raises, and cron fires (premature or not) resolve the cycle exclusively through the
+    probe-resolved authority ``_probe_resolved_available_cycle`` -- so a premature fire
+    can only ever fetch a cycle some provider probe CONFIRMS is published, or skip."""
+    import pytest
+
+    from scripts.download_replacement_forecast_current_targets import _parse_cycle
+
+    # The guess path is unconstructable.
+    with pytest.raises(ValueError, match="probe-resolved"):
+        _parse_cycle(None, now=datetime(2026, 6, 10, 20, 10, tzinfo=timezone.utc), release_lag_hours=14.0)
+
+    # The explicit operator path still parses and validates.
+    explicit = _parse_cycle(
+        "2026-06-10T06:00:00+00:00",
+        now=datetime(2026, 6, 10, 20, 10, tzinfo=timezone.utc),
+        release_lag_hours=14.0,
+    )
+    assert explicit == datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)
+
+    # The production resolver is the probe authority: it returns exactly the newest
+    # cycle whose BOTH legs the injected probes confirm, independent of any lag.
+    import src.data.replacement_forecast_production as production
+    from src.data.replacement_cycle_availability import (
+        newest_complete_cycle,
+        resolve_cycle_leg_availability,
+    )
+
+    published = {datetime(2026, 6, 10, 0, 0, tzinfo=timezone.utc),
+                 datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)}
+    availability = resolve_cycle_leg_availability(
+        datetime(2026, 6, 10, 20, 10, tzinfo=timezone.utc),
+        probe_aifs=lambda c: c in published,
+        probe_anchor=lambda c: c in published,
+    )
+    assert newest_complete_cycle(availability) == datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)
+    # And the production module exposes the single authority the jobs call.
+    assert callable(production._probe_resolved_available_cycle)

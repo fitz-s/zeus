@@ -179,7 +179,7 @@ def test_evidence_gate_pure_predicate_contract() -> None:
 # evidence_absent_or_failing asserted the evidence gate DEGRADES the LIVE 0.1 authority
 # path to None on absent/failing evidence. That gating was DELETED by operator directive
 # 2026-06-08 (commits b646f99339 "remove promotion/capital-objective evidence gate from
-# BOTH live-authority sites" + 54a53334a9): LIVE_AUTHORITY is now FLAG-ONLY and U0R runs
+# BOTH live-authority sites" + 54a53334a9): LIVE_AUTHORITY is now FLAG-ONLY and BAYES_PRECISION_FUSION runs
 # live without the settlement-evidence gate. The removal is pinned by
 # tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py (the superseding
 # owner of this surface). The dead gating invariant has no surviving new form here.

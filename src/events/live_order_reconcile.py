@@ -93,6 +93,57 @@ def append_user_trade_observed(
     )
 
 
+def append_reconcile_recovered_fill(
+    ledger: LiveOrderAggregateLedger,
+    *,
+    aggregate_id: str,
+    event_id: str,
+    final_intent_id: str,
+    venue_order_id: str,
+    occurred_at: datetime,
+    payload: dict[str, Any],
+) -> LiveOrderAggregateEvent:
+    """UserTradeObserved recovered by EXPLICIT venue reconcile (RECONCILE_SOURCE).
+
+    THE ORPHAN CLASS THIS KILLS (HK 30°C 2026-06-12 incident): a venue fill
+    whose WS_USER CONFIRMED message was lost to a user-channel dropout exists
+    only as a REST-sourced MATCHED trade fact. The user-channel bridge cannot
+    see it, so the fill never reaches FILL_CONFIRMED, the position is never
+    materialised, and the loss is never booked — a silent, permanent P&L
+    orphan.
+
+    Authority basis: ``assert_user_channel_fill_authority`` already names
+    RECONCILE_SOURCE as a legal fill-truth source. This event asserts
+    FILL_CONFIRMED on the strength of an explicit, payload-recorded proof
+    chain — the authenticated REST trade fact plus the venue command's
+    terminal FILLED/PARTIAL state, after a grace window in which the user
+    channel had every chance to deliver. Provenance is mandatory: the payload
+    must carry the recovery basis or this function refuses.
+    """
+    recovery = dict(payload or {})
+    for required in ("source_trade_fact_authority", "venue_command_state", "recovery_basis"):
+        if not str(recovery.get(required) or "").strip():
+            raise LiveOrderReconcileError(
+                f"reconcile-recovered fill requires payload field {required!r}"
+            )
+    assert_user_channel_fill_authority(source=RECONCILE_SOURCE)
+    return ledger.append_event(
+        aggregate_id=aggregate_id,
+        event_type="UserTradeObserved",
+        payload={
+            **recovery,
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "source_authority": RECONCILE_SOURCE,
+            "trade_status": "CONFIRMED",
+            "fill_authority_state": _fill_authority_state("CONFIRMED"),
+            "venue_order_id": venue_order_id,
+        },
+        occurred_at=occurred_at,
+        source_authority="explicit_reconcile",
+    )
+
+
 def append_reconciled(
     ledger: LiveOrderAggregateLedger,
     *,

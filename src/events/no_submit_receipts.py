@@ -24,6 +24,34 @@ class EdliNoSubmitReceiptLedger:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
+    def insert_shadow_idempotent(
+        self,
+        receipt: EventSubmissionReceipt,
+        *,
+        decision_time: datetime,
+        created_at: datetime | None = None,
+    ) -> str:
+        """Insert a DAY0_SCOPE_SHADOW_ONLY shadow receipt into edli_no_submit_receipts.
+
+        Shadow receipts carry proof_accepted=False (they are scope-rejected, not
+        pipeline-accepted) but MUST land in this table so the shadow comparator's
+        adapter (day0_remaining_day_adapter) can pair their q_live/direction/bin_label
+        against settled outcomes. The never-submit guarantee is preserved: the receipt
+        has side_effect_status="NO_SUBMIT" and the reactor still routes it through
+        _write_regret for no_trade_regret_events persistence.
+
+        Preconditions enforced here:
+          - side_effect_status == "NO_SUBMIT" (structural no-submit is still mandatory)
+          - reason == "DAY0_SCOPE_SHADOW_ONLY" (only the shadow reason bypasses proof_accepted)
+        """
+        if receipt.side_effect_status != "NO_SUBMIT":
+            raise ValueError("insert_shadow_idempotent only accepts NO_SUBMIT receipts")
+        if receipt.reason != "DAY0_SCOPE_SHADOW_ONLY":
+            raise ValueError(
+                "insert_shadow_idempotent only accepts DAY0_SCOPE_SHADOW_ONLY receipts"
+            )
+        return self._insert_impl(receipt, decision_time=decision_time, created_at=created_at)
+
     def insert_idempotent(
         self,
         receipt: EventSubmissionReceipt,
@@ -35,6 +63,15 @@ class EdliNoSubmitReceiptLedger:
             raise ValueError("edli_no_submit_receipts only accepts NO_SUBMIT receipts")
         if not receipt.proof_accepted:
             raise ValueError("edli_no_submit_receipts only accepts proof-accepted receipts")
+        return self._insert_impl(receipt, decision_time=decision_time, created_at=created_at)
+
+    def _insert_impl(
+        self,
+        receipt: EventSubmissionReceipt,
+        *,
+        decision_time: datetime,
+        created_at: datetime | None = None,
+    ) -> str:
         receipt_json = _receipt_json(receipt)
         receipt_hash = hashlib.sha256(receipt_json.encode("utf-8")).hexdigest()
         projection_hash = _projection_hash(receipt)
@@ -86,7 +123,8 @@ class EdliNoSubmitReceiptLedger:
                 mainstream_point, mainstream_delta, mainstream_bin_label,
                 mainstream_source, mainstream_fetched_at_utc,
                 alpha_gap,
-                posterior_id, probability_authority, q_lcb_calibration_source
+                posterior_id, probability_authority, q_lcb_calibration_source,
+                envelope_json
             ) VALUES (
                 :receipt_id, :event_id, :causal_snapshot_id, :decision_time,
                 :family_id, :candidate_id, :condition_id, :token_id, :direction,
@@ -99,7 +137,8 @@ class EdliNoSubmitReceiptLedger:
                 :mainstream_point, :mainstream_delta, :mainstream_bin_label,
                 :mainstream_source, :mainstream_fetched_at_utc,
                 :alpha_gap,
-                :posterior_id, :probability_authority, :q_lcb_calibration_source
+                :posterior_id, :probability_authority, :q_lcb_calibration_source,
+                :envelope_json
             )
             """,
             {
@@ -165,6 +204,10 @@ class EdliNoSubmitReceiptLedger:
                 "posterior_id": receipt.posterior_id,
                 "probability_authority": receipt.probability_authority,
                 "q_lcb_calibration_source": receipt.q_lcb_calibration_source,
+                # DecisionProvenanceEnvelope (operator law 2026-06-11): the complete decision-time
+                # provenance blob. NULL on legacy receipts; observability only — never gates and is
+                # omit-when-None in receipt_json so existing receipt_hash stays byte-stable.
+                "envelope_json": receipt.envelope_json,
             },
         )
         return receipt_id
@@ -241,6 +284,36 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
         payload.pop("posterior_id", None)
     if payload.get("probability_authority") is None:
         payload.pop("probability_authority", None)
+    # same_bin_yes_posterior: omit when None so legacy / buy-YES / canonical receipts
+    # that never carried the YES-bin posterior keep byte-identical receipt_json (and
+    # therefore receipt_hash). Present (set) only on buy-NO receipts whose proof
+    # carried the materialized YES posterior — persisted so the gate input is
+    # recoverable from the blob too. Mirrors the alpha_gap / q_source / posterior_id
+    # omit-when-None pattern above.
+    if payload.get("same_bin_yes_posterior") is None:
+        payload.pop("same_bin_yes_posterior", None)
+    # settlement_coverage_status (twin-authority reconciliation #7, 2026-06-11): omit
+    # when None so canonical / legacy / verdict-unevaluated receipts keep byte-identical
+    # receipt_json (and therefore receipt_hash). Present only on replacement-path
+    # receipts whose family coverage verdict was evaluated — persisted so the receipt-
+    # level twin gate's input is recoverable from the blob, mirroring
+    # same_bin_yes_posterior above.
+    if payload.get("settlement_coverage_status") is None:
+        payload.pop("settlement_coverage_status", None)
+    # DecisionProvenanceEnvelope (operator law 2026-06-11): ALWAYS excluded from receipt_json —
+    # never hashed. The envelope embeds decision_time-dependent ages (cycle_age_h, book age_s),
+    # so a retried event would recompute different envelope bytes for the SAME
+    # (event_id, final_intent_id) key and the idempotent insert would raise
+    # EdliReceiptHashDriftError on the money path. The envelope's canonical home is the
+    # envelope_json COLUMN (queryable, full provenance); receipt_json/receipt_hash stay
+    # byte-identical to pre-envelope receipts.
+    payload.pop("envelope_json", None)
+    # submit_lane (silent-trade-kill antibody 2026-06-12): omit when None so legacy /
+    # pre-stamp receipts keep byte-identical receipt_json (and therefore receipt_hash).
+    # Present (set) on every NEW adapter-produced receipt — persisted because WHICH lane
+    # decided is first-class decision provenance, recoverable from the blob forever.
+    if payload.get("submit_lane") is None:
+        payload.pop("submit_lane", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

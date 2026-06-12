@@ -22,12 +22,14 @@ def test_live_canary_runtime_requires_operator_unshadow_and_submit_guards():
     enabled together rather than a split shadow/live configuration.
     """
     settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli_v1"]
+    edli = settings["edli"]
 
     assert edli["real_order_submit_enabled"] is True
-    assert edli["live_execution_mode"] == "edli_live_canary"
+    assert edli["live_execution_mode"] == "edli_live"
     assert edli["reactor_mode"] == "live"
-    assert edli["live_canary_enabled"] is True
+    # Wave-1 2026-06-12: live_canary_enabled gate flag DELETED — live submit no longer
+    # requires a separate canary on/off flag (operator arm + real-submit flag are the gates).
+    assert "live_canary_enabled" not in edli
     assert edli["durable_submit_outbox_enabled"] is True
     assert edli["enabled"] is True
     assert edli["event_writer_enabled"] is True
@@ -36,7 +38,8 @@ def test_live_canary_runtime_requires_operator_unshadow_and_submit_guards():
     assert edli["day0_extreme_trigger_enabled"] is True
     assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is True
-    assert edli["taker_fok_fak_live_enabled"] is True
+    # Wave-2 item 8: taker_fok_fak_live_enabled DELETED (taker law unconditional) — key absent.
+    assert "taker_fok_fak_live_enabled" not in edli
 
 
 def test_live_canary_groundwork_has_live_cap_schema_and_verifiers():
@@ -351,7 +354,6 @@ def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=False,
         pre_submit_authority_provider=_pre_submit_authority_provider,
-        taker_fok_fak_live_enabled=True,
     )
 
     receipt = submit(event, decision_time)
@@ -385,7 +387,6 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
         decision_time=decision_time,
         live_cap_conn=conn,
         pre_submit_authority_provider=_pre_submit_authority_provider,
-        taker_fok_fak_live_enabled=True,
     )
 
     events = conn.execute(
@@ -653,7 +654,6 @@ def test_submit_disabled_redecision_returns_no_submit_for_locked_same_price(monk
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=False,
         pre_submit_authority_provider=_pre_submit_authority_provider,
-        taker_fok_fak_live_enabled=True,
     )
 
     first = submit(event_1, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -695,7 +695,6 @@ def test_live_build_failure_rolls_back_partial_live_order_aggregate(monkeypatch)
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=False,
         pre_submit_authority_provider=_pre_submit_authority_provider,
-        taker_fok_fak_live_enabled=True,
     )
 
     receipt = submit(event, decision_time)
@@ -727,7 +726,6 @@ def test_live_execution_command_build_fails_without_pre_submit_authority_witness
             receipt=accepted,
             decision_time=decision_time,
             live_cap_conn=conn,
-            taker_fok_fak_live_enabled=True,
         )
 
 
@@ -763,7 +761,6 @@ def test_live_execution_command_blocks_identity_fallback_calibration():
             decision_time=decision_time,
             live_cap_conn=conn,
             pre_submit_authority_provider=_pre_submit_authority_provider,
-            taker_fok_fak_live_enabled=True,
         )
 
 
@@ -785,7 +782,6 @@ def test_live_execution_command_requires_q_source_provenance():
             decision_time=decision_time,
             live_cap_conn=conn,
             pre_submit_authority_provider=_pre_submit_authority_provider,
-            taker_fok_fak_live_enabled=True,
         )
 
 
@@ -846,7 +842,6 @@ def test_live_execution_command_requires_opportunity_book_selection_match():
             decision_time=decision_time,
             live_cap_conn=conn,
             pre_submit_authority_provider=_pre_submit_authority_provider,
-            taker_fok_fak_live_enabled=True,
         )
 
 
@@ -867,8 +862,11 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
     # Low trade_score + p_fill_lcb keeps EV boundary False → MAKER (post_only=True).
     # With limit_price ~0.4 and witness ask=0.39, would_cross=True → verifier raises.
+    # P0 mode-authority: declare the PROVEN maker mode so the fresh-book validator (which
+    # also computes MAKER from the low EV) confirms it and proceeds to the would_cross verifier
+    # check, rather than aborting on a proof/fresh mode disagreement.
     accepted = replace(
-        _accepted_receipt(event),
+        _accepted_receipt(event, execution_mode_intent="MAKER", maker_limit_price=0.40),
         trade_score=0.0,
         p_fill_lcb=0.0,
     )
@@ -887,8 +885,15 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
         )
 
 
-def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
-    from src.decision_kernel import claims
+def test_fresh_pre_submit_book_aborts_mode_flip_for_proven_maker_that_would_cross():
+    # P0 mode-authority (operator review 2026-06-10) — RE-PURPOSED from the former
+    # "promotes_stale_maker_candidate_to_taker" test. The final command builder may NOT
+    # promote a proven-MAKER candidate to TAKER on a fresh book that makes crossing newly
+    # attractive: that was the validator-bypassing late EV-override flip (a maker that never
+    # cleared TAKER recapture full-fee/PRICE_MOVED entering the taker submit path). The fresh
+    # tight book (bid 0.39 / ask 0.40) now makes _select_edli_order_mode return TAKER, so a
+    # PROVEN-MAKER proof must ABORT SUBMIT_ABORTED_MODE_FLIPPED — NO order built, defer to a
+    # full re-rank next cycle.
     from src.engine import event_reactor_adapter as adapter
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
@@ -896,8 +901,9 @@ def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
     conn.row_factory = sqlite3.Row
     event = _forecast_event()
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    # PROVEN MAKER (stale wide book at eval), large edge (q_live 0.7 vs reservation 0.4).
     accepted = replace(
-        _accepted_receipt(event),
+        _accepted_receipt(event, execution_mode_intent="MAKER", maker_limit_price=0.39),
         trade_score=0.015,
         p_fill_lcb=0.10,
     )
@@ -913,44 +919,34 @@ def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
                 "book_hash": "stale-book-hash",
             },
         ),
+        # Wave-1 2026-06-12 (canary force-taker deleted): the fresh mode is the deadline-aware
+        # rest-then-cross policy. To exercise the proven-MAKER-would-cross flip, the snapshot
+        # must sit NEAR the deadline so the policy genuinely crosses (fresh=TAKER) on the tight
+        # fresh book — the MAKER proof then aborts MODE_FLIPPED. (The shared fixture gives a far
+        # horizon to a MAKER proof; this test overrides it to the crossing scenario it targets.)
+        executable_snapshot=replace(
+            proof_bundle.executable_snapshot,
+            payload={
+                **proof_bundle.executable_snapshot.payload,
+                "market_end_at": (decision_time + timedelta(minutes=5)).isoformat(),
+            },
+        ),
     )
     accepted = replace(accepted, decision_proof_bundle=proof_bundle)
 
-    certs = adapter._build_live_execution_command_certificates(
-        event=event,
-        receipt=accepted,
-        decision_time=decision_time,
-        live_cap_conn=conn,
-        pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
-            current_best_bid=0.39,
-            current_best_ask=0.40,
-        ),
-        taker_fok_fak_live_enabled=True,
-    )
-
-    final_intent = next(c for c in certs if getattr(c, "certificate_type", None) == claims.FINAL_INTENT)
-    pre_submit = next(c for c in certs if getattr(c, "certificate_type", None) == claims.PRE_SUBMIT_REVALIDATION)
-
-    assert final_intent.payload["order_mode"] == "TAKER"
-    assert final_intent.payload["post_only"] is False
-    assert final_intent.payload["time_in_force"] in {"FOK", "FAK"}
-    assert final_intent.payload["limit_price"] == pytest.approx(0.40)
-    assert final_intent.payload["city"] == "Chicago"
-    assert final_intent.payload["target_date"] == "2026-05-24"
-    assert final_intent.payload["metric"] == "high"
-    assert final_intent.payload["temperature_metric"] == "high"
-    assert final_intent.payload["bin_label"] == "80-82"
-    assert final_intent.payload["outcome_label"] == "YES"
-    assert final_intent.payload["unit"] == "F"
-    assert pre_submit.payload["would_cross_book"] is True
-    assert pre_submit.payload["post_only"] is False
-    assert pre_submit.payload["city"] == "Chicago"
-    assert pre_submit.payload["target_date"] == "2026-05-24"
-    assert pre_submit.payload["metric"] == "high"
-    assert pre_submit.payload["temperature_metric"] == "high"
-    assert pre_submit.payload["bin_label"] == "80-82"
-    assert pre_submit.payload["outcome_label"] == "YES"
-    assert pre_submit.payload["unit"] == "F"
+    # The fresh tight book near the deadline makes the policy cross → fresh mode
+    # TAKER vs proven MAKER → mode flip → typed abort, NO certificates built.
+    with pytest.raises(adapter._SubmitAbortedModeFlipped, match="SUBMIT_ABORTED_MODE_FLIPPED"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
+                current_best_bid=0.39,
+                current_best_ask=0.40,
+            ),
+        )
 
 
 def test_live_command_reuses_single_pre_submit_authority_witness():
@@ -979,7 +975,6 @@ def test_live_command_reuses_single_pre_submit_authority_witness():
         decision_time=decision_time,
         live_cap_conn=conn,
         pre_submit_authority_provider=_provider,
-        taker_fok_fak_live_enabled=True,
     )
 
     pre_submit = next(c for c in certs if getattr(c, "certificate_type", None) == claims.PRE_SUBMIT_REVALIDATION)
@@ -1004,7 +999,13 @@ def test_edli_live_cap_path_does_not_reference_legacy_cap_columns():
     assert "SUM(notional_usd)" not in source
 
 
-def test_live_adapter_submit_enabled_canary_disabled_blocks(monkeypatch):
+def test_live_adapter_no_canary_gate_proceeds_past_deleted_canary_block(monkeypatch):
+    """Wave-1 2026-06-12 antibody: the LIVE_CANARY_DISABLED gate is DELETED.
+
+    With real_order_submit_enabled=True there is no longer any canary on/off flag that
+    can refuse the submit with reason 'LIVE_CANARY_DISABLED'. The adapter proceeds past
+    the (deleted) canary check to the NEXT real gate — here the durable-outbox requirement
+    (no outbox passed) — proving the canary block is gone, not merely flipped on."""
     from src.engine import event_reactor_adapter as adapter
     from src.events.reactor import EventSubmissionReceipt
     from src.riskguard.risk_level import RiskLevel
@@ -1026,13 +1027,15 @@ def test_live_adapter_submit_enabled_canary_disabled_blocks(monkeypatch):
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=True,
-        live_canary_enabled=False,
+        # durable_submit_outbox_enabled intentionally NOT passed (defaults False).
     )
 
     receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
 
-    assert receipt.proof_accepted is False
-    assert receipt.reason == "LIVE_CANARY_DISABLED"
+    # The deleted canary gate is unreachable: reason is the next honest gate, never the
+    # old LIVE_CANARY_DISABLED.
+    assert receipt.reason != "LIVE_CANARY_DISABLED"
+    assert receipt.reason == "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED"
 
 
 def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypatch):
@@ -1070,12 +1073,10 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
             real_order_submit_enabled=True,
-            live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
             operator_arm=_operator_arm(),
             executor_submit=_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
-            taker_fok_fak_live_enabled=True,
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -1118,7 +1119,6 @@ def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch):
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
             real_order_submit_enabled=True,
-            live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
             operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
@@ -1130,7 +1130,6 @@ def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch):
                 raw_response={"status": "submitted"},
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
-            taker_fok_fak_live_enabled=True,
         )
 
         receipt = submit(event, decision_time)
@@ -1213,7 +1212,6 @@ def test_live_adapter_blocks_real_submit_without_durable_outbox(monkeypatch):
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
             real_order_submit_enabled=True,
-            live_canary_enabled=True,
             executor_submit=_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
         )
@@ -1251,7 +1249,6 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
             real_order_submit_enabled=True,
-            live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
             operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
@@ -1262,7 +1259,6 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
                 raw_response={"status": "rejected"},
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
-            taker_fok_fak_live_enabled=True,
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -1333,10 +1329,8 @@ def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeyp
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
             real_order_submit_enabled=True,
-            live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
             operator_arm=_operator_arm(),
-            taker_fok_fak_live_enabled=True,
             executor_submit=_boundary_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
         )
@@ -1400,7 +1394,6 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
             real_order_submit_enabled=True,
-            live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
             operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
@@ -1412,7 +1405,6 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
                 reconciliation_followup_required=True,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
-            taker_fok_fak_live_enabled=True,
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -1464,7 +1456,6 @@ def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypat
             live_cap_conn=conn,
             get_current_level=lambda: RiskLevel.GREEN,
             real_order_submit_enabled=True,
-            live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
             operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
@@ -1479,7 +1470,6 @@ def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypat
                 side_effect_known=False,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
-            taker_fok_fak_live_enabled=True,
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -1846,7 +1836,26 @@ def test_main_pre_submit_authority_provider_blocks_venue_connectivity_failure(mo
         provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
 
 
-def _accepted_receipt(event):
+def _accepted_receipt(event, *, execution_mode_intent="TAKER", maker_limit_price=None,
+                      rest_then_cross_policy=None):
+    # P0 mode-authority (operator review 2026-06-10): a real accepted receipt that
+    # reaches the FINAL command builder ALWAYS carries the selected proof's PROVEN
+    # execution_mode_intent (the live path writes it from proof.execution_mode_intent).
+    # The fixture declares it so the final-stage validator (_validate_final_order_mode_or_abort)
+    # confirms the proven mode against the fresh book instead of failing closed on a missing
+    # mode. Default TAKER: this fixture's economics (q_live 0.7 vs reservation 0.4 — a large
+    # edge — on the tight fresh book bid 0.39 / ask 0.40) make the rest-then-cross policy
+    # favor crossing, so the proven mode IS TAKER. A maker-proof test passes
+    # execution_mode_intent="MAKER" (and a non-crossing book) to declare the proven maker mode.
+    #
+    # Wave-1 2026-06-12: the canary force-taker knob is DELETED — the proof's
+    # rest_then_cross_policy is the SINGLE mode authority validated against the fresh book.
+    # A TAKER proof therefore declares a TAKER_* policy lane so the fresh re-derivation
+    # (_fresh_rest_then_cross_mode -> select_rest_then_cross_mode) is consistent with it.
+    if rest_then_cross_policy is None:
+        rest_then_cross_policy = (
+            "TAKER_FLEETING_EDGE" if execution_mode_intent == "TAKER" else "REST_DEFAULT"
+        )
     from src.events.reactor import EventSubmissionReceipt
 
     return EventSubmissionReceipt(
@@ -1886,6 +1895,9 @@ def _accepted_receipt(event):
         risk_decision_id="risk-1",
         final_intent_id="intent-1",
         q_source="emos",
+        execution_mode_intent=execution_mode_intent,
+        rest_then_cross_policy=rest_then_cross_policy,
+        maker_limit_price=maker_limit_price,
         opportunity_book={
             "selected_candidate_id": "candidate-1",
             "actual_receipt_selected_candidate_id": "candidate-1",

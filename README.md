@@ -17,8 +17,8 @@ The live forecast→edge→size path is the **replacement_forecast** chain (auth
 ```text
 contract semantics
   → source truth (settlement provider, station, observation field)
-  → per-model walk-forward empirical-Bayes de-bias (u0r_bayes.eb_bias, λ=n/(n+8))
-  → T2 Bayesian precision fusion, Ledoit-Wolf Σ (u0r_bayes.fuse_u0r_posterior)
+  → per-model walk-forward empirical-Bayes de-bias (bayes_precision_fusion.eb_bias, λ=n/(n+8))
+  → T2 Bayesian precision fusion, Ledoit-Wolf Σ (bayes_precision_fusion.fuse_bayes_precision_posterior)
   → σ_pred = max(1.0°C, √(fused.sd²+σ_resid²))
   → settlement-preimage bin q (emos.bin_probability_settlement, q_shape fused_normal_direct)
   → q_lcb floor (Wilson z=1.645) → edge → BH FDR (per tested-family)
@@ -29,9 +29,9 @@ contract semantics
 
 Live entry `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`; q built and persisted by `src/data/replacement_forecast_materializer.py` `_insert_posterior`; the single settlement integrator is `src/calibration/emos.py` `bin_probability_settlement`.
 
-### Baseline & Caps (legacy chain)
+### Baseline (legacy chain — diagnostics only since 2026-06-12)
 
-The legacy 51-ENS chain still runs as an **independent baseline / LCB cap only**, joined to the live q as a floor (`effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)` in `src/engine/event_reactor_adapter.py`) — it is NOT the live q:
+The legacy 51-ENS chain still runs as an **independent baseline for diagnostics and for strategies genuinely on baseline q**. It no longer caps or vetoes the live replacement q (Wave-2 single-q-authority cut, commit 479cb34446): the former `min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)` join is deleted; the baseline value is carried as `baseline_q_lcb_reference` receipt provenance. Regime law: `docs/authority/regime_unification_2026-06-12.md` (U1):
 
 ```text
 51 ENS members → analytic_p_raw_vector_from_maxes (closed-form Gaussian-mixture;

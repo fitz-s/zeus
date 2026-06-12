@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-06-09
 # Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-09
 # 2026-06-09 STALE_LAW re-pin: smoothing flag promoted default-OFF -> default-ON
-#   (config edli_v1.replacement_0_1_member_vote_smoothing_enabled=true). The shipped-
+#   (config edli.replacement_0_1_member_vote_smoothing_enabled=true). The shipped-
 #   config resolver test now asserts the default alpha; OFF inertness stays covered by
 #   the monkeypatch tests.
 # Purpose: Protect the replacement_forecast_materializer wiring of the flag-gated AIFS
@@ -144,11 +144,11 @@ def _expected_q(*, alpha: float | None) -> dict:
 
 # NOTE: the full materialize path enforces strict prewrite gates the lightweight fixtures do not
 # satisfy; the smoothing lands in _insert_posterior, so the wiring is exercised directly there.
-# The EB-bias resolver is held at None in every test to isolate the smoothing effect.
+# Wave-2 item 7: the EB-bias layer is permanently deleted (center never shifted), so
+# the smoothing effect is already isolated without neutralizing the EB resolver.
 
 
 def test_flag_off_materialized_posterior_byte_identical_to_today(monkeypatch) -> None:
-    monkeypatch.setattr(mod, "_replacement_eb_bias_shift_c", lambda request, *, metric: None)
     monkeypatch.setattr(mod, "_replacement_member_vote_smoothing_alpha", lambda: None)
     conn = _conn()
     posterior_id = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
@@ -156,7 +156,6 @@ def test_flag_off_materialized_posterior_byte_identical_to_today(monkeypatch) ->
 
 
 def test_flag_on_materialized_posterior_matches_smoothed_construction(monkeypatch) -> None:
-    monkeypatch.setattr(mod, "_replacement_eb_bias_shift_c", lambda request, *, metric: None)
     monkeypatch.setattr(mod, "_replacement_member_vote_smoothing_alpha", lambda: MEMBER_VOTE_SMOOTHING_ALPHA)
     conn = _conn()
     posterior_id = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
@@ -173,7 +172,7 @@ def test_flag_on_materialized_posterior_matches_smoothed_construction(monkeypatc
 
 def test_resolver_shipped_config_flag_is_on_returns_default_alpha() -> None:
     # STALE_LAW re-pin 2026-06-09: replacement_0_1_member_vote_smoothing_enabled was
-    # promoted from default-OFF to default-ON (authority: config edli_v1.
+    # promoted from default-OFF to default-ON (authority: config edli.
     # replacement_0_1_member_vote_smoothing_enabled=true; the alpha key is absent so the
     # resolver falls back to MEMBER_VOTE_SMOOTHING_ALPHA=0.05). The live path now applies
     # Laplace smoothing. (Flag-OFF inertness is still covered by the monkeypatch tests.)
@@ -185,7 +184,7 @@ def test_resolver_shipped_config_flag_is_on_returns_default_alpha() -> None:
 def test_resolver_returns_alpha_when_flag_enabled(monkeypatch) -> None:
     import src.config as cfg
 
-    edli = cfg.settings["edli_v1"]  # the underlying mutable dict
+    edli = cfg.settings["edli"]  # the underlying mutable dict
     monkeypatch.setitem(edli, "replacement_0_1_member_vote_smoothing_enabled", True)
     monkeypatch.setitem(edli, "replacement_0_1_member_vote_smoothing_alpha", MEMBER_VOTE_SMOOTHING_ALPHA)
     assert mod._replacement_member_vote_smoothing_alpha() == pytest.approx(MEMBER_VOTE_SMOOTHING_ALPHA)
@@ -194,7 +193,7 @@ def test_resolver_returns_alpha_when_flag_enabled(monkeypatch) -> None:
 def test_resolver_fail_closed_on_nonpositive_alpha(monkeypatch) -> None:
     import src.config as cfg
 
-    edli = cfg.settings["edli_v1"]  # the underlying mutable dict
+    edli = cfg.settings["edli"]  # the underlying mutable dict
     monkeypatch.setitem(edli, "replacement_0_1_member_vote_smoothing_enabled", True)
     monkeypatch.setitem(edli, "replacement_0_1_member_vote_smoothing_alpha", 0.0)  # invalid -> fail-closed
     assert mod._replacement_member_vote_smoothing_alpha() is None

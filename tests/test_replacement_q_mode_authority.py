@@ -1,13 +1,17 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-06-09
-# Authority basis: FIX 1/FIX 2/FIX 5 (operator-reviewed 2026-06-09) on the replacement chain
-#   (docs/authority/replacement_final_form_2026_06_09.md). Relationship tests for the cross-module
-#   boundary: the materializer DERIVES an explicit replacement_q_mode into provenance_json, and the
-#   EDLI live seam (event_reactor_adapter._replacement_q_mode_live_eligibility) ADMITS real submit
-#   ONLY for the fused-Normal modes. Category killed: a posterior that silently fell back to the
-#   legacy member-vote soft-anchor q (fusion None / fused-q build failed / flag off) sizing live
-#   Kelly under a different probability regime than the release evidence assumes — distinguishable
-#   now ONLY by a data-class label the live gate enforces, not by a WARNING log.
+# Last reused or audited: 2026-06-10
+# Authority basis: FIX 1/FIX 2/FIX 5 (operator-reviewed 2026-06-09) + P0 grandfather-revoked
+#   (operator directive 2026-06-10). Relationship tests for the cross-module boundary: the
+#   materializer DERIVES an explicit replacement_q_mode into provenance_json, and the EDLI live
+#   seam (event_reactor_adapter._replacement_q_mode_live_eligibility) ADMITS real submit ONLY for
+#   the fused-Normal modes. Category killed: a posterior that silently fell back to the legacy
+#   member-vote soft-anchor q (fusion None / fused-q build failed / flag off) sizing live Kelly
+#   under a different probability regime than the release evidence assumes — distinguishable now
+#   ONLY by a data-class label the live gate enforces, not by a WARNING log.
+#   P0 grandfather-revoked: old DB rows with q_shape="fused_normal_direct" and no explicit
+#   replacement_q_mode key are no longer live-eligible (FUSED_NORMAL_GRANDFATHER_REVOKED). They
+#   carry no q_lcb/q_ucb bounds and would mix fused-Normal q with Wilson/AIFS q_lcb — the
+#   two-measures disease that caused the Milan wrong order. Rematerialization required.
 """Relationship tests: replacement q-mode authority + settlement-sigma-floor coherence.
 
 These verify the INVARIANT that holds across the materializer -> live-gate boundary:
@@ -26,7 +30,7 @@ import pytest
 
 import src.data.replacement_forecast_materializer as mod
 from src.engine.event_reactor_adapter import _replacement_q_mode_live_eligibility
-from tests.test_u0r_history_provider_materializer_wiring import (  # reuse the proven harness
+from tests.test_bayes_precision_fusion_history_provider_materializer_wiring import (  # reuse the proven harness
     _conn,
     _disable_other_layers,
     _enable_fusion,
@@ -54,7 +58,7 @@ def _full_live_values() -> dict[str, float]:
 def _enable_fused_shape(monkeypatch) -> None:
     from src.config import settings
 
-    monkeypatch.setitem(settings["edli_v1"], "replacement_0_1_fused_q_shape_enabled", True)
+    monkeypatch.setitem(settings["edli"], "replacement_0_1_fused_q_shape_enabled", True)
 
 
 class _BundleStub:
@@ -75,26 +79,26 @@ def _materialize_provenance(conn) -> dict:
 # =====================================================================================
 def test_fusion_override_raises_shadow_accrues_capture_missing_gate_rejects(monkeypatch) -> None:
     """Fusion override raises -> the posterior STILL materializes (shadow accrual preserved),
-    replacement_q_mode == U0R_CAPTURE_MISSING, and the live gate rejects it."""
+    replacement_q_mode == BAYES_PRECISION_FUSION_CAPTURE_MISSING, and the live gate rejects it."""
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     _enable_fused_shape(monkeypatch)
     # Force the override layer to fail-soft to None (its documented contract on any error).
     monkeypatch.setattr(
-        mod, "_replacement_u0r_fusion_override", lambda *a, **k: None
+        mod, "_replacement_bayes_precision_fusion_override", lambda *a, **k: None
     )
     conn = _conn()
     _seed_history(conn, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn, values=_full_live_values())
 
     prov = _materialize_provenance(conn)  # MUST NOT raise — shadow row accrues
-    assert prov["replacement_q_mode"] == "U0R_CAPTURE_MISSING"
+    assert prov["replacement_q_mode"] == "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
     assert prov["q_shape"] == "aifs_member_votes_soft_anchor"
     assert prov["capture_status"] == "STALE_HISTORY_ONLY"
 
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
     assert eligible is False
-    assert mode == "U0R_CAPTURE_MISSING"
+    assert mode == "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 
 
 def test_fused_q_build_raises_mode_build_failed_gate_rejects(monkeypatch) -> None:
@@ -137,8 +141,8 @@ def test_happy_path_full_mode_gate_admits(monkeypatch) -> None:
     assert prov["replacement_q_mode"] == "FUSED_NORMAL_FULL"
     assert prov["q_shape"] == "fused_normal_direct"
     assert prov["capture_status"] == "FULL_CURRENT"
-    assert prov["u0r_fusion"]["decorrelated_providers_served"] == 5
-    assert prov["u0r_fusion"]["decorrelated_providers_complete"] is True
+    assert prov["bayes_precision_fusion"]["decorrelated_providers_served"] == 5
+    assert prov["bayes_precision_fusion"]["decorrelated_providers_complete"] is True
 
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
     assert eligible is True
@@ -172,13 +176,16 @@ def test_partial_mode_gate_admits(monkeypatch) -> None:
     assert mode == "FUSED_NORMAL_PARTIAL"
 
 
-def test_grandfathered_fused_row_without_mode_key_admitted() -> None:
-    """A pre-change live row (q_shape == fused_normal_direct, NO replacement_q_mode key) is
-    grandfathered as a fused-Normal mode so this change does not brick the 67 existing live rows."""
+def test_grandfathered_fused_row_without_mode_key_rejected() -> None:
+    """P0 grandfather-revoked (operator directive 2026-06-10): a pre-change DB row with
+    q_shape="fused_normal_direct" and NO replacement_q_mode key is NO LONGER live-eligible.
+    These rows have no q_lcb/q_ucb bounds and would size Kelly under fused-Normal q +
+    Wilson/AIFS q_lcb — the two-measures disease. FUSED_NORMAL_GRANDFATHER_REVOKED is the
+    rejection reason; rows must rematerialize to get proper bounds and be admitted."""
     grandfathered = {"q_shape": "fused_normal_direct"}  # no replacement_q_mode key
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(grandfathered))
-    assert eligible is True
-    assert mode == "FUSED_NORMAL_GRANDFATHERED"
+    assert eligible is False
+    assert mode == "FUSED_NORMAL_GRANDFATHER_REVOKED"
 
 
 def test_legacy_non_fused_row_without_mode_key_rejected() -> None:
@@ -194,15 +201,17 @@ def test_legacy_non_fused_row_without_mode_key_rejected() -> None:
 # =====================================================================================
 def test_floor_present_widens_sigma_q_flatter(monkeypatch) -> None:
     """Floor present AND greater than sigma_pred -> the persisted q is built from the WIDENED
-    sigma: strictly flatter (max-bin probability lower) than the same cell with the floor OFF.
-    Plus the provenance fields record the floor application."""
+    sigma: strictly flatter (max-bin probability lower) than the same cell with NO floor cell.
+    Plus the provenance fields record the floor application.
+
+    Wave-2 item 6 (2026-06-12): the floor is applied by PER-CELL DATA AVAILABILITY (no flag).
+    The unfloored comparison is now produced by making the floor cell ABSENT (lookup -> None),
+    not by toggling a deleted flag."""
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     _enable_fused_shape(monkeypatch)
-    from src.config import settings
 
-    # Floor ON (Paris JJA high has an empirical floor ~4.3C >> the ~1.x sigma_pred).
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_enabled", True)
+    # Floor cell PRESENT (Paris JJA high has an empirical floor ~4.3C >> the ~1.x sigma_pred).
     conn_on = _conn()
     _seed_history(conn_on, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn_on, values=_full_live_values())
@@ -216,10 +225,14 @@ def test_floor_present_widens_sigma_q_flatter(monkeypatch) -> None:
     assert prov_on["replacement_sigma_basis"] == "fused_center_residual_std"
     assert prov_on["settlement_sigma_floor_unavailable_reason"] is None
     # the recorded floor must exceed the raw predictive sigma (else max() is a no-op)
-    assert prov_on["settlement_sigma_floor_c"] > prov_on["u0r_fusion"]["predictive_sigma_c"]
+    assert prov_on["settlement_sigma_floor_c"] > prov_on["bayes_precision_fusion"]["predictive_sigma_c"]
 
-    # Floor OFF for the identical cell.
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_enabled", False)
+    # Floor cell ABSENT for the identical cell -> the floor is inert (no widening).
+    monkeypatch.setattr(
+        mod,
+        "_replacement_settlement_sigma_floor_lookup",
+        lambda request, *, metric: (None, "SETTLEMENT_SIGMA_FLOOR_ABSENT:test"),
+    )
     conn_off = _conn()
     _seed_history(conn_off, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn_off, values=_full_live_values())
@@ -242,8 +255,8 @@ def test_floor_absent_records_reason_does_not_block(monkeypatch) -> None:
     _enable_fused_shape(monkeypatch)
     from src.config import settings
 
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_enabled", True)
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_required", False)
+    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_enabled", True)
+    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_required", False)
     # Force the floor lookup to report the cell as absent (no empirical floor).
     monkeypatch.setattr(
         mod,
@@ -262,17 +275,15 @@ def test_floor_absent_records_reason_does_not_block(monkeypatch) -> None:
     assert prov["replacement_q_mode"] == "FUSED_NORMAL_FULL"
 
 
-def test_floor_required_but_absent_degrades_to_partial(monkeypatch) -> None:
-    """When edli_settlement_sigma_floor_required is true, a fused-N built WITHOUT an available
-    floor degrades the mode to FUSED_NORMAL_PARTIAL (live gate still admits; receipt shows it).
-    This honors the flag semantics — no new blocking lane is invented."""
+def test_floor_absent_no_longer_degrades_to_partial(monkeypatch) -> None:
+    """Wave-2 item 6 (2026-06-12): the settlement-floor-REQUIRED mode-degrade
+    (edli_settlement_sigma_floor_required) is DELETED. A fused-N built WITHOUT an available
+    floor cell stays FUSED_NORMAL_FULL — a missing floor is data-availability-inert and never
+    degrades the q-mode. (The former required=True -> PARTIAL path is gone.)"""
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     _enable_fused_shape(monkeypatch)
-    from src.config import settings
 
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_enabled", True)
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_required", True)
     monkeypatch.setattr(
         mod,
         "_replacement_settlement_sigma_floor_lookup",
@@ -285,11 +296,12 @@ def test_floor_required_but_absent_degrades_to_partial(monkeypatch) -> None:
     prov = _materialize_provenance(conn)
     assert prov["q_shape"] == "fused_normal_direct"
     assert prov["settlement_sigma_floor_applied"] is False
-    assert prov["replacement_q_mode"] == "FUSED_NORMAL_PARTIAL"
+    # A missing floor no longer degrades the mode (the required-flag PARTIAL path is deleted).
+    assert prov["replacement_q_mode"] == "FUSED_NORMAL_FULL"
 
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
-    assert eligible is True  # PARTIAL is still live-eligible
-    assert mode == "FUSED_NORMAL_PARTIAL"
+    assert eligible is True
+    assert mode == "FUSED_NORMAL_FULL"
 
 
 # =====================================================================================
@@ -319,8 +331,12 @@ def _check_live_gate(bundle) -> tuple[bool, str]:
 
     Mirrors the two-check sequence in _replacement_authority_probability_and_fdr_proof:
       1. _replacement_q_mode_live_eligibility
-      2. bounds presence / basis check
+      2. bounds presence / basis check (only reached for live-eligible modes)
     Returns (eligible, rejection_reason) — True/"OK" on pass.
+
+    NOTE: grandfathered rows (q_shape=fused_normal_direct, no mode key) are rejected by the
+    FIRST gate (FUSED_NORMAL_GRANDFATHER_REVOKED) — the grandfather branch is deleted. The
+    second bounds check is only reached for rows that passed the first gate (FULL/PARTIAL).
     """
     from typing import Mapping
     eligible, q_mode = _replacement_q_mode_live_eligibility(bundle)
@@ -328,7 +344,8 @@ def _check_live_gate(bundle) -> tuple[bool, str]:
         return False, f"REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#{q_mode}"
     prov = getattr(bundle, "provenance_json", None) or {}
     q_shape = str(prov.get("q_shape") if isinstance(prov, Mapping) else "")
-    needs_bounds = (q_shape == "fused_normal_direct" or q_mode == "FUSED_NORMAL_GRANDFATHERED")
+    # Second gate: bounds required for fused_normal_direct shape rows that passed the first gate.
+    needs_bounds = q_shape == "fused_normal_direct"
     if needs_bounds:
         qlcb = getattr(bundle, "q_lcb", None) or {}
         qucb = getattr(bundle, "q_ucb", None) or {}
@@ -400,25 +417,25 @@ def test_prefixed_row_full_mode_null_bounds_rejected_by_second_gate() -> None:
     assert "FUSED_NORMAL_BOUNDS_MISSING" in reason
 
 
-def test_grandfathered_row_without_bounds_rejected_by_second_gate() -> None:
-    """PR#403 hard line: a grandfathered row (pre-key, q_shape=fused_normal_direct, no mode key)
-    is NOT live-eligible now because it predates bounds materialization entirely. It would size
-    Kelly under the fused-Normal q but use the Wilson LCB authority — a regime mismatch. The
-    second gate rejects it. The next materialization will write proper bounds and be admitted."""
+def test_grandfathered_row_rejected_by_first_gate() -> None:
+    """P0 grandfather-revoked (operator directive 2026-06-10): a grandfathered row (pre-key,
+    q_shape=fused_normal_direct, no mode key) is rejected by the FIRST gate with
+    FUSED_NORMAL_GRANDFATHER_REVOKED — the grandfather branch has been deleted. The second
+    gate is never reached. The next materialization will write proper bounds and mode key."""
     grandfathered_prov = {
         "q_shape": "fused_normal_direct",
-        # No replacement_q_mode key (grandfathered row — pre FIX-1 materialization).
+        # No replacement_q_mode key (pre FIX-1 materialization).
         "q_lcb_basis": None,
     }
     bundle = _BundleStubWithBounds(grandfathered_prov, q_lcb=None, q_ucb=None)
-    # First gate: q_mode_eligibility returns FUSED_NORMAL_GRANDFATHERED = eligible.
+    # First gate now rejects: FUSED_NORMAL_GRANDFATHER_REVOKED (not eligible).
     eligible_mode, mode = _q_mode_elig(_BundleStub(grandfathered_prov))
-    assert eligible_mode is True
-    assert mode == "FUSED_NORMAL_GRANDFATHERED"
-    # Second gate: bounds absent -> rejected.
+    assert eligible_mode is False
+    assert mode == "FUSED_NORMAL_GRANDFATHER_REVOKED"
+    # Full gate path also rejects, reason contains the mode tag.
     eligible, reason = _check_live_gate(bundle)
     assert eligible is False
-    assert "FUSED_NORMAL_BOUNDS_MISSING" in reason
+    assert "FUSED_NORMAL_GRANDFATHER_REVOKED" in reason
 
 
 def test_happy_path_full_mode_with_bounds_passes_both_gates() -> None:

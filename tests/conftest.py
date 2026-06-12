@@ -131,12 +131,34 @@ def r3_default_risk_allocator_for_unit_tests():
 
 
 @pytest.fixture(autouse=True)
+def _redeem_pivot_test_machinery_context(monkeypatch):
+    """K3.6 redeem pivot (operator law 2026-06-10): the redeem SUBMISSION
+    machinery is preserved for supervised manual redrives but hard-refuses in
+    daemon context unless the operator-only override token is set. The legacy
+    redeem-machinery suites (settlement_commands, web3 wire, negRisk routing,
+    cascade liveness...) pin that PRESERVED machinery, so the test session runs
+    in the operator-override context. The antibody itself is pinned by
+    tests/execution/test_redeem_pivot_antibody.py, whose tests explicitly
+    delenv/override this fixture's env per test — the gate's CI teeth live
+    there, not here.
+    """
+    from src.execution.settlement_commands import (
+        REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV,
+        REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN,
+    )
+
+    monkeypatch.setenv(
+        REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV, REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN
+    )
+
+
+@pytest.fixture(autouse=True)
 def _mainstream_gate_test_isolation(monkeypatch):
     """Test-isolation antibody (#135): mainstream-agreement reference OFF by default in
     tests, submit-enforcement OFF, and live Open-Meteo fetches forbidden.
 
     The live reactor reads the MUTABLE operational flag
-    ``settings["edli_v1"]["mainstream_agreement_reference_enabled"]`` (F1 rename of
+    ``settings["edli"]["mainstream_agreement_reference_enabled"]`` (F1 rename of
     the former ``mainstream_agreement_gate_enabled``) and dials
     ``fetch_mainstream_point`` (Open-Meteo). Without this fixture, flipping that
     flag ON for live shadow trading silently changed acceptance-suite behaviour:
@@ -156,7 +178,7 @@ def _mainstream_gate_test_isolation(monkeypatch):
     from src.config import settings
 
     data = getattr(settings, "_data", None)
-    edli_cfg = data.get("edli_v1") if isinstance(data, dict) else None
+    edli_cfg = data.get("edli") if isinstance(data, dict) else None
     if isinstance(edli_cfg, dict):
         monkeypatch.setitem(edli_cfg, "mainstream_agreement_reference_enabled", False)
         monkeypatch.setitem(edli_cfg, "mainstream_agreement_enforce_on_submit", False)
@@ -332,8 +354,8 @@ _WLA_RESIDUAL_ALLOWLIST = frozenset({
     "scripts/probe_full_live_path_to_submit.py", # pending_track_a6: standalone live-path probe script; operator diagnostic tool, not daemon src/
     "scripts/ops/health_probe.py",  # read_only liveness probe: connects mode=ro + PRAGMA query_only=ON, ZERO writes — cannot violate write-atomicity; standalone ops/cron diagnostic, not daemon src/ (authority: feedback_liveness_first_health_antibody)
     "scripts/ops/orderable_bias_pass_candidates.py",  # pending_track_a6: read-only arm-review observability query (order-able ∩ bias-pass); standalone ops script, not daemon src/
-    "scripts/validate_member_vote_smoothing_3way.py",  # read_only: standalone 3-way U0R smoothing settlement-validation diagnostic; mode=ro connections only, no writes; not daemon src/
-    # backfill_u0r_history_from_b0.py PROMOTED to the production allowlist
+    "scripts/validate_member_vote_smoothing_3way.py",  # read_only: standalone 3-way BAYES_PRECISION_FUSION smoothing settlement-validation diagnostic; mode=ro connections only, no writes; not daemon src/
+    # backfill_bayes_precision_fusion_history_from_b0.py PROMOTED to the production allowlist
     # (db_writer_lock.SQLITE_CONNECT_ALLOWLIST, 2026-06-08): principled decision —
     # operator-invoked RW of the SHADOW_ONLY research-accrual table raw_model_forecasts
     # only (training_allowed=0, never money-path), --db REQUIRED, INSERT OR IGNORE

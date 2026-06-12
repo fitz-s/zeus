@@ -1,5 +1,22 @@
 # Created: 2026-05 (R3 M5)
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-10
+# Authority basis (operator external-close incident chain 2026-06-10): the operator
+#   manually SOLD Zeus's position on the SHARED proxy wallet. When the order FILLED the
+#   void-misbooking double-counted the same 66.25 economic claim (journal buy-claim +
+#   voided-position terminal-holdings = expected_wallet 132.50 vs exchange 0), so
+#   position_drift re-recorded forever. The K=1 absorption (a) books the external close
+#   as a SELL exit fact consuming the journal buy-claim and (b) tags the dangling
+#   terminal position chain_state=external_operator_closed so the closed-holdings view
+#   stops contributing it. STRICTLY gated on an operator-acknowledged resolution row for
+#   the SAME subject token. See _absorb_operator_external_close.
+# Authority basis (2026-06-10 operator-acknowledged ghost antibody): an in-Zeus-domain
+#   resting order the operator manually placed on the SHARED proxy wallet and
+#   explicitly acknowledged (a prior finding resolved_by 'session_operator_confirmed'
+#   or resolution prefix 'operator_manual') is record-and-resolved while unfilled
+#   (size_matched == 0), so one acknowledged unwind cannot freeze the engine via the
+#   risk_allocator reconcile_finding_threshold or the WS two-proofs M5 zero-findings
+#   latch. Any matched size voids the acknowledgment (fail-closed, mirrors the
+#   foreign-wallet matched-size tripwire). See _is_operator_acknowledged_resting_order.
 # Authority basis: R3 M5 reconcile + 2026-06-04 M5 mutex-IO antibody. The adapter-
 #   touching entrypoints (fresh_reconcile_snapshot, run_reconcile_sweep) assert
 #   the world write mutex is NOT held before any venue read, so a future caller
@@ -104,6 +121,15 @@ _REDEEM_PENDING_WALLET_HOLDING_STATES = frozenset(
 )
 _CLOSED_POSITION_WALLET_HOLDING_PHASES = frozenset({"settled", "admin_closed", "voided"})
 _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES = frozenset({"synced", "exit_pending_missing"})
+# A terminal position whose CTF tokens left the wallet via an operator-confirmed
+# EXTERNAL close (the operator manually sold Zeus's position on the shared proxy
+# wallet). The tokens are provably no longer on-chain, so this chain_state is
+# DELIBERATELY excluded from _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES: the
+# closed-position-holdings view assumes tokens are still on-chain, and a position
+# tagged here must NOT contribute an expected-wallet holding (that double-count is
+# exactly the 2026-06-10 void-misbooking disease). The historical ``shares`` record
+# is preserved — only the chain reality tag changes.
+_EXTERNAL_OPERATOR_CLOSED_CHAIN_STATE = "external_operator_closed"
 _REDEEM_TERMINAL_WALLET_CONTRADICTION_STATES = frozenset(
     {"REDEEM_CONFIRMED", "REDEEM_FAILED", "REDEEM_REVIEW_REQUIRED"}
 )
@@ -341,6 +367,7 @@ def refresh_unresolved_reconcile_findings(
     # read): run the migration pass here too so the kill switch clears on the next
     # 1-minute refresh instead of waiting for the next full ws-gap sweep.
     foreign_resolved = _resolve_foreign_wallet_ghost_findings(conn, observed_at=observed)
+    foreign_resolved += _resolve_operator_acknowledged_ghost_findings(conn, observed_at=observed)
     token_ids = _unresolved_position_drift_tokens(conn)
     trade_ids = _unresolved_unrecorded_trade_ids(conn)
     if not token_ids and not trade_ids:
@@ -515,6 +542,15 @@ def run_reconcile_sweep(
                     observed_at=observed,
                 )
                 continue
+            if _is_operator_acknowledged_resting_order(conn, order_id, raw):
+                _record_operator_acknowledged_ghost(
+                    conn,
+                    order_id=order_id,
+                    raw=raw,
+                    context=context,
+                    observed_at=observed,
+                )
+                continue
             findings.append(
                 record_finding(
                     conn,
@@ -660,6 +696,7 @@ def run_reconcile_sweep(
             )
         )
     _resolve_foreign_wallet_ghost_findings(conn, observed_at=observed)
+    _resolve_operator_acknowledged_ghost_findings(conn, observed_at=observed)
     _resolve_disappeared_ghost_order_findings(
         adapter, conn, open_order_ids, trades=trades if trades_available else None, observed_at=observed
     )
@@ -821,6 +858,498 @@ def _resolve_foreign_wallet_ghost_findings(
         )
         resolved += 1
     return resolved
+
+
+# An operator-acknowledged ghost is an in-Zeus-domain resting order the operator
+# manually placed on the SHARED proxy wallet and explicitly declared (2026-06-10:
+# the Milan-high manual unwind). Unlike a foreign-wallet order, this market IS in
+# Zeus's domain, so the foreign-wallet classifier correctly does not apply. The
+# acknowledgment is honored ONLY while the order stays UNFILLED (size_matched == 0):
+# any fill on the shared wallet is never auto-suppressed — mirror the strictness of
+# the foreign-wallet matched-size tripwire (credential-compromise / unexpected-fill
+# kill switch stays armed).
+_OPERATOR_ACK_GHOST_RESOLUTION = "operator_acknowledged_ghost_order_rollforward"
+_OPERATOR_ACK_RESOLVED_BY = "session_operator_confirmed"
+_OPERATOR_ACK_RESOLUTION_PREFIX = "operator_manual"
+
+
+def _has_operator_acknowledgment(conn: sqlite3.Connection, order_id: str) -> bool:
+    """Whether an operator has explicitly acknowledged this ghost subject.
+
+    The acknowledgment is a pre-existing RESOLVED finding for the same subject_id
+    whose resolution marks operator action: either resolved_by the operator-session
+    marker, or a resolution text with the ``operator_manual`` prefix (the manually
+    resolved row's shape), or the rollforward marker this antibody itself writes.
+    Fail-closed: no acknowledgment row => not acknowledged => strict ghost path.
+    """
+
+    if not order_id:
+        return False
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
+           AND subject_id = ?
+           AND resolved_at IS NOT NULL
+           AND (
+                resolved_by = ?
+             OR resolution LIKE ? || '%'
+             OR resolution = ?
+           )
+         LIMIT 1
+        """,
+        (
+            order_id,
+            _OPERATOR_ACK_RESOLVED_BY,
+            _OPERATOR_ACK_RESOLUTION_PREFIX,
+            _OPERATOR_ACK_GHOST_RESOLUTION,
+        ),
+    ).fetchone()
+    return row is not None
+
+
+def _is_operator_acknowledged_resting_order(
+    conn: sqlite3.Connection, order_id: str, raw: Mapping[str, Any]
+) -> bool:
+    """An in-domain ghost the operator acknowledged AND that is still unfilled.
+
+    Strictness mirrors the foreign-wallet rules: any matched size on the CURRENT
+    exchange order voids the acknowledgment (a fill on the shared wallet is never
+    auto-suppressed). An unparseable matched size is treated as non-zero by
+    ``_order_matched_size`` and therefore also voids suppression — stay fail-closed.
+    """
+
+    if _order_matched_size(raw) != 0:
+        return False
+    return _has_operator_acknowledgment(conn, order_id)
+
+
+def _record_operator_acknowledged_ghost(
+    conn: sqlite3.Connection,
+    *,
+    order_id: str,
+    raw: Mapping[str, Any],
+    context: ReconcileContext,
+    observed_at: datetime,
+) -> None:
+    """Record-and-immediately-resolve an operator-acknowledged in-domain ghost.
+
+    Mirrors ``_record_foreign_wallet_ghost``: dedup against an existing
+    rollforward-resolved row so repeated sweeps do not churn duplicate audit rows,
+    then record one audit finding and resolve it in the same sweep. The
+    record-and-resolve shape keeps the M5 ws-gap "zero unresolved findings"
+    arithmetic and the governor unresolved-finding count both clean (the resolved
+    row is excluded from the returned ``findings`` list AND from
+    ``list_unresolved_findings``).
+    """
+
+    existing = conn.execute(
+        """
+        SELECT 1 FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
+           AND subject_id = ?
+           AND resolution = ?
+         LIMIT 1
+        """,
+        (order_id, _OPERATOR_ACK_GHOST_RESOLUTION),
+    ).fetchone()
+    if existing is not None:
+        return
+    logger.warning(
+        "operator_acknowledged_ghost_order: venue order %s on Zeus-domain market %s "
+        "is an operator-acknowledged unfilled resting order on the shared wallet "
+        "(size_matched=0); recorded for audit, excluded from the reconcile kill "
+        "switch until it fills",
+        order_id,
+        raw.get("market"),
+    )
+    finding = record_finding(
+        conn,
+        kind="exchange_ghost_order",
+        subject_id=order_id,
+        context=context,
+        evidence={
+            "exchange_order": dict(raw),
+            "reason": "exchange_open_order_absent_from_venue_commands",
+            "classification": "operator_acknowledged_ghost_order",
+        },
+        recorded_at=observed_at,
+    )
+    resolve_finding(
+        conn,
+        finding.finding_id,
+        resolution=_OPERATOR_ACK_GHOST_RESOLUTION,
+        resolved_by="src.execution.exchange_reconcile",
+        resolved_at=observed_at,
+    )
+
+
+def _resolve_operator_acknowledged_ghost_findings(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime,
+) -> int:
+    """Resolve pre-existing unresolved ghost findings the operator acknowledged.
+
+    Migration / re-record pass: a re-recorded unresolved ghost row for an
+    operator-acknowledged subject (the whack-a-mole row the live sweep produced
+    after the manual resolution) is resolved from local evidence alone (no venue
+    read), so the 1-minute refresh and the next sweep both clear it. Only honored
+    while the recorded evidence shows the order still unfilled (size_matched == 0).
+    """
+
+    rows = conn.execute(
+        """
+        SELECT finding_id, subject_id, evidence_json
+          FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
+           AND resolved_at IS NULL
+        """
+    ).fetchall()
+    resolved = 0
+    for row in rows:
+        try:
+            evidence = json.loads(row["evidence_json"])
+        except (TypeError, ValueError):
+            continue
+        raw = evidence.get("exchange_order") or {}
+        if not isinstance(raw, Mapping):
+            continue
+        if not _is_operator_acknowledged_resting_order(conn, str(row["subject_id"]), raw):
+            continue
+        logger.warning(
+            "operator_acknowledged_ghost_order: resolving re-recorded ghost finding "
+            "%s (subject %s acknowledged by operator, zero matched size)",
+            row["finding_id"],
+            row["subject_id"],
+        )
+        resolve_finding(
+            conn,
+            str(row["finding_id"]),
+            resolution=_OPERATOR_ACK_GHOST_RESOLUTION,
+            resolved_by="src.execution.exchange_reconcile",
+            resolved_at=observed_at,
+        )
+        resolved += 1
+    return resolved
+
+
+# ---- Operator external-close absorption (the variant-3 antibody) ----------------------
+#
+# 2026-06-10 incident chain: the operator manually SOLD Zeus's Milan position on the
+# shared proxy wallet. While the order rested -> ghost suppression (works). When it
+# FILLED -> position_drift (correct). chain_sync then VOIDED the position, but the void
+# created a "terminal_position_current_chain_holdings" entry (66.25) WITHOUT consuming the
+# journal buy-claim (66.25) with an offsetting sell fact. The drift detector's
+# expected_wallet then DOUBLE-COUNTS the same 66.25 economic claim (journal 66.25 +
+# closed-holdings 66.25 = 132.50) vs exchange 0 -> position_drift re-records forever.
+#
+# K=1 mechanism (make the CATEGORY impossible, not the instance): when a position's
+# tokens leave the wallet via an OPERATOR-CONFIRMED external fill, converge the books by
+#   (a) booking the external close as an exit FACT (a SELL venue_trade_fact, size = the
+#       journal's net long, price = the operator's documented limit, price_basis=
+#       operator_limit) that CONSUMES the journal buy-claim -> journal nets to 0; and
+#   (b) tagging the dangling terminal position's chain_state EXTERNAL_OPERATOR_CLOSED so
+#       the closed-position-holdings view (which assumes tokens are still on-chain) no
+#       longer contributes that 66.25 -> single-count.
+# After absorption expected_wallet == 0 == exchange -> no finding on re-sweep.
+#
+# STRICTNESS (mirrors the operator-acknowledged-ghost antibody): absorption requires an
+# operator-acknowledged RESOLUTION row for the SAME subject token (resolved_by LIKE
+# 'session_operator_confirmed%' OR resolution LIKE 'operator_manual%'). Never automatic
+# for unexplained drifts — an unacknowledged drift stays fail-closed and arms the latch.
+_OPERATOR_EXTERNAL_CLOSE_RESOLUTION = "position_drift_operator_external_close_absorbed"
+_OPERATOR_EXTERNAL_CLOSE_PRICE_BASIS = "operator_limit"
+_OPERATOR_ACK_DRIFT_RESOLVED_BY_PREFIX = "session_operator_confirmed"
+_OPERATOR_ACK_DRIFT_RESOLUTION_PREFIX = "operator_manual"
+
+
+def _operator_acknowledged_drift_resolution(
+    conn: sqlite3.Connection, token_id: str
+) -> Mapping[str, Any] | None:
+    """The operator-acknowledged drift resolution row for ``token_id``, if any.
+
+    Fail-closed: a token is eligible for external-close absorption ONLY when the
+    operator has explicitly acknowledged THIS subject — a prior RESOLVED position_drift
+    finding whose ``resolved_by`` starts with the operator-session marker or whose
+    ``resolution`` carries the ``operator_manual`` prefix. No such row => not eligible =>
+    strict drift path. The stopgap auto-resolver's marker
+    (``session_operator_confirmed_stopgap``) matches the prefix, which is intentional:
+    those rows attest the same operator-confirmed external close.
+    """
+
+    if not token_id:
+        return None
+    row = conn.execute(
+        """
+        SELECT finding_id, resolution, resolved_by, evidence_json
+          FROM exchange_reconcile_findings
+         WHERE kind = 'position_drift'
+           AND subject_id = ?
+           AND resolved_at IS NOT NULL
+           AND (
+                resolved_by LIKE ? || '%'
+             OR resolution LIKE ? || '%'
+           )
+         ORDER BY resolved_at ASC
+         LIMIT 1
+        """,
+        (
+            token_id,
+            _OPERATOR_ACK_DRIFT_RESOLVED_BY_PREFIX,
+            _OPERATOR_ACK_DRIFT_RESOLUTION_PREFIX,
+        ),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _operator_external_close_price(
+    conn: sqlite3.Connection, token_id: str, ack_row: Mapping[str, Any] | None
+) -> Decimal:
+    """The price to book the external close at (price_basis=operator_limit).
+
+    Authority order: the operator's documented limit on the open ENTRY command for this
+    token (the position's own price), else a positive price parsed from the
+    acknowledged-order evidence, else the conservative 0 (proceeds unknown — the size
+    consumes the journal regardless; price only feeds realized economics, never the
+    wallet-size reconciliation that drives the latch).
+    """
+
+    row = conn.execute(
+        """
+        SELECT price
+          FROM venue_commands
+         WHERE token_id = ?
+           AND price IS NOT NULL
+         ORDER BY created_at DESC
+         LIMIT 1
+        """,
+        (token_id,),
+    ).fetchone()
+    if row is not None:
+        price = _positive_decimal_or_none(row["price"])
+        if price is not None:
+            return price
+    if ack_row is not None:
+        evidence = _json_mapping(ack_row.get("evidence_json"))
+        order = evidence.get("exchange_order")
+        if isinstance(order, Mapping):
+            price = _positive_decimal_or_none(order.get("price"))
+            if price is not None:
+                return price
+    return Decimal("0")
+
+
+def _absorb_operator_external_close(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    exchange_size: Decimal,
+    confirmed_size: Decimal,
+    closed_position_size: Decimal,
+    observed_at: datetime,
+) -> bool:
+    """Converge the books for an operator-confirmed external close. K=1.
+
+    Returns True iff this token was a double-count external-close drift (operator-
+    acknowledged, exchange below expected, a positive journal long and/or a dangling
+    voided-position holding) and the absorption booked the offsetting state. Idempotent:
+    once booked the journal nets to 0 and the holdings are untagged, so the drift
+    condition no longer triggers and re-sweep does not re-absorb.
+    """
+
+    ack_row = _operator_acknowledged_drift_resolution(conn, token_id)
+    if ack_row is None:
+        return False
+    # The external-close shape: the operator removed the tokens, so the exchange wallet
+    # is BELOW the journal-confirmed long. A drift where the exchange holds MORE than the
+    # journal is a different disease (unrecorded acquisition) and is never absorbed here.
+    journal_long = _nonnegative_wallet_size(confirmed_size)
+    if journal_long <= Decimal("0") and closed_position_size <= Decimal("0"):
+        return False
+    if exchange_size >= journal_long:
+        return False
+
+    booked = False
+    # (a) Book the external close as a SELL exit fact consuming the journal buy-claim.
+    if journal_long > Decimal("0"):
+        booked = _book_external_operator_close_exit_fact(
+            conn,
+            token_id=token_id,
+            close_size=journal_long,
+            close_price=_operator_external_close_price(conn, token_id, ack_row),
+            observed_at=observed_at,
+        ) or booked
+    # (b) Untag the dangling terminal-position chain holdings so they stop double-counting.
+    if closed_position_size > Decimal("0"):
+        booked = _tag_external_operator_closed_position_holdings(
+            conn, token_id=token_id, observed_at=observed_at
+        ) or booked
+    return booked
+
+
+def _book_external_operator_close_exit_fact(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    close_size: Decimal,
+    close_price: Decimal,
+    observed_at: datetime,
+) -> bool:
+    """Append a synthetic SELL exit trade fact that consumes the journal expectation.
+
+    The fact is keyed to a synthetic EXIT/SELL command (reusing the open ENTRY command's
+    snapshot/envelope provenance FKs) so ``_journal_positions_by_token`` nets the buy
+    claim to zero. Append-only: never rewrites the original buy fact. Idempotent on the
+    deterministic command_id / trade_id, so a re-sweep does not double-book.
+    """
+
+    from src.state.venue_command_repo import append_trade_fact
+
+    entry = conn.execute(
+        """
+        SELECT command_id, snapshot_id, envelope_id, position_id, decision_id,
+               market_id, venue_order_id, created_at
+          FROM venue_commands
+         WHERE token_id = ?
+           AND UPPER(COALESCE(intent_kind, '')) = 'ENTRY'
+           AND UPPER(COALESCE(side, '')) = 'BUY'
+         ORDER BY created_at DESC
+         LIMIT 1
+        """,
+        (token_id,),
+    ).fetchone()
+    if entry is None:
+        return False
+    command_id = "external_operator_close:" + sha256(token_id.encode()).hexdigest()[:24]
+    trade_id = "external_operator_close_fact:" + sha256(token_id.encode()).hexdigest()[:24]
+    existing = conn.execute(
+        "SELECT 1 FROM venue_trade_facts WHERE trade_id = ? LIMIT 1",
+        (trade_id,),
+    ).fetchone()
+    if existing is not None:
+        return False
+    # Insert the synthetic EXIT/SELL command via a DIRECT write, NOT insert_command():
+    # insert_command is the U1 pre-side-effect SUBMISSION gate (snapshot freshness, tick
+    # alignment, price-in-(0,1)) — entirely inappropriate for a reconciliation correction
+    # and would CRASH the sweep on a long-stale snapshot. This row is journal-only truth
+    # (a SELL side for _journal_positions_by_token to net the buy claim), never submitted.
+    # It reuses the entry command's valid snapshot/envelope FKs.
+    if conn.execute(
+        "SELECT 1 FROM venue_commands WHERE command_id = ? LIMIT 1", (command_id,)
+    ).fetchone() is None:
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size, price,
+                venue_order_id, state, created_at, updated_at, review_required_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, ?, ?, 'FILLED', ?, ?, ?)
+            """,
+            (
+                command_id,
+                str(entry["snapshot_id"]),
+                str(entry["envelope_id"]),
+                str(entry["position_id"] or ""),
+                str(entry["decision_id"] or f"dec-{command_id}"),
+                command_id,
+                str(entry["market_id"] or token_id),
+                token_id,
+                float(close_size),
+                float(close_price),
+                str(entry["venue_order_id"] or "") or None,
+                observed_at.isoformat(),
+                observed_at.isoformat(),
+                "operator_external_close_absorption",
+            ),
+        )
+    payload = {
+        "schema_version": 1,
+        "reason": "operator_external_close_absorption",
+        "source_module": "src.execution.exchange_reconcile",
+        "token_id": token_id,
+        "close_size": str(close_size),
+        "close_price": str(close_price),
+        "price_basis": _OPERATOR_EXTERNAL_CLOSE_PRICE_BASIS,
+        "classification": "external_operator_close",
+        "source_entry_command_id": entry["command_id"],
+    }
+    append_trade_fact(
+        conn,
+        trade_id=trade_id,
+        venue_order_id=str(entry["venue_order_id"] or ""),
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size=str(close_size),
+        fill_price=str(close_price),
+        source="OPERATOR",
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        raw_payload_hash=_hash_payload(payload),
+        raw_payload_json=payload,
+    )
+    logger.warning(
+        "operator_external_close: booked external close exit fact for token %s "
+        "(size=%s price=%s price_basis=%s) consuming the journal buy-claim",
+        token_id,
+        close_size,
+        close_price,
+        _OPERATOR_EXTERNAL_CLOSE_PRICE_BASIS,
+    )
+    return True
+
+
+def _tag_external_operator_closed_position_holdings(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    observed_at: datetime,
+) -> bool:
+    """Tag terminal positions holding ``token_id`` as externally closed (single-count).
+
+    The void misbooking left a terminal position with chain_state in
+    _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES, which the closed-position-holdings view
+    reads as an on-chain expected wallet holding. After an operator external close the
+    tokens are GONE, so the chain reality tag is corrected to
+    EXTERNAL_OPERATOR_CLOSED — DELIBERATELY outside the holdings set. The historical
+    ``shares`` record is preserved. Returns True iff any row was corrected.
+    """
+
+    if not _table_exists(conn, "position_current"):
+        return False
+    phase_placeholders = ", ".join("?" for _ in _CLOSED_POSITION_WALLET_HOLDING_PHASES)
+    chain_placeholders = ", ".join("?" for _ in _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES)
+    cursor = conn.execute(
+        f"""
+        UPDATE position_current
+           SET chain_state = ?,
+               chain_shares = 0,
+               updated_at = ?
+         WHERE (token_id = ? OR no_token_id = ?)
+           AND phase IN ({phase_placeholders})
+           AND chain_state IN ({chain_placeholders})
+        """,
+        (
+            _EXTERNAL_OPERATOR_CLOSED_CHAIN_STATE,
+            observed_at.isoformat(),
+            token_id,
+            token_id,
+            *tuple(sorted(_CLOSED_POSITION_WALLET_HOLDING_PHASES)),
+            *tuple(sorted(_CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES)),
+        ),
+    )
+    if cursor.rowcount > 0:
+        logger.warning(
+            "operator_external_close: tagged %d terminal position(s) for token %s "
+            "chain_state=%s (tokens left wallet via operator external close; "
+            "removed from expected-wallet closed-holdings to stop the double-count)",
+            cursor.rowcount,
+            token_id,
+            _EXTERNAL_OPERATOR_CLOSED_CHAIN_STATE,
+        )
+        return True
+    return False
 
 
 def reconcile_recorded_maker_fill_economics(
@@ -1457,6 +1986,26 @@ def _record_position_drift_findings(
                 resolved_at=observed_at,
             )
             continue
+        # Variant-3 antibody: an operator-confirmed EXTERNAL close (the operator manually
+        # sold Zeus's tokens off the shared wallet) converges the books here instead of
+        # re-recording the void-misbooking double-count forever. Strictly gated on an
+        # operator-acknowledged resolution row for THIS subject (see
+        # _operator_acknowledged_drift_resolution). Idempotent on re-sweep.
+        if _absorb_operator_external_close(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_size=confirmed_size,
+            closed_position_size=closed_position_size,
+            observed_at=observed_at,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution=_OPERATOR_EXTERNAL_CLOSE_RESOLUTION,
+                resolved_at=observed_at,
+            )
+            continue
         findings.append(
             record_finding(
                 conn,
@@ -1608,6 +2157,147 @@ def _order_ids_for_unrecorded_trade_findings(conn: sqlite3.Connection) -> frozen
     return frozenset(order_ids)
 
 
+_SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS = 24.0
+_SETTLED_EXTERNAL_RESOLUTION = "position_drift_settled_external_suppressed"
+
+
+def _condition_ids_for_tokens(
+    conn: sqlite3.Connection,
+    tokens: tuple[str, ...],
+) -> dict[str, str]:
+    """token_id -> condition_id via executable_market_snapshots (local, same conn).
+
+    The canonical market registry stores ONE token per row (the YES side), so a NO-side
+    holding can never be matched by token alone — exactly how the HK 06-09 NO x19 sweep
+    stayed an unresolvable drift for 11h. The snapshot table carries both sides
+    (yes/no/selected token columns); any side maps to the market's condition_id.
+    Fail-soft: missing table / no rows -> empty mapping.
+    """
+    if not tokens or not _table_exists(conn, "executable_market_snapshots"):
+        return {}
+    placeholders = ", ".join("?" for _ in tokens)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT yes_token_id, no_token_id, selected_outcome_token_id, condition_id
+              FROM executable_market_snapshots
+             WHERE yes_token_id IN ({placeholders})
+                OR no_token_id IN ({placeholders})
+                OR selected_outcome_token_id IN ({placeholders})
+            """,
+            (*tokens, *tokens, *tokens),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — fail-soft: token simply stays unmapped
+        return {}
+    wanted = set(tokens)
+    out: dict[str, str] = {}
+    for row in rows:
+        condition = str(row["condition_id"] or "")
+        if not condition:
+            continue
+        for col in ("yes_token_id", "no_token_id", "selected_outcome_token_id"):
+            value = str(row[col] or "")
+            if value in wanted:
+                out.setdefault(value, condition)
+    return out
+
+
+def _market_calendar_terminal_evidence(
+    token_ids: tuple[str, ...] | frozenset[str] | set[str],
+    *,
+    observed_at: datetime,
+    conditions_by_token: Mapping[str, str] | None = None,
+) -> dict[str, dict[str, str]]:
+    """token_id -> market-calendar terminal evidence, for tokens whose market's target
+    local day ended >= _SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS ago.
+
+    Authority: the canonical market registry (zeus-forecasts market_events: slug, city,
+    target_date) + the city timezone from src.config — never a slug parse, never a venue
+    call. A market this far past its question date is settled at the venue; tokens for it
+    are no longer an open trading concern. Matching is by token_id OR by the token's
+    condition_id (``conditions_by_token``, from executable_market_snapshots): the
+    registry stores only the YES-side token per row, so NO-side holdings are reachable
+    only through the condition bridge. FAIL-CLOSED: registry unreadable, token unmatched,
+    or timezone unknown -> the token is simply not classified terminal (the drift finding
+    stays open and the operator-ack path remains the only door).
+
+    Read-only, short-lived connection (three-phase contract: no connection outlives the
+    lookup, nothing is held across any other I/O).
+    """
+    tokens = tuple(sorted({str(t) for t in token_ids if str(t).strip()}))
+    if not tokens:
+        return {}
+    condition_map = {
+        str(token): str(condition)
+        for token, condition in (conditions_by_token or {}).items()
+        if str(condition).strip()
+    }
+    conditions = tuple(sorted(set(condition_map.values())))
+    try:
+        from datetime import time as _time, timedelta as _timedelta  # noqa: PLC0415
+        from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+        from src.config import cities_by_name  # noqa: PLC0415
+        from src.state.db import ZEUS_FORECASTS_DB_PATH  # noqa: PLC0415
+
+        token_ph = ", ".join("?" for _ in tokens)
+        condition_ph = ", ".join("?" for _ in conditions) if conditions else "''"
+        ro = sqlite3.connect(f"file:{ZEUS_FORECASTS_DB_PATH}?mode=ro", uri=True, timeout=5.0)
+        try:
+            ro.row_factory = sqlite3.Row
+            rows = ro.execute(
+                f"""
+                SELECT token_id, market_slug, city, target_date, condition_id
+                  FROM market_events
+                 WHERE token_id IN ({token_ph})
+                    OR condition_id IN ({condition_ph})
+                """,
+                (*tokens, *conditions),
+            ).fetchall()
+        finally:
+            ro.close()
+        evidence_by_token: dict[str, dict[str, str]] = {}
+        evidence_by_condition: dict[str, dict[str, str]] = {}
+        for row in rows:
+            city_cfg = cities_by_name.get(str(row["city"]))
+            if city_cfg is None:
+                continue
+            try:
+                target = datetime.fromisoformat(str(row["target_date"])).date()
+                tz = ZoneInfo(str(city_cfg.timezone))
+            except Exception:  # noqa: BLE001 — fail-closed per token
+                continue
+            local_day_end = datetime.combine(target + _timedelta(days=1), _time(0, 0), tzinfo=tz)
+            terminal_after = local_day_end.astimezone(timezone.utc) + _timedelta(
+                hours=_SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS
+            )
+            if observed_at.astimezone(timezone.utc) < terminal_after:
+                continue
+            evidence = {
+                "market_slug": str(row["market_slug"]),
+                "city": str(row["city"]),
+                "target_date": str(row["target_date"]),
+                "condition_id": str(row["condition_id"] or ""),
+                "terminal_after_utc": terminal_after.isoformat(),
+            }
+            evidence_by_token[str(row["token_id"])] = evidence
+            if evidence["condition_id"]:
+                evidence_by_condition[evidence["condition_id"]] = evidence
+        out: dict[str, dict[str, str]] = {}
+        for token in tokens:
+            direct = evidence_by_token.get(token)
+            if direct is not None:
+                out[token] = direct
+                continue
+            bridged = evidence_by_condition.get(condition_map.get(token, ""))
+            if bridged is not None:
+                out[token] = {**bridged, "matched_via": "condition_id_bridge"}
+        return out
+    except Exception as exc:  # noqa: BLE001 — fail-closed: nothing classified terminal
+        logger.debug("market-calendar terminal lookup unavailable (fail-closed): %s", exc)
+        return {}
+
+
 def _resolve_position_drift_tokens_from_current_truth(
     conn: sqlite3.Connection,
     *,
@@ -1616,6 +2306,13 @@ def _resolve_position_drift_tokens_from_current_truth(
     open_orders: list[Any] | None = None,
     observed_at: datetime,
 ) -> None:
+    calendar_terminal = _market_calendar_terminal_evidence(
+        token_ids,
+        observed_at=observed_at,
+        conditions_by_token=_condition_ids_for_tokens(
+            conn, tuple(sorted(str(item) for item in token_ids))
+        ),
+    )
     exchange = _exchange_positions_by_token(positions)
     confirmed_journal = _journal_positions_by_token(
         conn,
@@ -1729,6 +2426,66 @@ def _resolve_position_drift_tokens_from_current_truth(
                 conn,
                 token,
                 resolution="position_drift_recent_fill_suppressed",
+                resolved_at=observed_at,
+            )
+            continue
+        # SETTLED-CLASS EXTERNAL CLOSE (2026-06-11, redeem-abandonment follow-through):
+        # the operator's standing third-party auto-redeemer sweeps EVERY settled position
+        # off the shared wallet, so "venue 0 + confirmed journal long + market's target
+        # local day over by 24h+" is the EXPECTED terminal state, not a drift. The duty
+        # of registering settled winners in token_suppression used to live in the
+        # harvester and DIED with the abandoned redeem subsystem — leaving each swept
+        # winner as a permanent latch-closing finding (HK 06-09: 11h submit freeze).
+        # Auto-register the suppression with market-calendar evidence; the suppression
+        # door above keeps it resolved on every future sweep. A NON-terminal
+        # disappearance never matches here and still requires the operator-ack path
+        # below (the theft/bug surface is preserved). Money truth is untouched: no
+        # synthetic exit is booked — settlement P&L stays with the settlement organs +
+        # the Confirm-pending-deposit check.
+        settled_terminal = calendar_terminal.get(token)
+        if (
+            settled_terminal is not None
+            and exchange_size <= Decimal("0")
+            and confirmed_wallet_size > Decimal("0")
+            and open_sell_locked_size <= Decimal("0")
+        ):
+            from src.state.db import record_token_suppression  # noqa: PLC0415
+
+            record_token_suppression(
+                conn,
+                token_id=token,
+                suppression_reason="settled_position",
+                source_module="exchange_reconcile.settled_external_absorber",
+                condition_id=settled_terminal.get("condition_id") or None,
+                evidence={
+                    "absorber": "settled_external_close",
+                    "journal_size": str(confirmed_wallet_size),
+                    "exchange_size": str(exchange_size),
+                    **settled_terminal,
+                },
+            )
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution=_SETTLED_EXTERNAL_RESOLUTION,
+                resolved_at=observed_at,
+            )
+            continue
+        # Variant-3 antibody (refresh path): converge the operator external-close
+        # double-count from current truth too, so the 1-minute refresh clears the latch
+        # without waiting for the next full sweep. Same strict operator-ack gate.
+        if _absorb_operator_external_close(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_size=confirmed_size,
+            closed_position_size=closed_position_size,
+            observed_at=observed_at,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution=_OPERATOR_EXTERNAL_CLOSE_RESOLUTION,
                 resolved_at=observed_at,
             )
 

@@ -64,6 +64,13 @@ NON_STATE_MACHINE_JOB_IDS = frozenset({
     # *_REQUESTED rows) and owns no cascade-liveness obligation — classed with
     # wu_daily / arm_gate_emit / world_wal_checkpoint.
     "settlement_guard_report",
+    # settlement_skill_attribution is the daily skill-vs-luck grader (2026-06-12):
+    # a read-only pass (its only write is the settlement_attribution audit row, its
+    # own sanctioned table) that grades settled positions into SKILL_WIN / LUCKY_WIN
+    # / SKILL_LOSS / MISCALIBRATED_LOSS / STALE_DECISION. It polls NO state-machine
+    # table (no *_INTENT_CREATED / *_REQUESTED rows) and owns no cascade-liveness
+    # obligation — classed with settlement_guard_report / wu_daily / arm_gate_emit.
+    "settlement_skill_attribution",
 })
 
 

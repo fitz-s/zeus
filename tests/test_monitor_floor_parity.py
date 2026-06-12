@@ -80,11 +80,11 @@ _BINS = [(None, 26.0), (27.0, 27.0), (28.0, None)]
 _TARGET_D = date(2026, 7, 15)  # JJA season
 
 
-def _edli_v1_floor_on():
+def _edli_floor_on():
     return {"edli_settlement_sigma_floor_enabled": True, "edli_settlement_sigma_floor_required": False}
 
 
-def _edli_v1_floor_off():
+def _edli_floor_off():
     return {"edli_settlement_sigma_floor_enabled": False, "edli_settlement_sigma_floor_required": False}
 
 
@@ -159,7 +159,7 @@ def test_r1_floor_enabled_cell_missing_marks_not_fresh(monkeypatch):
     city = _make_city()
     semantics = MagicMock()
 
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_on(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_on(), "ensemble": {}}):
         q = _build_monitor_one_calibrator_q(
             city=city,
             target_d=_TARGET_D,
@@ -214,7 +214,7 @@ def test_r2_floor_present_both_sides_applies_parity(monkeypatch):
     city = _make_city()
     semantics = MagicMock()
 
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_on(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_on(), "ensemble": {}}):
         q = _build_monitor_one_calibrator_q(
             city=city,
             target_d=_TARGET_D,
@@ -241,14 +241,14 @@ def test_r2_floor_present_q_is_wider_than_no_floor(monkeypatch):
     semantics = MagicMock()
 
     monkeypatch.setattr(emos_mod, "_sigma_floor_cache", _FLOOR_TABLE_EMPTY, raising=False)
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_off(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_off(), "ensemble": {}}):
         q_off = _build_monitor_one_calibrator_q(
             city=city, target_d=_TARGET_D, metric="high", lead_days=3.0,
             member_extrema=_MEMBERS, semantics=semantics, all_bins=_BINS,
         )
 
     monkeypatch.setattr(emos_mod, "_sigma_floor_cache", _FLOOR_TABLE_WITH_CELL, raising=False)
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_on(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_on(), "ensemble": {}}):
         q_on = _build_monitor_one_calibrator_q(
             city=city, target_d=_TARGET_D, metric="high", lead_days=3.0,
             member_extrema=_MEMBERS, semantics=semantics, all_bins=_BINS,
@@ -267,19 +267,22 @@ def test_r2_floor_present_q_is_wider_than_no_floor(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_r3_floor_disabled_no_blocking(monkeypatch):
-    """R3: floor_enabled=False → floor_missing_reason=None even when cell absent.
+    """R3 (Wave-2 item 6): an ABSENT floor cell must NOT newly block exits.
 
-    Cells where entry never had a floor (44/54 missing cities, LOW metric, flag OFF)
-    must not be newly blocked by this change. Behaviour today is preserved.
+    The floor is now applied by PER-CELL DATA AVAILABILITY (no flag) symmetrically on entry
+    and monitor. A genuinely absent cell (44/54 missing cities, LOW metric) records a
+    floor_cell_absent reason but is SYMMETRIC (entry also had no floor) — settlement_sigma_floor
+    _applied is False and the reason is a structural-absence reason, NOT a transient probe error,
+    so the caller's parity rule does not mark NOT FRESH. Behaviour preserved: no new blocking.
     """
     monkeypatch.setattr(emos_mod, "_emos_table_cache", _SYNTH_EMOS_TABLE, raising=False)
-    # Cell absent, but flag is OFF — should NOT set floor_missing_reason.
+    # Cell absent in the floor table.
     monkeypatch.setattr(emos_mod, "_sigma_floor_cache", _FLOOR_TABLE_EMPTY, raising=False)
 
     city = _make_city()
     semantics = MagicMock()
 
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_off(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_off(), "ensemble": {}}):
         q = _build_monitor_one_calibrator_q(
             city=city,
             target_d=_TARGET_D,
@@ -290,17 +293,19 @@ def test_r3_floor_disabled_no_blocking(monkeypatch):
             all_bins=_BINS,
         )
 
-    assert q.floor_missing_reason is None, (
-        "floor_missing_reason must be None when floor is disabled — no new blocking"
-    )
     assert q.settlement_sigma_floor_applied is False
+    # A structural-absence reason (not a transient probe error) -> the parity rule does NOT block.
+    if q.floor_missing_reason is not None:
+        assert not str(q.floor_missing_reason).startswith("floor_probe_error"), (
+            "an absent cell must record a structural-absence reason, never a transient "
+            "probe-error reason (the only reason that marks NOT FRESH)"
+        )
     # q_source must still be set (EMOS served the cell normally)
     assert q.q_source in ("emos", "raw_honest")
 
 
 def test_r3_low_metric_with_missing_floor_cell_flag_off_no_blocking(monkeypatch):
-    """R3 LOW variant: LOW cells with 44/54 cities missing from floor table + flag OFF → no block."""
-    # LOW EMOS cell exists, floor table has no LOW cell, flag OFF.
+    """R3 LOW variant: LOW cells with 44/54 cities missing from the floor table -> no block."""
     low_emos_table = {
         "_meta": {"metric": "multi"},
         "cells": {"TestCity|JJA|low": {"params": [0.0, 1.0, -0.4, 0.5, 0.0], "n": 99, "served": "emos"}},
@@ -311,7 +316,7 @@ def test_r3_low_metric_with_missing_floor_cell_flag_off_no_blocking(monkeypatch)
     city = _make_city()
     semantics = MagicMock()
 
-    with patch("src.engine.monitor_refresh.settings", {"edli_v1": _edli_v1_floor_off(), "ensemble": {}}):
+    with patch("src.engine.monitor_refresh.settings", {"edli": _edli_floor_off(), "ensemble": {}}):
         q = _build_monitor_one_calibrator_q(
             city=city,
             target_d=_TARGET_D,
@@ -322,5 +327,6 @@ def test_r3_low_metric_with_missing_floor_cell_flag_off_no_blocking(monkeypatch)
             all_bins=_BINS,
         )
 
-    assert q.floor_missing_reason is None, "LOW cell + flag OFF: floor_missing_reason must be None"
     assert q.settlement_sigma_floor_applied is False
+    if q.floor_missing_reason is not None:
+        assert not str(q.floor_missing_reason).startswith("floor_probe_error")

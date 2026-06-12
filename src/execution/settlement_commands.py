@@ -136,6 +136,47 @@ class SettlementCommandStateError(SettlementCommandError):
     """Raised for illegal settlement command transitions."""
 
 
+class RedeemSubmissionAbandonedError(SettlementCommandError):
+    """K3.6 redeem pivot: Zeus never submits redeem transactions (operator law)."""
+
+
+# K3.6 REDEEM PIVOT (operator directive 2026-06-10 ~22:55Z "完全抛弃redeem"):
+# redemption on the shared wallet is owned by third-party auto-redeem. Zeus keeps
+# ACCOUNTING and the deposit-confirm/sweep step (NOT a redeem) — submission never.
+# The override below is operator-domain ONLY (set by hand for a supervised manual
+# redrive; never by a scheduler, plist, or settings flag). It must carry the exact
+# token value — a truthy env is NOT enough, so a stray "1" export cannot re-arm
+# redemption. ZEUS_AUTONOMOUS_REDEEM_ENABLED is irrelevant to this barrier by
+# design: a flag flip alone must never be the only thing between Zeus and an
+# on-chain redeem broadcast.
+REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV = "ZEUS_OPERATOR_REDEEM_OVERRIDE"
+REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN = "operator-confirmed-manual-redeem"
+
+
+def redeem_submission_allowed() -> bool:
+    return (
+        os.environ.get(REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV, "").strip()
+        == REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN
+    )
+
+
+def assert_redeem_submission_allowed(context: str) -> None:
+    """Hard-refuse redeem submission unless the operator-only override is set.
+
+    Raises BEFORE any side effect. Pinned by
+    tests/execution/test_redeem_pivot_antibody.py: no codepath reachable from a
+    daemon scheduler can broadcast a redeem tx.
+    """
+    if not redeem_submission_allowed():
+        raise RedeemSubmissionAbandonedError(
+            f"REDEEM_SUBMISSION_ABANDONED:{context}: operator law 2026-06-10 — Zeus "
+            "never submits redeem transactions (third-party auto-redeem owns the "
+            f"shared wallet). Manual override requires env "
+            f"{REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV}={REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN!r} "
+            "(operator hand-set for a supervised redrive only)."
+        )
+
+
 def _enum_value(value: Any) -> str:
     if value is None:
         return ""
@@ -681,6 +722,12 @@ def submit_redeem(
     If the adapter returns a tx hash, ``REDEEM_TX_HASHED`` becomes the recovery
     anchor; later ``reconcile_pending_redeems`` follows chain receipt truth.
     """
+    # K3.6 REDEEM PIVOT (operator directive 2026-06-10 "完全抛弃redeem"): Zeus
+    # never submits redeem transactions again — third-party auto-redeem owns
+    # redemption on the shared wallet. This raise sits BEFORE any side effect
+    # and before the env flag is even consulted: a flag flip alone must never
+    # re-enable submission.
+    assert_redeem_submission_allowed("submit_redeem")
     from src.architecture.gate_runtime import check as _gate_runtime_check
     _gate_runtime_check("on_chain_mutation")
 

@@ -42,6 +42,11 @@ class CandidateEvaluation:
     low_volume_usd: float | None = None
     q_lcb_calibration_source: str | None = None
     same_bin_yes_posterior: float | None = None
+    # Twin-authority reconciliation #7 (2026-06-11): the family settlement-backward
+    # coverage VERDICT status, copied from the proof so this receipt projection's
+    # admission view (live_buy_no_conservative_evidence_*) matches the proof-
+    # generation gate's verdict-aware outcome. None on canonical/legacy paths.
+    settlement_coverage_status: str | None = None
     # FIX C (mode-consistent EV, 2026-06-10): the per-candidate maker/taker mode
     # decision and BOTH EVs (trade_score == the chosen mode's EV). Receipt-level
     # provenance for the settlement loop to recalibrate p_fill_maker / the
@@ -132,6 +137,7 @@ class CandidateEvaluation:
             execution_price=self.execution_price,
             q_lcb_calibration_source=self.q_lcb_calibration_source,
             same_bin_yes_posterior=self.same_bin_yes_posterior,
+            settlement_coverage_status=self.settlement_coverage_status,
         )
 
     @property
@@ -195,6 +201,7 @@ class CandidateEvaluation:
             "low_volume_usd": self.low_volume_usd,
             "q_lcb_calibration_source": self.q_lcb_calibration_source,
             "same_bin_yes_posterior": self.same_bin_yes_posterior,
+            "settlement_coverage_status": self.settlement_coverage_status,
             "admitted": self.admitted,
             "live_win_rate_floor": LIVE_DIRECTION_WIN_RATE_FLOOR,
             "live_win_rate_admissible": self.live_win_rate_admissible,

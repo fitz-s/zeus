@@ -78,7 +78,7 @@ def _seed_ensemble_snapshots_row(
     """S1.3 / T2.g helper: INSERT a minimal valid ensemble_snapshots row.
 
     Closes the "natural-empty-v2 bypass" in T2.d/e/f tests — when v2 is
-    empty, `_read_v2_snapshot_metadata` returns {} and
+    empty, `_read_snapshot_metadata` returns {} and
     `boundary_ambiguous_refuses_signal({})` returns False (no refusal).
     The DT7 gate passes but via dormant path. Post-T2.g, the gate runs
     against a REAL populated row and its boundary_ambiguous=0 is
@@ -222,7 +222,7 @@ class TestDT7ScemaPathActuallyRuns:
     trivial empty-table short-circuit.
 
     Without these two tests, a future refactor that silently breaks
-    `_read_v2_snapshot_metadata` (wrong column name, wrong WHERE clause,
+    `_read_snapshot_metadata` (wrong column name, wrong WHERE clause,
     swapped temperature_metric comparison) would leave the TestSelection-
     FamilySubstrate suite green because they all pass via the legacy
     empty-v2 bypass. These tests exercise the real schema path end-to-end
@@ -230,16 +230,16 @@ class TestDT7ScemaPathActuallyRuns:
 
     def test_T2g_read_metadata_returns_boundary_ambiguous_zero_from_real_row(self, tmp_path):
         """Seed a row with boundary_ambiguous=0 and verify
-        `_read_v2_snapshot_metadata` returns the correct dict against the
+        `_read_snapshot_metadata` returns the correct dict against the
         real schema path (not via the fall-through empty-row branch)."""
-        from src.engine.evaluator import _read_v2_snapshot_metadata
+        from src.engine.evaluator import _read_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_bambig_zero.db")
         _init_schema_with_forecast_authority(conn)
         snapshot_id = _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=0,
         )
-        meta = _read_v2_snapshot_metadata(
+        meta = _read_snapshot_metadata(
             conn, "Dallas", "2026-04-12", "high", snapshot_id=snapshot_id
         )
         assert meta, "meta must be non-empty — schema path must read the real row"
@@ -255,14 +255,14 @@ class TestDT7ScemaPathActuallyRuns:
         REJECTED_BOUNDARY_AMBIGUOUS per the CHECK constraint on that column)
         and verify the refusal-gate actually fires. This is the positive
         proof that DT7 is wired — not just dormant."""
-        from src.engine.evaluator import _read_v2_snapshot_metadata
+        from src.engine.evaluator import _read_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_bambig_one.db")
         _init_schema_with_forecast_authority(conn)
         snapshot_id = _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=1, causality_status="REJECTED_BOUNDARY_AMBIGUOUS",
         )
-        meta = _read_v2_snapshot_metadata(
+        meta = _read_snapshot_metadata(
             conn, "Dallas", "2026-04-12", "high", snapshot_id=snapshot_id
         )
         assert meta.get("boundary_ambiguous") == 1
@@ -278,14 +278,14 @@ class TestDT7ScemaPathActuallyRuns:
         The evaluator must not use the latest city/date/metric row as a proxy
         for the candidate's executable decision snapshot.
         """
-        from src.engine.evaluator import _read_v2_snapshot_metadata
+        from src.engine.evaluator import _read_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_exact_only.db")
         _init_schema_with_forecast_authority(conn)
         _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=1, causality_status="REJECTED_BOUNDARY_AMBIGUOUS",
         )
-        assert _read_v2_snapshot_metadata(conn, "Dallas", "2026-04-12", "high") == {}
+        assert _read_snapshot_metadata(conn, "Dallas", "2026-04-12", "high") == {}
 
 
 class TestSelectionFamilySubstrate:
@@ -527,6 +527,7 @@ class TestSelectionFamilySubstrate:
             "41°F or higher",
         ]
 
+    @pytest.mark.skip(reason="DEAD_TEST 2026-06-10: scan_full_hypothesis_family buy_no path was eliminated by commit 16c35e7445 (Make YES and NO probability authority independent) — buy_no hypotheses are blocked until independent native-NO posteriors are wired; the unconditional `continue` at market_analysis_family_scan.py:111 prevents any buy_no FullFamilyHypothesis from being appended")
     def test_multi_bin_full_family_scan_uses_native_no_market_price(self):
         class FakeAnalysis:
             bins = [
@@ -561,6 +562,7 @@ class TestSelectionFamilySubstrate:
         # explicitly — EP does not equal a bare float (PR #348 Blocker 1).
         assert float(no_hypotheses[0].entry_price) == 0.55
 
+    @pytest.mark.skip(reason="DEAD_TEST 2026-06-10: MarketAnalysis.find_edges() buy_no path eliminated by commit 16c35e7445 — `if self.supports_buy_no_edges(i): ... continue` at market_analysis.py:706-723 short-circuits before computing p_post_no=1-p_yes (that complement formula is explicitly forbidden); test expects a buy_no edge from find_edges() which no longer fires without independent native-NO posterior")
     def test_market_analysis_multi_bin_buy_no_requires_native_no_quote(self):
         bins = [
             Bin(low=None, high=67, unit="F", label="67°F or lower"),
@@ -627,6 +629,7 @@ class TestSelectionFamilySubstrate:
         with pytest.raises(ValueError, match="requires"):
             dedup_module.native_multibin_buy_no_live_enabled()
 
+    @pytest.mark.skip(reason="DEAD_TEST 2026-06-10: _bootstrap_bin_no CI test depends on find_edges()/family scan emitting a buy_no edge; both paths short-circuit (market_analysis.py:723 and family_scan.py:111) before computing the bootstrap CI for buy_no; no independent native-NO posterior → no buy_no edge emitted → CI assertion never reached")
     def test_multi_bin_buy_no_bootstrap_uses_native_no_market_price(self, monkeypatch):
         bins = [
             Bin(low=None, high=67, unit="F", label="67°F or lower"),
@@ -656,6 +659,7 @@ class TestSelectionFamilySubstrate:
         assert ci_hi == pytest.approx(0.25)
         assert p_value == 0.0
 
+    @pytest.mark.skip(reason="DEAD_TEST 2026-06-10: scan_full_hypothesis_family buy_no path blocked by unconditional continue at family_scan.py:111 (16c35e7445); expects 4 hypotheses (2 yes + 2 no) but only yes hypotheses are emitted; FakeAnalysis.supports_buy_no_edges also has old zero-arg signature incompatible with current idx-param call")
     def test_binary_full_family_scan_keeps_executable_buy_no(self):
         class FakeAnalysis:
             bins = [
@@ -849,6 +853,7 @@ class TestSelectionFamilySubstrate:
         assert family_strategy_key == ""
         assert sorted(hypothesis_strategy_keys) == ["", "center_buy"]
 
+    @pytest.mark.skip(reason="DEAD_TEST 2026-06-10: test expects buy_no EdgeDecision (direction='buy_no', rejection_stage='SIZING_TOO_SMALL') from evaluate_candidate, but the buy_no edge-scan path in MarketAnalysis.find_edges() is short-circuited since commit 16c35e7445; result is FDR_FILTERED (no edge found) instead of SIZING_TOO_SMALL; the complement-formula buy_no posterior is forbidden and no independent native-NO posterior is wired in this test")
     def test_evaluate_candidate_materializes_selection_facts(self, tmp_path, monkeypatch):
         # T2.g CLOSED 2026-04-24: explicit ensemble_snapshots fixture row
         # with boundary_ambiguous=0 replaces the prior natural-empty-v2
@@ -1238,7 +1243,7 @@ class TestSelectionFamilySubstrate:
         # inputs.temperature_metric.is_low().
         #
         # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_canonical_schema which creates
-        # empty ensemble_snapshots; _read_v2_snapshot_metadata on empty
+        # empty ensemble_snapshots; _read_snapshot_metadata on empty
         # table naturally returns {} → boundary_ambiguous_refuses_signal
         # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
         # WILL replace this natural bypass with a real v2 fixture row
@@ -1466,7 +1471,7 @@ class TestSelectionFamilySubstrate:
         # inputs.temperature_metric.is_low().
         #
         # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_canonical_schema which creates
-        # empty ensemble_snapshots; _read_v2_snapshot_metadata on empty
+        # empty ensemble_snapshots; _read_snapshot_metadata on empty
         # table naturally returns {} → boundary_ambiguous_refuses_signal
         # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
         # WILL replace this natural bypass with a real v2 fixture row

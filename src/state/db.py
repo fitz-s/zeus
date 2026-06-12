@@ -1574,6 +1574,10 @@ def init_schema(
             prob_tail_mass_cal REAL,
             prob_tail_mass_market REAL,
             prob_tail_entropy REAL,
+            -- Continuous re-decision P1 belief cache (resurrection 2026-06-12): per-bin executable
+            -- condition_id (parallel to bin_labels_json) for the synthesized 'edli_belief:' rows.
+            -- NULL for every non-belief / legacy row.
+            condition_ids_json TEXT,
             recorded_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_probability_trace_city_target
@@ -2400,6 +2404,15 @@ def init_schema(
     except sqlite3.OperationalError:
         pass
 
+    # Continuous re-decision P1 belief cache (resurrection 2026-06-12): the synthesized
+    # 'edli_belief:' rows store the per-bin executable condition_id (parallel to bin_labels_json)
+    # so the P2 screen can join a cached belief to the freshest executable_market_snapshots row.
+    # Additive, NULL for every legacy row; column-subset-safe per assert_db_matches_registry.
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN condition_ids_json TEXT;")
+    except sqlite3.OperationalError:
+        pass
+
     # LIVE-PROB-P0 (SCHEMA_VERSION 34, 2026-05-23): probability_trace_fact gains
     # three tail-evidence columns for the cumulative tail-mass discrepancy gate.
     # Same ALTER TABLE pattern as ``market_phase`` / A5 above — fresh DBs hit the
@@ -2881,9 +2894,20 @@ def init_schema(
     from src.state.schema.edli_live_profit_audit_schema import ensure_table as _ensure_edli_live_profit_audit_table
     _ensure_edli_live_profit_audit_table(conn)
 
+    # Settlement skill-attribution (2026-06-12): per-settled-position skill-vs-luck
+    # grade ledger (SKILL_WIN / LUCKY_WIN / SKILL_LOSS / MISCALIBRATED_LOSS /
+    # STALE_DECISION). Sole writer = src/analysis/settlement_skill_attribution.py.
+    from src.state.schema.settlement_attribution_schema import ensure_table as _ensure_settlement_attribution_table
+    _ensure_settlement_attribution_table(conn)
+
     # EDLI redemption (2026-05-25): proof-carrying decision certificate ledger.
     from src.state.schema.decision_certificates_schema import ensure_tables as _ensure_decision_certificate_tables
     _ensure_decision_certificate_tables(conn)
+
+    # fill-bridge retry-spiral fix (2026-06-12): per-aggregate terminal disposition table.
+    # Prevents settled-market infinite retry and quarantines persistently-failing aggregates.
+    from src.state.schema.edli_fill_bridge_dispositions_schema import ensure_table as _ensure_edli_fill_bridge_dispositions_table
+    _ensure_edli_fill_bridge_dispositions_table(conn)
 
     # 2026-05-21 live authority follow-up: decision_events CHECK constraints
     # must admit shadow_decision / unknown_legacy before PRAGMA user_version is
@@ -3501,7 +3525,7 @@ _FORECAST_TABLES = (
 )
 
 
-def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
+def _ensure_forecast_indexes(conn: sqlite3.Connection) -> None:
     """Idempotent CREATE INDEX IF NOT EXISTS for every v2 forecast-class index.
 
     PLAN-evidence: docs/operations/task_2026-05-14_attach_path_index_fix/PLAN.md
@@ -3874,7 +3898,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # market_events: B3cont (PR3) collapsed market_events_v2 → market_events on
     # forecasts.db; the old v1 shell on world.db (0 rows, missing temperature_metric
     # + recorded_at) was declared legacy_archived but not yet dropped from the live
-    # file. If the ATTACH path picks up that ghost DDL and then _ensure_v2_forecast_indexes
+    # file. If the ATTACH path picks up that ghost DDL and then _ensure_forecast_indexes
     # runs CREATE INDEX ON market_events(temperature_metric), it crashes with
     # "no such column: temperature_metric". Fix: always build via _create_market_events
     # (canonical static DDL in v2_schema.py) and never copy from world_src.
@@ -3952,7 +3976,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 
         # Post-P2 fallback: world.db may be world-class-only (no legacy forecast
         # table copies). Any registry forecast table not yet on forecasts conn
-        # must be created via static helpers so _ensure_v2_forecast_indexes succeeds.
+        # must be created via static helpers so _ensure_forecast_indexes succeeds.
         _missing_on_fc = {
             tbl for tbl in _registry_forecast_tables
             if not conn.execute(
@@ -4018,7 +4042,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # missing on the forecasts conn. Run the idempotent helper unconditionally
     # so both branches converge to the canonical v2 index inventory.
     # PLAN-evidence: docs/operations/task_2026-05-14_attach_path_index_fix/PLAN.md
-    _ensure_v2_forecast_indexes(conn)
+    _ensure_forecast_indexes(conn)
 
     # T2 Day0Nowcast — SCHEMA_FORECASTS_VERSION 4 (2026-05-19).
     # These tables are forecast-class only; not in world_src so always created
@@ -9597,6 +9621,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         "chain_seen_at",
         "chain_absence_at",
         "entry_ci_width",
+        "exit_retry_count",
+        "next_exit_retry_at",
     )
     authority_select_expr = ", ".join(
         c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
@@ -9667,6 +9693,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "execution_fact_filled_at": fill_economics["execution_fact_filled_at"],
                 "p_posterior": row["p_posterior"],
                 "entry_ci_width": row["entry_ci_width"],
+                "exit_retry_count": row["exit_retry_count"],
+                "next_exit_retry_at": row["next_exit_retry_at"],
                 "last_monitor_prob": _finite_float_or_none(row["last_monitor_prob"]),
                 "last_monitor_edge": _finite_float_or_none(row["last_monitor_edge"]),
                 "last_monitor_market_price": row["last_monitor_market_price"],

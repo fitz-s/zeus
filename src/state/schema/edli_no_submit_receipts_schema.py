@@ -91,6 +91,12 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "posterior_id", "INTEGER")
     _ensure_column(conn, "probability_authority", "TEXT")
     _ensure_column(conn, "q_lcb_calibration_source", "TEXT")
+    # DecisionProvenanceEnvelope (operator law 2026-06-11): the complete decision-time
+    # provenance blob (data combination, per-input ages, time-to-settlement, economics) as one
+    # queryable JSON column. Nullable, no DEFAULT, omit-when-None from receipt_json so existing-row
+    # receipt_hash stays byte-stable. Authority:
+    # docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md.
+    _ensure_column(conn, "envelope_json", "TEXT")
     conn.execute(CREATE_EVENT_INDEX_SQL)
     conn.execute(CREATE_DECISION_TIME_INDEX_SQL)
     conn.execute(CREATE_PROBABILITY_AUTHORITY_INDEX_SQL)

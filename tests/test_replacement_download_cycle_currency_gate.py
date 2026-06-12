@@ -5,7 +5,7 @@
 #   the ALREADY_COVERED / HAVE_RAW_MANIFESTS short-circuits contained NO cycle comparison, so once
 #   any cycle fully materialized the download cron could never advance the anchor again —
 #   deterministic_forecast_anchors froze at 2026-06-08T18 for ~24h while Open-Meteo served
-#   2026-06-09T00 (httpx 200 OK on the U0R leg of the SAME job run).
+#   2026-06-09T00 (httpx 200 OK on the BAYES_PRECISION_FUSION leg of the SAME job run).
 """RELATIONSHIP antibody: current-target COVERAGE never implies CYCLE CURRENCY.
 
 Cross-module invariant (plan coverage -> download gate boundary):
@@ -88,9 +88,12 @@ def _wire(monkeypatch, *, plan: _PlanStub, calls: list):
     monkeypatch.setattr(
         plan_mod, "build_replacement_forecast_current_target_plan", lambda _db: plan
     )
+    # Run-selection single authority (2026-06-11): the production job resolves the
+    # available cycle via provider probes, never the dead now-minus-lag guess.
+    import src.data.replacement_forecast_production as production
+
     monkeypatch.setattr(
-        dl, "_parse_cycle",
-        lambda value, *, now, release_lag_hours: AVAILABLE_CYCLE if value is None else value,
+        production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE
     )
 
     def _fake_download(**kwargs):

@@ -1,0 +1,415 @@
+# Created: 2026-06-10
+# Last reused or audited: 2026-06-10
+# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K2.1
+# (rejection-reason taxonomy) + /tmp/funnel_autopsy.md (operator-ratified categories).
+"""Typed registry for no_trade_regret_events.rejection_reason (K2.1).
+
+THE DISEASE THIS KILLS: rejection reasons were free-text strings — structured
+prefixes at best ("BASE:detail:detail"), raw exception text at worst ("UNIQUE
+constraint failed: platt_models...", "database is locked", "name '...' is not
+defined" all appear in the live table). Every funnel query was substring-matching
+prose, and a new emit site could invent a new spelling silently.
+
+THE CONTRACT:
+- Every rejection reason BASE (the token before the first ':') is a declared
+  member of :class:`RejectionReason`, carrying a category and a docstring.
+- Detail stays a colon-suffix (string value preserved for DB compat):
+  ``f"{RejectionReason.X.value}:{detail}"`` or the existing literal whose base
+  equals a registered value.
+- CI antibody (tests/contracts/test_k2_rejection_reason_registry.py) AST-scans
+  every EventSubmissionReceipt(reason=...) emit site: a string literal whose
+  base is not registered FAILS CI.
+- Runtime sensor: the regret-write chokepoint warns (once per base per process)
+  on unregistered bases — catches dynamic/exception-leak paths that the AST
+  check cannot see.
+- The standing funnel report (K5.2) groups by ``classify_rejection_reason``.
+
+Categories (operator-ratified framework, funnel autopsy 2026-06-10):
+- HONEST_MARKET: the market itself offers nothing (phase closed, no edge,
+  empty native book). Expected, self-resolving, not actionable.
+- HONEST_DATA: our inputs honestly not ready (staleness, readiness expired,
+  source runs incomplete). Self-resolving on data cadence; actionable only if
+  chronically dominant.
+- DESIGNED_GATE: a deliberate protection fired as designed (riskguard, Kelly,
+  FDR, direction law, shadow scopes, submit-time fail-closed aborts).
+- ARTIFICIAL_SUSPECT: pipeline-defect signal (build failures, missing proofs
+  that the pipeline should have produced, connection/boundary errors, raw
+  exception text). Every sustained ARTIFICIAL_SUSPECT stream is a bug hunt.
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+
+
+class RejectionCategory(str, Enum):
+    HONEST_MARKET = "HONEST_MARKET"
+    HONEST_DATA = "HONEST_DATA"
+    DESIGNED_GATE = "DESIGNED_GATE"
+    ARTIFICIAL_SUSPECT = "ARTIFICIAL_SUSPECT"
+
+
+class RejectionReason(str, Enum):
+    """Declared rejection-reason bases. Member value == DB string base."""
+
+    def __new__(cls, value: str, category: RejectionCategory, doc: str) -> "RejectionReason":
+        obj = str.__new__(cls, value)
+        obj._value_ = value
+        obj.category = category
+        obj.__doc__ = doc
+        return obj
+
+    # ----- HONEST_MARKET -------------------------------------------------
+    EVENT_BOUND_MARKET_PHASE_CLOSED = (
+        "EVENT_BOUND_MARKET_PHASE_CLOSED",
+        RejectionCategory.HONEST_MARKET,
+        "Market phase (post_trading/settlement_day) forbids entry. Correct by design.",
+    )
+    TRADE_SCORE_NON_POSITIVE = (
+        "TRADE_SCORE_NON_POSITIVE",
+        RejectionCategory.HONEST_MARKET,
+        "Certified q_lcb minus all-in cost is non-positive: no edge exists.",
+    )
+    EXECUTABLE_NATIVE_ASK_MISSING = (
+        "EXECUTABLE_NATIVE_ASK_MISSING",
+        RejectionCategory.HONEST_MARKET,
+        "Native book has no executable ask (e.g. clob_no_ask_illiquid on tail bins).",
+    )
+    EVENT_BOUND_SELECTED_CANDIDATE_MISSING = (
+        "EVENT_BOUND_SELECTED_CANDIDATE_MISSING",
+        RejectionCategory.HONEST_MARKET,
+        "Full-family scan produced no positive-deltaU candidate (all bins gated or "
+        "non-positive). Funnel autopsy 2026-06-10 section 3: honest. Reserved now for "
+        "the genuine ZERO-PROOF family (annotated :family_candidates=..:proofs=..); the "
+        "all-priced-rejected case carries EVENT_BOUND_ALL_CANDIDATES_REJECTED instead.",
+    )
+    EVENT_BOUND_ALL_CANDIDATES_REJECTED = (
+        "EVENT_BOUND_ALL_CANDIDATES_REJECTED",
+        RejectionCategory.HONEST_MARKET,
+        "Every priced candidate in the family was gate-rejected (capital-efficiency "
+        "EV<=0 / direction-law / buy-NO-evidence), the efficient-market normal state. "
+        "Carries per-class counts + the closest-to-tradeable leg. Replaces the "
+        "NATIVE_ASK_MISSING / bare SELECTED_CANDIDATE_MISSING label lie (2026-06-11) "
+        "when the books were actually live two-sided.",
+    )
+    EVENT_BOUND_MARKET_TOPOLOGY_INVALID = (
+        "EVENT_BOUND_MARKET_TOPOLOGY_INVALID",
+        RejectionCategory.HONEST_MARKET,
+        "Market family topology unparseable/invalid as listed by the venue.",
+    )
+
+    # ----- HONEST_DATA ---------------------------------------------------
+    LIVE_INFERENCE_INPUTS_MISSING = (
+        "LIVE_INFERENCE_INPUTS_MISSING",
+        RejectionCategory.HONEST_DATA,
+        "A live-inference input (posterior bundle, authority readiness, calibration "
+        "row) is absent or expired. Self-resolving on the data cadence.",
+    )
+    EXECUTABLE_SNAPSHOT_BLOCKED = (
+        "EXECUTABLE_SNAPSHOT_BLOCKED",
+        RejectionCategory.HONEST_DATA,
+        "Executable snapshot substrate starved (capture-retry exhausted).",
+    )
+    EXECUTABLE_SNAPSHOT_STALE = (
+        "EXECUTABLE_SNAPSHOT_STALE",
+        RejectionCategory.HONEST_DATA,
+        "Selected executable snapshot expired between decision and use.",
+    )
+    MONEY_PATH_TRANSIENT_EXHAUSTED = (
+        "MONEY_PATH_TRANSIENT_EXHAUSTED",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "A money-path transient (price race / mode flip / stale snapshot) was still "
+        "unresolved after the bounded requeue cap; the terminal label carries the "
+        "last transient reason. Recurring volume here = a structural cadence or "
+        "race defect, never an honest market verdict.",
+    )
+    EXECUTOR_PRE_VENUE_REJECTED = (
+        "EXECUTOR_PRE_VENUE_REJECTED",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "The executor's pre-venue integrity guard refused the final intent before "
+        "any venue call (no side effect). Live 2026-06-12: maker intents carried "
+        "the EDLI event id where the venue-event identity was expected.",
+    )
+    EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING = (
+        "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING",
+        RejectionCategory.HONEST_DATA,
+        "No executable snapshot row bound to the event.",
+    )
+    EVENT_BOUND_SELECTED_SNAPSHOT_MISSING = (
+        "EVENT_BOUND_SELECTED_SNAPSHOT_MISSING",
+        RejectionCategory.HONEST_DATA,
+        "The event's selected snapshot id resolves to no row.",
+    )
+    EVENT_BOUND_MARKET_TOPOLOGY_MISSING = (
+        "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
+        RejectionCategory.HONEST_DATA,
+        "No market-topology row for the event's family.",
+    )
+    CALIBRATION_AUTHORITY_EVIDENCE_MISSING = (
+        "CALIBRATION_AUTHORITY_EVIDENCE_MISSING",
+        RejectionCategory.HONEST_DATA,
+        "No calibration authority evidence (model row / Platt calibrator) for the cell.",
+    )
+    FSR_SOURCE_RUN_NOT_COMPLETE = (
+        "FSR_SOURCE_RUN_NOT_COMPLETE",
+        RejectionCategory.HONEST_DATA,
+        "Forecast source run incomplete for the decision cycle.",
+    )
+    FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE = (
+        "FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE",
+        RejectionCategory.HONEST_DATA,
+        "Forecast source window authority not live-eligible.",
+    )
+    SOURCE_TRUTH_BLOCKED = (
+        "SOURCE_TRUTH_BLOCKED",
+        RejectionCategory.HONEST_DATA,
+        "Source-truth gate blocked the cell (observation source not authoritative).",
+    )
+    FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED = (
+        "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED",
+        RejectionCategory.HONEST_DATA,
+        "Forecast reader bundle not live-eligible (readiness expired, bounds missing).",
+    )
+    TOPOLOGY_CLOCK_MISSING = (
+        "TOPOLOGY_CLOCK_MISSING",
+        RejectionCategory.HONEST_DATA,
+        "Family clock (timezone/window) unavailable for time-semantics checks.",
+    )
+    REPLACEMENT_FORECAST_HOOK_BLOCKED = (
+        "REPLACEMENT_FORECAST_HOOK_BLOCKED",
+        RejectionCategory.HONEST_DATA,
+        "Replacement-forecast hook reported blocking reason codes (e.g. switch "
+        "readiness missing).",
+    )
+
+    # ----- DESIGNED_GATE -------------------------------------------------
+    RISK_GUARD_BLOCKED = (
+        "RISK_GUARD_BLOCKED",
+        RejectionCategory.DESIGNED_GATE,
+        "RiskGuard refused the trade (caps, chain state, drawdown rules).",
+    )
+    KELLY_REJECTED = (
+        "KELLY_REJECTED",
+        RejectionCategory.DESIGNED_GATE,
+        "Kelly sizing produced no admissible stake.",
+    )
+    FDR_REJECTED = (
+        "FDR_REJECTED",
+        RejectionCategory.DESIGNED_GATE,
+        "False-discovery-rate gate rejected the candidate's p-value. NOTE: the buy_no "
+        "p=1.0 hardcode (100% artificial FDR kills) was fixed 9ddad492d8; sustained "
+        "one-direction-only FDR streams remain a tripwire.",
+    )
+    FDR_FULL_FAMILY_PROOF_MISSING = (
+        "FDR_FULL_FAMILY_PROOF_MISSING",
+        RejectionCategory.DESIGNED_GATE,
+        "FDR requires the full-family proof; absent proof fails closed.",
+    )
+    DAY0_SCOPE_SHADOW_ONLY = (
+        "DAY0_SCOPE_SHADOW_ONLY",
+        RejectionCategory.DESIGNED_GATE,
+        "day0-lane event under edli_live_scope=day0_shadow: full pipeline runs, "
+        "enriched no-submit receipt, NEVER submits. The shadow comparator's source "
+        "of truth.",
+    )
+    DAY0_OUT_OF_SCOPE_AT_BOUNDARY = (
+        "DAY0_OUT_OF_SCOPE_AT_BOUNDARY",
+        RejectionCategory.DESIGNED_GATE,
+        "day0-lane event while scope excludes day0 entirely.",
+    )
+    DAY0_HARD_FACT_AUTHORITY_BLOCKED = (
+        "DAY0_HARD_FACT_AUTHORITY_BLOCKED",
+        RejectionCategory.DESIGNED_GATE,
+        "day0 hard-fact authority (observed extreme) contradicts the candidate.",
+    )
+    LIVE_CANARY_DISABLED = (
+        "LIVE_CANARY_DISABLED",
+        RejectionCategory.DESIGNED_GATE,
+        "Live canary off: submit path closed by operator configuration.",
+    )
+    OPERATOR_ARM_REQUIRED = (
+        "OPERATOR_ARM_REQUIRED",
+        RejectionCategory.DESIGNED_GATE,
+        "Operator arm gate not armed for live submission.",
+    )
+    SUBMIT_DISABLED = (
+        "SUBMIT_DISABLED",
+        RejectionCategory.DESIGNED_GATE,
+        "real_order_submit_enabled=false: decision pipeline runs, submission closed.",
+    )
+    EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED = (
+        "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED",
+        RejectionCategory.DESIGNED_GATE,
+        "Durable submit outbox unavailable; refusing non-durable submission.",
+    )
+    ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING = (
+        "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING",
+        RejectionCategory.DESIGNED_GATE,
+        "buy_no admission requires the independent YES posterior for the direction "
+        "law; absent fails closed.",
+    )
+    MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE = (
+        "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE",
+        RejectionCategory.DESIGNED_GATE,
+        "Stale market-channel trade events never trigger direct trading.",
+    )
+    NO_SUBMIT_PROOF_FALSE = (
+        "NO_SUBMIT_PROOF_FALSE",
+        RejectionCategory.DESIGNED_GATE,
+        "Receipt's proof_accepted is False on the no-submit lane.",
+    )
+    REPLACEMENT_FORECAST_HOOK_DIRECTION_FLIP = (
+        "REPLACEMENT_FORECAST_HOOK_DIRECTION_FLIP",
+        RejectionCategory.DESIGNED_GATE,
+        "Replacement policy may veto but never flip direction without evidence.",
+    )
+    REPLACEMENT_FORECAST_LIVE_DIRECTION_PROOF_MISSING = (
+        "REPLACEMENT_FORECAST_LIVE_DIRECTION_PROOF_MISSING",
+        RejectionCategory.DESIGNED_GATE,
+        "Live replacement direction requires its proof artifact.",
+    )
+    REPLACEMENT_FORECAST_LIVE_EXECUTABLE_PROOF_MISSING = (
+        "REPLACEMENT_FORECAST_LIVE_EXECUTABLE_PROOF_MISSING",
+        RejectionCategory.DESIGNED_GATE,
+        "Live replacement execution requires its executable proof artifact.",
+    )
+    REPLACEMENT_FORECAST_HOOK_UNSUPPORTED = (
+        "REPLACEMENT_FORECAST_HOOK_UNSUPPORTED",
+        RejectionCategory.DESIGNED_GATE,
+        "Replacement hook does not support this event shape.",
+    )
+    SUBMIT_ABORTED_EDGE_REVERSED = (
+        "SUBMIT_ABORTED_EDGE_REVERSED",
+        RejectionCategory.DESIGNED_GATE,
+        "Submit-time recapture found non-positive marginal utility on the fresh curve.",
+    )
+    SUBMIT_ABORTED_FAMILY_REVERSED = (
+        "SUBMIT_ABORTED_FAMILY_REVERSED",
+        RejectionCategory.DESIGNED_GATE,
+        "Submit-time family re-rank changed the selected candidate (scope-set "
+        "mismatch false-firing fixed cbfa50cc87).",
+    )
+    SUBMIT_ABORTED_PRICE_MOVED = (
+        "SUBMIT_ABORTED_PRICE_MOVED",
+        RejectionCategory.DESIGNED_GATE,
+        "Submit-time price moved beyond tolerance vs the proven price.",
+    )
+    SUBMIT_ABORTED_BELOW_MIN_ORDER = (
+        "SUBMIT_ABORTED_BELOW_MIN_ORDER",
+        RejectionCategory.DESIGNED_GATE,
+        "Recaptured admissible stake fell below venue min order.",
+    )
+    SUBMIT_ABORTED_MODE_FLIPPED = (
+        "SUBMIT_ABORTED_MODE_FLIPPED",
+        RejectionCategory.DESIGNED_GATE,
+        "Fresh-book mode witness diverged from the proven execution_mode_intent; "
+        "fail-closed abort + re-rank (never an inline mode rebuild).",
+    )
+    LEGACY_INJECTED_TEST_SUBMIT = (
+        "legacy_injected_test_submit",
+        RejectionCategory.DESIGNED_GATE,
+        "Test-only injected submit path marker (never a live reason).",
+    )
+
+    # ----- DESIGNED_GATE :: Day0 input-correctness (NOT a cap) -------------
+    # day0_multiangle_critique_2026-06-12 Blind spot C, re-scoped 2026-06-12 per
+    # operator anti-over-design directive (no caps, no trip-wires). This is an
+    # INPUT-ORDERING correctness check, not a configurable ban window: a day0
+    # decision's orderbook snapshot must be newer than the observation state that
+    # produced its probability. It fires ONLY when the ordering is genuinely
+    # violated (a stale book pricing an already-moved observation) — a real data
+    # error, not a throttle. DESIGNED_GATE because it is a deliberate, evidence-
+    # based refusal of an incoherent decision input.
+    DAY0_QUOTE_PRECEDES_OBSERVATION = (
+        "DAY0_QUOTE_PRECEDES_OBSERVATION",
+        RejectionCategory.DESIGNED_GATE,
+        "Day0 input-ordering violation: the orderbook snapshot used to price the "
+        "candidate was captured at/before the observation availability that produced "
+        "its probability. The quote prices a stale, pre-update book — an incoherent "
+        "decision input, refused on correctness grounds (NOT a time-window cap).",
+    )
+
+    # ----- ARTIFICIAL_SUSPECT ---------------------------------------------
+    EDLI_LIVE_CERTIFICATE_BUILD_FAILED = (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "The live certificate could not be built from a candidate that passed the "
+        "pipeline — a seam defect until proven otherwise (hash missing, "
+        "QUOTE_FEASIBILITY_BID_ASK_REQUIRED, authority blocked...).",
+    )
+    EDLI_EVENT_BOUND_RECEIPT_SCHEMA_INVALID = (
+        "EDLI_EVENT_BOUND_RECEIPT_SCHEMA_INVALID",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "The receipt our own pipeline built fails schema validation.",
+    )
+    EDLI_EVENT_BOUND_RECEIPT_NOT_NO_SUBMIT = (
+        "EDLI_EVENT_BOUND_RECEIPT_NOT_NO_SUBMIT",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "Receipt kind mismatch at the no-submit boundary.",
+    )
+    KELLY_PROOF_MISSING = (
+        "KELLY_PROOF_MISSING",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "A candidate that reached sizing has no Kelly proof — the pipeline should "
+        "have produced one.",
+    )
+    NO_SUBMIT_CERTIFICATE_REJECTED = (
+        "NO_SUBMIT_CERTIFICATE_REJECTED",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "Certificate verification rejected our own no-submit certificate (the "
+        "wrong-chain-credential cert wall was this category).",
+    )
+    EXECUTOR_BOUNDARY_MISSING = (
+        "EXECUTOR_BOUNDARY_MISSING",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "Executor boundary unavailable at submit time.",
+    )
+    FORECAST_AUTHORITY_CONNECTION_MISSING = (
+        "FORECAST_AUTHORITY_CONNECTION_MISSING",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "Forecast authority DB connection absent — wiring defect.",
+    )
+    TOPOLOGY_AUTHORITY_CONNECTION_MISSING = (
+        "TOPOLOGY_AUTHORITY_CONNECTION_MISSING",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "Topology authority DB connection absent — wiring defect.",
+    )
+    CALIBRATION_AUTHORITY_CONNECTION_MISSING = (
+        "CALIBRATION_AUTHORITY_CONNECTION_MISSING",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "Calibration authority DB connection absent — wiring defect.",
+    )
+    UNKNOWN_REVIEW_REQUIRED = (
+        "UNKNOWN_REVIEW_REQUIRED",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "Dead-letter stage: an unhandled exception became the reason text. Every "
+        "row here is a bug (raw exception text in rejection_reason is the disease "
+        "this registry exists to kill).",
+    )
+
+
+_REGISTRY_BY_VALUE: dict[str, RejectionReason] = {m.value: m for m in RejectionReason}
+
+
+def base_reason(raw: object) -> str:
+    """The taxonomy base of a raw rejection_reason string (token before first ':')."""
+    return str(raw).split(":", 1)[0].strip()
+
+
+def lookup_rejection_reason(raw: object) -> RejectionReason | None:
+    """Registry member for a raw reason string, or None when unregistered."""
+    return _REGISTRY_BY_VALUE.get(base_reason(raw))
+
+
+def is_registered_rejection_reason(raw: object) -> bool:
+    return lookup_rejection_reason(raw) is not None
+
+
+def classify_rejection_reason(raw: object) -> RejectionCategory:
+    """Category for a raw reason string. Unregistered bases are ARTIFICIAL_SUSPECT
+    BY DEFINITION: a reason no one declared is a defect signal (free-text leak,
+    new spelling, raw exception) until someone registers and categorizes it."""
+    member = lookup_rejection_reason(raw)
+    if member is not None:
+        return member.category
+    return RejectionCategory.ARTIFICIAL_SUSPECT

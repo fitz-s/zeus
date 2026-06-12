@@ -142,7 +142,7 @@ class MonitorOneCalibratorQ:
 
 def _monitor_emos_regime_enabled() -> bool:
     try:
-        return bool(settings["edli_v1"].get("edli_emos_sole_calibrator_enabled", False))
+        return bool(settings["edli"].get("edli_emos_sole_calibrator_enabled", False))
     except Exception:
         return False
 
@@ -225,21 +225,18 @@ def _build_monitor_one_calibrator_q(
 
     season = _monitor_emos_season(target_d)
     unit = str(city.settlement_unit)
-    apply_settlement_floor = bool(
-        settings["edli_v1"].get("edli_settlement_sigma_floor_enabled", False)
-    )
-    require_settlement_floor = bool(
-        settings["edli_v1"].get("edli_settlement_sigma_floor_required", True)
-    )
+    # Wave-2 item 6 (2026-06-12): the settlement σ-floor is applied by PER-CELL DATA
+    # AVAILABILITY (no flag — edli_settlement_sigma_floor_enabled / _required deleted),
+    # in PARITY with the entry path. apply=True, required=False ⇒ floor when the fitted
+    # cell exists, no-op (never blocks) when absent.
+    apply_settlement_floor = True
+    require_settlement_floor = False
 
-    # PARITY: probe floor availability when the flag is on. Probed ONCE here (not twice) and
-    # shared to both the emos and honest-raw branches below so the probe cost is minimal.
-    _floor_found: bool = False
-    _floor_missing_reason: str | None = None
-    if apply_settlement_floor:
-        _floor_found, _floor_missing_reason = _probe_monitor_settlement_floor(
-            city.name, season, metric
-        )
+    # PARITY: probe floor availability and share to both the emos and honest-raw branches
+    # below so the probe cost is minimal (used for entry/monitor parity provenance).
+    _floor_found, _floor_missing_reason = _probe_monitor_settlement_floor(
+        city.name, season, metric
+    )
 
     q_result = None
     try:
@@ -340,6 +337,40 @@ def _build_monitor_one_calibrator_q(
 
 def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
     setattr(position, _MONITOR_PROBABILITY_FRESH_ATTR, is_fresh)
+
+
+# K6 stage-1 belief-dead watchdog (2026-06-12). A fail-closed hold on missing
+# probability authority is correct for one cycle and a silent catastrophe for
+# 719 (the Karachi position was monitored its whole life with stale belief and
+# nothing escalated). Track consecutive stale-belief cycles per position WHILE
+# the market price stays fresh; at the threshold, brand the monitor event and
+# log at ERROR so the condition is loud in both the event payload and the log.
+_BELIEF_STALE_FAULT_THRESHOLD = 3
+_belief_stale_cycles: dict[str, int] = {}
+
+
+def _track_belief_staleness(pos: Position) -> None:
+    key = str(getattr(pos, "trade_id", "") or id(pos))
+    if getattr(pos, "last_monitor_prob_is_fresh", False):
+        _belief_stale_cycles.pop(key, None)
+        return
+    if not getattr(pos, "last_monitor_market_price_is_fresh", False):
+        return
+    count = _belief_stale_cycles.get(key, 0) + 1
+    _belief_stale_cycles[key] = count
+    _append_monitor_validation(pos, f"belief_stale_cycles={count}")
+    if count >= _BELIEF_STALE_FAULT_THRESHOLD:
+        _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
+        logger.error(
+            "BELIEF_AUTHORITY_FAULT: position %s (%s %s %s) has had stale belief "
+            "for %d consecutive monitor cycles while the market price is fresh — "
+            "the exit organ is blind on a live position",
+            getattr(pos, "trade_id", "?"),
+            getattr(pos, "city", "?"),
+            getattr(pos, "target_date", "?"),
+            getattr(pos, "direction", "?"),
+            count,
+        )
 
 
 def _record_nowcast_write_success() -> None:
@@ -931,12 +962,19 @@ def _refresh_ens_member_counting(
                     "period_extrema_members_adapter",
                     f"monitor_emos_sole_calibrator_failed:{type(exc).__name__}",
                 ]
-            # PARITY RULE (P1 review finding 2026-06-09): if the floor was enabled at monitor
-            # time but the cell is absent, the monitor q is narrower than the entry q was
-            # (entry ran with floor applied; monitor silently dropped it). Mark NOT FRESH so
-            # exit decisions do not fire on the degraded posterior — same fail-closed semantics
-            # as the day0 panic-sell hold fix ("Exit authority incomplete").
-            if _monitor_q.floor_missing_reason is not None:
+            # PARITY RULE (P1 review finding 2026-06-09; Wave-2 item 6 refinement 2026-06-12):
+            # the floor is applied by PER-CELL DATA AVAILABILITY on BOTH entry and monitor (same
+            # table, same cell). A genuinely ABSENT cell is SYMMETRIC — entry also applied no
+            # floor — so it is NOT a parity violation and must NOT newly block exits for the
+            # 44/54 cities that have no fitted floor cell. Only a TRANSIENT probe error
+            # (table read failed at monitor while entry may have obtained the floor) is a true
+            # asymmetry: mark NOT FRESH so exit decisions do not fire on a possibly-degraded
+            # (narrower) posterior — same fail-closed semantics as the day0 panic-sell hold fix.
+            _floor_probe_failed_transiently = (
+                _monitor_q.floor_missing_reason is not None
+                and str(_monitor_q.floor_missing_reason).startswith("floor_probe_error")
+            )
+            if _floor_probe_failed_transiently:
                 logger.warning(
                     "MONITOR_FLOOR_PARITY_VIOLATION cell=%s|%s|%s "
                     "floor_applied=%s floor_missing_reason=%s — "
@@ -2235,7 +2273,53 @@ def monitor_probability_refresh(
     city,
     target_d,
 ) -> tuple[float, Position, bool | None]:
-    """Refresh held-side posterior without consuming the held-token quote."""
+    """Refresh held-side posterior without consuming the held-token quote.
+
+    PRIMARY AUTHORITY (K1 single belief authority, 2026-06-12): the
+    replacement-chain posterior (``forecast_posteriors``) — the SAME authority
+    the entry decision used. The legacy ens/day0 refreshers below remain as
+    explicit fallback telemetry only; they cannot be the freshness authority
+    while a fresh replacement row exists. This kills the entry-belief vs
+    exit-belief twin-authority that left every held position with
+    ``last_monitor_prob_is_fresh=False`` for its entire lifetime (719/719
+    stale refreshes on the Karachi 2026-06-12 position) while the entry
+    posterior had already re-ranked the held bin to family top.
+    """
+    from src.engine.position_belief import (
+        SELECTED_METHOD_REPLACEMENT_POSTERIOR,
+        load_replacement_belief,
+        monitor_belief_max_age_hours,
+    )
+
+    try:
+        belief = load_replacement_belief(
+            city=pos.city,
+            target_date=pos.target_date,
+            temperature_metric=str(getattr(pos, "temperature_metric", "high")),
+            bin_label=pos.bin_label,
+            direction=str(getattr(pos.direction, "value", pos.direction)),
+            max_age_hours=monitor_belief_max_age_hours(),
+        )
+    except Exception as exc:  # noqa: BLE001 — belief read must not kill the monitor
+        belief = None
+        logger.warning(
+            "monitor_probability_refresh: replacement belief read failed for %s: %s",
+            pos.trade_id,
+            exc,
+        )
+    if belief is not None and belief.fresh:
+        fresh_pos = replace(pos)
+        setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(fresh_pos, SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(fresh_pos, belief.freshness_validation())
+        _set_monitor_probability_fresh(fresh_pos, True)
+        return float(belief.held_side_prob), fresh_pos, True
+    if belief is not None:
+        _append_monitor_validation(
+            pos, f"replacement_posterior_stale;age_h={belief.age_hours:.2f}"
+        )
+    else:
+        _append_monitor_validation(pos, "replacement_posterior_missing")
 
     registry = {
         EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
@@ -2377,6 +2461,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         current_p_posterior = float("nan")
         pos.last_monitor_edge = float("nan")
         _append_monitor_validation(pos, "monitor_probability_refresh_failed")
+
+    _track_belief_staleness(pos)
 
     pos.last_monitor_whale_toxicity = _detect_whale_toxicity_from_orderbook(
         conn,

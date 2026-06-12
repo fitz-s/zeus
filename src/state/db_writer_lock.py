@@ -659,6 +659,12 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/main.py",                  # read_only_ro_uri: live boot verifies zeus-forecasts.db user_version with mode=ro + query_only
         "src/data/replacement_forecast_live_dry_run.py",  # read_only_ro_uri: replacement switch dry-run inventory opens forecasts DB mode=ro + query_only; SELECT-only
         "src/observability/status_summary.py",  # RO: status dashboard read-only
+        "src/engine/position_belief.py",  # read_only_ro_uri: K1 single belief authority — held-position belief reads forecast_posteriors mode=ro, short-lived, SELECT-only (settlement-losses incident 2026-06-12)
+        "src/data/replacement_cycle_advance_trigger.py",  # read_only_ro_uri: U5 step 2a re-mat trigger reads zeus_trades.position_current mode=ro for HELD-position prioritization, short-lived, SELECT-only (never writes trades; forecasts writes go through _connect live) — docs/evidence/freshness/2026-06-12
+        "src/execution/exchange_reconcile.py",  # read_only_ro_uri: settled-external absorber reads canonical market_events (zeus-forecasts) mode=ro, short-lived, SELECT-only — docs/evidence/settlement_guard/2026-06-11_settled_external_absorber_plan.md
+        "scripts/verify_e2e_money_path.py",  # read_only_ro_uri: e2e money-path walker opens every DB mode=ro, SELECT-only (operator-demanded full-chain diagnostic, 2026-06-11)
+        "scripts/query_decision_provenance.py",  # read_only_ro_uri: decision-provenance query opens zeus-world.db mode=ro, SELECT-only over regret/no_submit receipts — operator "一切可被溯源" query entry 2026-06-11 (docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md)
+        "scripts/sigma_scale_before_after.py",  # read_only_ro_uri: sigma-scale before/after evidence table, opens forecasts/trades DBs mode=ro, SELECT-only (docs/operations/c3_sigma_calibration_surface_2026-06-12.md)
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
         # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
@@ -671,14 +677,17 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/replay_downloaded_replacement_economic.py",  # read_only_ro_uri: replacement forecast economic replay opens forecasts+trade DBs with mode=ro/query_only; writes reports only
         # --- calibration bake-off + settlement backfill (2026-06-02, operator-invoked offline) ---
         "scripts/fit_settlement_sigma_floor.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over settlement_outcomes(VERIFIED); writes settlement_sigma_floor.json only; EMPIRICAL σ-floor offline fit (q1000 2026-06-05)
+        "scripts/fit_sigma_scale.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over forecast_posteriors ⋈ settlement_outcomes(VERIFIED); writes state/sigma_scale_fit.json only; MLE σ-scale (k) + uniform-mixture (w) offline fit (operator law 2026-06-12, docs/operations/c3_sigma_calibration_surface_2026-06-12.md)
+        "scripts/replay_exit_path_comparison.py",  # read_only_ro_uri: opens trades DB via file:...?mode=ro&immutable=1 uri; SELECT-only over position_current + position_events(MONITOR_REFRESHED/SETTLED); replays legacy-vs-canonical exit decisions per stored monitor refresh (HOLD_VALUE_EXIT_COSTS flag monkeypatched in-process); writes docs/evidence/exit_path_replay md only (Wave-2 item 3 flip verification 2026-06-12)
         "scripts/measure_wu_obs_latency.py",  # read_only_ro_uri: opens world+trades DBs via file:...?mode=ro uri; SELECT-only over observation_instants + settlement_day_observation_authority; writes config/wu_obs_latency.json + evidence md only (day0 first-principles 2026-06-10)
         "scripts/measure_wu_metar_divergence.py",  # read_only_ro_uri: opens world DB via file:...?mode=ro uri; SELECT-only over observation_instants; writes config/wu_metar_divergence.json + evidence md only (anomaly-threshold calibration 2026-06-10)
+        # --- 06/18Z cycle-phase offline qualification study (2026-06-11, operator-directed) ---
+        "scripts/cycle_phase_offline_study.py",  # offline study: 4x connect to its own SCRATCH db (state/cycle_phase_study*.db, created+owned by the script) + 1x trades DB via file:...?mode=ro uri (settlement truth reads only); never touches live forecasts/world DBs for write; report + scratch artifacts only
         "scripts/calibration_bakeoff.py",   # read_only: scores calibrators vs settlements VERIFIED; writes JSON/txt only
-        "scripts/calibration_bakeoff_v2.py",  # read_only: corrected bake-off (RAW on live-served vector, OOS-gated); writes JSON/txt only
         "scripts/backfill_settlement_outcomes_canonical_2026_06_02.py",  # RO dry-run default; RW settlement_outcomes only with --execute, atomic SAVEPOINT (zeus-forecasts.db)
         "scripts/backfill_settlement_unit_2026_06_03.py",  # operator_invoked: RO dry-run default; RW settlement_outcomes.settlement_unit only with --commit, atomic SAVEPOINT (zeus-forecasts.db, W2)
-        # --- U0R-Bayes walk-forward history seed (2026-06-08, operator-invoked offline) ---
-        "scripts/backfill_u0r_history_from_b0.py",  # operator_invoked: RW raw_model_forecasts (SHADOW_ONLY, training_allowed=0) only; INSERT OR IGNORE idempotent; never money-path; --db REQUIRED; B0 seed 2026-06-08
+        # --- BAYES_PRECISION_FUSION-Bayes walk-forward history seed (2026-06-08, operator-invoked offline) ---
+        "scripts/backfill_bayes_precision_fusion_history_from_b0.py",  # operator_invoked: RW raw_model_forecasts (SHADOW_ONLY, training_allowed=0) only; INSERT OR IGNORE idempotent; never money-path; --db REQUIRED; B0 seed 2026-06-08
         # --- read-only scripts: verified SELECT-only, named in PR #86 ---
         "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
         "scripts/audit_divergence_exit_counterfactual.py",  # read_only (PR #86)
@@ -693,6 +702,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- additional read-only / ro-URI scripts ---
         "scripts/audit_observation_instants.py",         # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
         "scripts/audit_observation_instants_v2.py",     # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
+        "scripts/audit_day0_extreme_undercapture.py",    # read_only_ro_uri: opens world+forecasts DBs via file:...?mode=ro uri; SELECT-only over observation_instants + settlement_outcomes; writes evidence md only (day0 undercapture audit 2026-06-12)
         "scripts/build_ens_residual_evidence.py",        # read_only_ro_uri (T2/T3 residual-evidence ledger; mode=ro + query_only, refuses canonical DBs, writes CSV only)
         "scripts/capture_before_fixture.py",             # read_only (query_only=ON, SELECT-only; Phase-0 before/after baseline capture, TRIBUNAL 2026-05-29)
         "scripts/score_raw_vs_sd3_bins.py",              # read_only_ro_uri (sd3 validation Test B; mode=ro + query_only, SELECT-only, writes CSV only)
@@ -725,6 +735,9 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/state_census.py",                      # read_only_ro_uri
         "scripts/topology_doctor_code_review_graph.py", # read_only_ro_uri
         "scripts/ws_poll_reaction_weekly.py",           # read_only_ro_uri
+        "scripts/probe_anchor_cap_overlap.py",          # read_only_ro_uri: opens zeus-forecasts.db + zeus_trades.db via file:...?mode=ro URI; SELECT-only over forecast_posteriors + executable_market_snapshots; writes docs/evidence/sigma_scale/ + /tmp/ only; anchor-cap vs sigma-scale overlap analysis (operator question 2026-06-12)
+        "scripts/probe_favorite_capture.py",            # read_only_ro_uri: opens zeus-forecasts.db + zeus_trades.db via file:...?mode=ro URI; SELECT-only over forecast_posteriors + executable_market_snapshots + venue_commands + settlement_outcomes; writes docs/evidence/favorite_capture/ + /tmp/ only; favorite-capture miss quantification (operator critique 2026-06-12)
+        "scripts/probe_lib.py",                         # read_only_ro_uri: shared probe helper (ro() opens any live DB mode=ro; iso_cutoff/guarded-watch encode the T-separator + lock-false-positive laws; session retrospective 2026-06-12)
         # --- repro_antibodies.py: mixed; all sites verified safe ---
         "scripts/repro_antibodies.py",                  # already_guarded + read_only + in_memory_only
         # --- K1 migration scripts: operator-mediated, not runtime daemon ---
@@ -753,7 +766,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/backfill_obs.py",                       # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_ogimet_metar.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_outcome_fact.py",                 # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/backfill_tigge_snapshot_p_raw_v2.py",      # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/backfill_tigge_snapshot_p_raw.py",      # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_wu_daily_all.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/cleanup_ghost_positions.py",               # already_guarded: writes under db_writer_lock(BULK)
         "scripts/fill_obs_dst_gaps.py",                  # already_guarded: writes under db_writer_lock(BULK) when not dry_run
@@ -843,6 +856,9 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/purge_partial_fsr_events.py",  # operator_invoked: drops/restores no_delete+no_update triggers; DELETE PARTIAL FSR rows only; ran once 2026-05-31 (941 rows); idempotent
         # --- ThePath P1 (2026-06-07): activate the Day0 nowcast lane / start the obs-timing clock ---
         "scripts/persist_day0_horizon_identity_fit.py",  # operator_invoked + already_guarded: the LIVE write goes through write_platt_fit -> get_forecasts_connection(LIVE) under db_writer_lock(LIVE); the bare sqlite3.connect() sites are ONLY the read-back/--verify (file:...?mode=ro uri, SELECT-only) and the --dry-run TEMP copy (throwaway file, never a canonical DB); persists a documented CONSERVATIVE/IDENTITY HorizonPlattFit (zero claimed skill)
+        # --- e2e fill verification script (2026-06-10) ---
+        "scripts/verify_fill_e2e.py",  # read_only_ro_uri: opens trades+world DBs with mode=ro uri; SELECT-only; operator diagnostic; never daemon path
+        "scripts/verify_pipeline_liveness.py",  # read_only_ro_uri: data-supply e2e liveness check (forecasts+world, mode=ro, SELECT-only); antibody for the 2026-06-10 10h download dead-zone incident
     }
 )
 

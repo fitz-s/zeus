@@ -1,0 +1,364 @@
+# Created: 2026-06-12
+# Last reused or audited: 2026-06-12
+# Authority basis: operator stagnation root-cause 2026-06-12 ("continuous redecision没有作用中") +
+#   /tmp/continuous_redecision_resurrection.md. RELATIONSHIP antibodies for the P1 deadlock-free
+#   belief write, the P2 cheap screen, §4.5 rest management, and the EDLI_REDECISION_PENDING consume
+#   path (forecast-lane acceptance under all scopes + the strategy classifier).
+"""Antibodies for the continuous re-decision resurrection (deadlock-free P1 + P2 + §4.5)."""
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+import src.events.continuous_redecision as cr
+
+
+def _mem_world() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    cr.ensure_belief_cache_schema(conn)
+    return conn
+
+
+def _mem_trade() -> sqlite3.Connection:
+    """A minimal executable_market_snapshots table (the columns the price reader needs)."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            orderbook_top_bid TEXT,
+            orderbook_top_ask TEXT,
+            freshness_deadline TEXT,
+            captured_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def _cache(conn, *, family_id="hyp|live|Wuhan|2026-06-12|high|disc", p_yes=0.99,
+           snapshot_id="snap1", cond="0xc30", recorded_at="2026-06-12T00:00:00+00:00"):
+    cr.cache_belief(
+        conn,
+        family_id=family_id, city="Wuhan", target_date="2026-06-12",
+        snapshot_id=snapshot_id, calibrator_model_hash="identity",
+        bin_labels=["b29", "b30"], p_posterior_vec=[0.001, p_yes],
+        recorded_at=recorded_at, condition_ids=["0xc29", cond],
+    )
+
+
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+# ANTIBODY 1 — DEADLOCK REGRESSION: the belief write must NOT open a second connection / commit.
+# This pins the 2026-05-31 self-deadlock (persist_belief_live opened get_world_connection() and
+# committed WHILE the reactor held the world WAL write lock) as STRUCTURALLY IMPOSSIBLE: the kernel
+# path must write through the GIVEN conn with no sqlite3.connect() and no commit() of its own.
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+class _CommitCountingConn:
+    """Wrap a real sqlite3 connection, counting commit() calls and forbidding new connections.
+
+    sqlite3.Connection.commit is a read-only C attribute (cannot be monkeypatched directly), so we
+    proxy. A second sqlite3.connect() inside the window is the deadlock — pinned by the connect
+    patch in the test."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.commit_count = 0
+
+    def commit(self):
+        self.commit_count += 1
+        return self._conn.commit()
+
+    def execute(self, *a, **k):
+        return self._conn.execute(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_belief_write_uses_given_conn_no_second_connection():
+    raw = _mem_world()
+    proxy = _CommitCountingConn(raw)
+    # Simulate the reactor's open write transaction: BEGIN, then write the belief INSIDE it.
+    raw.execute("BEGIN IMMEDIATE")
+
+    # Any attempt to open a SECOND connection inside the window is the 2026-05-31 deadlock category.
+    real_connect = sqlite3.connect
+
+    def _boom(*a, **k):  # noqa: ANN002, ANN003
+        raise AssertionError("write_belief_row opened a SECOND sqlite connection — deadlock category")
+
+    sqlite3.connect = _boom  # type: ignore[assignment]
+    try:
+        cr.write_belief_row(
+            proxy,
+            family_id="hyp|live|Wuhan|2026-06-12|high|disc", city="Wuhan", target_date="2026-06-12",
+            snapshot_id="snap1", calibrator_model_hash="identity",
+            bin_labels=["b29", "b30"], p_posterior_vec=[0.1, 0.9],
+            recorded_at="2026-06-12T00:00:00+00:00", condition_ids=["0xc29", "0xc30"],
+        )
+    finally:
+        sqlite3.connect = real_connect  # type: ignore[assignment]
+
+    assert proxy.commit_count == 0, "write_belief_row must NOT commit — the reactor's window owns the commit"
+    # The row is visible on THIS conn (same txn) before any commit — the in-transaction write.
+    row = raw.execute(
+        "SELECT decision_id FROM probability_trace_fact WHERE decision_id LIKE 'edli_belief:%'"
+    ).fetchone()
+    assert row is not None, "belief row must be present in the open transaction"
+    raw.execute("ROLLBACK")
+
+
+def test_persist_belief_live_removed():
+    """The deadlock-causing entry point must be GONE (replaced by write_belief_row)."""
+    assert not hasattr(cr, "persist_belief_live"), (
+        "persist_belief_live (second-connection write) must not be reintroduced"
+    )
+
+
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+# ANTIBODY 2 — SCREEN FIRES on an edge-appeared fixture (price drops → positive edge → enqueue).
+# Reads cached belief (world) × freshest executable price (trade) end-to-end.
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+def test_entry_screen_fires_on_edge_appeared():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.99, cond="0xc30")
+    # Fresh executable snapshot: YES ask 0.70 → edge = 0.99 - 0.70 - fee ≈ +0.28.
+    trade.execute(
+        "INSERT INTO executable_market_snapshots "
+        "(snapshot_id, condition_id, selected_outcome_token_id, orderbook_top_bid, "
+        "orderbook_top_ask, freshness_deadline, captured_at) VALUES "
+        "('s1','0xc30','tok','0.30','0.70','2026-06-12T02:00:00+00:00','2026-06-12T00:30:00+00:00')"
+    )
+    trade.commit()
+    fired = cr.screen_entry_redecisions(
+        world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
+    )
+    keys = {(e.family_id, e.bin_label, e.direction) for e in fired}
+    assert ("hyp|live|Wuhan|2026-06-12|high|disc", "b30", "buy_yes") in keys
+
+
+def test_entry_screen_silent_when_no_edge():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.55, cond="0xc30")
+    # YES ask 0.72 → edge = 0.55 - 0.72 - fee < 0 → no enqueue.
+    trade.execute(
+        "INSERT INTO executable_market_snapshots "
+        "(snapshot_id, condition_id, selected_outcome_token_id, orderbook_top_bid, "
+        "orderbook_top_ask, freshness_deadline, captured_at) VALUES "
+        "('s1','0xc30','tok','0.20','0.72','2026-06-12T02:00:00+00:00','2026-06-12T00:30:00+00:00')"
+    )
+    trade.commit()
+    fired = cr.screen_entry_redecisions(
+        world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
+    )
+    assert all(e.direction != "buy_yes" or e.family_id != "hyp|live|Wuhan|2026-06-12|high|disc"
+               for e in fired)
+
+
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+# ANTIBODY 3 — REST PULL fires on belief-decay (NEW evidence), HOLDS on same-snapshot wiggle.
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+def test_rest_pull_fires_on_belief_decay_new_evidence():
+    world = _mem_world()
+    trade = _mem_trade()
+    # Rest was priced on snap1 (belief YES=0.90). New evidence snap2 decays belief to 0.60 (Δ0.30).
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30", recorded_at="2026-06-12T00:00:00+00:00")
+    _cache(world, p_yes=0.60, snapshot_id="snap2", cond="0xc30", recorded_at="2026-06-12T12:00:00+00:00")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=0.0,
+    )
+    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+    assert len(pulls) == 1
+    _rest, decision = pulls[0]
+    assert decision.reason == "BELIEF_WORSENING"
+
+
+def test_rest_pull_holds_on_same_snapshot_price_wiggle():
+    world = _mem_world()
+    trade = _mem_trade()
+    # Only the rest's OWN snapshot is cached (no new evidence). Belief unchanged → HOLD.
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=0.0,  # fresh quote, no stale pull
+    )
+    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+    assert pulls == [], "a bare wiggle on the same snapshot must never pull a rest (anti-twitch)"
+
+
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+# ANTIBODY 4 — FEE is the canonical price-dependent model, not the flat 1¢ magic number.
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+def test_fee_is_price_dependent_polymarket_model():
+    from src.contracts.execution_price import polymarket_fee
+
+    assert cr._fee_at(0.5) == pytest.approx(polymarket_fee(0.5))
+    assert cr._fee_at(0.9) == pytest.approx(polymarket_fee(0.9))
+    # Conservative fail-soft for a degenerate price (outside (0,1)) → parabola max at 0.5.
+    assert cr._fee_at(1.5) == pytest.approx(polymarket_fee(0.5))
+
+
+def test_screen_deltas_have_documented_tick_basis():
+    assert cr.IMPROVE_DELTA == pytest.approx(2.0 * cr.TICK_SIZE)
+    assert cr.BELIEF_REPRICE_DELTA == pytest.approx(3.0 * cr.TICK_SIZE)
+    assert cr.BELIEF_REPRICE_DELTA > cr.IMPROVE_DELTA  # must exceed entry friction
+
+
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+# ANTIBODY 5 — SCOPE GATE + classifier accept EDLI_REDECISION_PENDING as forecast-lane under ALL
+# scopes (deliberate extension). A redecision must classify to the forecast strategy, never raise.
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+def test_redecision_type_is_in_forecast_decision_set():
+    import src.engine.event_reactor_adapter as adapter
+    import src.events.reactor as reactor
+    import src.events.event_store as store
+
+    assert cr.REDECISION_EVENT_TYPE in adapter._FORECAST_DECISION_EVENT_TYPES
+    assert cr.REDECISION_EVENT_TYPE in reactor._FORECAST_DECISION_EVENT_TYPES
+    assert cr.REDECISION_EVENT_TYPE in store._FORECAST_DECISION_EVENT_TYPES
+    # The forecast-decision set is the scope gate's forecast-lane set verbatim.
+    assert adapter._FORECAST_DECISION_EVENT_TYPES == frozenset(
+        {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}
+    )
+
+
+def test_strategy_classifier_accepts_redecision_type():
+    """The classifier RAISES on unknown event types (fail-closed). EDLI_REDECISION_PENDING must
+    resolve to the forecast strategy, exactly like FORECAST_SNAPSHOT_READY, never raise."""
+    from src.engine.event_reactor_adapter import _event_bound_strategy_key
+
+    fsr = _event_bound_strategy_key(
+        event_type="FORECAST_SNAPSHOT_READY", direction="buy_yes", metric="high"
+    )
+    redecision = _event_bound_strategy_key(
+        event_type="EDLI_REDECISION_PENDING", direction="buy_yes", metric="high"
+    )
+    assert redecision == fsr, "a redecision must classify to the SAME forecast strategy as an FSR"
+
+
+def test_timeliness_floor_applies_to_redecision_type():
+    """A strictly-past EDLI_REDECISION_PENDING must be filtered by the same timeliness floor as an
+    FSR — else a price-driven redecision could re-fire on an already-settled market."""
+    import src.events.event_store as store
+
+    # The forecast-decision set is what _is_timely branches on (not == FSR).
+    assert "EDLI_REDECISION_PENDING" in store._FORECAST_DECISION_EVENT_TYPES
+
+
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+# ANTIBODY 6 — END-TO-END CONSUME: an EDLI_REDECISION_PENDING event is consumed by the reactor and
+# routed through the forecast decision path (submit called, processed — NOT rejected as unknown).
+# The reactor also persists the receipt's belief_payload through its OWN conn (deadlock-free P1).
+# ───────────────────────────────────────────────────────────────────────────────────────────────
+def _redecision_event(*, event_type: str):
+    from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
+
+    payload = ForecastSnapshotReadyPayload(
+        city="Chicago", target_date="2026-05-24", metric="high",
+        source_id="opendata", source_run_id="run-1", cycle="00", track="live",
+        snapshot_id="snap-1", snapshot_hash="hash-1",
+        captured_at="2026-05-24T18:00:00+00:00", available_at="2026-05-24T18:01:00+00:00",
+        required_fields_present=True, required_steps_present=True, member_count=51,
+        min_members_floor=40, completeness_status="COMPLETE", required_steps=[0],
+        observed_steps=[0], expected_members=51, source_run_status="SUCCESS",
+        source_run_completeness_status="COMPLETE", coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
+    )
+    return make_opportunity_event(
+        event_type=event_type,
+        entity_key="Chicago|2026-05-24|high|run-1",
+        source="edli_redecision:cycle-x",
+        observed_at="2026-05-24T18:00:00+00:00",
+        available_at="2026-05-24T18:01:00+00:00",
+        received_at="2026-05-24T18:02:00+00:00",
+        payload=payload,
+        causal_snapshot_id="snap-1",
+    )
+
+
+def test_redecision_event_consumed_and_belief_persisted():
+    import json
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from src.events.event_store import EventStore
+    from src.events.reactor import (
+        EventSubmissionReceipt,
+        OpportunityEventReactor,
+        ReactorConfig,
+    )
+    from src.state.db import init_schema
+    from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    store = EventStore(conn)
+    event = _redecision_event(event_type="EDLI_REDECISION_PENDING")
+    store.insert_or_ignore(event)
+
+    submitted: list[str] = []
+
+    def _submit(ev, _dt):
+        submitted.append(ev.event_id)
+        payload = json.loads(ev.payload_json)
+        receipt = EventSubmissionReceipt(
+            submitted=False, proof_accepted=True, event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city=payload.get("city"), target_date=payload.get("target_date"),
+            metric=payload.get("metric"), condition_id="condition-1", token_id="yes-1",
+            executable_snapshot_id="snapshot-exec-1", family_id="family-1",
+            trade_score_positive=True, fdr_pass=True, fdr_family_id="family-1",
+            fdr_hypothesis_count=2, kelly_pass=True,
+            kelly_execution_price_type="ExecutionPrice", kelly_price_fee_deducted=True,
+            kelly_size_usd=1.0, kelly_cost_basis_id="cost-1", kelly_decision_id="kelly-1",
+            risk_decision_id="risk-1", final_intent_id="intent-1",
+            # The captured belief the adapter would attach — the reactor must persist it.
+            belief_payload={
+                "family_id": "hyp|live|Chicago|2026-05-24|high|d", "city": "Chicago",
+                "target_date": "2026-05-24", "snapshot_id": "snap-1",
+                "calibrator_model_hash": "identity", "bin_labels": ["b73", "b74"],
+                "p_posterior_vec": [0.4, 0.6], "condition_ids": ["0xa", "0xb"],
+            },
+        )
+        return replace(
+            receipt,
+            decision_proof_bundle=build_test_no_submit_proof_bundle(ev, receipt, decision_time=_dt),
+        )
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(reactor_mode="live_no_submit"),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    result = reactor.process_pending(
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    )
+
+    # The redecision event reached the SUBMIT path (was NOT fail-closed as an unknown type).
+    assert submitted == [event.event_id], "EDLI_REDECISION_PENDING must reach the forecast decision path"
+    assert result.dead_lettered == 0
+    # P1: the belief was persisted through the reactor's OWN conn (deadlock-free), now queryable.
+    belief_rows = conn.execute(
+        "SELECT decision_id FROM probability_trace_fact WHERE decision_id LIKE 'edli_belief:%'"
+    ).fetchall()
+    assert len(belief_rows) == 1, "the reactor must persist the receipt belief_payload (P1)"
+    assert "hyp|live|Chicago|2026-05-24|high|d" in belief_rows[0][0]

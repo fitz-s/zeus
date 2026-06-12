@@ -298,8 +298,15 @@ def _replacement_q_lcb_for_candidate(
     proof: Any,
     *,
     replacement_bundle: object | None,
-    cap_to_baseline: bool = True,
 ) -> float:
+    # Wave-2 item 1 (2026-06-12): SINGLE q AUTHORITY. The replacement chain owns the live
+    # q_lcb; the legacy baseline LCB no longer CAPS it. When a replacement q_lcb exists for
+    # the candidate bin it is used directly (uncapped). The baseline is retained ONLY as an
+    # honest fail-soft default: when there is no replacement data for the bin (bundle absent,
+    # no bin binding, no q_lcb entry) the candidate falls back to baseline_q_lcb — that is a
+    # legacy strategy genuinely running on baseline q, not a cap on the replacement value.
+    # The SHADOW_VETO down-clamp (veto can only lower q_lcb, never raise) stays downstream as
+    # its own honest gate.
     baseline_q_lcb = float(getattr(proof, "q_lcb_5pct"))
     if replacement_bundle is None:
         return baseline_q_lcb
@@ -327,10 +334,7 @@ def _replacement_q_lcb_for_candidate(
         raw = q_lcb.get(bin_id)
     if raw is None:
         return baseline_q_lcb
-    replacement_q_lcb = min(max(float(raw), 0.0), 1.0)
-    if cap_to_baseline:
-        return min(replacement_q_lcb, baseline_q_lcb)
-    return replacement_q_lcb
+    return min(max(float(raw), 0.0), 1.0)
 
 
 def _replacement_q_posterior_for_candidate(
@@ -369,7 +373,6 @@ def _candidate_view_from_proof(
     decision_time: datetime,
     *,
     replacement_bundle: object | None = None,
-    cap_replacement_q_lcb_to_baseline: bool = True,
 ) -> ReplacementForecastCandidateView:
     candidate = getattr(proof, "candidate")
     bin_id = _candidate_bin_id(proof, replacement_bundle=replacement_bundle)
@@ -389,7 +392,6 @@ def _candidate_view_from_proof(
         candidate_q_lcb=_replacement_q_lcb_for_candidate(
             proof,
             replacement_bundle=replacement_bundle,
-            cap_to_baseline=cap_replacement_q_lcb_to_baseline,
         ),
         candidate_kelly_fraction=0.0,
         market_snapshot_id=str(getattr(proof, "executable_snapshot_id", None) or ""),
@@ -579,11 +581,13 @@ def build_replacement_forecast_event_hook(
                 reason_code=reason_code,
             )
         replacement_bundle = bundle_result.bundle if bundle_result is not None and bundle_result.ok else None
+        # Wave-2 item 1: single q authority — the replacement q_lcb is used directly for
+        # every policy status (no baseline cap). The SHADOW_VETO down-clamp remains downstream
+        # in the veto guardrail (it can only lower q_lcb, never raise it).
         candidate_view = _candidate_view_from_proof(
             proof,
             decision_time,
             replacement_bundle=replacement_bundle,
-            cap_replacement_q_lcb_to_baseline=policy.status != "LIVE_AUTHORITY",
         )
         hook_result = apply_replacement_forecast_reactor_hook(
             policy=policy,

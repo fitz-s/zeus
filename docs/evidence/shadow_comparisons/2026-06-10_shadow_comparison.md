@@ -1,6 +1,6 @@
 # Shadow-vs-Live Comparison — 2026-06-10
 
-Generated: 2026-06-10T02:57:55.556562+00:00
+Generated: 2026-06-10T09:20:00.097021+00:00
 
 One standing comparator (K<<N). Each candidate's shadow q is contrasted
 against the live q over VERIFIED-settled cohort cells, graded through the

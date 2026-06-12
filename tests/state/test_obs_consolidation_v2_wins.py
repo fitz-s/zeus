@@ -13,7 +13,7 @@ INVARIANT that spans the live-migration and the settlement-read boundary:
     When a legacy (DST-WRONG) row and a v2 (DST-correct) row share the same
     natural key (city, source, utc_timestamp), the consolidation migration MUST
     keep the v2 value — and the downstream settlement reader
-    (day0_observation_reader.read_day0_observed_extrema_v2) MUST then return the
+    (day0_observation_reader.read_day0_observed_extrema) MUST then return the
     v2 (correct) running_max, NOT the legacy (wrong) one.
 
 Why this category of bug matters (Fitz #4 — data provenance over code correctness):
@@ -181,9 +181,9 @@ def test_settlement_replay_reads_v2_running_max(migrated_conn: sqlite3.Connectio
     This closes the relationship across the migration→reader boundary: the value
     that survives the merge is exactly the value settlement would read.
     """
-    from src.data.day0_observation_reader import read_day0_observed_extrema_v2
+    from src.data.day0_observation_reader import read_day0_observed_extrema
 
-    result = read_day0_observed_extrema_v2(
+    result = read_day0_observed_extrema(
         migrated_conn,
         city=_CITY,
         target_date=_TARGET_DATE,

@@ -1,39 +1,61 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-05; last_reviewed=2026-06-05; last_reused=2026-06-05
-# Purpose: Fit the EMPIRICAL settlement σ-floor table from VERIFIED settlement_outcomes.
-# Reuse: inspect architecture/script_manifest.yaml and review the generated JSON before enabling.
-# Authority basis: q=1.000 investigation 2026-06-05; EMPIRICAL settlement σ-floor, iron rule 5
-#   (overconfidence = ruin). The EMOS σ-model σ = √exp(c + d·logS² + e·lead) is SYSTEMICALLY
-#   under-dispersed (median σ_emos/σ_settled = 0.49 across 66% of EMOS-served cells). The correct
-#   dispersion floor is the EMPIRICAL settlement std per (city, season, metric) — but the NAÏVE raw
-#   same-season std OVER-widens by conflating the intra-season warming trend, so we use the
-#   DETRENDED residual std of a trailing window. Output feeds src.calibration.emos.settlement_sigma_floor
-#   which floors σ universally at k·σ_settled (k=0.8): max() only WIDENS σ → lower q_lcb → fewer
-#   overconfident bets; can NEVER tighten or create a wrong-side trade.
+# Lifecycle: created=2026-06-05; last_reviewed=2026-06-10; last_reused=2026-06-10
+# Purpose: Fit the EMPIRICAL settlement σ-floor table from FORECAST RESIDUALS (fused center vs
+#   VERIFIED settlement), NOT from the climatological std of settled values.
+# Authority basis: floor-recalibration 2026-06-10 (/tmp/floor_recal_report.md; /tmp/deep_verify_report.md
+#   Verification A); supersedes the 2026-06-05 detrended-settled-value method.
 #
-# READ-ONLY over state/zeus-forecasts.db.settlement_outcomes (authority='VERIFIED' only — Fitz
-# constraint #4: UNVERIFIED/QUARANTINED data does not enter the computation chain). Writes
-# state/settlement_sigma_floor.json. Run as new settlements arrive (recommend daily, post-settlement).
-"""Fit the EMPIRICAL settlement σ-floor table.
+# WHY THE REWRITE (Fitz #4 — data provenance category error):
+#   The floor exists as an ANTIBODY against fused-σ OVERCONFIDENCE: the predictive sigma claims a
+#   q_lcb tighter than realized coverage warrants. The CORRECT lower bound on a residual-calibrated
+#   predictive sigma is therefore the EMPIRICAL DISPERSION OF THE FORECAST RESIDUAL
+#   r = (settled_value − fused_center) — how far the center actually lands from truth — NOT the
+#   climatological day-to-day spread of the settled values. The OLD method computed the detrended
+#   std of SETTLED VALUES (e.g. Paris|JJA|high 5.407°C ×0.8 = 4.33°C effective), ~2.9× the empirical
+#   1.2-1.5°C forecast residual, inflating the floored predictive sigma and (a) suppressing genuine
+#   interior edges everywhere (no-trade contributor) and (b) inflating open-ended catch-all bins (the
+#   Paris ≥26 wrong trade; separately neutralised by the catch-all topology invariant a8a1c80536).
+#   Flooring a residual-calibrated sigma with a settled-value std is a CATEGORY ERROR — the floor's
+#   source semantics ≠ the quantity it floors.
+#
+# METHOD (the most correct recalibration):
+#   1. residual r = (settled_c − fused_center_c) for every posterior whose target_date settled to a
+#      VERIFIED outcome, NO-LEAK: source_cycle_time strictly before target_date (lead ≥ 1 day).
+#      Source: forecast_posteriors.provenance_json.anchor_value_c ⋈ settlement_outcomes(VERIFIED).
+#   2. estimator = MAD-σ ABOUT ZERO = 1.4826 · median(|r|). Robust to large-miss outliers (median,
+#      not squared) AND keeps any systematic bias (measured about ZERO, not about the residual mean)
+#      — the floor must bound TOTAL miss including bias, since an overconfident σ that ignores a known
+#      cold/warm bias is exactly the failure it insures against. The plain std is outlier-inflated; a
+#      trimmed std discards the very large-miss tail the floor exists to insure against.
+#   3. cohort fallback ladder (data is thin: per city×metric n≈3-6 << robust threshold):
+#        TIER 1 city×metric  if n ≥ MIN_COHORT_N → city×metric residual MAD-σ
+#        TIER 2 metric pool  else if metric-pool n ≥ MIN_COHORT_N → all-city same-metric MAD-σ
+#        TIER 3 global pool   else → all-city all-metric MAD-σ
+#      Season is carried in the cell KEY only (the consumer keys city|SEASON|metric); there is < 1
+#      season of fused-residual history so season-specific residual pooling is not yet supportable
+#      (documented future refinement once ≥ 1 settled year of residuals exists).
+#   4. lower bound: max(σ_floor_raw, ABSOLUTE_FLOOR_C=1.0) — the chain law's 1.0°C absolute floor STAYS.
+#   5. k_default = 1.0: the residual MAD-σ IS the calibrated floor (no haircut justified — we are no
+#      longer shrinking an over-wide climatological std). The consumer formula k·sigma_floor_c is
+#      UNCHANGED; only the stored value's meaning and k change. sigma_floor_c stored = the floor itself.
+#
+# READ-ONLY over state/zeus-forecasts.db (forecast_posteriors + settlement_outcomes, authority=VERIFIED
+# only — Fitz #4: UNVERIFIED/QUARANTINED do not enter the chain). Writes state/settlement_sigma_floor.json
+# via the script's sanctioned atomic-replace path. Run as new settlements arrive (recommend daily).
+"""Fit the EMPIRICAL settlement σ-floor table from FORECAST RESIDUALS.
 
-Per (city, season, metric):
-  - season key = NH month-season (DJF/MAM/JJA/SON) via the same month-only convention as
-    src.calibration.emos.emos_season / fit_emos_calibration.season — NOT hemisphere-aware (a
-    lat-flipped season would key the OPPOSITE-season cell for SH cities).
-  - σ_settled_floor = the DETRENDED std of settled values in a trailing 45-day CROSS-SEASON window
-    per (city, metric): subtract a linear-in-day fit, take the residual std. Detrending removes the
-    intra-window warming/cooling trend that would otherwise inflate the std (the investigation proved
-    the raw same-season std over-widens).
-  - For a (city, season, metric) with ≥ MIN_IN_SEASON in-season settled days, use the in-season
-    DETRENDED std; else fall back to the 45-day cross-season detrended std (validated by the
-    investigation). Require ≥ MIN_N points overall, else OMIT the cell (no floor → caller keeps σ).
-
-All values are stored in °C.
+Output: state/settlement_sigma_floor.json
+  {"_meta": {...}, "cells": {"City|SEASON|metric": {"sigma_floor_c": float, "n": int,
+   "cohort_tier": "city_metric|metric|global", "estimator": "mad_sigma_about_zero",
+   "window": "<residual target_date span>", "source_query_hash": "<sha256[:16]>"}}}
+All values °C. The consumer src.calibration.emos.settlement_sigma_floor floors σ universally at
+σ_eff = max(model_σ, k_default·sigma_floor_c); with k_default=1.0 the stored value IS the floor.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import os
 import sqlite3
@@ -45,11 +67,13 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FCST_DEFAULT = os.path.join(REPO, "state", "zeus-forecasts.db")
 OUT_DEFAULT = os.path.join(REPO, "state", "settlement_sigma_floor.json")
 
-# Window + thresholds (investigation 2026-06-05).
-WINDOW_DAYS_DEFAULT = 45          # trailing cross-season window for the detrended-std fallback
-MIN_IN_SEASON_DEFAULT = 8         # ≥ this many in-season days → use the in-season detrended std
-MIN_N_DEFAULT = 10                # overall minimum sample → else OMIT the cell (no floor)
-K_DEFAULT = 0.8                   # σ_eff = max(model_σ, k·σ_settled)
+# Recalibration thresholds (floor-recalibration 2026-06-10).
+MIN_COHORT_N_DEFAULT = 20         # ≥ this many residuals in a cohort → use that cohort's MAD-σ
+MIN_GLOBAL_N_DEFAULT = 10         # overall minimum residual sample → else REFUSE (no table)
+ABSOLUTE_FLOOR_C = 1.0            # chain law: predictive σ floor never below 1.0°C
+K_DEFAULT = 1.0                   # residual MAD-σ IS the floor (no haircut); consumer formula unchanged
+MAD_TO_SIGMA = 1.4826            # MAD → σ scale for a Normal (1/Φ⁻¹(0.75))
+SEASONS = ("DJF", "MAM", "JJA", "SON")
 
 
 def to_c(v, u):
@@ -73,14 +97,12 @@ def season(mm) -> str:
 def detrended_std(days: "np.ndarray", values: "np.ndarray") -> float:
     """Residual std of ``values`` after removing a LINEAR-in-day trend.
 
-    A linearly-trending series has a large RAW std (driven by the trend) but a small RESIDUAL std
-    (the day-to-day noise about the trend). The σ-floor must be the residual std: the trend is a
-    deterministic seasonal march, NOT forecast uncertainty, so it must not inflate the dispersion
-    floor (the investigation proved the raw same-season std over-widens).
-
-    Fits ``value ≈ a + b·day`` by least squares, returns the two-parameter residual standard error
-    (sqrt(SSE / (n - 2))). For < 3 points or a degenerate design (all days equal) the trend is
-    unidentifiable → falls back to the raw std.
+    RETAINED UTILITY (no longer on the floor path): a linearly-trending series has a large RAW std
+    (driven by the trend) but a small RESIDUAL std (day-to-day noise about the trend). Fits
+    ``value ≈ a + b·day`` by least squares, returns the two-parameter residual standard error
+    sqrt(SSE/(n-2)). For < 3 points or a degenerate design falls back to the raw std. Kept because
+    downstream diagnostics + the legacy detrend relationship test still import it; the floor itself
+    now derives from forecast residuals (mad_sigma_about_zero), not the detrended settled-value std.
     """
     d = np.asarray(days, dtype=float)
     v = np.asarray(values, dtype=float)
@@ -88,165 +110,209 @@ def detrended_std(days: "np.ndarray", values: "np.ndarray") -> float:
     if n < 2:
         return 0.0
     if n < 3 or float(np.ptp(d)) == 0.0:
-        # cannot identify a slope with <3 points or zero day-spread → raw std (best available)
         return float(np.std(v, ddof=1))
-    # least-squares linear fit value ~ a + b*day
     A = np.vstack([np.ones_like(d), d]).T
     coef, *_ = np.linalg.lstsq(A, v, rcond=None)
     resid = v - A @ coef
-    # ddof=2: two parameters (intercept, slope) are consumed by the fit, so the residual std
-    # uses (n-2) degrees of freedom: sqrt(SSE / (n-2)).
     return float(np.sqrt(float(np.sum(resid ** 2)) / max(n - 2, 1)))
 
 
-def _load_settlements(fcst_path: str):
-    """Return {(city, metric): [(date, value_c), ...]} for VERIFIED settlements only, sorted by date.
+def mad_sigma_about_zero(residuals: "np.ndarray") -> float:
+    """Robust σ estimate from forecast residuals: 1.4826 · median(|r|), centred at ZERO.
 
-    Fitz constraint #4: only authority='VERIFIED' rows enter the chain; UNVERIFIED/QUARANTINED are
-    excluded. Values are converted to °C via the row's settlement_unit.
+    THE floor estimator. Median-absolute (not squared) → not blown out by 1-2 large misses; centred
+    at ZERO (not the residual mean) so a systematic forecast bias is INCLUDED in the dispersion the
+    floor bounds (an overconfident σ that ignores a known cold/warm bias is exactly the overconfidence
+    the floor insures against). Returns 0.0 for an empty input.
+    """
+    r = np.asarray(residuals, dtype=float)
+    r = r[np.isfinite(r)]
+    if r.size == 0:
+        return 0.0
+    return float(MAD_TO_SIGMA * float(np.median(np.abs(r))))
+
+
+# Canonical no-leak residual-join SQL. Hashed into provenance so a future session can prove the
+# table's lineage. NO-LEAK: source_cycle_time strictly before target_date (the forecast could not
+# have seen the settlement). VERIFIED settlements only (Fitz #4).
+_RESIDUAL_QUERY = (
+    "SELECT fp.city, fp.temperature_metric, fp.target_date, "
+    "       json_extract(fp.provenance_json,'$.anchor_value_c') AS center, "
+    "       so.settlement_value, so.settlement_unit, fp.source_cycle_time "
+    "FROM forecast_posteriors fp "
+    "JOIN settlement_outcomes so "
+    "  ON so.city=fp.city AND so.target_date=fp.target_date "
+    " AND so.temperature_metric=fp.temperature_metric "
+    "WHERE json_extract(fp.provenance_json,'$.anchor_value_c') IS NOT NULL "
+    "  AND so.authority='VERIFIED' AND so.settlement_value IS NOT NULL"
+)
+
+
+def _load_residuals(fcst_path: str, *, asof: _dt.date):
+    """Return [(city, metric, target_date, residual_c)] for no-leak VERIFIED residual pairs.
+
+    residual = settled_c − fused_center_c. NO-LEAK guard: keep only pairs whose source_cycle_time
+    DATE is strictly before the target_date (lead ≥ 1 day) AND whose target_date ≤ asof (no future
+    settlements). Settlement value converted to °C via settlement_unit (Fitz #4: VERIFIED only).
     """
     con = sqlite3.connect(f"file:{fcst_path}?mode=ro", uri=True)
     try:
         cur = con.cursor()
-        cur.execute(
-            "SELECT city, target_date, temperature_metric, settlement_value, settlement_unit "
-            "FROM settlement_outcomes "
-            "WHERE authority = 'VERIFIED' AND settlement_value IS NOT NULL"
-        )
+        cur.execute(_RESIDUAL_QUERY)
         rows = cur.fetchall()
     finally:
         con.close()
-    out: dict = defaultdict(list)
-    for city, tdate, metric, val, unit in rows:
-        if not city or not tdate or not metric:
-            continue
-        vc = to_c(val, unit)
-        if vc is None or not np.isfinite(vc):
+    out: list = []
+    for city, metric, tdate, center, sval, sunit, sct in rows:
+        if not city or not tdate or not metric or center is None:
             continue
         try:
-            d = _dt.date.fromisoformat(str(tdate)[:10])
-        except ValueError:
+            td = _dt.date.fromisoformat(str(tdate)[:10])
+            cyc = _dt.date.fromisoformat(str(sct)[:10])
+        except (ValueError, TypeError):
             continue
-        out[(city, str(metric).lower())].append((d, float(vc)))
-    for key in out:
-        out[key].sort(key=lambda t: t[0])
+        if cyc >= td:            # NO-LEAK: forecast cycle must predate the target date
+            continue
+        if td > asof:            # no future settlements relative to as-of
+            continue
+        # UNIT DISCIPLINE: the fused center is provenance.anchor_value_c — ALREADY °C by contract
+        # (named *_c). ONLY the settlement_value carries settlement_unit and must be converted. A
+        # blanket to_c() on the center would F→C-convert an already-°C value for F-settled cities
+        # (159 C vs 26 F rows in the live join) and manufacture a spurious ~50°C residual.
+        c = float(center)
+        s = to_c(float(sval), sunit)
+        if s is None or not (np.isfinite(c) and np.isfinite(s)):
+            continue
+        out.append((str(city), str(metric).lower(), td, float(s) - float(c)))
     return out
 
 
 def fit_floors(
-    settlements: dict,
+    residuals: list,
     *,
-    asof: _dt.date,
-    window_days: int = WINDOW_DAYS_DEFAULT,
-    min_in_season: int = MIN_IN_SEASON_DEFAULT,
-    min_n: int = MIN_N_DEFAULT,
+    min_cohort_n: int = MIN_COHORT_N_DEFAULT,
 ) -> dict:
-    """Compute {cell_key: {sigma_floor_c, n, window}} for every (city, season, metric) cell.
+    """Compute {City|SEASON|metric: cell} from forecast residuals via the cohort fallback ladder.
 
-    For each (city, metric):
-      - Take the trailing ``window_days`` cross-season window ending at ``asof``.
-      - The CROSS-SEASON detrended std is the fallback floor for every season of that (city, metric).
-      - For each season with ≥ ``min_in_season`` in-window in-season days, prefer the IN-SEASON
-        detrended std. A season with < ``min_n`` points (in-season or via fallback) is OMITTED.
+    Cells are emitted for EVERY (city, metric) observed × all four seasons (the consumer keys by the
+    target_date's season, so all four must resolve). Each cell's σ_floor_raw is resolved:
+      TIER 1 city×metric  if that cohort's n ≥ min_cohort_n
+      TIER 2 metric pool  else if the all-city same-metric pool n ≥ min_cohort_n
+      TIER 3 global pool   else
+    Then max(σ_floor_raw, ABSOLUTE_FLOOR_C). The residual cohort is season-agnostic (< 1 season of
+    history); season lives in the key only.
     """
+    by_city_metric: dict = defaultdict(list)
+    by_metric: dict = defaultdict(list)
+    global_pool: list = []
+    td_min: _dt.date | None = None
+    td_max: _dt.date | None = None
+    for city, metric, td, r in residuals:
+        by_city_metric[(city, metric)].append(r)
+        by_metric[metric].append(r)
+        global_pool.append(r)
+        td_min = td if td_min is None else min(td_min, td)
+        td_max = td if td_max is None else max(td_max, td)
+    window = (
+        f"residual-{td_min.isoformat()}..{td_max.isoformat()}"
+        if td_min and td_max
+        else "residual-empty"
+    )
+    global_arr = np.asarray(global_pool, dtype=float)
+    global_sigma = mad_sigma_about_zero(global_arr)
+
+    def _resolve(city: str, metric: str) -> tuple[float, int, str]:
+        cm = by_city_metric.get((city, metric), [])
+        if len(cm) >= min_cohort_n:
+            return mad_sigma_about_zero(np.asarray(cm, dtype=float)), len(cm), "city_metric"
+        mp = by_metric.get(metric, [])
+        if len(mp) >= min_cohort_n:
+            return mad_sigma_about_zero(np.asarray(mp, dtype=float)), len(mp), "metric"
+        return global_sigma, int(global_arr.size), "global"
+
     cells: dict = {}
-    window_start = asof - _dt.timedelta(days=window_days)
-    epoch = window_start  # day-0 reference for the linear-in-day fit
-    for (city, metric), recs in settlements.items():
-        win = [(d, v) for (d, v) in recs if window_start <= d <= asof]
-        if len(win) < min_n:
-            continue
-        win_days = np.array([(d - epoch).days for d, _ in win], dtype=float)
-        win_vals = np.array([v for _, v in win], dtype=float)
-        cross_std = detrended_std(win_days, win_vals)
-        if not (cross_std > 0.0) or not np.isfinite(cross_std):
-            continue
-        # group the in-window points by NH month-season
-        by_season: dict = defaultdict(list)
-        for d, v in win:
-            by_season[season(d.month)].append((d, v))
-        for seas in ("DJF", "MAM", "JJA", "SON"):
-            pts = by_season.get(seas, [])
-            if len(pts) >= min_in_season:
-                sd = np.array([(d - epoch).days for d, _ in pts], dtype=float)
-                sv = np.array([v for _, v in pts], dtype=float)
-                in_std = detrended_std(sd, sv)
-                if in_std > 0.0 and np.isfinite(in_std):
-                    cells[f"{city}|{seas}|{metric}"] = {
-                        "sigma_floor_c": round(float(in_std), 4),
-                        "n": int(len(pts)),
-                        "window": f"in-season-detrended-{window_days}d",
-                    }
-                    continue
-            # fallback: cross-season detrended std (only if the overall window met min_n above)
+    for (city, metric) in sorted(by_city_metric.keys()):
+        sigma_raw, n, tier = _resolve(city, metric)
+        sigma_floor = max(float(sigma_raw), ABSOLUTE_FLOOR_C)
+        for seas in SEASONS:
             cells[f"{city}|{seas}|{metric}"] = {
-                "sigma_floor_c": round(float(cross_std), 4),
-                "n": int(len(win)),
-                "window": f"cross-season-detrended-{window_days}d",
+                "sigma_floor_c": round(sigma_floor, 4),
+                "n": int(n),
+                "cohort_tier": tier,
+                "estimator": "mad_sigma_about_zero",
+                "window": window,
             }
     return cells
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Fit the EMPIRICAL settlement σ-floor table (#q1000 2026-06-05).")
-    ap.add_argument("--fcst", default=FCST_DEFAULT, help="zeus-forecasts.db path (settlement_outcomes).")
+    ap = argparse.ArgumentParser(
+        description="Fit the EMPIRICAL settlement σ-floor table from FORECAST RESIDUALS (recal 2026-06-10)."
+    )
+    ap.add_argument("--fcst", default=FCST_DEFAULT, help="zeus-forecasts.db (forecast_posteriors + settlement_outcomes).")
     ap.add_argument("--out", default=OUT_DEFAULT, help="output settlement_sigma_floor.json path.")
-    ap.add_argument("--asof", default=None, help="as-of date YYYY-MM-DD (default: today / max settled date).")
-    ap.add_argument("--window-days", type=int, default=WINDOW_DAYS_DEFAULT)
-    ap.add_argument("--min-in-season", type=int, default=MIN_IN_SEASON_DEFAULT)
-    ap.add_argument("--min-n", type=int, default=MIN_N_DEFAULT)
-    ap.add_argument("--k", type=float, default=K_DEFAULT, help="k_default written to _meta (σ_eff = max(σ, k·σ_settled)).")
+    ap.add_argument("--asof", default=None, help="as-of date YYYY-MM-DD (default: today; settlements after it are dropped).")
+    ap.add_argument("--min-cohort-n", type=int, default=MIN_COHORT_N_DEFAULT)
+    ap.add_argument("--min-global-n", type=int, default=MIN_GLOBAL_N_DEFAULT)
+    ap.add_argument("--k", type=float, default=K_DEFAULT, help="k_default written to _meta (σ_eff = max(σ, k·sigma_floor_c)).")
     args = ap.parse_args()
 
-    settlements = _load_settlements(args.fcst)
-    if not settlements:
-        print(f"[sigma-floor] no VERIFIED settlements in {args.fcst} — refusing to write empty table")
+    asof = _dt.date.fromisoformat(args.asof) if args.asof else _dt.date.today()
+    residuals = _load_residuals(args.fcst, asof=asof)
+    if len(residuals) < args.min_global_n:
+        print(
+            f"[sigma-floor] only {len(residuals)} no-leak VERIFIED residual pairs in {args.fcst} "
+            f"(< min_global_n={args.min_global_n}) — refusing to write a low-confidence table"
+        )
         return 2
 
-    if args.asof:
-        asof = _dt.date.fromisoformat(args.asof)
-    else:
-        # use the latest settled date present (so a stale clock doesn't drop the freshest window)
-        asof = max(d for recs in settlements.values() for d, _ in recs)
+    cells = fit_floors(residuals, min_cohort_n=args.min_cohort_n)
 
-    cells = fit_floors(
-        settlements,
-        asof=asof,
-        window_days=args.window_days,
-        min_in_season=args.min_in_season,
-        min_n=args.min_n,
-    )
+    # source_query_hash: lineage proof (canonical residual SQL + asof). Stamped on every cell.
+    qhash = hashlib.sha256(
+        (_RESIDUAL_QUERY + f"|asof={asof.isoformat()}").encode("utf-8")
+    ).hexdigest()[:16]
+    for cell in cells.values():
+        cell["source_query_hash"] = qhash
+
+    global_arr = np.asarray([r for *_, r in residuals], dtype=float)
     table = {
         "_meta": {
             "created": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-            "method": "detrended-settlement-std",
+            "method": "forecast-residual-mad-sigma",
+            "estimator": "mad_sigma_about_zero",
             "k_default": float(args.k),
-            "window_days": int(args.window_days),
-            "min_in_season": int(args.min_in_season),
-            "min_n": int(args.min_n),
+            "min_cohort_n": int(args.min_cohort_n),
+            "absolute_floor_c": float(ABSOLUTE_FLOOR_C),
             "asof": asof.isoformat(),
-            "authority": "settlement_sigma_floor_v1",
-            "source": "settlement_outcomes(authority=VERIFIED)",
+            "authority": "settlement_sigma_floor_v2_residual",
+            "source": "forecast_posteriors.anchor_value_c ⋈ settlement_outcomes(authority=VERIFIED), no-leak",
+            "source_query_hash": qhash,
+            "residual_pairs_total": int(global_arr.size),
+            "residual_mean_c": round(float(np.mean(global_arr)), 4),
+            "residual_std_c": round(float(np.std(global_arr, ddof=1)), 4) if global_arr.size > 1 else None,
+            "global_mad_sigma_c": round(mad_sigma_about_zero(global_arr), 4),
         },
         "cells": cells,
     }
-    # atomic write (tmp + os.replace), the Zeus state-update convention
     tmp = f"{args.out}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(table, f, indent=2, sort_keys=True)
     os.replace(tmp, args.out)
 
-    print(f"[sigma-floor] wrote {len(cells)} cells -> {args.out} (asof={asof}, window={args.window_days}d, k={args.k})")
-    # report a few reference cells the investigation pinned
-    refs = ["Tel Aviv|JJA|high", "Paris|MAM|high", "Milan|MAM|high", "Paris|JJA|high",
-            "Singapore|MAM|high", "London|JJA|high"]
+    print(
+        f"[sigma-floor] wrote {len(cells)} cells -> {args.out} "
+        f"(asof={asof}, residual_pairs={global_arr.size}, global_mad_sigma="
+        f"{mad_sigma_about_zero(global_arr):.3f}°C, k={args.k})"
+    )
+    refs = ["Tel Aviv|JJA|high", "Paris|MAM|high", "Milan|JJA|high", "Paris|JJA|high",
+            "London|JJA|high", "Paris|JJA|low"]
     for key in refs:
         c = cells.get(key)
         if c:
-            print(f"    {key:24s} σ_settled={c['sigma_floor_c']:.3f}°C  k·σ={args.k * c['sigma_floor_c']:.3f}°C  "
-                  f"n={c['n']}  [{c['window']}]")
+            print(f"    {key:22s} σ_floor={c['sigma_floor_c']:.3f}°C  n={c['n']}  [tier={c['cohort_tier']}]")
         else:
-            print(f"    {key:24s} (omitted — < min_n or no window)")
+            print(f"    {key:22s} (omitted — no residual pairs for this city/metric)")
     return 0
 
 

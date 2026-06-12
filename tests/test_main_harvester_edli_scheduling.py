@@ -9,13 +9,13 @@
 #   the redeem pollers (consumers) have nothing to consume.
 # Reuse: inspect src/main.py scheduler.add_job(_harvester_cycle, ...) registration
 #   site and src/engine/harvest_cycle.py before re-running; verify the job appears in
-#   the scheduler for edli_live, edli_live_canary, edli_submit_disabled_bridge modes.
+#   the scheduler for edli_live, edli_submit_disabled_bridge modes.
 """Antibody: harvester (settlement→redeem resolver) scheduled in EDLI modes.
 
 RED-first contract:
   (a) _harvester_should_register(mode) is True for EVERY EDLI event-driven mode
-      (edli_shadow_no_submit, edli_submit_disabled_bridge, edli_live_canary,
-      edli_live) AND for legacy_cron. Before the fix the harvester was gated to
+      (edli_shadow_no_submit, edli_submit_disabled_bridge, edli_live)
+      AND for legacy_cron. Before the fix the harvester was gated to
       `live_execution_mode == "legacy_cron"` only, so this is RED for EDLI.
 
   (b) The scheduler.add_job(_harvester_cycle, ...) call in src/main.py is NOT
@@ -33,10 +33,10 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _MAIN_PY = _REPO_ROOT / "src" / "main.py"
 
+# Wave-2 item 5: canary collapsed into edli_live (the only event-driven live mode).
 _EDLI_EVENT_DRIVEN_MODES = (
     "edli_shadow_no_submit",
     "edli_submit_disabled_bridge",
-    "edli_live_canary",
     "edli_live",
 )
 

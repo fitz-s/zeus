@@ -86,7 +86,7 @@ Sweep: hardcoded lat/lon literals outside `tests/` and `.omc/`, particularly in 
 | `scripts/ingest_grib_to_snapshots.py:224` | `grid_lon = 180.0` | CLEAN | Dateline boundary constant for GRIB grid-coordinate arithmetic, not a city coordinate. |
 | `src/engine/event_reactor_adapter.py:2643` | `_epsilon = -1e-9` | CLEAN | Floating-point rounding epsilon, not a coordinate. |
 | `config/model_domain_polygons.yaml:34–38` | `[-3.94, 43.18]` etc. | CLEAN | Polygon vertices for model domain gates. These are domain hull coordinates, not city fetch coordinates. Governed by `config/model_domain_polygons.yaml` (the designated polygon authority). |
-| `scripts/backfill_u0r_promoted_model_history.py:64–65` | `"latitude": city["lat"], "longitude": city["lon"]` | CLEAN | Reads from cities.json (line 57). Coordinate authority respected. |
+| `scripts/backfill_bayes_precision_fusion_promoted_model_history.py:64–65` | `"latitude": city["lat"], "longitude": city["lon"]` | CLEAN | Reads from cities.json (line 57). Coordinate authority respected. |
 
 **P4 verdict: three MARGINAL findings** (oos_validation_harness, produce_activation_evidence, build_replacement_forecast_simple_switch_evidence). None are on live money paths. The risk is stale-fixture-vs-cities.json drift if coordinates are ever re-pinned. **No production src/ file hardcodes weather-fetch coordinates.**
 
@@ -127,11 +127,11 @@ Full enumeration of requested (model, endpoint) combos vs. persisted rows in `ra
 
 **Additional observations:**
 
-- `OPENMETEO_MODEL_IDS` (`src/data/u0r_multimodel_capture.py:54`) does NOT include `ncep_nbm_conus`, `ukmo_global_deterministic_10km`, or `ukmo_uk_deterministic_2km`. These fall back to identity mapping (model name = OM API model name). The backfill at `scripts/backfill_u0r_promoted_model_history.py` confirmed `ncep_nbm_conus` as a valid OM model ID (13,392 rows successfully fetched). However, **there is no explicit entry in `OPENMETEO_MODEL_IDS` for these three new models** — the identity fallback is implicit. If OM ever names a model differently from our internal identifier, this would silently request the wrong model.
+- `OPENMETEO_MODEL_IDS` (`src/data/bayes_precision_fusion_capture.py:54`) does NOT include `ncep_nbm_conus`, `ukmo_global_deterministic_10km`, or `ukmo_uk_deterministic_2km`. These fall back to identity mapping (model name = OM API model name). The backfill at `scripts/backfill_bayes_precision_fusion_promoted_model_history.py` confirmed `ncep_nbm_conus` as a valid OM model ID (13,392 rows successfully fetched). However, **there is no explicit entry in `OPENMETEO_MODEL_IDS` for these three new models** — the identity fallback is implicit. If OM ever names a model differently from our internal identifier, this would silently request the wrong model.
 
-- `OPENMETEO_PREVIOUS_RUNS_MODEL_IDS` (`src/data/u0r_multimodel_download.py:281`) contains ONLY `ecmwf_ifs → ecmwf_ifs025`. For all other models (including the three new ones), it falls through to `OPENMETEO_MODEL_IDS.get(model, model)` — the same identity fallback.
+- `OPENMETEO_PREVIOUS_RUNS_MODEL_IDS` (`src/data/bayes_precision_fusion_download.py:281`) contains ONLY `ecmwf_ifs → ecmwf_ifs025`. For all other models (including the three new ones), it falls through to `OPENMETEO_MODEL_IDS.get(model, model)` — the same identity fallback.
 
-- **Replacement forecast sources** (`raw_forecast_artifacts`): `openmeteo_ecmwf_ifs_9km` (1,090 rows) and `ecmwf_aifs_ens` (30 rows). Both have persisted rows; both confirmed operational. AIFS has 0 rows in `raw_model_forecasts` (correct: AIFS is not a U0R Bayes member).
+- **Replacement forecast sources** (`raw_forecast_artifacts`): `openmeteo_ecmwf_ifs_9km` (1,090 rows) and `ecmwf_aifs_ens` (30 rows). Both have persisted rows; both confirmed operational. AIFS has 0 rows in `raw_model_forecasts` (correct: AIFS is not a BAYES_PRECISION_FUSION Bayes member).
 
 **P5 suspect: implicit identity fallback for ncep_nbm_conus, ukmo_global_deterministic_10km, ukmo_uk_deterministic_2km.** Not a current failure (backfill rows prove the model IDs work), but the absence of explicit entries in `OPENMETEO_MODEL_IDS` means a future OM API rename would silently request the wrong model with no code-level signal. Low immediate risk (models just verified to work), noted for future hardening.
 
@@ -162,13 +162,13 @@ Sweep: all models in selection + download sets; check for same-provider pairs no
 
 | pair | same-provider? | verdict |
 |---|---|---|
-| `ecmwf_ifs` (anchor/prior) + `ecmwf_aifs_ens` (AIFS likelihood) | Both ECMWF | NOT-APPLICABLE — AIFS is NOT a U0R Bayes member (0 rows in `raw_model_forecasts`). It enters only the replacement forecast as a separate probabilistic input to a different strategy. No double-count risk in U0R fusion. |
-| `ecmwf_ifs` + `ecmwf_ifs025` (previous-runs history bridge) | Both ECMWF | NOT-APPLICABLE — `ecmwf_ifs025` is the same physical product as `ecmwf_ifs`, bridged via `u0r_anchor_bridge.py`. Stored under single `model='ecmwf_ifs'` key. Never a separate fusion member. |
+| `ecmwf_ifs` (anchor/prior) + `ecmwf_aifs_ens` (AIFS likelihood) | Both ECMWF | NOT-APPLICABLE — AIFS is NOT a BAYES_PRECISION_FUSION Bayes member (0 rows in `raw_model_forecasts`). It enters only the replacement forecast as a separate probabilistic input to a different strategy. No double-count risk in BAYES_PRECISION_FUSION fusion. |
+| `ecmwf_ifs` + `ecmwf_ifs025` (previous-runs history bridge) | Both ECMWF | NOT-APPLICABLE — `ecmwf_ifs025` is the same physical product as `ecmwf_ifs`, bridged via `bayes_precision_fusion_anchor_bridge.py`. Stored under single `model='ecmwf_ifs'` key. Never a separate fusion member. |
 | `jma_seamless` (only JMA product in system) | JMA only | NOT-APPLICABLE — no second JMA product in selection. |
-| `meteofrance_arome_france_hd` (only MF product in U0R) | MF only | NOT-APPLICABLE — `openmeteo_arome_fr_hd` exists in registry but `tier="disabled"`, `enabled_by_default=False`. No active second MF product. |
+| `meteofrance_arome_france_hd` (only MF product in BAYES_PRECISION_FUSION) | MF only | NOT-APPLICABLE — `openmeteo_arome_fr_hd` exists in registry but `tier="disabled"`, `enabled_by_default=False`. No active second MF product. |
 | `gem_global` (only CMC product) | CMC only | NOT-APPLICABLE — no second CMC product. |
 
-**P6 verdict: NO unresolved suspects.** PROVIDER_FAMILIES covers all active same-provider pairs. ECMWF (ifs+AIFS) is not a U0R family concern because AIFS never enters U0R Bayes. MF, JMA, and CMC each have only one active product.
+**P6 verdict: NO unresolved suspects.** PROVIDER_FAMILIES covers all active same-provider pairs. ECMWF (ifs+AIFS) is not a BAYES_PRECISION_FUSION family concern because AIFS never enters BAYES_PRECISION_FUSION Bayes. MF, JMA, and CMC each have only one active product.
 
 ---
 
@@ -178,7 +178,7 @@ Sweep: all models in selection + download sets; check for same-provider pairs no
 |---|---|---|---|---|
 | 1 | **P2** | `src/ingest_main.py:762–774` — `etl_diurnal_curves.py` and `etl_temp_persistence.py` subprocess stdout WARNINGs silently discarded | **Production ingest daemon scheduler job.** Calibration anomalies, data-gap notices, or model-fit warnings from the daily ETL scripts are invisible to the operator unless the script exits non-zero. Same structural gap as the materializer-queue fix applied today. No rc!=0 needed to produce a WARNING — the script can succeed with degraded output. | HIGH |
 | 2 | **P2** | `src/main.py:5546–5568` — `measure_arm_gate_settlement.py` subprocess stdout silently discarded on rc==0 | ARM-gate artifact emission in the live-trading daemon. On successful runs, any WARNING from the producer script (e.g., incomplete settlement data, coverage gap) is lost. The artifact is written but its provenance quality is opaque. | MEDIUM |
-| 3 | **P5** | `src/data/u0r_multimodel_capture.py:54` — `OPENMETEO_MODEL_IDS` missing explicit entries for `ncep_nbm_conus`, `ukmo_global_deterministic_10km`, `ukmo_uk_deterministic_2km` | Identity fallback works today (backfill proved it), but any OM API rename would silently request the wrong model for three newly-promoted selection members. The gap is latent: no current failure. | LOW |
+| 3 | **P5** | `src/data/bayes_precision_fusion_capture.py:54` — `OPENMETEO_MODEL_IDS` missing explicit entries for `ncep_nbm_conus`, `ukmo_global_deterministic_10km`, `ukmo_uk_deterministic_2km` | Identity fallback works today (backfill proved it), but any OM API rename would silently request the wrong model for three newly-promoted selection members. The gap is latent: no current failure. | LOW |
 | 4 | **P4** | `scripts/oos_validation_harness.py:321` / `scripts/produce_activation_evidence.py:72–73` — hardcoded City fixtures not reading from cities.json | Diverges from cities.json authority for offline validation and evidence scripts. If NYC or London coordinates are re-pinned to match updated WU/METAR stations, these fixtures silently use stale coordinates. Not money-path but could invalidate evidence artifacts. | LOW |
 | 5 | **P2** | `src/ingest_main.py:1181–1195` — `etl_forecast_skill.py` stdout truncated to last 2000 chars | WARNINGs emitted early in a long-running ETL run are truncated. Partial information, not total loss. | LOW |
 

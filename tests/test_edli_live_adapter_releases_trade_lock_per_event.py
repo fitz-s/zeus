@@ -160,7 +160,6 @@ def test_live_adapter_submit_releases_trade_lock_per_event(tmp_path, monkeypatch
         trade_conn,
         get_current_level=lambda: None,
         real_order_submit_enabled=False,
-        live_canary_enabled=False,
     )
 
     # Sanity: lock is free before we start.

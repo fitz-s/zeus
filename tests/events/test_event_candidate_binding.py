@@ -135,6 +135,73 @@ def test_forecast_event_requires_causal_snapshot_id():
         bind_event_to_candidate_family(event, [_candidate()], decision_time=DECISION_TIME)
 
 
+def test_forecast_binding_completeness_label_is_advisory_structure_binds():
+    """Serving-authority ruling (incident 2026-06-11T16:33:51Z; THIRD site found
+    live 19:53Z, minutes after the gate fix let PARTIAL events through): the
+    trigger event's completeness label is ADVISORY at candidate binding — the
+    money path serves the freshest ELIGIBLE bundle and proves coverage at proof
+    time. ANTIBODY relationship: binding succeeds across the entire known
+    completeness vocabulary; only structural junk (unknown label / missing
+    identity fields / snapshot mismatch) raises."""
+    import dataclasses
+    import json as _json
+    from typing import get_args
+
+    from src.events.forecast_completeness import ForecastCompletenessStatus
+
+    # Full -inf..+inf MECE family (mirrors test_family_binding_hash_deterministic)
+    # so the bind reaches the forecast validator and topology guard both pass.
+    full_family = [
+        _candidate(
+            condition_id="condition-1", yes_token_id="yes-1", no_token_id="no-1",
+            bin=Bin(low=70, high=71, unit="F", label="70-71°F"),
+        ),
+        _candidate(
+            condition_id="condition-2", yes_token_id="yes-2", no_token_id="no-2",
+            bin=Bin(low=72, high=73, unit="F", label="72-73°F"),
+        ),
+        _candidate(
+            condition_id="condition-low", yes_token_id="yes-low", no_token_id="no-low",
+            bin=Bin(low=None, high=69, unit="F", label="69°F or below"),
+        ),
+        _candidate(
+            condition_id="condition-high", yes_token_id="yes-high", no_token_id="no-high",
+            bin=Bin(low=74, high=None, unit="F", label="74°F or above"),
+        ),
+    ]
+
+    base = _forecast_event()
+
+    def _with_payload(**updates):
+        payload = _json.loads(base.payload_json)
+        payload.update(updates)
+        return dataclasses.replace(
+            base,
+            payload_json=_json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        )
+
+    for label in get_args(ForecastCompletenessStatus):
+        event = _with_payload(completeness_status=label)
+        family = bind_event_to_candidate_family(
+            event, full_family, decision_time=DECISION_TIME
+        )
+        assert family is not None, label
+
+    # Structural junk still raises (fail-closed unchanged):
+    with pytest.raises(CandidateBindingError, match="known completeness label"):
+        bind_event_to_candidate_family(
+            _with_payload(completeness_status="GARBAGE"),
+            full_family,
+            decision_time=DECISION_TIME,
+        )
+    with pytest.raises(CandidateBindingError, match="required fields"):
+        bind_event_to_candidate_family(
+            _with_payload(required_fields_present=False),
+            full_family,
+            decision_time=DECISION_TIME,
+        )
+
+
 def test_day0_event_requires_live_authority_status():
     event = _day0_event(live_authority_status="UNKNOWN")
 

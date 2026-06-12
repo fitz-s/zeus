@@ -27,6 +27,13 @@ httpx==0.28.1
 requests==2.33.0
 websockets>=16.0,<17
 
+# --- anchor transport rung 3: direct S3 om-file partial-run read (added 2026-06-11) ---
+# open-meteo's official om-file reader + fsspec/s3fs for cloud-native partial reads of
+# data_spatial/<run>/<step>.om files (src/data/openmeteo_ecmwf_ifs9_bucket_transport.py).
+omfiles==1.2.0
+fsspec==2026.4.0
+s3fs==2026.4.0
+
 # --- scheduling / runtime ---
 apscheduler==3.11.2
 

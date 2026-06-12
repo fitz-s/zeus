@@ -200,7 +200,7 @@ class MarketAnalysis:
         market_prior: MarketPriorDistribution | None = None,
         allow_legacy_quote_prior: bool = False,
         *,
-        forecast_sharpness: "ForecastSharpnessEvidence",  # K1: REQUIRED (no default) — omission is a TypeError
+        forecast_sharpness: "ForecastSharpnessEvidence | None" = None,  # Wave-1 2026-06-12: gate DELETED. Param retained as an inert provenance carrier (callers still pass exempt evidence); it no longer vetoes any edge. Sharpness, if ever wanted, belongs inside calibrated q — never as an emit veto.
         transfer_logit_sigma: float = 0.0,
         bootstrap_probability_sampler: BootstrapProbabilitySampler | None = None,
         bootstrap_signal_type: str = "generic_ensemble",
@@ -347,46 +347,25 @@ class MarketAnalysis:
                 f"entry_quote_evidence_no must have length {expected_bins}, "
                 f"got {len(self._entry_quote_evidence_no)}"
             )
-        # K1 — ForecastSharpnessEvidence (Phase-2, required ctor param; omission is a
-        # TypeError raised by Python before this body runs). Re-assert that the
-        # sharpness evidence was measured in the SAME unit as this analysis (B6 ETL
-        # contamination block): a °F skill row paired with a °C market is a unit leak
-        # that would silently mis-threshold the gate. The verdict (whether this city's
-        # forecast is too flat to emit edges) is precomputed and consulted at the ONE
-        # gate site (find_edges_with_trace / _sharpness_suppresses_edges) — it never
-        # touches the POINT q, only whether any edge is emitted at all.
-        if not isinstance(forecast_sharpness, ForecastSharpnessEvidence):
-            raise TypeError(
-                "forecast_sharpness must be a ForecastSharpnessEvidence, got "
-                f"{type(forecast_sharpness).__name__}"
-            )
-        if forecast_sharpness.unit != self._unit:
-            raise ValueError(
-                "ForecastSharpnessEvidence unit mismatch: evidence unit "
-                f"{forecast_sharpness.unit!r} != analysis unit {self._unit!r} "
-                "(B6 ETL-contamination block)"
-            )
+        # Wave-1 2026-06-12: the forecast-sharpness EDGE-SUPPRESSION GATE is DELETED
+        # (it was a 50/54-city zero-trade veto — an artificial throttle the operator law
+        # forbids). The evidence param is retained as an inert provenance carrier only.
+        # When evidence IS supplied, the unit-leak guard still fires (B6 ETL-contamination
+        # block: a °F skill row paired with a °C market is a unit leak); when absent it is
+        # simply stored as None. It never vetoes an edge, never touches the POINT q.
+        if forecast_sharpness is not None:
+            if not isinstance(forecast_sharpness, ForecastSharpnessEvidence):
+                raise TypeError(
+                    "forecast_sharpness must be a ForecastSharpnessEvidence or None, got "
+                    f"{type(forecast_sharpness).__name__}"
+                )
+            if forecast_sharpness.unit != self._unit:
+                raise ValueError(
+                    "ForecastSharpnessEvidence unit mismatch: evidence unit "
+                    f"{forecast_sharpness.unit!r} != analysis unit {self._unit!r} "
+                    "(B6 ETL-contamination block)"
+                )
         self._forecast_sharpness = forecast_sharpness
-
-    def _sharpness_suppresses_edges(self) -> bool:
-        """Return True iff the K1 sharpness gate suppresses ALL edges for this market.
-
-        This is the ONE gate site for the K1 invariant. ``find_edges_with_trace`` and
-        ``scan_full_hypothesis_family`` both consult this single verdict — there is no
-        second sharpness check anywhere (no parallel-mechanism creep; the emit query
-        reads the verdict, it does not re-derive it).
-
-        Flag-gated (SHADOW-safe): when ``edli_v1.forecast_sharpness_gate_enabled`` is
-        False (default), this ALWAYS returns False, so live emit is byte-identical to
-        legacy regardless of the evidence carried.
-        """
-        from src.config import settings
-
-        ev = settings["edli_v1"]
-        if not bool(ev.get("forecast_sharpness_gate_enabled", False)):
-            return False
-        multiplier = float(ev.get("forecast_sharpness_mae_multiplier", 1.5))
-        return self._forecast_sharpness.suppresses_edges(multiplier=multiplier)
 
     def _compute_posterior(self, p_cal: np.ndarray) -> np.ndarray:
         if self._posterior_mode == MODEL_ONLY_POSTERIOR_MODE:
@@ -532,30 +511,10 @@ class MarketAnalysis:
         edges: list[BinEdge] = []
         trace: list[EdgeScanTrace] = []
 
-        # K1 — forecast-sharpness gate (ONE site). When the flag is ON and this city's
-        # settlement MAE is wider than N_SIGMA*bin_width, the forecast is too flat to
-        # carry a meaningful edge: emit ZERO edges (the antibody for flat-q -> 96%
-        # buy_no skew). A per-bin trace row records the suppression so BH accounting and
-        # diagnostics see WHY nothing emitted. Flag OFF => never fires => legacy emit.
-        if self._sharpness_suppresses_edges():
-            for i, b in enumerate(self.bins):
-                trace.append(
-                    EdgeScanTrace(
-                        support_index=i,
-                        bin_label=b.label,
-                        executable=self.is_executable_bin(i),
-                        direction="support",
-                        p_posterior=None,
-                        p_market=None,
-                        raw_edge=None,
-                        ci_lower=None,
-                        ci_upper=None,
-                        p_value=None,
-                        decision="forecast_sharpness_gate_suppressed",
-                    )
-                )
-            return [], trace
-
+        # Wave-1 2026-06-12: the forecast-sharpness edge-suppression gate that used to
+        # short-circuit here (emit ZERO edges when settlement MAE was wide) is DELETED.
+        # It was a 50/54-city zero-trade veto. Edge emission now proceeds for every
+        # market; sharpness, if ever wanted, must live inside calibrated q, not as a veto.
         for i, b in enumerate(self.bins):
             if not self.is_executable_bin(i):
                 trace.append(

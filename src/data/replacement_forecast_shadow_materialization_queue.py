@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from src.config import PROJECT_ROOT
+from src.contracts.replacement_pipeline_files import (
+    ContractViolation,
+    validate_materialization_request,
+    validate_materialization_seed,
+)
+from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_forecast_materialization_request_builder import (
     build_replacement_forecast_materialization_request,
 )
@@ -252,14 +258,30 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         target_date = str(seed["target_date"])
         metric = str(seed["temperature_metric"])
         baseline_source_run_id = str(seed["baseline_source_run_id"])
+        posterior_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
+        }
+        # TRADEABLE-GRADE COVERAGE (operator directive 2026-06-10; basis-predicate fix 2026-06-12).
+        # A covering posterior must be CERTIFIED-bootstrap tradeable-grade. The original proxy
+        # `q_lcb_json IS NOT NULL` broke once the soft-anchor path began carrying a PROMOTED
+        # Wilson-over-AIFS-votes q_lcb (basis="wilson_aifs_member_votes") instead of NULL: a
+        # CAPTURE_MISSING / FUSED_Q_BUILD_FAILED row is STILL not live-eligible, yet now has a
+        # non-NULL q_lcb and would WRONGLY satisfy the old proxy — re-introducing the exact
+        # mask-and-starve disease (an untradeable posterior counting as "done forever" and blocking
+        # its own fusion repair). The predicate now keys on the CERTIFIED bootstrap basis (the SAME
+        # string the live calibration-credential reader pins), so only a fusion-grade row counts as
+        # coverage and a soft-anchor/CAPTURE_MISSING row re-seeds on the next cycle. Single authority:
+        # cycle_policy.tradeable_grade_coverage_sql. Schema-conditional as before.
+        tradeable_grade_clause = tradeable_grade_coverage_sql(posterior_columns=posterior_columns)
         posterior = conn.execute(
-            """
+            f"""
             SELECT 1
             FROM forecast_posteriors
             WHERE source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
               AND city = ?
               AND target_date = ?
               AND temperature_metric = ?
+              {tradeable_grade_clause}
               AND json_extract(dependency_source_run_ids_json, '$.baseline_b0') = ?
             LIMIT 1
             """,
@@ -313,6 +335,67 @@ def _write_request(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
 
 
+# POISON-PILL IMMUNITY (2026-06-10): the materializer subprocess accesses these keys
+# unconditionally and immediately (scripts/materialize_replacement_forecast_shadow.py:163-165,
+# then 173/178/197 for the aifs input). A request file missing any of them — e.g. a
+# new_listing_scout intent stub {condition_id, enqueued_at, reason, source} — crashes the
+# subprocess with KeyError on every cycle and, because it is never removed from requests/,
+# permanently consumes a queue slot. 772 such stubs starved ALL legitimate posterior
+# production on 2026-06-10. The category antibody: validate the request schema BEFORE
+# spawning, and route an invalid file to failed/ so each bad file consumes queue budget AT
+# MOST ONCE. A malformed producer must never be able to starve the queue.
+# Authority basis: materializer queue starvation incident 2026-06-10, /tmp/materializer_collapse_report.md
+_REQUEST_REQUIRED_KEYS: tuple[str, ...] = (
+    "temperature_metric",
+    "target_date",
+    "source_cycle_time",
+)
+
+
+def _validate_request_payload(path: Path) -> tuple[bool, str, str]:
+    """Return (ok, reason_code, detail) for a queued request file WITHOUT spawning a subprocess.
+
+    A valid materialization request always carries the minimal keys the materializer accesses
+    before any work (temperature_metric, target_date, source_cycle_time) plus one AIFS input
+    selector (aifs_samples_json or aifs_grib_path). Anything else (a scout intent stub,
+    unparseable JSON, a non-object) is poison: fail it fast so it leaves the queue at most once.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_UNREADABLE", repr(exc)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return False, "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MALFORMED_JSON", str(exc)
+    if not isinstance(payload, dict):
+        return False, "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_NOT_OBJECT", f"top-level {type(payload).__name__}"
+    # BOUNDARY CONTRACT (2026-06-10): the consumer half of the producer⇄consumer
+    # contract. This replaces the ad-hoc required-key / AIFS-input checks with the
+    # single shared schema in src.contracts.replacement_pipeline_files. The exact
+    # scout-stub shape is rejected here with a ContractViolation whose detail names
+    # every missing field — written verbatim into the failed/ receipt below — and
+    # the file leaves the queue at most once. Authority basis: pipeline-contract
+    # project, operator directive 2026-06-10.
+    try:
+        validate_materialization_request(payload)
+    except ContractViolation as exc:
+        # Preserve the pre-existing reason-code vocabulary the receipt consumers /
+        # tests rely on, while sourcing the precise detail from the shared contract.
+        if exc.detail.startswith("missing_or_empty_required_keys="):
+            reason_code = "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MISSING_REQUIRED_KEYS"
+        elif "AIFS input selector" in exc.detail:
+            reason_code = "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MISSING_AIFS_INPUT"
+        else:
+            reason_code = "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_CONTRACT_VIOLATION"
+        return (
+            False,
+            reason_code,
+            exc.detail,
+        )
+    return True, "", ""
+
+
 def _prepare_seed_requests(
     *,
     seed_dir: Path | str | None,
@@ -342,7 +425,39 @@ def _prepare_seed_requests(
             seed = _load_seed_json(seed_json)
             if not _looks_like_seed(seed):
                 continue
-            if _seed_already_covered(forecast_db=forecast_db, seed=seed):
+            # BOUNDARY CONTRACT (2026-06-10): the seed consumer half. _looks_like_seed
+            # only discriminates "is this file a seed at all"; the full SEED schema is
+            # enforced here so a seed-shaped-but-malformed file (missing a required field,
+            # wrong-typed number) is routed to failed/ with the precise ContractViolation
+            # detail in the receipt, at most once — never silently passed to the request
+            # builder. Authority basis: pipeline-contract project, operator directive
+            # 2026-06-10.
+            try:
+                validate_materialization_seed(seed)
+            except ContractViolation as exc:
+                moved = _move_request(seed_json, failed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "ERROR",
+                        "reason_codes": ["REPLACEMENT_SHADOW_MATERIALIZATION_SEED_CONTRACT_VIOLATION"],
+                        "error": exc.detail,
+                        "request_written": False,
+                    },
+                )
+                failed.append(str(moved))
+                continue
+            # UPGRADE RE-SEED BYPASS (Task #32, 2026-06-11): a seed written by the fusion-upgrade
+            # trigger (upgrade_trigger="instrument_set_expansion") INTENTIONALLY re-materializes a
+            # covered scope — "a tradeable posterior exists" is precisely the state it supersedes
+            # (that posterior was fused from a strictly smaller instrument set). Coverage-skipping
+            # it would make every upgrade seed die as SKIPPED_ALREADY_COVERED and the PARTIAL
+            # fusion could never heal. The upgrade seed's idempotency authority is the
+            # fusion_upgrade_enqueues marker (at most one enqueue per (scope, cycle,
+            # capturable-family-superset) transition), NOT coverage — so this bypass cannot loop.
+            if not seed.get("upgrade_trigger") and _seed_already_covered(
+                forecast_db=forecast_db, seed=seed
+            ):
                 moved = _move_request(seed_json, processed_path)
                 _write_sidecar(
                     moved,
@@ -533,6 +648,32 @@ def _process_replacement_forecast_shadow_materialization_queue_locked(
     processed: list[str] = []
     failed: list[str] = []
     for input_json in requests[:limit]:
+        # POISON-PILL GATE: validate the request schema before spawning the materializer
+        # subprocess. An invalid file (scout stub, malformed JSON, missing required keys)
+        # is moved to failed/ here, so it consumes this queue slot AT MOST ONCE and can
+        # never crash-and-stay to starve legitimate seeds. See _validate_request_payload.
+        valid, reason_code, detail = _validate_request_payload(input_json)
+        if not valid:
+            _LOG.warning(
+                "materialize[%s] rejected pre-spawn: %s (%s)",
+                input_json.name,
+                reason_code,
+                detail,
+            )
+            moved = _move_request(input_json, failed_path)
+            _write_sidecar(
+                moved,
+                {
+                    "status": "ERROR",
+                    "returncode": None,
+                    "reason_codes": [reason_code],
+                    "error": detail,
+                    "request_validated": False,
+                    "subprocess_spawned": False,
+                },
+            )
+            failed.append(str(moved))
+            continue
         command = (
             sys.executable,
             str(PROJECT_ROOT / "scripts" / "materialize_replacement_forecast_shadow.py"),

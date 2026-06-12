@@ -70,7 +70,7 @@ from src.contracts.season import season_from_date  # noqa: E402
 
 # The SHIPPED EB resolver (replacement_forecast_materializer._replacement_eb_bias_shift_c)
 # keys the promoted bias by the OpenData ENS product the bias was FIT on (NOT the AIFS
-# data_version) — config edli_v1.replacement_0_1_eb_bias_live_data_version. Mirror it here.
+# data_version) — config edli.replacement_0_1_eb_bias_live_data_version. Mirror it here.
 EB_BIAS_LIVE_DATA_VERSION = {
     "high": "ecmwf_opendata_mx2t3_local_calendar_day_max",
     "low": "ecmwf_opendata_mn2t3_local_calendar_day_min",

@@ -6,7 +6,7 @@
 
 The override replaces the live MC q_5pct (lcb_by_direction) with the coverage-honest
 EMOS analytic CI for LICENSED HIGH-metric cities only, gated on
-edli_v1.edli_emos_ci_live_enabled (default OFF). DEFAULT OFF — no live decision change.
+edli.edli_emos_ci_live_enabled (default OFF). DEFAULT OFF — no live decision change.
 
 Cases (per task spec §5):
   (a) flag OFF → lcb_by_direction BYTE-IDENTICAL to the MC values (override never runs)
@@ -140,16 +140,16 @@ def emos_env(tmp_path, monkeypatch):
 
 
 def _set_flag(monkeypatch, enabled: bool):
-    """Patch settings._data['edli_v1'] with the live flag, monkeypatch-restored.
+    """Patch settings._data['edli'] with the live flag, monkeypatch-restored.
 
-    settings['edli_v1'] returns settings._data['edli_v1'] (a plain dict). We replace
+    settings['edli'] returns settings._data['edli'] (a plain dict). We replace
     that dict with a shallow copy carrying the flag so the original config is untouched
     and monkeypatch restores it after the test.
     """
     from src.config import settings
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli["edli_emos_ci_live_enabled"] = enabled
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
 
 
 def _expected_emos_yes_lcb(unit, k_cov):

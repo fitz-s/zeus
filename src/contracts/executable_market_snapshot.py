@@ -1,4 +1,7 @@
 # Created: 2026-04-27
+# Last reused or audited: 2026-06-11 (K=1 STAGE 1: ExecutableTradeabilityStatus gains
+#   optional provenance_source — round-trips JIT_PRESUBMIT for the fresh submit-time
+#   snapshot row; omitted from to_json_dict when absent so pre-K1 rows are byte-identical)
 # Last reused/audited: 2026-06-09
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
 #                  docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
@@ -85,11 +88,17 @@ class ExecutableTradeabilityStatus:
     clob_enable_order_book: Optional[bool] = None
     executable_allowed: bool = False
     reason: str = "uninitialized"
+    # K=1 STAGE 1 provenance envelope (Fitz #4): optional self-describing source of
+    # the snapshot row. Default None preserves byte-identical serialization for all
+    # pre-K1 rows (the key is omitted from to_json_dict when absent). Set to
+    # "JIT_PRESUBMIT" for the fresh submit-time book row persisted before consume.
+    provenance_source: Optional[str] = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any] | None) -> "ExecutableTradeabilityStatus":
         if not payload:
             return cls()
+        provenance_source = payload.get("provenance_source")
         return cls(
             gamma_parent_closed=_optional_bool(payload.get("gamma_parent_closed")),
             gamma_parent_active=_optional_bool(payload.get("gamma_parent_active")),
@@ -100,6 +109,7 @@ class ExecutableTradeabilityStatus:
             clob_enable_order_book=_optional_bool(payload.get("clob_enable_order_book")),
             executable_allowed=bool(payload.get("executable_allowed", False)),
             reason=str(payload.get("reason") or "uninitialized"),
+            provenance_source=str(provenance_source) if provenance_source else None,
         )
 
     @classmethod
@@ -130,7 +140,7 @@ class ExecutableTradeabilityStatus:
         )
 
     def to_json_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "gamma_parent_closed": self.gamma_parent_closed,
             "gamma_parent_active": self.gamma_parent_active,
             "child_closed": self.child_closed,
@@ -141,6 +151,10 @@ class ExecutableTradeabilityStatus:
             "executable_allowed": self.executable_allowed,
             "reason": self.reason,
         }
+        # Omit when absent so pre-K1 rows serialize byte-identically (dark-safe).
+        if self.provenance_source:
+            payload["provenance_source"] = self.provenance_source
+        return payload
 
 
 @dataclass(frozen=True)

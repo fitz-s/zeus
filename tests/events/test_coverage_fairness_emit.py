@@ -50,6 +50,22 @@ _AVAILABLE_AT = "2026-06-03T03:45:00+00:00"
 _DECISION_TIME = datetime(2026, 6, 3, 5, 0, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def _pin_replacement_filter_off(monkeypatch: Any) -> None:
+    """HERMETIC PIN (2026-06-11): scan_committed_snapshots adds an
+    ``AND EXISTS(... forecast_posteriors ...)`` filter when the LIVE config flag
+    ``openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled`` is True.
+    These fixtures carry no posteriors, so with the live flag ON every candidate
+    vanished and all four fairness tests failed for a reason unrelated to the
+    fairness contract (live-config leak into the test). Pin the filter OFF —
+    the fairness contract under test is orthogonal to the replacement filter.
+    """
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        lambda: False,
+    )
+
+
 def _make_city_id(name: str) -> str:
     return name.lower().replace(" ", "_")
 
@@ -265,11 +281,7 @@ def test_emit_covers_all_market_cities(monkeypatch: Any) -> None:
     cycles_required = math.ceil(len(cities) / limit)  # = 3
     assert cycles_required == 3
 
-    # Patch the flag ON.
-    monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._coverage_fairness_emit_enabled",
-        lambda: True,
-    )
+    # Wave-1 2026-06-12: coverage fairness is UNCONDITIONAL (flag deleted) — no patch needed.
     monkeypatch.setattr(
         "src.events.triggers.forecast_snapshot_ready.market_phase_admits",
         lambda **_kwargs: True,
@@ -315,10 +327,7 @@ def test_no_city_starved_beyond_two_cycles(monkeypatch: Any) -> None:
     limit = 20
     max_cycles = math.ceil(len(cities) / limit)  # = 2
 
-    monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._coverage_fairness_emit_enabled",
-        lambda: True,
-    )
+    # Wave-1 2026-06-12: coverage fairness is UNCONDITIONAL (flag deleted) — no patch needed.
     monkeypatch.setattr(
         "src.events.triggers.forecast_snapshot_ready.market_phase_admits",
         lambda **_kwargs: True,
@@ -350,66 +359,35 @@ def test_no_city_starved_beyond_two_cycles(monkeypatch: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — flag-OFF == legacy ORDER BY (regression antibody)
+# Test 3 — Wave-1 2026-06-12: the legacy ORDER-BY OFF path is DELETED (fairness is
+# unconditional). The former test_flag_off_legacy_order (which pinned the deleted
+# OFF branch) is removed. Fairness covering all cities with N <= LIMIT in one scan
+# is now asserted unconditionally here.
 # ---------------------------------------------------------------------------
 
-def test_flag_off_legacy_order(monkeypatch: Any) -> None:
-    """B4 shadow-safe rule: when flag OFF, scan_committed_snapshots output must be
-    byte-identical to the legacy ORDER BY (LIVE_ELIGIBLE first, then
-    computed_at DESC, snapshot_id DESC, LIMIT).
-    Any divergence from the legacy path with flag OFF is a regression.
-    """
-    # Use 5 cities so all fit in a single scan (LIMIT=10 > 5).
+def test_fairness_covers_all_cities_single_scan_when_within_limit(monkeypatch: Any) -> None:
+    """With N <= LIMIT, one fairness scan emits every city exactly once (no flag)."""
     cities = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
     limit = 10
 
     monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._coverage_fairness_emit_enabled",
-        lambda: False,  # flag OFF → must be legacy
+        "src.events.triggers.forecast_snapshot_ready.market_phase_admits",
+        lambda **_kwargs: True,
     )
-
     forecasts_conn = _build_forecasts_conn(cities)
-
-    # Run 1: flag OFF.
-    world_conn_1 = _build_world_conn()
-    trigger_1 = _trigger(world_conn_1)
-    trigger_1.scan_committed_snapshots(
+    world_conn = _build_world_conn()
+    _trigger(world_conn).scan_committed_snapshots(
         forecasts_conn=forecasts_conn,
         decision_time=_DECISION_TIME,
         received_at=_COMPUTED_AT,
         limit=limit,
     )
-    cities_flag_off = _emitted_cities(world_conn_1)
-
-    # Run 2: flag still OFF (second call with fresh conn + different received_at to avoid
-    # idempotency collision on entity_key — proves the legacy path is deterministic).
-    monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._coverage_fairness_emit_enabled",
-        lambda: False,
+    emitted = _emitted_cities(world_conn)
+    assert set(emitted) == set(cities), (
+        f"fairness dropped cities: missing={set(cities) - set(emitted)}"
     )
-    world_conn_2 = _build_world_conn()
-    trigger_2 = _trigger(world_conn_2)
-    trigger_2.scan_committed_snapshots(
-        forecasts_conn=forecasts_conn,
-        decision_time=_DECISION_TIME,
-        received_at=_COMPUTED_AT,
-        limit=limit,
-    )
-    cities_default = _emitted_cities(world_conn_2)
-
-    # Both flag-OFF runs should return the same city set and ordering.
-    assert cities_flag_off == cities_default, (
-        f"flag-OFF is not stable: first={cities_flag_off}, second={cities_default}"
-    )
-
-    # All 5 cities must be present (no starvation when N ≤ LIMIT).
-    assert set(cities_flag_off) == set(cities), (
-        f"flag-OFF dropped cities: missing={set(cities) - set(cities_flag_off)}"
-    )
-
-    # Verify count matches input (no duplicates).
-    assert len(cities_flag_off) == len(cities), (
-        f"flag-OFF count mismatch: expected={len(cities)}, got={len(cities_flag_off)}"
+    assert len(emitted) == len(cities), (
+        f"fairness count mismatch: expected={len(cities)}, got={len(emitted)}"
     )
 
 
@@ -495,10 +473,7 @@ def test_scan_unbounded_fairness_still_emits_one_freshest_run_per_family(monkeyp
         computed_at="2026-06-03T16:01:00+00:00",
     )
     world_conn = _build_world_conn()
-    monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._coverage_fairness_emit_enabled",
-        lambda: True,
-    )
+    # Wave-1 2026-06-12: fairness is unconditional (flag deleted) — no patch needed.
 
     results = _trigger(world_conn).scan_committed_snapshots(
         forecasts_conn=forecasts_conn,

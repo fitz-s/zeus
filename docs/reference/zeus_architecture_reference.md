@@ -19,15 +19,15 @@ Zeus is a **live weather settlement-contract trading runtime** for Polymarket.
 The live forecast→edge→size path is the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block). Cite symbols, not line numbers — lines drift.
 
 ```
-per-model walk-forward EB de-bias (u0r_bayes.eb_bias, λ=n/(n+8)) → T2 Bayesian precision
-fusion, Ledoit-Wolf Σ (u0r_bayes.fuse_u0r_posterior; bayes_fuse + shrink_cov) →
+per-model walk-forward EB de-bias (bayes_precision_fusion.eb_bias, λ=n/(n+8)) → T2 Bayesian precision
+fusion, Ledoit-Wolf Σ (bayes_precision_fusion.fuse_bayes_precision_posterior; bayes_fuse + shrink_cov) →
 σ_pred = max(1.0°C, √(fused.sd²+σ_resid²)) → settlement-preimage bin q
 (emos.bin_probability_settlement, q_shape fused_normal_direct) → q_lcb floor →
 Edge → BH FDR → Fractional Kelly → Position Size
 ```
 
 - Live-authority entry: `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof` (gated by `_replacement_authority_enabled`); q-mode gate `_replacement_q_mode_live_eligibility` admits only FUSED_NORMAL_FULL/PARTIAL, else deterministic no-submit.
-- q is built and persisted in `src/data/replacement_forecast_materializer.py` `_insert_posterior` (owns q_mode); σ_pred floor in `_replacement_u0r_fusion_override`.
+- q is built and persisted in `src/data/replacement_forecast_materializer.py` `_insert_posterior` (owns q_mode); σ_pred floor in `_replacement_bayes_precision_fusion_override`.
 - The single live settlement integrator is `src/calibration/emos.py` `bin_probability_settlement` (WMO round-half preimage of N(μ*, σ)).
 
 **The Probability Chain (LEGACY BASELINE — independent LCB cap only, NOT the live q):**

@@ -294,7 +294,6 @@ class TestFOKDepthBelowMinOrderSize:
                 min_order_size=1.0,
                 best_bid=0.68,
                 best_ask=0.80,
-                taker_fok_fak_live_enabled=True,
                 available_crossable_shares=0.5,   # ← below min_order_size=1.0
             )
 
@@ -381,7 +380,6 @@ class TestFOKSizeToDepthCertBuilder:
             min_order_size=1.0,
             best_bid=0.68,
             best_ask=0.80,
-            taker_fok_fak_live_enabled=True,
             available_crossable_shares=5.5,         # ← available depth
             sweep_expected_fill_price=0.80,         # ← sweep VWAP
         )
@@ -463,7 +461,6 @@ class TestFOKSizeToDepthCertBuilder:
             min_order_size=1.0,
             best_bid=0.70,
             best_ask=0.82,
-            taker_fok_fak_live_enabled=True,
             available_crossable_shares=5.5,
             sweep_expected_fill_price="0.80",
         )

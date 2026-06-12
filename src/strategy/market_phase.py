@@ -270,7 +270,7 @@ def market_end_anchor_source(market: dict) -> str:
 #
 # ONE pure predicate, applied at BOTH the FSR intake locus
 # (src/events/triggers/forecast_snapshot_ready.py, gated by
-# ``edli_v1.edli_intake_phase_filter_enabled``) AND the reactor bind-time
+# ``edli.edli_intake_phase_filter_enabled``) AND the reactor bind-time
 # backstop (src/engine/event_reactor_adapter.py, the
 # EVENT_BOUND_MARKET_PHASE_CLOSED emission). Both sites call THIS function so
 # they cannot diverge (relationship test RT-2 pins identity).

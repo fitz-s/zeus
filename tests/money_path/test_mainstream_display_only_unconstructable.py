@@ -78,7 +78,6 @@ def _build_submit(monkeypatch, event, *, mainstream_agreement_pass, called):
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=True,
-        live_canary_enabled=True,
         durable_submit_outbox_enabled=True,
         executor_submit=_executor,
     )
@@ -91,7 +90,7 @@ def test_mainstream_pass_value_cannot_change_submit_decision(monkeypatch):
     mainstream verdict may produce MAINSTREAM_AGREEMENT_REQUIRED (the deleted branch)."""
     # The config key has NO effect now — set both postures to prove value-independence.
     for enforce_posture in (True, False):
-        monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_enforce_on_submit", enforce_posture)
+        monkeypatch.setitem(settings["edli"], "mainstream_agreement_enforce_on_submit", enforce_posture)
         reasons = {}
         for verdict in (True, False, None):
             event = _event()

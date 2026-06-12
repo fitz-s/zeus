@@ -244,10 +244,10 @@ class TestRT1IntakeEmissionFilter:
         city_tz = _TZ
         target_date = "2026-06-15"
 
-        # Turn the intake phase filter ON (default OFF in code). settings["edli_v1"]
+        # Turn the intake phase filter ON (default OFF in code). settings["edli"]
         # is the live dict the trigger reads via .get(...); setitem auto-restores.
         monkeypatch.setitem(
-            _settings["edli_v1"], "edli_intake_phase_filter_enabled", True
+            _settings["edli"], "edli_intake_phase_filter_enabled", True
         )
 
         # CLOSED: decision on the local target day → SETTLEMENT_DAY → reject.

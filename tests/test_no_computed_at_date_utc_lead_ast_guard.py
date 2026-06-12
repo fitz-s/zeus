@@ -1,15 +1,15 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: AST guard — no computed_at.date() (UTC) in lead_days computation; enforces city-local ZoneInfo date at the AST level (BLOCKER 6 structural antibody).
-# Reuse: Run with pytest; update if lead_days computation pattern in src/main.py or U0R capture changes.
+# Reuse: Run with pytest; update if lead_days computation pattern in src/main.py or BAYES_PRECISION_FUSION capture changes.
 from __future__ import annotations
 
 # Created: 2026-06-08
 # Last reused/audited: 2026-06-08
 # Authority basis: PR#400 review item A (operator: "add ast test to prevent
-#   computed_at.date()"). B6 bug = U0R lead_days computed from the UTC
+#   computed_at.date()"). B6 bug = BAYES_PRECISION_FUSION lead_days computed from the UTC
 #   ``computed_at.date()`` calendar instead of the city-local calendar
 #   (ZoneInfo(tz_name).date()), off-by-one across timezones.
-"""B6 antibody: the U0R lead-date must be derived from the CITY-LOCAL calendar,
+"""B6 antibody: the BAYES_PRECISION_FUSION lead-date must be derived from the CITY-LOCAL calendar,
 never the raw UTC ``computed_at.date()`` calendar.
 
 ``computed_at`` is a UTC instant. The decision date that drives the lead bucket /
@@ -20,7 +20,7 @@ from UTC at the cutover instant (e.g. Tokyo 2026-06-03T16:30Z is local 06-04, so
 06-04 target is lead 0, not 1). That was the B6 live-money bug.
 
 STRUCTURAL ANTIBODY (makes the category unconstructable, not just the instance):
-this guard parses the AST of the U0R lead/date code and FAILS if it finds
+this guard parses the AST of the BAYES_PRECISION_FUSION lead/date code and FAILS if it finds
 ``computed_at.date()`` — a ``Call`` on an ``Attribute`` named ``date`` whose value is
 the ``Name`` ``computed_at`` — anywhere OTHER THAN inside an ``except`` handler.
 
@@ -42,10 +42,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-# Files that compute U0R lead / decision dates from ``computed_at``. The B6 fix and
+# Files that compute BAYES_PRECISION_FUSION lead / decision dates from ``computed_at``. The B6 fix and
 # its only legitimate ``computed_at.date()`` fallback both live in the materializer;
-# any future module that derives a U0R lead from ``computed_at`` must be added here.
-U0R_LEAD_DATE_PATHS = (
+# any future module that derives a BAYES_PRECISION_FUSION lead from ``computed_at`` must be added here.
+BAYES_PRECISION_FUSION_LEAD_DATE_PATHS = (
     "src/data/replacement_forecast_materializer.py",
 )
 
@@ -105,19 +105,19 @@ def _utc_lead_snippet_findings(source: str) -> list[str]:
     return findings
 
 
-def test_u0r_lead_code_does_not_use_utc_computed_at_date():
-    """No primary (non-except) ``computed_at.date()`` in the U0R lead/date code.
+def test_bayes_precision_fusion_lead_code_does_not_use_utc_computed_at_date():
+    """No primary (non-except) ``computed_at.date()`` in the BAYES_PRECISION_FUSION lead/date code.
 
     GREEN with the B6 fix in place (city-local ``astimezone(ZoneInfo(tz_name)).date()``
     primary; UTC ``computed_at.date()`` only inside the ``except`` fallback). RED the
     instant someone reverts the primary lead computation to the UTC calendar.
     """
     findings: list[str] = []
-    for relative_path in U0R_LEAD_DATE_PATHS:
+    for relative_path in BAYES_PRECISION_FUSION_LEAD_DATE_PATHS:
         findings.extend(_utc_lead_findings(relative_path))
 
     assert not findings, (
-        "B6 regression: U0R lead/date computed from the UTC `computed_at.date()` "
+        "B6 regression: BAYES_PRECISION_FUSION lead/date computed from the UTC `computed_at.date()` "
         "calendar outside an except fallback. Use the city-local "
         "`computed_at.astimezone(ZoneInfo(tz_name)).date()` instead:\n"
         + "\n".join(findings)

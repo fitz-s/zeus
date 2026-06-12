@@ -1,12 +1,12 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: BLOCKER 4 — the U0R download writer must persist Open-Meteo request params (lat/lon, timezone, model, endpoint, request_params_json, url_hash) so every stored forecast is reconstructable.
+# Purpose: BLOCKER 4 — the BAYES_PRECISION_FUSION download writer must persist Open-Meteo request params (lat/lon, timezone, model, endpoint, request_params_json, url_hash) so every stored forecast is reconstructable.
 # Reuse: Run with pytest; update if raw_model_forecasts schema or download writer changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §6 F1 raw capture; Fitz Constraint #4 (data provenance:
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 raw capture; Fitz Constraint #4 (data provenance:
 #   the request that produced a forecast value MUST be reconstructable — requested lat/lon,
 #   timezone, the OM model id, the endpoint). CONTINUITY_AND_WIRING.md §4 steps 2-3.
-"""BLOCKER 4 — the U0R download job must PERSIST the Open-Meteo request params + identity.
+"""BLOCKER 4 — the BAYES_PRECISION_FUSION download job must PERSIST the Open-Meteo request params + identity.
 
 When the download writes a raw_model_forecasts row it must record, for that exact fetch:
 requested latitude/longitude, requested timezone, the OM model_name actually addressed, the
@@ -34,16 +34,16 @@ def _forecast_db(tmp_path: Path) -> Path:
 
 
 def _targets():
-    from src.data.u0r_multimodel_download import U0RDownloadTarget
+    from src.data.bayes_precision_fusion_download import BayesPrecisionFusionDownloadTarget
     return [
-        U0RDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
+        BayesPrecisionFusionDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
                           lead_days=1, latitude=48.967, longitude=2.428,
                           timezone_name="Europe/Paris"),
     ]
 
 
 def test_request_params_and_identity_persisted(tmp_path) -> None:
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
     cycle = datetime(2026, 6, 8, 0, 0, tzinfo=UTC)
@@ -54,7 +54,7 @@ def test_request_params_and_identity_persisted(tmp_path) -> None:
     def _previous(*, model, latitude, longitude, timezone_name, target_date, lead_days, metric):
         return 19.5
 
-    download_u0r_extra_raw_inputs(
+    download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=cycle, targets=_targets(),
         single_runs_fetch=_single, previous_runs_fetch=_previous,
     )
@@ -96,12 +96,12 @@ def test_request_params_and_identity_persisted(tmp_path) -> None:
 def test_previous_runs_records_om_previous_runs_product(tmp_path) -> None:
     """The previous_runs rows must record source_family='openmeteo_previous_runs' and the
     correct per-model previous-runs source_id (e.g. gfs_global -> gfs_previous_runs)."""
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
     cycle = datetime(2026, 6, 8, 0, 0, tzinfo=UTC)
 
-    download_u0r_extra_raw_inputs(
+    download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=cycle, targets=_targets(),
         single_runs_fetch=lambda **k: 20.0,
         previous_runs_fetch=lambda **k: 19.5,

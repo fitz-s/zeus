@@ -1,0 +1,176 @@
+# Created: 2026-06-10
+# Last reused/audited: 2026-06-10
+# Authority basis: funnel autopsy 2026-06-10 — buy_no FDR p-value reconciled with the
+#   certified fused NO posterior (operator directive: "the hypothesis test contradicts
+#   the certified probability and must be RECONCILED, not weakened"). Root cause: the
+#   live replacement_0_1 path hardcoded p_value[buy_no]=1.0, so every buy_no
+#   UNCONDITIONALLY failed BH-FDR (q=0.10 can never admit p=1.0) even when the native
+#   NO robust lower bound (1 - q_ucb_yes) cleared the native NO cost by >10c. Stale law:
+#   the hardcode was correct when the NO authority was a disabled placeholder (q_no==0,
+#   no q_ucb); it became artificial once the native NO authority went live.
+"""Relationship test: certified fused NO posterior <-> BH-FDR p-value (cross-module).
+
+This is a RELATIONSHIP test (Fitz methodology): it does not check a single function's
+output, it checks the property that holds ACROSS the boundary where the certified
+probability authority (the fused posterior's q_ucb -> native NO q_lcb) flows into the
+FDR hypothesis-test layer (p_value). The invariant:
+
+    a buy_no whose native robust NO lower bound (1 - q_ucb_yes) exceeds the native NO
+    cost MUST receive an edge-positive (0.0) FDR p-value — the SAME indicator the buy_yes
+    leg receives — so BH-FDR cannot reject a hypothesis the certified posterior backs.
+
+A buy_no with NO edge (lower bound below cost) must still receive p=1.0 and be rejected:
+the gate is reconciled, not removed.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from src.contracts.execution_price import ExecutionPrice
+from src.engine import event_reactor_adapter as adapter
+from src.types.market import Bin
+
+
+def _family() -> SimpleNamespace:
+    # cond-22 is a forecast-DISTANT tail: high YES mass on the family center (cond-28)
+    # means a buy_no on cond-22 has a high native NO lower bound (1 - q_ucb_yes_22).
+    return SimpleNamespace(
+        city="Testopolis",
+        target_date="2026-06-09",
+        metric="high",
+        candidates=(
+            SimpleNamespace(
+                condition_id="cond-22",
+                yes_token_id="yes-22",
+                no_token_id="no-22",
+                bin=Bin(low=22.0, high=22.0, unit="C", label="22°C"),
+            ),
+            SimpleNamespace(
+                condition_id="cond-28",
+                yes_token_id="yes-28",
+                no_token_id="no-28",
+                bin=Bin(low=28.0, high=28.0, unit="C", label="28°C"),
+            ),
+        ),
+    )
+
+
+def _replacement_bundle() -> SimpleNamespace:
+    # Native NO authority PRESENT: q_ucb map carried by the bundle. For cond-22 the YES
+    # upper bound is small (0.12) so the native NO lower bound 1 - q_ucb_yes = 0.88 — a
+    # strong favorite-longshot NO. For cond-28 (the center) the YES upper bound is large
+    # (0.92) so the native NO lower bound is only 0.08.
+    return SimpleNamespace(
+        posterior_id=456,
+        product_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
+        q={"bin-22": 0.08, "bin-28": 0.80},
+        q_lcb={"bin-22": 0.03, "bin-28": 0.70},
+        q_ucb={"bin-22": 0.12, "bin-28": 0.92},
+        provenance_json={
+            "replacement_q_mode": "FUSED_NORMAL_FULL",
+            "q_shape": "fused_normal_direct",
+            "q_lcb_basis": "fused_center_bootstrap_p05",
+            "aifs_member_count": 51,
+            "aifs_probabilities": {"bin-22": 4 / 51, "bin-28": 41 / 51},
+            "bin_topology": [
+                {"bin_id": "bin-22", "lower_c": 22.0, "upper_c": 22.0},
+                {"bin_id": "bin-28", "lower_c": 28.0, "upper_c": 28.0},
+            ],
+        },
+    )
+
+
+def _run(native_costs):
+    from src.config import settings
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.engine import replacement_forecast_hook_factory as hook_factory
+    from tests.test_replacement_forecast_runtime_policy import (
+        _capital_objective_evidence,
+        _passing_evidence,
+    )
+
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    try:
+        feature_flags = dict(settings._data.get("feature_flags", {}))
+        feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = True
+        mp.setitem(settings._data, "feature_flags", feature_flags)
+        mp.setattr(hook_factory, "_latest_replacement_readiness", lambda *a, **k: object())
+        mp.setattr(
+            reader,
+            "read_replacement_forecast_bundle",
+            lambda *a, **k: SimpleNamespace(
+                ok=True, bundle=_replacement_bundle(), reason_code="READY"
+            ),
+        )
+        return adapter._replacement_authority_probability_and_fdr_proof(
+            event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
+            payload={},
+            family=_family(),
+            conn=object(),
+            native_costs=native_costs,
+            decision_time=datetime(2026, 6, 9, tzinfo=timezone.utc),
+            promotion_evidence=_passing_evidence(),
+            capital_objective_evidence=_capital_objective_evidence(),
+        )
+    finally:
+        mp.undo()
+
+
+def test_buy_no_with_certified_edge_gets_edge_positive_fdr_p_value() -> None:
+    """cond-22 NO: native NO q_lcb 0.88 > NO cost 0.72 -> p_value MUST be 0.0 (admit)."""
+    native_costs = {
+        ("cond-22", "buy_yes"): (None, ExecutionPrice(0.08, "ask", fee_deducted=True, currency="probability_units"), 0.08, None, None),
+        ("cond-28", "buy_yes"): (None, ExecutionPrice(0.80, "ask", fee_deducted=True, currency="probability_units"), 0.80, None, None),
+        # Favorite-longshot NO on the distant tail: cheap-ish NO cost well under the
+        # certified native NO lower bound (0.88).
+        ("cond-22", "buy_no"): (None, ExecutionPrice(0.72, "ask", fee_deducted=True, currency="probability_units"), 0.72, None, None),
+        ("cond-28", "buy_no"): (None, ExecutionPrice(0.45, "ask", fee_deducted=True, currency="probability_units"), 0.45, None, None),
+    }
+    _q, lcb, p_values, prefilter, _ev = _run(native_costs)
+
+    # The certified native NO lower bound for the distant tail clears its cost.
+    from src.calibration.qlcb_provenance import _qlcb_float
+
+    assert _qlcb_float(lcb[("cond-22", "buy_no")]) == pytest.approx(0.88, abs=1e-9)
+    # INVARIANT: FDR p-value reconciled with that certified edge -> edge-positive.
+    assert p_values[("cond-22", "buy_no")] == 0.0
+    assert prefilter[("cond-22", "buy_no")] is True
+
+
+def test_buy_no_without_edge_still_rejected_by_fdr() -> None:
+    """cond-28 NO: native NO q_lcb 0.08 < NO cost 0.45 -> p_value MUST stay 1.0 (reject).
+
+    Reconciliation is one-directional: a NO with no certified edge is NOT admitted. The
+    gate is preserved, not weakened.
+    """
+    native_costs = {
+        ("cond-22", "buy_yes"): (None, ExecutionPrice(0.08, "ask", fee_deducted=True, currency="probability_units"), 0.08, None, None),
+        ("cond-28", "buy_yes"): (None, ExecutionPrice(0.80, "ask", fee_deducted=True, currency="probability_units"), 0.80, None, None),
+        ("cond-22", "buy_no"): (None, ExecutionPrice(0.72, "ask", fee_deducted=True, currency="probability_units"), 0.72, None, None),
+        # Center-bin NO: native NO lower bound is only 0.08, far below this 0.45 cost.
+        ("cond-28", "buy_no"): (None, ExecutionPrice(0.45, "ask", fee_deducted=True, currency="probability_units"), 0.45, None, None),
+    }
+    _q, _lcb, p_values, prefilter, _ev = _run(native_costs)
+
+    assert p_values[("cond-28", "buy_no")] == 1.0
+    assert prefilter[("cond-28", "buy_no")] is False
+
+
+def test_buy_no_missing_native_cost_is_non_actionable() -> None:
+    """No native NO price -> no edge can be certified -> p=1.0 (fail-closed, unchanged)."""
+    native_costs = {
+        ("cond-22", "buy_yes"): (None, ExecutionPrice(0.08, "ask", fee_deducted=True, currency="probability_units"), 0.08, None, None),
+        ("cond-28", "buy_yes"): (None, ExecutionPrice(0.80, "ask", fee_deducted=True, currency="probability_units"), 0.80, None, None),
+        # No buy_no entries at all -> native_costs.get returns the default (price None).
+    }
+    _q, _lcb, p_values, prefilter, _ev = _run(native_costs)
+
+    assert p_values[("cond-22", "buy_no")] == 1.0
+    assert prefilter[("cond-22", "buy_no")] is False
+    assert p_values[("cond-28", "buy_no")] == 1.0
+    assert prefilter[("cond-28", "buy_no")] is False

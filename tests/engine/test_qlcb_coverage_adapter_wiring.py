@@ -1,7 +1,7 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
 # Authority basis: Phase-2 K3. Adapter-boundary wiring of the QlcbProvenance carrier
-#   + the settlement-coverage SHADOW flag (edli_v1.q_lcb_settlement_coverage_gate_enabled,
+#   + the settlement-coverage SHADOW flag (edli.q_lcb_settlement_coverage_gate_enabled,
 #   default FALSE). Proves: (1) the live lcb carrier is the typed QlcbByDirection so a
 #   bare float is unconstructable at the seam; (2) the coverage shrink helpers leave the
 #   float byte-identical when the flag is OFF; (3) the carrier helpers read/write float
@@ -76,5 +76,5 @@ def test_default_shadow_flag_is_off():
     root = Path(__file__).parent.parent.parent
     cfg = json.loads((root / "config" / "settings.json").read_text())
     assert (
-        cfg["edli_v1"].get("q_lcb_settlement_coverage_gate_enabled") is False
+        cfg["edli"].get("q_lcb_settlement_coverage_gate_enabled") is False
     ), "q_lcb_settlement_coverage_gate_enabled must ship default FALSE (shadow-safe)"

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from src.config import cities_by_name
+from src.contracts.replacement_pipeline_files import validate_materialization_request
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
@@ -155,10 +156,16 @@ def build_replacement_forecast_materialization_request(
         raise ValueError("temperature_metric must be high or low")
     source_cycle_time = _dt(payload.get("source_cycle_time"), field_name="source_cycle_time")
     computed_at = _dt(payload.get("computed_at"), field_name="computed_at")
+    # SINGLE freshness authority (operator directive 2026-06-11): derive readiness expiry
+    # from the cycle's staleness bound — same function as the materializer stamp site.
+    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+        replacement_readiness_expires_at,
+    )
+
     expires_at = (
         _dt(payload.get("expires_at"), field_name="expires_at")
         if payload.get("expires_at") is not None
-        else computed_at + timedelta(hours=3)
+        else replacement_readiness_expires_at(source_cycle_time)
     )
     if expires_at <= computed_at:
         raise ValueError("expires_at must be after computed_at")
@@ -222,9 +229,21 @@ def build_replacement_forecast_materialization_request(
         "openmeteo_anchor_artifact_id",
         "latitude",
         "longitude",
+        # Task #32: honest re-materialization provenance. When the seed was written by the
+        # fusion-upgrade trigger it carries upgrade_trigger="instrument_set_expansion"; thread it
+        # through verbatim so the materializer can record it in the posterior provenance_json.
+        "upgrade_trigger",
     ):
         if optional_key in payload:
             request[optional_key] = payload[optional_key]
+    # BOUNDARY CONTRACT (2026-06-10): validate the assembled request against the
+    # shared producer⇄consumer schema BEFORE returning it READY. This is the
+    # producer half of the contract: a request that passes here is guaranteed to
+    # pass the queue's consumer-side validate_materialization_request, so a
+    # divergence between this assembly site and the consumer's expectations can
+    # never ship a poison file downstream. Authority basis: pipeline-contract
+    # project, operator directive 2026-06-10.
+    validate_materialization_request(request)
     return ReplacementForecastMaterializationRequestBuildResult(
         status="READY",
         reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),

@@ -72,7 +72,7 @@ DEFERRED_ARTIFACTS: dict[str, str] = {
         "requires ≥110 settled calibration_pairs_v2 target_dates "
         "for ECE analysis"
     ),
-    "settlements_v2": (
+    "settlement_outcomes": (
         "market-facing settlements; populated as Polymarket markets "
         "open and settle over time"
     ),
@@ -934,10 +934,17 @@ def _verification_tables() -> tuple[list[str], list[str]]:
     world-class: observations, observation_instants, solar_daily,
                  temp_persistence, diurnal_curves, forecasts,
                  forecast_skill, model_bias, asos_wu_offsets
-    forecast-class: settlements_v2, market_events_v2, ensemble_snapshots,
-                    calibration_pairs_v2
+    forecast-class: settlement_outcomes, market_events, ensemble_snapshots,
+                    calibration_pairs
 
     Removed vestigial: historical_forecasts (0 rows), model_skill (table gone).
+
+    Canonical names (version-drop 2026-06-10): the forecast-class tables were
+    renamed by the B3/B3cont collapse — settlements_v2 -> settlement_outcomes,
+    market_events_v2 -> market_events, calibration_pairs_v2 -> calibration_pairs
+    (verified live on zeus-forecasts.db). The dropped _v2 names made this
+    read-only COUNT verification silently report "(table missing)" for 3 of 4
+    forecast tables; the bare/renamed names below hit the live tables.
     """
     world_tables = [
         "observations",
@@ -951,10 +958,10 @@ def _verification_tables() -> tuple[list[str], list[str]]:
         "asos_wu_offsets",
     ]
     forecast_tables = [
-        "settlements_v2",
-        "market_events_v2",
+        "settlement_outcomes",
+        "market_events",
         "ensemble_snapshots",
-        "calibration_pairs_v2",
+        "calibration_pairs",
     ]
     return world_tables, forecast_tables
 

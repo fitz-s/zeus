@@ -129,7 +129,7 @@ _SETTLEMENTS_TABLE_REF_RE = re.compile(
 # antibody to the dual-track v2 calibration table. Phase 4 audit
 # confirmed all 5 current v2 reader sites (refit_platt.py:92,113;
 # rebuild_calibration_pairs.py:198,205; verify_truth_surfaces.py:1631;
-# backfill_tigge_snapshot_p_raw_v2.py:132) include WHERE temperature_
+# backfill_tigge_snapshot_p_raw.py:132) include WHERE temperature_
 # metric = ?. This lint ensures FUTURE readers conform.
 _CALIBRATION_PAIRS_TABLE_REF_RE = re.compile(
     rf"""

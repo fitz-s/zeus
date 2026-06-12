@@ -131,7 +131,6 @@ def _build_submit(monkeypatch, *, operator_arm, executor_called):
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=True,
-        live_canary_enabled=True,
         durable_submit_outbox_enabled=True,
         executor_submit=_executor_submit,
         operator_arm=operator_arm,
@@ -174,7 +173,7 @@ def test_live_adapter_submit_passes_arm_guard_when_operator_arm_present(monkeypa
 
 # --- selector law: live builder selected ONLY when operator_arm is not None ----------
 
-@pytest.mark.parametrize("live_execution_mode", ["edli_live_canary", "live"])
+@pytest.mark.parametrize("live_execution_mode", ["edli_live"])
 def test_live_builder_not_selected_when_operator_not_authorized(live_execution_mode: str) -> None:
     """ITEM A selector law (main.py ~5220): the live adapter is chosen ONLY when
     (live_submit_effective AND operator_arm is not None). With operator_authorized
@@ -186,7 +185,6 @@ def test_live_builder_not_selected_when_operator_not_authorized(live_execution_m
         "live_execution_mode": live_execution_mode,
         "reactor_mode": "live",
         "real_order_submit_enabled": True,
-        "live_canary_enabled": True,
         "edli_live_operator_authorized": False,
     }
     operator_arm = require_operator_arm(edli_cfg)
@@ -198,7 +196,7 @@ def test_live_builder_not_selected_when_operator_not_authorized(live_execution_m
     assert live_builder_selected is False
 
 
-@pytest.mark.parametrize("live_execution_mode", ["edli_live_canary", "live"])
+@pytest.mark.parametrize("live_execution_mode", ["edli_live"])
 def test_live_builder_selected_when_operator_authorized(live_execution_mode: str) -> None:
     """With operator_authorized true, require_operator_arm mints the token, so for BOTH
     live-submit modes the selector predicate is True and the real-submit live adapter
@@ -209,7 +207,6 @@ def test_live_builder_selected_when_operator_authorized(live_execution_mode: str
         "live_execution_mode": live_execution_mode,
         "reactor_mode": "live",
         "real_order_submit_enabled": True,
-        "live_canary_enabled": True,
         "edli_live_operator_authorized": True,
     }
     operator_arm = require_operator_arm(edli_cfg)

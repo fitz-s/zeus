@@ -7,7 +7,7 @@
 #                  + 2026-06-09 STALE_LAW re-pin: operator ARMED the live canary
 #                    (live_execution_mode=edli_live_canary, real_order_submit_enabled=
 #                    True, taker_fok_fak_live_enabled=True, market_channel_ingestor_
-#                    enabled=True). Authority: config note keys edli_v1.
+#                    enabled=True). Authority: config note keys edli.
 #                    _edli_live_scope_note_2026_06_09 + _mass_enable_note_2026_06_09
 #                    (operator directive 2026-06-09 "全部打开"). The dead shadow-mode
 #                    "must be OFF" assertions were re-pinned to the armed-canary
@@ -27,22 +27,21 @@ import pytest
 
 def test_edli_online_config_defaults_inert_under_legacy_cron():
     settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli_v1"]
+    edli = settings["edli"]
     # STALE_LAW re-pin 2026-06-09: the operator ARMED the live canary. Authority:
-    # config note keys edli_v1._edli_live_scope_note_2026_06_09 (operator directive
+    # config note keys edli._edli_live_scope_note_2026_06_09 (operator directive
     # 2026-06-09 "全部打开 ... 把这些 gate 都删了": the shadow-only gate that blocked
-    # real submit was removed) and edli_v1._mass_enable_note_2026_06_09. Current law
-    # is live_execution_mode == "edli_live_canary" with real submit + taker live ON,
-    # subject to all OTHER arm/promotion/coverage proofs (enforced by the live-canary
-    # readiness tests below). The dead shadow-mode "must be OFF" assertions are gone;
-    # we pin the armed-canary posture as config truth instead.
-    # NB: the value is read into a local before asserting so this file never contains
-    # the literal substring guarded by the meta-test below.
+    # real submit was removed) and edli._mass_enable_note_2026_06_09. Current law
+    # is live_execution_mode == "edli_live" (Wave-2 item 5: canary collapsed into the
+    # single live mode) with real submit ON, subject to all OTHER arm/promotion/coverage
+    # proofs (enforced by the live-readiness tests below). The dead shadow-mode "must be
+    # OFF" assertions are gone; we pin the armed-live posture as config truth instead.
+    # Wave-2 item 8: taker_fok_fak_live_enabled is DELETED (taker law unconditional), so
+    # it is no longer read here. NB: the value is read into a local before asserting so
+    # this file never contains the literal substring guarded by the meta-test below.
     real_submit = edli["real_order_submit_enabled"]
-    taker_live = edli["taker_fok_fak_live_enabled"]
-    assert real_submit is True, "ARMED: operator armed real order submission (live canary)"
-    assert taker_live is True, "ARMED: operator armed taker FOK/FAK (live canary)"
-    assert edli["live_execution_mode"] == "edli_live_canary", "ARMED: live-canary mode"
+    assert real_submit is True, "ARMED: operator armed real order submission (live)"
+    assert edli["live_execution_mode"] == "edli_live", "ARMED: edli_live mode"
     assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
     assert edli["day0_extreme_trigger_enabled"] is True
     assert edli["day0_authority_catchup_scanner_enabled"] is True
@@ -60,13 +59,15 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["no_trade_regret_enabled"] is True
     assert edli["reports_enabled"] is True
     assert edli["forecast_snapshot_emit_limit"] is False
-    assert edli["coverage_fairness_emit_enabled"] is True
+    # Wave-1 2026-06-12: coverage_fairness_emit_enabled flag DELETED — fairness is now
+    # unconditional, so the key is ABSENT (the OFF branch no longer exists).
+    assert "coverage_fairness_emit_enabled" not in edli
     assert edli["day0_catchup_emit_limit"] <= 20
-    # Re-pinned 2026-06-09: these emit/decision caps moved from unbounded (False) to
-    # concrete bounds per the throughput audit (config note _redecision_cap_note_2026_06_09:
-    # redecision cap raised to the code ceiling 200; emit/proof limits given finite bounds).
-    assert edli["no_submit_proof_limit"] is False or int(edli["no_submit_proof_limit"]) > 0
-    assert edli["redecision_max_per_cycle"] is False or int(edli["redecision_max_per_cycle"]) > 0
+    # Wave-1 2026-06-12: no_submit_proof_limit + redecision_max_per_cycle caps DELETED —
+    # proofs are unbounded and the fair round-robin cursor governs re-decision coverage.
+    # The keys must be ABSENT so a future cap reintroduction is caught.
+    assert "no_submit_proof_limit" not in edli
+    assert "redecision_max_per_cycle" not in edli
     assert edli["market_channel_refresh_max_actions_per_window"] <= 5
     assert edli["market_channel_refresh_window_seconds"] >= 1
     assert edli["no_submit_visible_depth_fill_lcb"] < 1.0
@@ -79,15 +80,14 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     # _mass_enable_note_2026_06_09 + _edli_live_scope_note_2026_06_09). Values read
     # into locals so this file never carries the substring guarded by the meta-test.
     real_submit = edli["real_order_submit_enabled"]
-    taker_live = edli["taker_fok_fak_live_enabled"]
     operator_authorized = edli["edli_live_operator_authorized"]
     assert real_submit is True
-    assert taker_live is True
     assert operator_authorized is True
-    assert edli["edli_live_promotion_artifact_required"] is False
-    assert edli["edli_live_min_canary_count"] == 0
-    assert edli["edli_live_max_unresolved_unknowns"] == 0
-    assert edli["edli_live_min_realized_edge_bps"] == 0
+    # Wave-1 2026-06-12: the promotion-artifact + canary-count + live_canary gate flags
+    # are DELETED (the operator arm is the sole gate). Keys must be ABSENT.
+    assert "edli_live_promotion_artifact_required" not in edli
+    assert "edli_live_min_canary_count" not in edli
+    assert "live_canary_enabled" not in edli
 
 
 def test_tiny_live_mechanism_is_fully_deleted_no_cap_replacement():
@@ -95,7 +95,7 @@ def test_tiny_live_mechanism_is_fully_deleted_no_cap_replacement():
     # Order size is governed SOLELY by structural fractional-Kelly sizing. Assert
     # the cap is GONE at every layer (config, ledger API, source), and that the
     # exactly-once reservation knobs are NOT replaced by any new dollar/count cap.
-    edli = json.loads(Path("config/settings.json").read_text())["edli_v1"]
+    edli = json.loads(Path("config/settings.json").read_text())["edli"]
     for forbidden_key in (
         "tiny_live_max_notional_usd",
         "tiny_live_max_orders_per_day",
@@ -134,11 +134,11 @@ def test_tiny_live_mechanism_is_fully_deleted_no_cap_replacement():
 
 def test_day0_scope_admits_day0_with_market_channel_armed():
     # STALE_LAW re-pin 2026-06-09 (was test_day0_shadow_scope_..._keeps_market_channel_disabled).
-    # Authority: edli_v1._edli_live_scope_note_2026_06_09 + _mass_enable_note_2026_06_09
+    # Authority: edli._edli_live_scope_note_2026_06_09 + _mass_enable_note_2026_06_09
     # (operator "全部打开"). The market channel and real submit are now ARMED; the
     # day0 scope flags stay true. Pin armed-canary config truth.
     settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli_v1"]
+    edli = settings["edli"]
 
     assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
     assert edli["day0_extreme_trigger_enabled"] is True
@@ -146,29 +146,25 @@ def test_day0_scope_admits_day0_with_market_channel_armed():
     assert edli["day0_authority_catchup_scanner_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is True
     real_submit = edli["real_order_submit_enabled"]
-    taker_live = edli["taker_fok_fak_live_enabled"]
     assert real_submit is True
-    assert taker_live is True
 
 
 def test_pr_scope_document_matches_settings_flags():
     # STALE_LAW re-pin 2026-06-09. The PR332 package spec
     # (EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md) is a FROZEN historical deploy-ready
     # description of the PRE-ARM shadow/no-submit posture; the operator armed the
-    # live canary AFTER it (authority: edli_v1._edli_live_scope_note_2026_06_09 +
+    # live canary AFTER it (authority: edli._edli_live_scope_note_2026_06_09 +
     # _mass_enable_note_2026_06_09, operator directive 2026-06-09 "全部打开"). The
     # dead config<->spec equality on the now-flipped safety flags is removed; the
     # spec doc is intentionally NOT edited (frozen PR package). We pin the current
     # armed-canary config truth and keep the spec-existence/Day0 documentation checks.
     settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli_v1"]
+    edli = settings["edli"]
     spec = Path("docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md").read_text()
 
     real_submit = edli["real_order_submit_enabled"]
-    taker_live = edli["taker_fok_fak_live_enabled"]
-    assert real_submit is True, "ARMED: operator armed real order submission (live canary)"
-    assert taker_live is True, "ARMED: operator armed taker FOK/FAK (live canary)"
-    assert edli["live_execution_mode"] == "edli_live_canary", "ARMED: live-canary mode"
+    assert real_submit is True, "ARMED: operator armed real order submission (live)"
+    assert edli["live_execution_mode"] == "edli_live", "ARMED: edli_live mode"
     assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
     assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is True
@@ -187,9 +183,9 @@ def test_edli_online_invariants_do_not_claim_day0_real_submit():
 def test_edli_online_invariants_market_channel_and_submit_are_armed():
     # STALE_LAW re-pin 2026-06-09 (was ..._do_not_claim_market_channel_deployed_when_disabled).
     # Operator armed the live canary; market channel + real submit are ON. Authority:
-    # edli_v1._mass_enable_note_2026_06_09 + _edli_live_scope_note_2026_06_09.
+    # edli._mass_enable_note_2026_06_09 + _edli_live_scope_note_2026_06_09.
     settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli_v1"]
+    edli = settings["edli"]
 
     assert edli["market_channel_ingestor_enabled"] is True
     real_submit = edli["real_order_submit_enabled"]
@@ -208,16 +204,18 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "event_bound_live_adapter_from_trade_conn" in source
     assert 'submit_disabled_effective_mode = reactor_mode == "live_no_submit"' in source
     assert 'real_submit_effective = real_order_submit_enabled if reactor_mode == "live" else False' in source
-    assert "taker_fok_fak_effective" in source
+    # Wave-2 item 8: taker_fok_fak_effective deleted (taker law unconditional).
+    assert "taker_fok_fak_effective" not in source
     assert "live_submit_effective = live_bridge_mode or submit_disabled_effective_mode" in source
     assert "real submit disabled this cycle because portfolio_state_unavailable" in source
     assert "if real_submit_effective and _portfolio_state_provider is None" in source
     assert "submit_existing_cycle_for_event" not in source
     assert 'edli_cfg.get("real_order_submit_enabled", False)' in source
     assert "real_order_submit_enabled=real_order_submit_enabled" in source
-    assert 'edli_cfg.get("live_canary_enabled", False)' in source
+    # Wave-1 2026-06-12: the canary on/off flag and no_submit_proof_limit cap reads are DELETED.
+    assert 'edli_cfg.get("live_canary_enabled"' not in source
+    assert 'edli_cfg.get("no_submit_proof_limit"' not in source
     assert "forecast_snapshot_emit_limit" in source
-    assert "no_submit_proof_limit" in source
     assert "process_pending_decision_time = datetime.now(timezone.utc)" in source
     assert "reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)" in source
     assert "reactor.process_pending(decision_time=now, limit=proof_limit)" not in source
@@ -231,7 +229,7 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "_assert_live_execution_mode_contract" in source
     assert "live_execution_mode == \"legacy_cron\"" in source
     assert "edli_submit_disabled_bridge" in source
-    assert "edli_live_canary" in source
+    assert "edli_live" in source
     assert "EDLI_EVENT_DRIVEN_MODES" in source
     for existing_job in ("opening_hunt", "day0_capture", "imminent_open_capture", "market_discovery", "harvester"):
         assert existing_job in source
@@ -251,7 +249,6 @@ def test_live_execution_mode_legacy_cron_does_not_register_edli_reactor(monkeypa
             "market_channel_ingestor_enabled": False,
             "edli_user_channel_reconcile_enabled": False,
             "real_order_submit_enabled": False,
-            "taker_fok_fak_live_enabled": False,
         },
     )
 
@@ -267,8 +264,8 @@ def test_live_execution_mode_legacy_cron_does_not_register_edli_reactor(monkeypa
     assert "imminent_open_capture" in job_ids
     assert "market_discovery" in job_ids
     assert "harvester" in job_ids
-    assert settings_copy["edli_v1"]["enabled"] is False
-    assert settings_copy["edli_v1"]["live_execution_mode"] == "legacy_cron"
+    assert settings_copy["edli"]["enabled"] is False
+    assert settings_copy["edli"]["live_execution_mode"] == "legacy_cron"
 
 
 def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron(monkeypatch, tmp_path):
@@ -285,7 +282,6 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
             "market_channel_ingestor_enabled": True,
             "edli_user_channel_reconcile_enabled": True,
             "real_order_submit_enabled": False,
-            "taker_fok_fak_live_enabled": False,
             **_stage_evidence_updates(tmp_path),
         },
     )
@@ -314,12 +310,12 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
     # POST is the separately-gated _redeem_submitter_cycle, not this resolver.
     assert "harvester" in job_ids
     assert "heartbeat" in job_ids
-    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_submit_disabled_bridge"
-    assert settings_copy["edli_v1"]["forecast_snapshot_trigger_enabled"] is True
-    assert settings_copy["edli_v1"]["day0_extreme_trigger_enabled"] is False
-    assert settings_copy["edli_v1"]["market_channel_ingestor_enabled"] is True
-    assert settings_copy["edli_v1"]["edli_user_channel_reconcile_enabled"] is True
-    assert settings_copy["edli_v1"]["real_order_submit_enabled"] is False
+    assert settings_copy["edli"]["live_execution_mode"] == "edli_submit_disabled_bridge"
+    assert settings_copy["edli"]["forecast_snapshot_trigger_enabled"] is True
+    assert settings_copy["edli"]["day0_extreme_trigger_enabled"] is False
+    assert settings_copy["edli"]["market_channel_ingestor_enabled"] is True
+    assert settings_copy["edli"]["edli_user_channel_reconcile_enabled"] is True
+    assert settings_copy["edli"]["real_order_submit_enabled"] is False
 
 
 def test_market_substrate_warm_cadence_stays_inside_executable_price_ttl(monkeypatch, tmp_path):
@@ -338,7 +334,6 @@ def test_market_substrate_warm_cadence_stays_inside_executable_price_ttl(monkeyp
             "market_channel_ingestor_enabled": False,
             "edli_user_channel_reconcile_enabled": False,
             "real_order_submit_enabled": False,
-            "taker_fok_fak_live_enabled": False,
             **_stage_evidence_updates(tmp_path),
         },
     )
@@ -372,16 +367,15 @@ def test_shadow_no_submit_with_user_ws_registers_reconcile_job(monkeypatch, tmp_
             "market_channel_ingestor_enabled": False,
             "edli_user_channel_reconcile_enabled": False,
             "real_order_submit_enabled": False,
-            "taker_fok_fak_live_enabled": False,
             **_stage_evidence_updates(tmp_path),
         },
     )
 
     job_ids = {job.id for job in scheduler.jobs}
     assert "edli_user_channel_reconcile" in job_ids
-    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_shadow_no_submit"
-    assert settings_copy["edli_v1"]["real_order_submit_enabled"] is False
-    assert settings_copy["edli_v1"]["edli_user_channel_reconcile_enabled"] is False
+    assert settings_copy["edli"]["live_execution_mode"] == "edli_shadow_no_submit"
+    assert settings_copy["edli"]["real_order_submit_enabled"] is False
+    assert settings_copy["edli"]["edli_user_channel_reconcile_enabled"] is False
 
 
 def test_live_execution_mode_rejects_legacy_cron_with_edli_runtime_enabled(monkeypatch):
@@ -445,19 +439,20 @@ def test_forecast_only_live_scope_rejects_day0_runtime(monkeypatch):
 
 
 def test_live_execution_mode_stage_requires_matching_reactor_mode(monkeypatch):
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_REQUIRES_REACTOR_MODE_LIVE"):
+    # Wave-2 item 5: canary collapsed into edli_live; the contract error is now
+    # EDLI_LIVE_REQUIRES_REACTOR_MODE_LIVE (mode.upper() = EDLI_LIVE).
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_REACTOR_MODE_LIVE"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
                 "enabled": True,
-                "live_execution_mode": "edli_live_canary",
+                "live_execution_mode": "edli_live",
                 "reactor_mode": "live_no_submit",
                 "event_writer_enabled": True,
                 "forecast_snapshot_trigger_enabled": True,
                 "market_channel_ingestor_enabled": True,
                 "edli_user_channel_reconcile_enabled": True,
                 "real_order_submit_enabled": True,
-                "live_canary_enabled": True,
             },
         )
 
@@ -522,20 +517,22 @@ def test_submit_disabled_bridge_requires_lifecycle_authorities(monkeypatch):
         )
 
 
-def test_live_canary_requires_submit_and_canary_flags(monkeypatch):
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_REQUIRES_REAL_ORDER_SUBMIT_ENABLED_AND_LIVE_CANARY_ENABLED"):
+def test_live_canary_requires_submit_flag(monkeypatch):
+    # Wave-1 2026-06-12: live_canary_enabled is DELETED from the live-mode require-list;
+    # real_order_submit_enabled remains a required flag. With it False, boot still fails
+    # closed on REAL_ORDER_SUBMIT_ENABLED (the canary token in the error name is gone).
+    with pytest.raises(RuntimeError, match="REAL_ORDER_SUBMIT_ENABLED"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
                 "enabled": True,
-                "live_execution_mode": "edli_live_canary",
+                "live_execution_mode": "edli_live",
                 "reactor_mode": "live",
                 "event_writer_enabled": True,
                 "forecast_snapshot_trigger_enabled": True,
                 "market_channel_ingestor_enabled": True,
                 "edli_user_channel_reconcile_enabled": True,
                 "real_order_submit_enabled": False,
-                "live_canary_enabled": False,
             },
         )
 
@@ -567,37 +564,38 @@ def test_live_canary_requires_stage_evidence_file_paths(monkeypatch, tmp_path):
     # _require_stage_file_paths (config-key check) no longer raises.
     # evaluate_edli_stage_readiness (disk-existence check) raises instead:
     # absent files → STALE/MISSING reasons → FAIL status →
-    # _assert_edli_stage_readiness raises EDLI_LIVE_CANARY_READINESS_FAIL.
+    # _assert_edli_stage_readiness raises EDLI_LIVE_READINESS_FAIL (Wave-2 item 5:
+    # canary collapsed into edli_live; the boot-block readiness path is unchanged).
     # Boot is fail-CLOSED: guard is intact, source of raise shifted.
-    # RATIFIED 2026-06-03 (FIX-2 investigation). See also: src/main.py
-    # lines 370-426 (_require_stage_file_paths, evaluate_edli_stage_readiness).
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_READINESS_FAIL"):
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_READINESS_FAIL"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             _edli_live_canary_updates(
                 edli_stage_loaded_sha_file=str(tmp_path / "missing-loaded-sha.json"),
                 edli_stage_source_health_json=str(tmp_path / "missing-source-health.json"),
                 edli_stage_status_json=str(tmp_path / "missing-status-summary.json"),
+                edli_live_promotion_artifact_path=str(tmp_path / "missing-promotion.json"),
             ),
         )
 
 
 def test_edli_live_canary_stage_readiness_waits_on_clean_db(monkeypatch, tmp_path):
+    # Wave-2 item 5: canary collapsed into edli_live. On a clean DB with no stage-file
+    # blockers, edli_live readiness PASSes with full live allowance (the canary
+    # qualifying-event WAITING semantics + scaleout=False are dead). The canary artifact
+    # param is also deleted.
     import src.main as main
 
     db_path = tmp_path / "world.db"
     _init_stage_world_db(db_path)
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
-    report = main.evaluate_edli_stage_readiness(
-        stage="edli_live_canary",
-        canary_artifact_path=str(tmp_path / "missing-canary.json"),
-    )
+    report = main.evaluate_edli_stage_readiness(stage="edli_live")
 
-    assert report.status == "WAITING_FOR_QUALIFYING_EVENT"
+    assert report.status == "PASS"
     assert report.live_entries_allowed is True
     assert report.submit_allowed is True
-    assert report.scaleout_allowed is False
+    assert report.scaleout_allowed is True
 
 
 def test_edli_live_canary_with_stage_evidence_waits_for_qualifying_event(monkeypatch, tmp_path):
@@ -611,7 +609,7 @@ def test_edli_live_canary_with_stage_evidence_waits_for_qualifying_event(monkeyp
     assert "edli_event_reactor" in job_ids
     assert "edli_market_channel_ingestor" in job_ids
     assert "edli_user_channel_reconcile" in job_ids
-    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_live_canary"
+    assert settings_copy["edli"]["live_execution_mode"] == "edli_live"
 
 
 def test_edli_live_canary_does_not_consume_promotion_arm_artifact(monkeypatch, tmp_path):
@@ -626,7 +624,7 @@ def test_edli_live_canary_does_not_consume_promotion_arm_artifact(monkeypatch, t
 
     assert scheduler.started is True
     assert "edli_event_reactor" in {job.id for job in scheduler.jobs}
-    assert settings_copy["edli_v1"]["edli_arm_gate_artifact_required"] is True
+    assert settings_copy["edli"]["edli_arm_gate_artifact_required"] is True
 
 
 def test_emos_sole_canary_skips_legacy_bias_platt_boot_guard(monkeypatch, tmp_path):
@@ -651,7 +649,7 @@ def test_emos_sole_canary_skips_legacy_bias_platt_boot_guard(monkeypatch, tmp_pa
 
     assert scheduler.started is True
     assert "edli_event_reactor" in {job.id for job in scheduler.jobs}
-    assert settings_copy["edli_v1"]["edli_emos_sole_calibrator_enabled"] is True
+    assert settings_copy["edli"]["edli_emos_sole_calibrator_enabled"] is True
 
 
 def test_edli_live_canary_boot_runs_stage_readiness_before_registering_edli_jobs(monkeypatch):
@@ -662,7 +660,7 @@ def test_edli_live_canary_boot_runs_stage_readiness_before_registering_edli_jobs
     def _fake_readiness(_cfg):
         calls.append("readiness")
         return main.EdliStageReadiness(
-            stage="edli_live_canary",
+            stage="edli_live",
             status=main.EDLI_STAGE_WAITING,
             live_entries_allowed=True,
             submit_allowed=True,
@@ -723,7 +721,7 @@ def test_edli_live_canary_stage_readiness_blocks_unresolved_unknown(monkeypatch,
     conn.close()
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
-    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+    report = main.evaluate_edli_stage_readiness(stage="edli_live")
 
     assert report.status == "FAIL"
     assert any(reason.startswith("EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN") for reason in report.reasons)
@@ -751,7 +749,7 @@ def test_edli_live_canary_stage_readiness_blocks_open_cap_reservation(monkeypatc
     conn.close()
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
-    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+    report = main.evaluate_edli_stage_readiness(stage="edli_live")
 
     assert report.status == "FAIL"
     assert any(reason.startswith("EDLI_STAGE_LIVE_CAP_RESERVED") for reason in report.reasons)
@@ -767,7 +765,7 @@ def test_edli_live_canary_stage_readiness_fails_closed_on_missing_projection(mon
     conn.close()
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
-    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+    report = main.evaluate_edli_stage_readiness(stage="edli_live")
 
     assert report.status == "FAIL"
     assert any(reason.startswith("EDLI_STAGE_PENDING_RECONCILE_QUERY_FAILED") for reason in report.reasons)
@@ -784,7 +782,7 @@ def test_edli_live_canary_stage_readiness_fails_closed_on_missing_cap_usage(monk
     conn.close()
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
-    report = main.evaluate_edli_stage_readiness(stage="edli_live_canary")
+    report = main.evaluate_edli_stage_readiness(stage="edli_live")
 
     assert report.status == "FAIL"
     assert any(reason.startswith("EDLI_STAGE_OPEN_CAP_QUERY_FAILED") for reason in report.reasons)
@@ -800,7 +798,7 @@ def test_edli_live_canary_stage_readiness_blocks_stale_source(monkeypatch, tmp_p
     monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
 
     report = main.evaluate_edli_stage_readiness(
-        stage="edli_live_canary",
+        stage="edli_live",
         source_health_json=str(source),
         max_age_seconds=1,
     )
@@ -820,16 +818,21 @@ def test_edli_live_canary_boot_defers_self_written_status_summary_staleness(monk
     source = tmp_path / "source_health.json"
     status = tmp_path / "status_summary.json"
     now = datetime.now(timezone.utc)
+    promotion = tmp_path / "promotion.json"
     loaded.write_text(json.dumps({"loaded_sha": "abc123"}))
     source.write_text(json.dumps({"generated_at": now.isoformat()}))
     status.write_text(json.dumps({"generated_at": (now - timedelta(hours=1)).isoformat()}))
+    promotion.write_text(json.dumps({"ok": True}))
 
     report = main._assert_edli_stage_readiness(
         {
-            "live_execution_mode": "edli_live_canary",
+            # Wave-2 item 5: canary collapsed into edli_live; edli_live requires the
+            # promotion-artifact stage-file path (REQUIRED_STAGE_FILES_BY_MODE).
+            "live_execution_mode": "edli_live",
             "edli_stage_loaded_sha_file": str(loaded),
             "edli_stage_source_health_json": str(source),
             "edli_stage_status_json": str(status),
+            "edli_live_promotion_artifact_path": str(promotion),
             "edli_stage_readiness_max_age_seconds": 60,
         }
     )
@@ -841,21 +844,22 @@ def test_edli_live_canary_boot_defers_self_written_status_summary_staleness(monk
 
 
 def _edli_live_canary_updates(**overrides):
+    # Wave-2 item 5: canary collapsed into edli_live. This helper now produces an
+    # edli_live config (deleted keys live_canary_enabled / taker_fok_fak_live_enabled
+    # are not emitted). Name retained for call-site stability.
     values = {
         "enabled": True,
-        "live_execution_mode": "edli_live_canary",
+        "live_execution_mode": "edli_live",
         "reactor_mode": "live",
         "event_writer_enabled": True,
         "forecast_snapshot_trigger_enabled": True,
         "market_channel_ingestor_enabled": True,
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
-        "live_canary_enabled": True,
-        "taker_fok_fak_live_enabled": True,
         "durable_submit_outbox_enabled": True,
         # 2026-06-04: the arm direction-gate boot guard is DELETED (mainstream is
         # display-only). These keys are now INERT (no boot guard reads them); retained
-        # here only to keep this canary config explicit. They do not affect boot.
+        # here only to keep this live config explicit. They do not affect boot.
         "mainstream_agreement_enforce_on_submit": True,
         "mainstream_agreement_reference_enabled": True,
     }
@@ -873,12 +877,9 @@ def _edli_live_updates(**overrides):
         "market_channel_ingestor_enabled": True,
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
-        "live_canary_enabled": True,
-        "taker_fok_fak_live_enabled": True,
         "durable_submit_outbox_enabled": True,
         "edli_live_operator_authorized": True,
         "edli_live_promotion_artifact_required": True,
-        "edli_live_min_canary_count": 1,
         "edli_live_max_unresolved_unknowns": 0,
         "edli_live_min_realized_edge_bps": 0,
         # 2026-06-04: inert keys (arm direction-gate guard DELETED). See _edli_live_canary_updates.
@@ -899,165 +900,38 @@ def test_edli_live_requires_operator_authorized_flag(monkeypatch):
         )
 
 
-def test_edli_live_requires_promotion_artifact(monkeypatch):
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(edli_live_promotion_artifact_path=""),
-        )
+# ---------------------------------------------------------------------------
+# Wave-1 2026-06-12: the EDLI-live PROMOTION-ARTIFACT and ARM-GATE-ARTIFACT
+# verification gates are DELETED (operator no-overengineering law: they were
+# promotion bureaucracy / a "circular promotion proof" — an artifact file proving
+# a min canary fill count, a capital-weighted-EV measurement, a commit-sha binding).
+# The operator ARM (edli_live_operator_authorized) is now the SOLE boot gate. The
+# former RED tests (boot MUST raise on missing/invalid/negative-EV/sha-mismatch
+# artifacts) are deleted; replaced by deletion-antibody tests proving boot proceeds
+# WITHOUT any artifact, and that the dead requirement keys are gone.
+# ---------------------------------------------------------------------------
 
 
-def _arm_gate_artifact_updates(tmp_path, **overrides):
-    """Stage a VALID ARM-gate evidence artifact and turn the boot requirement ON.
+def test_edli_live_promotion_and_arm_gate_artifacts_no_longer_required(monkeypatch):
+    """Antibody: edli_live arms with the operator authorization ONLY — no artifact
+    files, no canary-fill-count proof, no EV/sha measurement. The deleted gate
+    functions are now intentional no-ops; boot must NOT raise on their absence."""
+    import src.main as main
 
-    The harness pins ``_capture_boot_state`` to sha="abc123", so the artifact's
-    commit_sha must match that for the SHA binding to pass.
-    """
-    art_path = tmp_path / "arm_gate_artifact.json"
-    art = {
-        "schema": "edli_arm_gate_v1",
-        "commit_sha": "abc123",
-        "measurement_cmd_hash": "f" * 64,
-        "capital_weighted_ev": 0.012,
-        "production_n": 40,
-        "gate_pass_n": 40,
-        "per_city_n": {"shanghai": 6, "singapore": 7},
-        "ev_sigma": 2.1,
-        "date_coverage": ["2026-06-01", "2026-06-02"],
-        "coverage_licensed": True,
-    }
-    art.update(overrides)
-    art_path.write_text(json.dumps(art))
-    return {
-        "edli_arm_gate_artifact_required": True,
-        "edli_arm_gate_artifact_path": str(art_path),
-    }
+    # The gate asserters survive as no-ops (callable, never raise on a missing artifact).
+    main._assert_edli_live_promotion_artifact({"edli_live_operator_authorized": True})
+    main._assert_edli_arm_gate_artifact({"edli_live_operator_authorized": True})
+    # The only honest gate left: operator authorization. Absent it, boot still fails closed.
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_EDLI_LIVE_OPERATOR_AUTHORIZED"):
+        main._assert_edli_live_promotion_artifact({"edli_live_operator_authorized": False})
 
 
-def test_live_boot_fails_without_arm_artifact(monkeypatch, tmp_path):
-    # PR-2 (A) RED: with the ARM-gate requirement ON but NO artifact on disk,
-    # arming the live daemon is a BOOT FAILURE, not a runtime path. A
-    # well-formed positive promotion artifact is staged so the failure is
-    # ATTRIBUTABLE to the missing ARM artifact (not the promotion gate).
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.01)
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_MISSING"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(
-                edli_live_promotion_artifact_path=str(artifact),
-                **_stage_evidence_updates(tmp_path),
-                edli_arm_gate_artifact_required=True,
-                edli_arm_gate_artifact_path=str(tmp_path / "does-not-exist.json"),
-            ),
-            world_db_path=db_path,
-        )
-
-
-def test_capital_weighted_arm_denial_blocks_boot(monkeypatch, tmp_path):
-    # PR-2 (A) RED: an ARM artifact that exists and matches HEAD but reports a
-    # NON-POSITIVE capital-weighted EV must DENY the boot. The capital-weighted
-    # edge is THE arm criterion; a zero/negative one cannot arm.
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.01)
-    arm_updates = _arm_gate_artifact_updates(tmp_path, capital_weighted_ev=0.0)
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARM_GATE_EV_NOT_POSITIVE"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(
-                edli_live_promotion_artifact_path=str(artifact),
-                **_stage_evidence_updates(tmp_path),
-                **arm_updates,
-            ),
-            world_db_path=db_path,
-        )
-
-
-def test_arm_artifact_sha_mismatch_blocks_boot(monkeypatch, tmp_path):
-    # PR-2 (A): a stale ARM artifact (measured on a DIFFERENT commit) cannot arm
-    # the current code — SHA binding makes "armed on unproven code" unconstructable.
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.01)
-    arm_updates = _arm_gate_artifact_updates(tmp_path, commit_sha="deadbeefdeadbeef")
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARM_GATE_COMMIT_SHA_MISMATCH"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(
-                edli_live_promotion_artifact_path=str(artifact),
-                **_stage_evidence_updates(tmp_path),
-                **arm_updates,
-            ),
-            world_db_path=db_path,
-        )
-
-
-def test_live_boot_accepts_valid_arm_artifact(monkeypatch, tmp_path):
-    # PR-2 (A) GREEN: a valid, HEAD-bound, positive-EV, coverage-licensed ARM
-    # artifact lets the armed boot proceed (alongside the promotion artifact).
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.000001)
-    arm_updates = _arm_gate_artifact_updates(tmp_path)
-
-    scheduler, settings_copy = _run_main_with_fake_scheduler(
-        monkeypatch,
-        _edli_live_updates(
-            edli_live_promotion_artifact_path=str(artifact),
-            **_stage_evidence_updates(tmp_path),
-            **arm_updates,
-        ),
-        world_db_path=db_path,
-    )
-
-    assert scheduler.started is True
-    assert "edli_event_reactor" in {job.id for job in scheduler.jobs}
-    assert settings_copy["edli_v1"]["edli_arm_gate_artifact_required"] is True
-
-
-def test_edli_live_blocks_unresolved_unknowns(monkeypatch, tmp_path):
-    artifact, db_path = _write_db_backed_promotion_artifact(
-        tmp_path,
-        realized_edge=0.01,
-        audit_state="POST_SUBMIT_UNKNOWN",
-    )
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_UNRESOLVED_UNKNOWN"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
-            world_db_path=db_path,
-        )
-
-
-def test_edli_live_blocks_non_positive_realized_edge(monkeypatch, tmp_path):
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=-0.01)
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
-            world_db_path=db_path,
-        )
-
-
-def test_edli_live_blocks_scalar_promotion_artifact_without_db_proof(monkeypatch, tmp_path):
-    artifact = tmp_path / "promotion.json"
-    artifact.write_text(json.dumps({"canary_count": 1, "unresolved_unknowns": 0, "realized_edge_bps": 1}))
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARTIFACT_SCHEMA_INVALID"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
-        )
-
-
-def test_edli_live_blocks_exact_zero_realized_edge(monkeypatch, tmp_path):
-    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.0)
-
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_REALIZED_EDGE_INSUFFICIENT"):
-        _run_main_with_fake_scheduler(
-            monkeypatch,
-            _edli_live_updates(edli_live_promotion_artifact_path=str(artifact)),
-            world_db_path=db_path,
-        )
+def test_edli_live_artifact_gate_settings_keys_are_deleted():
+    """Antibody: the promotion/arm-gate REQUIREMENT toggles are removed from config."""
+    edli = json.loads(Path("config/settings.json").read_text())["edli"]
+    assert "edli_live_promotion_artifact_required" not in edli
+    assert "edli_arm_gate_artifact_required" not in edli
+    assert "edli_live_min_canary_count" not in edli
 
 
 def test_edli_live_accepts_positive_promotion_artifact(monkeypatch, tmp_path):
@@ -1074,8 +948,8 @@ def test_edli_live_accepts_positive_promotion_artifact(monkeypatch, tmp_path):
     assert "edli_event_reactor" in job_ids
     assert "edli_market_channel_ingestor" in job_ids
     assert "edli_user_channel_reconcile" in job_ids
-    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_live"
-    assert settings_copy["edli_v1"]["edli_live_operator_authorized"] is True
+    assert settings_copy["edli"]["live_execution_mode"] == "edli_live"
+    assert settings_copy["edli"]["edli_live_operator_authorized"] is True
 
 
 def test_market_discovery_constructs_public_clob_with_bounded_timeout(monkeypatch):
@@ -1168,8 +1042,8 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
     # *_arm_artifact tests below). Default the requirement OFF here so the broad
     # boot fixtures stay focused; a test that asserts the arm-gate fires sets
     # edli_arm_gate_artifact_required=True explicitly (and wins via the update).
-    settings_copy["edli_v1"]["edli_arm_gate_artifact_required"] = False
-    settings_copy["edli_v1"].update(edli_updates)
+    settings_copy["edli"]["edli_arm_gate_artifact_required"] = False
+    settings_copy["edli"].update(edli_updates)
     monkeypatch.setattr(main, "settings", settings_copy)
     monkeypatch.setattr(main, "get_mode", lambda: "live")
     monkeypatch.setattr(main.sys, "argv", ["src/main.py"])

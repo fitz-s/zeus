@@ -14,7 +14,6 @@ from src.strategy.live_inference.trade_score import (
     assert_causal_snapshot,
     assert_passive_post_only_gate,
     assert_positive_trade_score,
-    assert_taker_live_allowed,
     robust_trade_score,
 )
 
@@ -48,9 +47,9 @@ def test_available_at_future_blocks_trade():
         )
 
 
-def test_taker_fok_live_requires_execution_policy_review():
-    with pytest.raises(LiveInferenceBlocked, match="taker FOK/FAK"):
-        assert_taker_live_allowed(taker_fok_fak_live_enabled=False)
+# Wave-2 item 8 (2026-06-12): assert_taker_live_allowed is DELETED (taker FOK/FAK
+# legality is unconditional inside the execution certificate). The OFF-branch test
+# that pinned the deleted gate is removed.
 
 
 def test_passive_post_only_live_uses_passive_fill_gate():

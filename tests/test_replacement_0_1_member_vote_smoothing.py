@@ -7,7 +7,7 @@
 #   instance — every bin gets a strictly-positive prior so the 0.1 anchor Gaussian (weight 0.80)
 #   can place mass in formerly-0-vote bins (the soft anchor becomes soft).
 # Reuse: Run before changing member-prior construction, the alpha constant, or the smoothing flag.
-# Authority basis: Operator task replacement_0_1_member_vote_smoothing_enabled (edli_v1, default OFF).
+# Authority basis: Operator task replacement_0_1_member_vote_smoothing_enabled (edli, default OFF).
 """Flag-gated additive smoothing of the AIFS member-vote prior (the zero-prior veto fix)."""
 
 from __future__ import annotations

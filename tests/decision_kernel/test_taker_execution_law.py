@@ -58,7 +58,6 @@ _UNSET = object()
 
 def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None = None,
                  quote_overrides: dict | None = None, return_parents: bool = False,
-                 taker_fok_fak_live_enabled: bool = True,
                  passive_maker_context=_UNSET,
                  available_crossable_shares: float | None = None,
                  sweep_expected_fill_price: str | None = None):
@@ -190,7 +189,6 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         min_order_size=1.0,
         best_bid=float(quote_payload["best_bid"]),
         best_ask=float(quote_payload["best_ask"]),
-        taker_fok_fak_live_enabled=bool(taker_fok_fak_live_enabled),  # F1 kill-lever
         available_crossable_shares=available_crossable_shares,
         sweep_expected_fill_price=sweep_expected_fill_price,
     )
@@ -442,69 +440,16 @@ def test_maker_inside_spread_price_capped_by_reservation():
 
 
 # --------------------------------------------------------------------------
-# CANARY branch: force taker FOK at the >=5c edge floor
+# Wave-1 2026-06-12: the CANARY force-taker branch of _select_edli_order_mode is
+# DELETED (twin-authority disease: a knob that force-flips the proof's mode to
+# TAKER competes with the single rest-then-cross policy authority). The two former
+# canary-force tests (force taker at >=5c floor; no force below floor) are removed.
+# Mode is now driven by the spread guard, the governor, and the proof's
+# rest_then_cross_policy ONLY.
 # --------------------------------------------------------------------------
-def test_canary_forces_taker_fok_when_edge_clears_5c_floor():
-    """canary_force_taker + (q_posterior - best_ask - f) >= 0.05 -> FOK taker."""
-    from src.engine.event_reactor_adapter import _select_edli_order_mode
-
-    actionable_payload = {
-        "direction": "buy_yes",
-        "q_live": 0.55,  # q - best_ask(0.45) - fee(0) = 0.10 >= 0.05 floor
-        "c_fee_adjusted": 0.50,
-        "p_fill_lcb": 0.10,
-        "trade_score": 0.05,
-        "fee_rate": 0.0,
-    }
-    quote_payload = {"best_bid": 0.40, "best_ask": 0.45, "visible_depth": 8.0}
-
-    class _Snap:
-        payload = {}
-
-    mode = _select_edli_order_mode(
-        actionable_payload=actionable_payload,
-        quote_payload=quote_payload,
-        best_bid=0.40,
-        best_ask=0.45,
-        executable_snapshot=_Snap(),
-        canary_force_taker=True,
-        canary_edge_floor=0.05,
-    )
-    assert mode == "TAKER"
-
-
-def test_canary_does_not_force_taker_below_5c_floor():
-    """Sub-floor canary candidate falls through to governor/EV (no forced cross)."""
-    from src.engine.event_reactor_adapter import _select_edli_order_mode
-
-    actionable_payload = {
-        "direction": "buy_yes",
-        "q_live": 0.47,  # q - best_ask(0.45) - 0 = 0.02 < 0.05 floor
-        "c_fee_adjusted": 0.50,
-        "p_fill_lcb": 0.70,  # deep-book modest edge -> EV says rest
-        "trade_score": 0.02,
-        "fee_rate": 0.0,
-    }
-    quote_payload = {"best_bid": 0.44, "best_ask": 0.45, "visible_depth": 500.0}
-
-    class _Snap:
-        payload = {}
-
-    mode = _select_edli_order_mode(
-        actionable_payload=actionable_payload,
-        quote_payload=quote_payload,
-        best_bid=0.44,
-        best_ask=0.45,
-        executable_snapshot=_Snap(),
-        canary_force_taker=True,
-        canary_edge_floor=0.05,
-    )
-    # Floor not met + governor unconfigured (MAKER) + EV modest -> rest as maker.
-    assert mode == "MAKER"
-
-
-def test_ev_boundary_crosses_on_thin_book_large_edge():
-    """§2: high edge + low P_fill (thin book) -> TAKER even without canary."""
+def test_proof_policy_drives_taker_on_healthy_book():
+    """A TAKER_* proof policy on a healthy (tight-spread) book routes TAKER; the
+    canary force-taker knob is gone, so the proof policy is the sole mode authority."""
     from src.engine.event_reactor_adapter import _select_edli_order_mode
 
     actionable_payload = {
@@ -514,6 +459,39 @@ def test_ev_boundary_crosses_on_thin_book_large_edge():
         "trade_score": 0.06,  # e
         "p_fill_lcb": 0.15,   # thin
         "fee_rate": 0.0,
+        "rest_then_cross_policy": "TAKER_FLEETING_EDGE",
+    }
+    quote_payload = {"best_bid": 0.48, "best_ask": 0.50, "visible_depth": 6.0}
+
+    class _Snap:
+        payload = {}
+
+    mode = _select_edli_order_mode(
+        actionable_payload=actionable_payload,
+        quote_payload=quote_payload,
+        best_bid=0.48,
+        best_ask=0.50,
+        executable_snapshot=_Snap(),
+        fresh_best_bid=0.48,
+        fresh_best_ask=0.50,
+    )
+    assert mode == "TAKER"
+
+
+def test_rest_policy_rests_maker_on_thin_book_large_edge():
+    """§2: with NO TAKER_* proof policy, the fresh-mode witness rests MAKER even on a
+    thin book with a large edge — the escalation lane owns any later cross, never an
+    inline one. (Replaces the deleted §2 EV-override / canary force-taker behaviour.)"""
+    from src.engine.event_reactor_adapter import _select_edli_order_mode
+
+    actionable_payload = {
+        "direction": "buy_yes",
+        "q_live": 0.56,
+        "c_fee_adjusted": 0.50,
+        "trade_score": 0.06,  # e
+        "p_fill_lcb": 0.15,   # thin
+        "fee_rate": 0.0,
+        # No rest_then_cross_policy -> REST/MAKER witness.
     }
     quote_payload = {"best_bid": 0.40, "best_ask": 0.50, "visible_depth": 6.0}
 
@@ -526,57 +504,48 @@ def test_ev_boundary_crosses_on_thin_book_large_edge():
         best_bid=0.40,
         best_ask=0.50,
         executable_snapshot=_Snap(),
-        canary_force_taker=False,
     )
-    # e*(1-Pfill)=0.06*0.85=0.051 >= s/2*(1+Pfill)=0.05*1.15=0.0575? No -> need check.
-    # spread=0.10 -> rhs=0.0575; lhs=0.051 -> rests. Adjust expectation: deep spread.
-    # This documents the boundary is real; with s=0.10 it rests.
+    # No TAKER_* policy on the payload -> the rest-then-cross witness is MAKER, regardless
+    # of the thin book / large edge. The escalation lane owns any later cross.
     assert mode == "MAKER"
 
 
 # --------------------------------------------------------------------------
-# F1 kill-lever: taker_fok_fak_live_enabled must be in the cert payload and
-# event_bound_final_intent must honour it (fail-CLOSED when False).
+# Wave-2 item 8 (2026-06-12): taker FOK/FAK legality is UNCONDITIONAL. The
+# former taker_fok_fak_live_enabled kill-lever (config flag + cert payload field
+# + assert_taker_live_allowed OFF branch) is DELETED. The governor-decided taker
+# tuple (post_only False, maker_intent False, FOK/FAK) is the single authority.
 # --------------------------------------------------------------------------
-def test_taker_kill_lever_false_blocks_submission():
-    """taker_fok_fak_live_enabled=False in cert -> expressibility layer raises LiveInferenceBlocked.
+def test_taker_legality_is_unconditional_no_kill_lever():
+    """A governor-decided TAKER cert is submittable with NO config flag.
 
-    This is the load-bearing relationship test for F1: the flag must travel
-    execution.py -> cert payload -> event_bound_final_intent.py and actually deny.
-    A missing field (absent from payload) is equivalent to False (fail-closed default).
+    Relationship test for the fold: the taker tuple alone authorizes the taker
+    path at the expressibility boundary; there is no longer any payload flag or
+    OFF branch that can deny it. The flag field must be ABSENT from the payload.
     """
-    from src.strategy.live_inference.state import LiveInferenceBlocked
-
-    # Build a TAKER cert with the kill-lever OFF
-    _, _, final_intent = _taker_chain(order_mode="TAKER", taker_fok_fak_live_enabled=False)
-
-    # Confirm the flag landed in the payload as False (not absent/True)
-    assert final_intent.payload["taker_fok_fak_live_enabled"] is False
-
-    # The expressibility boundary MUST raise LiveInferenceBlocked — not silently allow
-    with pytest.raises(LiveInferenceBlocked, match="taker FOK/FAK live disabled"):
-        validate_final_intent_cert_for_existing_executor(final_intent)
-
-
-def test_taker_kill_lever_true_allows_submission():
-    """taker_fok_fak_live_enabled=True in cert -> expressibility layer passes.
-
-    Confirms the flag is the ONLY gate: same market, same order, only flag differs.
-    Also confirms maker path is unaffected (maker cert never calls assert_taker_live_allowed).
-    """
-    from src.strategy.live_inference.state import LiveInferenceBlocked
-
-    # TAKER cert with lever ON -> must pass
-    _, _, taker_intent = _taker_chain(order_mode="TAKER", taker_fok_fak_live_enabled=True)
-    assert taker_intent.payload["taker_fok_fak_live_enabled"] is True
+    _, _, taker_intent = _taker_chain(order_mode="TAKER")
+    # The deleted flag must not reappear in the cert payload.
+    assert "taker_fok_fak_live_enabled" not in taker_intent.payload
+    # Taker is authorized purely by the tuple: post_only False, maker_intent False.
+    assert taker_intent.payload["post_only"] is False
+    assert taker_intent.payload["maker_intent"] is False
     native_hash = validate_final_intent_cert_for_existing_executor(taker_intent)
     assert native_hash
 
-    # MAKER cert with lever False -> maker path never calls assert_taker_live_allowed
-    _, _, maker_intent = _taker_chain(order_mode="MAKER", taker_fok_fak_live_enabled=False)
-    assert maker_intent.payload["taker_fok_fak_live_enabled"] is False
+
+def test_assert_taker_live_allowed_is_deleted():
+    """The OFF-branch gate function must no longer exist on the trade_score module."""
+    import src.strategy.live_inference.trade_score as _ts
+
+    assert not hasattr(_ts, "assert_taker_live_allowed")
+
+
+def test_maker_path_unaffected_by_taker_fold():
+    """MAKER cert still passes the expressibility boundary (maker law untouched)."""
+    _, _, maker_intent = _taker_chain(order_mode="MAKER")
+    assert "taker_fok_fak_live_enabled" not in maker_intent.payload
     maker_hash = validate_final_intent_cert_for_existing_executor(maker_intent)
-    assert maker_hash  # maker unaffected — kill-lever does not touch the passive path
+    assert maker_hash
 
 
 # --------------------------------------------------------------------------

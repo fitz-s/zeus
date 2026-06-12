@@ -69,6 +69,12 @@ _T_GROUP_RE = re.compile(r"\bT\d{8}\b")
 #: the reactor cycle can be faster — do not hammer a free government API).
 DEFAULT_MIN_FETCH_INTERVAL_S = 90.0
 
+#: Maximum cache age (seconds) at which the fast lane may serve the ENTRY gate
+#: (monitor fallback — Option B). Kills are staleness-safe; entries are not.
+#: At 15 min the cache is still fresh enough that the running extreme it
+#: encodes is a valid local-day extreme for entry-probability computation.
+FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
+
 
 @dataclass(frozen=True)
 class FastObsSource:
@@ -610,7 +616,7 @@ class Day0FastObsEmitter:
             return [], FETCH_NO_DATA, None
 
     def latest_rounded_extreme(
-        self, city_name: str, target_date: str, metric: str
+        self, city_name: str, target_date: str, metric: str, *, world_conn: Any = None
     ) -> Optional[int]:
         """Latest settlement-rounded extreme known to the fast lane for
         (city, date, metric) — the hard-fact monotone KILL source.
@@ -620,11 +626,105 @@ class Day0FastObsEmitter:
         been degraded — monotone kills are safe under staleness; entries are
         gated separately). Consumed by src/execution/day0_hard_fact_exit.py.
         Reads the KILL memo (round-2 P0-1 split: independent of whether a live
-        event was emitted). None when nothing recorded in this process
-        (restart, lane disabled, city excluded).
+        event was emitted).
+
+        RESTART-SAFE RECOVERY (2026-06-12, critique Angle 1 Gap C): the in-process
+        kill memo is lost on daemon restart. Rather than persisting a NEW table,
+        we recover from the DAY0_EXTREME_UPDATED events that emit_prefetched
+        ALREADY persisted durably to opportunity_events (zeus-world.db). When the
+        in-process memo has no value, this reads the latest memo-safe (AUTHORIZED
+        + local-date MATCH + DST UNAMBIGUOUS) rounded extreme for the cell from
+        those events, applies the absorbing-direction reduction (high=max,
+        low=min), caches it into the in-process memo (so the live monotone emit
+        logic stays consistent post-restart), and returns it. Fail-soft: any DB
+        error leaves the memo untouched and returns None (the lane simply has no
+        recovered fact this call). ``world_conn`` is caller-supplied for tests;
+        when None a short read-only world connection is opened and closed here.
         """
+        key = (str(city_name), str(target_date), str(metric))
         with self._lock:
-            return self._last_kill_memo_rounded.get((str(city_name), str(target_date), str(metric)))
+            memo = self._last_kill_memo_rounded.get(key)
+        if memo is not None:
+            return memo
+        # In-process memo empty (restart / first call this process): recover from
+        # the durable event store before giving up.
+        recovered = _recover_kill_memo_from_events(
+            city_name=str(city_name),
+            target_date=str(target_date),
+            metric=str(metric),
+            world_conn=world_conn,
+        )
+        if recovered is None:
+            return None
+        with self._lock:
+            # Re-check under lock: a concurrent emit may have populated the memo;
+            # honor the absorbing direction so recovery never regresses it.
+            current = self._last_kill_memo_rounded.get(key)
+            if current is None or (
+                (metric == "high" and recovered > current)
+                or (metric == "low" and recovered < current)
+            ):
+                self._last_kill_memo_rounded[key] = recovered
+                return recovered
+            return current
+
+    def latest_extremes(
+        self,
+        city: Any,
+        target_date: str,
+        *,
+        as_of: Optional[datetime] = None,
+    ) -> Optional["FastObsExtremes"]:
+        """Return computed FastObsExtremes from the in-process METAR cache for
+        ``city`` on ``target_date`` (UTC date, ISO string).
+
+        This is the ENTRY-GATE source for Option-B monitor fallback (see
+        day0_obs_fastlane_plan.md §4.2). Unlike ``latest_rounded_extreme`` (the
+        monotone KILL memo), this method recomputes extremes LIVE from cached
+        reports — so ``first_obs_time`` and ``sample_count`` are accurate for
+        coverage-window evaluation.
+
+        CONTRACT:
+          - Returns None when the cache is empty (no fetch has succeeded in this
+            process), when the city is not eligible for the fast lane (non-wu_icao
+            or excluded by the faithfulness gate), or when no station-matching
+            reports exist for the target date.
+          - Does NOT perform any network I/O — reads only from ``_cached_reports``
+            (the in-process memo).
+          - ``as_of``: UTC instant cap passed to running_extremes_for_local_day;
+            defaults to now().
+
+        Consumed EXCLUSIVELY by observation_client._fetch_wu_observation fallback
+        (Option-B wiring). Do NOT call from hot paths outside the monitor lane.
+        """
+        source = fast_obs_source_for_city(city)
+        if source is None:
+            return None
+        with self._lock:
+            reports = list(self._cached_reports)
+            cache_monotonic = self._cache_fetched_monotonic
+        if not reports:
+            return None
+        # Freshness gate: cache must be ≤ FAST_LANE_ENTRY_MAX_CACHE_AGE_S old.
+        # Stale caches must not serve the entry gate (kills are staleness-safe;
+        # entries are not — see plan §4.2 "Freshness contract").
+        cache_age_s = time.monotonic() - cache_monotonic
+        if cache_age_s > FAST_LANE_ENTRY_MAX_CACHE_AGE_S:
+            return None
+        effective_as_of = (as_of or datetime.now(UTC)).astimezone(UTC)
+        try:
+            extremes = running_extremes_for_local_day(
+                reports, city=city, target_date=target_date, as_of=effective_as_of
+            )
+        except Exception as exc:
+            logger.warning(
+                "DAY0_FAST_OBS_LATEST_EXTREMES_FAILED city=%s exc=%s: %s",
+                getattr(city, "name", "?"), type(exc).__name__, exc,
+            )
+            return None
+        if extremes.sample_count == 0:
+            return None
+        return extremes
 
     def prefetch(
         self,
@@ -689,6 +789,7 @@ class Day0FastObsEmitter:
         prefetch: FastObsPrefetch,
         received_at: str,
         limit: int = 50,
+        day0_is_tradeable: bool = True,
     ) -> int:
         """DB-write phase: emit DAY0_EXTREME_UPDATED events from a prefetch.
 
@@ -696,6 +797,11 @@ class Day0FastObsEmitter:
         DENIED for stale-after-failure data older than the city's staleness
         budget and for observations without live authority (publication clock
         missing, etc.) — those may only advance the monotone kill memo (P0-3).
+
+        ``day0_is_tradeable`` (default True) flows to the trigger so day0 events
+        emitted under day0_shadow carry the lower PRIORITY_DAY0_SHADOW sub-sort
+        (2026-06-11 anti-starvation; the scope-aware claim tier in fetch_pending
+        is the cross-tier authority).
         """
         from src.events.event_writer import EventWriter
         from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
@@ -706,7 +812,9 @@ class Day0FastObsEmitter:
             return 0
         reports = list(prefetch.reports)
         decision_time = prefetch.decision_time
-        trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
+        trigger = Day0ExtremeUpdatedTrigger(
+            EventWriter(world_conn), day0_is_tradeable=day0_is_tradeable
+        )
         emitted = 0
         for city, source, target_date in prefetch.eligible:
             if emitted >= max(1, int(limit)):
@@ -788,14 +896,19 @@ class Day0FastObsEmitter:
                         decision_time=decision_time,
                         received_at=received_at,
                     )
-                    if result.inserted:
-                        # ONLY an INSERTED live event advances the live memo
-                        # (round-2 P0-1); it may also refresh the kill memo
-                        # (an inserted live value is memo-safe by live_ok).
+                    if result.inserted or result.duplicate:
+                        # A PERSISTED live event advances the live memo. `inserted`
+                        # is the normal path; `duplicate` is the restart/dedup path
+                        # where the immutable event already exists in world DB. If a
+                        # duplicate did not advance the in-process live memo, the
+                        # restarted daemon would re-attempt the same INSERT OR IGNORE
+                        # every cycle until the next rounded movement. That is not a
+                        # trading error, but it is not live-stable behavior either.
                         with self._lock:
                             self._last_live_emitted_rounded[key] = rounded
                             if memo_safe and _moved(self._last_kill_memo_rounded.get(key)):
                                 self._last_kill_memo_rounded[key] = rounded
+                    if result.inserted:
                         emitted += 1
                         logger.info(
                             "DAY0_FAST_OBS_EMIT city=%s date=%s metric=%s rounded=%s "
@@ -803,6 +916,14 @@ class Day0FastObsEmitter:
                             city_name, target_date, metric, rounded,
                             observation["observation_time"], observation["observation_available_at"],
                             extremes.sample_count, extremes.skipped_unit_law,
+                            prefetch.freshness_status,
+                        )
+                    elif result.duplicate:
+                        logger.debug(
+                            "DAY0_FAST_OBS_EMIT_DUPLICATE city=%s date=%s metric=%s rounded=%s "
+                            "obs_time=%s available_at=%s freshness=%s (live memo advanced)",
+                            city_name, target_date, metric, rounded,
+                            observation["observation_time"], observation["observation_available_at"],
                             prefetch.freshness_status,
                         )
             except Exception as exc:  # noqa: BLE001 — one city must not kill the lane
@@ -833,6 +954,64 @@ class Day0FastObsEmitter:
         return self.emit_prefetched(
             world_conn=world_conn, prefetch=prefetch, received_at=received_at, limit=limit
         )
+
+
+def _recover_kill_memo_from_events(
+    *,
+    city_name: str,
+    target_date: str,
+    metric: str,
+    world_conn: Any = None,
+) -> Optional[int]:
+    """Recover the kill-memo rounded extreme from durably-persisted
+    DAY0_EXTREME_UPDATED events (restart-safe; no new table).
+
+    Reads opportunity_events (zeus-world.db) for the cell, keeps only memo-safe
+    rows (source_authorized_status=AUTHORIZED, local_date_status=MATCH,
+    dst_status=UNAMBIGUOUS — the SAME authorization the live kill memo required),
+    and reduces by the absorbing direction (high=MAX, low=MIN). None when no
+    recoverable row exists or on any error (fail-soft). ``world_conn`` is
+    caller-supplied for tests; when None a short read-only world connection is
+    opened and closed here.
+    """
+    own_conn = False
+    conn = world_conn
+    try:
+        if conn is None:
+            from src.state.db import get_world_connection_read_only
+
+            conn = get_world_connection_read_only()
+            own_conn = True
+        agg = "MAX" if metric == "high" else "MIN"
+        sql = f"""
+            SELECT {agg}(CAST(json_extract(payload_json, '$.rounded_value') AS INTEGER)) AS extreme
+            FROM opportunity_events
+            WHERE event_type = 'DAY0_EXTREME_UPDATED'
+              AND json_extract(payload_json, '$.city') = ?
+              AND json_extract(payload_json, '$.target_date') = ?
+              AND json_extract(payload_json, '$.metric') = ?
+              AND json_extract(payload_json, '$.source_authorized_status') = 'AUTHORIZED'
+              AND json_extract(payload_json, '$.local_date_status') = 'MATCH'
+              AND json_extract(payload_json, '$.dst_status') = 'UNAMBIGUOUS'
+              AND json_extract(payload_json, '$.rounded_value') IS NOT NULL
+        """
+        row = conn.execute(sql, (city_name, target_date, metric)).fetchone()
+        if row is None:
+            return None
+        value = row[0]
+        return int(value) if value is not None else None
+    except Exception as exc:  # noqa: BLE001 — recovery is best-effort, fail-soft
+        logger.debug(
+            "DAY0_KILL_MEMO_RECOVERY_FAILED city=%s date=%s metric=%s exc=%s: %s",
+            city_name, target_date, metric, type(exc).__name__, exc,
+        )
+        return None
+    finally:
+        if own_conn and conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 _EMITTER_SINGLETON: Day0FastObsEmitter | None = None

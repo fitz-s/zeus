@@ -153,8 +153,9 @@ def sweep_chain_inventory_for_redeems(
     if positions is None:
         return []
 
-    probe_fn = getattr(adapter, "get_negrisk_winning_position_balance", None)
-    if not callable(probe_fn):
+    negrisk_probe_fn = getattr(adapter, "get_negrisk_winning_position_balance", None)
+    standard_probe_fn = getattr(adapter, "get_standard_ctf_winning_position_balance", None)
+    if not callable(negrisk_probe_fn) and not callable(standard_probe_fn):
         logger.warning("[INVENTORY_SWEEP_NO_PROBE] adapter lacks balance probe; skipping")
         return []
 
@@ -182,21 +183,18 @@ def sweep_chain_inventory_for_redeems(
             continue
         if outcome not in ("yes", "no"):
             continue
-        if not neg_risk:
-            # Standard-CTF winners are rare for Zeus (all temp markets are
-            # negRisk); surface loudly instead of silently guessing a path.
-            logger.warning(
-                "[INVENTORY_SWEEP_NON_NEGRISK_WINNER] condition_id=%s asset=%s "
-                "size=%s — not swept; needs standard CTF handling",
-                condition_id, asset, size,
-            )
-            continue
+        # neg_risk routing is a per-candidate fact, NOT a structural veto. Both
+        # negRisk and standard-CTF winners are swept; only the chain-truth probe
+        # (and the redeem lane downstream) differ. The standard-CTF lane was
+        # added 2026-06-10 (operator redeem directive — $19 stuck on a
+        # non-negRisk NO winner the negRisk-only sweep skipped forever).
         eligible.append({
             "cur_price": cur_price,
             "condition_id": condition_id,
             "asset": asset,
             "outcome": outcome,
             "size": size,
+            "neg_risk": neg_risk,
             "title": str(p.get("title") or "")[:60],
         })
 
@@ -220,7 +218,21 @@ def sweep_chain_inventory_for_redeems(
         asset = cand["asset"]
         outcome = cand["outcome"]
         cur_price = cand["cur_price"]
+        cand_neg_risk = bool(cand["neg_risk"])
         zeus_index = 2 if outcome == "yes" else 1
+
+        # Probe routing: negRisk positions derive their ERC1155 id via
+        # NegRiskAdapter.wcol(); standard-CTF positions derive directly from
+        # USDC.e collateral. Each lane has its OWN chain-truth probe; the redeem
+        # command downstream (submit_redeem) routes on the same neg_risk fact.
+        probe_fn = negrisk_probe_fn if cand_neg_risk else standard_probe_fn
+        if not callable(probe_fn):
+            logger.warning(
+                "[INVENTORY_SWEEP_NO_PROBE_FOR_LANE] condition_id=%s neg_risk=%s "
+                "— adapter lacks the matching balance probe; skipped",
+                condition_id, cand_neg_risk,
+            )
+            continue
 
         # Chain-truth verification: derived winning positionId must equal the
         # API asset id AND the live balance must be positive. This is the ONLY

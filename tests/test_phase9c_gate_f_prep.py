@@ -513,7 +513,7 @@ class TestRCCBoundaryGateWired:
         """R-CC.1: helper returns {} when v2 is empty — permissive default
         that keeps the gate dormant until data flows (current Golden Window
         state)."""
-        from src.engine.evaluator import _read_v2_snapshot_metadata
+        from src.engine.evaluator import _read_snapshot_metadata
         from src.state.schema.v2_schema import apply_canonical_schema
         from src.state.db import init_schema
 
@@ -522,7 +522,7 @@ class TestRCCBoundaryGateWired:
         init_schema(conn)
         apply_canonical_schema(conn)
 
-        meta = _read_v2_snapshot_metadata(
+        meta = _read_snapshot_metadata(
             conn,
             "NYC",
             "2026-07-15",
@@ -541,11 +541,11 @@ class TestRCCBoundaryGateWired:
         Pre-fix: R-CC.1/R-CC.2 only probed the helper + policy function in
         isolation; the evaluator wiring itself was un-guarded. Dave's
         surgical-revert probe confirmed replacing the evaluator's
-        `v2_snapshot_meta = _read_v2_snapshot_metadata(...)` with
+        `v2_snapshot_meta = _read_snapshot_metadata(...)` with
         `v2_snapshot_meta = {}` broke NO test — R-CC.2 was a checkbox antibody
         at the helper boundary.
 
-        Post-fix: this test monkeypatches `_read_v2_snapshot_metadata` to
+        Post-fix: this test monkeypatches `_read_snapshot_metadata` to
         force-return `{"boundary_ambiguous": True}`, then invokes the DT#7
         gate block from evaluator.py. The relationship seam under test is
         evaluator's internal usage of the helper + policy function. If the
@@ -553,7 +553,7 @@ class TestRCCBoundaryGateWired:
         """
         from src.engine import evaluator as evaluator_module
         from src.engine.evaluator import (
-            EdgeDecision, _read_v2_snapshot_metadata,
+            EdgeDecision, _read_snapshot_metadata,
         )
         from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
 
@@ -561,7 +561,7 @@ class TestRCCBoundaryGateWired:
         # snapshot that ingest flagged per §DT#7 boundary-leakage law).
         monkeypatch.setattr(
             evaluator_module,
-            "_read_v2_snapshot_metadata",
+            "_read_snapshot_metadata",
             lambda conn, city, date, metric: {"boundary_ambiguous": True},
         )
 
@@ -598,14 +598,14 @@ class TestRCCBoundaryGateWired:
                     fn_name = sub.func.id
                 elif isinstance(sub.func, ast.Attribute):
                     fn_name = sub.func.attr
-                if fn_name == "_read_v2_snapshot_metadata":
+                if fn_name == "_read_snapshot_metadata":
                     helper_calls_in_body.append(sub)
                 if fn_name == "boundary_ambiguous_refuses_signal":
                     policy_if_blocks.append(sub)
 
         assert helper_calls_in_body, (
             "R-CC.3 (critic-dave MAJOR-1 fix): evaluate_candidate must "
-            "CALL _read_v2_snapshot_metadata inside its body. Pre-P9C.1 "
+            "CALL _read_snapshot_metadata inside its body. Pre-P9C.1 "
             "a silent replacement with `v2_snapshot_meta = {}` passed tests; "
             "post-P9C.1 this AST walk catches it."
         )
@@ -626,7 +626,7 @@ class TestRCCBoundaryGateWired:
         )
 
         # Smoke check: patched helper still returns truthy for policy function
-        meta = evaluator_module._read_v2_snapshot_metadata(
+        meta = evaluator_module._read_snapshot_metadata(
             None, "NYC", "2026-07-15", "low",
         )
         assert boundary_ambiguous_refuses_signal(meta) is True
@@ -637,7 +637,7 @@ class TestRCCBoundaryGateWired:
         with boundary_ambiguous_refuses_signal, this drives the evaluator
         refusal at the candidate gate.
         """
-        from src.engine.evaluator import _read_v2_snapshot_metadata
+        from src.engine.evaluator import _read_snapshot_metadata
         from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
         from src.state.schema.v2_schema import apply_canonical_schema
         from src.state.db import init_schema
@@ -679,7 +679,7 @@ class TestRCCBoundaryGateWired:
             """
         ).fetchone()[0]
 
-        meta = _read_v2_snapshot_metadata(
+        meta = _read_snapshot_metadata(
             conn,
             "NYC",
             "2026-07-15",

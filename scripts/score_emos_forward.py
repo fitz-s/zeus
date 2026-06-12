@@ -371,7 +371,7 @@ def main() -> None:
     if not all_rows:
         print("Ledger is empty (0 rows).  Enable the flag and collect data first.")
         print(f"  Ledger path: {LEDGER}")
-        print("  Flag: settings['edli_v1']['edli_emos_shadow_ledger_enabled'] = true")
+        print("  Flag: settings['edli']['edli_emos_shadow_ledger_enabled'] = true")
         return
 
     total_rows = len(all_rows)

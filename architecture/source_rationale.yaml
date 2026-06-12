@@ -152,11 +152,11 @@ providers:
     role: forecast_infrastructure
     client: src/data/forecast_source_registry.py
     why: Internal forecast infrastructure module — registry, ingest protocol, extrema authority, DB fetcher. Not an external truth source; coordinates routing between ecmwf_open_data and tigge providers. (PR #359)
-  u0r_history:
+  bayes_precision_fusion_history:
     role: forecast_skill_historical
-    client: src/data/u0r_history_provider.py
+    client: src/data/bayes_precision_fusion_history_provider.py
     why: >
-      Walk-forward historical forecast residuals for U0R-Bayes fusion (previous_runs
+      Walk-forward historical forecast residuals for BAYES_PRECISION_FUSION-Bayes fusion (previous_runs
       endpoint only, target_date < decision_date, VERIFIED settlement). Intra-DB JOIN
       on zeus-forecasts.db (raw_model_forecasts + settlement_outcomes). Not an
       external network source; reads Zeus's own persisted forecast history.

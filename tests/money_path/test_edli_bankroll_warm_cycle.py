@@ -63,7 +63,7 @@ def _enable_warm_cfg(monkeypatch) -> None:
         main_module,
         "_settings_section",
         lambda name, default=None: (
-            {"enabled": True} if name == "edli_v1" else (default if default is not None else {})
+            {"enabled": True} if name == "edli" else (default if default is not None else {})
         ),
     )
 
@@ -182,7 +182,7 @@ def test_warm_cycle_failsoft_on_fetch_error(monkeypatch):
 
 
 def test_warm_cycle_noop_when_edli_disabled(monkeypatch):
-    """Config gate: when edli_v1 is disabled the warm job does no fetch."""
+    """Config gate: when edli is disabled the warm job does no fetch."""
     try:
         _set_cache(value_usd=None, fetched_age_seconds=None)
 
@@ -196,7 +196,7 @@ def test_warm_cycle_noop_when_edli_disabled(monkeypatch):
         monkeypatch.setattr(
             main_module,
             "_settings_section",
-            lambda name, default=None: ({"enabled": False} if name == "edli_v1" else (default or {})),
+            lambda name, default=None: ({"enabled": False} if name == "edli" else (default or {})),
         )
 
         main_module._edli_bankroll_warm_cycle()

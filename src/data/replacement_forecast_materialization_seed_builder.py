@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from src.config import cities_by_name
+from src.contracts.replacement_pipeline_files import validate_materialization_seed
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 
@@ -276,10 +277,18 @@ def build_replacement_forecast_materialization_seed(
         seed["aifs_samples_json"] = _relative_or_absolute(Path(aifs_samples_json), base_dir=base_path)
     if aifs_grib_path is not None:
         seed["aifs_grib_path"] = _relative_or_absolute(Path(aifs_grib_path), base_dir=base_path)
+    final_seed = {key: value for key, value in seed.items() if value is not None}
+    # BOUNDARY CONTRACT (2026-06-10): validate the assembled seed against the
+    # shared producer⇄consumer schema BEFORE returning it READY. A seed that
+    # passes here is guaranteed to pass the queue's consumer-side
+    # validate_materialization_seed, so this assembly site and the consumer can
+    # never silently diverge. Authority basis: pipeline-contract project,
+    # operator directive 2026-06-10.
+    validate_materialization_seed(final_seed)
     return ReplacementForecastMaterializationSeedResult(
         status="READY",
         reason_codes=("REPLACEMENT_MATERIALIZATION_SEED_READY",),
-        seed={key: value for key, value in seed.items() if value is not None},
+        seed=final_seed,
     )
 
 

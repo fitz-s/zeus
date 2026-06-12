@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Mapping
 from zoneinfo import ZoneInfoNotFoundError
 
+from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.engine.time_context import has_city_local_day_started
 from src.state.db import _connect
@@ -262,10 +263,13 @@ def build_replacement_forecast_current_target_plan(
     """Return current market targets and the replacement artifacts needed for them."""
 
     db_path = Path(forecast_db)
+    # Use now_utc as the reference clock when min_target_date is not explicit — avoids
+    # wall-clock drift against fixtures or callers that pass a fixed now_utc.
+    _ref_clock = (now_utc or datetime.now(tz=timezone.utc)).astimezone(timezone.utc)
     minimum_target_date = (
         min_target_date.isoformat()
         if isinstance(min_target_date, date)
-        else str(min_target_date or datetime.now(tz=timezone.utc).date().isoformat())
+        else str(min_target_date or _ref_clock.date().isoformat())
     )
     if not db_path.exists():
         return ReplacementForecastCurrentTargetPlan(
@@ -323,6 +327,18 @@ def build_replacement_forecast_current_target_plan(
         posterior_source_run_clause = ""
         readiness_source_run_clause = ""
         readiness_status_clause = ""
+        # TRADEABLE-GRADE COVERAGE (2026-06-11, second site of the 2026-06-10 K-decision;
+        # basis-predicate fix 2026-06-12): a covering posterior must be CERTIFIED-bootstrap
+        # tradeable-grade. The mask-and-starve antibody guards against a capture-missing
+        # materialization marking its scope covered at PLAN level and blocking its own fusion repair
+        # (observed 2026-06-11: Atlanta/Austin/Beijing 00Z rows self-masked one tick after
+        # materializing). The original proxy `p.q_lcb_json IS NOT NULL` broke once the soft-anchor
+        # path began carrying a promoted Wilson q_lcb (basis="wilson_aifs_member_votes") instead of
+        # NULL — so the predicate now keys on the certified bootstrap basis (single authority:
+        # cycle_policy). Schema-conditional like the queue clause.
+        posterior_tradeable_grade_clause = tradeable_grade_coverage_sql(
+            posterior_columns=posterior_columns, alias="p."
+        )
         if source_run_targets and "dependency_source_run_ids_json" not in posterior_columns:
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_SOURCE_RUN_DEPENDENCY_SCHEMA_MISSING")
         if source_run_targets and "dependency_json" not in readiness_columns:
@@ -424,6 +440,7 @@ def build_replacement_forecast_current_target_plan(
                           AND p.city = targets.city
                           AND p.target_date = targets.target_date
                           AND p.temperature_metric = targets.temperature_metric
+                          {posterior_tradeable_grade_clause}
                           {posterior_source_run_clause}
                     ) AS posterior_count,
                     (
@@ -468,6 +485,7 @@ def build_replacement_forecast_current_target_plan(
                     WHERE source_id = ?
                       AND training_allowed = 0
                       AND trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                      {posterior_tradeable_grade_clause.replace("p.q_lcb_json", "q_lcb_json")}
                     GROUP BY city, target_date, temperature_metric
                 ),
                 readiness AS (

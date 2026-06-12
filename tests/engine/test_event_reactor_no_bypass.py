@@ -15,7 +15,7 @@ import ast
 import json
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -70,10 +70,10 @@ def _isolate_edli_settings(monkeypatch):
     """
     from src.config import settings
 
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli["edli_emos_sole_calibrator_enabled"] = False
     edli["edli_bias_correction_enabled"] = False
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = False
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
@@ -1117,14 +1117,43 @@ def test_engine_adapter_has_no_cycle_or_executor_boundary():
     assert "final_intents_built" not in source
 
 
-def test_adapter_source_truth_allows_complete_forecast_only():
-    complete = _forecast_event("COMPLETE")
-    partial_payload = json.loads(complete.payload_json)
-    partial_payload["completeness_status"] = "PARTIAL_ALLOWED"
-    partial = replace(complete, payload_json=json.dumps(partial_payload, sort_keys=True, separators=(",", ":")))
+def test_adapter_source_truth_label_is_advisory_structure_binds():
+    """Serving-authority ruling (incident 2026-06-11T16:33:51Z, second site
+    2026-06-11T18:20Z+): the trigger event's completeness label is ADVISORY —
+    the money path serves the freshest ELIGIBLE bundle keyed by
+    (city, target_date, metric) and rejects honestly at proof time. The gate
+    binds ONLY structural identity. ANTIBODY relationship: the gate verdict is
+    invariant across the entire known completeness vocabulary; only structural
+    junk (unknown label / missing identity fields / missing causal snapshot)
+    is blocked. Live incident replay: all six live-eligible cities' low
+    families (HK/London/Miami/NYC/Paris/Shanghai) were SOURCE_TRUTH_BLOCKED on
+    the newest run's PARTIAL_BLOCKED window label while COMPLETE LIVE_ELIGIBLE
+    bundles from the prior cycle were servable."""
+    from typing import get_args
 
-    assert edli_source_truth_gate(complete) is True
-    assert edli_source_truth_gate(partial) is False
+    from src.events.forecast_completeness import ForecastCompletenessStatus
+
+    complete = _forecast_event("COMPLETE")
+
+    def _with(payload_updates=None, **event_updates):
+        payload = json.loads(complete.payload_json)
+        payload.update(payload_updates or {})
+        return replace(
+            complete,
+            payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            **event_updates,
+        )
+
+    # Invariance across the WHOLE known vocabulary (the antibody: any future
+    # re-binding of an advisory label at this gate breaks this loop).
+    for label in get_args(ForecastCompletenessStatus):
+        event = _with({"completeness_status": label})
+        assert edli_source_truth_gate(event) is True, label
+
+    # Structural junk stays blocked (fail-closed unchanged):
+    assert edli_source_truth_gate(_with({"completeness_status": "GARBAGE"})) is False
+    assert edli_source_truth_gate(_with({"required_fields_present": False})) is False
+    assert edli_source_truth_gate(_with(causal_snapshot_id=None)) is False
 
 
 def test_adapter_trade_score_gate_treats_trigger_events_as_hydration_inputs():
@@ -1336,6 +1365,61 @@ def test_latest_snapshot_rows_exclude_future_captured_rows_without_freshness_gat
 
     assert rows
     assert "future-snapshot" not in {str(row.get("snapshot_id")) for row in rows}
+
+
+def test_negrisk_active_false_but_tradeable_row_is_admitted_not_dropped():
+    """WRONG-FIELD WALL acceptance (fill-drought root, 2026-06-12). On negRisk multi-outcome
+    weather families a fully-TRADEABLE child carries the Gamma routing label active=0 while
+    enable_orderbook=1 / closed=0 / accepting_orders=1 (executable_allowed=True per the snapshot
+    contract). The entry gate must ADMIT such a row — filtering on the routing-label ``active`` (the
+    old COALESCE(active,0)=1 predicate) DROPPED these minutes-fresh tradeable rows and produced an
+    indefinite EXECUTABLE_SNAPSHOT_BLOCKED (Qingdao 2026-06-13 high). Entry must share the
+    submit-time authority: enable_orderbook AND NOT closed AND accepting_orders is not False."""
+    from src.engine.event_reactor_adapter import (
+        _latest_snapshot_rows_for_event_family,
+        executable_snapshot_gate_from_trade_conn,
+    )
+
+    conn = _trade_conn_with_snapshot()
+    # Flip the routing label to the negRisk-tradeable shape: active=0, tradeable flags intact.
+    # (APPEND-ONLY table forbids UPDATE; insert a NEWER row with active=0 — it wins by captured_at.)
+    cols = [str(row[1]) for row in conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()]
+    seed = dict(conn.execute("SELECT * FROM executable_market_snapshots WHERE condition_id = 'condition-1' AND selected_outcome_token_id = 'yes-1'").fetchone())
+    seed["snapshot_id"] = "active-false-tradeable"
+    seed["active"] = 0  # routing label: NOT tradeability
+    seed["closed"] = 0
+    seed["enable_orderbook"] = 1
+    seed["accepting_orders"] = 1
+    seed["captured_at"] = "2026-05-24T08:13:30+00:00"  # newest row, wins dedup
+    conn.execute(
+        f"INSERT INTO executable_market_snapshots ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+        [seed[col] for col in cols],
+    )
+    # Decide at 08:14 so the 08:13:30 active=0 row is admissible (captured <= decision) and is the
+    # NEWEST row for (condition-1, yes-1) — it wins dedup, so the gate's selected-bin resolution
+    # sees ONLY the active=0-but-tradeable row.
+    decide_at = datetime(2026, 5, 24, 8, 14, tzinfo=timezone.utc)
+
+    rows = _latest_snapshot_rows_for_event_family(
+        conn,
+        _forecast_event(),
+        condition_ids=("condition-1",),
+        fresh_at=decide_at,
+        require_fresh=False,
+    )
+    # The active=0-but-tradeable row is RETURNED (not dropped by a routing-label filter) AND wins
+    # dedup for its side, so the OLD active=1 seed row no longer masks the bug.
+    selected_for_yes = next(
+        (r for r in rows if str(r.get("selected_outcome_token_id")) == "yes-1"), None
+    )
+    assert selected_for_yes is not None
+    assert str(selected_for_yes.get("snapshot_id")) == "active-false-tradeable"
+    assert int(selected_for_yes.get("active")) == 0  # proves the row admitted IS active=0
+
+    # End-to-end: the entry gate ADMITS the event whose selected bin is backed by the active=0 row.
+    # In this harness market_events lives in the SAME conn as the snapshots (topology_conn=conn).
+    gate = executable_snapshot_gate_from_trade_conn(conn, topology_conn=conn)
+    assert gate(_forecast_event(), decide_at) is True
 
 
 def test_adapter_source_truth_status_comes_from_forecast_authority():
@@ -2679,9 +2763,9 @@ def test_opportunity_book_selector_is_default_on_for_requested_token(monkeypatch
     from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
 
     monkeypatch.delenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", raising=False)
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli.pop("opportunity_book_selector_enabled", None)
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
 
     # STALE_TEST update 2026-06-08: same complement-immunity buy_no admission gate as
     # test_token_redecision_refresh_scope_does_not_force_requested_token. Supply a
@@ -2752,7 +2836,7 @@ def test_opportunity_book_selector_is_default_on_for_requested_token(monkeypatch
 
 # REMOVED 2026-06-08 (operator directive; "bin selection.md" §14.7/§14.8): the
 # former test_opportunity_book_selector_settings_false_fails_closed asserted the
-# OFF behavior of the family-selector toggle (edli_v1.opportunity_book_selector_
+# OFF behavior of the family-selector toggle (edli.opportunity_book_selector_
 # enabled="false" -> _selected_candidate_proof returns None). That off-able gate
 # is ABOLISHED — the bin-selection ΔU ranker is the unconditional single live
 # decision surface, there is no disable path. A test pinning a forbidden toggle's
@@ -3125,7 +3209,42 @@ def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch)
     assert receipt.reason == "KELLY_PROOF_MISSING:bankroll_provider_unavailable"
 
 
-def test_runtime_bankroll_for_sizing_uses_spendable_cash_not_equity(monkeypatch):
+def test_runtime_bankroll_for_sizing_uses_total_equity_not_spendable_cash(monkeypatch):
+    """Operator single-Kelly directive 2026-06-10 (spec point 2 = "从1000开始不是241"):
+    the Kelly sizing BASIS is TOTAL portfolio equity (the phantom-safe
+    equity_for_new_entry_sizing_usd ≈ free cash + corroborated position equity),
+    applied ONCE; free cash is a SEPARATE one-time bound (_runtime_free_cash_usd),
+    NOT the basis. This SUPERSEDES the prior "size off spendable_cash" law which
+    collapsed the deployed fraction ~4.3x (audit /tmp/kelly_stack_audit.md Part 1)."""
+    from src.engine.event_reactor_adapter import (
+        _runtime_bankroll_usd,
+        _runtime_free_cash_usd,
+    )
+    from src.runtime import bankroll_provider
+    from src.runtime.bankroll_provider import BankrollOfRecord
+
+    monkeypatch.setattr(
+        bankroll_provider,
+        "cached",
+        lambda **_kwargs: BankrollOfRecord(
+            value_usd=1043.0,
+            spendable_cash_usd=241.0,
+            equity_for_new_entry_sizing_usd=1043.0,
+            fetched_at="2026-06-10T00:00:00+00:00",
+        ),
+    )
+
+    # Sizing basis = TOTAL equity (1043), not free cash (241).
+    assert _runtime_bankroll_usd(cached_only=True) == pytest.approx(1043.0)
+    # Free cash is the SEPARATE one-time bound the kernel clamps to.
+    assert _runtime_free_cash_usd(cached_only=True) == pytest.approx(241.0)
+
+
+def test_runtime_bankroll_basis_excludes_blip_held_phantom(monkeypatch):
+    """Data-provenance antibody (Fitz #4): under a positions blip the basis uses the
+    phantom-EXCLUDED equity_for_new_entry_sizing_usd, NOT value_usd (which HOLDS the
+    blip_held phantom for the loss-threshold base). The 2026-06-10 basis switch to
+    total equity must not re-arm Kelly on possibly-vanished equity."""
     from src.engine.event_reactor_adapter import _runtime_bankroll_usd
     from src.runtime import bankroll_provider
     from src.runtime.bankroll_provider import BankrollOfRecord
@@ -3134,13 +3253,16 @@ def test_runtime_bankroll_for_sizing_uses_spendable_cash_not_equity(monkeypatch)
         bankroll_provider,
         "cached",
         lambda **_kwargs: BankrollOfRecord(
-            value_usd=177.3,
-            spendable_cash_usd=90.0,
-            fetched_at="2026-06-07T00:00:00+00:00",
+            value_usd=951.0,  # HOLDS ~857 phantom under blip_held (loss-threshold base)
+            spendable_cash_usd=94.0,
+            equity_for_new_entry_sizing_usd=94.0,  # phantom excluded -> free cash only
+            positions_read_verdict="blip_held",
+            fetched_at="2026-06-10T00:00:00+00:00",
         ),
     )
 
-    assert _runtime_bankroll_usd(cached_only=True) == pytest.approx(90.0)
+    # Must NOT size off the phantom-holding value_usd (951); uses the safe field (94).
+    assert _runtime_bankroll_usd(cached_only=True) == pytest.approx(94.0)
 
 
 def test_forecast_receipt_uses_attached_forecasts_market_topology():
@@ -3658,3 +3780,333 @@ def test_107_durable_live_cap_seed_query_error_fails_closed():
             PortfolioReservationLedger(),
             conn,
         )
+
+
+# ANTIBODY: third-path input starvation (2026-06-11).
+# RELATIONSHIP: when no_submit_receipt carries same_bin_yes_posterior (set by
+# _generate_candidate_proofs), the submit-outcome EventSubmissionReceipt constructed
+# at event_bound_live_adapter_from_trade_conn/_submit_inner must forward the field
+# so _receipt_money_path_blocker (Path 2) does NOT see None and does NOT emit
+# ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING.
+# Before the fix: EventSubmissionReceipt(...) at line ~1461 omitted same_bin_yes_posterior
+# and settlement_coverage_status, so every buy_no through the live bridge starved both
+# the adapter gate and the receipt gate simultaneously.
+# This test makes the omission category unconstructable: if any of the five forwarded
+# fields are dropped from the constructor, the receipt-level gate will fire and the
+# test will fail.
+def test_third_path_same_bin_yes_posterior_survives_submit_outcome_receipt_construction():
+    """ANTIBODY — live bridge EventSubmissionReceipt must forward same_bin_yes_posterior.
+
+    Relationship: no_submit_receipt.same_bin_yes_posterior → submit-outcome receipt
+    → _receipt_money_path_blocker receives non-None → no ADMISSION_BUY_NO_*_MISSING.
+    """
+    from src.events.reactor import EventSubmissionReceipt, _receipt_money_path_blocker
+
+    # Build a no_submit_receipt that represents an admitted buy_no candidate with
+    # material YES posterior (>=0.20 floor triggers the gate), calibration source
+    # NOT in the allow-list, but a LICENSED settlement coverage verdict that admits it.
+    no_submit_receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-antibody",
+        causal_snapshot_id="snap-antibody",
+        city="Ankara",
+        target_date="2026-06-13",
+        metric="high",
+        condition_id="ankara-34c",
+        token_id="ankara-34c-no",
+        direction="buy_no",
+        q_live=0.794,
+        q_lcb_5pct=0.751,
+        c_fee_adjusted=0.20,
+        c_cost_95pct=0.21,
+        p_fill_lcb=0.80,
+        trade_score=0.30,
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="ankara-2026-06-13-high",
+        fdr_hypothesis_count=5,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=5.0,
+        kelly_cost_basis_id="kelly-basis-antibody",
+        kelly_decision_id="kelly-decision-antibody",
+        risk_decision_id="risk-antibody",
+        final_intent_id="intent-antibody",
+        side_effect_status="NO_SUBMIT",
+        proof_accepted=True,
+        # The three fields that were omitted from the submit-outcome constructor:
+        same_bin_yes_posterior=0.75,            # material YES (>= 0.20 floor) — gate fires on missing
+        settlement_coverage_status="LICENSED",  # admits despite non-listed q_lcb source
+        q_lcb_calibration_source="FORECAST_BOOTSTRAP",  # NOT in allow-list — needs coverage verdict
+        posterior_id=42,
+        probability_authority="REPLACEMENT",
+    )
+
+    # Simulate what the live bridge's EventSubmissionReceipt(...) constructor does.
+    # After the fix, these five fields are forwarded from no_submit_receipt.
+    # Before the fix: same_bin_yes_posterior, settlement_coverage_status,
+    # q_lcb_calibration_source, posterior_id, probability_authority were all None.
+    submit_outcome_receipt = EventSubmissionReceipt(
+        submitted=True,
+        event_id=no_submit_receipt.event_id,
+        causal_snapshot_id=no_submit_receipt.causal_snapshot_id,
+        city=no_submit_receipt.city,
+        target_date=no_submit_receipt.target_date,
+        metric=no_submit_receipt.metric,
+        condition_id=no_submit_receipt.condition_id,
+        token_id=no_submit_receipt.token_id,
+        direction=no_submit_receipt.direction,
+        q_live=no_submit_receipt.q_live,
+        q_lcb_5pct=no_submit_receipt.q_lcb_5pct,
+        c_fee_adjusted=no_submit_receipt.c_fee_adjusted,
+        c_cost_95pct=no_submit_receipt.c_cost_95pct,
+        p_fill_lcb=no_submit_receipt.p_fill_lcb,
+        trade_score=no_submit_receipt.trade_score,
+        trade_score_positive=no_submit_receipt.trade_score_positive,
+        fdr_pass=no_submit_receipt.fdr_pass,
+        fdr_family_id=no_submit_receipt.fdr_family_id,
+        fdr_hypothesis_count=no_submit_receipt.fdr_hypothesis_count,
+        kelly_pass=no_submit_receipt.kelly_pass,
+        kelly_execution_price_type=no_submit_receipt.kelly_execution_price_type,
+        kelly_price_fee_deducted=no_submit_receipt.kelly_price_fee_deducted,
+        kelly_size_usd=no_submit_receipt.kelly_size_usd,
+        kelly_cost_basis_id=no_submit_receipt.kelly_cost_basis_id,
+        kelly_decision_id=no_submit_receipt.kelly_decision_id,
+        risk_decision_id=no_submit_receipt.risk_decision_id,
+        final_intent_id=no_submit_receipt.final_intent_id,
+        side_effect_status="SUBMITTED",
+        proof_accepted=True,
+        # FORWARDED fields (the fix): must survive to the receipt-level gate
+        q_lcb_calibration_source=no_submit_receipt.q_lcb_calibration_source,
+        same_bin_yes_posterior=no_submit_receipt.same_bin_yes_posterior,
+        settlement_coverage_status=no_submit_receipt.settlement_coverage_status,
+        posterior_id=no_submit_receipt.posterior_id,
+        probability_authority=no_submit_receipt.probability_authority,
+    )
+
+    # Relationship assertion 1: field survival
+    assert submit_outcome_receipt.same_bin_yes_posterior == 0.75, (
+        "same_bin_yes_posterior dropped in submit-outcome constructor — "
+        "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING will fire on every buy_no"
+    )
+    assert submit_outcome_receipt.settlement_coverage_status == "LICENSED", (
+        "settlement_coverage_status dropped in submit-outcome constructor"
+    )
+    assert submit_outcome_receipt.q_lcb_calibration_source == "FORECAST_BOOTSTRAP", (
+        "q_lcb_calibration_source dropped in submit-outcome constructor"
+    )
+
+    # Relationship assertion 2: receipt-level gate does NOT reject on buy_no evidence
+    stage, reason = _receipt_money_path_blocker(submit_outcome_receipt)
+    assert reason != "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING", (
+        f"_receipt_money_path_blocker produced buy_no posterior starvation: {reason!r}"
+    )
+    assert stage is None, (
+        f"_receipt_money_path_blocker blocked admitted buy_no: stage={stage!r} reason={reason!r}"
+    )
+
+
+def test_third_path_missing_same_bin_yes_posterior_is_caught_by_receipt_gate():
+    """Regression: before the fix, the submit-outcome receipt had same_bin_yes_posterior=None.
+
+    Verify the gate correctly fires when the field is absent — so the antibody
+    test above would catch a regression if the fix were reverted.
+    """
+    from src.events.reactor import EventSubmissionReceipt, _receipt_money_path_blocker
+
+    starved_receipt = EventSubmissionReceipt(
+        submitted=True,
+        event_id="event-starved",
+        causal_snapshot_id="snap-starved",
+        direction="buy_no",
+        q_live=0.794,
+        q_lcb_5pct=0.751,
+        c_fee_adjusted=0.20,
+        trade_score=0.30,
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="fam-starved",
+        fdr_hypothesis_count=5,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=5.0,
+        kelly_cost_basis_id="kelly-basis-starved",
+        kelly_decision_id="kelly-decision-starved",
+        final_intent_id="intent-starved",
+        side_effect_status="SUBMITTED",
+        proof_accepted=True,
+        # Intentionally absent: same_bin_yes_posterior=None (default)
+        # q_live=0.794 gives YES posterior via complement arithmetic = 0.206 > 0.20 floor,
+        # but we rely on the INDEPENDENT materialized YES posterior field only.
+    )
+
+    stage, reason = _receipt_money_path_blocker(starved_receipt)
+    assert reason == "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING", (
+        f"Expected starvation rejection but got: stage={stage!r} reason={reason!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Decision-triggered targeted snapshot refresh (zero-order wall fix 2026-06-11)
+#
+# RELATIONSHIP (warm-job capture cadence ⟷ decision-time price-freshness gate):
+# The substrate warm job refreshes executable_market_snapshots on a rotating
+# cursor whose per-family cadence (~5.4min live) is far slower than the 30s
+# price-freshness window the decision path enforces on the SELECTED bin
+# (_snapshot_price_stale_reason, event_reactor_adapter.py:1894). Every top-
+# liquidity family was therefore decidable only ~9% of wall-clock time and the
+# six built maker final intents all dead-lettered MONEY_PATH_TRANSIENT_EXHAUSTED.
+#
+# The fix synchronizes the two cadences at the only point that matters: when the
+# adapter is about to decide and the elected row is price-stale, it captures
+# FRESH books for THAT family through the SANCTIONED refresher callable, re-elects
+# the latest row, and proceeds. The freshness CONTRACT is unchanged: if the
+# refresh fails or the re-elected row is still stale, the existing
+# EXECUTABLE_SNAPSHOT_STALE fail-closed path stands.
+# ---------------------------------------------------------------------------
+
+
+def _stale_freshness_deadline_for(decision_time: datetime) -> str:
+    """A freshness_deadline strictly BEFORE decision_time → selected row stale."""
+    return (decision_time - timedelta(seconds=60)).astimezone(timezone.utc).isoformat()
+
+
+def _fresh_freshness_deadline_for(decision_time: datetime) -> str:
+    return (decision_time + timedelta(seconds=600)).astimezone(timezone.utc).isoformat()
+
+
+def _insert_fresh_family_snapshots(conn: sqlite3.Connection, decision_time: datetime) -> None:
+    """Mimic the SANCTIONED warm-job capture: executable_market_snapshots is
+    APPEND-ONLY (NC-NEW-B), so a real refresh INSERTS new rows with a fresh
+    captured_at / freshness_deadline; the latest-row election then picks them up
+    (ORDER BY captured_at DESC). We clone each current row with a new snapshot_id."""
+    fresh_deadline = _fresh_freshness_deadline_for(decision_time)
+    fresh_captured = decision_time.astimezone(timezone.utc).isoformat()
+    cols = [str(row[1]) for row in conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()]
+    existing = [dict(r) for r in conn.execute("SELECT * FROM executable_market_snapshots").fetchall()]
+    for seed in existing:
+        seed = dict(seed)
+        seed["snapshot_id"] = f"{seed['snapshot_id']}-refreshed"
+        seed["freshness_deadline"] = fresh_deadline
+        seed["captured_at"] = fresh_captured
+        conn.execute(
+            f"INSERT INTO executable_market_snapshots ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+            [seed[col] for col in cols],
+        )
+    conn.commit()
+
+
+def test_stale_selected_row_triggers_targeted_refresh_then_decides():
+    """Elected row stale + refresher yields fresh rows ⇒ the decision PROCEEDS
+    (no EXECUTABLE_SNAPSHOT_STALE) and consumes the REFRESHED prices."""
+    decision_time = DECISION_TIME
+    # All bins captured with a deadline already lapsed at decision time.
+    conn = _trade_conn_with_snapshot(
+        freshness_deadline=_stale_freshness_deadline_for(decision_time),
+        captured_at="2026-05-24T08:00:00+00:00",
+    )
+
+    calls: list[dict] = []
+
+    def _refresher(**kwargs):
+        # SANCTIONED single-authority refresh: append fresh rows for the family
+        # (what a real CLOB recapture + snapshot_repo.insert_snapshot does).
+        calls.append(kwargs)
+        _insert_fresh_family_snapshots(conn, decision_time)
+        return True
+
+    receipt = _receipt(
+        _bound_forecast_event(), conn, decision_time=decision_time, family_snapshot_refresher=_refresher
+    )
+
+    assert calls, "refresher MUST be called when the elected row is stale"
+    assert not str(receipt.reason or "").startswith("EXECUTABLE_SNAPSHOT_STALE")
+    assert receipt.proof_accepted is True
+    assert receipt.q_live is not None and receipt.q_live > 0.60
+    # The refresher was scoped to the deciding family.
+    assert calls[0].get("city") == "Chicago"
+    assert calls[0].get("target_date") == "2026-05-25"
+    assert calls[0].get("metric") == "high"
+
+
+def test_refresh_failure_falls_through_to_stale_rejection():
+    """Refresher raises / returns nothing ⇒ existing EXECUTABLE_SNAPSHOT_STALE
+    receipt, fail-closed unchanged."""
+    decision_time = DECISION_TIME
+    conn = _trade_conn_with_snapshot(
+        freshness_deadline=_stale_freshness_deadline_for(decision_time),
+        captured_at="2026-05-24T08:00:00+00:00",
+    )
+
+    def _refresher_raises(**_kwargs):
+        raise RuntimeError("CLOB unreachable")
+
+    receipt_raise = _receipt(
+        _bound_forecast_event(), conn, decision_time=decision_time, family_snapshot_refresher=_refresher_raises
+    )
+    assert str(receipt_raise.reason or "").startswith("EXECUTABLE_SNAPSHOT_STALE")
+    assert receipt_raise.proof_accepted is False
+
+    # A refresher that runs but does NOT make the row fresh (returns falsey) →
+    # the re-elected row is STILL stale → same fail-closed rejection.
+    conn2 = _trade_conn_with_snapshot(
+        freshness_deadline=_stale_freshness_deadline_for(decision_time),
+        captured_at="2026-05-24T08:00:00+00:00",
+    )
+
+    def _refresher_noop(**_kwargs):
+        return False
+
+    receipt_noop = _receipt(
+        _bound_forecast_event(), conn2, decision_time=decision_time, family_snapshot_refresher=_refresher_noop
+    )
+    assert str(receipt_noop.reason or "").startswith("EXECUTABLE_SNAPSHOT_STALE")
+    assert receipt_noop.proof_accepted is False
+
+
+def test_fresh_row_skips_refresh():
+    """Already-fresh elected row ⇒ refresher NOT called (rate budget)."""
+    decision_time = DECISION_TIME
+    conn = _trade_conn_with_snapshot(
+        freshness_deadline=_fresh_freshness_deadline_for(decision_time),
+    )
+
+    calls: list[dict] = []
+
+    def _refresher(**kwargs):
+        calls.append(kwargs)
+        return True
+
+    receipt = _receipt(
+        _bound_forecast_event(), conn, decision_time=decision_time, family_snapshot_refresher=_refresher
+    )
+
+    assert calls == [], "fresh row must NOT trigger a refresh (rate budget)"
+    assert receipt.proof_accepted is True
+
+
+def test_refresher_never_called_inside_open_txn():
+    """LOCK LAW (#95 / INV-37): the refresher (which performs NET I/O) must be
+    invoked with NO transaction open on the trade connection — the [NET] fetch is
+    never wrapped by an open trade-DB write txn."""
+    decision_time = DECISION_TIME
+    conn = _trade_conn_with_snapshot(
+        freshness_deadline=_stale_freshness_deadline_for(decision_time),
+        captured_at="2026-05-24T08:00:00+00:00",
+    )
+
+    observed: list[bool] = []
+
+    def _refresher(**_kwargs):
+        observed.append(conn.in_transaction)
+        _insert_fresh_family_snapshots(conn, decision_time)
+        return True
+
+    _receipt(
+        _bound_forecast_event(), conn, decision_time=decision_time, family_snapshot_refresher=_refresher
+    )
+
+    assert observed, "refresher must have been invoked on the stale row"
+    assert observed[0] is False, "no trade-DB txn may be open across the refresher's NET fetch"

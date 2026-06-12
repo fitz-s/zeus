@@ -136,7 +136,6 @@ def _build_live_adapter_day0_shadow(monkeypatch, event, *, executor_called):
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=True,
-        live_canary_enabled=True,
         durable_submit_outbox_enabled=True,
         executor_submit=_executor,
         operator_arm=arm,
@@ -191,7 +190,6 @@ def test_day0_shadow_scope_zero_venue_commands_written(monkeypatch) -> None:
         conn,
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=True,
-        live_canary_enabled=True,
         durable_submit_outbox_enabled=True,
         executor_submit=lambda *_: executor_called.update({"called": True}),  # type: ignore[arg-type]
         operator_arm=require_operator_arm({"edli_live_operator_authorized": True}),
@@ -247,7 +245,6 @@ def test_forecast_only_scope_does_not_add_day0_scope_gate(monkeypatch) -> None:
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=True,
-        live_canary_enabled=True,
         durable_submit_outbox_enabled=True,
         executor_submit=lambda *_: None,  # type: ignore[arg-type]
         operator_arm=require_operator_arm({"edli_live_operator_authorized": True}),
@@ -288,7 +285,6 @@ def test_forecast_plus_day0_scope_does_not_block_day0_event(monkeypatch) -> None
         sqlite3.connect(":memory:"),
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=True,
-        live_canary_enabled=True,
         durable_submit_outbox_enabled=True,
         executor_submit=lambda *_: None,  # type: ignore[arg-type]
         operator_arm=require_operator_arm({"edli_live_operator_authorized": True}),

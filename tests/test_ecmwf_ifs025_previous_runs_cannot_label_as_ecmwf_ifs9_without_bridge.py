@@ -3,7 +3,7 @@
 # Reuse: Run with pytest; update if ifs025->ifs9 bridge logic or anchor_tau0 computation changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §3 anchor + Fitz Constraint #4. The capture forms the
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 anchor + Fitz Constraint #4. The capture forms the
 #   anchor prior (anchor_z/anchor_tau0) from the anchor walk-forward history. That history's
 #   physical product is ecmwf_ifs025 (0.25), NOT the live 9km ecmwf_ifs. The capture must NOT
 #   pass the raw 025 tau0 through as if it were a 9km prior — it must apply the declared
@@ -21,10 +21,10 @@ from __future__ import annotations
 import statistics
 from datetime import date
 
-from src.data.u0r_multimodel_capture import ModelHistory, capture_u0r_instruments
-from src.forecast import u0r_anchor_bridge as bridge
+from src.data.bayes_precision_fusion_capture import ModelHistory, capture_bayes_precision_instruments
+from src.forecast import bayes_precision_fusion_anchor_bridge as bridge
 from src.forecast.model_selection import ANCHOR_MODEL
-from src.forecast.u0r_bayes import MIN_TRAIN
+from src.forecast.bayes_precision_fusion import MIN_TRAIN
 
 
 def _history_provider(histories):
@@ -53,7 +53,7 @@ def test_capture_anchor_tau0_is_bridged_from_025_not_raw() -> None:
     histories = {ANCHOR_MODEL: anchor_hist}
 
     # No live extras -> only the anchor prior is formed (likelihood empty is fine for this test).
-    result = capture_u0r_instruments(
+    result = capture_bayes_precision_instruments(
         city="Paris", metric="high", latitude=48.967, longitude=2.428,
         timezone_name="Europe/Paris", run="2026-06-06T00:00:00+00:00",
         target_local_date=date(2026, 6, 7), lead_days=1,

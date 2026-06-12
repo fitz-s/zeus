@@ -430,7 +430,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     """)
 
     # ------------------------------------------------------------------------
-    # raw_model_forecasts  (U0R_BAYES_SPEC.md §6 F1 raw capture)
+    # raw_model_forecasts  (BAYES_PRECISION_FUSION_SPEC.md §6 F1 raw capture)
     # ------------------------------------------------------------------------
     # The spec-named SHADOW-ONLY multi-model walk-forward capture table. One row per
     # (model, city, target_date, metric, source_cycle_time, endpoint): the decorrelated
@@ -442,7 +442,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     # causality run_time != source_available_at). SHADOW_ONLY + training_allowed=0 are
     # CHECK-pinned exactly like raw_forecast_artifacts: this is a research-accrual surface,
     # NEVER an order/training truth table. Lives ONLY on zeus-forecasts.db (FORECAST_CLASS,
-    # INV-37 single-DB). The walk-forward history JOIN (src/data/u0r_history_provider.py)
+    # INV-37 single-DB). The walk-forward history JOIN (src/data/bayes_precision_fusion_history_provider.py)
     # reads endpoint='previous_runs' rows JOINed to settlement_outcomes (same DB) with
     # target_date < decision_date and authority='VERIFIED' (no-leak, IRON RULE #3).
     # BLOCKER 4 (live-money data provenance, Fitz Constraint #4): the original capture columns
@@ -509,7 +509,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             -- insert (RawModelForecastRequestConflict + an audit row) so a corrected request is a
             -- LOUD, attributable event rather than two silently-coexisting rows the history JOIN
             -- (which keys on model/city/metric/lead/endpoint/target_date, NOT on the hash) would
-            -- conflate. See src/data/u0r_multimodel_download.py::_persist_rows.
+            -- conflate. See src/data/bayes_precision_fusion_download.py::_persist_rows.
             UNIQUE(model, product_id, request_url_hash, city, target_date, metric,
                    source_cycle_time, endpoint)
         )
@@ -561,7 +561,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     # (logical key + product_id + request_url_hash) forward-only, no DROP/rebuild. On a fresh DB
     # this is redundant with the table-level UNIQUE above (both pin the identical column set); on
     # a legacy DB it is the only way the widened key reaches the physical table. The persist layer
-    # (src/data/u0r_multimodel_download.py::_persist_rows) is the PRIMARY antibody — it REJECTS a
+    # (src/data/bayes_precision_fusion_download.py::_persist_rows) is the PRIMARY antibody — it REJECTS a
     # same-logical-key/different-request-hash insert before it is attempted — and this index is
     # defense-in-depth for any write path that bypasses _persist_rows.
     conn.execute("""
@@ -600,6 +600,59 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
         CREATE INDEX IF NOT EXISTS idx_rmf_request_conflicts_logical_key
             ON raw_model_forecast_request_conflicts(model, city, target_date, metric,
                                                     source_cycle_time, endpoint)
+    """)
+    # Task #32 (PARTIAL-fusion upgrade trigger) idempotency marker. When the fusion-upgrade
+    # trigger (src/data/replacement_fusion_upgrade_trigger.py) detects that a scope's latest
+    # posterior was fused from a STRICTLY SMALLER decorrelated-provider family set than is now
+    # capturable at the SAME source_cycle_time, it enqueues ONE re-materialization seed and writes
+    # one row here. The UNIQUE index on (city, target_date, metric, source_cycle_time,
+    # capturable_family_set) is the bound: a scope is re-enqueued AT MOST ONCE per
+    # (cycle, capturable-family-superset) transition, so a still-missing 5th provider (gfs HTTP
+    # 400, jma off the 06Z single_runs cadence) can never loop the queue. SHADOW research surface
+    # only — never an order/training truth table.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fusion_upgrade_enqueues (
+            enqueue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            enqueued_at TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            served_family_set TEXT NOT NULL,
+            capturable_family_set TEXT NOT NULL,
+            seed_file TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_fusion_upgrade_enqueues_scope_cycle_superset
+            ON fusion_upgrade_enqueues(city, target_date, metric, source_cycle_time,
+                                       capturable_family_set)
+    """)
+    # U5 step 2a (newer-cycle-triggered re-materialization, freshness investigation 2026-06-12)
+    # idempotency marker. Sibling of fusion_upgrade_enqueues: when the cycle-advance trigger
+    # (src/data/replacement_cycle_advance_trigger.py) detects that a scope's latest posterior
+    # consumed a model cycle OLDER than the freshest in-universe cycle now ingested, it enqueues ONE
+    # re-materialization seed and writes one row here. The UNIQUE index on
+    # (city, target_date, metric, target_cycle_time) is the bound: a scope is re-enqueued AT MOST
+    # ONCE per (target-cycle) advance, so a still-unmaterialized seed (manifest not yet on disk,
+    # day0 guard) can never loop the queue — it heals on the next tick once the seed drains, and
+    # the NEXT fresher cycle gets its own distinct marker. SHADOW research surface only.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cycle_advance_enqueues (
+            enqueue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            enqueued_at TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            consumed_cycle_time TEXT NOT NULL,
+            target_cycle_time TEXT NOT NULL,
+            held_position INTEGER NOT NULL DEFAULT 0,
+            seed_file TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_cycle_advance_enqueues_scope_target_cycle
+            ON cycle_advance_enqueues(city, target_date, metric, target_cycle_time)
     """)
 
 

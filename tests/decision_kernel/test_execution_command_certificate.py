@@ -241,6 +241,57 @@ def test_final_intent_notional_at_or_below_reserved_passes_integrity_guard():
     verify_final_intent(final_intent, (actionable,))
 
 
+def test_final_intent_notional_float_roundtrip_ulp_passes_integrity_guard():
+    """ANTIBODY (live 2026-06-11, Amsterdam 20:26/20:56Z + Lucknow 21:38Z): the
+    maker sizing contract is size = reserved/price (float), notional =
+    size*price — IEEE754 makes (r/p)*p exceed r by ~1 ULP for a large fraction
+    of (r, p) pairs, and the strict > guard hard-killed correctly-sized maker
+    intents at random (terminal dead-letter, opportunity consumed). The guard
+    must tolerate the round-trip artifact; material excess must still raise."""
+    # Real ULP-overflow pair: (14.634415443986683 / 0.217) * 0.217 exceeds the
+    # reservation by 1.78e-15.
+    reserved = 14.634415443986683
+    price = 0.217
+    notional = (reserved / price) * price
+    assert notional > reserved  # the artifact this antibody exists for
+
+    actionable = _cert(
+        claims.ACTIONABLE_TRADE,
+        "actionable:event-1",
+        {
+            **_actionable_payload(),
+            "live_cap_reserved_notional_usd": reserved,
+        },
+    )
+    final_intent = _cert(
+        claims.FINAL_INTENT,
+        "final-intent:intent-1",
+        {
+            **_final_intent_payload(actionable),
+            "limit_price": price,
+            "size": reserved / price,
+            "notional_usd": notional,
+        },
+        parents=(actionable,),
+    )
+
+    verify_final_intent(final_intent, (actionable,))
+
+    # Material excess (1 cent on ~$14.6) still raises — the guard is not weakened.
+    material = _cert(
+        claims.FINAL_INTENT,
+        "final-intent:intent-2",
+        {
+            **_final_intent_payload(actionable),
+            "limit_price": price,
+            "notional_usd": reserved + 0.01,
+        },
+        parents=(actionable,),
+    )
+    with pytest.raises(CertificateVerificationError, match="exceeds live cap reserved notional"):
+        verify_final_intent(material, (actionable,))
+
+
 def test_executor_expressibility_requires_final_intent_parent():
     parents, expressibility = executor_expressibility_graph(drop_parent=claims.FINAL_INTENT)
 

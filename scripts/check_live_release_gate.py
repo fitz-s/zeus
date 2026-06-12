@@ -54,10 +54,11 @@ from src.data.replacement_forecast_current_target_plan import build_replacement_
 
 PASS = "PASS"
 FAIL = "FAIL"
+# Wave-2 item 5 (2026-06-12): the canary live stage is collapsed into edli_live (the
+# only event-driven live mode). The deploy gate's live stage is now edli_live alone.
 LIVE_RELEASE_STAGES = (
     "legacy_cron",
     "edli_submit_disabled_bridge",
-    "edli_live_canary",
     "edli_live",
 )
 
@@ -564,7 +565,7 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
 
 def _edli_stage_results(args: argparse.Namespace) -> list[GateResult]:
     stage = str(args.stage)
-    if stage not in {"edli_submit_disabled_bridge", "edli_live_canary", "edli_live"}:
+    if stage not in {"edli_submit_disabled_bridge", "edli_live"}:
         return []
     import src.main as main
 
@@ -577,21 +578,11 @@ def _edli_stage_results(args: argparse.Namespace) -> list[GateResult]:
         trade_db_path=str(args.trade_db),
         forecasts_db_path=str(args.forecasts_db),
         loaded_sha_file=str(args.loaded_sha_file) if args.loaded_sha_file else "",
-        canary_artifact_path=str(args.canary_artifact_json) if args.canary_artifact_json else "",
         promotion_artifact_path=str(args.promotion_artifact_json) if args.promotion_artifact_json else "",
         source_health_json=str(args.source_health_json),
         status_json=str(args.status_json),
         max_age_seconds=min(int(args.source_max_age_seconds), int(args.status_max_age_seconds)),
     )
-    if stage == "edli_live_canary":
-        ok = report.status in {main.EDLI_STAGE_PASS, main.EDLI_STAGE_WAITING} and report.submit_allowed
-        return [
-            GateResult(
-                "edli_stage_readiness",
-                PASS if ok else FAIL,
-                f"status={report.status}:submit_allowed={report.submit_allowed}:reasons={list(report.reasons)}",
-            )
-        ]
     if stage == "edli_submit_disabled_bridge":
         ok = report.status in {main.EDLI_STAGE_PASS, main.EDLI_STAGE_WAITING} and not report.submit_allowed
         return [
@@ -663,7 +654,6 @@ def _check_edli_promotion_artifact(args: argparse.Namespace) -> GateResult:
 _REACTOR_MODE_BY_STAGE = {
     "legacy_cron": "disabled",
     "edli_submit_disabled_bridge": "submit_disabled_live_bridge",
-    "edli_live_canary": "live",
     "edli_live": "live",
 }
 
@@ -675,9 +665,9 @@ def _check_stage_settings(stage: str, settings_json: Path) -> GateResult:
         settings = json.loads(settings_json.read_text())
     except json.JSONDecodeError as exc:
         return GateResult("stage_settings", FAIL, f"invalid_json:{exc}")
-    edli_cfg = settings.get("edli_v1") if isinstance(settings, dict) else None
+    edli_cfg = settings.get("edli") if isinstance(settings, dict) else None
     if not isinstance(edli_cfg, dict):
-        return GateResult("stage_settings", FAIL, "missing_edli_v1")
+        return GateResult("stage_settings", FAIL, "missing_edli")
     errors: list[str] = []
     if str(edli_cfg.get("live_execution_mode") or "") != stage:
         errors.append(f"live_execution_mode={edli_cfg.get('live_execution_mode')!r}")
@@ -689,7 +679,7 @@ def _check_stage_settings(stage: str, settings_json: Path) -> GateResult:
             errors.append("enabled=true")
         if bool(edli_cfg.get("real_order_submit_enabled", False)):
             errors.append("real_order_submit_enabled=true")
-    if stage in {"edli_submit_disabled_bridge", "edli_live_canary", "edli_live"}:
+    if stage in {"edli_submit_disabled_bridge", "edli_live"}:
         if not bool(edli_cfg.get("enabled", False)):
             errors.append("enabled=false")
         if not bool(edli_cfg.get("market_channel_ingestor_enabled", False)):
@@ -698,13 +688,12 @@ def _check_stage_settings(stage: str, settings_json: Path) -> GateResult:
             errors.append("edli_user_channel_reconcile_enabled=false")
     if stage == "edli_submit_disabled_bridge" and bool(edli_cfg.get("real_order_submit_enabled", False)):
         errors.append("real_order_submit_enabled=true")
-    if stage in {"edli_live_canary", "edli_live"}:
+    if stage == "edli_live":
+        # Wave-2 item 5/8: canary collapsed into edli_live; the live_canary_enabled and
+        # taker_fok_fak_live_enabled flags were deleted (taker law is unconditional). The
+        # remaining honest live preconditions are real submit + durable outbox + operator arm.
         if not bool(edli_cfg.get("real_order_submit_enabled", False)):
             errors.append("real_order_submit_enabled=false")
-        if not bool(edli_cfg.get("live_canary_enabled", False)):
-            errors.append("live_canary_enabled=false")
-        if not bool(edli_cfg.get("taker_fok_fak_live_enabled", False)):
-            errors.append("taker_fok_fak_live_enabled=false")
         if not bool(edli_cfg.get("durable_submit_outbox_enabled", False)):
             errors.append("durable_submit_outbox_enabled=false")
     if stage == "edli_live" and not bool(edli_cfg.get("edli_live_operator_authorized", False)):
@@ -731,7 +720,9 @@ def _result_detail(results: tuple[GateResult, ...], name: str) -> str:
 def _stage_status(stage: str, *, status: str, results: tuple[GateResult, ...]) -> str:
     if status != PASS:
         return FAIL
-    if stage == "edli_live_canary":
+    # Wave-2 item 5: canary collapsed into edli_live; the WAITING-for-status-summary
+    # deferral tolerance now belongs to the single live mode.
+    if stage == "edli_live":
         detail = _result_detail(results, "edli_stage_readiness")
         if "status=WAITING_FOR_QUALIFYING_EVENT" in detail:
             return "WAITING_FOR_QUALIFYING_EVENT"
@@ -762,10 +753,6 @@ def _stage_allowance(
         if _result_status(results, "edli_stage_readiness") != PASS:
             return False, False, False, basis + ("submit_disabled", "edli_stage_readiness_required")
         return False, False, False, basis + ("submit_disabled",)
-    if stage == "edli_live_canary":
-        if _result_status(results, "edli_stage_readiness") != PASS:
-            return False, False, False, basis + ("canary_preflight_required", "tiny_cap_only")
-        return True, True, False, basis + ("canary_preflight", "tiny_cap_only")
     if stage == "edli_live":
         if _result_status(results, "edli_stage_readiness") != PASS:
             return False, False, False, basis + ("edli_stage_readiness_required", "scaleout_blocked")

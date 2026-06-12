@@ -25,6 +25,20 @@ LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
 LIVE_BUY_NO_MATERIAL_YES_POSTERIOR = 0.20
 LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES = frozenset({"EMOS_ANALYTIC", "SETTLEMENT_ISOTONIC"})
 
+# SINGLE AUTHORITY (twin-authority reconciliation #7, 2026-06-11): the settlement-backward
+# coverage verdict statuses that LICENSE a fused-bootstrap q_lcb for live. ONE home — this
+# module — consumed by BOTH the admission gate below AND the adapter's cert credential
+# (event_reactor_adapter re-exports it as _FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES).
+# LICENSED  = realized settled win-rate backs the claimed q_lcb within tolerance.
+# UNLICENSED = the record refuted the raw claim and the K3 shrink to realized-minus-1pp
+#              was the verdict's output — the (shrunk) q_lcb is settled-record-backed.
+# INSUFFICIENT_DATA (and None/UNEVALUATED) carry NO realized backing → never license.
+# Category inversion this kills: before reconciliation a record-BACKED bootstrap q_lcb
+# kept source=FORECAST_BOOTSTRAP → admission rejected, while a record-REFUTED one got
+# shrunk → branded SETTLEMENT_ISOTONIC → admission accepted. The verdict, not the brand,
+# is the evidence.
+SETTLEMENT_COVERAGE_LICENSING_STATUSES = frozenset({"LICENSED", "UNLICENSED"})
+
 
 def live_win_rate_floor_rejection_reason(
     *,
@@ -174,6 +188,7 @@ def live_buy_no_conservative_evidence_rejection_reason(
     execution_price: float | int | None,
     q_lcb_calibration_source: str | None,
     same_bin_yes_posterior: float | int | None = None,
+    settlement_coverage_status: str | None = None,
     material_yes_posterior: float = LIVE_BUY_NO_MATERIAL_YES_POSTERIOR,
     allowed_lcb_sources: frozenset[str] = LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES,
 ) -> str | None:
@@ -184,6 +199,18 @@ def live_buy_no_conservative_evidence_rejection_reason(
     guard must never infer YES from a NO candidate by complement arithmetic. The
     guard is deliberately one-way: it never creates a trade and it does not touch
     buy-YES.
+
+    ``settlement_coverage_status`` (twin-authority reconciliation #7, 2026-06-11) is
+    the family's settlement-backward coverage VERDICT status — the SAME flag-
+    independent verdict the cert credential licenses on (computed once per family on
+    the replacement path; the caller threads the status string, keeping this module
+    pure). When the q_lcb source is not in the allow-list, a verdict in
+    SETTLEMENT_COVERAGE_LICENSING_STATUSES ({LICENSED, UNLICENSED}) admits: the
+    settled record evaluated this scope and backed the (possibly shrunk) claim.
+    INSUFFICIENT_DATA / None reject exactly as before, with the status appended to
+    the reason for provenance. This is reconciliation, not gate-weakening: the
+    evidence bar (settled-record backing) is unchanged — only the vocabulary the
+    gate reads is unified with the cert layer's.
     """
 
     if direction != "buy_no":
@@ -214,14 +241,27 @@ def live_buy_no_conservative_evidence_rejection_reason(
     if yes_posterior >= material_floor:
         source = str(q_lcb_calibration_source or "").strip()
         if source not in allowed_lcb_sources:
+            # Twin-authority reconciliation #7 (2026-06-11): a settlement-backward
+            # coverage verdict the settled record evaluated (LICENSED, or UNLICENSED
+            # where the shrink was the verdict's output) is settled-record backing —
+            # the SAME evidence bar the source allow-list expresses, read from the
+            # cert layer's vocabulary instead of the q_lcb brand. Kills the category
+            # inversion where a record-BACKED bootstrap q_lcb was rejected while a
+            # record-REFUTED one (re-branded by the shrink) was accepted.
+            status = str(settlement_coverage_status or "").strip()
+            if status in SETTLEMENT_COVERAGE_LICENSING_STATUSES:
+                return None
             # FIX-4 (§2): the conservative_edge>confidence_gap waiver is DELETED.
             # It admitted a material-YES buy_no on a self-referential test of the
             # SAME un-provenanced q_lcb. Material-YES buy_no now requires an allowed
             # native NO source UNCONDITIONALLY — no edge-vs-gap escape hatch.
+            # (The coverage VERDICT above is not a waiver: it is independent settled-
+            # record evidence, not a self-referential test of the claimed q_lcb.)
             return (
                 "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:"
                 f"yes_posterior={yes_posterior:.6f}:max={material_floor:.6f}:"
                 f"no_q_lcb={q_lcb_value:.6f}:price={price:.6f}:"
-                f"source={source or 'missing'}"
+                f"source={source or 'missing'}:"
+                f"coverage_status={status or 'missing'}"
             )
     return None

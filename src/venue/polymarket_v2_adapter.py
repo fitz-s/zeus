@@ -907,6 +907,17 @@ class PolymarketV2Adapter:
         and returns the stub so operator CLI handles it.
         """
 
+        # K3.6 REDEEM PIVOT (operator law 2026-06-10): second defense layer at
+        # the tx-broadcast boundary itself — Zeus never broadcasts a redeem
+        # unless the operator-only override token is hand-set. Raises before
+        # any RPC/signing work; the flag check below is now irrelevant to
+        # safety (a flag flip alone can never re-arm redemption).
+        from src.execution.settlement_commands import (  # noqa: PLC0415 — lazy, avoids cycle
+            assert_redeem_submission_allowed,
+        )
+
+        assert_redeem_submission_allowed("polymarket_v2_adapter.redeem")
+
         # Karachi safety / Path A precedence: default OFF returns the stub
         # verbatim. settlement_commands.py:426-454 already handles this
         # errorCode by routing to REDEEM_OPERATOR_REQUIRED (NOT terminal;
@@ -1328,6 +1339,123 @@ class PolymarketV2Adapter:
             "balance_micro": int(balance_micro),
             "position_id": int(position_id),
             "wcol": wcol_addr,
+            "holder": holder_addr,
+            "zeus_index_set": int(index_set),
+            "ctf_index_set": ctf_index_set,
+        }
+
+    def get_standard_ctf_winning_position_balance(
+        self,
+        condition_id: str,
+        index_set: int,
+        *,
+        holder: str | None = None,
+    ) -> dict[str, Any]:
+        """Read the Safe's live ERC1155 balance of a winning STANDARD-CTF position.
+
+        Standard-CTF analogue of get_negrisk_winning_position_balance, for
+        non-negRisk markets (operator redeem directive 2026-06-10 — $19 stuck on
+        a standard-CTF NO winner the negRisk-only sweep skipped forever).
+
+        Difference from the negRisk probe: the position ERC1155 id derives from
+        USDC.e collateral DIRECTLY (no NegRiskAdapter.wcol() indirection). For a
+        standard-CTF position the data-api `asset` id IS this positionId, so the
+        caller's chain-truth veto is `position_id == data-api asset AND balance>0`.
+
+        index_set uses the SAME Zeus convention as the negRisk probe and
+        settlement_commands.winning_index_set: 2 = YES (slot 0), 1 = NO (slot 1).
+        The CTF indexSet bitmask is 1<<slot (Zeus 2 -> 1, Zeus 1 -> 2); see the
+        CONVENTION ANTIBODY on _zeus_index_set_to_ctf_bitmask. Verified on-chain
+        2026-06-10: the stuck NO winner (Zeus index 1) matched ONLY at CTF
+        bitmask 2.
+
+        Derivation (no web3 lib — uses self._rpc_call, the same urllib JSON-RPC
+        seam every other on-chain read in this adapter uses):
+          1. ctf_index_set = 1<<slot derived from the Zeus label.
+          2. collectionId = CTF.getCollectionId(0x00..00, conditionId, ctf_index_set).
+          3. positionId   = CTF.getPositionId(USDC.e, collectionId).
+          4. balance      = CTF.balanceOf(holder_safe, positionId).
+
+        Returns the same dict shape as the negRisk probe on success, or
+        {"ok": False, "errorCode": ..., "errorMessage": ...} on any RPC/derivation
+        failure (caller fails closed: does NOT submit when balance/identity
+        cannot be established).
+        """
+        holder_addr = holder or self.funder_address
+        if not self.polygon_rpc_url:
+            return {
+                "ok": False,
+                "errorCode": "REDEEM_RPC_URL_MISSING",
+                "errorMessage": "polygon_rpc_url required for chain-truth balance probe",
+            }
+        try:
+            condition_bytes = _normalize_condition_id_bytes32(condition_id)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "errorCode": "REDEEM_CALLDATA_BUILD_FAILED",
+                "errorMessage": f"invalid condition_id for balance probe: {exc}",
+            }
+        try:
+            # Zeus label -> CTF bitmask (1<<slot). Reuses the single source of
+            # truth so the probe and the redeem calldata can never diverge.
+            ctf_index_set = _zeus_index_set_to_ctf_bitmask(int(index_set))
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "errorCode": "REDEEM_CALLDATA_BUILD_FAILED",
+                "errorMessage": str(exc),
+            }
+        try:
+            # 1. getCollectionId(parentCollectionId=0, conditionId, ctf_index_set)
+            collection_data = (
+                CTF_GET_COLLECTION_ID_SELECTOR
+                + ("00" * 32)
+                + condition_bytes.hex()
+                + format(ctf_index_set, "064x")
+            )
+            collection_raw = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_call",
+                [{"to": POLYGON_CTF_ADDRESS, "data": collection_data}, "latest"],
+            )
+            collection_hex = str(collection_raw or "0x").removeprefix("0x").rjust(64, "0")[:64]
+            # 2. getPositionId(collateralToken=USDC.e, collectionId)
+            position_data = (
+                CTF_GET_POSITION_ID_SELECTOR
+                + _abi_address(POLYGON_USDCE_ADDRESS)
+                + collection_hex
+            )
+            position_id = _eth_call_uint(
+                self.polygon_rpc_url,
+                self._rpc_call,
+                to=POLYGON_CTF_ADDRESS,
+                data=position_data,
+            )
+            # 3. balanceOf(holder, positionId)
+            balance_data = (
+                ERC1155_BALANCE_OF_SELECTOR
+                + _abi_address(holder_addr)
+                + format(int(position_id), "064x")
+            )
+            balance_micro = _eth_call_uint(
+                self.polygon_rpc_url,
+                self._rpc_call,
+                to=POLYGON_CTF_ADDRESS,
+                data=balance_data,
+            )
+        except Exception as exc:  # noqa: BLE001 — any RPC failure → fail-closed
+            return {
+                "ok": False,
+                "errorCode": "REDEEM_BALANCE_PROBE_FAILED",
+                "errorMessage": f"chain-truth balance probe failed: {exc}",
+                "condition_id": condition_id,
+            }
+        return {
+            "ok": True,
+            "balance_micro": int(balance_micro),
+            "position_id": int(position_id),
+            "collateral": POLYGON_USDCE_ADDRESS,
             "holder": holder_addr,
             "zeus_index_set": int(index_set),
             "ctf_index_set": ctf_index_set,
@@ -2797,14 +2925,53 @@ def _normalize_condition_id_bytes32(condition_id: str) -> bytes:
         ) from exc
 
 
+def _zeus_index_set_to_ctf_bitmask(zeus_index_set: int) -> int:
+    """Translate a Zeus binary outcome label to the on-chain CTF indexSet bitmask.
+
+    CONVENTION ANTIBODY (2026-06-10, operator redeem directive — $19 stuck):
+    Zeus stores the winning outcome as 2=YES (slot 0) / 1=NO (slot 1) in
+    settlement_commands.winning_index_set. The CTF/NegRisk contracts expect the
+    on-chain indexSet to be the BITMASK over outcome slots: indexSet = 1 << slot,
+    i.e. YES/slot0 -> 1, NO/slot1 -> 2 — the EXACT INVERSE of the Zeus number.
+
+    This is the SAME mapping the negRisk balance probe
+    (get_negrisk_winning_position_balance) and amounts builder
+    (_build_negrisk_redeem_calldata, which encodes amounts by Zeus label) already
+    apply. Centralising it here makes winning_index_set carry ONE consistent
+    meaning (the Zeus label) across BOTH the negRisk and standard-CTF lanes, so a
+    NO winner can never be encoded as the (losing) YES bitmask.
+
+    Verified on-chain 2026-06-10 against the stuck standard-CTF NO winner
+    (condition 0xde5f67…d9c, asset …360377): outcome="No"/outcomeIndex=1, and the
+    matching getCollectionId indexSet word is 1<<1 = 2. Zeus label 1 (NO) MUST
+    map to CTF bitmask 2.
+    """
+    if int(zeus_index_set) == 2:  # YES, slot 0
+        return 1
+    if int(zeus_index_set) == 1:  # NO, slot 1
+        return 2
+    raise ValueError(
+        f"standard-CTF binary redeem only supports Zeus indexSet 1 (NO) or 2 (YES); "
+        f"got {zeus_index_set!r}"
+    )
+
+
 def _build_redeem_calldata(condition_id: str, index_sets: list[int]) -> str:
-    """ABI-encode CTF redeemPositions calldata. PR-I.5.c.
+    """ABI-encode standard CTF redeemPositions calldata. PR-I.5.c.
 
     ``redeemPositions(address collateralToken, bytes32 parentCollectionId,
                       bytes32 conditionId, uint256[] indexSets)``
 
     parentCollectionId is the zero word for top-level positions (no nested
-    conditions). collateralToken is the pUSD Polygon address.
+    conditions). collateralToken is USDC.e: Polymarket standard-CTF positions are
+    minted against USDC.e, NOT pUSD (verified on-chain 2026-06-10 — the stuck
+    winner's positionId derives from getPositionId(USDC.e, …), not pUSD). Using
+    the wrong collateral derives the wrong positionId and the redeem reverts.
+
+    ``index_sets`` carries the Zeus binary label (2=YES, 1=NO), the SAME contract
+    as settlement_commands.winning_index_set and the negRisk lane. It is
+    translated to the CTF bitmask (1<<slot) here via _zeus_index_set_to_ctf_bitmask
+    so a NO winner redeems the NO token (bitmask 2), not the losing YES token.
 
     Returns hex-encoded calldata starting with the selector (0x01b7037c).
     """
@@ -2812,15 +2979,16 @@ def _build_redeem_calldata(condition_id: str, index_sets: list[int]) -> str:
 
     if not isinstance(index_sets, (list, tuple)) or not index_sets:
         raise ValueError(f"index_sets must be a non-empty list, got {index_sets!r}")
-    coerced: list[int] = []
+    ctf_bitmasks: list[int] = []
     for entry in index_sets:
-        coerced.append(int(entry))
         if int(entry) <= 0:
             raise ValueError(f"index_sets entries must be positive uint256, got {entry!r}")
+        # Translate Zeus label -> CTF bitmask. Binary markets only (1 or 2).
+        ctf_bitmasks.append(_zeus_index_set_to_ctf_bitmask(int(entry)))
 
-    collateral = bytes.fromhex(POLYGON_PUSD_ADDRESS.removeprefix("0x"))
+    collateral = bytes.fromhex(POLYGON_USDCE_ADDRESS.removeprefix("0x"))
     if len(collateral) != 20:
-        raise ValueError("POLYGON_PUSD_ADDRESS is not a valid 20-byte address")
+        raise ValueError("POLYGON_USDCE_ADDRESS is not a valid 20-byte address")
     parent_collection_id = b"\x00" * 32
     condition_bytes = _normalize_condition_id_bytes32(condition_id)
     encoded_args = _abi_encode(
@@ -2829,7 +2997,7 @@ def _build_redeem_calldata(condition_id: str, index_sets: list[int]) -> str:
             "0x" + collateral.hex(),
             parent_collection_id,
             condition_bytes,
-            coerced,
+            ctf_bitmasks,
         ],
     )
     return CTF_REDEEM_POSITIONS_SELECTOR + encoded_args.hex()

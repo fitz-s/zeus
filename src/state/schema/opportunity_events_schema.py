@@ -17,7 +17,11 @@ CREATE TABLE IF NOT EXISTS opportunity_events (
         'DAY0_EXTREME_UPDATED',
         'BOOK_SNAPSHOT',
         'BEST_BID_ASK_CHANGED',
-        'NEW_MARKET_DISCOVERED'
+        'NEW_MARKET_DISCOVERED',
+        -- Continuous re-decision resurrection (2026-06-12): a PRICE-driven re-decision of a
+        -- forecast family. Carries the same FSR-shaped payload; routes through the forecast
+        -- decision lane (see _FORECAST_DECISION_EVENT_TYPES across reactor/adapter/store).
+        'EDLI_REDECISION_PENDING'
     )),
     entity_key TEXT NOT NULL,
     source TEXT NOT NULL,
@@ -78,8 +82,38 @@ END
 """
 
 
+def _migrate_event_type_check_for_redecision(conn: sqlite3.Connection) -> None:
+    """Add EDLI_REDECISION_PENDING to the event_type CHECK on LIVE DBs created before the
+    continuous-redecision resurrection (2026-06-12).
+
+    A SQLite CHECK constraint cannot be ALTERed in place; the canonical fix is a table rebuild. We
+    only run it when the live table's stored SQL is MISSING the new type (idempotent — a fresh DB
+    built from CREATE_TABLE_SQL already has it, so the guard is False and this is a pure no-op).
+    The rebuild is append-only-safe: drop the no-update/no-delete triggers, copy rows into a new
+    table carrying the widened CHECK, swap, and restore the triggers. Wrapped so a row that somehow
+    predates the constraint cannot abort the daemon boot — but the copy is a straight INSERT SELECT
+    of an append-only log, so it is deterministic."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='opportunity_events'"
+    ).fetchone()
+    if row is None or not row[0]:
+        return  # table not yet created (CREATE_TABLE_SQL above handles fresh DBs)
+    if "EDLI_REDECISION_PENDING" in row[0]:
+        return  # already widened (fresh DB or prior migration) — no-op
+    # Live DB with the old CHECK: rebuild with the widened constraint.
+    conn.execute("DROP TRIGGER IF EXISTS trg_opportunity_events_no_update")
+    conn.execute("DROP TRIGGER IF EXISTS trg_opportunity_events_no_delete")
+    conn.execute(CREATE_TABLE_SQL.replace("opportunity_events", "opportunity_events__new"))
+    conn.execute(
+        "INSERT INTO opportunity_events__new SELECT * FROM opportunity_events"
+    )
+    conn.execute("DROP TABLE opportunity_events")
+    conn.execute("ALTER TABLE opportunity_events__new RENAME TO opportunity_events")
+
+
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
+    _migrate_event_type_check_for_redecision(conn)
     conn.execute(CREATE_PENDING_ORDER_INDEX_SQL)
     conn.execute(CREATE_TYPE_AVAILABLE_INDEX_SQL)
     conn.execute(CREATE_FSR_TARGET_DATE_INDEX_SQL)

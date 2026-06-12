@@ -1,0 +1,248 @@
+# Created: 2026-06-11
+# Last reused or audited: 2026-06-11
+# Authority basis: operator URGENT 2026-06-11 17:51-17:56Z claim-storm incident.
+#   Cycles alternated `processed=0 retried=250 reasons=[]` (whole cycle bounced) and
+#   `processed=22 ... retried=209` (one mid-cycle bounce poisoned the rest). TWO
+#   composed defects, both in-process:
+#   (1) ROOT — main._edli_pending_entity_keys ran `PRAGMA busy_timeout = 250` on the
+#       SHARED world conn (the EventStore claim conn) and never restored it: every
+#       claim waited <=250 ms instead of the configured 30 s, so ANY overlapping
+#       in-process writer (heartbeat 2 s, ingestor, wrap reconciler 30 s, user-channel
+#       reconcile 60 s) bounced it.
+#   (2) AMPLIFIER — the reactor's claim lock-error path returned WITHOUT rolling back,
+#       leaving the implicit txn OPEN; the next fetch_pending then read INSIDE that
+#       dangling txn (pinning a stale snapshot), and every later claim failed
+#       SQLITE_BUSY_SNAPSHOT instantly (the busy handler never engages for
+#       snapshot-upgrade conflicts) => the 0/250 storm. attempt_count never moved
+#       (verified live: Busan stuck at 2) and the bounces were invisible (reasons=[]).
+"""RELATIONSHIP tests across the boundary
+
+    concurrent world writer txn -> EventStore.claim() under busy_timeout
+    -> reactor Window A lock-error handling -> next fetch_pending's snapshot
+
+Pins: (a) a claim contending with a held write txn WAITS and LANDS (no bounce);
+(b) a dangling stale-snapshot txn cannot storm the cycle (guard rolls it back);
+(c) a genuine claim bounce is VISIBLE (claim_lock_bounces + warning log) and
+resets the conn (rollback), never silently folded into retried alone.
+"""
+from __future__ import annotations
+
+import sqlite3
+import threading
+import time
+from datetime import datetime, timezone
+
+from src.events.event_store import EventStore
+from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
+from src.events.reactor import OpportunityEventReactor
+from src.state.db import init_schema
+from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
+
+_DT = datetime(2026, 6, 4, 18, 10, tzinfo=timezone.utc)
+
+
+def _payload(snapshot_id: str) -> ForecastSnapshotReadyPayload:
+    return ForecastSnapshotReadyPayload(
+        city="Chicago",
+        target_date="2026-06-05",
+        metric="high",
+        source_id="ecmwf-open-data",
+        source_run_id="run-1",
+        cycle="00",
+        track="ens",
+        snapshot_id=snapshot_id,
+        snapshot_hash=snapshot_id,
+        captured_at="2026-06-04T04:10:00+00:00",
+        available_at="2026-06-04T04:15:00+00:00",
+        required_fields_present=True,
+        required_steps_present=True,
+        member_count=51,
+        min_members_floor=40,
+        completeness_status="COMPLETE",
+        required_steps=[0, 3, 6],
+        observed_steps=[0, 3, 6],
+        expected_members=51,
+        source_run_status="COMMITTED",
+        source_run_completeness_status="COMPLETE",
+        coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
+    )
+
+
+def _event(snapshot_id: str):
+    return make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key=f"Chicago|2026-06-05|high|{snapshot_id}",
+        source="forecast",
+        observed_at="2026-06-04T04:10:00+00:00",
+        available_at="2026-06-04T04:15:00+00:00",
+        received_at="2026-06-04T04:16:00+00:00",
+        causal_snapshot_id=snapshot_id,
+        payload=_payload(snapshot_id),
+        priority=100,
+    )
+
+
+def _file_store(tmp_path):
+    """File-backed world DB so a SECOND connection can contend for the WAL write
+    lock (in-memory DBs cannot be shared across plain connections)."""
+    db_path = tmp_path / "world.db"
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    init_schema(conn)
+    conn.commit()
+    return db_path, conn, EventStore(conn)
+
+
+def _reactor(conn, store) -> OpportunityEventReactor:
+    return OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _d: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=lambda _event, _dt: None,  # terminal consume after gates
+        reject=lambda *_a: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+
+def _status(conn, event_id: str) -> str:
+    return conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()[0]
+
+
+def test_claim_waits_for_concurrent_write_txn_and_lands(tmp_path):
+    """ANTIBODY (a): a concurrent writer holding the WAL write lock does NOT bounce
+    claim() — the busy handler engages (full configured timeout) and the claim
+    lands once the writer commits. This is the test the live 250 ms downgrade
+    would FAIL if it ever leaks back onto the claim conn."""
+    db_path, conn, store = _file_store(tmp_path)
+    event = _event("snap-contend")
+    store.insert_or_ignore(event)
+    conn.commit()
+
+    lock_held = threading.Event()
+    release_done = threading.Event()
+
+    def _writer():
+        other = sqlite3.connect(str(db_path), timeout=30.0)
+        try:
+            other.execute("PRAGMA busy_timeout = 30000")
+            other.execute("BEGIN IMMEDIATE")  # takes the WAL write lock
+            lock_held.set()
+            time.sleep(0.6)  # hold well past any fast-bounce threshold
+            other.commit()
+            release_done.set()
+        finally:
+            other.close()
+
+    t = threading.Thread(target=_writer, daemon=True)
+    t.start()
+    assert lock_held.wait(5.0), "writer thread failed to take the write lock"
+
+    reactor = _reactor(conn, store)
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+    t.join(5.0)
+
+    assert result.claim_lock_bounces == 0, (
+        "claim bounced instead of waiting out the concurrent write txn — the busy "
+        "handler is not engaged on the claim path (250ms-downgrade category)"
+    )
+    assert _status(conn, event.event_id) == "processed"
+    assert release_done.is_set()
+
+
+def test_dangling_stale_snapshot_txn_cannot_storm_the_cycle(tmp_path):
+    """ANTIBODY (b) — the storm reproducer: a dangling txn on the store conn with a
+    PINNED READ SNAPSHOT, made stale by another writer's commit. On the old code
+    every claim then failed SQLITE_BUSY_SNAPSHOT instantly (processed=0
+    retried=N). The pre-fetch guard must roll the dangling txn back so the cycle
+    proceeds normally."""
+    db_path, conn, store = _file_store(tmp_path)
+    event = _event("snap-stale")
+    store.insert_or_ignore(event)
+    conn.commit()
+
+    # Recreate the EXACT poisoned state: open txn + read (snapshot pinned) ...
+    conn.execute("BEGIN")
+    conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()
+    # ... then another connection commits a write => the pinned snapshot is stale.
+    other = sqlite3.connect(str(db_path), timeout=30.0)
+    try:
+        other.execute("PRAGMA busy_timeout = 30000")
+        # Any committed write advances the WAL and stales the pinned snapshot —
+        # a scratch table keeps the fixture independent of real-table constraints.
+        other.execute("CREATE TABLE IF NOT EXISTS _stale_snapshot_marker (k TEXT)")
+        other.execute("INSERT INTO _stale_snapshot_marker (k) VALUES ('x')")
+        other.commit()
+    finally:
+        other.close()
+    assert conn.in_transaction, "precondition: the dangling txn must be open"
+
+    reactor = _reactor(conn, store)
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.claim_lock_bounces == 0, (
+        "stale-snapshot dangling txn stormed the claims — the pre-fetch guard "
+        "did not reset the conn"
+    )
+    assert _status(conn, event.event_id) == "processed"
+
+
+def test_claim_lock_bounce_is_visible_and_resets_the_conn(tmp_path, caplog, monkeypatch):
+    """ANTIBODY (c) — visibility + hygiene regression pin: a genuine claim lock
+    error (1) increments claim_lock_bounces AND retried (never silent), (2) emits
+    a warning log line, (3) ROLLS BACK so the conn carries no dangling txn into
+    the next fetch, (4) leaves the event pending (re-claimable next cycle)."""
+    import logging
+
+    db_path, conn, store = _file_store(tmp_path)
+    event = _event("snap-bounce")
+    store.insert_or_ignore(event)
+    conn.commit()
+
+    def _locked_claim(_event_id, *, claimed_at=None):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "claim", _locked_claim)
+    reactor = _reactor(conn, store)
+
+    with caplog.at_level(logging.WARNING, logger="zeus.events.reactor"):
+        result = reactor.process_pending(decision_time=_DT, limit=1)
+
+    assert result.claim_lock_bounces == 1, "claim lock bounce must be counted, not silent"
+    assert result.retried == 1
+    assert result.processed == 0 and result.rejected == 0 and result.dead_lettered == 0
+    assert any("claim lock-bounce" in rec.message for rec in caplog.records), (
+        "claim lock bounce must emit a visible warning log line"
+    )
+    assert not conn.in_transaction, (
+        "the lock-bounce path must ROLL BACK — a dangling txn here is the exact "
+        "stale-snapshot storm amplifier"
+    )
+    assert _status(conn, event.event_id) == "pending"
+
+
+def test_pending_entity_keys_restores_busy_timeout():
+    """ANTIBODY (root cause): _edli_pending_entity_keys may downgrade busy_timeout
+    for ITS OWN read, but the shared connection's configured value MUST be
+    restored afterwards — the 250 ms leak onto the claim path was the storm's
+    root cause."""
+    from src.main import _edli_pending_entity_keys
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.execute("PRAGMA busy_timeout = 30000")
+
+    _edli_pending_entity_keys(conn)
+
+    restored = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert int(restored) == 30000, (
+        f"busy_timeout leaked at {restored} ms after _edli_pending_entity_keys — "
+        "the claim path inherits this connection-wide value (claim-storm root cause)"
+    )

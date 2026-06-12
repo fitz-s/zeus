@@ -177,13 +177,13 @@ edge → execution → monitoring → settlement → learning
 The probability chain (strategy of record, 2026-06-09 — authority `docs/authority/replacement_final_form_2026_06_09.md`):
 
 ```
-per-model walk-forward de-bias (u0r_bayes.eb_bias, λ=n/(n+8)) → T2 Bayesian precision
-fusion, Ledoit-Wolf Σ (fuse_u0r_posterior) → σ_pred (floor 1.0°C) → settlement-preimage
+per-model walk-forward de-bias (bayes_precision_fusion.eb_bias, λ=n/(n+8)) → T2 Bayesian precision
+fusion, Ledoit-Wolf Σ (fuse_bayes_precision_posterior) → σ_pred (floor 1.0°C) → settlement-preimage
 bin q (emos.bin_probability_settlement, q_shape fused_normal_direct) → q_lcb floor →
 Edge → Fractional Kelly → Position Size
 ```
 
-Live-authority entry: `event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`; q-mode gate `_replacement_q_mode_live_eligibility` (admits only FUSED_NORMAL_FULL/PARTIAL — all else is a deterministic no-submit). (Cite symbols, not line numbers — lines drift.) **Critical review surfaces (Tier-0/1):** `src/forecast/u0r_bayes.py`, `src/data/replacement_forecast_materializer.py` (`_insert_posterior` owns q_mode), `src/calibration/emos.py`.
+Live-authority entry: `event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`; q-mode gate `_replacement_q_mode_live_eligibility` (admits only FUSED_NORMAL_FULL/PARTIAL — all else is a deterministic no-submit). (Cite symbols, not line numbers — lines drift.) **Critical review surfaces (Tier-0/1):** `src/forecast/bayes_precision_fusion.py`, `src/data/replacement_forecast_materializer.py` (`_insert_posterior` owns q_mode), `src/calibration/emos.py`.
 
 The LEGACY BASELINE chain is now an independent baseline / LCB cap only (joined as a floor in `event_reactor_adapter.py`: `effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)`):
 

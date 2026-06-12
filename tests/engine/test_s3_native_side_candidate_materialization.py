@@ -239,13 +239,22 @@ def test_missing_native_no_quote_is_no_trade_not_complement():
     """A bin whose NO token has no executable ask yields a NATIVE_QUOTE_MISSING
     candidate; no path reads a YES-derived price into it (§12.A.2, §4).
 
-    The NO side has an empty ask book. The proof path prices it as no-trade
+    The NO side has an empty ask book AND no complementary YES bid to quote
+    behind (no maker-quote lane). The proof path prices it as no-trade
     (execution_price=None, native_quote_available=False). The materialized
     NativeSideCandidate is a NATIVE_QUOTE_MISSING no-trade candidate carrying NO
     executable curve and NO probability authority — there is nothing to
     complement-substitute from.
+
+    NOTE (2026-06-10 maker-quote lane): empty NO ask is no longer terminal when a
+    live complementary YES bid exists — that case becomes a MAKER quote
+    (tests/engine/test_maker_quote_empty_no_ask.py). This test pins the FAIL-CLOSED
+    end: empty NO ask AND empty YES bid -> still NATIVE_QUOTE_MISSING. The YES bid
+    is therefore explicitly removed here.
     """
-    row = _row(yes_asks=(("0.40", "1000"),), no_asks=())  # empty NO book
+    row = _row(
+        yes_asks=(("0.40", "1000"),), no_asks=(), yes_bids=(), no_bids=()
+    )  # empty NO book AND no complementary bid -> genuine no-trade
 
     # The proof path itself raises when pricing the NO side -> the proof carries
     # execution_price=None / native_quote_available=False (the upstream no-trade).
@@ -467,7 +476,7 @@ def test_curve_side_mismatch_is_unconstructable():
 def test_no_runtime_flag_routes_materialization():
     """SINGLE PATH: _native_side_candidate_from_proof has no env/settings toggle.
 
-    The materialization is one path; no ZEUS_* env var or edli_v1 setting can
+    The materialization is one path; no ZEUS_* env var or edli setting can
     route it to an alternate candidate shape. We assert the source carries no
     os.environ / settings lookup inside the helper body.
     """

@@ -61,7 +61,7 @@ def test_emit_job_writes_artifact_consumer_accepts_sha_at_head(tmp_path, monkeyp
             "edli_arm_gate_emit_enabled": True,
             "edli_arm_gate_artifact_path": str(artifact_path),
         }
-        if name == "edli_v1"
+        if name == "edli"
         else (default if default is not None else {}),
     )
 
@@ -102,7 +102,7 @@ def test_emit_job_on_denied_data_stays_blocking_consumer_rejects(tmp_path, monke
             "edli_arm_gate_emit_enabled": True,
             "edli_arm_gate_artifact_path": str(artifact_path),
         }
-        if name == "edli_v1"
+        if name == "edli"
         else (default if default is not None else {}),
     )
 
@@ -169,7 +169,7 @@ def test_emit_job_flag_off_is_noop(tmp_path, monkeypatch):
             "edli_arm_gate_emit_enabled": False,
             "edli_arm_gate_artifact_path": str(artifact_path),
         }
-        if name == "edli_v1"
+        if name == "edli"
         else (default if default is not None else {}),
     )
 
@@ -194,7 +194,7 @@ def test_emit_job_never_propagates_on_failure(tmp_path, monkeypatch):
             "edli_arm_gate_emit_enabled": True,
             "edli_arm_gate_artifact_path": str(artifact_path),
         }
-        if name == "edli_v1"
+        if name == "edli"
         else (default if default is not None else {}),
     )
 

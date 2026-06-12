@@ -431,38 +431,47 @@ def bin_probability_settlement(
     bin_high: Optional[float],
     *,
     half_step: float = 0.5,
+    rounding_rule: str = "wmo_half_up",
 ) -> float:
-    """Normal CDF probability mass for a settlement bin using WMO round-half-up rounding.
+    """Normal CDF probability mass for a settlement bin under the bin's rounding rule.
 
-    Matches the live settlement rounding convention in analytic_p_raw_vector_from_maxes
-    (ensemble_signal.py:296): a temperature display value t covers the continuous
-    interval [t − half_step, t + half_step).
+    The integration bounds are the SETTLEMENT PREIMAGE of the bin label set,
+    derived from ``rounding_rule`` via the single contract function
+    ``src.contracts.settlement_semantics.settlement_preimage_offsets`` — so this
+    integrator consumes the SAME per-city rule that the bins (and grading, and
+    day0 lanes) already declare, instead of hardcoding the WMO convention.
 
     This fixes the degenerate point-bin problem: when bin_low == bin_high == X
     (an interior bin labeled X), bin_probability() integrates over [X, X) = zero width
     and returns 0.  This function expands interior bins to their settlement preimage
     before integrating, so interior bins always produce non-zero probability mass.
 
-    Integration intervals by bin type (wmo_half_up, precision=1 ⇒ half_step=0.5):
-      - Interior bin (bin_low == bin_high == X):
-            [X − half_step, X + half_step)  ← preimage of round(x) == X
-      - Open-low shoulder (bin_low is None, bin_high == X):
-            (−∞, X + half_step)             ← all x that round to ≤ X
-      - Open-high shoulder (bin_low == X, bin_high is None):
-            [X − half_step, +∞)             ← all x that round to ≥ X
-      - Distinct-endpoint bin (bin_low == A, bin_high == B, A < B):
-            [A − half_step, B + half_step)  ← preimage of round(x) ∈ {A, …, B}
+    Integration intervals by bin type (precision=1 ⇒ half_step=0.5):
+      ``wmo_half_up`` (SYMMETRIC, standard cities) — round(x)==X ⟺ x∈[X−0.5, X+0.5):
+      - Interior bin (bin_low == bin_high == X):     [X − 0.5, X + 0.5)
+      - Open-low shoulder (None, X):                 (−∞, X + 0.5)
+      - Open-high shoulder (X, None):                [X − 0.5, +∞)
+      - Distinct-endpoint bin (A, B), A < B:         [A − 0.5, B + 0.5)
+      ``oracle_truncate`` / ``floor`` (ASYMMETRIC, Hong Kong) — floor(x)==X ⟺ x∈[X, X+1):
+      - Interior bin (X, X):                         [X, X + 1)
+      - Open-low shoulder (None, X):                 (−∞, X + 1)
+      - Open-high shoulder (X, None):                [X, +∞)
+      - Distinct-endpoint bin (A, B):                [A, B + 1)
 
-    Authority: ensemble_signal.py analytic_p_raw_vector_from_maxes §preimage derivation.
+    Authority: ensemble_signal.py analytic_p_raw_vector_from_maxes §preimage
+    derivation (the HK-aware MC-equivalent path) + settlement_preimage_offsets.
 
     Args:
         mu:        Normal distribution mean (same unit as bin bounds).
         sigma:     Normal distribution std-dev (must be > 0).
         bin_low:   Bin lower label, or None for open-low shoulder.
         bin_high:  Bin upper label, or None for open-high shoulder.
-        half_step: Rounding half-width (default 0.5 for precision=1 wmo_half_up).
-                   Must match the settlement precision; 0.5 is correct for all
-                   current Zeus markets.
+        half_step: Rounding half-width (default 0.5 for precision=1).  Equals
+                   settlement_step_c / 2; 0.5 is correct for all current markets.
+        rounding_rule: Settlement rounding convention from the bin/city contract.
+                   ``wmo_half_up`` (default — byte-identical to the historical
+                   symmetric path) for standard cities; ``oracle_truncate`` /
+                   ``floor`` for Hong Kong (HKO/UMA truncation); ``ceil``.
 
     Returns:
         Probability mass as float in [0, 1]. Never returns 0 for a non-degenerate
@@ -471,17 +480,25 @@ def bin_probability_settlement(
     if sigma <= 0.0:
         raise ValueError(f"bin_probability_settlement: sigma must be positive, got {sigma}")
 
-    # Derive integration bounds by expanding each bin label by ±half_step.
+    # Preimage offsets derived from the declared rounding rule (the SINGLE
+    # contract source).  wmo_half_up -> (-half_step, +half_step) keeps the
+    # historical symmetric path byte-identical; HK truncate -> (0, +2·half_step).
+    from src.contracts.settlement_semantics import settlement_preimage_offsets
+
+    low_offset, high_offset = settlement_preimage_offsets(
+        rounding_rule, half_step=half_step
+    )
+
     # Lower integration bound:
     if bin_low is None:
         cdf_low = 0.0  # −∞
     else:
-        cdf_low = float(_scipy_norm.cdf((float(bin_low) - half_step - mu) / sigma))
+        cdf_low = float(_scipy_norm.cdf((float(bin_low) + low_offset - mu) / sigma))
 
     # Upper integration bound:
     if bin_high is None:
         cdf_high = 1.0  # +∞
     else:
-        cdf_high = float(_scipy_norm.cdf((float(bin_high) + half_step - mu) / sigma))
+        cdf_high = float(_scipy_norm.cdf((float(bin_high) + high_offset - mu) / sigma))
 
     return max(0.0, cdf_high - cdf_low)

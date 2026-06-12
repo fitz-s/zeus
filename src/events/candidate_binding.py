@@ -197,12 +197,23 @@ def _validate_event_causality(event: OpportunityEvent, payload: dict) -> str:
 def _validate_forecast_event(event: OpportunityEvent, payload: dict, causal_snapshot_id: str) -> None:
     if event.event_type != "FORECAST_SNAPSHOT_READY":
         raise CandidateBindingError("forecast validator received non-forecast event")
-    if payload.get("completeness_status") != "COMPLETE":
-        raise CandidateBindingError("forecast candidate binding requires COMPLETE forecast snapshot")
+    # Coverage labels are ADVISORY here (serving-authority ruling, incident
+    # 2026-06-11T16:33:51Z; THIRD site found live 2026-06-11T19:53Z minutes
+    # after the gate fix e7e6749054 let PARTIAL events through): the money path
+    # serves the freshest ELIGIBLE bundle keyed by (city, target_date, metric)
+    # — never this trigger event's run — and the adapter rejects honestly at
+    # proof time when nothing servable exists. Binding binds STRUCTURE only:
+    # a label from the known vocabulary (junk guard), required identity fields,
+    # and causal snapshot equality. required_steps_present reflects THIS run's
+    # download state — advisory, the served bundle has its own coverage proof.
+    from typing import get_args
+
+    from src.events.forecast_completeness import ForecastCompletenessStatus
+
+    if payload.get("completeness_status") not in set(get_args(ForecastCompletenessStatus)):
+        raise CandidateBindingError("forecast candidate binding requires a known completeness label")
     if payload.get("required_fields_present") is not True:
         raise CandidateBindingError("forecast candidate binding requires required fields")
-    if payload.get("required_steps_present") is not True:
-        raise CandidateBindingError("forecast candidate binding requires required steps")
     if payload.get("snapshot_id") != causal_snapshot_id:
         raise CandidateBindingError("forecast candidate binding requires causal snapshot equality")
 

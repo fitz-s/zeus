@@ -31,7 +31,7 @@ from src.data.day0_observation_reader import (
     COVERAGE_NONE,
     COVERAGE_OK,
     Day0ObservedExtrema,
-    read_day0_observed_extrema_v2,
+    read_day0_observed_extrema,
 )
 
 
@@ -173,7 +173,7 @@ class TestHighSoFarMaxAggregation:
 
     def test_high_so_far_is_max_not_latest(self, amsterdam_conn: sqlite3.Connection) -> None:
         """high_so_far must equal 25.0 (peak at 15:00), not 17.0 (latest at 23:00)."""
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             amsterdam_conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -189,7 +189,7 @@ class TestHighSoFarMaxAggregation:
 
     def test_naive_latest_row_would_be_wrong(self, amsterdam_conn: sqlite3.Connection) -> None:
         """Document that 17.0 is the wrong (naive) answer — for clarity."""
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             amsterdam_conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -205,7 +205,7 @@ class TestHighSoFarMaxAggregation:
 
     def test_low_so_far_is_min_not_latest(self, amsterdam_conn: sqlite3.Connection) -> None:
         """low_so_far must equal 13.0 (lowest of 14.0 and 13.0)."""
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             amsterdam_conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -217,7 +217,7 @@ class TestHighSoFarMaxAggregation:
 
     def test_coverage_status_low_with_two_rows(self, amsterdam_conn: sqlite3.Connection) -> None:
         """2 rows < 6 threshold → LOW_COVERAGE."""
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             amsterdam_conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -251,7 +251,7 @@ class TestDecisionTimeCutoff:
             running_max=99.0,
             authority="VERIFIED",
         )
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -282,7 +282,7 @@ class TestAuthorityFilter:
             running_max=20.0,
             authority="VERIFIED",
         )
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -301,7 +301,7 @@ class TestAuthorityFilter:
             running_max=28.0,
             authority="ICAO_STATION_NATIVE",
         )
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -335,7 +335,7 @@ class TestSourcePriority:
             running_max=35.0,
             authority="VERIFIED",
         )
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -356,7 +356,7 @@ class TestSourcePriority:
             running_max=22.0,
             authority="VERIFIED",
         )
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -375,7 +375,7 @@ class TestSourcePriority:
 class TestCoverageStates:
     def test_no_data(self) -> None:
         conn = _make_conn()
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -398,7 +398,7 @@ class TestCoverageStates:
                 running_max=20.0 + hour,
                 authority="VERIFIED",
             )
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -425,7 +425,7 @@ class TestProvenance:
             running_max=25.0,
             authority="VERIFIED",
         )
-        result = read_day0_observed_extrema_v2(
+        result = read_day0_observed_extrema(
             conn,
             city="Amsterdam",
             target_date="2026-05-22",
@@ -445,7 +445,7 @@ class TestInputValidation:
         conn = _make_conn()
         naive_dt = datetime(2026, 5, 22, 22, 0)  # no tzinfo
         with pytest.raises(ValueError, match="timezone-aware"):
-            read_day0_observed_extrema_v2(
+            read_day0_observed_extrema(
                 conn,
                 city="Amsterdam",
                 target_date="2026-05-22",

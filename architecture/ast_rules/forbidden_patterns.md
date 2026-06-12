@@ -49,7 +49,8 @@ Architecture-level definitions: `docs/authority/zeus_current_architecture.md` §
    Enforcement: semgrep `zeus-no-direct-phase-assignment` (NC-07)
 
 2. **FM-09** — `1 - p` complements in engine/state/execution code paths  
-   Rationale: ad hoc probability complements across architecture boundaries break when semantic contracts exist (e.g., `HeldSideProbability` vs `NativeSidePrice`).  
+   Rationale: ad hoc probability complements across architecture boundaries break when semantic contracts exist (e.g., `HeldSideProbability` vs `NativeSidePrice`). The ban targets PROBABILITY/BELIEF derivation (a NO win-prob/edge/q_lcb/fill assumption from a YES belief = phantom-liquidity fiction), NOT a non-crossing PRICE placement bound.  
+   Carve-out (NC-09, 2026-06-10): a complement value `1 - comp_best_bid - tick` MAY bound ORDER PLACEMENT against the Polymarket mint boundary (the venue mint-matches complementary BUY orders, so the complement is a real non-crossing boundary), but may NEVER price an entry/edge/q/fill. Admissible only as a `min()` cap that lowers the resting limit; edge stays `q_fill_adj - our_quote`. Pinned by `tests/engine/test_maker_quote_empty_no_ask.py::test_quote_edge_non_positive_still_rejects`.  
    Enforcement: semgrep `zeus-no-ad-hoc-probability-complement` (NC-09)
 
 3. **FM-05** — fallback from missing decision snapshot to latest snapshot  

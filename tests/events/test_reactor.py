@@ -268,8 +268,6 @@ def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_afte
     marked processed, so once the family's snapshots are captured a later cycle re-evaluates
     it instead of losing it. This is the #42b fix for the live reactor never running the kernel.
     """
-    from src.events.reactor import MAX_EXECUTABLE_SNAPSHOT_RETRIES
-
     conn, store = _store()
     event = _forecast_event()
     store.insert_or_ignore(event)
@@ -283,11 +281,14 @@ def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_afte
             (event.event_id,),
         ).fetchone()[0]
 
-    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES - 1):
+    # 12 timely cycles (well past the old cap of 8): the event requeues, never
+    # consumed by an attempt count (operator law 2026-06-12: no caps).
+    for _ in range(12):
         result = reactor.process_pending(decision_time=dt)
         assert result.processed == 0
+        assert result.dead_lettered == 0
         assert result.retried == 1
-        assert _status() == "pending"  # retryable, NOT consumed
+        assert _status() == "pending"  # retryable, NOT consumed, NO cap
 
     present["v"] = True
     result = reactor.process_pending(decision_time=dt)
@@ -295,9 +296,11 @@ def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_afte
     assert _status() == "processed"
 
 
-def test_executable_snapshot_block_dead_letters_after_max_retries():
-    from src.events.reactor import MAX_EXECUTABLE_SNAPSHOT_RETRIES
-
+def test_executable_snapshot_block_terminalizes_at_timeliness_horizon():
+    """REWRITTEN 2026-06-12 (operator law "no caps"): an uncapturable snapshot is
+    NOT dead-lettered by attempt count. While the event is timely it requeues
+    indefinitely; it terminalizes only when its EVENT HORIZON (timeliness floor)
+    has passed — labeled MONEY_PATH_HORIZON_EXPIRED."""
     conn, store = _store()
     event = _forecast_event()
     store.insert_or_ignore(event)
@@ -305,18 +308,37 @@ def test_executable_snapshot_block_dead_letters_after_max_retries():
     reactor = _retry_reactor(store, present)
     dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
 
-    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES + 2):
-        reactor.process_pending(decision_time=dt)
+    def _status():
+        return conn.execute(
+            "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()[0]
 
-    status = conn.execute(
-        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+    # Many timely cycles: never dead-letters by count.
+    for _ in range(12):
+        reactor.process_pending(decision_time=dt)
+        assert _status() == "pending"
+
+    # Timeliness horizon passes (Chicago 2026-05-24 boundary is 2026-05-25T05:00Z).
+    # Drive the requeue disposition at the past time to assert the explicit horizon
+    # terminal (in production the read floor + archive sweep also reclaim it).
+    from src.events.reactor import ReactorResult
+
+    horizon_past = datetime(2026, 5, 26, 0, 0, tzinfo=timezone.utc)
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=horizon_past,
+        result=res,
+    )
+    assert res.dead_lettered == 1
+    assert _status() == "dead_letter"
+    row = conn.execute(
+        "SELECT failure_stage FROM event_dead_letters WHERE event_id = ?",
         (event.event_id,),
-    ).fetchone()[0]
-    assert status == "dead_letter"
-    assert conn.execute(
-        "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
-        (event.event_id,),
-    ).fetchone()[0] == 1
+    ).fetchone()
+    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED"
 
 
 def test_source_captured_after_decision_time_is_retryable_not_consumed():
@@ -2055,12 +2077,20 @@ def _fsr_event(key_suffix: str, completeness: str, available_at: str, received_a
     )
 
 
-def test_partial_fsr_dead_letters_complete_fsr_dequeued_first():
-    """Relationship test: PARTIAL FSR events dead-letter immediately; COMPLETE FSR events
-    are dequeued before PARTIAL ones even when PARTIAL has an older available_at.
+def test_partial_coverage_fsr_passes_gate_complete_fsr_dequeued_first():
+    """SERVE-FRESHEST-ELIGIBLE RECONCILIATION (2026-06-11, twin-authority #8).
 
-    Invariant: a PARTIAL-payload FSR event can NEVER produce a receipt (cert requires COMPLETE).
-    The reactor must drain them permanently rather than letting them clog the queue.
+    The event's coverage statuses are ADVISORY — the serving authority is the
+    bundle reader (tradeable-latest, 没有新的就用老的), which the adapter consults
+    at proof time. A coverage-PARTIAL/BLOCKED event therefore passes the
+    SOURCE_TRUTH intake gate and reaches the adapter (which rejects honestly
+    when nothing eligible is servable). Live incident: 16:33:51Z six low-metric
+    families dead-lettered in one second on branded PARTIAL/BLOCKED coverage
+    while an eligible replacement posterior was servable.
+
+    Ordering still holds: the COMPLETE/LIVE_ELIGIBLE event (claim Tier 1) is
+    dequeued BEFORE the PARTIAL one (Tier 2) even when PARTIAL has an older
+    available_at.
     """
     conn, store = _store()
 
@@ -2086,7 +2116,7 @@ def test_partial_fsr_dead_letters_complete_fsr_dequeued_first():
 
     def _submit(event, _dt):
         submitted_order.append(event.event_id)
-        return None  # no receipt — source_truth_gate rejects before here in a real run
+        return None  # no receipt — terminal consume downstream of the gate under test
 
     reactor = OpportunityEventReactor(
         store,
@@ -2099,32 +2129,73 @@ def test_partial_fsr_dead_letters_complete_fsr_dequeued_first():
     )
 
     dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
-    result = reactor.process_pending(decision_time=dt, limit=100)
+    reactor.process_pending(decision_time=dt, limit=100)
 
-    # PARTIAL event must be dead-lettered, not processed normally
+    # ANTIBODY: the PARTIAL-coverage event must NOT be dead-lettered at intake —
+    # it flows to the adapter, whose tradeable-latest bundle read decides.
     partial_status = conn.execute(
         "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
         (partial_event.event_id,),
     ).fetchone()[0]
-    assert partial_status == "dead_letter", f"PARTIAL FSR should dead-letter, got {partial_status}"
-
-    # PARTIAL event must appear in event_dead_letters
+    assert partial_status != "dead_letter", (
+        f"PARTIAL-coverage FSR must pass the intake gate (serving authority decides), "
+        f"got {partial_status}"
+    )
     partial_dl = conn.execute(
         "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
         (partial_event.event_id,),
     ).fetchone()[0]
-    assert partial_dl == 1, "PARTIAL FSR must have a dead_letter entry"
+    assert partial_dl == 0, "PARTIAL-coverage FSR must NOT have a dead_letter entry"
 
-    # COMPLETE event must NOT be dead-lettered (it proceeds through the pipeline)
-    complete_status = conn.execute(
-        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
-        (complete_event.event_id,),
-    ).fetchone()[0]
-    assert complete_status != "dead_letter", f"COMPLETE FSR must not dead-letter at intake, got {complete_status}"
-
-    # COMPLETE event must be processed (reached submit), PARTIAL must not reach submit
+    # Both reach the adapter; the COMPLETE (Tier 1) one FIRST.
     assert complete_event.event_id in submitted_order, "COMPLETE FSR must reach submit"
-    assert partial_event.event_id not in submitted_order, "PARTIAL FSR must not reach submit"
+    assert partial_event.event_id in submitted_order, (
+        "PARTIAL-coverage FSR must reach the adapter (the serving authority, not the "
+        "event payload, owns eligibility)"
+    )
+    assert submitted_order.index(complete_event.event_id) < submitted_order.index(partial_event.event_id), (
+        "COMPLETE/LIVE_ELIGIBLE (claim Tier 1) must be dequeued before PARTIAL (Tier 2)"
+    )
+
+
+def test_junk_src_completeness_fsr_still_dead_letters():
+    """ANTIBODY (the kept half of the intake gate): a STRUCTURALLY JUNK payload —
+    source_run_completeness_status outside {COMPLETE, PARTIAL} (malformed/unknown
+    producer state) — still dead-letters at intake. The serving-authority deferral
+    applies only to honest, branded coverage statuses."""
+    import dataclasses as _dc
+
+    conn, store = _store()
+    base = _fsr_event(
+        key_suffix="junk",
+        completeness="COMPLETE",
+        available_at="2026-05-24T04:00:00+00:00",
+        received_at="2026-05-24T04:01:00+00:00",
+    )
+    # Corrupt the run-identity field only (coverage stays honest).
+    payload = json.loads(base.payload_json)
+    payload["source_run_completeness_status"] = "GARBAGE_STATE"
+    junk = _dc.replace(base, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    store.insert_or_ignore(junk)
+
+    submitted_order = []
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda event, _dt: submitted_order.append(event.event_id),
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+    reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc), limit=10)
+
+    status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (junk.event_id,),
+    ).fetchone()[0]
+    assert status == "dead_letter", f"junk src_completeness must dead-letter, got {status}"
+    assert junk.event_id not in submitted_order
 
 
 def test_source_run_partial_window_complete_fsr_reaches_submit():
@@ -2296,4 +2367,40 @@ def test_market_channel_events_do_not_starve_fsr():
     assert fsr.event_id in fetched_ids, (
         f"COMPLETE FSR not in top-10 fetch despite tier-0 priority. "
         f"Fetched types: {[e.event_type for e in fetched][:10]}"
+    )
+
+
+# --- antibody: reactor._build_regret_envelope_json must not mutate store.conn.row_factory --------
+# Task #42 (2026-06-11): same footgun as the PRAGMA busy_timeout leak in the claim storm — a
+# connection-global attribute mutated inside a shared-conn path is visible to every concurrent
+# reader.  The cursor-local row_factory approach removes the mutation entirely.
+
+
+def _sentinel_row_factory(cursor, row):  # noqa: ARG001
+    """Detectable sentinel factory — identity observable with 'is'."""
+    return row
+
+
+def test_build_regret_envelope_json_does_not_mutate_store_conn_row_factory():
+    """ANTIBODY (Task #42): reactor._build_regret_envelope_json snapshot fetch must not set
+    store.conn.row_factory.  A sentinel factory pinned before the call must survive after it,
+    including through the sqlite3.Error exception path (table absent)."""
+    conn, store = _store()
+    # Pin a sentinel — not sqlite3.Row, not None; identity is the assertion.
+    conn.row_factory = _sentinel_row_factory
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    reactor, rejected, _submitted = _reactor(store, gates=False)
+
+    event = _day0_event()
+    store.insert_or_ignore(event)
+
+    # Process; the rejection writes a regret row and calls _build_regret_envelope_json,
+    # which tries to fetch from executable_market_snapshots (absent in the in-memory schema =>
+    # the query either returns None or raises — in both cases conn.row_factory must be untouched).
+    reactor.process_pending(decision_time=decision_time, limit=1)
+
+    assert conn.row_factory is _sentinel_row_factory, (
+        "reactor._build_regret_envelope_json mutated store.conn.row_factory — "
+        "cursor-local row_factory must be used instead of conn-level save/restore"
     )

@@ -16,7 +16,7 @@ selection path. S7 deletes the last residue of the old on/off toggle so there is
 ONE path and ONE truth, with NO way to silently disable selection:
 
   1. The env var ``ZEUS_OPPORTUNITY_BOOK_SELECTOR`` and the settings key
-     ``edli_v1.opportunity_book_selector_enabled`` no longer exist ANYWHERE in
+     ``edli.opportunity_book_selector_enabled`` no longer exist ANYWHERE in
      ``src/`` — not as a read, not as a string literal, not in a comment. A
      symbol that does not exist cannot be re-wired into a gate (the strongest
      antibody: the category is made unconstructable, not merely off).
