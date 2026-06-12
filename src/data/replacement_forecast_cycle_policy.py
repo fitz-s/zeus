@@ -75,6 +75,47 @@ _SYNOPTIC_CYCLE_HOURS = frozenset({0, 12})
 _INTERMEDIATE_CYCLE_HOURS = frozenset({6, 18})
 
 
+# ---------------------------------------------------------------------------
+# TRADEABLE-GRADE COVERAGE PREDICATE — SINGLE AUTHORITY (2026-06-12).
+#
+# Created: 2026-06-12
+# Authority basis: /tmp/qlcb_coverage_fix_report.md. When the soft-anchor (no-fusion) path began
+#   carrying a PROMOTED Wilson-over-AIFS-votes q_lcb (basis="wilson_aifs_member_votes") instead of
+#   NULL, the three mask-and-starve antibody sites that proxied "tradeable-grade coverage" as
+#   `q_lcb_json IS NOT NULL` (shadow_materialization_queue / seed_discovery / current_target_plan)
+#   would have WRONGLY counted a soft-anchor row as covered — re-introducing the exact mask-and-
+#   starve disease they were built to prevent (an untradeable, no-current-capture row marking its
+#   scope "done forever" and blocking its own fusion repair). The proxy was only ever valid because
+#   NULL ⟺ non-fused; promoting the bound broke that biconditional.
+#
+# THE REAL PREDICATE: tradeable-grade coverage = a posterior whose q_lcb is the CERTIFIED fused-
+#   center bootstrap bound. That is keyed by provenance_json.q_lcb_basis EXACTLY equal to the
+#   bootstrap marker — the SAME predicate the live calibration-credential reader pins
+#   (event_reactor_adapter._FUSED_BOOTSTRAP_QLCB_BASIS). Defining it ONCE here (the module both the
+#   materializer and the readers already import, no cycle) makes all four sites share one definition.
+TRADEABLE_GRADE_QLCB_BASIS = "fused_center_bootstrap_p05"
+
+
+def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
+    """SQL fragment selecting ONLY tradeable-grade (certified-bootstrap-bounded) posteriors.
+
+    Replaces the broken ``AND <alias>q_lcb_json IS NOT NULL`` proxy at the mask-and-starve
+    antibody sites. A soft-anchor Wilson-bounded row (non-NULL q_lcb but basis != bootstrap) is
+    NOT tradeable-grade, so it does NOT count as coverage and correctly re-seeds for fusion repair.
+
+    Schema-conditional (same convention as the existing clauses): when forecast_posteriors lacks
+    ``provenance_json`` the fragment is empty (no narrowing) rather than erroring. ``alias`` is the
+    table alias with a trailing dot already applied by the caller's existing convention (e.g. "p.").
+    """
+    cols = set(posterior_columns)
+    if "provenance_json" not in cols:
+        return ""
+    return (
+        f"AND json_extract({alias}provenance_json, '$.q_lcb_basis') = "
+        f"'{TRADEABLE_GRADE_QLCB_BASIS}'"
+    )
+
+
 def replacement_source_cycle_max_age_hours() -> float:
     """The active staleness horizon in hours (env-overridable, fail-closed).
 

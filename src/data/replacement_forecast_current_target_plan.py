@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Mapping
 from zoneinfo import ZoneInfoNotFoundError
 
+from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.engine.time_context import has_city_local_day_started
 from src.state.db import _connect
@@ -326,16 +327,17 @@ def build_replacement_forecast_current_target_plan(
         posterior_source_run_clause = ""
         readiness_source_run_clause = ""
         readiness_status_clause = ""
-        # TRADEABLE-GRADE COVERAGE (2026-06-11, second site of the 2026-06-10 K-decision):
-        # a covering posterior must carry q_lcb_json NOT NULL. The mask-and-starve antibody
-        # was applied to the queue's _already_covered but NOT here — so a capture-missing
-        # (NULL-q_lcb) materialization marked its scope covered at PLAN level and blocked
-        # its own fusion repair (observed 2026-06-11: Atlanta/Austin/Beijing 00Z NULL rows
-        # self-masked one tick after materializing; discovery skipped them while the
-        # reactor rejected their scopes BAYES_PRECISION_FUSION_CAPTURE_MISSING). Schema-conditional like the
-        # queue clause: a stripped table without the column simply omits the bound.
-        posterior_tradeable_grade_clause = (
-            "AND p.q_lcb_json IS NOT NULL" if "q_lcb_json" in posterior_columns else ""
+        # TRADEABLE-GRADE COVERAGE (2026-06-11, second site of the 2026-06-10 K-decision;
+        # basis-predicate fix 2026-06-12): a covering posterior must be CERTIFIED-bootstrap
+        # tradeable-grade. The mask-and-starve antibody guards against a capture-missing
+        # materialization marking its scope covered at PLAN level and blocking its own fusion repair
+        # (observed 2026-06-11: Atlanta/Austin/Beijing 00Z rows self-masked one tick after
+        # materializing). The original proxy `p.q_lcb_json IS NOT NULL` broke once the soft-anchor
+        # path began carrying a promoted Wilson q_lcb (basis="wilson_aifs_member_votes") instead of
+        # NULL — so the predicate now keys on the certified bootstrap basis (single authority:
+        # cycle_policy). Schema-conditional like the queue clause.
+        posterior_tradeable_grade_clause = tradeable_grade_coverage_sql(
+            posterior_columns=posterior_columns, alias="p."
         )
         if source_run_targets and "dependency_source_run_ids_json" not in posterior_columns:
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_SOURCE_RUN_DEPENDENCY_SCHEMA_MISSING")

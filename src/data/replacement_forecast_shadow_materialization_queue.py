@@ -19,6 +19,7 @@ from src.contracts.replacement_pipeline_files import (
     validate_materialization_request,
     validate_materialization_seed,
 )
+from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_forecast_materialization_request_builder import (
     build_replacement_forecast_materialization_request,
 )
@@ -260,17 +261,18 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         posterior_columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
         }
-        # TRADEABLE-GRADE COVERAGE (operator directive 2026-06-10): a covering posterior must
-        # carry q_lcb_json IS NOT NULL. A NULL-q_lcb posterior (BAYES_PRECISION_FUSION_CAPTURE_MISSING /
-        # FUSED_Q_BUILD_FAILED) is NOT live-eligible — the bundle reader's q-mode + bounds gates
-        # reject it — yet it would otherwise satisfy this coverage check and PERMANENTLY mask a
-        # scope that COULD be re-materialized to fusion grade once the capture is healthy. That is
-        # the mask-and-starve category: an untradeable posterior counting as "done forever". The
-        # clause makes it unconstructible — only a tradeable-grade (bounded) posterior counts as
-        # coverage, so a NULL-bound row re-seeds on the next cycle instead of starving the scope.
-        # Schema-conditional (same convention as the readiness clauses below): a stripped
-        # forecast_posteriors table without the column simply omits the bound rather than erroring.
-        tradeable_grade_clause = "AND q_lcb_json IS NOT NULL" if "q_lcb_json" in posterior_columns else ""
+        # TRADEABLE-GRADE COVERAGE (operator directive 2026-06-10; basis-predicate fix 2026-06-12).
+        # A covering posterior must be CERTIFIED-bootstrap tradeable-grade. The original proxy
+        # `q_lcb_json IS NOT NULL` broke once the soft-anchor path began carrying a PROMOTED
+        # Wilson-over-AIFS-votes q_lcb (basis="wilson_aifs_member_votes") instead of NULL: a
+        # CAPTURE_MISSING / FUSED_Q_BUILD_FAILED row is STILL not live-eligible, yet now has a
+        # non-NULL q_lcb and would WRONGLY satisfy the old proxy — re-introducing the exact
+        # mask-and-starve disease (an untradeable posterior counting as "done forever" and blocking
+        # its own fusion repair). The predicate now keys on the CERTIFIED bootstrap basis (the SAME
+        # string the live calibration-credential reader pins), so only a fusion-grade row counts as
+        # coverage and a soft-anchor/CAPTURE_MISSING row re-seeds on the next cycle. Single authority:
+        # cycle_policy.tradeable_grade_coverage_sql. Schema-conditional as before.
+        tradeable_grade_clause = tradeable_grade_coverage_sql(posterior_columns=posterior_columns)
         posterior = conn.execute(
             f"""
             SELECT 1

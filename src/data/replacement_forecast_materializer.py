@@ -32,6 +32,7 @@ from src.data.ecmwf_aifs_sampled_2t_localday import (
 )
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.replacement_forecast_cycle_policy import (
+    TRADEABLE_GRADE_QLCB_BASIS,
     classify_cycle_phase,
     cycle_age_exceeds_bound,
     replacement_source_cycle_max_age_hours,
@@ -1171,8 +1172,93 @@ def _replacement_bayes_precision_fusion_override(
 # ---------------------------------------------------------------------------
 
 _QLCB_BOOTSTRAP_DRAWS = 200
-_QLCB_BASIS = "fused_center_bootstrap_p05"
+# SINGLE AUTHORITY: the certified bootstrap basis string lives in cycle_policy (shared with the
+# tradeable-grade coverage predicate the mask-and-starve antibody sites use). Re-exported as
+# _QLCB_BASIS for the in-module call sites + existing tests that import it by this name.
+_QLCB_BASIS = TRADEABLE_GRADE_QLCB_BASIS
 _QLCB_SEED = 0x5EED_F09  # deterministic per-posterior rng (provenance-stable bounds)
+
+# ---------------------------------------------------------------------------
+# SOFT-ANCHOR Q_LCB FALLBACK (2026-06-12) — Wilson-over-AIFS-member-votes, PROMOTED into the
+# materializer so NO posterior is ever born with a NULL q_lcb.
+#
+# Created: 2026-06-12
+# Last reused or audited: 2026-06-12
+# Authority basis: /tmp/qlcb_coverage_fix_report.md (root-cause: 100% of NULL q_lcb_json on the
+#   06-12/06-13 surface are CAPTURE_MISSING soft-anchor rows — the BAYES_PRECISION_FUSION override
+#   returned None because the persisted CURRENT single_runs capture was absent at lead+1, so the
+#   fused-center bootstrap NEVER ran; ZERO NULLs come from the bootstrap raising). Single-authority
+#   law (architecture census 2026-06-11): the SAME Wilson-over-AIFS-votes bound the live decision
+#   path computed at read time (event_reactor_adapter._replacement_yes_lcb_for_bin / _wilson_lower_
+#   bound) is now computed ONCE at materialization, killing the materializer-vs-decision twin
+#   authority. The decision path still reads the bundle q_lcb first, so this is a no-behavior-change
+#   PROMOTION for the live read; what changes is that the bound is now PERSISTED + provenance-stamped
+#   with its OWN basis ("wilson_aifs_member_votes") instead of NULL.
+#
+# WHY NOT an analytic predictive-Normal bound here: measured (report Part 2). The soft-anchor
+# Gaussian spread is anchor_sigma_c≈3.0C (wide vs ~1-2C settlement bins); a center-uncertainty
+# bootstrap at that sigma collapses the per-bin 5th-percentile to ~0 on every bin (useless), and a
+# tighter SEM-style center sigma UNDERCOVERS on the n=21 settled CAPTURE_MISSING cells (overconfident,
+# unsafe). With n=21<min_n=30 there is INSUFFICIENT settled history to license any tighter bound, so
+# the honest move is the member-vote Wilson bound (a real binomial lower bound on the AIFS support
+# fraction) — NOT a fabricated Normal floor.
+#
+# HONESTY / NO-AUTO-PROMOTE: the basis string is DISTINCT from the certified bootstrap marker, so the
+# calibration-credential reader (event_reactor_adapter._FUSED_BOOTSTRAP_QLCB_BASIS exact-match) does
+# NOT treat it as the bootstrap basis — a CAPTURE_MISSING / SOFT_ANCHOR row is STILL not live-eligible
+# (its q_mode is not in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE). This bound exists for shadow accrual,
+# coverage measurement, and to make NULL q_lcb UNCONSTRUCTABLE — never to silently arm a degraded
+# (no-current-capture) posterior. Bound is clipped to [0, q_point] per bin (a lower bound can never
+# exceed the point mass).
+# ---------------------------------------------------------------------------
+_QLCB_SOFT_ANCHOR_BASIS = "wilson_aifs_member_votes"
+_QLCB_WILSON_Z = 1.645  # one-sided 95% (matches the live decision-path Wilson z)
+
+
+def _wilson_lower_bound(successes: float, trials: float, *, z: float = _QLCB_WILSON_Z) -> float:
+    """One-sided Wilson lower bound for a binomial proportion (successes/trials).
+
+    Byte-identical math to event_reactor_adapter._wilson_lower_bound (the live decision-path
+    fallback this PROMOTES). z=1.645 -> ~95% one-sided. Returns 0.0 for trials<=0.
+    """
+    if trials <= 0.0:
+        return 0.0
+    successes = min(max(float(successes), 0.0), float(trials))
+    p_hat = successes / float(trials)
+    z2 = z * z
+    denom = 1.0 + z2 / float(trials)
+    center = p_hat + z2 / (2.0 * float(trials))
+    margin = z * ((p_hat - (p_hat * p_hat) + z2 / (4.0 * float(trials))) / float(trials)) ** 0.5
+    return max(0.0, min(1.0, (center - margin) / denom))
+
+
+def _build_soft_anchor_wilson_lcb(
+    *,
+    aifs_probabilities: Mapping[str, float],
+    member_count: float,
+    q_point: Mapping[str, float],
+) -> dict[str, float]:
+    """Per-bin Wilson-over-AIFS-member-votes q_lcb for the soft-anchor (no-fusion) path.
+
+    For each bin: successes = aifs_prob(bin) * member_count, trials = member_count, then the
+    one-sided Wilson lower bound — the SAME estimator the live decision path used at read time.
+    Clipped to [0, q_point[bin]] (a lower bound can never exceed the point mass). Bins absent from
+    the AIFS vote map get q_lcb = 0.0 (no support evidence -> honest zero lower bound).
+
+    Raises on a non-finite member_count (caller fail-softs to NULL — never WORSE than status quo).
+    """
+    mc = float(member_count)
+    if not (math.isfinite(mc) and mc > 0.0):
+        raise ValueError(f"member_count must be positive-finite, got {member_count}")
+    out: dict[str, float] = {}
+    for bin_id, q_pt in q_point.items():
+        prob = aifs_probabilities.get(bin_id)
+        if prob is None:
+            out[bin_id] = 0.0
+            continue
+        lb = _wilson_lower_bound(float(prob) * mc, mc)
+        out[bin_id] = min(max(lb, 0.0), max(float(q_pt), 0.0))
+    return out
 
 
 def _family_rounding_rule(bins: Sequence["AifsTemperatureBin"]) -> str:
@@ -1584,6 +1670,41 @@ def _insert_posterior(
                 )
             except Exception:
                 pass
+    # SOFT-ANCHOR Q_LCB FALLBACK (2026-06-12) — PROMOTE the Wilson-over-AIFS-votes bound into the
+    # materializer so NO posterior is born with a NULL q_lcb. Reached ONLY when the fused-center
+    # bootstrap did not produce a bound (q_lcb_map is None): flag-off, no BAYES_PRECISION_FUSION
+    # override (CAPTURE_MISSING — the persisted current capture was absent), predictive_sigma None,
+    # or a fused-q build failure. The bound is the SAME estimator the live decision path computed at
+    # read time (single-authority law) — built from the AIFS member-vote probabilities the soft-anchor
+    # posterior already carries — now computed ONCE here with its OWN basis. FAIL-SOFT: any error
+    # leaves q_lcb_map None (NULL written, status-quo Wilson read-time fallback) — never WORSE.
+    # The DISTINCT basis means the calibration credential reader does NOT treat this as the certified
+    # bootstrap basis, so a CAPTURE_MISSING / SOFT_ANCHOR row is STILL not live-eligible (correct:
+    # n=21<min_n=30 settled CAPTURE_MISSING cells → insufficient coverage to license).
+    if q_lcb_map is None:
+        try:
+            _aifs_probs = dict(result.aifs_probabilities.probabilities)
+            _member_count = float(len(result.aifs_probabilities.member_values_c)) or 51.0
+            q_lcb_map = _build_soft_anchor_wilson_lcb(
+                aifs_probabilities=_aifs_probs,
+                member_count=_member_count,
+                q_point=q,
+            )
+            q_lcb_basis = _QLCB_SOFT_ANCHOR_BASIS
+            # No q_ucb on this path — the Wilson member-vote bound is one-sided (a lower bound only).
+            # q_ucb stays NULL; the bundle reader handles a present-lcb / absent-ucb posterior.
+        except Exception as _wexc:
+            q_lcb_map = None
+            q_lcb_basis = None
+            try:
+                import logging  # noqa: PLC0415
+                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                    "replacement_0_1 soft-anchor Wilson q_lcb fallback skipped "
+                    "(fail-soft to NULL, read-time Wilson unchanged): %s",
+                    _wexc,
+                )
+            except Exception:
+                pass
     bin_topology_payload = _bin_topology_payload(request.bins, settlement_step_c=float(request.settlement_step_c))
     bin_topology_hash = _json_hash(bin_topology_payload)
     dependency_payload = {
@@ -1683,13 +1804,16 @@ def _insert_posterior(
         "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),
         # FIX 5 (2026-06-09): capture-status provenance (recording only).
         "capture_status": capture_status,
-        # Q_LCB / Q_UCB provenance (2026-06-09). When the fused-center bootstrap succeeded these
-        # carry the populated-bound role + basis; otherwise the absent-role (Wilson fallback) as
-        # before. The percentile vectors do NOT sum to 1 (expected for bounds; bundle reader uses
-        # require_sum=False).
+        # Q_LCB / Q_UCB provenance. The role is BASIS-AWARE so the certified fused-center bootstrap
+        # bound and the promoted soft-anchor Wilson-over-AIFS-votes bound never alias: only the
+        # bootstrap basis carries the calibration credential (event_reactor_adapter basis-exact
+        # match). The percentile vectors do NOT sum to 1 (expected for bounds; require_sum=False).
+        # q_lcb_map is now NULL only on a true fail-soft (the Wilson fallback itself raised).
         "q_lcb_json_role": (
             "fused_center_bootstrap_lcb"
-            if q_lcb_map is not None
+            if q_lcb_basis == _QLCB_BASIS
+            else "wilson_aifs_member_votes_lcb"
+            if q_lcb_basis == _QLCB_SOFT_ANCHOR_BASIS
             else "absent_no_calibrated_lcb_available"
         ),
         "q_ucb_json_role": (
@@ -1698,7 +1822,9 @@ def _insert_posterior(
             else "absent_no_calibrated_ucb_available"
         ),
         "q_lcb_basis": q_lcb_basis,
-        "q_lcb_bootstrap_draws": (_QLCB_BOOTSTRAP_DRAWS if q_lcb_map is not None else None),
+        # bootstrap_draws is meaningful ONLY for the bootstrap basis; the Wilson member-vote bound
+        # is analytic (no draws) -> None.
+        "q_lcb_bootstrap_draws": (_QLCB_BOOTSTRAP_DRAWS if q_lcb_basis == _QLCB_BASIS else None),
         "bin_topology": bin_topology_payload,
         "bin_topology_hash": bin_topology_hash,
         "dependency_hash": dependency_hash,

@@ -13,6 +13,8 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
+import pytest
+
 import src.main as main_module
 from src.config import PROJECT_ROOT
 from src.data.replacement_forecast_runtime_policy import SHADOW_FLAG
@@ -326,6 +328,102 @@ def test_materialization_queue_skips_seed_that_is_already_covered(tmp_path) -> N
     moved = next(path for path in (tmp_path / "seed_processed").glob("*.json") if not path.name.endswith(".receipt.json"))
     receipt = json.loads(moved.with_suffix(moved.suffix + ".receipt.json").read_text())
     assert receipt["reason_codes"] == ["REPLACEMENT_MATERIALIZATION_SEED_ALREADY_COVERED"]
+
+
+@pytest.mark.parametrize(
+    "q_lcb_basis, expect_covered",
+    [
+        ("fused_center_bootstrap_p05", True),   # certified bootstrap row IS tradeable-grade -> covered
+        ("wilson_aifs_member_votes", False),    # promoted soft-anchor Wilson row is NOT -> must re-seed
+        (None, False),                          # NULL basis (genuine fail-soft) is NOT -> must re-seed
+    ],
+)
+def test_materialization_queue_coverage_keys_on_certified_bootstrap_basis_not_nonnull_qlcb(
+    tmp_path, q_lcb_basis, expect_covered
+) -> None:
+    """RELATIONSHIP INVARIANT (mask-and-starve antibody, basis-predicate fix 2026-06-12).
+
+    A posterior counts as tradeable-grade COVERAGE iff its q_lcb is the CERTIFIED fused-center
+    bootstrap bound — NOT merely a non-NULL q_lcb. Before the soft-anchor Wilson bound was promoted
+    into the materializer, ``q_lcb_json IS NOT NULL`` was a valid proxy (NULL ⟺ non-fused); once a
+    CAPTURE_MISSING row carries a Wilson q_lcb, that proxy would WRONGLY mark the scope covered and
+    starve its own fusion repair. This pins coverage to the basis, so only a bootstrap-basis row
+    suppresses re-seeding.
+    """
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    seed = _write_seed_inputs(seed_dir)
+    (seed_dir / "seed.json").write_text(json.dumps(seed), encoding="utf-8")
+    forecast_db = tmp_path / "forecast.db"
+    conn = sqlite3.connect(forecast_db)
+    try:
+        # Schema WITH q_lcb_json + provenance_json (the real columns the antibody reads).
+        conn.executescript(
+            """
+            CREATE TABLE forecast_posteriors (
+                source_id TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                q_lcb_json TEXT,
+                provenance_json TEXT,
+                dependency_source_run_ids_json TEXT
+            );
+            CREATE TABLE readiness_state (
+                strategy_key TEXT,
+                status TEXT DEFAULT 'SHADOW_ONLY',
+                provenance_json TEXT,
+                dependency_json TEXT
+            );
+            """
+        )
+        # A row with a non-NULL q_lcb for BOTH non-bootstrap cases (proving it is the BASIS, not the
+        # NULL-ness, that decides coverage). The NULL-basis case still carries a q_lcb_json blob.
+        prov = {"city": "Shanghai", "target_date": "2026-06-07", "temperature_metric": "high"}
+        if q_lcb_basis is not None:
+            prov["q_lcb_basis"] = q_lcb_basis
+        conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+                "Shanghai",
+                "2026-06-07",
+                "high",
+                json.dumps({"warm": 0.4}),  # non-NULL q_lcb in every case
+                json.dumps(prov),
+                json.dumps({"baseline_b0": "b0-run"}),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO readiness_state VALUES (?, ?, ?, ?)",
+            (
+                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+                "SHADOW_ONLY",
+                json.dumps(prov),
+                json.dumps({"dependencies": [{"role": "baseline_b0", "source_run_id": "b0-run"}]}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    calls: list[tuple[str, ...]] = []
+    report = process_replacement_forecast_shadow_materialization_queue(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=tmp_path / "requests",
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=forecast_db,
+        runner=lambda argv: calls.append(tuple(argv)) or _completed(0),
+    )
+    moved = next(
+        path for path in (tmp_path / "seed_processed").glob("*.json")
+        if not path.name.endswith(".receipt.json")
+    )
+    receipt = json.loads(moved.with_suffix(moved.suffix + ".receipt.json").read_text())
+    covered = receipt.get("reason_codes") == ["REPLACEMENT_MATERIALIZATION_SEED_ALREADY_COVERED"]
+    assert covered is expect_covered, (q_lcb_basis, receipt.get("reason_codes"))
 
 
 def test_materialization_queue_does_not_skip_seed_for_blocked_readiness(tmp_path) -> None:

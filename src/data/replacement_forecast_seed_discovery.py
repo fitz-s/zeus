@@ -11,6 +11,7 @@ from typing import Mapping
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
 from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
+from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_forecast_materialization_seed_builder import (
     build_replacement_forecast_materialization_seed,
     latest_baseline_coverage_for_replacement_seed,
@@ -201,14 +202,15 @@ def _candidate_targets(
     tables = _table_names(conn)
     skip_covered_sql = ""
     if _coverage_skip_schema_ready(conn, tables):
-        # TRADEABLE-GRADE COVERAGE (2026-06-11, third site of the 2026-06-10 K-decision):
-        # only a q_lcb-bearing posterior counts as coverage. A capture-missing (NULL
-        # q_lcb) row otherwise masks its own fusion repair (the mask-and-starve
-        # category) — same clause as the queue antibody and the plan builder.
-        _tradeable = (
-            "AND p.q_lcb_json IS NOT NULL"
-            if "q_lcb_json" in _columns(conn, "forecast_posteriors")
-            else ""
+        # TRADEABLE-GRADE COVERAGE (2026-06-11, third site of the 2026-06-10 K-decision;
+        # basis-predicate fix 2026-06-12): only a CERTIFIED-bootstrap-bounded posterior counts as
+        # coverage. The old proxy `p.q_lcb_json IS NOT NULL` broke once the soft-anchor path began
+        # carrying a promoted Wilson q_lcb (basis="wilson_aifs_member_votes") instead of NULL — a
+        # CAPTURE_MISSING row would then mask its own fusion repair (the mask-and-starve category).
+        # Now keyed on the certified bootstrap basis. Single authority: cycle_policy. Same clause as
+        # the queue antibody and the plan builder.
+        _tradeable = tradeable_grade_coverage_sql(
+            posterior_columns=_columns(conn, "forecast_posteriors"), alias="p."
         )
         skip_covered_sql = f"""
           AND (
