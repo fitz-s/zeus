@@ -1,0 +1,4222 @@
+Verdict
+
+Highest-confidence diagnosis: the seven-loss “buy NO on the model’s near-modal bin” sequence is exactly the failure mode produced by fitting a global spread scale while omitting location bias, then adding a uniform mixture. A fixed bias δ that is not modeled is mathematically indistinguishable, to a variance-only fit, from extra residual variance; in the continuous Gaussian limit the variance-only MLE converges to
+
+k
+wrong
+2
+	​
+
+=k
+true
+2
+	​
+
++(
+σ
+δ
+	​
+
+)
+2
+	​
+
+
+so a fitted k≈1.58 is compatible with RMS unmodeled center bias 
+1.58
+2
+−1
+	​
+
+≈1.22 forecast-sigma units if the true scale is near 1. That directly flattens the modal bin. A uniform mixture then flattens it further.
+
+Primary recommendation: replace the current distribution fit with an interval-censored categorical likelihood over the actual exchange bins, jointly estimating location bias and spread scale; remove the constant uniform mixture; add a low-dimensional distance-tied Dirichlet calibration layer; then trade only from a market-model blend whose class-conditional weight and Kelly fraction are estimated walk-forward from settled records.
+
+The claims below use strictly proper scoring-rule logic: log loss / categorical likelihood for fitting and Brier/log-loss for combining forecasts. Strict propriety is the reason that calibrated probability estimates, not selected-trade P&L alone, must be the validation primitive. Gneiting and Raftery’s review is the core reference for proper scoring rules: https://sites.stat.washington.edu/raftery/Research/PDF/Gneiting2007jasa.pdf
+ 
+Statistical Consulting Services
+. Murphy’s Brier decomposition is the standard reliability/resolution/uncertainty reference: https://www.semanticscholar.org/paper/A-New-Vector-Partition-of-the-Probability-Score-Murphy/b885f5a44da16e46e01a6181ecdfc8fe0a592e51
+ 
+Semantic Scholar
+.
+
+Notation used throughout
+
+For realization i=1,…,n:
+
+location ℓ
+i
+	​
+
+;
+
+model center before bias correction μ
+i
+	​
+
+;
+
+model predictive spread proxy σ
+i
+	​
+
+>0;
+
+observed winning bin Y
+i
+	​
+
+∈{1,…,K};
+
+ordered exchange bins B
+1
+	​
+
+,…,B
+K
+	​
+
+;
+
+real-valued latent physical quantity X
+i
+	​
+
+, rounded by known rule R(⋅) to integer T
+i
+	​
+
+=R(X
+i
+	​
+
+);
+
+bin preimage interval A
+k
+	​
+
+={x:R(x)∈B
+k
+	​
+
+}=[a
+k
+	​
+
+,b
+k
+	​
+
+), with a
+1
+	​
+
+=−∞ or b
+K
+	​
+
+=∞ for tails.
+
+For nearest-integer rounding and integer bin B
+k
+	​
+
+={L
+k
+	​
+
+,…,U
+k
+	​
+
+},
+
+A
+k
+	​
+
+=[L
+k
+	​
+
+−
+2
+1
+	​
+
+,U
+k
+	​
+
++
+2
+1
+	​
+
+),
+
+with the obvious open-ended tail modifications. The bin probability under location bias b
+ℓ
+	​
+
+ and spread scale k
+c
+	​
+
+ is
+
+π
+ik
+	​
+
+(b,k)=Φ(
+k
+c
+i
+	​
+
+	​
+
+σ
+i
+	​
+
+b
+k
+	​
+
+−μ
+i
+	​
+
+−b
+ℓ
+i
+	​
+
+	​
+
+	​
+
+)−Φ(
+k
+c
+i
+	​
+
+	​
+
+σ
+i
+	​
+
+a
+k
+	​
+
+−μ
+i
+	​
+
+−b
+ℓ
+i
+	​
+
+	​
+
+	​
+
+).
+Task 1 — Correct calibration of the predictive distribution
+1.1 Joint estimation of location bias and spread scale
+Derivation
+
+The statistically correct likelihood is not a Gaussian density at an integer midpoint. It is the categorical likelihood induced by integrating the latent predictive distribution over each exchange bin’s rounding preimage:
+
+ℓ(b,k)=
+i=1
+∑
+n
+	​
+
+logπ
+i,Y
+i
+	​
+
+	​
+
+(b,k)
+	​
+
+
+where
+
+π
+ik
+	​
+
+(b,k)=Φ(
+k
+c
+i
+	​
+
+	​
+
+σ
+i
+	​
+
+b
+k
+	​
+
+−μ
+i
+	​
+
+−b
+ℓ
+i
+	​
+
+	​
+
+	​
+
+)−Φ(
+k
+c
+i
+	​
+
+	​
+
+σ
+i
+	​
+
+a
+k
+	​
+
+−μ
+i
+	​
+
+−b
+ℓ
+i
+	​
+
+	​
+
+	​
+
+)
+	​
+
+
+and k
+c
+i
+	​
+
+	​
+
+ may be global, cluster-specific, or a hierarchical cluster random effect. If using a Student-t base family later, replace Φ by F
+ν
+	​
+
+, but do not change the interval-censored likelihood structure.
+
+Identifiability proof
+
+Fix one forecast state (μ,σ), one location ℓ, and at least two distinct finite cumulative bin boundaries r<s. Let two parameter pairs (b,k) and (b
+′
+,k
+′
+) generate the same bin probabilities. Then they generate the same cumulative probabilities at every finite bin boundary:
+
+Φ(
+kσ
+r−μ−b
+	​
+
+)=Φ(
+k
+′
+σ
+r−μ−b
+′
+	​
+
+),
+Φ(
+kσ
+s−μ−b
+	​
+
+)=Φ(
+k
+′
+σ
+s−μ−b
+′
+	​
+
+).
+
+Since Φ is strictly increasing,
+
+kσ
+r−μ−b
+	​
+
+=
+k
+′
+σ
+r−μ−b
+′
+	​
+
+,
+kσ
+s−μ−b
+	​
+
+=
+k
+′
+σ
+s−μ−b
+′
+	​
+
+.
+
+Subtracting,
+
+kσ
+s−r
+	​
+
+=
+k
+′
+σ
+s−r
+	​
+
+.
+
+Because s
+
+=r and σ>0, k=k
+′
+. Substituting back gives b=b
+′
+. Thus, with at least two finite effective boundaries, location shift and spread scale are jointly identifiable from the bin probabilities.
+
+For multiple locations and a global k, each location needs enough information to identify its b
+ℓ
+	​
+
+, and the common scale is then identified from the shared likelihood curvature. For cluster-specific k
+c
+	​
+
+, the same proof applies inside each cluster, but finite-sample variance can be large; cluster k
+c
+	​
+
+ should be shrunk toward a global k.
+
+Why fitting k alone absorbs bias
+
+Assume the true latent residual is
+
+X−μ=δ+k
+0
+	​
+
+σZ,Z∼N(0,1),
+
+but the fitted model wrongly forces δ=0 and estimates only k. In the continuous, non-binned limit the expected log likelihood is
+
+Q(k)=−log(kσ)−
+2k
+2
+σ
+2
+1
+	​
+
+E[(X−μ)
+2
+]+const.
+
+Since
+
+E[(X−μ)
+2
+]=k
+0
+2
+	​
+
+σ
+2
++δ
+2
+,
+Q(k)=−logk−
+2k
+2
+σ
+2
+k
+0
+2
+	​
+
+σ
+2
++δ
+2
+	​
+
++const.
+
+Differentiate:
+
+∂k
+∂Q
+	​
+
+=−
+k
+1
+	​
+
++
+k
+3
+k
+0
+2
+	​
+
++δ
+2
+/σ
+2
+	​
+
+.
+
+Setting the derivative to zero gives
+
+k
+wrong
+2
+	​
+
+=k
+0
+2
+	​
+
++(
+σ
+δ
+	​
+
+)
+2
+	​
+
+
+and therefore
+
+k
+wrong
+	​
+
+=
+k
+0
+2
+	​
+
++(δ/σ)
+2
+	​
+
+.
+	​
+
+
+For multiple locations with omitted fixed biases δ
+ℓ
+	​
+
+,
+
+k
+wrong
+2
+	​
+
+≈k
+0
+2
+	​
+
++
+∑
+i
+	​
+
+w
+i
+	​
+
+∑
+i
+	​
+
+w
+i
+	​
+
+δ
+ℓ
+i
+	​
+
+2
+	​
+
+/σ
+i
+2
+	​
+
+	​
+
+	​
+
+
+where w
+i
+	​
+
+ are approximately the per-observation Fisher weights for scale. With exact finite bins the pseudo-true k solves the categorical score equation
+
+i
+∑
+	​
+
+j=1
+∑
+K
+	​
+
+π
+ij
+true
+	​
+
+∂logk
+∂
+	​
+
+logπ
+ij
+	​
+
+(b=0,k)=0
+	​
+
+
+with
+
+∂logk
+∂π
+ij
+	​
+
+	​
+
+=z
+ij
+L
+	​
+
+ϕ(z
+ij
+L
+	​
+
+)−z
+ij
+U
+	​
+
+ϕ(z
+ij
+U
+	​
+
+),
+z
+ij
+L
+	​
+
+=
+kσ
+i
+	​
+
+a
+j
+	​
+
+−μ
+i
+	​
+
+	​
+
+,z
+ij
+U
+	​
+
+=
+kσ
+i
+	​
+
+b
+j
+	​
+
+−μ
+i
+	​
+
+	​
+
+.
+
+As bin widths get small relative to σ
+i
+	​
+
+, the categorical solution converges to the continuous formula above.
+
+Reference implementation sketch
+Python
+Run
+import numpy as np
+from scipy.special import erf, logsumexp
+from scipy.optimize import minimize
+
+EPS = 1e-15
+
+def norm_cdf(z):
+    return 0.5 * (1.0 + erf(z / np.sqrt(2.0)))
+
+def cell_probs(mu, sigma, lo, hi, loc_id, cluster_id, b_loc, log_k_cluster):
+    """
+    mu: shape [n]
+    sigma: shape [n]
+    lo, hi: shape [K], real-valued preimage boundaries; tails may be +/- np.inf
+    loc_id: shape [n], int
+    cluster_id: shape [n], int
+    b_loc: shape [L]
+    log_k_cluster: shape [C]
+    returns probs: shape [n, K]
+    """
+    k = np.exp(log_k_cluster[cluster_id])
+    center = mu + b_loc[loc_id]
+    scale = k * sigma
+
+    z_hi = (hi[None, :] - center[:, None]) / scale[:, None]
+    z_lo = (lo[None, :] - center[:, None]) / scale[:, None]
+
+    p = norm_cdf(z_hi) - norm_cdf(z_lo)
+    p = np.clip(p, EPS, 1.0)
+    p = p / p.sum(axis=1, keepdims=True)  # numerical only; should already sum to 1
+    return p
+
+def neg_loglik(theta, mu, sigma, y, lo, hi, loc_id, cluster_id, n_locs, n_clusters,
+               prior_b0=None, prior_tau=None):
+    b_loc = theta[:n_locs]
+    log_k = theta[n_locs:n_locs + n_clusters]
+    p = cell_probs(mu, sigma, lo, hi, loc_id, cluster_id, b_loc, log_k)
+    nll = -np.sum(np.log(p[np.arange(len(y)), y]))
+
+    # Optional Gaussian shrinkage prior for MAP; empirical Bayes section below gives prior.
+    if prior_b0 is not None and prior_tau is not None:
+        nll += 0.5 * np.sum(((b_loc - prior_b0) / prior_tau) ** 2)
+        nll += np.sum(np.log(prior_tau))
+
+    return nll
+
+def fit_bias_scale(mu, sigma, y, lo, hi, loc_id, cluster_id):
+    n_locs = int(loc_id.max()) + 1
+    n_clusters = int(cluster_id.max()) + 1
+    theta0 = np.r_[np.zeros(n_locs), np.zeros(n_clusters)]  # b=0, k=1
+    res = minimize(
+        neg_loglik, theta0,
+        args=(mu, sigma, y, lo, hi, loc_id, cluster_id, n_locs, n_clusters),
+        method="L-BFGS-B"
+    )
+    b_hat = res.x[:n_locs]
+    k_hat = np.exp(res.x[n_locs:n_locs + n_clusters])
+    return b_hat, k_hat, res
+Data requirements and sample efficiency
+
+Global k: thousands of settled observations are enough if the bin probabilities are not all in the same tail.
+
+Per-cluster k
+c
+	​
+
+: license only through posterior/Fisher information; expect several hundred effective settled observations per cluster unless the bins are very informative.
+
+Per-location b
+ℓ
+	​
+
+: raw per-location counts of 50–400 are enough only with shrinkage. Without shrinkage, locations with 50 samples will overfit location noise and contaminate k again.
+
+Failure modes and diagnostics
+
+Wrong rounding preimage: produces systematic one-bin displacement. Diagnostic: PIT/rank histogram has alternating sawtooth or boundary spikes.
+
+Location bias time variation: static b
+ℓ
+	​
+
+ averages regimes. Diagnostic: walk-forward residual signs by location have autocorrelation.
+
+Too-coarse bins: likelihood ridge between b
+ℓ
+	​
+
+ and k. Diagnostic: profile likelihood contours elongated; Hessian condition number high.
+
+Gaussian base misspecification: residual PIT U-shape after joint bias/scale. Diagnostic: tail bins over-realize even after b,k correction.
+
+1.2 Mixture weight w: replace the uniform mixture
+Comparison
+
+Constant uniform mixture
+
+q
+k
+(w)
+	​
+
+=(1−w)q
+k
+	​
+
++
+K
+w
+	​
+
+.
+
+This is one-dimensional and easy to fit, but it is the wrong geometry for this problem. If q
+k
+	​
+
+>1/K, the uniform mixture pulls q
+k
+	​
+
+ downward. Therefore it necessarily flattens the modal bin whenever the modal bin is above uniform. In the observed failure, the modal bin is already too low, so uniform mixing worsens the exact failure mode.
+
+Fitted Student-t tails
+
+q
+k
+(t)
+	​
+
+=F
+ν
+	​
+
+(
+s
+b
+k
+	​
+
+−μ−b
+ℓ
+	​
+
+	​
+
+)−F
+ν
+	​
+
+(
+s
+a
+k
+	​
+
+−μ−b
+ℓ
+	​
+
+	​
+
+).
+
+This is coherent, sample-efficient, and physically interpretable. It is good if the only problem is symmetric heavy-tailed residuals. It cannot easily express “modal bin too low but some intermediate bins too high” without also changing the whole residual shape.
+
+Per-bin-distance discrete kernel
+
+q
+k
+kernel
+	​
+
+=
+j
+∑
+	​
+
+q
+j
+	​
+
+K
+d(k,j)
+	​
+
+,K
+d
+	​
+
+≥0,
+d
+∑
+	​
+
+K
+d
+	​
+
+=1.
+
+This respects bin distance and can model discrete spillover. But it has more degrees of freedom, tends to blur already-smoothed forecasts, and can double-count spread if k is also fitted.
+
+Distance-tied Dirichlet calibration
+
+Use a low-dimensional multiclass calibration map:
+
+q
+~
+	​
+
+ik
+	​
+
+=
+∑
+j=1
+K
+	​
+
+exp{γlog(q
+ij
+	​
+
++ϵ)+β
+d
+ij
+	​
+
+	​
+
+}
+exp{γlog(q
+ik
+	​
+
++ϵ)+β
+d
+ik
+	​
+
+	​
+
+}
+	​
+
+	​
+
+
+where d
+ik
+	​
+
+ is the ordered-bin distance from the model’s modal bin for realization i. This is a constrained Dirichlet/multinomial-logistic calibration layer: log-transform probabilities, apply a linear correction, then softmax. Dirichlet calibration is a standard multiclass calibration construction: https://arxiv.org/abs/1910.12656
+ and https://research-information.bris.ac.uk/en/publications/beyond-temperature-scaling-obtaining-well-calibrated-multiclass-p/
+ 
+arXiv
++1
+.
+
+Recommendation
+Use distance-tied Dirichlet calibration; do not use a global uniform mixture.
+	​
+
+
+Tie-breaker: at n≈300 recent samples and n≈5,000–10,000 total samples, the recommended map uses only a few parameters, is fitted by proper log loss, can sharpen the mode, can thicken tails, and preserves most of the base distribution’s state-specific information. It directly addresses the sell-the-mode failure; Student-t is the second choice if diagnostics show only symmetric heavy tails.
+
+Estimator
+
+Fit θ=(γ,β) by penalized log loss:
+
+θ
+^
+=arg
+θ
+min
+	​
+
+[−
+i
+∑
+	​
+
+log
+q
+~
+	​
+
+i,Y
+i
+	​
+
+	​
+
+(θ)+
+2
+λ
+γ
+	​
+
+	​
+
+(γ−1)
+2
++
+2
+λ
+β
+	​
+
+	​
+
+r
+∑
+	​
+
+(Δ
+2
+β
+r
+	​
+
+)
+2
+]
+	​
+
+
+with one identifiability constraint such as β
+0
+	​
+
+=0 or ∑
+r
+	​
+
+β
+r
+	​
+
+=0. The second-difference penalty avoids noisy zig-zag corrections across distance.
+
+Distance classes should not be hardcoded as “near mode within 1.5 bins.” Start with exact ordered distances d=0,1,2,…, then merge adjacent distances until the posterior half-width target in Task 4 is met.
+
+Reference implementation sketch
+Python
+Run
+def distance_from_mode(q):
+    # ordered bins; tails can be handled by assigning their natural end index
+    n, K = q.shape
+    mode = np.argmax(q, axis=1)
+    idx = np.arange(K)[None, :]
+    return np.abs(idx - mode[:, None])
+
+def softmax_rows(eta):
+    z = eta - eta.max(axis=1, keepdims=True)
+    e = np.exp(z)
+    return e / e.sum(axis=1, keepdims=True)
+
+def calibrated_probs(q, dist_class, gamma, beta):
+    eta = gamma * np.log(np.clip(q, EPS, 1.0)) + beta[dist_class]
+    return softmax_rows(eta)
+
+def neg_logloss_cal(theta, q, y, dist_class, n_classes, lam_gamma=1.0, lam_beta=1.0):
+    gamma = theta[0]
+    # beta[0] fixed at 0 for identifiability
+    beta = np.r_[0.0, theta[1:]]
+    p = calibrated_probs(q, dist_class, gamma, beta)
+    loss = -np.sum(np.log(p[np.arange(len(y)), y]))
+
+    # shrink toward identity: gamma=1, beta all equal
+    loss += 0.5 * lam_gamma * (gamma - 1.0) ** 2
+    if len(beta) >= 3:
+        d2 = beta[2:] - 2 * beta[1:-1] + beta[:-2]
+        loss += 0.5 * lam_beta * np.sum(d2 ** 2)
+    return loss
+Failure modes and diagnostics
+
+Overfitting distance classes: calibration improves in-sample but not walk-forward. Diagnostic: prequential log loss degrades after complexity penalty.
+
+Asymmetry hidden by absolute distance: warm-side and cold-side misses differ. Diagnostic: reliability by signed distance; if asymmetric, use signed distance classes.
+
+Market/event selection shift: calibration fitted on all forecasts but applied only to selected trades. Diagnostic: reliability on the selected-trade subset, not only all forecasts.
+
+1.3 Hierarchical shrinkage of location bias
+Empirical-Bayes model
+
+For a continuous approximation, let residual proxy r
+i
+	​
+
+=X
+i
+	​
+
+−μ
+i
+	​
+
+ have
+
+r
+i
+	​
+
+=b
+ℓ
+i
+	​
+
+	​
+
++ε
+i
+	​
+
+,ε
+i
+	​
+
+∼N(0,k
+2
+σ
+i
+2
+	​
+
+).
+
+For location ℓ,
+
+b
+^
+ℓ
+	​
+
+=
+∑
+i:ℓ
+i
+	​
+
+=ℓ
+	​
+
+1/v
+i
+	​
+
+∑
+i:ℓ
+i
+	​
+
+=ℓ
+	​
+
+r
+i
+	​
+
+/v
+i
+	​
+
+	​
+
+,s
+ℓ
+2
+	​
+
+=(
+i:ℓ
+i
+	​
+
+=ℓ
+∑
+	​
+
+1/v
+i
+	​
+
+)
+−1
+,v
+i
+	​
+
+=k
+2
+σ
+i
+2
+	​
+
+.
+
+Assume a global bias distribution
+
+b
+ℓ
+	​
+
+∼N(b
+0
+	​
+
+,τ
+b
+2
+	​
+
+).
+
+Then the posterior mean is
+
+E[b
+ℓ
+	​
+
+∣
+b
+^
+ℓ
+	​
+
+]=b
+0
+	​
+
++S
+ℓ
+	​
+
+(
+b
+^
+ℓ
+	​
+
+−b
+0
+	​
+
+)
+	​
+
+
+with exact Gaussian shrinkage factor
+
+S
+ℓ
+	​
+
+=
+τ
+b
+2
+	​
+
++s
+ℓ
+2
+	​
+
+τ
+b
+2
+	​
+
+	​
+
+=
+I
+ℓ
+	​
+
++τ
+b
+−2
+	​
+
+I
+ℓ
+	​
+
+	​
+
+,I
+ℓ
+	​
+
+=s
+ℓ
+−2
+	​
+
+.
+	​
+
+
+For the exact binned likelihood, replace 
+b
+^
+ℓ
+	​
+
+,s
+ℓ
+2
+	​
+
+ by the location-specific MLE and inverse observed Fisher information, or compute the one-dimensional posterior over a grid:
+
+p(b
+ℓ
+	​
+
+∣bins)∝L
+ℓ
+	​
+
+(b
+ℓ
+	​
+
+)ϕ(
+τ
+b
+	​
+
+b
+ℓ
+	​
+
+−b
+0
+	​
+
+	​
+
+).
+
+Estimate (b
+0
+	​
+
+,τ
+b
+	​
+
+) by marginal likelihood:
+
+(
+b
+^
+0
+	​
+
+,
+τ
+^
+b
+	​
+
+)=arg
+b
+0
+	​
+
+,τ
+max
+	​
+
+ℓ
+∑
+	​
+
+log∫L
+ℓ
+	​
+
+(b)ϕ(
+τ
+b−b
+0
+	​
+
+	​
+
+)
+τ
+db
+	​
+
+.
+	​
+
+Walk-forward leakage proof
+
+Let F
+t
+	​
+
+ be the sigma-field generated by all forecasts, prices, and settled outcomes strictly available before the decision time for realization t. A walk-forward estimator is valid if
+
+θ
+^
+t
+	​
+
+=g
+t
+	​
+
+(F
+t
+	​
+
+)
+
+and the trade decision A
+t
+	​
+
+ is F
+t
+	​
+
+-measurable. Since Y
+t
+	​
+
+∈
+/
+F
+t
+	​
+
+, the prequential score
+
+S
+t
+	​
+
+=−logp
+θ
+^
+t
+	​
+
+	​
+
+(Y
+t
+	​
+
+)
+
+is an honest out-of-sample score. Leakage occurs if any component of 
+θ
+^
+t
+	​
+
+ uses Y
+t
+	​
+
+, same-realization post-trade prices, or calibration classes chosen after observing Y
+t
+	​
+
+.
+
+Refitting cadence
+
+Do not refit by calendar constants. Refit when the expected information gain exceeds the compute/operational cost:
+
+ΔI
+t
+	​
+
+=tr{I
+old
+−1
+	​
+
+I
+new
+	​
+
+}
+	​
+
+
+where I
+new
+	​
+
+ is Fisher information contributed by newly settled observations. If ΔI
+t
+	​
+
+ is negligible, update posterior sufficient statistics but do not re-optimize all hyperparameters. For daily data, a practical implementation is: update posterior summaries every settlement batch; refit hyperparameters when new information changes any tradable probability by more than the fee-adjusted edge threshold in Task 3.3.
+
+Task 2 — Optimal model-market combination for trading
+2.1 Optimal convex combination under proper scoring loss
+
+Let p
+i
+	​
+
+ be the true conditional probability vector for realization i. Let model and market probabilities be
+
+q
+i
+	​
+
+=p
+i
+	​
+
++ε
+i
+q
+	​
+
+,m
+i
+	​
+
+=p
+i
+	​
+
++ε
+i
+m
+	​
+
+,
+
+with zero-mean calibrated errors under the forecast state. Consider
+
+p
+^
+	​
+
+i
+	​
+
+(α)=αq
+i
+	​
+
++(1−α)m
+i
+	​
+
+,α∈[0,1].
+Brier-risk derivation
+
+The excess Brier risk is
+
+R(α)=E∥
+p
+^
+	​
+
+i
+	​
+
+(α)−p
+i
+	​
+
+∥
+2
+.
+
+Define
+
+A=E∥ε
+i
+q
+	​
+
+∥
+2
+,B=E∥ε
+i
+m
+	​
+
+∥
+2
+,C=E⟨ε
+i
+q
+	​
+
+,ε
+i
+m
+	​
+
+⟩.
+
+Then
+
+R(α)=α
+2
+A+(1−α)
+2
+B+2α(1−α)C.
+
+Differentiating gives
+
+α
+∗
+=clip
+[0,1]
+	​
+
+(
+A+B−2C
+B−C
+	​
+
+)
+	​
+
+
+or, using ρ=C/
+AB
+	​
+
+,
+
+α
+∗
+=clip
+[0,1]
+	​
+
+(
+A+B−2ρ
+AB
+	​
+
+B−ρ
+AB
+	​
+
+	​
+
+).
+	​
+
+
+Interpretation:
+
+if model is market plus independent noise, A>B and C≈B, so α
+∗
+→0;
+
+if market is model plus independent noise, B>A and C≈A, so α
+∗
+→1;
+
+if errors are highly correlated, the noisier source gets little weight.
+
+Log-loss local derivation
+
+For log loss,
+
+L(
+p
+^
+	​
+
+,p)=−
+k
+∑
+	​
+
+p
+k
+	​
+
+log
+p
+^
+	​
+
+k
+	​
+
+.
+
+A second-order expansion around p gives excess risk
+
+L(
+p
+^
+	​
+
+,p)−L(p,p)≈
+2
+1
+	​
+
+k
+∑
+	​
+
+p
+k
+	​
+
+(
+p
+^
+	​
+
+k
+	​
+
+−p
+k
+	​
+
+)
+2
+	​
+
+.
+
+Thus the same formula holds with weighted inner product
+
+⟨u,v⟩
+p
+	​
+
+=
+k
+∑
+	​
+
+p
+k
+	​
+
+u
+k
+	​
+
+v
+k
+	​
+
+	​
+
+.
+
+So
+
+A
+log
+	​
+
+=E⟨ε
+q
+,ε
+q
+⟩
+p
+	​
+
+,B
+log
+	​
+
+=E⟨ε
+m
+,ε
+m
+⟩
+p
+	​
+
+,C
+log
+	​
+
+=E⟨ε
+q
+,ε
+m
+⟩
+p
+	​
+
+,
+
+and
+
+α
+log
+∗
+	​
+
+≈
+A
+log
+	​
+
++B
+log
+	​
+
+−2C
+log
+	​
+
+B
+log
+	​
+
+−C
+log
+	​
+
+	​
+
+.
+	​
+
+
+For production, estimate α directly by walk-forward log-loss stacking:
+
+α
+^
+log
+	​
+
+=arg
+α∈[0,1]
+min
+	​
+
+[−
+i
+∑
+	​
+
+log{αq
+i,Y
+i
+	​
+
+	​
+
++(1−α)m
+i,Y
+i
+	​
+
+	​
+
+}].
+	​
+
+
+This is a convex one-dimensional optimization because −log of a positive affine function is convex.
+
+Observable Brier estimator
+
+You do not need to know p
+i
+	​
+
+. Let e
+iY
+	​
+
+ be the one-hot outcome vector. Define
+
+S
+q
+	​
+
+=
+n
+1
+	​
+
+i
+∑
+	​
+
+∥q
+i
+	​
+
+−e
+iY
+	​
+
+∥
+2
+,
+S
+m
+	​
+
+=
+n
+1
+	​
+
+i
+∑
+	​
+
+∥m
+i
+	​
+
+−e
+iY
+	​
+
+∥
+2
+,
+S
+qm
+	​
+
+=
+n
+1
+	​
+
+i
+∑
+	​
+
+⟨q
+i
+	​
+
+−e
+iY
+	​
+
+,m
+i
+	​
+
+−e
+iY
+	​
+
+⟩.
+
+The irreducible uncertainty cancels, so
+
+α
+^
+Brier
+	​
+
+=clip
+[0,1]
+	​
+
+(
+S
+q
+	​
+
++S
+m
+	​
+
+−2S
+qm
+	​
+
+S
+m
+	​
+
+−S
+qm
+	​
+
+	​
+
+).
+	​
+
+Class-conditional α
+
+Yes, α should depend on bin-distance-from-mode class if the modal region is broken and tails are not. For a binary contract on bin k, define class c(i,k), for example modal d=0, adjacent d=1, intermediate, tail. For each class, fit
+
+α
+c
+	​
+
+=clip
+[0,1]
+	​
+
+(
+S
+q,c
+	​
+
++S
+m,c
+	​
+
+−2S
+qm,c
+	​
+
+S
+m,c
+	​
+
+−S
+qm,c
+	​
+
+	​
+
+)
+	​
+
+
+where the sums are over bin-events (i,k) in class c, with binary outcome 1{Y
+i
+	​
+
+=k}. For coherent full-vector log loss, use
+
+r
+ik
+	​
+
+=α
+c(i,k)
+	​
+
+q
+ik
+	​
+
++(1−α
+c(i,k)
+	​
+
+)m
+ik
+	​
+
+,
+p
+^
+	​
+
+ik
+	​
+
+=r
+ik
+	​
+
+/
+j
+∑
+	​
+
+r
+ij
+	​
+
+,
+
+and optimize class α
+c
+	​
+
+ jointly by log loss.
+
+Sample-size requirement is not “30.” The class is licensed when the posterior standard error of α
+c
+	​
+
+ is small enough that the induced probability uncertainty is below the fee-adjusted edge threshold. The estimating equation for Brier is
+
+ψ
+i
+	​
+
+(α
+c
+	​
+
+)=(q
+ik
+	​
+
+−m
+ik
+	​
+
+){α
+c
+	​
+
+q
+ik
+	​
+
++(1−α
+c
+	​
+
+)m
+ik
+	​
+
+−y
+ik
+	​
+
+},
+
+and
+
+se(
+α
+^
+c
+	​
+
+)≈
+n
+eff,c
+	​
+
+	​
+
+E[(q
+ik
+	​
+
+−m
+ik
+	​
+
+)
+2
+∣c]
+Var(ψ
+i
+	​
+
+)
+	​
+
+	​
+
+.
+	​
+
+
+Use day/location block bootstrap or cluster-robust variance; do not count nK bin-events as independent.
+
+Reference implementation sketch
+Python
+Run
+def brier_alpha(q, m, y):
+    n, K = q.shape
+    onehot = np.zeros_like(q)
+    onehot[np.arange(n), y] = 1.0
+
+    eq = q - onehot
+    em = m - onehot
+
+    Sq = np.mean(np.sum(eq * eq, axis=1))
+    Sm = np.mean(np.sum(em * em, axis=1))
+    C = np.mean(np.sum(eq * em, axis=1))
+
+    denom = Sq + Sm - 2.0 * C
+    if denom <= 1e-15:
+        return 0.0
+    return float(np.clip((Sm - C) / denom, 0.0, 1.0))
+
+def logloss_alpha(q, m, y):
+    from scipy.optimize import minimize_scalar
+
+    def obj(a):
+        p_y = a * q[np.arange(len(y)), y] + (1.0 - a) * m[np.arange(len(y)), y]
+        return -np.sum(np.log(np.clip(p_y, EPS, 1.0)))
+
+    res = minimize_scalar(obj, bounds=(0.0, 1.0), method="bounded")
+    return float(res.x), res
+
+def binary_class_alpha(qk, mk, yk, weights=None):
+    if weights is None:
+        weights = np.ones_like(qk, dtype=float)
+    weights = weights / weights.sum()
+
+    eq = qk - yk
+    em = mk - yk
+    Sq = np.sum(weights * eq * eq)
+    Sm = np.sum(weights * em * em)
+    C = np.sum(weights * eq * em)
+    denom = Sq + Sm - 2.0 * C
+    if denom <= 1e-15:
+        return 0.0
+    return float(np.clip((Sm - C) / denom, 0.0, 1.0))
+2.2 One-sided capping versus using the blend directly
+Claim
+
+A one-sided cap is not admissible as a probability estimator under log loss or Brier loss if the α-blend is the fitted conditional-probability projection. Use the blend directly both ways, then apply posterior uncertainty and Kelly shrinkage to trading.
+
+Proof sketch
+
+Let p
+∗
+ be the fitted blend that minimizes expected strictly proper score risk in the candidate class. Strict propriety means the expected score is uniquely optimized at the true conditional probability; within a restricted class, p
+∗
+ is the risk projection. If a capped estimator g(p
+∗
+) differs from p
+∗
+ on a set with positive probability, then by strict convexity of log loss/Brier in the probability vector,
+
+E[S(g(p
+∗
+),Y)]>E[S(p
+∗
+,Y)]
+
+for loss orientation. Therefore capping is dominated as a forecast.
+
+For trading, a cap can reduce losses if it happens to suppress a known-broken region, but that is a model-risk patch, not an admissible estimator. The principled version is class-conditional α
+c
+	​
+
+ plus posterior uncertainty: in the broken near-modal class, α
+c
+	​
+
+ will move toward the market; in regions where the model is genuinely informative, α
+c
+	​
+
+ remains positive.
+
+Which loses less when one region is broken?
+
+Among the two naive choices:
+
+global blend directly: loses when a broken modal model still has nonzero α;
+
+one-sided cap: loses less in the specific broken direction but throws away valid model information elsewhere and is incoherent for YES/NO symmetry.
+
+The recommended choice is neither naive option:
+
+Use class-conditional blend directly, then trade from posterior/Kelly bounds.
+	​
+
+
+That dominates the cap when the model is broken in one region but useful elsewhere because it localizes the shrinkage.
+
+2.3 Market price to de-biased implied probability
+Fee/spread-adjusted raw probability interval
+
+For a YES ask a
+k
+Y
+	​
+
+, YES bid b
+k
+Y
+	​
+
+, NO ask a
+k
+N
+	​
+
+, NO bid b
+k
+N
+	​
+
+, and fee
+
+F(p)=cp(1−p),
+
+define gross cost for buying a token at price p:
+
+C(p)=p+F(p).
+
+If selling/reducing a token at bid incurs fee, define net proceeds
+
+P(p)=p−F(p).
+
+Then the no-trade interval for the bin-win probability p
+k
+	​
+
+ is approximately
+
+L
+k
+	​
+
+=max{P(b
+k
+Y
+	​
+
+),1−C(a
+k
+N
+	​
+
+)}
+	​
+
+U
+k
+	​
+
+=min{C(a
+k
+Y
+	​
+
+),1−P(b
+k
+N
+	​
+
+)}.
+	​
+
+
+Use the midpoint or liquidity-weighted midpoint inside [L
+k
+	​
+
+,U
+k
+	​
+
+] as raw r
+k
+	​
+
+. If quotes cross after fees, flag the market snapshot as internally inconsistent and project the vector to the simplex using minimum KL or minimum squared distance.
+
+Favorite-longshot de-biasing
+
+Favorite-longshot bias is the empirical regularity that longshots are overbet and favorites underbet; Snowberg and Wolfers summarize this in betting odds data: https://www.nber.org/system/files/working_papers/w15923/w15923.pdf
+ 
+NBER
+. Betting-market work commonly starts with inverse-odds normalization and then adjusts for bias; Koning and Zijm describe basic normalization, overround, favorite-longshot bias, and Shin’s model: https://link.springer.com/article/10.1007/s10479-022-04722-3
+ 
+Springer
+. The CRAN implied vignette lists basic, power, Shin, and related conversions: https://cran.r-project.org/web/packages/implied/vignettes/introduction.html
+ 
+CRAN
+.
+
+For this exchange setting, use a fitted power transform as the first production transform:
+
+m
+k
+	​
+
+(γ)=
+∑
+j=1
+K
+	​
+
+r
+j
+γ
+	​
+
+r
+k
+γ
+	​
+
+	​
+
+.
+	​
+
+
+γ=1: no correction.
+
+γ>1: sharpens favorites and suppresses longshots, correcting the usual longshot-overpricing pattern.
+
+γ<1: flattens, used only if history proves the opposite.
+
+Fit γ by settled-outcome log loss:
+
+γ
+^
+	​
+
+=arg
+γ>0
+min
+	​
+
+[−
+i
+∑
+	​
+
+log
+∑
+j
+	​
+
+r
+ij
+γ
+	​
+
+r
+i,Y
+i
+	​
+
+γ
+	​
+
+	​
+
+].
+	​
+
+
+If γ varies by regime, fit γ
+t
+	​
+
+ with the same hierarchical/decay machinery as other calibration parameters, not by hardcoded market assumptions.
+
+Reference implementation sketch
+Python
+Run
+def fee(price, c):
+    return c * price * (1.0 - price)
+
+def quote_interval(yes_bid, yes_ask, no_bid, no_ask, c):
+    yes_bid_net = yes_bid - fee(yes_bid, c)
+    yes_ask_gross = yes_ask + fee(yes_ask, c)
+    no_bid_net = no_bid - fee(no_bid, c)
+    no_ask_gross = no_ask + fee(no_ask, c)
+
+    lower = np.maximum(yes_bid_net, 1.0 - no_ask_gross)
+    upper = np.minimum(yes_ask_gross, 1.0 - no_bid_net)
+    return lower, upper
+
+def simplex_normalize(x):
+    x = np.clip(x, EPS, None)
+    return x / x.sum(axis=-1, keepdims=True)
+
+def market_raw_probs(yes_bid, yes_ask, no_bid, no_ask, c):
+    lo, hi = quote_interval(yes_bid, yes_ask, no_bid, no_ask, c)
+    raw = 0.5 * (lo + hi)
+    return simplex_normalize(raw), lo, hi
+
+def power_debias(raw, gamma):
+    z = np.power(np.clip(raw, EPS, 1.0), gamma)
+    return z / z.sum(axis=1, keepdims=True)
+
+def fit_power_gamma(raw, y):
+    from scipy.optimize import minimize_scalar
+
+    def obj(log_gamma):
+        gamma = np.exp(log_gamma)
+        p = power_debias(raw, gamma)
+        return -np.sum(np.log(np.clip(p[np.arange(len(y)), y], EPS, 1.0)))
+
+    res = minimize_scalar(obj, bounds=(-3.0, 3.0), method="bounded")
+    return float(np.exp(res.x)), res
+Failure modes and diagnostics
+
+Fee convention mismatch: if exchange fees are charged differently from additive cost, all break-evens shift. Diagnostic: reconcile historical fills against realized P&L per contract.
+
+Market price timestamps leak outcome information: use only quotes available at the decision time.
+
+Power transform too rigid: reliability curve still monotone-misfit after fitting γ. Diagnostic: residual calibration curve of actual frequency versus m
+k
+	​
+
+(
+γ
+^
+	​
+
+); if structured, upgrade to monotone spline/logit calibration.
+
+Class-conditional market bias: modal bins and far tails may need separate γ
+c
+	​
+
+, but license by posterior information, not defaults.
+
+Task 3 — Confidence bounds and sizing without arbitrary constants
+3.1 Probability bounds: ensemble bootstrap vs Bayesian posterior vs Wilson votes
+Comparison
+
+Bootstrap over ensemble members
+
+This estimates sensitivity to the finite set of numerical members, not the settled-outcome calibration error. It is valid only for the narrow question “how much would μ
+∗
+,σ
+∗
+ change if exchangeable members were resampled?” It misses location bias, spread misfit, calibration-layer uncertainty, market-blend uncertainty, and regime drift. If used, resample by model family/block, not individual member.
+
+Wilson bounds on member votes
+
+Wilson intervals are good binomial proportion intervals when x successes come from n Bernoulli trials; the NIST handbook gives the Wilson formula and one-sided construction: https://www.itl.nist.gov/div898/handbook/prc/section2/prc241.htm
+ 
+NIST
+. But member votes are not Bernoulli observations of the event. They are correlated model draws. A Wilson interval on “number of ensemble members in bin k” estimates the raw ensemble vote fraction, not P(Y=k∣F). It is the wrong estimand.
+
+Bayesian posterior / logistic-normal calibration posterior
+
+This is the correct object. The uncertainty should come from the posterior over fitted parameters:
+
+θ=(b
+ℓ
+	​
+
+,k,γ,β,α,γ
+market
+	​
+
+,…)
+
+given settled outcomes, then propagated to
+
+p
+ik
+	​
+
+=g
+k
+	​
+
+(x
+i
+	​
+
+;θ).
+
+Use Laplace posterior, bootstrap-over-days, or full Bayesian sampling:
+
+θ∣D≈N(
+θ
+^
+,H
+−1
+),
+
+where H is the penalized negative log-likelihood Hessian. Then draw θ
+(s)
+, compute p
+ik
+(s)
+	​
+
+, and take the decision-derived quantile below.
+
+Effective N for exchangeable but correlated ensemble members
+
+Let X
+j
+	​
+
+=1{member j falls in bin k}, EX
+j
+	​
+
+=p, Corr(X
+j
+	​
+
+,X
+l
+	​
+
+)=ρ for j
+
+=l. Then
+
+Var(
+X
+ˉ
+)=
+N
+p(1−p)
+	​
+
+{1+(N−1)ρ}.
+
+Thus
+
+N
+eff
+	​
+
+=
+1+(N−1)ρ
+N
+	​
+
+.
+	​
+
+
+More generally, for normalized member weights w
+j
+	​
+
+ and correlation matrix R,
+
+Var(
+j
+∑
+	​
+
+w
+j
+	​
+
+X
+j
+	​
+
+)=p(1−p)w
+⊤
+Rw
+
+so
+
+N
+eff
+	​
+
+=
+w
+⊤
+Rw
+1
+	​
+
+.
+	​
+
+
+For M model families with family sizes n
+m
+	​
+
+, within-family correlation ρ
+w
+	​
+
+, and between-family correlation ρ
+b
+	​
+
+,
+
+N
+eff
+	​
+
+=
+N+ρ
+w
+	​
+
+∑
+m
+	​
+
+n
+m
+	​
+
+(n
+m
+	​
+
+−1)+ρ
+b
+	​
+
+(N
+2
+−∑
+m
+	​
+
+n
+m
+2
+	​
+
+)
+N
+2
+	​
+
+.
+	​
+
+
+This is the same design-effect logic as Kish effective sample size: design effect is a variance inflation and n
+eff
+	​
+
+=n/Deff; the standard cluster formula is Deff=1+(n
+∗
+−1)ρ: https://en.wikipedia.org/wiki/Design_effect
+ 
+Wikipedia
++1
+.
+
+Derived credibility level from Kelly objective
+
+Let θ denote the probability that the token pays. For a YES token, θ=p
+k
+	​
+
+. For a NO token, θ=1−p
+k
+	​
+
+. Let execution cost including fee be
+
+C=a+ca(1−a).
+
+Buying one token for cost C returns 1 if it pays and 0 otherwise. If fraction f of bankroll is spent on token cost, the wealth multiplier is
+
+{
+1+f
+C
+1−C
+	​
+
+,
+1−f,
+	​
+
+pay,
+no pay.
+	​
+
+
+The exact Kelly fraction is
+
+f
+K
+	​
+
+(θ,C)=max{0,
+1−C
+θ−C
+	​
+
+}.
+	​
+
+
+Suppose the posterior for θ has samples θ
+(s)
+, mean 
+θ
+ˉ
+, and the empirically estimated fractional-Kelly shrinkage from Task 3.2 is λ∈[0,1]. The lower-bound probability that gives the same position as fractional Kelly is the unique θ
+B
+	​
+
+ satisfying
+
+f
+K
+	​
+
+(θ
+B
+	​
+
+,C)=λf
+K
+	​
+
+(
+θ
+ˉ
+,C).
+
+For 
+θ
+ˉ
+>C,
+
+θ
+B
+	​
+
+=C+λ(
+θ
+ˉ
+−C).
+	​
+
+
+The credibility level is therefore not chosen; it is
+
+γ
+∗
+=P(θ≤θ
+B
+	​
+
+∣D).
+	​
+
+
+Then use
+
+L
+θ
+	​
+
+=Q
+θ∣D
+	​
+
+(γ
+∗
+)=θ
+B
+	​
+
+	​
+
+
+up to Monte Carlo error. For a NO trade on bin k, this becomes an upper bound on bin-win probability:
+
+U
+p
+k
+	​
+
+	​
+
+=1−L
+θ
+NO
+	​
+
+	​
+
+.
+	​
+
+
+This derivation also exposes an important theorem: under exact Bayesian log utility with no additional model-risk penalty, the posterior mean is sufficient and no fixed “95% confidence bound” is Kelly-optimal. A lower bound becomes justified only through the empirically estimated shrinkage λ, ambiguity/model-risk posterior, or explicit ruin/drawdown constraints. Kelly/Breiman asymptotic optimality and MacLean–Thorp–Ziemba fractional-Kelly discussions are the relevant literature: https://www.stat.berkeley.edu/~aldous/157/Papers/Good_Bad_Kelly.pdf
+ 
+Department of Statistics
++1
+.
+
+Reference implementation sketch
+Python
+Run
+def effective_n(weights, corr):
+    w = np.asarray(weights, dtype=float)
+    w = w / w.sum()
+    return 1.0 / float(w @ corr @ w)
+
+def family_effective_n(family_sizes, rho_within, rho_between=0.0):
+    n = np.asarray(family_sizes, dtype=float)
+    N = n.sum()
+    within_pairs = np.sum(n * (n - 1.0))
+    between_pairs = N * N - np.sum(n * n)
+    denom = N + rho_within * within_pairs + rho_between * between_pairs
+    return float(N * N / denom)
+
+def kelly_fraction(theta_pay, cost):
+    # fraction of bankroll spent as token cost
+    raw = (theta_pay - cost) / (1.0 - cost)
+    return np.maximum(0.0, raw)
+
+def derived_bound_from_fractional_kelly(theta_samples, cost, lambda_frac):
+    theta_bar = float(np.mean(theta_samples))
+    if theta_bar <= cost:
+        return theta_bar, 1.0, 0.0  # no trade
+
+    theta_bound = cost + lambda_frac * (theta_bar - cost)
+    gamma_star = float(np.mean(theta_samples <= theta_bound))
+    f = float(kelly_fraction(theta_bound, cost))
+    return theta_bound, gamma_star, f
+Failure modes and diagnostics
+
+Posterior too narrow: realized coverage lower than nominal derived coverage. Diagnostic: rolling coverage of θ≥L
+θ
+	​
+
+ by class.
+
+Ignoring ensemble family correlation: N
+eff
+	​
+
+ wildly overstated. Diagnostic: estimate intraclass correlation of member residual indicators by model family.
+
+Selected-trade conditioning: posterior calibrated on all events but applied to extreme selected edges. Diagnostic: reliability conditional on trade selection rule.
+
+3.2 Fractional Kelly as a formula of measured estimation error
+Derivation
+
+Let X
+j
+	​
+
+ be realized return per dollar of bankroll fraction for candidate trade j, and 
+e
+^
+j
+	​
+
+=E[X
+j
+	​
+
+∣
+F
+j
+	​
+
+] be the predicted excess return. For small positions,
+
+log(1+f
+j
+	​
+
+X
+j
+	​
+
+)≈f
+j
+	​
+
+X
+j
+	​
+
+−
+2
+1
+	​
+
+f
+j
+2
+	​
+
+X
+j
+2
+	​
+
+.
+
+If plug-in Kelly uses
+
+f
+K,j
+	​
+
+≈
+v
+^
+j
+	​
+
+e
+^
+j
+	​
+
+	​
+
+,
+
+and production uses f
+j
+	​
+
+=λf
+K,j
+	​
+
+, then expected log growth is approximately
+
+G(λ)=λE[f
+K
+	​
+
+X]−
+2
+1
+	​
+
+λ
+2
+E[f
+K
+2
+	​
+
+X
+2
+].
+
+Therefore
+
+λ
+∗
+=clip
+[0,1]
+	​
+
+(
+E[f
+K
+2
+	​
+
+X
+2
+]
+E[f
+K
+	​
+
+X]
+	​
+
+).
+	​
+
+
+Under the measurement-error model
+
+e
+^
+=e+η,e∼(0,σ
+e
+2
+	​
+
+),η∼(0,τ
+2
+),e⊥η,
+
+the optimal shrinkage of the plug-in edge is
+
+λ
+∗
+=
+σ
+e
+2
+	​
+
++τ
+2
+σ
+e
+2
+	​
+
+	​
+
+=
+1+τ
+2
+/σ
+e
+2
+	​
+
+1
+	​
+
+.
+	​
+
+
+This is the classic fractional-Kelly shape, but the production estimator should be the direct walk-forward growth regression below.
+
+Exact walk-forward estimator
+
+For each historical candidate trade, compute:
+
+predicted pay probability 
+θ
+^
+j
+	​
+
+;
+
+fee-adjusted cost C
+j
+	​
+
+;
+
+full Kelly fraction f
+K,j
+	​
+
+=f
+K
+	​
+
+(
+θ
+^
+j
+	​
+
+,C
+j
+	​
+
+);
+
+realized return per dollar spent:
+
+X
+j
+	​
+
+={
+(1−C
+j
+	​
+
+)/C
+j
+	​
+
+,
+−1,
+	​
+
+token paid,
+token did not pay.
+	​
+
+
+Fit
+
+λ
+^
+=arg
+λ∈[0,1]
+max
+	​
+
+j
+∑
+	​
+
+log(1+λf
+K,j
+	​
+
+X
+j
+	​
+
+).
+	​
+
+
+This uses the same objective as production sizing, so no fixed 0.25 or 0.5 multiplier is required.
+
+Reference implementation sketch
+Python
+Run
+def realized_return_per_cost(paid, cost):
+    return np.where(paid, (1.0 - cost) / cost, -1.0)
+
+def fit_fractional_kelly_lambda(f_kelly, realized_ret):
+    from scipy.optimize import minimize_scalar
+
+    # require 1 + lambda * f * X > 0
+    def obj(lam):
+        mult = 1.0 + lam * f_kelly * realized_ret
+        if np.any(mult <= 0.0):
+            return np.inf
+        return -np.sum(np.log(mult))
+
+    res = minimize_scalar(obj, bounds=(0.0, 1.0), method="bounded")
+    return float(res.x), res
+
+def approx_lambda(f_kelly, realized_ret):
+    num = np.sum(f_kelly * realized_ret)
+    den = np.sum((f_kelly * realized_ret) ** 2)
+    if den <= 1e-15:
+        return 0.0
+    return float(np.clip(num / den, 0.0, 1.0))
+Failure modes and diagnostics
+
+Candidate-set bias: estimating λ only on trades selected by an old broken rule can understate future edge. Diagnostic: estimate λ on all candidate edges by bins of predicted edge, then on selected trades.
+
+Nonstationarity: old λ too optimistic. Diagnostic: decay-weighted λ
+t
+	​
+
+ and posterior drift test.
+
+Tail dependence / simultaneous losses: independent Kelly overstates portfolio fraction. Diagnostic: cluster realized returns by realization day and cap total exposure by multivariate Kelly covariance, not by per-trade constants.
+
+3.3 Edge threshold after fees and bound coverage error
+
+For a token with fee-adjusted cost
+
+C=a+ca(1−a),
+
+break-even pay probability is exactly
+
+θ>C.
+	​
+
+
+Suppose lower bound L satisfies
+
+P(θ≥L)≥1−ε.
+
+On the failure event, let the conservative lower fallback be θ
+min
+	​
+
+, often 0 for a paid-or-zero binary token. A conservative effective pay probability is
+
+θ
+eff
+	​
+
+=(1−ε)L+εθ
+min
+	​
+
+.
+
+Trade only if θ
+eff
+	​
+
+>C. Thus
+
+(1−ε)(C+e)+εθ
+min
+	​
+
+>C,
+
+where e=L−C. Solving,
+
+e>
+1−ε
+ε(C−θ
+min
+	​
+
+)
+	​
+
+.
+	​
+
+
+With θ
+min
+	​
+
+=0,
+
+L−C>
+1−ε
+εC
+	​
+
+.
+	​
+
+
+For a NO on bin k, θ=1−p
+k
+	​
+
+, so
+
+1−U
+p
+k
+	​
+
+	​
+
+−{a
+k
+N
+	​
+
++ca
+k
+N
+	​
+
+(1−a
+k
+N
+	​
+
+)}>
+1−ε
+εC
+N
+	​
+
+	​
+
+	​
+
+
+where U
+p
+k
+	​
+
+	​
+
+ is the upper bound on the bin-win probability and C
+N
+	​
+
+=a
+k
+N
+	​
+
++ca
+k
+N
+	​
+
+(1−a
+k
+N
+	​
+
+).
+
+Task 4 — Eliminate-the-constants audit
+Hardcoded constant class	Principled replacement	Estimator	Data needed	Update rule	Diagnostic
+Spread floor σ≥1.0	Variance component s
+i
+2
+	​
+
+=k
+c
+2
+	​
+
+σ
+i
+2
+	​
+
++σ
+0,c
+2
+	​
+
+	Joint interval-censored likelihood with σ
+0,c
+	​
+
+≥0, shrink σ
+0,c
+	​
+
+ toward global	Settled bins, forecast σ
+i
+	​
+
+, locations/clusters	Update with k
+c
+	​
+
+; license only if posterior mass away from 0 changes tradable probabilities	PIT by predicted spread decile
+Global k
+scale
+	​
+
+	Joint b
+ℓ
+	​
+
+,k
+c
+	​
+
+ model	MLE/MAP on categorical bin likelihood	Same	Walk-forward / decay-weighted Fisher update	Profile likelihood ridge b vs k
+Uniform mixture w	Distance-tied Dirichlet calibration	Penalized log-loss 
+q
+~
+	​
+
+k
+	​
+
+∝q
+k
+γ
+	​
+
+e
+β
+d
+	​
+
+	Settled q, winning bin, distance from mode	Update after each settlement batch; merge classes by information	Reliability by distance; modal-bin observed/predicted
+Confidence z=1.645	Kelly-derived quantile γ
+∗
+=P(θ≤C+λ(
+θ
+ˉ
+−C)∣D)	Posterior over θ plus fitted λ	Calibration posterior, historical returns	Recompute per opportunity	Realized bound coverage by class
+Blend α default	Brier/log-loss stacking weight	α=(S
+m
+	​
+
+−S
+qm
+	​
+
+)/(S
+q
+	​
+
++S
+m
+	​
+
+−2S
+qm
+	​
+
+), or 1D log-loss optimum	Model probabilities, market probabilities, outcomes	Walk-forward; class-conditional if licensed	α at boundary; paired log-loss
+Near-mode radius “1.5 steps”	Learned distance basis/classes	Merge adjacent ordered distances until CI-width target met; optionally spline over standardized distance	Outcomes by distance from mode	Recompute class map only inside training fold	Calibration residual versus distance
+Staleness cutoff	Information-decay weights	State-space drift estimate	Historical parameter estimates / score residuals over time	Weight age a by λ
+a
+	Drift residual whiteness
+Minimum n≥30	CI-width / posterior-regret licensing	Fisher or Wilson width target	Per-class effective observations	License parameter if induced probability half-width < edge threshold	Posterior width versus fee edge
+Fixed fractional Kelly 0.25	Growth-fitted λ	argmax
+λ∈[0,1]
+	​
+
+∑log(1+λf
+K
+	​
+
+X)	Historical candidate trades, realized returns	Decay-weighted / block bootstrap	λ stability and drawdown attribution
+Price→probability normalization	Fee/spread interval + fitted FL transform	Raw interval midpoint projected to simplex, then r
+γ
+/∑r
+γ
+	Bid/ask YES/NO, fees, outcomes	Fit γ walk-forward	Market reliability curve
+Sample aging by fixed recent window	Kalman exponential forgetting	Estimate process/observation variance ratio q=Q/R	Time series of score gradients or parameter estimates	λ=2/(2+q+
+q
+2
++4q
+	​
+
+)	Forecast score autocorrelation
+Information-decay formula
+
+Assume a scalar calibration parameter follows
+
+θ
+t
+	​
+
+=θ
+t−1
+	​
+
++η
+t
+	​
+
+,η
+t
+	​
+
+∼N(0,Q),
+
+and a noisy observation/score estimate has variance R. The steady-state Kalman gain is
+
+K=
+A+R
+A
+	​
+
+,A=
+2
+Q+
+Q
+2
++4QR
+	​
+
+	​
+
+.
+
+Old information decays by
+
+λ=1−K=
+2+q+
+q
+2
++4q
+	​
+
+2
+	​
+
+,q=Q/R.
+	​
+
+
+Weight an observation of age a by
+
+w(a)=λ
+a
+=exp(−a/h),h=−1/logλ.
+	​
+
+
+Estimate Q/R by maximum likelihood in this local-level state-space model for the calibration parameter or score-gradient process. If Q=0, λ=1 and there is no decay; if drift is high, λ falls automatically.
+
+Minimum sample sizes from CI-width targets
+
+For a scalar probability p, a Wilson-style half-width target h
+∗
+ gives approximately
+
+n
+eff
+	​
+
+≥
+(h
+∗
+)
+2
+z
+γ
+∗
+2
+	​
+
+p(1−p)
+	​
+
+	​
+
+
+where z
+γ
+∗
+	​
+
+ is not fixed; it is the quantile implied by the Kelly-bound construction in Task 3.1.
+
+The target h
+∗
+ should be the largest probability uncertainty that does not change the trade/no-trade decision:
+
+h
+∗
+=
+L
+θ,η
+	​
+
+e
+min
+	​
+
+	​
+
+	​
+
+
+where e
+min
+	​
+
+ is the fee/coverage edge threshold from Task 3.3 and L
+θ,η
+	​
+
+ is the local Lipschitz sensitivity of tradable probability to parameter η:
+
+L
+θ,η
+	​
+
+=
+	​
+
+∂η
+∂θ
+	​
+
+	​
+
+.
+
+For a parameter η with Fisher information I
+n
+	​
+
+=nI
+1
+	​
+
+,
+
+n
+eff
+	​
+
+≥
+I
+1
+	​
+
+(Δη
+∗
+)
+2
+z
+γ
+∗
+2
+	​
+
+	​
+
+,Δη
+∗
+=
+∣∂θ/∂η∣
+e
+min
+	​
+
+	​
+
+.
+	​
+
+Advisory findings
+
+These are clean-room statistical-design findings, not repo findings. Locations are abstract pipeline symbols Claude Code should map to local code.
+
+BLOCKER — statistical design — forecast_calibration.fit_spread_scale
+
+Evidence: fitting spread without location bias provably absorbs δ
+2
+ into variance; formula above gives k
+wrong
+2
+	​
+
+=k
+0
+2
+	​
+
++(δ/σ)
+2
+.
+Impact: modal probabilities are flattened; NO trades against near-modal bins become falsely attractive.
+Fix direction: implement interval-censored categorical likelihood jointly over b
+ℓ
+	​
+
+ and k
+c
+	​
+
+, with EB shrinkage for b
+ℓ
+	​
+
+.
+
+HIGH — distribution calibration — forecast_distribution.uniform_mixture
+
+Evidence: q
+(w)
+=(1−w)q+w/K pulls every above-uniform bin downward, including the mode.
+Impact: directly worsens observed modal-bin underprediction.
+Fix direction: remove global uniform mixture; replace with distance-tied Dirichlet calibration fitted by walk-forward log loss.
+
+HIGH — trading probability — trade_signal.no_buy_rule
+
+Evidence: model-only upper confidence bound ignores market as a noisy calibrated aggregator.
+Impact: trades fire exactly where model has regional calibration failure.
+Fix direction: use class-conditional market-model blend; near-mode α
+c
+	​
+
+ should be learned and will likely shrink toward market.
+
+HIGH — uncertainty — confidence.member_bootstrap / confidence.member_votes
+
+Evidence: ensemble members are correlated model states, not iid settled Bernoulli trials; Wilson intervals apply to Bernoulli samples, not raw model votes.
+Impact: confidence bounds understate true calibration uncertainty and target the wrong estimand.
+Fix direction: posterior over calibrated probability using settled-history likelihood; use ensemble N
+eff
+	​
+
+ only for input-feature uncertainty.
+
+HIGH — execution economics — market_implied_probability.price_to_prob
+
+Evidence: fees imply break-even C=p+cp(1−p); bid/ask YES/NO imply a no-trade interval, not a single raw price probability.
+Impact: edge is overstated if price is used without fee/spread conversion.
+Fix direction: compute fee-adjusted interval [L
+k
+	​
+
+,U
+k
+	​
+
+], project to simplex, fit favorite-longshot transform from history.
+
+MEDIUM — market calibration — market_debias.favorite_longshot
+
+Evidence: favorite-longshot bias is documented in betting markets; longshots are often overbet and favorites underbet, per Snowberg/Wolfers and Koning/Zijm: https://www.nber.org/system/files/working_papers/w15923/w15923.pdf
+ and https://link.springer.com/article/10.1007/s10479-022-04722-3
+ 
+NBER
++1
+.
+Impact: raw market probabilities can be systematically too flat or too sharp.
+Fix direction: fit γ in m
+k
+	​
+
+∝r
+k
+γ
+	​
+
+ walk-forward; do not assume γ=1.
+
+MEDIUM — temporal stability — calibration.training_window
+
+Evidence: fixed recent windows/cutoffs impose unstated process variance.
+Impact: either stale regimes dominate or sample size collapses.
+Fix direction: estimate state-space Q/R and weight by w(a)=λ
+a
+.
+
+LOW — parameter licensing — calibration.min_samples
+
+Evidence: n≥30 folklore is unrelated to fee edge, posterior width, or class imbalance.
+Impact: fitted values are sometimes licensed when they cannot affect decisions, or blocked when they are precise enough.
+Fix direction: license by induced probability CI width relative to fee/coverage edge threshold.
+
+Migration order
+Step 0 — immediate safety gate for the observed failure
+
+Before refactoring, disable any NO trade on a bin k unless the fee-adjusted, market-blended, posterior upper bound satisfies
+
+1−U
+p
+k
+	​
+
+	​
+
+−{a
+k
+N
+	​
+
++ca
+k
+N
+	​
+
+(1−a
+k
+N
+	​
+
+)}>
+1−ε
+εC
+N
+	​
+
+	​
+
+.
+
+This is not a permanent rule; it is the mathematically necessary no-trade condition under coverage error.
+
+Validation gate: replay the seven observed modal-NO losses. The new gate should reject any trade for which the realized modal-bin probability posterior upper bound exceeds break-even. This is a deterministic audit, not a statistical success claim.
+
+Step 1 — joint b
+ℓ
+	​
+
+,k
+c
+	​
+
+ interval likelihood
+
+Implement the categorical bin-integral likelihood and EB shrinkage. Remove the old variance-only k fit.
+
+Walk-forward metric: paired prequential log-loss difference
+
+d
+i
+	​
+
+=−logp
+i,Y
+i
+	​
+
+old
+	​
+
++logp
+i,Y
+i
+	​
+
+new
+	​
+
+.
+
+Deploy if the posterior lower bound of 
+d
+ˉ
+ is positive after subtracting the parameter-uncertainty penalty
+
+2
+1
+	​
+
+tr(H
+score
+	​
+
+Var(
+θ
+^
+)).
+
+Specific modal gate: for d=0 modal class,
+
+	​
+
+∑
+i
+	​
+
+p
+^
+	​
+
+i,mode
+i
+	​
+
+	​
+
+∑
+i
+	​
+
+1{Y
+i
+	​
+
+=mode
+i
+	​
+
+}
+	​
+
+−1
+	​
+
+
+must shrink walk-forward relative to the current model.
+
+Step 2 — remove uniform w, add distance-tied Dirichlet calibration
+
+Fit
+
+q
+~
+	​
+
+ik
+	​
+
+∝q
+ik
+γ
+	​
+
+exp(β
+d
+ik
+	​
+
+	​
+
+)
+
+inside each training fold.
+
+Walk-forward gate: deploy only if log-loss improvement exceeds the calibration complexity penalty. In prequential form, require positive lower credible bound for
+
+ΔLL=
+i
+∑
+	​
+
+log
+q
+~
+	​
+
+i,Y
+i
+	​
+
+	​
+
+−logq
+i,Y
+i
+	​
+
+	​
+
+−
+2
+1
+	​
+
+Δdf
+effective
+	​
+
+.
+Step 3 — market fee/spread transform and favorite-longshot fit
+
+Implement raw market interval, simplex projection, and fitted power transform r
+γ
+.
+
+Gate: market de-biased probabilities must improve market-only log loss over raw normalized market probabilities walk-forward. If 
+γ
+^
+	​
+
+’s posterior includes 1 and no improvement appears, keep γ=1 through shrinkage, not a hard default.
+
+Step 4 — class-conditional model-market blend
+
+Fit α
+c
+	​
+
+ by Brier closed form and confirm by log-loss stacking.
+
+Gate: for the near-modal class, if α
+c
+	​
+
+ posterior mass is near 0, accept that the market dominates there. For each class, deploy fitted α
+c
+	​
+
+ only if its induced probability posterior half-width is below the fee-adjusted edge threshold; otherwise shrink to global α.
+
+Step 5 — posterior bounds and growth-fitted fractional Kelly
+
+Fit λ by historical candidate-trade log growth:
+
+λ
+^
+=arg
+λ∈[0,1]
+max
+	​
+
+j
+∑
+	​
+
+log(1+λf
+K,j
+	​
+
+X
+j
+	​
+
+).
+
+Use bound
+
+θ
+B
+	​
+
+=C+λ(
+θ
+ˉ
+−C)
+
+and the corresponding posterior quantile.
+
+Gate: paper-trade replay must have positive lower credible bound on log growth after fees using block bootstrap by realization day. If not, keep probability calibration but do not size real trades.
+
+Step 6 — constants audit and information decay
+
+Replace hard windows, z-scores, sample-size floors, and fallback constants with posterior width / state-space decay formulas.
+
+Gate: no production parameter may be a magic constant unless it is purely numerical, such as log clipping ϵ; every statistical constant must map to a fitted posterior, a fee equation, or a decision-regret tolerance.
+
+Local verification checklist for Claude Code
+
+Verify the exact rounding preimage A
+k
+	​
+
+=[a
+k
+	​
+
+,b
+k
+	​
+
+) for every exchange bin, including open tails.
+
+Reproduce current modal-bin calibration: predicted modal probability versus realized modal frequency by walk-forward fold.
+
+Fit the joint interval-censored b
+ℓ
+	​
+
+,k
+c
+	​
+
+ model on historical folds; inspect profile likelihood for b,k ridge collapse.
+
+Compare old versus new prequential log loss, Brier score, and modal-class reliability.
+
+Remove uniform mixture and fit distance-tied Dirichlet calibration inside each fold only.
+
+Build fee-adjusted market probability intervals from YES/NO bid/ask; confirm historical fills match the fee model.
+
+Fit market power transform γ from history; plot reliability of raw versus transformed market probabilities.
+
+Fit global and class-conditional α; check whether near-modal α shrinks toward market.
+
+Generate posterior samples of current tradable probabilities from Hessian/Laplace or block bootstrap.
+
+Estimate λ from all historical candidate trades, then from selected trades; compare stability.
+
+Replay the seven modal-NO losses and confirm the new bound/edge rule rejects them.
+
+Run a full prequential backtest with no same-realization outcomes, no post-trade prices, and no calibration-class choices made outside the training fold.
+
+Sources inspected and access gaps
+
+Inspected:
+
+Strictly proper scoring rules: https://sites.stat.washington.edu/raftery/Research/PDF/Gneiting2007jasa.pdf
+ 
+Statistical Consulting Services
++1
+
+Murphy Brier decomposition metadata/abstract: https://www.semanticscholar.org/paper/A-New-Vector-Partition-of-the-Probability-Score-Murphy/b885f5a44da16e46e01a6181ecdfc8fe0a592e51
+ 
+Semantic Scholar
+
+Kelly / fractional Kelly discussion: https://www.stat.berkeley.edu/~aldous/157/Papers/Good_Bad_Kelly.pdf
+ 
+Department of Statistics
++1
+
+Favorite-longshot bias: https://www.nber.org/system/files/working_papers/w15923/w15923.pdf
+ 
+NBER
++1
+
+Betting odds normalization, Shin model, favorite-longshot treatment: https://link.springer.com/article/10.1007/s10479-022-04722-3
+ 
+Springer
+
+Odds-to-probability methods including power and Shin: https://cran.r-project.org/web/packages/implied/vignettes/introduction.html
+ 
+CRAN
+
+Dirichlet calibration: https://arxiv.org/abs/1910.12656
+ and https://research-information.bris.ac.uk/en/publications/beyond-temperature-scaling-obtaining-well-calibrated-multiclass-p/
+ 
+arXiv
++1
+
+Wilson interval: https://www.itl.nist.gov/div898/handbook/prc/section2/prc241.htm
+ 
+NIST
+
+Design effect / effective sample size formulas: https://en.wikipedia.org/wiki/Design_effect
+ 
+Wikipedia
++1
+
+Access gaps:
+
+Some publisher/PDF endpoints returned internal errors or timeouts, including an AMS Murphy page and one Raftery BMA PDF route. I used accessible alternative pages/PDFs for the same concepts. No codebase or local test runner was available; all formulas and implementation sketches must be verified by Claude Code locally.

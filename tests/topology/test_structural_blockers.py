@@ -392,14 +392,18 @@ def test_duplicate_active_authority_rule_acknowledges_review_required():
     """The duplicate_active_authority rule in topology_enforcement.yaml must
     currently be REVIEW_REQUIRED until a dedicated enforcer ships. This
     assertion prevents accidentally pointing it at the orchestrator (fork
-    bomb hazard) or at a script that doesn't actually implement it."""
+    bomb hazard) or at a script that doesn't actually implement it.
+
+    2026-06-13: rule moved from blocking_structural → advisory because a
+    blocking rule with a REVIEW_REQUIRED enforcer enforces nothing but bricks
+    the required CI gate (meta-integrity check). Search both sections."""
     import yaml
     enforce_path = REPO_ROOT / "architecture" / "topology_enforcement.yaml"
     with enforce_path.open() as f:
         enforce = yaml.safe_load(f)
+    all_rules = list(enforce.get("blocking_structural") or []) + list(enforce.get("advisory") or [])
     rule = next(
-        (r for r in (enforce.get("blocking_structural") or [])
-         if r.get("id") == "duplicate_active_authority"),
+        (r for r in all_rules if r.get("id") == "duplicate_active_authority"),
         None,
     )
     assert rule is not None, "duplicate_active_authority rule must exist in yaml"

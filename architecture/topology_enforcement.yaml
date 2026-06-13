@@ -63,35 +63,12 @@ blocking_structural:
     severity: blocking
     owner: ci-infra
 
-  - id: high_risk_surface_no_context_pack
-    description: "Changed file matches a T0/T1 surface but no Context Pack was emitted"
-    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
-    proving_test: tests/topology/test_structural_blockers.py
-    applies_to_surfaces:
-      - execution_cycle_runtime
-      - execution_venue_boundary
-      - executable_forecast_reader
-      - market_discovery_scanner
-      - db_schema_authority
-    override_allowed: true
-    severity: blocking
-    owner: ci-infra
-
   - id: workflow_refs_exist
     description: "Workflow `run:` repo-local path must exist"
     enforcer: scripts/ci/check_workflow_repo_refs.py
     proving_test: tests/ci/test_structural_blockers.py
     applies_to_surfaces: []
     override_allowed: false      # NO_OVERRIDE
-    severity: blocking
-    owner: ci-infra
-
-  - id: new_test_unregistered
-    description: "New tests/test_*.py without architecture/test_topology.yaml registration"
-    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
-    proving_test: tests/topology/test_structural_blockers.py
-    applies_to_surfaces: []
-    override_allowed: false      # NO_OVERRIDE — false protection
     severity: blocking
     owner: ci-infra
 
@@ -128,15 +105,6 @@ blocking_structural:
     severity: blocking
     owner: ci-infra
 
-  - id: duplicate_active_authority
-    description: "Two files claim active authority for the same fact class"
-    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
-    proving_test: tests/topology/test_structural_blockers.py
-    applies_to_surfaces: []
-    override_allowed: true
-    severity: blocking
-    owner: ci-infra
-
   - id: expired_override
     description: "architecture/ci_overrides.yaml entry past expiry_date"
     enforcer: scripts/ci/check_context_pack_overrides.py
@@ -155,6 +123,47 @@ blocking_structural:
     severity: blocking
     owner: ci-infra
 
+# ---------------------------------------------------------------------------
+# Advisory warnings (PR-summary signal only, never block)
+# ---------------------------------------------------------------------------
+advisory:
+
+  # downgraded to advisory 2026-06-13: blocking+placeholder enforcer bricked the required gate while enforcing nothing; restore to blocking when the dedicated enforcer lands (Phase E+)
+  - id: high_risk_surface_no_context_pack
+    description: "Changed file matches a T0/T1 surface but no Context Pack was emitted"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_structural_blockers.py
+    applies_to_surfaces:
+      - execution_cycle_runtime
+      - execution_venue_boundary
+      - executable_forecast_reader
+      - market_discovery_scanner
+      - db_schema_authority
+    override_allowed: true
+    severity: advisory
+    owner: ci-infra
+
+  # downgraded to advisory 2026-06-13: blocking+placeholder enforcer bricked the required gate while enforcing nothing; restore to blocking when the dedicated enforcer lands (Phase E+)
+  - id: new_test_unregistered
+    description: "New tests/test_*.py without architecture/test_topology.yaml registration"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_structural_blockers.py
+    applies_to_surfaces: []
+    override_allowed: true
+    severity: advisory
+    owner: ci-infra
+
+  # downgraded to advisory 2026-06-13: blocking+placeholder enforcer bricked the required gate while enforcing nothing; restore to blocking when the dedicated enforcer lands (Phase E+)
+  - id: duplicate_active_authority
+    description: "Two files claim active authority for the same fact class"
+    enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
+    proving_test: tests/topology/test_structural_blockers.py
+    applies_to_surfaces: []
+    override_allowed: true
+    severity: advisory
+    owner: ci-infra
+
+  # downgraded to advisory 2026-06-13: blocking+placeholder enforcer bricked the required gate while enforcing nothing; restore to blocking when the dedicated enforcer lands (Phase E+)
   - id: tier0_paired_relationship_test_gate
     description: "Tier 0 surface changed without paired required_relationship_test"
     enforcer: REVIEW_REQUIRED  # was self-recursive; needs dedicated enforcer (Phase E+)
@@ -163,14 +172,9 @@ blocking_structural:
       - execution_cycle_runtime
       - execution_venue_boundary
       - db_schema_authority
-    override_allowed: true       # allowed via ci_overrides.yaml with owner + expiry
-    severity: blocking
+    override_allowed: true
+    severity: advisory
     owner: ci-infra
-
-# ---------------------------------------------------------------------------
-# Advisory warnings (PR-summary signal only, never block)
-# ---------------------------------------------------------------------------
-advisory:
 
   - id: task_folder_sprawl
     description: "Multiple sibling task_* folders in docs/operations/current/"
@@ -263,7 +267,6 @@ escalation_rules:
 no_override_rules:
   - context_pack_schema_invalid
   - workflow_refs_exist
-  - new_test_unregistered
   - source_rationale_delta_gate
   - db_table_delta_gate
   - stdlib_shadowing_gate

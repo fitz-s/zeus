@@ -39,11 +39,10 @@ from src.state.db import (
     init_schema,
     init_schema_forecasts,
 )
-SCHEMA_VERSION = 43           # B2: frozen PRAGMA user_version written by init_schema
-SCHEMA_FORECASTS_VERSION = 7  # B2: frozen PRAGMA user_version written by init_schema_forecasts
+# B2 (2026-05-28): SCHEMA_VERSION / SCHEMA_FORECASTS_VERSION (PRAGMA user_version) cancelled.
+# Operator directive 2026-06-13: version-counter mechanism fully removed from init_schema.
+# Schema currency is now proven via canonical table presence.
 # B2: row-provenance value frozen in no_trade_events / decision_events schema_version columns.
-# Distinct from SCHEMA_VERSION (PRAGMA user_version) because the row-level counter
-# was last bumped at 42 and never reached 43 before the counter was cancelled.
 _ROW_SCHEMA_VERSION = 42
 from src.state.no_trade_events import (
     NoTradeEventsSchemaCompatibilityError,
@@ -185,24 +184,39 @@ def _check_loaded_sha(expected_sha: str, loaded_sha_file: Path | None) -> GateRe
     return GateResult("loaded_sha", status, f"loaded={loaded} expected={expected}")
 
 
+_CANONICAL_WORLD_TABLES = frozenset({
+    "decision_events",
+    "position_current",
+    "trade_decisions",
+})
+
+
 def _check_world_schema(world_db: Path) -> GateResult:
     if not world_db.exists():
         return GateResult("world_schema", FAIL, f"missing:{world_db}")
     conn = sqlite3.connect(str(world_db))
     try:
-        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        if version != SCHEMA_VERSION:
-            return GateResult("world_schema", FAIL, f"user_version={version} expected={SCHEMA_VERSION}")
+        present = frozenset(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        )
+        missing_tables = _CANONICAL_WORLD_TABLES - present
+        if missing_tables:
+            return GateResult(
+                "world_schema", FAIL,
+                f"missing canonical tables: {sorted(missing_tables)}"
+            )
         try:
-            # B2: use _ROW_SCHEMA_VERSION (42), not SCHEMA_VERSION (43 PRAGMA user_version).
-            # Row-provenance counter was frozen at 42; no_trade_events CHECK only goes to 42.
+            # B2: row-provenance counter frozen at 42; no_trade_events CHECK only goes to 42.
             assert_no_trade_events_schema_current_for_live(
                 conn,
                 expected_schema_version=_ROW_SCHEMA_VERSION,
             )
         except NoTradeEventsSchemaCompatibilityError as exc:
             return GateResult("world_schema", FAIL, str(exc))
-        return GateResult("world_schema", PASS, f"user_version={version}")
+        return GateResult("world_schema", PASS, "canonical tables present — OK")
     finally:
         conn.close()
 
@@ -225,8 +239,15 @@ def _count_where_in(conn: sqlite3.Connection, table: str, column: str, values: I
     return int(row[0] if row else 0)
 
 
+_CANONICAL_FORECASTS_TABLES = frozenset({
+    "ensemble_snapshots",
+    "settlement_outcomes",
+    "source_run",
+})
+
+
 def _check_forecasts_schema(forecasts_db: Path) -> GateResult:
-    """Gate: forecasts DB exists and schema version matches SCHEMA_FORECASTS_VERSION."""
+    """Gate: forecasts DB exists and canonical tables are present."""
     if not forecasts_db.exists():
         return GateResult(
             "forecasts_schema",
@@ -235,18 +256,24 @@ def _check_forecasts_schema(forecasts_db: Path) -> GateResult:
         )
     conn = sqlite3.connect(str(forecasts_db))
     try:
-        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        if version != SCHEMA_FORECASTS_VERSION:
+        present = frozenset(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        )
+        missing_tables = _CANONICAL_FORECASTS_TABLES - present
+        if missing_tables:
             return GateResult(
                 "forecasts_schema",
                 FAIL,
-                f"user_version={version} expected={SCHEMA_FORECASTS_VERSION}",
+                f"missing canonical tables: {sorted(missing_tables)}",
             )
         try:
             assert_schema_current_forecasts(conn)
         except SchemaOutOfDateError as exc:
             return GateResult("forecasts_schema", FAIL, str(exc))
-        return GateResult("forecasts_schema", PASS, f"user_version={version}")
+        return GateResult("forecasts_schema", PASS, "canonical tables present — OK")
     finally:
         conn.close()
 
@@ -772,12 +799,8 @@ def _write_fixture_files(root: Path) -> argparse.Namespace:
     # World DB
     conn = sqlite3.connect(str(world_db))
     init_schema(conn)
-    # PR D0b (2026-05-27): init_schema sets `PRAGMA user_version = SCHEMA_VERSION`
-    # but leaves an open transaction (in_transaction=True); without an explicit
-    # commit the PRAGMA write is rolled back on close() and the fixture world.db
-    # reopens with user_version=0, failing _check_world_schema. Production
-    # callers commit explicitly (per the world-DB migration contract); the
-    # fixture must too. Surfaced when SCHEMA_VERSION bumped 37→39.
+    # Commit after init_schema so the fixture world.db is fully initialized before
+    # _check_world_schema's structural table-presence check.
     conn.commit()
     conn.close()
 

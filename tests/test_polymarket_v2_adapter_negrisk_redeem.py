@@ -38,6 +38,12 @@ from src.venue.polymarket_v2_adapter import (
     _build_negrisk_redeem_calldata,
 )
 
+# Captured at import time, BEFORE conftest's autouse no-op patch runs per-test —
+# this is the genuine unconditional guard (operator law 2026-06-10).
+from src.execution.settlement_commands import (
+    assert_redeem_submission_allowed as _REAL_ASSERT_REDEEM,
+)
+
 
 # ── Constants ────────────────────────────────────────────────────────────────
 # Karachi reference vector: real Polymarket position, real condition_id.
@@ -173,13 +179,33 @@ class _StubAdapter:
         self.cls = PolymarketV2Adapter
 
 
-def test_redeem_negrisk_requires_amount_per_slot(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When neg_risk=True and amount_per_slot is None, fail-closed before broadcast."""
+# Updated 2026-06-12 (operator law 2026-06-10 ABSOLUTE — redeem submission
+# FORBIDDEN): adapter.redeem() now raises REDEEM_SUBMISSION_FORBIDDEN
+# unconditionally, before any preflight/broadcast. The old amount-threading
+# preflight (REDEEM_NEGRISK_AMOUNT_MISSING etc.) was DELETED with the broadcast
+# body. These two tests previously asserted that post-gate preflight; they now
+# assert the unconditional refuse. They restore the REAL guard (conftest installs
+# a session-wide no-op patch for accounting-setup suites).
+def _restore_real_redeem_guard(monkeypatch):
+    import src.execution.settlement_commands as _sc
+    from src.execution.settlement_commands import RedeemSubmissionAbandonedError
+
+    # Re-bind the GENUINE guard (captured at import time) onto the module so
+    # adapter.redeem's fresh `from ... import` resolves it. Without this the
+    # fresh import would pick up conftest's session no-op patch.
+    monkeypatch.setattr(_sc, "assert_redeem_submission_allowed", _REAL_ASSERT_REDEEM)
+    return RedeemSubmissionAbandonedError
+
+
+def test_redeem_negrisk_refuses_unconditionally(monkeypatch: pytest.MonkeyPatch) -> None:
+    """adapter.redeem(neg_risk=True) raises REDEEM_SUBMISSION_FORBIDDEN before
+    any preflight — redeem submission is forbidden (operator law 2026-06-10)."""
     from src.venue.polymarket_v2_adapter import (
         AUTONOMOUS_REDEEM_ENABLED_ENV,
         PolymarketV2Adapter,
     )
 
+    err = _restore_real_redeem_guard(monkeypatch)
     monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
 
     adapter = PolymarketV2Adapter(
@@ -189,30 +215,24 @@ def test_redeem_negrisk_requires_amount_per_slot(monkeypatch: pytest.MonkeyPatch
         polygon_rpc_url="https://example.invalid/rpc",
         signer_key="0x" + "11" * 32,
     )
-    result = adapter.redeem(
-        KARACHI_CONDITION_ID,
-        index_sets=[2],
-        neg_risk=True,
-        amount_per_slot=None,
-    )
-    assert result["success"] is False
-    assert result["errorCode"] == "REDEEM_NEGRISK_AMOUNT_MISSING", result
+    with pytest.raises(err, match="REDEEM_SUBMISSION_FORBIDDEN"):
+        adapter.redeem(
+            KARACHI_CONDITION_ID,
+            index_sets=[2],
+            neg_risk=True,
+            amount_per_slot=None,
+        )
 
 
-def test_redeem_standard_ctf_does_not_require_amount(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When neg_risk=False, amount_per_slot is ignored — standard CTF path
-    derives amounts from on-chain balance via the CTF contract itself.
-
-    This test passes when the redeem() preflight does NOT reject a None
-    amount_per_slot for the non-negRisk path (it should proceed to the next
-    preflight stage, which will fail on the invalid RPC URL — that is fine;
-    we just need to confirm the amount-missing guard does not fire here).
-    """
+def test_redeem_standard_ctf_refuses_unconditionally(monkeypatch: pytest.MonkeyPatch) -> None:
+    """adapter.redeem(neg_risk=False) also raises REDEEM_SUBMISSION_FORBIDDEN —
+    no path (negRisk or standard CTF) reaches construction or broadcast."""
     from src.venue.polymarket_v2_adapter import (
         AUTONOMOUS_REDEEM_ENABLED_ENV,
         PolymarketV2Adapter,
     )
 
+    err = _restore_real_redeem_guard(monkeypatch)
     monkeypatch.setenv(AUTONOMOUS_REDEEM_ENABLED_ENV, "1")
 
     adapter = PolymarketV2Adapter(
@@ -222,12 +242,10 @@ def test_redeem_standard_ctf_does_not_require_amount(monkeypatch: pytest.MonkeyP
         polygon_rpc_url="https://example.invalid/rpc",
         signer_key="0x" + "11" * 32,
     )
-    result = adapter.redeem(
-        KARACHI_CONDITION_ID,
-        index_sets=[2],
-        neg_risk=False,
-        amount_per_slot=None,
-    )
-    # Must NOT be the negRisk-missing errorCode — that would mean the guard
-    # incorrectly fired on the standard CTF path.
-    assert result["errorCode"] != "REDEEM_NEGRISK_AMOUNT_MISSING", result
+    with pytest.raises(err, match="REDEEM_SUBMISSION_FORBIDDEN"):
+        adapter.redeem(
+            KARACHI_CONDITION_ID,
+            index_sets=[2],
+            neg_risk=False,
+            amount_per_slot=None,
+        )

@@ -70,11 +70,12 @@ def _extract_block(gate_anchor: str, broadcast_anchor: str) -> list[str]:
     return _LINES[gate_idx:broadcast_idx]
 
 
-def _eoa_block() -> list[str]:
-    return _extract_block(
-        "# ── Dry-run gate (EOA path",
-        "# ── Broadcast",
-    )
+# NOTE (2026-06-12, operator law 2026-06-10 — redeem submission FORBIDDEN):
+# the EOA autonomous-broadcast path (and its dry-run gate) was DELETED from
+# redeem() along with the rest of the broadcast body. There is no EOA dry-run
+# block to scan anymore, so the EOA branch was removed from these antibodies.
+# The SAFE / NEGRISK helpers are retained (dead production code) and their
+# dry-run no-raw-tx-leak source contract is still pinned below.
 
 
 def _safe_block() -> list[str]:
@@ -165,8 +166,8 @@ def _method_body(method_name: str) -> list[str]:
     return body
 
 
-# Pre-extract dry-run blocks for all three branches (module-level for parametrize)
-_EOA_BLOCK = _eoa_block()
+# Pre-extract dry-run blocks for the retained SAFE + NEGRISK branches
+# (module-level for parametrize). The EOA branch was deleted (operator law).
 _SAFE_BLOCK = _safe_block()
 _NEGRISK_BLOCK = _negrisk_block()
 
@@ -180,7 +181,6 @@ class TestT1_FingerprintPresentNoRawTxHexInReturn:
     expose raw_tx_hex as a dict key in the return statement."""
 
     @pytest.mark.parametrize("branch,block", [
-        ("EOA", _EOA_BLOCK),
         ("SAFE", _SAFE_BLOCK),
         ("NEGRISK", _NEGRISK_BLOCK),
     ])
@@ -191,7 +191,6 @@ class TestT1_FingerprintPresentNoRawTxHexInReturn:
         )
 
     @pytest.mark.parametrize("branch,block", [
-        ("EOA", _EOA_BLOCK),
         ("SAFE", _SAFE_BLOCK),
         ("NEGRISK", _NEGRISK_BLOCK),
     ])
@@ -221,7 +220,6 @@ class TestT2_NoRawHexInLogArgs:
     """Log format strings in dry-run blocks must not have %s paired with raw_hex."""
 
     @pytest.mark.parametrize("branch,block", [
-        ("EOA", _EOA_BLOCK),
         ("SAFE", _SAFE_BLOCK),
         ("NEGRISK", _NEGRISK_BLOCK),
     ])
@@ -240,7 +238,6 @@ class TestT2_NoRawHexInLogArgs:
         )
 
     @pytest.mark.parametrize("branch,block", [
-        ("EOA", _EOA_BLOCK),
         ("SAFE", _SAFE_BLOCK),
         ("NEGRISK", _NEGRISK_BLOCK),
     ])
@@ -263,7 +260,6 @@ class TestT3_NoRawTxHexInReturnConstruction:
     even as a substring in dict-construction lines."""
 
     @pytest.mark.parametrize("branch,block", [
-        ("EOA", _EOA_BLOCK),
         ("SAFE", _SAFE_BLOCK),
         ("NEGRISK", _NEGRISK_BLOCK),
     ])
@@ -295,7 +291,6 @@ class TestT4_SHA256DerivationPresent:
     )
 
     @pytest.mark.parametrize("branch,block", [
-        ("EOA", _EOA_BLOCK),
         ("SAFE", _SAFE_BLOCK),
         ("NEGRISK", _NEGRISK_BLOCK),
     ])
@@ -322,30 +317,19 @@ class TestT5_BroadcastNotCalledDuringDryRun:
     This is a static structural test — no fixture required.
     """
 
-    def test_eoa_return_before_broadcast(self):
+    def test_eoa_broadcast_path_deleted(self):
+        """Operator law 2026-06-10 (redeem submission FORBIDDEN): the redeem()
+        entry point no longer contains ANY broadcast call. The old EOA dry-run
+        ordering antibody is replaced by the stronger contract that the broadcast
+        line does not exist in redeem() at all."""
         body = _redeem_body()
-        return_in_dry_run_idx = None
-        broadcast_idx = None
-        in_dry_run = False
-        for i, line in enumerate(body):
-            if "_eoa_dry_run" in line or "if _eoa_dry_run:" in line:
-                in_dry_run = True
-            if in_dry_run and re.search(r"\breturn\s*\{", line):
-                return_in_dry_run_idx = i
-                in_dry_run = False  # once we find the return, gate is done
-            if '"eth_sendRawTransaction"' in line and return_in_dry_run_idx is not None:
-                broadcast_idx = i
-                break
-
-        assert return_in_dry_run_idx is not None, (
-            "EOA dry-run block: could not find return statement inside `if _eoa_dry_run:` block"
+        joined = "\n".join(body)
+        assert '"eth_sendRawTransaction"' not in joined, (
+            "redeem() body must contain NO eth_sendRawTransaction call — the "
+            "broadcast path was deleted (operator law 2026-06-10)"
         )
-        assert broadcast_idx is not None, (
-            "EOA path: could not find eth_sendRawTransaction call after dry-run block"
-        )
-        assert return_in_dry_run_idx < broadcast_idx, (
-            "EOA dry-run return must appear BEFORE eth_sendRawTransaction broadcast call. "
-            f"return at body line {return_in_dry_run_idx}, broadcast at {broadcast_idx}"
+        assert "REDEEM_SUBMISSION_FORBIDDEN" in joined or "assert_redeem_submission_allowed" in joined, (
+            "redeem() must route through the unconditional submission-forbidden guard"
         )
 
     @pytest.mark.parametrize("branch,func_body_fn,gate_marker", [

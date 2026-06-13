@@ -373,6 +373,81 @@ def _track_belief_staleness(pos: Position) -> None:
         )
 
 
+def _position_is_replacement_authority(pos: Position) -> bool:
+    """True when the position was ENTERED under the replacement-chain belief
+    authority (``probability_authority='replacement_0_1'``).
+
+    Discriminator: replacement-chain (edli) entries carry an ``edli``-prefixed
+    ``trade_id`` — the established codebase convention (portfolio._is_open_edli_
+    entry_position_row, trade_id.startswith("edli")). Pre-replacement (legacy)
+    inventory has non-edli trade_ids and may still use the legacy refresh path.
+    A position with no trade_id is treated as NON-replacement (fail-open to the
+    legacy path) so this gate never strands a genuinely-legacy holding.
+    """
+    trade_id = str(getattr(pos, "trade_id", "") or "")
+    return trade_id.startswith("edli")
+
+
+def _enqueue_single_family_belief_reseed_failsoft(
+    *, city: str, target_date: str, metric: str
+) -> dict[str, object] | None:
+    """Fail-soft single-family replacement-posterior re-materialization trigger.
+
+    Called when a replacement-authority held position finds its belief
+    stale/missing (BELIEF_AUTHORITY_FAULT): re-materialize THAT family's
+    posterior onto the freshest materializable cycle so the exit organ regains a
+    fresh same-authority belief next cycle, instead of papering over the fault
+    with a cross-era legacy substitution (regime law U1/U2, 2026-06-12).
+
+    Reuses the SAME lane the reactor/poll uses (forecast_db/seed_dir/raw_manifest_dir
+    from the shadow-materialization queue config + the shared idempotency marker),
+    so a family already enqueued elsewhere never double-enqueues. NEVER raises into
+    the monitor: any error (config missing, DB lock, import failure) is logged and
+    a status dict (or None) is returned.
+    """
+    try:
+        from pathlib import Path
+
+        from src.data.replacement_forecast_production import (
+            _replacement_forecast_shadow_materialization_queue_config,
+        )
+        from src.data.replacement_cycle_advance_trigger import (
+            enqueue_single_family_cycle_advance_reseed,
+        )
+
+        cfg = _replacement_forecast_shadow_materialization_queue_config()
+        forecast_db = cfg.get("forecast_db")
+        seed_dir = cfg.get("seed_dir")
+        raw_manifest_dir = cfg.get("raw_manifest_dir")
+        if forecast_db is None or seed_dir is None or raw_manifest_dir is None:
+            logger.info(
+                "monitor belief reseed skipped (lane not configured): %s/%s/%s",
+                city, target_date, metric,
+            )
+            return None
+        report = enqueue_single_family_cycle_advance_reseed(
+            forecast_db=Path(str(forecast_db)),
+            seed_dir=Path(str(seed_dir)),
+            raw_manifest_dir=Path(str(raw_manifest_dir)),
+            city=city,
+            target_date=target_date,
+            metric=metric,
+        )
+        logger.info(
+            "monitor belief reseed enqueued city=%s target_date=%s metric=%s status=%s enqueued=%s",
+            city, target_date, metric,
+            report.get("status") if isinstance(report, dict) else None,
+            report.get("enqueued") if isinstance(report, dict) else None,
+        )
+        return report
+    except Exception as exc:  # noqa: BLE001 — reseed MUST NOT crash the monitor
+        logger.warning(
+            "monitor belief reseed FAILED (fail-soft) city=%s target_date=%s metric=%s exc=%s",
+            city, target_date, metric, exc,
+        )
+        return None
+
+
 def _record_nowcast_write_success() -> None:
     global _nowcast_consecutive_write_failures
     _nowcast_consecutive_write_failures = 0
@@ -2320,6 +2395,42 @@ def monitor_probability_refresh(
         )
     else:
         _append_monitor_validation(pos, "replacement_posterior_missing")
+
+    # Determine whether the fallthrough would use the day0 nowcast lane (a
+    # DISTINCT settlement-day observation authority that MUST remain) or the
+    # legacy ENS forecast-belief path (the CROSS-ERA substitution the regime law
+    # U1/U2 retires for replacement-managed positions).
+    _would_use_day0_lane = (
+        pos.entry_method == EntryMethod.DAY0_OBSERVATION.value
+        or (
+            _position_state_value(pos) == "day0_window"
+            and str(getattr(city, "settlement_source_type", "") or "") == "wu_icao"
+        )
+    )
+
+    # BELIEF-AUTHORITY FAULT (regime law U1/U2, 2026-06-12): a replacement-chain
+    # position whose replacement belief is stale/missing must NOT have the gap
+    # papered over by the legacy ENS forecast belief (the Denver 2026-06-12
+    # incident: stale 0.79 masked as fresh while the market said 0.22). For these
+    # positions we (a) mark belief NOT-fresh, (b) emit BELIEF_AUTHORITY_FAULT,
+    # (c) fire a fail-soft single-family reseed so the SAME authority refreshes
+    # next cycle — and return WITHOUT the cross-era substitution. The day0
+    # nowcast lane is exempt (it is settlement-day observation, not a forecast-
+    # belief substitution). Legacy-entered (non-edli) positions keep the legacy
+    # path, clearly branded.
+    if _position_is_replacement_authority(pos) and not _would_use_day0_lane:
+        _set_monitor_probability_fresh(pos, False)
+        _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
+        _append_monitor_validation(pos, "legacy_belief_substitution_suppressed")
+        _enqueue_single_family_belief_reseed_failsoft(
+            city=str(pos.city),
+            target_date=str(pos.target_date),
+            metric=resolve_position_metric(pos)[0],
+        )
+        # Return the stored entry-time posterior as the value carrier but with
+        # is_fresh=False so refresh_position records NaN current_p_posterior and
+        # the exit organ treats belief as unavailable (never a stale-as-fresh).
+        return pos.p_posterior, pos, False
 
     registry = {
         EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,

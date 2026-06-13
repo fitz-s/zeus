@@ -1,5 +1,6 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-06-12 (external review FINDING 2: per-family materializable-cycle
+#   gate + typed leg-artifact-missing reason + loud held-family read failure)
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
 #   docs/authority/regime_unification_2026-06-12.md §U2 + docs/evidence/freshness/
 #   2026-06-12_forecast_freshness_truth.md §Q4(b)). The U2 root fix's first half: re-materialize a
@@ -66,6 +67,16 @@ def _parse_cycle(value: object) -> datetime | None:
         return None
 
 
+def consumed_cycle_dt(value: str) -> datetime:
+    """Parse a consumed/target cycle ISO string back to a UTC datetime for comparison. The verdict
+    serializes cycles to ISO; the family-scope gate compares against them, so we round-trip here.
+    Raises on an unparseable value (the verdict produced it, so it must parse — fail-loud)."""
+    parsed = _parse_cycle(value)
+    if parsed is None:
+        raise ValueError(f"unparseable consumed cycle: {value!r}")
+    return parsed
+
+
 def _per_leg_max_cycle(conn: sqlite3.Connection, source_id: str) -> datetime | None:
     """MAX(source_cycle_time) ingested for one raw-artifact leg (None when absent). Fail-soft."""
     try:
@@ -93,6 +104,63 @@ def freshest_materializable_cycle(conn: sqlite3.Connection) -> datetime | None:
     if aifs is None or anchor is None:
         return None
     return min(aifs, anchor)
+
+
+def family_materializable_cycle(
+    manifests,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    expected_identity,
+    latest_manifest,
+) -> tuple[datetime | None, tuple[tuple[str, str], ...]]:
+    """FINDING 2 (external review 2026-06-12) — the materializable cycle AT FAMILY SCOPE.
+
+    ``freshest_materializable_cycle`` is a UNIVERSE-wide ceiling: MIN over both legs of the GLOBAL
+    MAX(source_cycle_time). That global max can claim a cycle is materializable when, for a SPECIFIC
+    (city, target_date, metric), only ONE leg's raw artifact exists at that cycle (AIFS 12Z for city
+    A while OM9 12Z exists only for city B). Acting on the global ceiling produces a FALSE advance
+    signal for the family that lacks a leg, then the seed build silently fails (manifest_missing).
+
+    This is the SAME authority, narrowed to a scope: a cycle is materializable for THIS family iff
+    BOTH required legs (AIFS-sampled + OM9 anchor) have a manifest for THIS (city, target_date). The
+    family-scoped cycle = MIN(latest_manifest(aifs).cycle, latest_manifest(anchor).cycle). It does
+    NOT create a second cycle-selection authority — the verdict still compares the consumed cycle to
+    this family cycle, exactly as the universe variant does, just with per-family leg presence.
+
+    Returns (cycle, missing_legs). cycle is None when EITHER leg's manifest is absent for the
+    family; missing_legs is the tuple of (role, source_id) legs that were absent (empty on success),
+    so the caller can record a typed CYCLE_LEG_ARTIFACT_MISSING reason naming the exact gap.
+    """
+    expected = expected_identity(metric)
+    legs = (
+        ("aifs_sampled_2t", expected["aifs_sampled_2t"]),
+        ("openmeteo_ifs9_anchor", expected["openmeteo_ifs9_anchor"]),
+    )
+    leg_cycles: list[datetime] = []
+    missing: list[tuple[str, str]] = []
+    for role, identity in legs:
+        man = latest_manifest(
+            manifests,
+            source_id=identity.source_id,
+            data_version=identity.data_version,
+            city=city,
+            target_date=target_date,
+        )
+        if man is None:
+            missing.append((role, str(identity.source_id)))
+            continue
+        cyc = man.source_cycle_time
+        if not isinstance(cyc, datetime):
+            cyc = _parse_cycle(cyc)
+        if cyc is None:
+            missing.append((role, str(identity.source_id)))
+            continue
+        leg_cycles.append(cyc.astimezone(UTC) if cyc.tzinfo else cyc.replace(tzinfo=UTC))
+    if missing or not leg_cycles:
+        return None, tuple(missing)
+    return min(leg_cycles), ()
 
 
 def _latest_posterior_consumed_cycle(
@@ -166,7 +234,19 @@ def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, s
               AND temperature_metric IS NOT NULL
             """
         ).fetchall()
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # FINDING 2 / MEDIUM (external review 2026-06-12): a held-family read FAILURE silently
+        # dropped held-position priority — the families whose stale belief most directly risks
+        # money would be processed as if NO position were held (nearest-target-first only),
+        # losing their re-materialization priority WITHOUT any signal. The poll must NOT crash on
+        # this (prioritization is best-effort), but the consequence must be LOUD so the dropped
+        # priority is diagnosable, not invisible.
+        _LOG.error(
+            "cycle-advance HELD-position read FAILED — held families lose re-materialization "
+            "PRIORITY this tick (processed as non-held, nearest-target-first only); stale held "
+            "belief may not be refreshed first: %s",
+            exc,
+        )
         return set()
     held: set[tuple[str, str, str]] = set()
     for r in rows:
@@ -211,17 +291,25 @@ def _record_enqueue(
     consumed_cycle_iso: str,
     target_cycle_iso: str,
     held_position: bool,
-    seed_file: str,
+    seed_file: str | None,
+    reason: str | None = None,
 ) -> bool:
     """Write the idempotency marker. Returns True iff this call inserted the row (False = a
-    concurrent/prior enqueue already recorded it, via the UNIQUE index INSERT OR IGNORE)."""
+    concurrent/prior enqueue already recorded it, via the UNIQUE index INSERT OR IGNORE).
+
+    ``reason`` carries a typed status for the row. None for a normal successful enqueue (the
+    presence of seed_file is the success signal); a typed string (FINDING 2) when the row instead
+    records a per-family leg-artifact gap (CYCLE_LEG_ARTIFACT_MISSING:<source>:<cycle>) so the
+    blocked family is VISIBLE in the queue rather than an invisible manifest_missing skip. Both
+    share the SAME UNIQUE(scope, target_cycle) bound, so a gap row and a later success row for the
+    same (scope, target-cycle) cannot both exist — the gap heals into the success on the next tick."""
     before = conn.total_changes
     conn.execute(
         """
         INSERT OR IGNORE INTO cycle_advance_enqueues
             (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
-             held_position, seed_file)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             held_position, seed_file, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             datetime.now(tz=UTC).isoformat(),
@@ -232,6 +320,7 @@ def _record_enqueue(
             target_cycle_iso,
             1 if held_position else 0,
             seed_file,
+            reason,
         ),
     )
     return conn.total_changes > before
@@ -293,6 +382,7 @@ def enqueue_cycle_advance_reseeds(
         "held_seeds_enqueued": 0,
         "already_enqueued": 0,
         "manifest_missing": 0,
+        "leg_artifact_missing": 0,
         "day0_skipped": 0,
         "enqueued": [],
     }
@@ -373,6 +463,53 @@ def enqueue_cycle_advance_reseeds(
                 report["held_advances_detected"] = int(report["held_advances_detected"]) + 1
             consumed_cycle_iso = str(verdict["consumed_cycle"])
             target_cycle_iso = str(verdict["target_cycle"])
+            # FINDING 2 (external review 2026-06-12): the verdict above used the UNIVERSE-wide
+            # freshest cycle, which can be a FALSE advance signal when a leg's raw artifact is
+            # missing for THIS family at that cycle. Re-check materializability AT FAMILY SCOPE.
+            try:
+                family_cycle, missing_legs = family_materializable_cycle(
+                    manifests,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    expected_identity=expected_replacement_dependency_identity_by_role,
+                    latest_manifest=_latest_manifest,
+                )
+            except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
+                _LOG.debug("cycle-advance family-scope check failed for %s/%s/%s: %s", city, target_date, metric, exc)
+                continue
+            if missing_legs:
+                # A held/active family lacks one leg's raw artifact at the freshest cycle. Do NOT
+                # silently increment manifest_missing — record a typed, idempotent reason row so the
+                # ALWAYS-DECIDABLE gap is VISIBLE in the queue and a fetch-repair lane can act on it.
+                reason = "CYCLE_LEG_ARTIFACT_MISSING:" + ",".join(
+                    f"{src}@{target_cycle_iso}" for _role, src in missing_legs
+                )
+                report["leg_artifact_missing"] = int(report.get("leg_artifact_missing", 0)) + 1
+                _LOG.error(
+                    "cycle-advance LEG ARTIFACT MISSING for %s/%s/%s at cycle %s — held=%s family "
+                    "cannot advance (missing legs: %s); recording typed gap (no silent skip)",
+                    city, target_date, metric, target_cycle_iso, is_held,
+                    [src for _role, src in missing_legs],
+                )
+                if not _already_enqueued(
+                    conn, city=city, target_date=target_date, metric=metric,
+                    target_cycle_iso=target_cycle_iso,
+                ):
+                    _record_enqueue(
+                        conn, city=city, target_date=target_date, metric=metric,
+                        consumed_cycle_iso=consumed_cycle_iso, target_cycle_iso=target_cycle_iso,
+                        held_position=is_held, seed_file=None, reason=reason,
+                    )
+                    conn.commit()
+                continue
+            # Both legs present for the family: the family-scoped cycle is the authoritative target.
+            # If it is NOT strictly newer than the consumed cycle, the global verdict was a false
+            # positive for this family (the fresher universe cycle was carried by OTHER cities) —
+            # honest no-op, not an advance.
+            if family_cycle is None or family_cycle <= consumed_cycle_dt(consumed_cycle_iso):
+                continue
+            target_cycle_iso = family_cycle.isoformat()
             if _already_enqueued(
                 conn, city=city, target_date=target_date, metric=metric, target_cycle_iso=target_cycle_iso
             ):
@@ -525,6 +662,48 @@ def enqueue_single_family_cycle_advance_reseed(
             return report
         consumed_cycle_iso = str(verdict["consumed_cycle"])
         target_cycle_iso = str(verdict["target_cycle"])
+        # FINDING 2 (external review 2026-06-12): re-check at FAMILY SCOPE. The verdict used the
+        # universe-wide freshest cycle, which can falsely claim advance when a leg's raw artifact is
+        # missing for THIS family. Same single authority, narrowed to scope.
+        family_cycle, missing_legs = family_materializable_cycle(
+            manifests,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            expected_identity=expected_replacement_dependency_identity_by_role,
+            latest_manifest=_latest_manifest,
+        )
+        if missing_legs:
+            # Record a typed, idempotent gap row instead of a silent manifest_missing skip.
+            reason = "CYCLE_LEG_ARTIFACT_MISSING:" + ",".join(
+                f"{src}@{target_cycle_iso}" for _role, src in missing_legs
+            )
+            _LOG.error(
+                "single-family cycle-advance LEG ARTIFACT MISSING for %s/%s/%s at cycle %s "
+                "(missing legs: %s) — recording typed gap (no silent skip)",
+                city, target_date, metric, target_cycle_iso, [src for _role, src in missing_legs],
+            )
+            if not _already_enqueued(
+                conn, city=city, target_date=target_date, metric=metric, target_cycle_iso=target_cycle_iso
+            ):
+                _record_enqueue(
+                    conn, city=city, target_date=target_date, metric=metric,
+                    consumed_cycle_iso=consumed_cycle_iso, target_cycle_iso=target_cycle_iso,
+                    held_position=False, seed_file=None, reason=reason,
+                )
+                conn.commit()
+            report["status"] = "CYCLE_ADVANCE_LEG_ARTIFACT_MISSING"
+            report["reason"] = reason
+            report["consumed_cycle"] = consumed_cycle_iso
+            report["target_cycle"] = target_cycle_iso
+            return report
+        if family_cycle is None or family_cycle <= consumed_cycle_dt(consumed_cycle_iso):
+            # Global verdict was a false positive for this family (fresher cycle carried by other
+            # cities). Honest no-op.
+            report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
+            report["consumed_cycle"] = consumed_cycle_iso
+            return report
+        target_cycle_iso = family_cycle.isoformat()
         if _already_enqueued(
             conn, city=city, target_date=target_date, metric=metric, target_cycle_iso=target_cycle_iso
         ):

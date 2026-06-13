@@ -34,7 +34,9 @@ def test_live_canary_runtime_requires_operator_unshadow_and_submit_guards():
     assert edli["enabled"] is True
     assert edli["event_writer_enabled"] is True
     assert edli["forecast_snapshot_trigger_enabled"] is True
-    assert edli["edli_live_scope"] == "day0_shadow"
+    # Day0→live promotion 2026-06-12 (task #49): scope flipped day0_shadow →
+    # forecast_plus_day0 once receipt-q persistence + obs fast lane landed.
+    assert edli["edli_live_scope"] == "forecast_plus_day0"
     assert edli["day0_extreme_trigger_enabled"] is True
     assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is True

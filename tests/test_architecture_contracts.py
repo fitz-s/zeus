@@ -510,7 +510,13 @@ def _canonical_event() -> dict:
 
 
 def _canonical_projection() -> dict:
-    return {
+    # Derive the full key set from the canonical column tuple (None default),
+    # then override load-bearing values — column additions (entry_ci_width,
+    # K3 exit_retry_count/next_exit_retry_at) can never rot this fixture again.
+    from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
+
+    payload = {column: None for column in CANONICAL_POSITION_CURRENT_COLUMNS}
+    payload.update({
         "position_id": "pos-1",
         "phase": "pending_entry",
         "trade_id": "trade-1",
@@ -564,7 +570,9 @@ def _canonical_projection() -> dict:
         "settlement_price": None,
         "settled_at": None,
         "exit_reason": None,
-    }
+        "exit_retry_count": 0,
+    })
+    return payload
 
 
 def test_position_events_direct_insert_requires_explicit_env():

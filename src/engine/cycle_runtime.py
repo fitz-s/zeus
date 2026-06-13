@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-23
+# Last reused/audited: 2026-06-13
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -3526,7 +3526,12 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             if _position_state_value(pos) == "day0_window" and city is not None:
                 try:
                     from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
-                    _hard_fact = evaluate_hard_fact_exit(position=pos, city=city, now=deps._utcnow())
+                    # Pass conn as world_conn so the METAR kill-memo cold-start
+                    # recovery does not open per-city independent world connections
+                    # (connection-burst antibody 2026-06-13).
+                    _hard_fact = evaluate_hard_fact_exit(
+                        position=pos, city=city, now=deps._utcnow(), world_conn=conn
+                    )
                 except Exception as _hf_exc:  # noqa: BLE001 — lane must never break the monitor
                     deps.logger.warning(
                         "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc

@@ -1,0 +1,4727 @@
+Verdict
+
+Confidence: high on the statistical direction and formulas; medium-high on finite-sample calibration details because Claude Code must verify actual design rank, era balance, provider coverage, posterior covariance quality, and book-history fit locally.
+
+There were no URLs under a “Source to review” section in the prompt. I therefore treated the linked-source requirement as applying to standard literature. I inspected primary/standard references for Wilks likelihood-ratio asymptotics, boundary LRTs, hierarchical Bayes shrinkage, FDR dependence, Bayesian multiple-comparison decision rules, Ledoit-Wolf shrinkage, Kelly log-utility, state-space/Kalman filtering, measurement-error likelihoods, and Avellaneda-Stoikov-style Poisson limit-order arrivals. Key supporting URLs are cited inline where used.
+
+Top findings
+
+BLOCKER — Q3 / multiplicity policy / “BH over 0-or-1 p-values”
+The current BH procedure is mathematically vacuous: with p-values in {0,1}, every 0 passes and every 1 fails, so multiplicity correction has no operational effect. Worse, the mutually exclusive bin structure violates the positive-dependence condition under which ordinary BH is justified; BY would be valid under arbitrary dependence but is still solving the wrong problem for bankroll growth. Fix: replace BH with posterior expected-log-utility thresholding plus hierarchical, correlation-aware edge shrinkage.
+
+HIGH — Q1 / era-mixed settled history / semantic drift
+Full pooling across pipeline eras is not defensible unless an explicit era-interaction test and predictive check fail to find practically meaningful drift. The default should be EB partial pooling on transformed parameters, not newest-only and not naive all-history pooling. Fix: fit pooled/free-era/EB models, use LRT or score tests on fixed era effects, and use a boundary-aware or bootstrap test for the era-variance component.
+
+HIGH — Q2 / provider de-bias and fusion weights
+Sequential “de-bias then inverse residual variance weight” is consistent only in the asymptotic no-drift/no-confounding case. In current conditions, provider bias error inflates residual covariance and distorts fusion weights; omitted provider×location/era structure can create persistent center bias. Fix: estimate provider, location, and era effects jointly, then derive GLS/BLUE fusion weights from the joint residual covariance.
+
+MEDIUM-HIGH — Q4 / maker-vs-taker execution
+Resting is not the conservative default for a real positive edge when fill and decay rates are uncertain. Under max-min reasoning, maker value can collapse to zero as fill intensity goes to zero or edge decay becomes fast; crossing locks the edge now. Fix: default to taker for robust positive-edge candidates; rest only when conservative posterior lower bounds on fill/decay still make maker value exceed taker value.
+
+Q1 — Fitting on era-mixed settled history
+Q1.1 Formal model and era-effect test
+
+Let row i have location ℓ_i, era/data-version e_i ∈ {1,…,E}, forecast center μ_i, spread σ_i, observed settled bin c_i, and bin interval B_{ic_i}=[L_{ic_i}, U_{ic_i}).
+
+Work on an unconstrained transformed parameter scale:
+
+ϕ
+e
+	​
+
+=(b
+e
+	​
+
+, logk
+e
+	​
+
+, τ
+e
+	​
+
+, logitα
+e
+	​
+
+, …)∈R
+p
+,
+
+where b_e is era-level center offset, k_e spread scale, τ_e tail-family parameterization, and α_e model-market blend. Include location effects separately, for example g_ℓ.
+
+For a calibrated CDF F
+i
+	​
+
+(t;ϕ
+e
+	​
+
+,g
+ℓ
+i
+	​
+
+	​
+
+),
+
+π
+ij
+	​
+
+(ϕ
+e
+	​
+
+,g
+ℓ
+i
+	​
+
+	​
+
+)=P
+θ
+	​
+
+(T
+i
+	​
+
+∈B
+ij
+	​
+
+∣μ
+i
+	​
+
+,σ
+i
+	​
+
+,ℓ
+i
+	​
+
+,e
+i
+	​
+
+)=F
+i
+	​
+
+(U
+ij
+	​
+
+;ϕ
+e
+	​
+
+,g
+ℓ
+i
+	​
+
+	​
+
+)−F
+i
+	​
+
+(L
+ij
+	​
+
+;ϕ
+e
+	​
+
+,g
+ℓ
+i
+	​
+
+	​
+
+).
+
+The interval-censored categorical log likelihood is
+
+ℓ(ϕ,g)=
+i=1
+∑
+n
+	​
+
+logπ
+i,c
+i
+	​
+
+	​
+
+(ϕ
+e
+i
+	​
+
+	​
+
+,g
+ℓ
+i
+	​
+
+	​
+
+).
+
+If row weights are used for sampling or exposure reasons, replace each term by w
+i
+	​
+
+logπ
+i,c
+i
+	​
+
+	​
+
+, but do not use arbitrary authority weights for QUARANTINED labels; see Q1.3.
+
+Fixed-effect era test
+
+Parameterize
+
+ϕ
+e
+	​
+
+=ϕ
+0
+	​
+
++δ
+e
+	​
+
+,δ
+1
+	​
+
+=0,
+
+or use a sum-to-zero contrast. The no-era-effect null is
+
+H
+0
+	​
+
+:δ
+2
+	​
+
+=⋯=δ
+E
+	​
+
+=0.
+
+Let 
+θ
+^
+0
+	​
+
+ be the pooled MLE and 
+θ
+^
+1
+	​
+
+ the free-era MLE. The likelihood-ratio statistic is
+
+Λ=2{ℓ(
+θ
+^
+1
+	​
+
+)−ℓ(
+θ
+^
+0
+	​
+
+)}.
+	​
+
+
+Under regularity, interior transformed parameters, fixed E,p, and n
+e
+	​
+
+→∞,
+
+Λ
+⟶
+d
+	​
+
+χ
+d
+2
+	​
+
+,d=(E−1)p
+	​
+
+
+plus any additional era-interaction degrees of freedom. This is Wilks’ theorem; the classic source is Wilks (1938), https://projecteuclid.org/journals/annals-of-mathematical-statistics/volume-9/issue-1/The-Large-Sample-Distribution-of-the-Likelihood-Ratio-for-Testing/10.1214/aoms/1177732360.full
+. 
+Project Euclid
+
+The score-test equivalent avoids fitting the free-era model. Let ψ be pooled nuisance parameters and δ era deviations. At (
+ψ
+^
+	​
+
+0
+	​
+
+,δ=0),
+
+U
+δ
+	​
+
+=
+∂δ
+∂ℓ
+	​
+
+,I
+δ∣ψ
+	​
+
+=I
+δδ
+	​
+
+−I
+δψ
+	​
+
+I
+ψψ
+−1
+	​
+
+I
+ψδ
+	​
+
+.
+
+Then
+
+Q
+score
+	​
+
+=U
+δ
+⊤
+	​
+
+I
+δ∣ψ
+−1
+	​
+
+U
+δ
+	​
+
+⟶
+d
+	​
+
+χ
+d
+2
+	​
+
+.
+	​
+
+
+If testing a random era-variance component Σ
+era
+	​
+
+=0, the null lies on the boundary of the parameter space, so the naive χ
+2
+ reference is wrong. Use a Self-Liang mixture/chi-bar-square approximation or, preferably here, a parametric bootstrap under the pooled model because E is small and the categorical/tail likelihood can be nonregular. Self and Liang’s boundary LRT result is the relevant standard reference, https://www.stat.cmu.edu/~brian/763-2015/week06/papers/self-liang-1987.pdf
+. 
+CMU Statistics & Data Science
+
+Decision rule: pooling vs partial pooling
+
+Use this rule in production:
+
+Use full pooling only if both statistical and practical era effects are absent. Otherwise use EB partial pooling.
+	​
+
+
+Concretely:
+
+Fit pooled, free-era, and EB partial-pooling models.
+
+Run the fixed-effect LRT/score test for era interactions.
+
+Run a boundary-aware/bootstrap test for Σ
+era
+	​
+
+=0.
+
+Compute decision-scale era impact:
+
+Δ
+π,e
+	​
+
+=
+traded rows/bins
+max
+	​
+
+	​
+
+π
+ij
+	​
+
+(
+ϕ
+^
+	​
+
+e
+	​
+
+)−π
+ij
+	​
+
+(
+ϕ
+^
+	​
+
+0
+	​
+
+)
+	​
+
+.
+
+Full pool only if:
+
+p
+era
+	​
+
+≥0.10andUCB
+95
+	​
+
+(Δ
+π,e
+	​
+
+)<ε
+pool
+	​
+
+for every era
+
+where ε
+pool
+	​
+
+ should be no larger than about half the minimum actionable edge threshold.
+
+Otherwise use partial pooling. Use fully separate newest-era MLE only when the newest-era CI-width license below passes.
+
+Tie-breaker: partial pooling wins over newest-only because it is consistent for the newest era as newest-era data grow, but has lower variance when newest-era n≈300–500.
+
+Q1.2 EB partial-pooling estimator
+
+Use a two-stage Laplace/normal approximation. For each era, compute an era-specific MLE and information matrix:
+
+ϕ
+^
+	​
+
+e
+	​
+
+≈N(ϕ
+e
+	​
+
+,V
+e
+	​
+
+),V
+e
+	​
+
+=I
+e
+	​
+
+(
+ϕ
+^
+	​
+
+e
+	​
+
+)
+−1
+.
+
+Hierarchical prior:
+
+ϕ
+e
+	​
+
+∣ϕ
+0
+	​
+
+,Σ
+era
+	​
+
+∼N(ϕ
+0
+	​
+
+,Σ
+era
+	​
+
+).
+	​
+
+
+The marginal EB likelihood is
+
+ℓ
+EB
+	​
+
+(ϕ
+0
+	​
+
+,Σ)=−
+2
+1
+	​
+
+e=1
+∑
+E
+	​
+
+[log∣V
+e
+	​
+
++Σ∣+(
+ϕ
+^
+	​
+
+e
+	​
+
+−ϕ
+0
+	​
+
+)
+⊤
+(V
+e
+	​
+
++Σ)
+−1
+(
+ϕ
+^
+	​
+
+e
+	​
+
+−ϕ
+0
+	​
+
+)]+C.
+	​
+
+
+For fixed Σ,
+
+ϕ
+^
+	​
+
+0
+	​
+
+(Σ)={
+e
+∑
+	​
+
+(V
+e
+	​
+
++Σ)
+−1
+}
+−1
+e
+∑
+	​
+
+(V
+e
+	​
+
++Σ)
+−1
+ϕ
+^
+	​
+
+e
+	​
+
+.
+	​
+
+
+Fit Σ by maximizing the marginal likelihood above, preferably with a structured covariance because E is small: diagonal, block-diagonal by parameter group, or scalar τ
+2
+I. The normal hierarchical shrinkage form is the Lindley-Smith / empirical-Bayes linear-model structure; see Lindley and Smith, https://www.ma.imperial.ac.uk/~das01/MyWeb/SCBI/Papers/LindleySmith.pdf
+. 
+Imperial College London
+
+Posterior era estimate:
+
+ϕ
+~
+	​
+
+e
+	​
+
+=
+ϕ
+^
+	​
+
+0
+	​
+
++Σ(Σ+V
+e
+	​
+
+)
+−1
+(
+ϕ
+^
+	​
+
+e
+	​
+
+−
+ϕ
+^
+	​
+
+0
+	​
+
+).
+	​
+
+
+Posterior covariance:
+
+V
+~
+e
+	​
+
+=(V
+e
+−1
+	​
+
++Σ
+−1
+)
+−1
+.
+	​
+
+Newest-era asymptotics
+
+Let e* be the newest era. If n
+e∗
+	​
+
+→∞, then V
+e∗
+	​
+
+=O(n
+e∗
+−1
+	​
+
+). For any positive definite finite Σ,
+
+Σ(Σ+V
+e∗
+	​
+
+)
+−1
+=I−V
+e∗
+	​
+
+Σ
+−1
++O(∥V
+e∗
+	​
+
+∥
+2
+).
+
+Therefore
+
+ϕ
+~
+	​
+
+e∗
+	​
+
+=
+ϕ
+^
+	​
+
+e∗
+	​
+
++V
+e∗
+	​
+
+Σ
+−1
+(
+ϕ
+^
+	​
+
+0
+	​
+
+−
+ϕ
+^
+	​
+
+e∗
+	​
+
+)+O(∥V
+e∗
+	​
+
+∥
+2
+),
+
+so
+
+ϕ
+~
+	​
+
+e∗
+	​
+
+−
+ϕ
+^
+	​
+
+e∗
+	​
+
+=O
+p
+	​
+
+(n
+e∗
+−1
+	​
+
+)⇒
+ϕ
+~
+	​
+
+e∗
+	​
+
+→
+ϕ
+^
+	​
+
+e∗
+	​
+
+.
+	​
+
+
+If the EB model collapses to 
+Σ
+^
+=0, that is full pooling. Under a fixed nonzero newest-era effect, the fixed-effect LRT has power tending to one as newest-era n grows, so the decision rule above exits full pooling and converges to the newest-era MLE.
+
+Q1.3 QUARANTINED authority rows
+
+Let C
+i
+	​
+
+ be the latent true settled category and O
+i
+	​
+
+ the observed category. Let A
+i
+	​
+
+∈{V,Q} be authority status. The assumption is:
+
+A
+i
+	​
+
+⊥C
+i
+	​
+
+∣X
+i
+	​
+
+
+where X
+i
+	​
+
+ includes location, era, forecast features, and settlement-source covariates. In words: quarantine indicates ambiguity, not directional outcome bias.
+
+Correct treatments
+
+There are exactly two unbiased primary treatments:
+
+Treatment A: exclude QUARANTINED rows, if VERIFIED labels are accurate and A⊥C∣X.
+	​
+
+
+Proof: the verified-row score is S
+i
+	​
+
+(θ)=∂logπ
+i,C
+i
+	​
+
+	​
+
+(θ)/∂θ. At θ
+0
+	​
+
+,
+
+E[S
+i
+	​
+
+(θ
+0
+	​
+
+)∣X
+i
+	​
+
+]=0.
+
+Because A
+i
+	​
+
+⊥C
+i
+	​
+
+∣X
+i
+	​
+
+,
+
+E[1{A
+i
+	​
+
+=V}S
+i
+	​
+
+(θ
+0
+	​
+
+)∣X
+i
+	​
+
+]=P(A
+i
+	​
+
+=V∣X
+i
+	​
+
+)E[S
+i
+	​
+
+(θ
+0
+	​
+
+)∣X
+i
+	​
+
+]=0.
+
+Thus complete-case verified likelihood is unbiased/consistent under positivity P(A=V∣X)>0.
+
+Treatment B: include QUARANTINED rows only through an explicit measurement-error likelihood.
+	​
+
+
+For categorical ambiguity, define a confusion matrix
+
+M
+oc
+(A)
+	​
+
+=P(O=o∣C=c,A).
+
+Then the correct observed-category probability is
+
+π
+~
+io
+(A)
+	​
+
+(θ)=
+c
+∑
+	​
+
+M
+oc
+(A)
+	​
+
+π
+ic
+	​
+
+(θ).
+	​
+
+
+The likelihood contribution is log
+π
+~
+i,O
+i
+	​
+
+(A
+i
+	​
+
+)
+	​
+
+. Its score is unbiased:
+
+E[
+∂θ
+∂
+	​
+
+log
+π
+~
+i,O
+i
+	​
+
+(A
+i
+	​
+
+)
+	​
+
+(θ
+0
+	​
+
+)]=
+o
+∑
+	​
+
+π
+~
+io
+(A
+i
+	​
+
+)
+	​
+
+(θ
+0
+	​
+
+)
+∂θ
+∂
+	​
+
+log
+π
+~
+io
+(A
+i
+	​
+
+)
+	​
+
+(θ
+0
+	​
+
+)=
+o
+∑
+	​
+
+∂θ
+∂
+	​
+
+π
+~
+io
+(A
+i
+	​
+
+)
+	​
+
+(θ
+0
+	​
+
+)=
+∂θ
+∂
+	​
+
+1=0.
+
+For continuous settlement ambiguity, use
+
+Z
+i
+	​
+
+=T
+i
+	​
+
++U
+i
+	​
+
+,U
+i
+	​
+
+∣A
+i
+	​
+
+∼h
+A
+i
+	​
+
+	​
+
+,
+
+and likelihood
+
+p(Z
+i
+	​
+
+=z∣X
+i
+	​
+
+,A
+i
+	​
+
+,θ)=∫h
+A
+i
+	​
+
+	​
+
+(z−t)f
+θ
+	​
+
+(t∣X
+i
+	​
+
+)dt.
+	​
+
+
+For Gaussian f
+θ
+	​
+
+ and Gaussian measurement error, this is exactly “inflated observation variance.” For interval/categorical bins, it is a convolution before binning, not a generic scalar weight. Measurement-error likelihoods are the relevant framework; see Carroll, Ruppert, Stefanski, and Crainiceanu, https://www.taylorfrancis.com/books/mono/10.1201/9781420010138/measurement-error-nonlinear-models-ciprian-crainiceanu-raymond-carroll-leonard-stefanski-david-ruppert
+. 
+Taylor & Francis
+
+What is not unbiased
+
+Naively treating QUARANTINED observed labels as truth with weight 0<w
+Q
+	​
+
+≤1 generally solves
+
+E[w
+Q
+	​
+
+∂θ
+∂
+	​
+
+logπ
+i,O
+i
+	​
+
+	​
+
+(θ)]=0,
+
+but under misclassification,
+
+E[
+∂θ
+∂
+	​
+
+logπ
+i,O
+i
+	​
+
+	​
+
+(θ
+0
+	​
+
+)]=
+o
+∑
+	​
+
+π
+~
+io
+	​
+
+(θ
+0
+	​
+
+)
+∂θ
+∂
+	​
+
+logπ
+io
+	​
+
+(θ
+0
+	​
+
+)
+
+=0
+
+unless M=I or in accidental special cases. Downweighting reduces asymptotic bias magnitude but does not remove it. Weight zero is exclusion; nonzero arbitrary weight is not a measurement-error correction.
+
+Recommendation: primary model excludes QUARANTINED. Secondary sensitivity model includes them only with an estimated confusion/measurement-error model from overlapping settlement sources.
+
+Q1.4 Time-decay weighting versus explicit era dummies
+
+A local-level state-space model
+
+θ
+t
+	​
+
+=θ
+t−1
+	​
+
++η
+t
+	​
+
+,η
+t
+	​
+
+∼N(0,Q),
+θ
+^
+t
+	​
+
+=θ
+t
+	​
+
++ϵ
+t
+	​
+
+,ϵ
+t
+	​
+
+∼N(0,R)
+
+has a steady-state Kalman filter
+
+m
+t
+	​
+
+=m
+t−1
+	​
+
++K(
+θ
+^
+t
+	​
+
+−m
+t−1
+	​
+
+),
+
+which is exponential smoothing with weights K(1−K)
+a
+. Thus w(a)=λ
+a
+ with λ=1−K. State-space/Kalman filtering is the standard formulation; see Harvey, https://books.google.com/books/about/Forecasting_Structural_Time_Series_Model.html?id=Kc6tnRHBwLcC
+. 
+Google Books
+
+Time-decay is sufficient only when drift is genuinely gradual and approximately local-level:
+
+θ
+t+1
+	​
+
+−θ
+t
+	​
+
+ is small, mean-zero, and not tied to known semantic breaks.
+
+It fails for known step changes. Suppose
+
+θ
+t
+	​
+
+={
+θ
+0
+	​
+
+,
+θ
+1
+	​
+
+=θ
+0
+	​
+
++Δ,
+	​
+
+t≤τ,
+t>τ.
+	​
+
+
+After n
+1
+	​
+
+ new-era observations, with infinitely many old-era observations and exponential weights by age,
+
+W
+new
+	​
+
+=
+a=0
+∑
+n
+1
+	​
+
+−1
+	​
+
+λ
+a
+=
+1−λ
+1−λ
+n
+1
+	​
+
+	​
+
+,
+W
+old
+	​
+
+=
+a=n
+1
+	​
+
+∑
+∞
+	​
+
+λ
+a
+=
+1−λ
+λ
+n
+1
+	​
+
+	​
+
+.
+
+The weighted estimator expectation is
+
+E[
+θ
+^
+λ
+	​
+
+]=θ
+1
+	​
+
+(1−λ
+n
+1
+	​
+
+)+θ
+0
+	​
+
+λ
+n
+1
+	​
+
+,
+
+so bias for the current era is
+
+Bias(
+θ
+^
+λ
+	​
+
+;θ
+1
+	​
+
+)=−Δλ
+n
+1
+	​
+
+.
+	​
+
+
+If λ=0.99 and n
+1
+	​
+
+=300, λ
+n
+1
+	​
+
+≈0.049. A one-bin-scale semantic step still leaves roughly 5% of the step as bias after 300 days. If λ=0.995, the residue is about 22%.
+
+Explicit era modeling has zero step bias in the free-era fixed-effect model and controlled shrinkage bias in the EB model. Therefore:
+
+Use time decay for smooth drift; use explicit eras for known pipeline or settlement semantic changes.
+	​
+
+Q1 reference implementation
+Python
+Run
+import numpy as np
+
+def era_lrt(loglik_free, loglik_pooled, n_eras, n_params_per_era, extra_df=0):
+    """
+    Returns LRT statistic and asymptotic df.
+    Claude Code should compute p-values with scipy.stats.chi2.sf
+    or parametric bootstrap for small/nonregular cases.
+    """
+    stat = 2.0 * (loglik_free - loglik_pooled)
+    df = (n_eras - 1) * n_params_per_era + extra_df
+    return stat, df
+
+
+def score_test(U_delta, I_dd, I_dp=None, I_pp_inv=None):
+    """
+    Efficient score test for era interactions.
+    U_delta: score vector for era deviations at pooled fit.
+    I_dd: information for era deviations.
+    I_dp: cross information era x nuisance.
+    I_pp_inv: inverse nuisance information.
+    """
+    if I_dp is not None and I_pp_inv is not None:
+        I_eff = I_dd - I_dp @ I_pp_inv @ I_dp.T
+    else:
+        I_eff = I_dd
+    return float(U_delta.T @ np.linalg.solve(I_eff, U_delta))
+
+
+def eb_era_diag(theta_hat, V_diag, tau2_grid=None):
+    """
+    Diagonal empirical-Bayes normal-means shrinkage.
+
+    theta_hat: shape (E, p), era MLEs on transformed scale.
+    V_diag: shape (E, p), diagonal variances from inverse Hessians.
+    Returns posterior means, posterior variances, EB grand mean, tau^2.
+    """
+    theta_hat = np.asarray(theta_hat, float)
+    V_diag = np.asarray(V_diag, float)
+    E, p = theta_hat.shape
+
+    if tau2_grid is None:
+        positive = V_diag[V_diag > 0]
+        lo = max(np.min(positive) * 1e-4, 1e-12)
+        hi = max(np.var(theta_hat, axis=0).max() * 100.0, np.max(positive) * 100.0, lo * 10)
+        tau2_grid = np.r_[0.0, np.exp(np.linspace(np.log(lo), np.log(hi), 400))]
+
+    mu = np.zeros(p)
+    tau2 = np.zeros(p)
+    post_mean = np.zeros_like(theta_hat)
+    post_var = np.zeros_like(theta_hat)
+
+    for j in range(p):
+        y = theta_hat[:, j]
+        s2 = np.maximum(V_diag[:, j], 1e-15)
+
+        best = None
+        for t2 in tau2_grid:
+            v = s2 + t2
+            w = 1.0 / v
+            muj = np.sum(w * y) / np.sum(w)
+            nll = 0.5 * np.sum(np.log(v) + (y - muj) ** 2 / v)
+            if best is None or nll < best[0]:
+                best = (nll, t2, muj)
+
+        _, t2, muj = best
+        mu[j] = muj
+        tau2[j] = t2
+
+        if t2 <= 1e-15:
+            post_mean[:, j] = muj
+            post_var[:, j] = 0.0
+        else:
+            prec = 1.0 / s2 + 1.0 / t2
+            post_var[:, j] = 1.0 / prec
+            post_mean[:, j] = post_var[:, j] * (y / s2 + muj / t2)
+
+    return post_mean, post_var, mu, tau2
+
+
+def eb_era_full_given_sigma(theta_hat, V_list, theta0, Sigma):
+    """
+    Full-matrix posterior means given EB hyperparameters.
+    theta_hat: (E,p)
+    V_list: list/array of E covariance matrices (p,p)
+    theta0: (p,)
+    Sigma: (p,p)
+    """
+    theta_hat = np.asarray(theta_hat, float)
+    theta0 = np.asarray(theta0, float)
+    Sigma = np.asarray(Sigma, float)
+    E, p = theta_hat.shape
+
+    out_mean = np.zeros_like(theta_hat)
+    out_cov = np.zeros((E, p, p))
+    Sinv = np.linalg.inv(Sigma)
+
+    for e in range(E):
+        V = np.asarray(V_list[e], float)
+        Vinv = np.linalg.inv(V)
+        post_cov = np.linalg.inv(Vinv + Sinv)
+        post_mean = post_cov @ (Vinv @ theta_hat[e] + Sinv @ theta0)
+        out_mean[e] = post_mean
+        out_cov[e] = post_cov
+
+    return out_mean, out_cov
+
+
+def observed_probs_with_confusion(true_probs, confusion):
+    """
+    true_probs[c] = P(true category c)
+    confusion[o,c] = P(observed o | true c)
+    returns observed_probs[o]
+    """
+    true_probs = np.asarray(true_probs, float)
+    confusion = np.asarray(confusion, float)
+    return confusion @ true_probs
+
+
+def step_change_time_decay_bias(delta, lam, n_new):
+    """
+    Bias of exponential time-decay estimator after a step change.
+    Target is newest-era theta_1 = theta_0 + delta.
+    """
+    return -delta * (lam ** n_new)
+Q1 data requirements and CI-width license
+
+Do not license by n≥30. License by decision-scale uncertainty:
+
+se
+(π
+ij
+	​
+
+)=
+∇
+ϕ
+	​
+
+π
+ij
+⊤
+	​
+
+Var
+(
+ϕ
+^
+	​
+
+e
+	​
+
+)∇
+ϕ
+	​
+
+π
+ij
+	​
+
+	​
+
+.
+
+Newest-era-only estimates are allowed only if
+
+1.96
+traded i,j
+max
+	​
+
+se
+(π
+ij
+	​
+
+)<ε
+edge
+	​
+
+/2.
+	​
+
+
+Otherwise use EB partial pooling. Also require every tested era/location block to have positive support and a full-rank design matrix.
+
+Q1 failure modes and diagnostics
+Severity	Failure mode	Diagnostic	Fix
+HIGH	Era labels confounded with location or season	Rank deficiency; era×location contingency table has empty blocks	Use connected components; do not estimate unsupported interactions
+HIGH	Tail/blend parameters on boundary	MLE at parameter bound; unstable Hessian	Bootstrap LRT; transform/restrict parameterization
+HIGH	EB over-shrinks real newest-era break	Newest-era posterior predictive residuals sign-biased	Force nonzero era variance floor or fixed newest-era effect
+MEDIUM	QUARANTINED error is directional after all	Residual sign/rank differs between Q and V conditional on X	Exclude Q; build settlement-source-specific confusion model
+MEDIUM	Time decay hides step changes	CUSUM or era-boundary residual jump	Explicit era dummy or intervention state-space model
+Q2 — Two-stage contamination: provider de-bias residuals feeding fusion weights
+Q2.1 Bias-estimation error propagates into residual variance and weights
+
+Let true settled value be T
+i
+	​
+
+. Provider m reports
+
+x
+im
+	​
+
+=T
+i
+	​
+
++b
+m
+	​
+
++c
+ℓ(i)
+	​
+
++u
+im
+	​
+
+,
+
+where b
+m
+	​
+
+ is provider bias, c
+ℓ
+	​
+
+ is location offset, and
+
+u
+i
+	​
+
+=(u
+i1
+	​
+
+,…,u
+iM
+	​
+
+)
+⊤
+,E[u
+i
+	​
+
+]=0,Cov(u
+i
+	​
+
+)=Ω.
+
+Stage 1 estimates
+
+b
+^
+m
+	​
+
+=b
+m
+	​
+
++ε
+m
+	​
+
+,E[ε]=0,Cov(ε)=C
+ε
+	​
+
+.
+
+After de-biasing,
+
+r
+im
+	​
+
+=x
+im
+	​
+
+−T
+i
+	​
+
+−c
+ℓ(i)
+	​
+
+−
+b
+^
+m
+	​
+
+=u
+im
+	​
+
+−ε
+m
+	​
+
+.
+
+If the stage-2 “variance” is really MSE around zero residual, then
+
+E[r
+i
+	​
+
+r
+i
+⊤
+	​
+
+]=Ω+C
+ε
+	​
+
+.
+	​
+
+
+For provider m,
+
+v
+~
+m
+	​
+
+=v
+m
+	​
+
++C
+ε,mm
+	​
+
+.
+	​
+
+
+Thus inverse-variance weights become
+
+w
+~
+m
+	​
+
+=
+∑
+j
+	​
+
+(v
+j
+	​
+
++C
+ε,jj
+	​
+
+)
+−1
+(v
+m
+	​
+
++C
+ε,mm
+	​
+
+)
+−1
+	​
+
+.
+	​
+
+
+For small C
+ε,mm
+	​
+
+,
+
+w
+m
+	​
+
+w
+~
+m
+	​
+
+−w
+m
+	​
+
+	​
+
+≈−
+v
+m
+	​
+
+C
+ε,mm
+	​
+
+	​
+
++
+j
+∑
+	​
+
+w
+j
+	​
+
+v
+j
+	​
+
+C
+ε,jj
+	​
+
+	​
+
+.
+	​
+
+
+So a provider with unusually uncertain bias estimation is downweighted even if its intrinsic residual variance v
+m
+	​
+
+ is good.
+
+For full covariance GLS weights,
+
+w(Σ)=
+1
+⊤
+Σ
+−1
+1
+Σ
+−1
+1
+	​
+
+.
+	​
+
+
+Using 
+Σ
+~
+=Ω+C
+ε
+	​
+
+, the first-order perturbation is
+
+δw=−Ω
+−1
+C
+ε
+	​
+
+w+w(1
+⊤
+Ω
+−1
+C
+ε
+	​
+
+w).
+	​
+
+
+The fused debiased center is
+
+μ
+i
+∗
+	​
+
+=
+m
+∑
+	​
+
+w
+m
+	​
+
+(x
+im
+	​
+
+−
+b
+^
+m
+	​
+
+)=T
+i
+	​
+
++c
+ℓ(i)
+	​
+
++w
+⊤
+u
+i
+	​
+
+−w
+⊤
+ε.
+
+Conditional on the realized stage-1 estimation error,
+
+Bias(μ
+i
+∗
+	​
+
+∣ε)=−w
+⊤
+ε.
+	​
+
+
+If E[ε]=0 and weights are independent of ε, unconditional mean bias is zero, but the deployed model has persistent realized bias with RMS
+
+RMSBias(μ
+i
+∗
+	​
+
+)=
+w
+⊤
+C
+ε
+	​
+
+w
+	​
+
+.
+	​
+
+
+Positive cross-provider error correlation in C
+ε
+	​
+
+ is especially damaging because it does not diversify away.
+
+Q2.2 Sequential consistency versus joint likelihood
+
+Sequential de-bias-then-weight is consistent only if all of these hold:
+
+b
+^
+m
+	​
+
+→b
+m
+	​
+
+,
+Ω
+^
+→Ω,provider/location/era design is correctly specified,
+
+and the train/evaluation distribution is stable. Under Q1-style era drift, these conditions fail unless stage 1 and stage 2 are both era-aware.
+
+The joint estimator is cleaner. For rows with observed providers S
+i
+	​
+
+, define
+
+x
+i,S
+i
+	​
+
+	​
+
+∣T
+i
+	​
+
+,ℓ
+i
+	​
+
+,e
+i
+	​
+
+∼N(T
+i
+	​
+
+1
+S
+i
+	​
+
+	​
+
++b
+S
+i
+	​
+
+	​
+
++c
+ℓ
+i
+	​
+
+	​
+
+1
+S
+i
+	​
+
+	​
+
++a
+e
+i
+	​
+
+,S
+i
+	​
+
+	​
+
+, Ω
+e
+i
+	​
+
+,S
+i
+	​
+
+S
+i
+	​
+
+	​
+
+).
+
+A simpler first production version is
+
+d
+im
+	​
+
+=x
+im
+	​
+
+−T
+i
+	​
+
+=μ+β
+m
+	​
+
++γ
+ℓ(i)
+	​
+
++η
+e(i)
+	​
+
++u
+im
+	​
+
+.
+	​
+
+
+Use constraints
+
+m
+∑
+	​
+
+β
+m
+	​
+
+=0,
+ℓ
+∑
+	​
+
+n
+ℓ
+	​
+
+γ
+ℓ
+	​
+
+=0,
+e
+∑
+	​
+
+n
+e
+	​
+
+η
+e
+	​
+
+=0
+
+or equivalent reference levels.
+
+The joint Gaussian log likelihood is
+
+ℓ(β,γ,η,Ω)=−
+2
+1
+	​
+
+i
+∑
+	​
+
+[r
+i,S
+i
+	​
+
+⊤
+	​
+
+Ω
+S
+i
+	​
+
+S
+i
+	​
+
+−1
+	​
+
+r
+i,S
+i
+	​
+
+	​
+
++log∣Ω
+S
+i
+	​
+
+S
+i
+	​
+
+	​
+
+∣+∣S
+i
+	​
+
+∣log(2π)],
+	​
+
+
+where
+
+r
+im
+	​
+
+=x
+im
+	​
+
+−T
+i
+	​
+
+−μ−β
+m
+	​
+
+−γ
+ℓ(i)
+	​
+
+−η
+e(i)
+	​
+
+.
+
+Then derive fusion weights from the estimated residual covariance:
+
+w
+S
+i
+	​
+
+	​
+
+=
+1
+⊤
+Ω
+S
+i
+	​
+
+S
+i
+	​
+
+−1
+	​
+
+1
+Ω
+S
+i
+	​
+
+S
+i
+	​
+
+−1
+	​
+
+1
+	​
+
+.
+	​
+
+Identifiability
+
+The model
+
+x
+im
+	​
+
+=T
+i
+	​
+
++b
+m
+	​
+
++c
+ℓ(i)
+	​
+
++u
+im
+	​
+
+
+has the invariance
+
+b
+m
+	​
+
+↦b
+m
+	​
+
++a,c
+ℓ
+	​
+
+↦c
+ℓ
+	​
+
+−a.
+
+Therefore only contrasts are identified unless a constraint is imposed. Provider contrasts are identified by within-row differences:
+
+x
+im
+	​
+
+−x
+im
+′
+	​
+
+=b
+m
+	​
+
+−b
+m
+′
+	​
+
++u
+im
+	​
+
+−u
+im
+′
+	​
+
+.
+
+Location contrasts are identified by provider-overlap across locations after provider effects are anchored.
+
+Minimum coverage condition: build a bipartite graph with provider nodes and location nodes; draw edge (m,ℓ) if provider m has settled observations at location ℓ. Fixed provider and location effects are identifiable up to one global offset iff this graph is connected. Every provider does not need every location, but there must be an overlap path. If era effects are included, the provider-location-era hypergraph must be connected after constraints.
+
+Covariance identification additionally requires provider co-coverage. To estimate full Ω, each provider pair needs enough simultaneous residuals or a structured covariance model. If pairwise coverage is sparse, use diagonal plus low-rank factor covariance, not an unconstrained full matrix.
+
+Q2.3 Practical two-way fixed/random estimator
+
+Production estimator:
+
+d
+im
+	​
+
+=x
+im
+	​
+
+−T
+i
+	​
+
+=μ+β
+m
+	​
+
++γ
+ℓ
+	​
+
++η
+e
+	​
+
++(βη)
+me
+	​
+
++u
+im
+	​
+
+.
+	​
+
+
+Use:
+
+Provider effects β
+m
+	​
+
+: fixed, because M=5.
+
+Location effects γ
+ℓ
+	​
+
+: random if many locations or sparse; fixed if few and dense.
+
+Era effects η
+e
+	​
+
+: fixed or EB as in Q1.
+
+Provider×era interactions (βη)
+me
+	​
+
+: include if Q1 residual tests show provider drift by era.
+
+Degrees of freedom for the fixed-effect mean model, with N_obs provider-row observations, M providers, L locations, and E eras:
+
+df
+mean
+	​
+
+=N
+obs
+	​
+
+−rank(X).
+	​
+
+
+For the additive fixed model with intercept and constraints, the nominal parameter count is
+
+1+(M−1)+(L−1)+(E−1),
+
+plus interaction ranks. Full covariance per era adds
+
+M(M+1)/2
+	​
+
+
+parameters per era if coverage supports it.
+
+Q2.4 Ledoit-Wolf shrinkage target under drift
+
+Ledoit-Wolf shrinkage uses
+
+Σ
+ρ
+	​
+
+=(1−ρ)S+ρμI,μ=
+M
+tr(S)
+	​
+
+.
+	​
+
+
+The scikit-learn documentation states this exact regularized covariance form and cites Ledoit and Wolf (2004), https://scikit-learn.org/stable/modules/generated/sklearn.covariance.LedoitWolf.html
+. 
+Scikit-learn
+ The original Ledoit-Wolf large-dimensional covariance estimator is https://www.ledoit.net/Well-conditioned2004.pdf
+; one opened PDF endpoint errored, but the official sklearn page exposes the implemented formula and citation.
+
+For diagonal S=diag(v
+m
+	​
+
+),
+
+w
+m
+	​
+
+(ρ)∝
+(1−ρ)v
+m
+	​
+
++ρ
+v
+ˉ
+1
+	​
+
+.
+
+If v
+m
+	​
+
+<v
+j
+	​
+
+, then increasing ρ reduces w
+m
+	​
+
+/w
+j
+	​
+
+ toward 1. Therefore:
+
+identity shrinkage biases weights toward equal weighting.
+	​
+
+
+This is conservative only when providers are exchangeable and variance estimates are mostly noise. It is harmful when provider skill heterogeneity is real or when era drift creates common-mode covariance. Shrinking off-diagonal common drift toward zero overstates diversification and can overweight redundant/bad providers.
+
+Recommendation: apply Ledoit-Wolf only after Q1 era residualization and use a target consistent with the structure, for example:
+
+Σ
+target
+	​
+
+=D+λ
+factor
+	​
+
+ff
+⊤
+
+or a constant-correlation target, not necessarily μI.
+
+Q2 reference implementation
+Python
+Run
+import numpy as np
+
+def minvar_weights(Sigma, ridge=1e-10):
+    Sigma = np.asarray(Sigma, float)
+    M = Sigma.shape[0]
+    S = Sigma + ridge * np.eye(M)
+    one = np.ones(M)
+    a = np.linalg.solve(S, one)
+    return a / (one @ a)
+
+
+def distorted_diag_weights(v, eps_var):
+    """
+    v: intrinsic residual variances.
+    eps_var: Var(stage-1 bias errors).
+    """
+    denom = np.asarray(v, float) + np.asarray(eps_var, float)
+    inv = 1.0 / denom
+    return inv / inv.sum()
+
+
+def first_order_weight_distortion(Sigma, Ceps):
+    Sigma = np.asarray(Sigma, float)
+    Ceps = np.asarray(Ceps, float)
+    M = Sigma.shape[0]
+    one = np.ones(M)
+
+    A = np.linalg.inv(Sigma)
+    w = minvar_weights(Sigma)
+    dw = -A @ Ceps @ w + w * (one @ A @ Ceps @ w)
+    return w, dw
+
+
+def center_rms_bias(w, Ceps):
+    w = np.asarray(w, float)
+    Ceps = np.asarray(Ceps, float)
+    return float(np.sqrt(w @ Ceps @ w))
+
+
+def ledoit_identity_shrink(S, rho):
+    S = np.asarray(S, float)
+    mu = np.trace(S) / S.shape[0]
+    return (1.0 - rho) * S + rho * mu * np.eye(S.shape[0])
+
+
+def fit_twoway_fixed_effects(d, provider, location):
+    """
+    Basic OLS two-way fixed effects for long-form residuals:
+    d_im = intercept + provider FE + location FE + error.
+
+    provider, location are integer-coded arrays aligned with d.
+    Drops provider 0 and location 0 as references.
+    """
+    d = np.asarray(d, float)
+    provider = np.asarray(provider, int)
+    location = np.asarray(location, int)
+
+    M = provider.max() + 1
+    L = location.max() + 1
+    n = len(d)
+
+    cols = [np.ones(n)]
+    for m in range(1, M):
+        cols.append((provider == m).astype(float))
+    for ell in range(1, L):
+        cols.append((location == ell).astype(float))
+
+    X = np.column_stack(cols)
+    beta_hat, *_ = np.linalg.lstsq(X, d, rcond=None)
+    resid = d - X @ beta_hat
+    rank = np.linalg.matrix_rank(X)
+
+    intercept = beta_hat[0]
+    provider_effect = np.zeros(M)
+    provider_effect[1:] = beta_hat[1:M]
+    location_effect = np.zeros(L)
+    location_effect[1:] = beta_hat[M:]
+
+    return {
+        "intercept": intercept,
+        "provider_effect": provider_effect,
+        "location_effect": location_effect,
+        "residual": resid,
+        "rank": rank,
+        "df_resid": n - rank,
+    }
+
+
+def provider_cov_from_wide_residuals(R):
+    """
+    R: shape (n_rows, M), residuals with np.nan for missing providers.
+    Pairwise covariance then nearest-PSD repair by eigenvalue clipping.
+    """
+    R = np.asarray(R, float)
+    n, M = R.shape
+    S = np.zeros((M, M))
+    counts = np.zeros((M, M))
+
+    for a in range(M):
+        for b in range(M):
+            mask = np.isfinite(R[:, a]) & np.isfinite(R[:, b])
+            counts[a, b] = mask.sum()
+            if counts[a, b] >= 2:
+                xa = R[mask, a] - np.nanmean(R[mask, a])
+                xb = R[mask, b] - np.nanmean(R[mask, b])
+                S[a, b] = xa @ xb / (counts[a, b] - 1)
+            else:
+                S[a, b] = np.nan
+
+    # Fill missing covariances with zero off-diagonal and median variance diagonal.
+    diag_med = np.nanmedian(np.diag(S))
+    for a in range(M):
+        for b in range(M):
+            if not np.isfinite(S[a, b]):
+                S[a, b] = diag_med if a == b else 0.0
+
+    S = 0.5 * (S + S.T)
+    vals, vecs = np.linalg.eigh(S)
+    vals = np.maximum(vals, 1e-10)
+    S_psd = (vecs * vals) @ vecs.T
+    return S_psd, counts
+Q2 data requirements and CI-width license
+
+License full provider fusion only if:
+
+1.96
+Var
+(μ
+i
+∗
+	​
+
+)
+	​
+
+<ε
+edge
+	​
+
+/2
+	​
+
+
+on the traded decision scale, including uncertainty from provider effects and covariance/weight estimation.
+
+Structural requirements:
+
+Provider-location graph connected.
+
+Era-provider graph connected if provider×era interactions are estimated.
+
+Each provider pair has enough overlap that the CI for correlation excludes operationally different signs, or else use diagonal/factor covariance.
+
+Weight uncertainty from block bootstrap by day/era must be small:
+
+m
+max
+	​
+
+1.96
+se
+(w
+m
+	​
+
+)<w
+tol
+	​
+
+,
+
+where w
+tol
+	​
+
+ should be set by how much center movement consumes edge.
+
+Q2 failure modes and diagnostics
+Severity	Failure mode	Diagnostic	Fix
+BLOCKER	Provider/location graph disconnected	Design rank deficient	Drop isolated component or impose external prior
+HIGH	Sequential residual variance includes bias-estimation error	Residual MSE drops materially after joint refit	Joint model; propagate C
+ε
+	​
+
+
+HIGH	Era drift in provider residuals	Provider residual means by era nonzero	Provider×era effects or era-specific covariance
+HIGH	Identity shrinkage hides common drift	Fused residual variance underpredicted out of sample	Factor/constant-correlation target
+MEDIUM	Pairwise covariance not PSD	Negative eigenvalues	EM covariance or PSD shrinkage
+MEDIUM	Walk-forward leakage	Bias estimates improve suspiciously at boundaries	Strict time split and audit feature timestamps
+Q3 — Multiplicity for correlated bin hypotheses
+Q3.1 BH validity under bin dependence
+
+BH controls FDR under independence and under PRDS-type positive dependence. Benjamini and Yekutieli proved ordinary BH control under positive regression dependency and a conservative modification under arbitrary dependence; see https://cris.tau.ac.il/en/publications/the-control-of-the-false-discovery-rate-in-multiple-testing-under/
+ and DOI https://doi.org/10.1214/aos/1013699998
+. 
+Tel Aviv University
+ The BH original is Benjamini and Hochberg (1995), https://www.stat.purdue.edu/~doerge/BIOINFORM.D/FALL06/Benjamini%20and%20Y%20FDR.pdf
+. 
+Purdue Statistics
+
+Mutually exclusive bins do not generally satisfy PRDS. Counterexample with two exhaustive bins:
+
+Let Z∼N(0,1), and define test statistics
+
+T
+1
+	​
+
+=Z,T
+2
+	​
+
+=−Z.
+
+This is the local two-bin geometry because increasing probability of one exhaustive bin decreases the other. PRDS requires that for any increasing set D,
+
+P(T∈D∣T
+1
+	​
+
+=t)
+
+is nondecreasing in t. Choose
+
+D={T
+2
+	​
+
+>c}.
+
+This is increasing in the second coordinate. But
+
+P(T∈D∣T
+1
+	​
+
+=t)=1{−t>c},
+
+which is decreasing in t. Therefore PRDS fails.
+
+Thus:
+
+Ordinary BH is not guaranteed valid for mutually exclusive bin tests.
+	​
+
+
+BY under arbitrary dependence uses threshold
+
+p
+(i)
+	​
+
+≤
+mH
+m
+	​
+
+iq
+	​
+
+,H
+m
+	​
+
+=
+j=1
+∑
+m
+	​
+
+j
+1
+	​
+
+.
+	​
+
+
+For K=12 bins:
+
+If m=12, H
+12
+	​
+
+=3.1032, so BY is about 3.1× stricter than BH.
+
+If testing both sides, m=24, H
+24
+	​
+
+=3.7760, so BY is about 3.8× stricter.
+
+At q=0.10, the largest possible BY cutoff for m=24 is 0.10/3.776=0.0265, one-sided normal z≈1.94, versus BH’s largest cutoff 0.10, one-sided z≈1.28.
+
+But BY is not the recommended fix because the current p-values are degenerate and FDR is not the bankroll objective.
+
+Q3.2 Correct continuous p-values, posterior sign probabilities, and utility
+
+Let candidate j be a (family, bin, side) action. Let q
+j
+	​
+
+ be calibrated event probability. For buying YES at ask a
+j
+	​
+
+, ignoring fee notation for a moment,
+
+e
+j
+	​
+
+=q
+j
+	​
+
+−a
+j
+	​
+
+.
+
+For buying NO at ask n
+j
+	​
+
+,
+
+e
+j
+	​
+
+=(1−q
+j
+	​
+
+)−n
+j
+	​
+
+.
+
+With fees and slippage threshold, write generally
+
+e
+j
+	​
+
+=g
+j
+	​
+
+(q
+j
+	​
+
+,market
+j
+	​
+
+)−e
+min,j
+	​
+
+.
+	​
+
+Continuous p-value if a frequentist test is required
+
+If 
+e
+^
+j
+	​
+
+ is approximately normal with standard error s
+j
+	​
+
+, test
+
+H
+0j
+	​
+
+:e
+j
+	​
+
+≤0vsH
+1j
+	​
+
+:e
+j
+	​
+
+>0.
+
+Then
+
+p
+j
+	​
+
+=1−Φ(
+s
+j
+	​
+
+e
+^
+j
+	​
+
+	​
+
+).
+	​
+
+
+This is the continuous p-value BH/BY would require. A posterior sample analogue is not a frequentist p-value; it is the local false-sign probability:
+
+lfsr
+j
+	​
+
+=P(e
+j
+	​
+
+≤0∣D).
+	​
+
+
+For posterior samples e
+j
+(s)
+	​
+
+,
+
+lfsr
+j
+	​
+
+=
+S
+1
+	​
+
+s=1
+∑
+S
+	​
+
+1{e
+j
+(s)
+	​
+
+≤0}.
+
+E-values can also be used for FDR control under dependence, but they still control an error rate, not expected log growth. Wang and Ramdas discuss FDR control with e-values, https://academic.oup.com/jrsssb/article/84/3/822/7056146
+. 
+OUP Academic
+
+Why FDR is the wrong objective for a betting agent
+
+A binary contract with price p, win probability q, and bankroll spend fraction f has log growth
+
+G(f;q,p)=qlog(1+fb)+(1−q)log(1−f),b=
+p
+1−p
+	​
+
+.
+
+The Kelly optimum is
+
+f
+∗
+=max(0,
+1−p
+q−p
+	​
+
+)
+	​
+
+
+before additional caps. Kelly’s original expected-log-wealth framing is https://www.princeton.edu/~wbialek/rome/refs/kelly_56.pdf
+. 
+Princeton University
+
+With posterior uncertainty,
+
+a
+∗
+(D)=arg
+a
+max
+	​
+
+E[U(a,θ)∣D].
+	​
+
+
+For log wealth, U is log growth. This is the Bayes action. FDR controls E[V/R], a frequentist false-discovery proportion, and is optimal only for specific multiple-testing loss functions. Müller, Parmigiani, and Rice show that different Bayesian multiple-comparison utilities lead to different optimal rules, including FDR-like rules only when the loss is explicitly FDR-like, https://web.ma.utexas.edu/users/pmueller/pap/MPR07.pdf
+. 
+Department of Mathematics
+ Storey’s pFDR/q-value framing similarly remains an error-rate framework, not a log-utility trading objective, https://genomics.princeton.edu/storeylab/papers/original-directfdr.pdf
+. 
+Lewis-Sigler Institute
+
+Therefore:
+
+Replace BH with posterior expected-log-utility thresholding plus selection shrinkage.
+	​
+
+Q3.3 Winner’s curse and selection-adjusted edge estimator
+
+Even if FDR is dropped, selection across hundreds of candidates creates winner’s curse. Let
+
+e
+^
+=e+η,η∼N(0,S),
+
+where N candidates are correlated. If all true edges are zero and independent with common σ, then
+
+E[
+j
+max
+	​
+
+e
+^
+j
+	​
+
+]≈σ[
+2logN
+	​
+
+−
+2
+2logN
+	​
+
+loglogN+log(4π)
+	​
+
+].
+
+For N=24, the multiplier is about 1.79; for N=288, about 2.73. Thus the top naive edge can be multiple standard errors too high.
+
+Use EB shrinkage:
+
+e
+^
+∣e∼N(e,S),e∣μ,τ
+2
+∼N(μ1,τ
+2
+R).
+	​
+
+
+Fit μ,τ
+2
+ by marginal likelihood:
+
+e
+^
+∼N(μ1,S+τ
+2
+R).
+
+Posterior covariance and mean:
+
+V=(S
+−1
++τ
+−2
+R
+−1
+)
+−1
+,
+	​
+
+m=V(S
+−1
+e
+^
++τ
+−2
+R
+−1
+μ1).
+	​
+
+
+Use m
+j
+	​
+
+, not 
+e
+^
+j
+	​
+
+, as the selection-adjusted edge. Select by posterior expected log growth, not raw edge:
+
+j
+∗
+=arg
+j
+max
+	​
+
+E[
+0≤f≤f
+max
+	​
+
+max
+	​
+
+G
+j
+	​
+
+(f;q
+j
+	​
+
+,p
+j
+	​
+
+)∣D],
+	​
+
+
+and trade only if
+
+P(e
+j
+∗
+	​
+
+>0∣D)≥π
+min
+	​
+
+andE[
+f
+max
+	​
+
+G
+j
+∗
+	​
+
+(f)∣D]>0.
+	​
+
+
+A practical default is π
+min
+	​
+
+=0.80 for exploratory paper trading and π
+min
+	​
+
+=0.90 for real bankroll, but Claude Code should set this by backtested log-growth drawdown tolerance.
+
+Q3 reference implementation
+Python
+Run
+import math
+import numpy as np
+
+def normal_cdf(x):
+    x = np.asarray(x, float)
+    return 0.5 * (1.0 + np.vectorize(math.erf)(x / math.sqrt(2.0)))
+
+
+def bh_rejections(pvals, q):
+    p = np.asarray(pvals, float)
+    m = len(p)
+    order = np.argsort(p)
+    ranked = p[order]
+    thresh = q * np.arange(1, m + 1) / m
+    ok = ranked <= thresh
+    reject = np.zeros(m, dtype=bool)
+    if np.any(ok):
+        k = np.max(np.nonzero(ok)[0])
+        reject[order[:k + 1]] = True
+    return reject
+
+
+def by_rejections(pvals, q):
+    p = np.asarray(pvals, float)
+    m = len(p)
+    Hm = np.sum(1.0 / np.arange(1, m + 1))
+    return bh_rejections(p, q / Hm)
+
+
+def continuous_edge_pvalue(edge_hat, edge_se):
+    z = np.asarray(edge_hat, float) / np.asarray(edge_se, float)
+    return 1.0 - normal_cdf(z)
+
+
+def local_false_sign_rate(edge_samples, threshold=0.0):
+    edge_samples = np.asarray(edge_samples, float)
+    return np.mean(edge_samples <= threshold, axis=0)
+
+
+def effective_num_tests_from_cov(S):
+    """
+    Li-Ji-style effective test count from correlation eigenvalues.
+    """
+    S = np.asarray(S, float)
+    d = np.sqrt(np.maximum(np.diag(S), 1e-15))
+    R = S / np.outer(d, d)
+    vals = np.linalg.eigvalsh(0.5 * (R + R.T))
+    vals = np.maximum(vals, 0.0)
+    return float((vals.sum() ** 2) / np.sum(vals ** 2))
+
+
+def expected_max_standard_normal_approx(N_eff):
+    N_eff = max(float(N_eff), 1.000001)
+    a = math.sqrt(2.0 * math.log(N_eff))
+    b = (math.log(math.log(N_eff)) + math.log(4.0 * math.pi)) / (2.0 * a)
+    return a - b
+
+
+def eb_shrink_edges(e_hat, S, R=None, tau2_grid=None):
+    """
+    Correlation-aware normal EB shrinkage:
+      e_hat | e ~ N(e, S)
+      e ~ N(mu*1, tau2*R)
+
+    Returns posterior mean m, posterior covariance V, EB mu, tau2.
+    """
+    e_hat = np.asarray(e_hat, float)
+    S = np.asarray(S, float)
+    N = len(e_hat)
+    one = np.ones(N)
+
+    if R is None:
+        R = np.eye(N)
+    else:
+        R = np.asarray(R, float)
+
+    if tau2_grid is None:
+        avg_noise = np.mean(np.diag(S))
+        empirical = np.var(e_hat)
+        hi = max(100.0 * avg_noise, 100.0 * empirical, 1e-8)
+        tau2_grid = np.r_[0.0, np.exp(np.linspace(np.log(1e-12), np.log(hi), 500))]
+
+    best = None
+    for tau2 in tau2_grid:
+        C = S + tau2 * R
+        C = 0.5 * (C + C.T)
+        sign, logdet = np.linalg.slogdet(C)
+        if sign <= 0:
+            continue
+        Cinv_one = np.linalg.solve(C, one)
+        mu = (one @ np.linalg.solve(C, e_hat)) / (one @ Cinv_one)
+        resid = e_hat - mu * one
+        nll = 0.5 * (logdet + resid @ np.linalg.solve(C, resid))
+        if best is None or nll < best[0]:
+            best = (nll, mu, tau2)
+
+    _, mu, tau2 = best
+
+    if tau2 <= 1e-15:
+        m = mu * one
+        V = np.zeros((N, N))
+        return m, V, mu, tau2
+
+    Sinv = np.linalg.inv(S)
+    Rinv = np.linalg.inv(R)
+    Prec = Sinv + (1.0 / tau2) * Rinv
+    V = np.linalg.inv(Prec)
+    m = V @ (Sinv @ e_hat + (1.0 / tau2) * Rinv @ (mu * one))
+    return m, V, mu, tau2
+
+
+def kelly_fraction_binary(q, price, f_cap=0.05):
+    """
+    Fraction of bankroll spent on contract, no fees.
+    """
+    q = np.asarray(q, float)
+    price = np.asarray(price, float)
+    f = (q - price) / np.maximum(1.0 - price, 1e-15)
+    return np.clip(f, 0.0, f_cap)
+
+
+def expected_log_growth_binary(q, price, f):
+    """
+    Spend fraction f. If win, profit multiple on spent capital is (1-price)/price.
+    If lose, spent capital is lost.
+    """
+    b = (1.0 - price) / np.maximum(price, 1e-15)
+    return q * np.log1p(f * b) + (1.0 - q) * np.log1p(-f)
+
+
+def select_by_posterior_utility(q_samples, prices, f_cap=0.05, min_prob_edge=0.90):
+    """
+    q_samples: shape (S, N), posterior calibrated probabilities.
+    prices: shape (N,), contract ask prices for the chosen side.
+    """
+    q_samples = np.asarray(q_samples, float)
+    prices = np.asarray(prices, float)
+    q_bar = q_samples.mean(axis=0)
+
+    f = kelly_fraction_binary(q_bar, prices, f_cap=f_cap)
+    growth = expected_log_growth_binary(q_bar, prices, f)
+    prob_edge = np.mean(q_samples > prices[None, :], axis=0)
+
+    allowed = (growth > 0.0) & (prob_edge >= min_prob_edge)
+    if not np.any(allowed):
+        return None
+
+    idx = np.argmax(np.where(allowed, growth, -np.inf))
+    return {
+        "idx": int(idx),
+        "growth": float(growth[idx]),
+        "fraction": float(f[idx]),
+        "prob_edge": float(prob_edge[idx]),
+        "q_mean": float(q_bar[idx]),
+        "price": float(prices[idx]),
+    }
+Q3 data requirements and CI-width license
+
+License a trade only when the selected, shrinkage-adjusted posterior lower edge clears the action threshold:
+
+m
+j
+	​
+
+−z
+1−α
+	​
+
+V
+jj
+	​
+
+	​
+
+>e
+min,j
+	​
+
+.
+	​
+
+
+Equivalently from samples:
+
+P(e
+j
+	​
+
+>e
+min,j
+	​
+
+∣D)≥π
+min
+	​
+
+.
+	​
+
+
+Also require the winner’s-curse diagnostic:
+
+e
+^
+max
+	​
+
+−m
+j
+∗
+	​
+
+<
+2
+1
+	​
+
+(
+e
+^
+max
+	​
+
+−e
+min
+	​
+
+)
+
+or treat the raw selected edge as too selection-driven.
+
+Q3 failure modes and diagnostics
+Severity	Failure mode	Diagnostic	Fix
+BLOCKER	p-values are {0,1}	BH output identical to unadjusted sign rule	Replace with posterior lfsr or continuous p-values
+BLOCKER	FDR objective mismatches bankroll utility	Backtest: FDR-approved trades have negative log growth	Use expected-log utility
+HIGH	Winner’s curse across many candidates	Top raw edge exceeds EB edge by multiple SEs	EB shrinkage / posterior joint model
+HIGH	Missing cross-family covariance	Selected-trade coverage below nominal	Block bootstrap by family/day
+MEDIUM	Double-counting mutually exclusive sides	Simultaneous YES and NO exposure in same family	Portfolio/Kelly constraint per family
+MEDIUM	Posterior miscalibrated	PIT, reliability, selected-edge coverage fail	Refit calibration and inflate posterior variance
+Q4 — Optimal passive placement versus crossing
+Q4.1 Maker-vs-taker as a one-shot stopping/queue problem
+
+For a buy-YES contract:
+
+Immediate taker price: p
+x
+	​
+
+.
+
+Resting limit price: p
+r
+	​
+
+<p
+x
+	​
+
+.
+
+Price improvement: s=p
+x
+	​
+
+−p
+r
+	​
+
+, adjusted for maker/taker fee difference.
+
+Current taker edge per contract: e
+x
+	​
+
+=q
+0
+	​
+
+−p
+x
+	​
+
+−fee
+x
+	​
+
+.
+
+Current resting edge if filled instantly: e
+r0
+	​
+
+=q
+0
+	​
+
+−p
+r
+	​
+
+−fee
+m
+	​
+
+=e
+x
+	​
+
++s.
+
+Deadline: D hours.
+
+Fill time: τ∼Exp(λ
+f
+	​
+
+).
+
+Edge decay: e
+r
+	​
+
+(t)=e
+r0
+	​
+
+e
+−λ
+e
+	​
+
+t
+.
+
+The Poisson-arrival limit-order assumption is the same simplifying structure used in Avellaneda-Stoikov-style market-making models; their paper explicitly models transaction risk through Poisson arrivals, https://people.orie.cornell.edu/sfs33/LimitOrderBook.pdf
+. 
+Cornell University People
+
+One-shot maker value is
+
+V
+M
+	​
+
+=E[1{τ≤D}e
+r
+	​
+
+(τ)].
+
+With exponential fill and exponential decay:
+
+V
+M
+	​
+
+=e
+r0
+	​
+
+λ
+f
+	​
+
++λ
+e
+	​
+
+λ
+f
+	​
+
+	​
+
+[1−e
+−(λ
+f
+	​
+
++λ
+e
+	​
+
+)D
+].
+	​
+
+
+Immediate taker value is
+
+V
+T
+	​
+
+=e
+x
+	​
+
+.
+	​
+
+
+Thus resting is optimal iff
+
+e
+r0
+	​
+
+λ
+f
+	​
+
++λ
+e
+	​
+
+λ
+f
+	​
+
+	​
+
+[1−e
+−(λ
+f
+	​
+
++λ
+e
+	​
+
+)D
+]>e
+x
+	​
+
+.
+	​
+
+
+For D→∞,
+
+λ
+f
+	​
+
+>λ
+e
+	​
+
+e
+r0
+	​
+
+−e
+x
+	​
+
+e
+x
+	​
+
+	​
+
+=λ
+e
+	​
+
+s
+e
+x
+	​
+
+	​
+
+.
+	​
+
+
+This is the clean threshold: resting needs fill intensity high relative to edge decay, scaled by the ratio of crossed edge to price improvement.
+
+If Claude Code later proves from markout data that passive fills are mostly uninformed and price improvement persists as a non-decaying component, use the more optimistic decomposition
+
+e
+r
+	​
+
+(t)=s+e
+x
+	​
+
+e
+−λ
+e
+	​
+
+t
+,
+
+giving
+
+V
+M
+	​
+
+=s(1−e
+−λ
+f
+	​
+
+D
+)+e
+x
+	​
+
+λ
+f
+	​
+
++λ
+e
+	​
+
+λ
+f
+	​
+
+	​
+
+[1−e
+−(λ
+f
+	​
+
++λ
+e
+	​
+
+)D
+].
+	​
+
+
+Tie-breaker: use the conservative all-edge-decays formula for live money until maker-fill markouts prove no adverse selection.
+
+Q4.2 Estimators for λ
+e
+	​
+
+ and λ
+f
+	​
+
+Edge decay λ
+e
+	​
+
+
+Let g
+t
+	​
+
+ be signed model-market gap or edge estimate at time t before settlement. Model it as an OU/local exponential decay:
+
+g
+t+Δ
+	​
+
+=exp(−λ
+e
+	​
+
+Δ)g
+t
+	​
+
++ξ
+t
+	​
+
+.
+
+For regular spacing Δ,
+
+ϕ
+^
+	​
+
+=
+∑
+t
+	​
+
+g
+t
+2
+	​
+
+∑
+t
+	​
+
+g
+t
+	​
+
+g
+t+Δ
+	​
+
+	​
+
+,
+λ
+^
+e
+	​
+
+=−
+Δ
+log
+ϕ
+^
+	​
+
+	​
+
+.
+	​
+
+
+For irregular Δ
+t
+	​
+
+, estimate λ
+e
+	​
+
+ by minimizing
+
+t
+∑
+	​
+
+[g
+t+Δ
+t
+	​
+
+	​
+
+−e
+−λ
+e
+	​
+
+Δ
+t
+	​
+
+g
+t
+	​
+
+]
+2
+.
+	​
+
+
+Report half-life:
+
+t
+1/2
+	​
+
+=
+λ
+e
+	​
+
+log2
+	​
+
+.
+	​
+
+
+Estimate separately by family, bin-distance, forecast update type, and era.
+
+Fill intensity λ
+f
+	​
+
+
+With only 10–50 own orders, own fills are insufficient. Use a prior from order-book dynamics.
+
+Bucket by distance-from-touch, queue-ahead, side, time-to-settlement, spread, and imbalance. For bucket b,
+
+λ
+b
+	​
+
+∼Gamma(a
+0b
+	​
+
+,b
+0b
+	​
+
+)
+
+using rate parameterization. Estimate a
+0b
+	​
+
+,b
+0b
+	​
+
+ from historical queue depletions and hypothetical fill simulations.
+
+For own orders j in bucket b with exposure time d
+j
+	​
+
+ and fill indicator y
+j
+	​
+
+,
+
+L(λ
+b
+	​
+
+)=
+j
+∏
+	​
+
+λ
+b
+y
+j
+	​
+
+	​
+
+e
+−λ
+b
+	​
+
+d
+j
+	​
+
+.
+
+Posterior:
+
+λ
+b
+	​
+
+∣own orders∼Gamma(a
+0b
+	​
+
++
+j
+∑
+	​
+
+y
+j
+	​
+
+, b
+0b
+	​
+
++
+j
+∑
+	​
+
+d
+j
+	​
+
+).
+	​
+
+
+Posterior fill probability before deadline D:
+
+E[1−e
+−λ
+b
+	​
+
+D
+∣data]=1−(
+b
+b
+	​
+
++D
+b
+b
+	​
+
+	​
+
+)
+a
+b
+	​
+
+.
+	​
+
+
+For queue position, if queue ahead requires r unit depletions and depletion flow is Poisson with rate Λ, then fill time is Erlang/Gamma. The exponential model is the r=1 approximation; for deeper queue, replace fill CDF by
+
+P(τ≤D)=P(Poisson(ΛD)≥r).
+Q4.3 Conservative default under wide posteriors
+
+For positive edge candidate, define conservative credible bounds:
+
+e
+x
+L
+	​
+
+,e
+r0
+L
+	​
+
+,λ
+f
+L
+	​
+
+,λ
+e
+U
+	​
+
+.
+
+Maker value is increasing in e
+r0
+	​
+
+ and λ
+f
+	​
+
+, decreasing in λ
+e
+	​
+
+. Therefore conservative maker lower bound is
+
+V
+M
+L
+	​
+
+=e
+r0
+L
+	​
+
+λ
+f
+L
+	​
+
++λ
+e
+U
+	​
+
+λ
+f
+L
+	​
+
+	​
+
+[1−e
+−(λ
+f
+L
+	​
+
++λ
+e
+U
+	​
+
+)D
+].
+	​
+
+
+Taker lower value is
+
+V
+T
+L
+	​
+
+=e
+x
+L
+	​
+
+.
+	​
+
+
+Decision:
+
+⎩
+⎨
+⎧
+	​
+
+no trade,
+rest maker,
+cross taker,
+	​
+
+e
+x
+L
+	​
+
+≤0,
+V
+M
+L
+	​
+
+>V
+T
+L
+	​
+
+,
+e
+x
+L
+	​
+
+>0 and V
+M
+L
+	​
+
+≤V
+T
+L
+	​
+
+.
+	​
+
+	​
+
+
+Proof of max-min default: if λ
+f
+	​
+
+ is allowed arbitrarily near zero or λ
+e
+	​
+
+ arbitrarily large, then
+
+λ
+f
+	​
+
+,λ
+e
+	​
+
+inf
+	​
+
+V
+M
+	​
+
+=0.
+
+For a robust positive-edge candidate, V
+T
+L
+	​
+
+=e
+x
+L
+	​
+
+>0. Hence taker dominates maker in max-min value unless the posterior bounds exclude low-fill/high-decay regimes enough to make V
+M
+L
+	​
+
+>V
+T
+L
+	​
+
+. If e
+x
+L
+	​
+
+≤0, no-trade has value zero and dominates both.
+
+Q4 reference implementation
+Python
+Run
+import numpy as np
+
+def maker_value_conservative(e_cross, price_improvement, lam_f, lam_e, D):
+    """
+    Conservative model: entire resting edge decays.
+    e_rest0 = e_cross + price_improvement.
+    """
+    e_rest0 = e_cross + price_improvement
+    rate = lam_f + lam_e
+    if rate <= 0:
+        return e_rest0 if D > 0 else 0.0
+    return e_rest0 * lam_f / rate * (1.0 - np.exp(-rate * D))
+
+
+def maker_value_with_persistent_improvement(e_cross, price_improvement, lam_f, lam_e, D):
+    """
+    Optimistic model: price improvement persists; only crossed edge decays.
+    Use only after markout diagnostics support non-adverse passive fills.
+    """
+    fill_prob = 1.0 - np.exp(-lam_f * D)
+    rate = lam_f + lam_e
+    decayed_component = e_cross * lam_f / rate * (1.0 - np.exp(-rate * D))
+    return price_improvement * fill_prob + decayed_component
+
+
+def maker_taker_decision(e_cross_L, e_rest_improvement_L, lam_f_L, lam_e_U, D):
+    """
+    Max-min conservative decision.
+    """
+    if e_cross_L <= 0.0:
+        return "NO_TRADE", 0.0, e_cross_L
+
+    vm_L = maker_value_conservative(
+        e_cross=e_cross_L,
+        price_improvement=e_rest_improvement_L,
+        lam_f=lam_f_L,
+        lam_e=lam_e_U,
+        D=D,
+    )
+    vt_L = e_cross_L
+
+    if vm_L > vt_L:
+        return "MAKE", vm_L, vt_L
+    return "TAKE", vm_L, vt_L
+
+
+def fit_edge_decay_grid(g_now, g_next, dt, lam_grid=None):
+    """
+    Fits g_next ~= exp(-lambda * dt) * g_now by grid SSE.
+    Supports irregular dt.
+    """
+    g_now = np.asarray(g_now, float)
+    g_next = np.asarray(g_next, float)
+    dt = np.asarray(dt, float)
+
+    mask = np.isfinite(g_now) & np.isfinite(g_next) & np.isfinite(dt) & (dt > 0)
+    g_now, g_next, dt = g_now[mask], g_next[mask], dt[mask]
+
+    if lam_grid is None:
+        lam_grid = np.exp(np.linspace(np.log(1e-4), np.log(100.0), 1000))
+
+    best = None
+    for lam in lam_grid:
+        pred = np.exp(-lam * dt) * g_now
+        sse = np.sum((g_next - pred) ** 2)
+        if best is None or sse < best[0]:
+            best = (sse, lam)
+
+    return {"lambda_e": best[1], "sse": best[0], "half_life": np.log(2.0) / best[1]}
+
+
+def gamma_fill_update(a0, b0, filled, exposure_time):
+    """
+    Gamma prior/posterior for exponential fill hazard.
+    Rate parameterization: density proportional to lambda^(a-1) exp(-b lambda).
+    """
+    filled = np.asarray(filled, int)
+    exposure_time = np.asarray(exposure_time, float)
+    return a0 + filled.sum(), b0 + exposure_time.sum()
+
+
+def gamma_posterior_fill_prob(a, b, D):
+    """
+    E[1 - exp(-lambda D)] for lambda ~ Gamma(a,b).
+    """
+    return 1.0 - (b / (b + D)) ** a
+
+
+def maker_value_mc(e_cross_samples, improvement_samples, lam_f_samples, lam_e_samples, D):
+    e_cross_samples = np.asarray(e_cross_samples, float)
+    improvement_samples = np.asarray(improvement_samples, float)
+    lam_f_samples = np.asarray(lam_f_samples, float)
+    lam_e_samples = np.asarray(lam_e_samples, float)
+
+    vals = maker_value_conservative(
+        e_cross=e_cross_samples,
+        price_improvement=improvement_samples,
+        lam_f=lam_f_samples,
+        lam_e=lam_e_samples,
+        D=D,
+    )
+    return {
+        "mean": float(np.mean(vals)),
+        "p05": float(np.quantile(vals, 0.05)),
+        "p50": float(np.quantile(vals, 0.50)),
+        "p95": float(np.quantile(vals, 0.95)),
+    }
+Q4 data requirements and CI-width license
+
+License maker placement only if the conservative decision is stable across posterior uncertainty:
+
+V
+M
+L
+	​
+
+−V
+T
+L
+	​
+
+>ε
+exec
+	​
+
+	​
+
+
+where V
+M
+L
+	​
+
+ uses lower fill intensity and upper decay intensity. If this fails but e
+x
+L
+	​
+
+>0, cross. If e
+x
+L
+	​
+
+≤0, do not trade.
+
+For λ
+e
+	​
+
+, require a half-life CI narrow enough that
+
+	​
+
+V
+M
+	​
+
+(λ
+e
+95%U
+	​
+
+)−V
+M
+	​
+
+(λ
+e
+50%
+	​
+
+)
+	​
+
+<ε
+exec
+	​
+
+/2.
+
+For λ
+f
+	​
+
+, require posterior fill probability CI width:
+
+UCB
+95
+	​
+
+[P(fill)]−LCB
+95
+	​
+
+[P(fill)]<p
+fill,tol
+	​
+
+.
+
+With only 10–50 own orders, this will usually fail unless the book-dynamics prior is strong and validated.
+
+Q4 failure modes and diagnostics
+Severity	Failure mode	Diagnostic	Fix
+HIGH	Passive fills are adverse-selected	Post-fill markout worse than contemporaneous unfilled orders	Use all-edge-decays model; require larger maker edge
+HIGH	Fill model ignores queue	Actual fill rate by queue bucket below predicted	Queue-depletion/Erlang model
+HIGH	Edge decay non-exponential	Gap residual autocorrelation; half-life varies by update type	Stratify by family/update/era
+MEDIUM	Own-fill sample too small	Gamma posterior dominated by prior	Use book-sim prior; cap maker sizing
+MEDIUM	Market moves while resting	Fill conditional on price move asymmetric	Include markout covariate in hazard/value model
+Local verification checklist for Claude Code
+
+Era design audit
+
+Build era×location×season counts.
+
+Check rank of pooled/free-era design matrices.
+
+Identify locations with settlement-source convention changes.
+
+Q1 model fits
+
+Fit pooled, free-era, and EB partial-pooling calibration models on transformed parameter scale.
+
+Run LRT/score tests for fixed era effects.
+
+Bootstrap the era-variance-component test under pooled fit.
+
+Compare out-of-era log score and selected-bin calibration by era.
+
+QUARANTINED validation
+
+Compare VERIFIED vs QUARANTINED residual sign/rank conditional on location, era, forecast center, and source.
+
+If overlapping settlement sources exist, estimate M
+(Q)
+ confusion matrix or continuous ambiguity variance.
+
+Otherwise exclude QUARANTINED from primary fit.
+
+Provider fusion
+
+Build provider-location and provider-era connectivity graphs.
+
+Fit joint two-way provider×location×era model.
+
+Compare sequential and joint provider biases.
+
+Estimate C
+ε
+	​
+
+ for stage-1 bias errors and quantify w
+⊤
+C
+ε
+	​
+
+w.
+
+Compare identity Ledoit-Wolf target versus factor/constant-correlation target in walk-forward log score.
+
+Multiplicity replacement
+
+Delete {0,1} p-value BH from trading decision path.
+
+Generate posterior edge samples for all family/bin/side candidates.
+
+Fit EB edge shrinkage over the candidate universe.
+
+Backtest selected trades using posterior expected log growth and compare to old BH gate.
+
+Run selected-edge coverage: among trades with claimed 90% posterior positive edge, empirical hit/edge realization should not be materially below 90% after binning by posterior probability.
+
+Execution
+
+Estimate gap half-life λ
+e
+	​
+
+ by family/bin/side/time-to-settlement.
+
+Estimate fill hazard λ
+f
+	​
+
+ using book-dynamics priors and own-order updates.
+
+Compute maker/taker decisions using lower/upper posterior bounds, not posterior means.
+
+Run maker-fill markout diagnostics before enabling persistent-price-improvement maker formula.
+
+Priority ranking by expected impact
+
+Q1 — Era-aware partial pooling
+Highest impact on sell-the-mode miscalibration: if calibration history mixes incompatible μ/σ/settlement semantics, every downstream probability, edge, and Kelly bound is poisoned.
+
+Q3 — Replace BH with posterior utility plus selection shrinkage
+Highest impact on zero-order paralysis: current {0,1} p-values make BH a no-op, while utility thresholding gives an actionable trade/no-trade rule and handles winner’s curse.
+
+Q2 — Joint provider/location/era de-bias and fusion
+High impact on center bias: sequential residual weighting can bake provider-bias error into weights, but it is downstream of Q1’s era semantics.
+
+Q4 — Maker/taker execution rule
+Important, but second-order until calibrated edge is trustworthy; once Q1–Q3 are fixed, this prevents passive-order paralysis and adverse fill selection.
+
+Sources inspected and access notes
+
+No task-specific “Source to review” URLs were supplied. I inspected these standard sources:
+
+Wilks likelihood-ratio asymptotics: https://projecteuclid.org/journals/annals-of-mathematical-statistics/volume-9/issue-1/The-Large-Sample-Distribution-of-the-Likelihood-Ratio-for-Testing/10.1214/aoms/1177732360.full
+. 
+Project Euclid
+
+Self and Liang boundary/nonstandard LRTs: https://www.stat.cmu.edu/~brian/763-2015/week06/papers/self-liang-1987.pdf
+. 
+CMU Statistics & Data Science
+
+Lindley-Smith hierarchical Bayes linear model: https://www.ma.imperial.ac.uk/~das01/MyWeb/SCBI/Papers/LindleySmith.pdf
+. 
+Imperial College London
+
+Benjamini-Hochberg FDR: https://www.stat.purdue.edu/~doerge/BIOINFORM.D/FALL06/Benjamini%20and%20Y%20FDR.pdf
+. 
+Purdue Statistics
+
+Benjamini-Yekutieli dependency FDR: https://cris.tau.ac.il/en/publications/the-control-of-the-false-discovery-rate-in-multiple-testing-under/
+. 
+Tel Aviv University
+
+Storey direct FDR/q-value discussion: https://genomics.princeton.edu/storeylab/papers/original-directfdr.pdf
+. 
+Lewis-Sigler Institute
+
+Müller, Parmigiani, Rice Bayesian multiple-comparison decision framing: https://web.ma.utexas.edu/users/pmueller/pap/MPR07.pdf
+. 
+Department of Mathematics
+
+Wang and Ramdas e-value FDR: https://academic.oup.com/jrsssb/article/84/3/822/7056146
+. 
+OUP Academic
+
+Ledoit-Wolf implemented shrinkage target: https://scikit-learn.org/stable/modules/generated/sklearn.covariance.LedoitWolf.html
+. 
+Scikit-learn
+
+Avellaneda-Stoikov limit-order Poisson-arrival model: https://people.orie.cornell.edu/sfs33/LimitOrderBook.pdf
+. 
+Cornell University People
+
+Kelly expected-log-wealth criterion: https://www.princeton.edu/~wbialek/rome/refs/kelly_56.pdf
+. 
+Princeton University
+
+Harvey state-space/Kalman filtering reference: https://books.google.com/books/about/Forecasting_Structural_Time_Series_Model.html?id=Kc6tnRHBwLcC
+. 
+Google Books
+
+Measurement-error likelihood reference: https://www.taylorfrancis.com/books/mono/10.1201/9781420010138/measurement-error-nonlinear-models-ciprian-crainiceanu-raymond-carroll-leonard-stefanski-david-ruppert
+. 
+Taylor & Francis
+
+Access gap: the Project Euclid BY page returned an Incapsula error when opened directly, so I used the Tel Aviv University publication page for the abstract/DOI and ResearchGate/search snippets for redundancy. One Ledoit-Wolf PDF endpoint errored, so I used the official scikit-learn documentation for the implemented shrinkage formula and citation, plus search results for the primary paper.

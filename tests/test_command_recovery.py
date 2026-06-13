@@ -439,6 +439,10 @@ def _seed_pending_entry_projection(
         "settlement_price": None,
         "settled_at": None,
         "exit_reason": None,
+        # K3 exit-retry backoff columns (task #45, 2026-06-11): canonical;
+        # zero/NULL on a pending entry.
+        "exit_retry_count": 0,
+        "next_exit_retry_at": None,
     }
     append_many_and_project(conn, events, projection)
 

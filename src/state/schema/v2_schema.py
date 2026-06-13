@@ -647,13 +647,28 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             consumed_cycle_time TEXT NOT NULL,
             target_cycle_time TEXT NOT NULL,
             held_position INTEGER NOT NULL DEFAULT 0,
-            seed_file TEXT
+            seed_file TEXT,
+            reason TEXT
         )
     """)
     conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS uq_cycle_advance_enqueues_scope_target_cycle
             ON cycle_advance_enqueues(city, target_date, metric, target_cycle_time)
     """)
+    # FINDING 2 (external review 2026-06-12): per-family leg-artifact gap visibility. When a held
+    # family's freshest materializable cycle is blocked because ONE raw leg's artifact is missing
+    # for THAT (city, target_date) scope, the trigger records a typed reason row here (e.g.
+    # CYCLE_LEG_ARTIFACT_MISSING:<source>:<cycle>) instead of silently incrementing manifest_missing
+    # — making the ALWAYS-DECIDABLE-violating gap visible rather than an invisible skip. Idempotent
+    # ADD COLUMN for existing DBs.
+    for alter_sql in [
+        "ALTER TABLE cycle_advance_enqueues ADD COLUMN reason TEXT",
+    ]:
+        try:
+            conn.execute(alter_sql)
+        except Exception as exc:  # noqa: BLE001
+            if "duplicate column" not in str(exc).lower():
+                raise
 
 
 def _create_calibration_pairs(conn: sqlite3.Connection) -> None:

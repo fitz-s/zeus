@@ -1,9 +1,16 @@
+# Last reused/audited: 2026-06-12
+# Authority basis (2026-06-12): operator law 2026-06-10 ABSOLUTE — Zeus NEVER
+#   submits redeem transactions. submit_redeem / assert_redeem_submission_allowed
+#   now raise REDEEM_SUBMISSION_FORBIDDEN unconditionally (the operator-override
+#   token escape hatch was DELETED). ACCOUNTING surfaces (request_redeem intent,
+#   reconcile_pending_redeems chain-receipt classification, EXTERNAL_REDEMPTION
+#   booking) are fully intact. External deep-review finding 2026-06-12.
 """Durable settlement/redeem command ledger for R3 R1.
 
-R1 makes redemption side effects crash-recoverable without authorizing default
-live chain submission.  The ledger records intent, submission, tx-hash, terminal
-confirmation/failure, and operator-review states.  Chain truth follows the
-``REDEEM_TX_HASHED`` anchor during reconciliation.
+R1 records redemption ACCOUNTING (intent, chain-receipt reconciliation, terminal
+confirmation/failure, operator-review states) crash-recoverably. It does NOT
+authorize chain submission: redemption is EXTERNAL (operator law 2026-06-10).
+Chain truth follows the ``REDEEM_TX_HASHED`` anchor during reconciliation.
 """
 
 from __future__ import annotations
@@ -137,44 +144,41 @@ class SettlementCommandStateError(SettlementCommandError):
 
 
 class RedeemSubmissionAbandonedError(SettlementCommandError):
-    """K3.6 redeem pivot: Zeus never submits redeem transactions (operator law)."""
+    """Operator law 2026-06-10: Zeus NEVER submits redeem transactions.
+
+    Subclass of SettlementCommandError -> RuntimeError, so callers and tests
+    catching RuntimeError (the documented contract type) still match.
+    """
 
 
-# K3.6 REDEEM PIVOT (operator directive 2026-06-10 ~22:55Z "完全抛弃redeem"):
-# redemption on the shared wallet is owned by third-party auto-redeem. Zeus keeps
-# ACCOUNTING and the deposit-confirm/sweep step (NOT a redeem) — submission never.
-# The override below is operator-domain ONLY (set by hand for a supervised manual
-# redrive; never by a scheduler, plist, or settings flag). It must carry the exact
-# token value — a truthy env is NOT enough, so a stray "1" export cannot re-arm
-# redemption. ZEUS_AUTONOMOUS_REDEEM_ENABLED is irrelevant to this barrier by
-# design: a flag flip alone must never be the only thing between Zeus and an
-# on-chain redeem broadcast.
-REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV = "ZEUS_OPERATOR_REDEEM_OVERRIDE"
-REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN = "operator-confirmed-manual-redeem"
+# REDEEM SUBMISSION FORBIDDEN (operator law 2026-06-10, ABSOLUTE):
+# redemption on the shared wallet is EXTERNAL — third-party auto-redeem owns it.
+# Zeus keeps ONLY the ACCOUNTING surfaces (EXTERNAL_REDEMPTION detection/booking,
+# reconcile_pending_redeems chain-receipt classification, request_redeem intent
+# recording, the deposit-confirm/sweep step) — it NEVER constructs or broadcasts a
+# redeem transaction. The former operator-override token (a supervised manual
+# redrive escape hatch) is DELETED: there is no env, flag, or token that re-arms
+# submission. The barrier is now unconstructable, not merely double-gated.
 
 
 def redeem_submission_allowed() -> bool:
-    return (
-        os.environ.get(REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV, "").strip()
-        == REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN
-    )
+    """Always False (operator law 2026-06-10). Retained so calm-skip callers
+    (e.g. the scheduler's redeem-submitter cycle) keep a stable boolean seam."""
+    return False
 
 
 def assert_redeem_submission_allowed(context: str) -> None:
-    """Hard-refuse redeem submission unless the operator-only override is set.
+    """UNCONDITIONALLY refuse redeem submission (operator law 2026-06-10).
 
-    Raises BEFORE any side effect. Pinned by
-    tests/execution/test_redeem_pivot_antibody.py: no codepath reachable from a
-    daemon scheduler can broadcast a redeem tx.
+    Raises ``RedeemSubmissionAbandonedError`` (a RuntimeError) BEFORE any side
+    effect, regardless of any env var or override. Pinned by
+    tests/execution/test_redeem_pivot_antibody.py: no codepath — scheduler,
+    operator override, or otherwise — can broadcast a redeem tx.
     """
-    if not redeem_submission_allowed():
-        raise RedeemSubmissionAbandonedError(
-            f"REDEEM_SUBMISSION_ABANDONED:{context}: operator law 2026-06-10 — Zeus "
-            "never submits redeem transactions (third-party auto-redeem owns the "
-            f"shared wallet). Manual override requires env "
-            f"{REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV}={REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN!r} "
-            "(operator hand-set for a supervised redrive only)."
-        )
+    raise RedeemSubmissionAbandonedError(
+        f"REDEEM_SUBMISSION_FORBIDDEN: {context}: operator law 2026-06-10 — Zeus "
+        "never submits redeem; book EXTERNAL_REDEMPTION instead"
+    )
 
 
 def _enum_value(value: Any) -> str:
@@ -722,11 +726,11 @@ def submit_redeem(
     If the adapter returns a tx hash, ``REDEEM_TX_HASHED`` becomes the recovery
     anchor; later ``reconcile_pending_redeems`` follows chain receipt truth.
     """
-    # K3.6 REDEEM PIVOT (operator directive 2026-06-10 "完全抛弃redeem"): Zeus
-    # never submits redeem transactions again — third-party auto-redeem owns
-    # redemption on the shared wallet. This raise sits BEFORE any side effect
-    # and before the env flag is even consulted: a flag flip alone must never
-    # re-enable submission.
+    # REDEEM SUBMISSION FORBIDDEN (operator law 2026-06-10): Zeus never submits
+    # redeem transactions — redemption is EXTERNAL. This UNCONDITIONAL raise sits
+    # BEFORE any side effect (no DB read/write, no adapter contact): there is no
+    # env, flag, or override that re-arms submission. Accounting lives elsewhere
+    # (reconcile_pending_redeems, EXTERNAL_REDEMPTION booking).
     assert_redeem_submission_allowed("submit_redeem")
     from src.architecture.gate_runtime import check as _gate_runtime_check
     _gate_runtime_check("on_chain_mutation")

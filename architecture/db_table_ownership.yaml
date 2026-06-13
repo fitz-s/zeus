@@ -2754,3 +2754,34 @@ tables:
     created_by: edli_live_split_trade_ghost
     pk_col: null
     notes: Ghost on zeus_trades.db from EDLI full-live split (2026-05-25). Authoritative copy in zeus-world.db. Drop after 2026-08-30.
+
+  - name: fusion_upgrade_enqueues
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: _create_replacement_forecast_shadow_tables
+    pk_col: enqueue_id
+    notes: >
+      Instrument-set-aware coverage upgrade markers (task #32, 2026-06-11):
+      idempotency record for PARTIAL->FULL fusion re-materialization enqueues
+      when newly published instruments widen a family's provider set. One row
+      per (city, target_date, metric, source_cycle_time, instrument superset);
+      UNIQUE index uq_fusion_upgrade_enqueues_scope_cycle_superset. Writer:
+      data-ingest availability poll lane. Lives on zeus-forecasts.db only
+      (INV-37 single-DB); not settlement/calibration/order truth.
+
+  - name: cycle_advance_enqueues
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: _create_replacement_forecast_shadow_tables
+    pk_col: enqueue_id
+    notes: >
+      Newer-cycle re-materialization markers (U5-2a, 2026-06-12): idempotency
+      record for cycle-advance reseeds (held-position families first). reason
+      column (nullable, 2026-06-12 external-review FINDING 2) carries typed
+      per-family leg gaps (CYCLE_LEG_ARTIFACT_MISSING:<source>@<cycle>) so a
+      family skipped for a missing raw-artifact leg is visible, never silent.
+      Writer: data-ingest availability poll lane
+      (src/data/replacement_cycle_advance_trigger.py). Lives on
+      zeus-forecasts.db only; not settlement/calibration/order truth.

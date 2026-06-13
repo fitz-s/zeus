@@ -14,8 +14,8 @@ from src.state.db import (
     init_schema,
 )
 
-# B2 (2026-05-28): SCHEMA_VERSION counter cancelled. Frozen literal used in tests.
-SCHEMA_VERSION = 43  # frozen: the last value written by init_schema to PRAGMA user_version
+# B2 (2026-05-28) + operator directive 2026-06-13: PRAGMA user_version mechanism removed.
+# init_schema no longer writes a version counter; schema currency via structural table presence.
 
 
 # ---------------------------------------------------------------------------
@@ -66,32 +66,35 @@ def test_rel1_no_hot_path_init_schema():
 
 
 # ---------------------------------------------------------------------------
-# REL-2: PRAGMA user_version unchanged if init_schema raises before §5.2 anchor
+# REL-2: partial init_schema failure leaves no spurious canonical tables
 # ---------------------------------------------------------------------------
 
-def test_rel2_pragma_unchanged_on_partial_init_failure(monkeypatch):
-    """If _apply_canonical_schema raises, user_version must remain 0 (PRAGMA not yet set)."""
-    import src.state.db as _db
+def test_rel2_partial_init_failure_leaves_no_canonical_tables(monkeypatch):
+    """If apply_canonical_schema raises, no canonical tables should be visible.
+
+    B2 + operator directive 2026-06-13: PRAGMA user_version removed; this REL-2
+    now tests the structural invariant: a failed init_schema must not leave the DB
+    in a half-initialized state where _check_world_schema could falsely pass.
+    """
+    import src.state.schema.v2_schema as _v2
 
     conn = sqlite3.connect(":memory:")
 
     def _boom(c, **kwargs):
-        raise RuntimeError("simulated _apply_canonical_schema failure")
+        raise RuntimeError("simulated apply_canonical_schema failure")
 
-    monkeypatch.setattr(_db, "_apply_canonical_schema", _boom, raising=False)
-    # _apply_canonical_schema is imported locally inside init_schema — patch via module attr
-    # The local import aliases it; we need to patch the module it's imported FROM.
-    # Patch at the schema.v2_schema level instead.
-    import src.state.schema.v2_schema as _v2
     monkeypatch.setattr(_v2, "apply_canonical_schema", _boom)
 
     with pytest.raises(RuntimeError, match="simulated"):
         init_schema(conn)
 
-    v = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert v == 0, (
-        f"PRAGMA user_version={v} after failed init_schema; expected 0. "
-        "PRAGMA write must be placed AFTER _apply_canonical_schema (§5.2 anchor)."
+    # No tables should be present (the canonical tables come from apply_canonical_schema)
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    assert "market_price_history" not in tables, (
+        "canonical table market_price_history present after failed init_schema; "
+        "partial initialization must not leave canonical tables"
     )
 
 
@@ -190,28 +193,32 @@ def test_rel4_assert_schema_current_o1():
 # ---------------------------------------------------------------------------
 
 def test_rel5_schema_drift_detected():
-    """SQLite version >= 3.37.0 (PRAGMA user_version page-1 guarantee)."""
+    """SQLite version >= 3.37.0 required for strict table support and write-ahead stability."""
     assert sqlite3.sqlite_version_info >= (3, 37, 0), (
         f"SQLite {sqlite3.sqlite_version} < 3.37.0"
     )
 
 
 # ---------------------------------------------------------------------------
-# REL-6: fixed-point — init_schema(any_prior_user_version) → SCHEMA_VERSION
+# REL-6: fixed-point — init_schema is structurally idempotent
 # ---------------------------------------------------------------------------
 
 def test_rel6_fixed_point():
-    """init_schema always writes SCHEMA_VERSION regardless of prior user_version."""
-    prior_versions = {0, max(0, SCHEMA_VERSION - 1), SCHEMA_VERSION, SCHEMA_VERSION + 1}
-    for prior_uv in sorted(prior_versions):
-        conn = sqlite3.connect(":memory:")
-        conn.execute(f"PRAGMA user_version = {prior_uv}")
-        init_schema(conn)
-        v = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert v == SCHEMA_VERSION, (
-            f"After init_schema with prior user_version={prior_uv}: "
-            f"got user_version={v}, expected SCHEMA_VERSION={SCHEMA_VERSION}"
-        )
+    """init_schema is a structural fixed-point: sqlite_master hash is stable after 2 calls.
+
+    B2 + operator directive 2026-06-13: PRAGMA user_version removed. REL-6 now verifies
+    the structural fixed-point property: init_schema on any DB (fresh or pre-initialized)
+    produces the same canonical sqlite_master regardless of call count.
+    """
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    h1 = _sqlite_master_hash(conn)
+    init_schema(conn)
+    h2 = _sqlite_master_hash(conn)
+    assert h1 == h2, (
+        "sqlite_master changed between first and second init_schema call — "
+        "init_schema is not idempotent (structural fixed-point violated)"
+    )
 
 
 # ---------------------------------------------------------------------------

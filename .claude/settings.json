@@ -1,5 +1,8 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "worktree": {
+    "baseRef": "head"
+  },
   "hooks": {
     "PostToolUse": [
       {
@@ -76,6 +79,11 @@
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py cotenant_staging_guard",
             "description": "[hook v2 ADVISORY] Warn on broad git add in main worktree (co-tenant absorption risk; no deny path; PR #74 retired BLOCKING tier)"
+          },
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py maintree_git_state_guard",
+            "description": "[BLOCKING 2026-06-12] Block branch-mutating git (checkout/switch/branch -b/-B/-d/-D/-f/-m, reset --hard) when effective repo dir is the MAIN tree (live daemons). Worktrees exempt. Bypass: MAINTREE_GIT_BYPASS=1"
           },
           {
             "type": "command",

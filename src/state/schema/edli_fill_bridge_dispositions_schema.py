@@ -52,6 +52,45 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     # earlier version of this table (pure safety; fresh DBs already have it).
     _ensure_column(conn, "last_error", "TEXT")
     _ensure_column(conn, "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_disposition_nullable(conn)
+
+
+def _ensure_disposition_nullable(conn: sqlite3.Connection) -> None:
+    """Rebuild the table when a legacy DB still carries ``disposition TEXT NOT NULL``.
+
+    Idempotent DDL (the IF-NOT-EXISTS form above) is unable to relax constraints
+    on a pre-existing table, so a live DB created under the original
+    two-terminal-states DDL silently keeps NOT NULL while the code writes
+    NULL-disposition accumulating rows. That made
+    every `_increment_failure_count` insert fail, froze attempt_count at 1, and
+    made the quarantine threshold unreachable (infinite retry storm, 2026-06-12).
+    SQLite cannot ALTER a column constraint; the sanctioned path is a rebuild.
+    """
+    notnull = {
+        str(row[1]): bool(row[3])
+        for row in conn.execute("PRAGMA table_info(edli_fill_bridge_dispositions)").fetchall()
+    }
+    if not notnull.get("disposition", False):
+        return
+    conn.execute("DROP TABLE IF EXISTS edli_fill_bridge_dispositions_rebuild")
+    conn.execute(
+        CREATE_TABLE_SQL.replace(
+            "IF NOT EXISTS edli_fill_bridge_dispositions",
+            "edli_fill_bridge_dispositions_rebuild",
+        )
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_fill_bridge_dispositions_rebuild
+            (aggregate_id, disposition, reason, attempt_count, last_error, created_at, updated_at)
+        SELECT aggregate_id, disposition, reason, attempt_count, last_error, created_at, updated_at
+        FROM edli_fill_bridge_dispositions
+        """
+    )
+    conn.execute("DROP TABLE edli_fill_bridge_dispositions")
+    conn.execute(
+        "ALTER TABLE edli_fill_bridge_dispositions_rebuild RENAME TO edli_fill_bridge_dispositions"
+    )
 
 
 def _ensure_column(conn: sqlite3.Connection, column_name: str, column_sql: str) -> None:

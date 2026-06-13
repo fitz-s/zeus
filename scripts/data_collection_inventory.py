@@ -81,6 +81,8 @@ _SRC_MAIN_NON_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
     "edli_market_substrate_warm", # market substrate cache warm (trading prep)
     "edli_mainstream_warm",       # mainstream consensus warm (trading prep)
     "arm_gate_emit",              # ARM gate signal emitter (trading control)
+    "edli_continuous_redecision_screen",  # continuous redecision screen over held families
+                                          # (trading control loop, reads already-collected data)
     "world_wal_checkpoint",       # WAL checkpoint (DB maintenance, not data collection)
     "edli_user_channel_reconcile",  # EDLI user-channel order reconcile (execution layer)
     "edli_market_channel_ingestor", # EDLI market-channel event ingestor (exchange events,

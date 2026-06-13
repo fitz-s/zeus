@@ -1,3 +1,13 @@
+# Last reused/audited: 2026-06-12 (external deep-review fixes A-E: A taker depth
+#   twin-authority — fail closed LIVE_DEPTH_AUTHORITY_MISSING when the fresh-price
+#   witness does not match the swept snapshot depth; B free-cash bound under injected
+#   bankroll provider — fail closed BANKROLL_FREE_CASH_MISSING, never size unclamped;
+#   C settlement-coverage shrinker — fail closed QLCB_COVERAGE_AUTHORITY_FAULT on a
+#   structural exception in live mode, not fail-open on the unshrunk q_lcb; D legacy
+#   probability builder — NO-side edge-positivity reconciled to the native NO q_lcb
+#   independent of YES executability; E min-order bump — DELETE the 2% bankroll cap,
+#   replace with honest EV-at-venue-minimum + free-cash bound. Authority basis:
+#   external code review 2026-06-12, operator direct-fix order.)
 # Last reused or audited: 2026-06-11 (decision-triggered targeted family snapshot
 #   refresh: when the elected SELECTED-bin row is price-stale, capture fresh family
 #   books NOW via an injected FamilySnapshotRefresher, re-elect the latest row, then
@@ -525,6 +535,44 @@ def persist_presubmit_jit_snapshot(
             "K1 Stage 1 presubmit snapshot persist failed (non-blocking): %s", exc
         )
         return None
+
+
+def _assert_taker_depth_authority_fresh(
+    *,
+    snapshot: "ExecutableMarketSnapshot",
+    direction: str,
+    witness_touch: Decimal,
+    tick_size: Decimal,
+) -> None:
+    """FINDING-A relationship invariant (external review 2026-06-12).
+
+    The final TAKER size is swept from ``snapshot``'s DEPTH while the limit price is
+    the FRESH submit-time witness touch. The witness proves PRICE only (it carries no
+    depth/size field), so sweeping the snapshot's depth is sound ONLY when that
+    snapshot describes the SAME top-of-book the witness witnessed. If the snapshot's
+    own top-of-book on THIS side is absent, or diverges from the witness touch by more
+    than one tick, the depth that would be swept is STALE relative to the fresh price
+    (e.g. a 300-share DB book behind a 5-share live book) — an oversized FOK/FAK or a
+    wrong VWAP. Fail CLOSED with the typed TRANSIENT reason ``LIVE_DEPTH_AUTHORITY_MISSING``
+    (registered in ``src.events.reactor.TRANSIENT_MONEY_PATH_REASONS``) so the candidate
+    requeues with a snapshot refresh, NEVER sizing from the stale depth.
+
+    The tolerance is exactly one tick: a book that moved by a single level is still the
+    same depth authority for the FOK sweep; a larger move (or a missing touch) means the
+    witness saw a book whose depth we do not hold.
+    """
+    if direction.startswith("buy_"):
+        snap_touch = getattr(snapshot, "orderbook_top_ask", None)
+    else:
+        snap_touch = getattr(snapshot, "orderbook_top_bid", None)
+    if snap_touch is None or abs(Decimal(str(snap_touch)) - witness_touch) > tick_size:
+        raise ValueError(
+            "LIVE_DEPTH_AUTHORITY_MISSING:"
+            f"side={direction}:"
+            f"witness_touch={witness_touch}:"
+            f"snapshot_touch={snap_touch}:"
+            f"tick={tick_size}"
+        )
 
 
 class _LiveOpportunityAlreadyLocked(RuntimeError):
@@ -1255,6 +1303,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
     calibration_conn: sqlite3.Connection | None = None,
     live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
+    free_cash_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
     replacement_forecast_runtime_flags: Mapping[str, object] | None = None,
@@ -1333,6 +1382,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
                 calibration_conn=calibration_conn,
                 get_current_level=get_current_level,
                 bankroll_usd_provider=bankroll_usd_provider,
+                free_cash_usd_provider=free_cash_usd_provider,
                 portfolio_state_provider=portfolio_state_provider,
                 portfolio_reservation=portfolio_reservation,
                 locked_opportunity_conn=live_cap_conn or trade_conn,
@@ -1368,6 +1418,7 @@ def event_bound_live_adapter_from_trade_conn(
     calibration_conn: sqlite3.Connection | None = None,
     live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
+    free_cash_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
     replacement_forecast_runtime_flags: Mapping[str, object] | None = None,
@@ -1543,6 +1594,7 @@ def event_bound_live_adapter_from_trade_conn(
             calibration_conn=calibration_conn,
             get_current_level=get_current_level,
             bankroll_usd_provider=bankroll_usd_provider,
+            free_cash_usd_provider=free_cash_usd_provider,
             portfolio_state_provider=portfolio_state_provider,
             portfolio_reservation=portfolio_reservation,
             locked_opportunity_conn=live_cap_conn or trade_conn,
@@ -2003,6 +2055,7 @@ def _build_event_bound_no_submit_receipt_core(
     topology_conn: sqlite3.Connection | None = None,
     calibration_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
+    free_cash_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
@@ -2716,14 +2769,32 @@ def _build_event_bound_no_submit_receipt_core(
         # FREE-CASH ONE-TIME BOUND (operator single-Kelly directive 2026-06-10, spec
         # point 2): ``bankroll_usd`` above is now TOTAL portfolio equity (the sizing
         # basis, applied once); free available cash bounds the chosen stake ONCE in the
-        # kernel (min, never a multiplicative haircut). When the bankroll comes from an
-        # injected provider (tests/tools), free cash is unknown -> None (bound no-ops,
-        # equity-basis behavior). On the live cached path, read the SAME wallet record.
-        free_cash_usd = (
-            None
-            if bankroll_usd_provider is not None
-            else _runtime_free_cash_usd(cached_only=True)
-        )
+        # kernel (min, never a multiplicative haircut).
+        #
+        # FINDING-B FIX (external review 2026-06-12): the prior code set
+        # ``free_cash_usd=None`` WHENEVER a bankroll provider was injected, so the cash
+        # bound VANISHED under an injected bankroll — a strong-edge stake could exceed
+        # available free cash with no clamp. The fix threads a COMPANION
+        # ``free_cash_usd_provider`` alongside the bankroll provider:
+        #   - bankroll provider + free-cash provider present: use the provider's value.
+        #     A live free-cash AUTHORITY that returns None is a TYPED FAULT
+        #     (BANKROLL_FREE_CASH_MISSING, transient) — never a silent no-clamp.
+        #   - bankroll provider WITHOUT a free-cash provider: legacy proof-only / tool
+        #     injection that wired no cash authority -> None (bound no-ops, as before).
+        #   - no bankroll provider (live cached path): read the SAME wallet record.
+        if bankroll_usd_provider is not None:
+            if free_cash_usd_provider is not None:
+                _provided_free_cash = free_cash_usd_provider()
+                if _provided_free_cash is None:
+                    raise ValueError(
+                        "BANKROLL_FREE_CASH_MISSING:"
+                        "free_cash_usd_provider_returned_none"
+                    )
+                free_cash_usd = float(_provided_free_cash)
+            else:
+                free_cash_usd = None
+        else:
+            free_cash_usd = _runtime_free_cash_usd(cached_only=True)
         kelly_multiplier = _runtime_kelly_multiplier()
         (
             kelly_multiplier,
@@ -3274,6 +3345,7 @@ def build_event_bound_no_submit_receipt(
     topology_conn: sqlite3.Connection | None = None,
     calibration_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
+    free_cash_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
@@ -3306,6 +3378,7 @@ def build_event_bound_no_submit_receipt(
         topology_conn=topology_conn,
         calibration_conn=calibration_conn,
         bankroll_usd_provider=bankroll_usd_provider,
+        free_cash_usd_provider=free_cash_usd_provider,
         portfolio_state_provider=portfolio_state_provider,
         portfolio_reservation=portfolio_reservation,
         locked_opportunity_conn=locked_opportunity_conn,
@@ -3918,6 +3991,30 @@ def _build_live_execution_command_certificates(
                         )
                     _limit_price_d = _fresh_touch
                     _rounding_mode = "down"
+                # FINDING-A FIX (twin-authority kill, external review 2026-06-12):
+                # the FINAL taker size is swept from this snapshot's DEPTH, but the
+                # limit price (_fresh_touch) is the FRESH submit-time WITNESS price.
+                # The witness (PreSubmitAuthorityWitness) proves PRICE only — it
+                # carries NO depth/size-at-best field — so sizing from the elected DB
+                # snapshot's depth pairs FRESH price authority with STALE size
+                # authority. If the elected snapshot saw a DIFFERENT top-of-book than
+                # the witness (a fresher/thinner book — e.g. 300-share DB depth behind
+                # a 5-share live book), the swept size is sized against liquidity that
+                # is no longer witnessed: an oversized FOK/FAK reject or a wrong VWAP.
+                # The depth is trustworthy ONLY when the snapshot's own top-of-book on
+                # THIS side agrees with the witnessed touch (same book → same depth).
+                # On any divergence (or a missing snapshot touch on this side) the
+                # fresh book's depth is UNWITNESSED: fail CLOSED with a typed TRANSIENT
+                # reason so the candidate requeues with a snapshot refresh, rather than
+                # sweeping the stale depth. The check is a named relationship invariant
+                # (_assert_taker_depth_authority_fresh) so it is unit-testable apart from
+                # the full cert-build path.
+                _assert_taker_depth_authority_fresh(
+                    snapshot=_snap_for_depth,
+                    direction=_direction_for_depth,
+                    witness_touch=_fresh_touch,
+                    tick_size=_tick_size_d,
+                )
                 # Tick-align the marketable touch using the canonical tick_size:
                 # BUY rounds up to keep crossing; SELL rounds down to keep crossing.
                 import math as _math
@@ -8129,14 +8226,13 @@ class _StakeBelowMinOrder(RuntimeError):
 # are DELETED with the day0 family notional cap (operator no-caps law).
 
 
-# Operator guard on the auto-bump-to-min-order action (2026-06-09 fix). When the
-# fractional-Kelly haircut shrinks the chosen stake below the venue min order but the
-# ROBUST (q_lcb-based) ΔU at the min-order notional is strictly positive, the sizing
-# path bumps the stake UP to min order — the fractional-Kelly risk intent is preserved
-# because a $0.05–$0.80 min order on a ~$900 wallet is well under this ceiling. The bump
-# is ALLOWED only when min_order_usd <= this fraction of the SIZING bankroll; above it,
-# the candidate aborts as SUBMIT_ABORTED_BELOW_MIN_ORDER rather than over-committing.
-_MIN_ORDER_BUMP_MAX_BANKROLL_PCT = 0.02
+# FINDING-E (external review 2026-06-12, NO-CAPS operator law): the former
+# _MIN_ORDER_BUMP_MAX_BANKROLL_PCT = 0.02 percentage cap on the auto-bump-to-min-order
+# action is DELETED. It refused any positive-EV candidate whose venue minimum exceeded
+# 2% of the wallet — an artificial throttle producing no-order states that are not honest
+# gates. The bump-to-venue-minimum admission is now the HONEST economics only: positive
+# q_lcb edge at the venue minimum AND the minimum fitting the free-cash bound (see
+# _robust_marginal_utility_stake_and_price). No percentage cap.
 
 
 def _robust_marginal_utility_stake_and_price(
@@ -8192,14 +8288,16 @@ def _robust_marginal_utility_stake_and_price(
     be priced. The selected proof is scored within the WHOLE family so the π /
     exposure / OUTSIDE geometry matches the ranking decision exactly.
 
-    MIN-ORDER FLOOR (2026-06-09 false-EDGE_REVERSED fix). When the fractional-Kelly
-    haircut shrinks the chosen stake below the venue min-order notional but the ROBUST
-    ΔU at min order is strictly positive AND min order is within the bankroll-cap guard
-    (``_MIN_ORDER_BUMP_MAX_BANKROLL_PCT``), the stake is BUMPED to min order and the
-    floor is recorded in ``stake_floor_out`` (if provided) as
-    ``stake_floor="VENUE_MIN_ORDER"``. When the bump is not admissible (bankroll cap
-    fails) it raises :class:`_StakeBelowMinOrder` — a DISTINCT sizing abort the decision
-    body maps to ``SUBMIT_ABORTED_BELOW_MIN_ORDER``, never EDGE_REVERSED. A genuinely
+    MIN-ORDER FLOOR (2026-06-09 false-EDGE_REVERSED fix; FINDING-E 2026-06-12 NO-CAPS).
+    When the fractional-Kelly haircut shrinks the chosen stake below the venue min-order
+    notional but the ROBUST q_lcb ΔU at min order is strictly positive AND the venue
+    minimum fits the FREE-CASH bound, the stake is BUMPED to min order and the floor is
+    recorded in ``stake_floor_out`` (if provided) as ``stake_floor="VENUE_MIN_ORDER"``.
+    The prior 2% bankroll percentage cap on this bump is DELETED (artificial throttle,
+    operator no-caps law). When the bump is not admissible (q_lcb EV non-positive at the
+    venue minimum, or the minimum exceeds the free-cash bound) it raises
+    :class:`_StakeBelowMinOrder` — a DISTINCT sizing abort the decision body maps to
+    ``SUBMIT_ABORTED_BELOW_MIN_ORDER``, never EDGE_REVERSED. A genuinely
     reversed candidate (no positive-ΔU stake at ANY admissible size incl. min order)
     still returns ``(0.0, None)`` -> EDGE_REVERSED.
 
@@ -8352,44 +8450,56 @@ def _robust_marginal_utility_stake_and_price(
         # low-probability bins the haircut stake can fall BELOW the venue min-order
         # notional even though the ROBUST (q_lcb-based) edge at min order is strictly
         # positive. Previously ``_chosen_stake_execution_price`` raised "below min
-        # order" and the generic except mapped it to (0.0, None) -> a FALSE
-        # EDGE_REVERSED. Now: if the haircut stake is below min order BUT ΔU at the
-        # min-order notional is strictly positive AND min order is within the operator
-        # bankroll-cap guard, BUMP the stake up to min order (the fractional-Kelly risk
-        # intent is preserved — a sub-$1 min order on a ~$900 wallet is << the cap) and
-        # record the floor in provenance. Otherwise raise ``_StakeBelowMinOrder`` so the
-        # decision body emits a DISTINCT SUBMIT_ABORTED_BELOW_MIN_ORDER (never
-        # EDGE_REVERSED). ΔU(min_order) is the SAME robust q_lcb-based π/exposure the
-        # ranker used (utility_ranker records it on the score), so the min-order edge is
-        # robust-consistent, never a looser point estimate.
+        # order" and the generic except mapped it to (0.0, None) -> a FALSE EDGE_REVERSED.
+        #
+        # FINDING-E FIX (external review 2026-06-12, NO-CAPS operator law). The prior
+        # admission test ALSO required ``min_order_usd <= 2% × bankroll`` — an ARTIFICIAL
+        # percentage cap that produced no-order states for any positive-EV candidate whose
+        # venue minimum happened to exceed 2% of the wallet. That is exactly the kind of
+        # artificial throttle the operator law forbids (caps are not honest gates). The
+        # 2% cap is DELETED. The admission is now the HONEST economics only:
+        #   (1) the robust q_lcb-based edge at the venue minimum is strictly positive
+        #       (ΔU(min_order) > 0 — the SAME robust π/exposure the ranker used), AND
+        #   (2) the venue minimum fits the FREE-CASH bound (it does not spend more than
+        #       the wallet's free BUY collateral; no bound when free cash is unknown).
+        # If both hold, trade the venue minimum. Otherwise raise ``_StakeBelowMinOrder``
+        # with the HONEST economic reason (EV non-positive at the venue minimum, or the
+        # cash bound) -> DISTINCT SUBMIT_ABORTED_BELOW_MIN_ORDER, never EDGE_REVERSED and
+        # never an artificial-cap reject.
         min_order_usd = Decimal(str(score.min_order_notional_usd))
-        # Wave-1 2026-06-12: the DAY0 cap-vs-venue-floor abort is DELETED with the cap.
         if min_order_usd > Decimal("0") and chosen < min_order_usd:
             delta_u_at_min = float(score.delta_u_at_min_order)
-            bankroll_cap = Decimal(str(_MIN_ORDER_BUMP_MAX_BANKROLL_PCT)) * Decimal(
-                str(bankroll_usd)
+            _ev_positive_at_min = delta_u_at_min > 0.0
+            _fits_free_cash = (
+                free_cash_usd is None
+                or min_order_usd <= Decimal(str(free_cash_usd))
             )
-            if delta_u_at_min > 0.0 and min_order_usd <= bankroll_cap:
-                # Edge is genuinely positive at min order and the floor is within the
-                # bankroll cap -> trade at the venue minimum.
+            if _ev_positive_at_min and _fits_free_cash:
+                # Edge is genuinely positive at the venue minimum and the minimum fits the
+                # free-cash bound -> trade at the venue minimum (no percentage cap).
                 chosen = min_order_usd
                 if stake_floor_out is not None:
                     stake_floor_out["stake_floor"] = "VENUE_MIN_ORDER"
                     stake_floor_out["stake_floor_min_order_usd"] = float(min_order_usd)
                     stake_floor_out["stake_floor_delta_u_at_min_order"] = delta_u_at_min
             else:
-                # Either ΔU(min_order) <= 0 (no admissible positive-edge stake — but the
-                # ranker already excluded that via is_no_trade above, so this arm is the
-                # bankroll-cap guard) or min order exceeds the bankroll cap. Distinct
-                # BELOW_MIN_ORDER abort — NOT an edge reversal.
+                # Honest economic rejection: either the q_lcb edge is non-positive at the
+                # venue minimum, or the venue minimum exceeds the free-cash bound. NOT an
+                # edge reversal and NOT an artificial cap.
+                _why = (
+                    "ev_non_positive_at_venue_minimum"
+                    if not _ev_positive_at_min
+                    else "venue_minimum_exceeds_free_cash_bound"
+                )
+                _free_cash_str = (
+                    f"{float(free_cash_usd):.6f}" if free_cash_usd is not None else "None"
+                )
                 raise _StakeBelowMinOrder(
                     f"chosen stake {float(chosen):.6f} USD below venue min order "
-                    f"{float(min_order_usd):.6f} USD; "
+                    f"{float(min_order_usd):.6f} USD; reason={_why}; "
                     f"delta_u_at_min_order={delta_u_at_min:.6g}, "
-                    f"min_order_usd/bankroll_cap={float(min_order_usd):.6f}/"
-                    f"{float(bankroll_cap):.6f} "
-                    f"(positive edge at min order but stake floor not admissible; "
-                    f"NOT an edge reversal)"
+                    f"free_cash_usd={_free_cash_str} "
+                    f"(honest economic block at venue minimum; NOT an edge reversal)"
                 )
 
         # S5 boundary: reprice the SELECTED leg at the CHOSEN stake on its OWN curve
@@ -8552,10 +8662,12 @@ def _evaluate_submit_recapture_for_selected(
       3. stake <= 0 (no positive-utility stake at ANY admissible size INCLUDING min
          order on the fresh curve) -> EDGE_REVERSED (utility nonpositive, §5 ``if
          utility <= 0: Abort``);
-      3b. positive edge at min order but the fractional-Kelly haircut stake is below
-         the venue min order and cannot be bumped within the bankroll cap ->
-         BELOW_MIN_ORDER (a DISTINCT sizing abort, NOT an edge reversal — 2026-06-09
-         antibody; the regret ledger records the true cause);
+      3b. the fractional-Kelly haircut stake is below the venue min order and the venue
+         minimum is not honestly tradeable (q_lcb EV non-positive at the minimum, or the
+         minimum exceeds the free-cash bound) -> BELOW_MIN_ORDER (a DISTINCT sizing abort,
+         NOT an edge reversal — 2026-06-09 antibody; FINDING-E 2026-06-12 deleted the 2%
+         bankroll percentage cap that previously gated this bump; the regret ledger
+         records the true cause);
       4. recaptured all-in cost > ``max_acceptable_price`` -> PRICE_MOVED;
       5. ``edge_lcb = q_lcb - all_in_cost <= 0`` or forecast not current -> EDGE_REVERSED.
 
@@ -9931,6 +10043,40 @@ def _side_q_lcb_from_yes_samples(
     return q_lcb_yes, q_lcb_no
 
 
+def _native_no_edge_positivity(
+    *,
+    native_costs: dict,
+    condition_id: str,
+    q_lcb_no: float,
+) -> tuple[float, bool]:
+    """FINDING-D relationship invariant (external review 2026-06-12).
+
+    Return ``(no_p_value, no_prefilter)`` for the buy-NO leg from its OWN native NO cost
+    and OWN native NO robust lower bound ``q_lcb_no`` (= 1 - q_ucb_yes) — INDEPENDENT of
+    the YES token's market state.
+
+    ``scan_full_hypothesis_family`` only ever emits buy_yes hypotheses (its buy_no loop
+    body is a bare ``continue``), so the canonical builder never had a NO hypothesis and
+    used to hardcode p=1.0 / prefilter=False for EVERY buy_no — making the native NO leg
+    unconditionally fail BH-FDR even when the NO posterior cleared its native cost. The
+    NO posterior is a native authority (the per-sample complement of YES) that exists
+    regardless of YES executability, so its admissibility must be reconciled to it. This
+    mirrors the live replacement path's fix (commit 9ddad492d8); it is the SAME degenerate
+    edge-positivity indicator the YES leg uses:
+
+        p_value = 0.0  (admissible)   iff  a native NO ask exists AND q_lcb_no > no_cost
+        p_value = 1.0  (rejected)     otherwise
+
+    Reconciliation, NEVER gate-weakening: BH multiplicity is unchanged, a non-edge NO
+    still gets p=1.0, and the leg is still gated downstream by its OWN execution data
+    (a missing native NO ask -> rejected). Never a YES-complement price.
+    """
+    no_price = native_costs.get((condition_id, "buy_no"), (None, None, 0.0, None, None))[1]
+    no_cost = float(no_price.value) if no_price is not None else 1.0
+    no_edge_lcb_positive = no_price is not None and float(q_lcb_no) > no_cost
+    return (0.0 if no_edge_lcb_positive else 1.0), bool(no_edge_lcb_positive)
+
+
 def _canonical_probability_and_fdr_proof(
     *,
     event: OpportunityEvent,
@@ -10038,21 +10184,40 @@ def _canonical_probability_and_fdr_proof(
             )
             prefilter[(condition_id, "buy_yes")] = bool(yes_hyp.passed_prefilter)
             # NO direction: q_lcb_no is the native-NO robust lower bound (1 - q_ucb_yes).
-            # FDR for NO follows the NO hypothesis when the NO side is executable; absent
-            # a NO hypothesis the NO direction is recorded non-actionable (rejected
-            # downstream by the missing native NO ask, never a complement price).
             _set_qlcb_provenance(
                 lcb_by_direction,
                 (condition_id, "buy_no"),
                 q_lcb_no,
                 source="FORECAST_BOOTSTRAP",
             )
+            # FINDING-D FIX (external review 2026-06-12) — reconcile the NO-side FDR
+            # p_value/prefilter to the CERTIFIED native-NO authority, independent of YES
+            # executability. ``scan_full_hypothesis_family`` emits ONLY buy_yes
+            # hypotheses (its buy_no loop body is a bare ``continue``), so ``no_hyp`` is
+            # ALWAYS None here and the prior code hardcoded p=1.0 / prefilter=False for
+            # EVERY buy_no — making the native NO leg UNCONDITIONALLY fail BH-FDR even
+            # when the NO posterior clears its own native cost. This is the SAME defect
+            # class already fixed on the live replacement path (commit 9ddad492d8): the
+            # NO posterior (q_lcb_no = 1 - q_ucb_yes) is a native authority that exists
+            # regardless of the YES token's market state. Compute the NO leg's edge from
+            # its OWN native NO cost and OWN native NO q_lcb — the SAME degenerate
+            # edge-positivity indicator the YES leg uses (0.0 = the robust NO lower bound
+            # clears the native NO cost; 1.0 = it does not). Reconciliation, NEVER
+            # gate-weakening: BH multiplicity is unchanged, a non-edge NO still gets
+            # p=1.0, and the NO leg is still gated downstream by its OWN execution data
+            # (a missing native NO ask -> EXECUTABLE_NATIVE_ASK_MISSING). NEVER a YES
+            # complement price.
             if no_hyp is not None and no_hyp.p_value is not None:
                 p_values[(condition_id, "buy_no")] = float(no_hyp.p_value)
                 prefilter[(condition_id, "buy_no")] = bool(no_hyp.passed_prefilter)
             else:
-                p_values[(condition_id, "buy_no")] = 1.0
-                prefilter[(condition_id, "buy_no")] = False
+                _no_p_value, _no_prefilter = _native_no_edge_positivity(
+                    native_costs=native_costs,
+                    condition_id=condition_id,
+                    q_lcb_no=q_lcb_no,
+                )
+                p_values[(condition_id, "buy_no")] = _no_p_value
+                prefilter[(condition_id, "buy_no")] = _no_prefilter
         else:
             # scan_full_hypothesis_family skips a bin entirely when its YES side has no
             # executable market. Emit neutral, non-actionable values for BOTH directions:
@@ -11848,8 +12013,22 @@ def _maybe_apply_settlement_coverage_to_lcb(
     apply_settlement_coverage (only UNLICENSED moves the number; the shrink only ever
     LOWERS the LCB). The new entry's calibration_source becomes SETTLEMENT_ISOTONIC.
 
-    FAIL-OPEN: any error keeps the upstream lcb (never crash the hot path, never
-    widen optimistically). Touches ONLY lcb_by_direction; q/p_values/prefilter stay.
+    GATE OFF (default): IMMEDIATE no-op, byte-identical lcb (never reached below).
+
+    FINDING-C FIX (external review 2026-06-12): when the GATE IS ON (live coverage
+    licensing), this is a SAFETY gate (it can only LOWER an unlicensed bound). Two
+    outcomes were previously conflated under one fail-OPEN swallow:
+      (1) "no historical coverage data" — settlement_backward_coverage_check returns a
+          typed INSUFFICIENT_DATA VERDICT (NOT an exception); apply_settlement_coverage
+          keeps the lcb (new_q == claimed). This is the legitimate no-shrink path and
+          STAYS — it never raises.
+      (2) "coverage AUTHORITY threw" — a structural fault (DB read error, grade_receipt
+          crash, import/season failure). The prior code swallowed this and kept the
+          UNSHRUNK upstream q_lcb: a SAFETY GATE FAILING OPEN in live sizing.
+    With the gate ON, a structural exception now FAILS CLOSED with the typed TRANSIENT
+    reason QLCB_COVERAGE_AUTHORITY_FAULT (registered in TRANSIENT_MONEY_PATH_REASONS):
+    the candidate requeues (the read re-runs clean next cycle) rather than sizing on the
+    unshrunk, unlicensed bound. Touches ONLY lcb_by_direction; q/p_values/prefilter stay.
     """
     import logging as _logging
 
@@ -11857,9 +12036,13 @@ def _maybe_apply_settlement_coverage_to_lcb(
         if not bool(settings["edli"].get("q_lcb_settlement_coverage_gate_enabled", False)):
             return
     except Exception:
+        # The flag READ itself is not the coverage authority; a config read fault keeps
+        # the OFF default (no-op) rather than fabricating a live-gate fault.
         return
 
     log = _logging.getLogger("zeus.qlcb_settlement_coverage")
+    # GATE IS ON past this point: the coverage authority is a live SAFETY gate, so any
+    # structural fault in it must fail CLOSED (never proceed on the unshrunk bound).
     try:
         from src.calibration.qlcb_provenance import _qlcb_float, _set_qlcb_provenance
         from src.calibration.settlement_backward_coverage import (
@@ -11873,8 +12056,9 @@ def _maybe_apply_settlement_coverage_to_lcb(
         lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
         season = season_from_date(str(getattr(family, "target_date", "")), lat=lat)
     except Exception as exc:
-        log.warning("K3 coverage setup failed (non-fatal, lcb kept): %s", exc)
-        return
+        raise ValueError(
+            f"QLCB_COVERAGE_AUTHORITY_FAULT:setup:{exc}"
+        ) from exc
 
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
@@ -11913,11 +12097,15 @@ def _maybe_apply_settlement_coverage_to_lcb(
                         verdict.status, verdict.n_settlement_observations,
                     )
             except Exception as exc:
-                log.warning(
-                    "K3 coverage skipped bin %s/%s (non-fatal, lcb kept): %s",
-                    family.city, getattr(bin_obj, "label", "?"), exc,
-                )
-                continue
+                # FINDING-C: the coverage authority threw for this (bin, direction).
+                # "Insufficient data" is a typed VERDICT, not an exception — so reaching
+                # here is a STRUCTURAL fault. Fail CLOSED (the gate is ON): never keep the
+                # unshrunk lcb. Transient -> the candidate requeues, the read re-runs.
+                raise ValueError(
+                    "QLCB_COVERAGE_AUTHORITY_FAULT:"
+                    f"city={family.city}:bin={getattr(bin_obj, 'label', '?')}:"
+                    f"dir={direction}:{exc}"
+                ) from exc
 
 
 def _snapshot_p_raw(
@@ -13118,7 +13306,14 @@ def _native_quote_book_from_snapshot_row(row: dict[str, Any]):
     min_tick_size = Decimal(str(row.get("min_tick_size") or row.get("tick_size") or "0.01"))
     min_order_size = Decimal(str(row.get("min_order_size") or "1"))
     fee_details = _json_object(row.get("fee_details_json") or row.get("fee_details") or {})
-    fee_rate = fee_rate_fraction_from_details(fee_details)
+    # Realized-fee authority over the schedule CAP (incident 2026-06-12: the
+    # CLOB base_fee=1000bps schedule was consumed as the actual fee — ~10%
+    # phantom tax on every EV — while all realized fills carried 0 bps).
+    from src.contracts.fee_authority import resolve_taker_fee_fraction
+
+    fee_rate, _fee_source = resolve_taker_fee_fraction(
+        fee_rate_fraction_from_details(fee_details)
+    )
     neg_risk = bool(_optional_bool(row.get("neg_risk")) or False)
     depth = _json_object(row.get("orderbook_depth_json") or row.get("orderbook_depth_jsonb") or {})
     yes_token_id = str(row.get("yes_token_id") or "")

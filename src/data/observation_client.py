@@ -315,6 +315,61 @@ def _wu_result_needs_fallback(
     return None
 
 
+def _fuse_wu_prefix_with_metar_tail(
+    wu: "Day0ObservationContext",
+    metar: "Day0ObservationContext",
+) -> Optional["Day0ObservationContext"]:
+    """Fuse a coverage-proving (but stale) WU prefix with a fresh METAR tail.
+
+    Settlement-day incident 2026-06-12 (Denver): the METAR fast-lane memo is
+    process-lifetime, so after any daemon restart its first_obs_time can never
+    again fall inside the local-day-start grace window -> every fast-lane
+    context is WINDOW_INCOMPLETE -> the day0 quality gate (honestly) rejects it
+    -> the 3-5-min source exists but is never APPLIED, and held-position belief
+    freezes for the rest of the settlement day.
+
+    The honest day-extreme is the UNION of the two lanes: the persisted WU
+    surface proves coverage from local-day start (its own coverage_status is
+    OK/LOW_COVERAGE) but its tail is stale; the METAR memo has the fresh tail
+    but no prefix. Fused extremes are the max/min across both; the freshness
+    clock (observation_time / available_at) is METAR's; the coverage claim is
+    WU's (the prefix prover). Both lanes report the SAME physical settlement
+    station (station identity gate inside the fast lane), so the union is a
+    single-sensor running extreme, not a cross-source blend.
+
+    Returns None (caller falls back to existing behavior) when the units
+    differ or either lane lacks the extreme fields — never fabricates.
+    """
+    import dataclasses
+
+    wu_cov = str(getattr(wu, "coverage_status", "") or "").strip().upper()
+    if wu_cov not in ("OK", "LOW_COVERAGE"):
+        return None  # WU cannot prove the prefix — stay honest-incomplete.
+    if str(getattr(wu, "unit", "")) != str(getattr(metar, "unit", "")):
+        return None
+    try:
+        high = max(float(wu.high_so_far), float(metar.high_so_far))
+        low = min(float(wu.low_so_far), float(metar.low_so_far))
+    except (TypeError, ValueError):
+        return None
+    annotation = (
+        f"{metar.provider_reported_time or ''};prefix=wu_api"
+        f";prefix_coverage={wu_cov}"
+        f";prefix_last={getattr(wu, 'last_sample_time', None) or getattr(wu, 'observation_time', None)}"
+    )
+    return dataclasses.replace(
+        metar,
+        high_so_far=high,
+        low_so_far=low,
+        coverage_status=wu_cov,
+        first_sample_time=getattr(wu, "first_sample_time", None),
+        sample_count=int(getattr(wu, "sample_count", 0) or 0)
+        + int(getattr(metar, "sample_count", 0) or 0),
+        provider_reported_time=annotation,
+    )
+
+
+
 def _fetch_metar_fast_lane_observation(
     city: "City",
     *,
@@ -457,6 +512,21 @@ def get_current_observation(
                 city, target_day=target_day, reference_utc=reference_utc
             )
             if fast_result is not None:
+                # Prefix fusion (Denver incident 2026-06-12): a stale-but-
+                # coverage-proving WU result + a fresh-but-prefixless METAR
+                # tail fuse into one honest local-day context. Without this,
+                # the process-lifetime METAR memo is WINDOW_INCOMPLETE for the
+                # whole settlement day after any restart and the quality gate
+                # (correctly) rejects it — the fast source exists but never
+                # applies.
+                if (
+                    result is not None
+                    and str(fast_result.coverage_status).strip().upper()
+                    == "WINDOW_INCOMPLETE"
+                ):
+                    fused = _fuse_wu_prefix_with_metar_tail(result, fast_result)
+                    if fused is not None:
+                        fast_result = fused
                 logger.info(
                     "DAY0_OBS_FAST_LANE_FALLBACK city=%s target_date=%s "
                     "wu_needs_fallback=%s metar_source=%s coverage=%s age_annotation=%s",

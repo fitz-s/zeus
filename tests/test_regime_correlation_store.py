@@ -177,15 +177,15 @@ def test_cache_round_trip() -> None:
 # ---------------------------------------------------------------------------
 
 def test_schema_migration_N_to_N_plus_1() -> None:
-    """A fresh init_schema DB has regime_correlation_cache + current PRAGMA user_version.
+    """A fresh init_schema DB has regime_correlation_cache table.
 
-    Plan §T2 acceptance test 4 (verbatim):
-      "pre-migration world DB at version N gains regime_correlation_cache table;
-       PRAGMA user_version == N+1 post-migration."
+    Plan §T2 acceptance test 4 (adapted):
+      "init_schema creates regime_correlation_cache table."
 
-    We verify two things:
-      1. init_schema creates regime_correlation_cache (table exists in sqlite_master).
-      2. PRAGMA user_version equals SCHEMA_VERSION (currently 24).
+    B2 + operator directive 2026-06-13: PRAGMA user_version mechanism removed.
+    Schema currency proven via structural table presence only.
+
+    We verify: init_schema creates regime_correlation_cache (table exists in sqlite_master).
     """
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
@@ -197,17 +197,6 @@ def test_schema_migration_N_to_N_plus_1() -> None:
     assert row is not None, (
         "regime_correlation_cache table not found after init_schema(); "
         "ensure ensure_table is called from db.py::init_schema."
-    )
-
-    # PRAGMA user_version must match current global SCHEMA_VERSION.
-    pragma_version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert pragma_version == SCHEMA_VERSION, (
-        f"PRAGMA user_version={pragma_version} != SCHEMA_VERSION={SCHEMA_VERSION}. "
-        "db.py::init_schema must set PRAGMA user_version = SCHEMA_VERSION as final step."
-    )
-    assert SCHEMA_VERSION >= 24, (
-        f"SCHEMA_VERSION expected >= 24 (Phase 5 T2 bump introduced regime_correlation_cache); "
-        f"got {SCHEMA_VERSION}. Subsequent bumps (Phase 6+) are acceptable."
     )
 
     # Columns must match the DDL specification.

@@ -493,7 +493,14 @@ def test_snapshot_refresh_db_lock_wait_is_bound_to_capture_budget(monkeypatch):
     assert summary["inserted"] == 0
     assert summary["failed"] == 3
     assert summary["failure_samples"][0]["error"] == "database is locked"
-    assert observed_timeouts == [250, 250, 250]
+    # Fitz #5 lock-category kill (2026-06-08): the old min(250ms, remaining)
+    # clamp fail-fasted EVERY contended insert (inserted=0 -> coverage NONE ->
+    # armed daemon could not trade). The contract is now a DURABLE FLOOR
+    # (default 1000ms) <= wait <= configured cap (default 2000ms), still
+    # tightened by the remaining per-cycle budget — never the whole window.
+    assert all(1000 <= t <= 2000 for t in observed_timeouts), observed_timeouts
+    # Remaining-budget tightening: waits never grow as the cycle burns down.
+    assert observed_timeouts == sorted(observed_timeouts, reverse=True), observed_timeouts
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
 
 
@@ -3888,9 +3895,14 @@ class TestForwardMarketSubstrateProducer:
             "cond-mid",
             "cond-high",
         ]
-        assert next(o for o in snapshot.events if o["condition_id"] == "cond-mid")[
-            "executable_snapshot_id"
-        ] == "snap-mid"
+        # Static-topology authority (task #41): sibling support topology is the
+        # STATIC market_events bin structure, not executable-quote freshness —
+        # the reader returns it without snapshot enrichment, so the old
+        # executable_snapshot_id pin no longer applies. The contract here is
+        # the bin topology itself.
+        mid = next(o for o in snapshot.events if o["condition_id"] == "cond-mid")
+        assert mid["range_low"] == 36.0 and mid["range_high"] == 37.0
+        assert mid["token_id"] == "yes-mid"
 
     def test_persisted_sibling_reader_uses_static_topology_when_executable_snapshot_stale(self):
         """Relationship: monitor bin topology is static, not executable quote freshness."""

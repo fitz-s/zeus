@@ -165,7 +165,17 @@ CREATE TABLE IF NOT EXISTS position_current (
     exit_price REAL,
     settlement_price REAL,
     settled_at TEXT,
-    exit_reason TEXT
+    exit_reason TEXT,
+    -- Canonical-column parity (2026-06-12): these were added to
+    -- CANONICAL_POSITION_CURRENT_COLUMNS by later packets but never to this
+    -- kernel DDL, so a FRESH kernel DB failed assert_canonical_transaction_schema
+    -- while legacy DBs were healed by the ALTER backfill. entry_ci_width is the
+    -- entry-time q CI width; exit_retry_count / next_exit_retry_at are the K3
+    -- exit-retry backoff projection (task #45). Nullable / zero-default so the
+    -- ALTER path on legacy DBs stays equivalent.
+    entry_ci_width REAL,
+    exit_retry_count INTEGER,
+    next_exit_retry_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS strategy_health (

@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-12
 # Authority basis: Paris >=26C wrong-trade incident 2026-06-10 (/tmp/mainstream_gate_report.md
 #   Mission 1; /tmp/deep_verify_report.md Verification A). The settlement sigma floor
 #   (calibrated on INTERIOR-bin settlement dispersion) is designed to ONLY widen sigma ->
@@ -191,4 +191,105 @@ def test_materializer_open_ended_bin_not_inflated_by_floor(monkeypatch) -> None:
     assert warm.bin_id in capped_bins
     assert warm.bin_id in prov["settlement_sigma_floor_catchall_capped"], (
         "provenance must record the capped open-ended bin"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FINDING 1 (external review 2026-06-12): the open-ended catch-all cap in the
+# UNIFORM-MIXTURE path was defeated by post-cap renormalization. The mixture
+# path (a) caps the far open-ended bin at its honest normalized mass, then
+# (b) divided ALL bins by _rtot. After the cap _rtot < 1 (the cap removed
+# mass), so the divide RE-INFLATED the capped bin above its honest cap —
+# resurrecting the Paris >=26 inflation category. This test forces BOTH the
+# wide floor AND a non-zero uniform mixture so the warm (>=27) open-high
+# catch-all is capped INSIDE the mixture path, and asserts the persisted q
+# never exceeds the honest (un-floored, pre-mixture) normalized mass for it.
+# The UNFIXED code fails this (the renorm re-inflates the capped bin).
+# ---------------------------------------------------------------------------
+
+def _force_floor_and_mixture(monkeypatch, *, floor_c: float, w: float) -> None:
+    """Wide floor ON, plus a non-zero fitted uniform-mixture weight (k=1, w>0).
+
+    Patches the floor lookup (as _force_wide_floor) AND the sigma-scale/uniform-mixture
+    lookup to return (k=1.0, w) so the mixture seam is exercised with a real w. k is kept
+    at 1.0 so the ONLY widening comes from the floor (isolating the floor↔mixture↔cap
+    interaction that FINDING 1 lives in)."""
+    monkeypatch.setitem(cfg.settings["edli"], "edli_settlement_sigma_floor_enabled", True)
+    monkeypatch.setattr(
+        mod,
+        "_replacement_settlement_sigma_floor_lookup",
+        lambda request, *, metric: (float(floor_c), None),
+    )
+    monkeypatch.setattr(mod, "_replacement_sigma_scale_lookup", lambda unit: (1.0, float(w)))
+
+
+def test_uniform_mixture_renorm_does_not_reinflate_capped_catchall(monkeypatch) -> None:
+    """FINDING 1 regression: with a wide floor AND a non-zero uniform mixture, the warm
+    (>=27) open-high catch-all bin must not be re-inflated above its honest normalized mass
+    by the post-cap renormalization in the mixture path.
+
+    Harness topology (_bins): cool(<=22 open-low), mild([23,26]), warm(>=27 open-high).
+    The fused center is ~23-24 (below the 27 anchor), so the warm catch-all is the far tail
+    the floor inflates; the uniform mixture then lifts it again toward 1/3, so it is capped
+    INSIDE the mixture path. The honest cap = the un-floored, pre-mixture normalized mass."""
+    _disable_other_layers(monkeypatch)
+    _enable_fusion(monkeypatch)
+    _enable_fused_shape(monkeypatch)
+    _force_floor_and_mixture(monkeypatch, floor_c=4.326, w=0.35)
+    conn = _conn()
+    models = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"]
+    _seed_history(conn, decision=date(2026, 6, 7), models=models)
+    _seed_current_single_runs(conn, values=_live_values())
+    pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
+    row = _row(conn, pid)
+    prov = json.loads(row["provenance_json"])
+    assert prov["q_shape"] == "fused_normal_direct"
+    assert prov["settlement_sigma_floor_applied"] is True
+    # The mixture must actually have been applied (w threaded through) — otherwise the path
+    # under test was skipped and the regression would be vacuously "passing".
+    assert prov.get("uniform_mixture_w_applied") == pytest.approx(0.35), (
+        "fixture sanity: the uniform mixture must have been applied (w threaded into the path)"
+    )
+    center = float(prov["bayes_precision_fusion"]["anchor_value_c"])
+    predictive_sigma = float(prov["bayes_precision_fusion"]["predictive_sigma_c"])
+    assert predictive_sigma < 4.326, "fixture sanity: forced floor must exceed predictive sigma"
+
+    q = json.loads(row["q_json"])
+    assert sum(q.values()) == pytest.approx(1.0, abs=1e-9), "q must be a valid distribution"
+
+    bins = list(_request().bins)  # type: ignore[attr-defined]
+
+    def _mass(sig: float, b) -> float:
+        return bin_probability_settlement(
+            mu=center, sigma=sig,
+            bin_low=(None if b.lower_c is None else float(b.lower_c)),
+            bin_high=(None if b.upper_c is None else float(b.upper_c)),
+        )
+
+    # Honest normalized mass for each open-ended catch-all bin: the un-floored predictive-sigma
+    # mass divided by the pre-mixture fused total (the SAME basis the cap uses internally). This
+    # is the upper bound the persisted q must never exceed for those bins.
+    capped_vec = {}
+    for b in bins:
+        is_open_ended = (b.lower_c is None) != (b.upper_c is None)
+        floored = _mass(4.326, b)
+        if is_open_ended:
+            capped_vec[b.bin_id] = min(floored, _mass(predictive_sigma, b))
+        else:
+            capped_vec[b.bin_id] = floored
+    pre_mixture_total = sum(capped_vec.values())
+
+    warm = next(b for b in bins if b.upper_c is None and b.lower_c is not None)
+    honest_norm_warm = _mass(predictive_sigma, warm) / pre_mixture_total
+    # Fixture sanity: the floor DOES inflate the >=27 catch-all (center ~23-24 < 27).
+    assert _mass(4.326, warm) > _mass(predictive_sigma, warm), "fixture: floor inflates >=27 catch-all"
+
+    # CORE ASSERTION: the persisted q for the far open-high catch-all must NOT exceed its honest
+    # normalized mass. The UNFIXED code re-inflates it above this bound via the _rtot renorm.
+    assert q[warm.bin_id] <= honest_norm_warm + 1e-9, (
+        f"FINDING 1: catch-all {warm.bin_id} persisted q {q[warm.bin_id]} exceeds honest cap "
+        f"{honest_norm_warm} — post-cap renormalization re-inflated it above the honest mass"
+    )
+    assert warm.bin_id in prov["settlement_sigma_floor_catchall_capped"], (
+        "provenance must record the capped open-ended bin in the mixture path"
     )

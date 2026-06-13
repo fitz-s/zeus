@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-13
 # Authority basis: day0 first-principles review 2026-06-10 §6.2 (live obs hook)
 #   + operator green-light 2026-06-10 (free METAR fast lane; no paid sources);
 #   /tmp/weather_source_research.md (aviationweather.gov ~3-5 min obs-to-cache,
@@ -638,8 +638,14 @@ class Day0FastObsEmitter:
         low=min), caches it into the in-process memo (so the live monotone emit
         logic stays consistent post-restart), and returns it. Fail-soft: any DB
         error leaves the memo untouched and returns None (the lane simply has no
-        recovered fact this call). ``world_conn`` is caller-supplied for tests;
-        when None a short read-only world connection is opened and closed here.
+        recovered fact this call).
+
+        ``world_conn`` must be supplied by callers that hold a composite write
+        connection (the production path: execute_monitoring_phase → evaluate_hard_fact_exit
+        → this method). Opening an independent world connection when None was the
+        old fallback; it has been deleted to prevent the connection-burst regression
+        (347f713d) — see _recover_kill_memo_from_events docstring. When world_conn
+        is None and the memo is cold, recovery is skipped and None is returned.
         """
         key = (str(city_name), str(target_date), str(metric))
         with self._lock:
@@ -648,6 +654,12 @@ class Day0FastObsEmitter:
             return memo
         # In-process memo empty (restart / first call this process): recover from
         # the durable event store before giving up.
+        # GUARD: world_conn=None means no connection was threaded — skip recovery
+        # (return None) rather than opening an independent connection. The production
+        # call path always supplies world_conn via execute_monitoring_phase; any path
+        # that does not is cold-start-safe (the memo is empty, so None is correct).
+        if world_conn is None:
+            return None
         recovered = _recover_kill_memo_from_events(
             city_name=str(city_name),
             target_date=str(target_date),
@@ -961,7 +973,7 @@ def _recover_kill_memo_from_events(
     city_name: str,
     target_date: str,
     metric: str,
-    world_conn: Any = None,
+    world_conn: Any,
 ) -> Optional[int]:
     """Recover the kill-memo rounded extreme from durably-persisted
     DAY0_EXTREME_UPDATED events (restart-safe; no new table).
@@ -970,18 +982,25 @@ def _recover_kill_memo_from_events(
     rows (source_authorized_status=AUTHORIZED, local_date_status=MATCH,
     dst_status=UNAMBIGUOUS — the SAME authorization the live kill memo required),
     and reduces by the absorbing direction (high=MAX, low=MIN). None when no
-    recoverable row exists or on any error (fail-soft). ``world_conn`` is
-    caller-supplied for tests; when None a short read-only world connection is
-    opened and closed here.
+    recoverable row exists or on any error (fail-soft).
+
+    ``world_conn`` MUST be supplied by the caller (a world-main read connection or
+    a composite connection with zeus-world ATTACHed). Passing None raises
+    RuntimeError immediately — the old "open a fresh connection when None" fallback
+    has been DELETED because it caused the day0 connection-burst regression
+    (commit 347f713d): 47 simultaneous per-city independent world connections opened
+    inside the reactor cycle that already held the composite write lock, producing
+    SQLITE_BUSY × 47 per cycle. See docs/evidence/lock_storm/
+    2026-06-13_lock_storm_regression_archaeology.md for the full mechanism.
     """
-    own_conn = False
+    if world_conn is None:
+        raise RuntimeError(
+            "_recover_kill_memo_from_events: world_conn must be supplied by the caller. "
+            "Opening an independent world connection here is forbidden (connection-burst "
+            "antibody — see 2026-06-13 lock_storm_regression_archaeology.md)."
+        )
     conn = world_conn
     try:
-        if conn is None:
-            from src.state.db import get_world_connection_read_only
-
-            conn = get_world_connection_read_only()
-            own_conn = True
         agg = "MAX" if metric == "high" else "MIN"
         sql = f"""
             SELECT {agg}(CAST(json_extract(payload_json, '$.rounded_value') AS INTEGER)) AS extreme
@@ -1006,12 +1025,6 @@ def _recover_kill_memo_from_events(
             city_name, target_date, metric, type(exc).__name__, exc,
         )
         return None
-    finally:
-        if own_conn and conn is not None:
-            try:
-                conn.close()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 _EMITTER_SINGLETON: Day0FastObsEmitter | None = None

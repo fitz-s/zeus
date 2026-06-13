@@ -2910,8 +2910,8 @@ def init_schema(
     _ensure_edli_fill_bridge_dispositions_table(conn)
 
     # 2026-05-21 live authority follow-up: decision_events CHECK constraints
-    # must admit shadow_decision / unknown_legacy before PRAGMA user_version is
-    # stamped current. CREATE TABLE IF NOT EXISTS cannot upgrade stale CHECKs.
+    # must admit shadow_decision / unknown_legacy. CREATE TABLE IF NOT EXISTS
+    # cannot upgrade stale CHECKs.
     _migrate_decision_events_schema(conn)
     _migrate_world_strategy_key_checks(conn)
 
@@ -2942,8 +2942,6 @@ def init_schema(
     # Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
     from src.calibration.ens_bias_repo import init_ens_bias_schema as _init_ens_bias_schema
     _init_ens_bias_schema(conn)
-
-    conn.execute("PRAGMA user_version = 43")
 
     # db_chunk_boundary_events — K2 live-contention event log (Cluster B fix 2026-05-18)
     conn.execute("""
@@ -3098,7 +3096,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
 
 
 class SchemaOutOfDateError(RuntimeError):
-    """Raised when PRAGMA user_version does not match the expected frozen value."""
+    """Raised when the DB schema does not meet structural readiness requirements."""
 
 
 class BridgeAbsentError(RuntimeError):
@@ -3121,7 +3119,6 @@ def assert_schema_current(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 # B2 (2026-05-28): SCHEMA_FORECASTS_VERSION counter cancelled alongside SCHEMA_VERSION.
 # Forecast schema drift is detected via content-hash fingerprint.
-# Frozen value 7 is stamped as PRAGMA user_version by init_schema_forecasts.
 
 
 # B3cont (2026-05-28): _create_settlements removed — bare world-class settlements shell dropped.
@@ -3881,8 +3878,6 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
       producer readiness_state, job_run, observations, settlements,
       calibration_pairs, settlement_outcomes, market_events
 
-    Sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION as the final step.
-
     K1 split 2026-05-11 — do NOT call init_schema() on the forecasts conn;
     that would create world-class tables on the wrong DB.
 
@@ -4101,8 +4096,6 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     )
     _create_replacement_shadow(conn)
 
-    # Mark schema current — MUST be last (partial failure must not mark ready).
-    conn.execute("PRAGMA user_version = 7")
     conn.commit()
 
 

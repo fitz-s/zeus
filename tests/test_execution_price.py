@@ -168,12 +168,17 @@ class TestEvaluatorWiring:
     """Verify evaluator.py correctly wires ExecutionPrice at the Kelly boundary."""
 
     def test_evaluator_imports_execution_price(self):
-        """evaluator.py must import ExecutionPrice and polymarket_fee."""
-        import ast
+        """evaluator.py must wire ExecutionPrice; fee enters via with_taker_fee.
+
+        The direct polymarket_fee import pin rotted when the taker fold
+        (Wave-2 item 8) routed all fee math through
+        ExecutionPrice.with_taker_fee (which delegates to polymarket_fee
+        internally) — the law is the fee APPLICATION, not the import name.
+        """
         from pathlib import Path
         src = (Path(__file__).parent.parent / "src" / "engine" / "evaluator.py").read_text()
         assert "ExecutionPrice" in src
-        assert "polymarket_fee" in src
+        assert "with_taker_fee" in src
 
     def test_evaluator_calls_with_taker_fee(self):
         """evaluator.py must call with_taker_fee() before Kelly sizing."""

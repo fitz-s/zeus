@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-13
 # Authority basis: adversarial review /tmp/day0_adversarial_review.md MUST-FIX
 #   #1 (hard-fact bin-death exit lane) + #3-wiring (resting-order cancel on bin
 #   death) — operator requirement "新高出现时能否立即drop". Calibration artifact:
@@ -191,13 +191,23 @@ def _wu_rounded_extremes(
     return high, low
 
 
-def _metar_rounded_extreme(city_name: str, target_date: str, metric: str) -> Optional[float]:
+def _metar_rounded_extreme(
+    city_name: str, target_date: str, metric: str, *, world_conn: Any = None
+) -> Optional[float]:
     """Settlement-grade rounded extreme from the fast METAR lane's emit memo
-    (values there passed the LIVE_AUTHORITY hard-fact statuses at emission)."""
+    (values there passed the LIVE_AUTHORITY hard-fact statuses at emission).
+
+    ``world_conn`` is threaded from the caller's composite connection so the
+    kill-memo restart-recovery path does not open an independent world connection.
+    When None (non-composite callers), recovery is skipped for this call — the
+    in-process memo is used when warm, or None is returned when cold.
+    """
     try:
         from src.data.day0_fast_obs import get_fast_obs_emitter
 
-        return get_fast_obs_emitter().latest_rounded_extreme(city_name, target_date, metric)
+        return get_fast_obs_emitter().latest_rounded_extreme(
+            city_name, target_date, metric, world_conn=world_conn
+        )
     except Exception:  # noqa: BLE001
         return None
 
@@ -208,6 +218,7 @@ def settlement_grade_effective_extreme(
     target_date: str,
     metric: str,
     now: datetime,
+    world_conn: Any = None,
 ) -> tuple[Optional[float], str]:
     """(effective_extreme, source) for hard-fact decisions, margin-adjusted.
 
@@ -216,6 +227,10 @@ def settlement_grade_effective_extreme(
     (HIGH: minus margin; LOW: plus margin) so a METAR-only crossing must clear
     the measured divergence allowance. The two compose by the absorbing law
     (HIGH max / LOW min). None when no source is available.
+
+    ``world_conn`` is threaded from the monitoring-phase composite connection so
+    the METAR kill-memo recovery (cold-start path) does not open an independent
+    world connection — see connection-burst antibody (2026-06-13).
     """
     city_name = str(getattr(city, "name", "") or "")
     unit = str(getattr(city, "settlement_unit", "F") or "F").upper()
@@ -225,7 +240,7 @@ def settlement_grade_effective_extreme(
     metar_value = None
     margin = _metar_kill_margin_units(city_name, unit)
     if margin is not None:
-        raw = _metar_rounded_extreme(city_name, target_date, metric)
+        raw = _metar_rounded_extreme(city_name, target_date, metric, world_conn=world_conn)
         if raw is not None:
             metar_value = raw - margin if metric == "high" else raw + margin
 
@@ -245,10 +260,18 @@ def evaluate_hard_fact_exit(
     position: Any,
     city: Any,
     now: Optional[datetime] = None,
+    world_conn: Any = None,
 ) -> Optional[HardFactVerdict]:
     """The lane entry point for one held day0 position. None = no hard fact
     (the estimator-evidence lane proceeds unchanged). Fail-soft everywhere:
-    any data gap or active oracle-anomaly pause yields None (hold)."""
+    any data gap or active oracle-anomaly pause yields None (hold).
+
+    ``world_conn`` should be the caller's composite world connection (zeus_trades
+    with zeus-world ATTACHed). It is threaded through to the METAR kill-memo
+    recovery path so the cold-start restart does not open an independent world
+    connection per city. When None, the METAR memo recovery is skipped for cold
+    cells; warm memo cells are unaffected.
+    """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
     try:
         target_date = str(getattr(position, "target_date", "") or "")
@@ -274,7 +297,7 @@ def evaluate_hard_fact_exit(
             return None
 
         effective, source = settlement_grade_effective_extreme(
-            city=city, target_date=target_date, metric=metric, now=moment
+            city=city, target_date=target_date, metric=metric, now=moment, world_conn=world_conn
         )
         if effective is None:
             return None

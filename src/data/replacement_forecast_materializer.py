@@ -1,7 +1,7 @@
 """Materialize replacement forecast shadow posterior rows into forecast DB.
 
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-12
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md (the probability chain
 #   §1d-§1e fused-N-direct + settlement sigma floor); FIX 1/FIX 2/FIX 5 (operator-reviewed
 #   2026-06-09): explicit replacement_q_mode authority, settlement-sigma-floor coherence in the
@@ -1586,17 +1586,71 @@ def _insert_posterior(
                         _q_mixed = {key: val / _mtot for key, val in _mixed.items()}
                         # Re-cap open-ended catch-all bins at their honest normalized mass (the same
                         # honest mass, normalized by the pre-mixture _total, that the floor cap used).
+                        # CATEGORY-KILL FIX (2026-06-12, external review FINDING 1): the cap is an
+                        # HONESTY constraint, not an artificial throttle — a capped open-ended bin must
+                        # end EXACTLY at its honest mass, never above. The previous code capped, then
+                        # renormalized ALL bins by _rtot; with _rtot < 1 after the cap (the common case,
+                        # the cap removes mass) the divide RE-INFLATED the capped bin above its cap,
+                        # resurrecting the Paris >=26 inflation category the cap exists to kill.
+                        # CONSTRAINED REDISTRIBUTION: pin each capped open-ended bin at its honest mass
+                        # and absorb the deficit/surplus ONLY across the UNCAPPED bins (proportionally).
+                        # Capped bins are excluded from the renorm divisor so they stay exactly at cap.
+                        _honest_norm_by_bin: dict[str, float] = {}
+                        _capped_now: set[str] = set()
                         for _bid, _honest in _catchall_honest_mass.items():
                             _honest_norm = float(_honest) / _total
+                            _honest_norm_by_bin[_bid] = _honest_norm
                             if _q_mixed.get(_bid, 0.0) > _honest_norm:
                                 _q_mixed[_bid] = _honest_norm
+                                _capped_now.add(_bid)
                                 if _bid not in _catchall_capped_bins:
                                     _catchall_capped_bins.append(_bid)
-                        _rtot = sum(_q_mixed.values())
-                        if _rtot > 0.0 and math.isfinite(_rtot):
-                            q = {key: val / _rtot for key, val in _q_mixed.items()}
+                        _capped_mass = sum(_q_mixed[_b] for _b in _capped_now)
+                        _uncapped_mass = sum(
+                            _val for _key, _val in _q_mixed.items() if _key not in _capped_now
+                        )
+                        _residual = 1.0 - _capped_mass  # mass the uncapped bins must carry
+                        if (
+                            _capped_now
+                            and _uncapped_mass > 0.0
+                            and math.isfinite(_uncapped_mass)
+                            and _residual >= 0.0
+                        ):
+                            # Scale uncapped bins so the whole vector sums to 1; capped bins untouched.
+                            _scale = _residual / _uncapped_mass
+                            q = {
+                                _key: (_val if _key in _capped_now else _val * _scale)
+                                for _key, _val in _q_mixed.items()
+                            }
                             uniform_mixture_w_applied = _uniform_w
                             settlement_sigma_floor_catchall_capped = tuple(_catchall_capped_bins)
+                        else:
+                            # Degenerate: nothing capped (no-op cap), OR every bin is a capped
+                            # open-ended bin / no uncapped mass to absorb the residual. With no uncapped
+                            # bin to redistribute onto, plain renormalization is the only option (and is
+                            # exactly the prior behavior — correct when no cap bit). DOCUMENTED tradeoff:
+                            # in the all-capped degenerate case a capped bin may exceed its honest mass
+                            # after the renorm divide; this is unavoidable when there is no other bin to
+                            # carry the residual, and is mathematically distinct from the inflation bug
+                            # (there it was a non-degenerate vector with uncapped bins available).
+                            _rtot = sum(_q_mixed.values())
+                            if _rtot > 0.0 and math.isfinite(_rtot):
+                                q = {key: val / _rtot for key, val in _q_mixed.items()}
+                                uniform_mixture_w_applied = _uniform_w
+                                settlement_sigma_floor_catchall_capped = tuple(_catchall_capped_bins)
+                        # POST-CONDITIONS (relationship invariant): in the non-degenerate path every
+                        # capped open-ended bin sits at EXACTLY its honest mass (<= honest + 1e-9) and
+                        # the total is 1.0 +/- 1e-9. Assert so a future refactor cannot silently
+                        # reintroduce the renorm re-inflation.
+                        if _capped_now and _uncapped_mass > 0.0 and _residual >= 0.0:
+                            for _bid in _capped_now:
+                                assert q[_bid] <= _honest_norm_by_bin[_bid] + 1e-9, (
+                                    f"capped open-ended bin {_bid} re-inflated above honest mass: "
+                                    f"{q[_bid]} > {_honest_norm_by_bin[_bid]}"
+                                )
+                            assert abs(sum(q.values()) - 1.0) <= 1e-9, (
+                                f"constrained-redistribution mass drift: {sum(q.values())}"
+                            )
             q_shape = "fused_normal_direct"
             # Q_LCB / Q_UCB (2026-06-09) — fused-center parameter-uncertainty bootstrap. INDEPENDENT
             # fail-soft: a bound-construction error must NOT roll back the fused q point (that would

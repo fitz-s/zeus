@@ -3789,11 +3789,18 @@ def _live_order(
                             "idempotency_key": idem.value,
                         },
                     )
-                if _own_conn:
-                    conn.commit()
+                # Commit UNCONDITIONALLY (same rule as the post-ACK path and the
+                # exit-order twin): the request crossed the venue boundary, so the
+                # venue may hold a live order. Under a caller-owned connection the
+                # old `if _own_conn` guard let a crash/rollback before the outer
+                # commit ERASE the unknown-side-effect fence — the next cycle then
+                # re-submits the same economic intent (duplicate live order).
+                # External review 2026-06-12 CRITICAL-2.
+                conn.commit()
             except Exception as inner:
                 logger.error(
-                    "_live_order: terminal SDK-exception event append failed "
+                    "_live_order: terminal SDK-exception event append/commit failed — "
+                    "unknown-side-effect fence NOT durable; reconcile before next submit "
                     "(command_id=%s trade_id=%s): inner=%s original=%s",
                     command_id, trade_id, inner, exc,
                 )

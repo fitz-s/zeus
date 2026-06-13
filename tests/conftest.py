@@ -132,23 +132,25 @@ def r3_default_risk_allocator_for_unit_tests():
 
 @pytest.fixture(autouse=True)
 def _redeem_pivot_test_machinery_context(monkeypatch):
-    """K3.6 redeem pivot (operator law 2026-06-10): the redeem SUBMISSION
-    machinery is preserved for supervised manual redrives but hard-refuses in
-    daemon context unless the operator-only override token is set. The legacy
-    redeem-machinery suites (settlement_commands, web3 wire, negRisk routing,
-    cascade liveness...) pin that PRESERVED machinery, so the test session runs
-    in the operator-override context. The antibody itself is pinned by
-    tests/execution/test_redeem_pivot_antibody.py, whose tests explicitly
-    delenv/override this fixture's env per test — the gate's CI teeth live
-    there, not here.
-    """
-    from src.execution.settlement_commands import (
-        REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV,
-        REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN,
-    )
+    """Redeem submission FORBIDDEN in production (operator law 2026-06-10): there
+    is no env/override that re-arms it; ``assert_redeem_submission_allowed``
+    raises ``REDEEM_SUBMISSION_FORBIDDEN`` unconditionally.
 
-    monkeypatch.setenv(
-        REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV, REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN
+    But the receipt-CLASSIFICATION antibodies (standard-CTF receipt verification,
+    negRisk misroute reset, gamma fallback, world-attach) legitimately bootstrap
+    their REDEEM_TX_HASHED fixture state through ``submit_redeem`` before
+    asserting on ``reconcile_pending_redeems`` (pure chain-receipt accounting).
+    To keep that ACCOUNTING coverage alive without weakening the production law,
+    this autouse fixture monkeypatches the guard to a no-op for the test session
+    only. The production teeth — the unconditional raise and "no venue/RPC method
+    invoked" antibody — are pinned by tests/execution/test_redeem_pivot_antibody.py,
+    which does NOT use this fixture's patch (it imports the real guard) and so
+    sees the genuine unconditional raise.
+    """
+    import src.execution.settlement_commands as _sc
+
+    monkeypatch.setattr(
+        _sc, "assert_redeem_submission_allowed", lambda *_a, **_k: None
     )
 
 

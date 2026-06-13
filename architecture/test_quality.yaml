@@ -115,3 +115,33 @@ tests:
     falsifying_proof:
       type: negative_fixture
       description: "OperatorArm (FIX-2b) must gate every EDLI live-submit: require_operator_arm returns None unless edli_live_operator_authorized is the literal True, and the live adapter enforces the arm token at the EDLI boundary. The mainline executor (execute_final_intent) path is unaffected."
+  tests/money_path/test_finding_a_taker_depth_authority.py:
+    category: money_path
+    protects: [MP-ORD-001]
+    falsifying_proof:
+      type: negative_fixture
+      description: "Stale DB depth (300) + diverging fresh witness must raise LIVE_DEPTH_AUTHORITY_MISSING, never size from unwitnessed depth (external review 2026-06-12 CRITICAL-3)."
+  tests/money_path/test_finding_b_free_cash_bound.py:
+    category: money_path
+    protects: [MP-ORD-001]
+    falsifying_proof:
+      type: negative_fixture
+      description: "Injected bankroll with free cash 5 must clamp stake to 5; unresolvable free cash must fault BANKROLL_FREE_CASH_MISSING, never size unclamped."
+  tests/money_path/test_finding_c_coverage_failclosed.py:
+    category: money_path
+    protects: [MP-MD-001]
+    falsifying_proof:
+      type: negative_fixture
+      description: "Coverage authority raising must block with QLCB_COVERAGE_AUTHORITY_FAULT (fail-closed); insufficient-data keeps lcb unchanged without raising."
+  tests/money_path/test_finding_d_no_side_independent.py:
+    category: money_path
+    protects: [MP-MD-001]
+    falsifying_proof:
+      type: negative_fixture
+      description: "Native NO with q_lcb_no above its own cost must be FDR-admissible even when YES is absent/unexecutable; non-edge NO stays p=1.0."
+  tests/money_path/test_finding_e_no_min_order_cap.py:
+    category: money_path
+    protects: [MP-ORD-001]
+    falsifying_proof:
+      type: negative_fixture
+      description: "Venue minimum above the deleted 2% bankroll cap with positive EV and cash must trade the minimum; only honest EV/cash reasons may block (NO-CAPS law)."

@@ -51,18 +51,11 @@ def test_no_schema_version_constant_in_db():
     )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "PRAGMA user_version remains in src/state/db.py (used for WAL-mode check and "
-        "legacy DB migration detection); full removal deferred post-PR3"
-    ),
-)
 def test_no_pragma_user_version_in_db():
-    """src/state/db.py must not call PRAGMA user_version after B2."""
+    """src/state/db.py must not call PRAGMA user_version (operator directive 2026-06-13: full removal)."""
     db_py = REPO_ROOT / "src" / "state" / "db.py"
     assert db_py.exists(), "src/state/db.py not found"
     text = db_py.read_text(encoding="utf-8")
     assert _PRAGMA.lower() not in text.lower(), (
-        "PRAGMA user_version still set in src/state/db.py"
+        "PRAGMA user_version still set in src/state/db.py — operator directive mandates full removal"
     )

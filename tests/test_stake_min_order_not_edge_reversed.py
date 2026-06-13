@@ -1,5 +1,7 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-06-09
+# Last reused/audited: 2026-06-12 (FINDING-E NO-CAPS: the 2% bankroll percentage cap on
+#   the bump-to-min-order is DELETED; the two cap-asserting tests are reworked to the
+#   honest economics — EV-at-venue-minimum + free-cash bound, no percentage cap.)
 # Authority basis: /tmp/edge_reversed_audit.md (2026-06-09 REGRESSION_BUG verdict) +
 #   "bin selection.md" §5.2/§5.3 (fractional-Kelly haircut after the ΔU optimizer) +
 #   §13 (no-trade gate) + §7 reversal taxonomy + operator directive 2026-06-09
@@ -151,9 +153,10 @@ def _recapture(proof, *, bankroll, mult, floor_out=None):
 def test_positive_edge_below_min_order_bumps_to_min_order_not_edge_reversed():
     """A cheap-bin candidate (ask 0.03, razor q_lcb 0.031) whose ×0.125 haircut stake
     falls below the venue min order (5 shares = $0.15) but whose ROBUST ΔU at min order
-    is strictly positive, with min order << 2% of a $900 bankroll: the kernel BUMPS the
-    stake to min order and records stake_floor=VENUE_MIN_ORDER. It does NOT zero the
-    stake (which would trip the false EDGE_REVERSED)."""
+    is strictly positive: the kernel BUMPS the stake to min order and records
+    stake_floor=VENUE_MIN_ORDER. It does NOT zero the stake (which would trip the false
+    EDGE_REVERSED). (FINDING-E: the bump no longer requires the minimum to be under any
+    percentage-of-bankroll cap — only positive EV + free-cash affordability.)"""
     row = _snapshot_row(yes_asks=(("0.03", "10000000"),), min_order="5")
     proof = _proof_from_row(
         direction="buy_yes", row=row, token_id="yes-1",
@@ -196,39 +199,36 @@ def test_positive_edge_below_min_order_decision_is_submit_not_edge_reversed():
 
 
 # ===========================================================================
-# 2. POSITIVE EDGE but the bump fails the bankroll cap -> SUBMIT_ABORTED_BELOW_MIN_ORDER,
-#    NEVER EDGE_REVERSED. (ΔU(min) > 0, but min_order_usd > 2% of bankroll.)
+# 2. FINDING-E (2026-06-12, NO-CAPS operator law). The former 2% bankroll percentage cap
+#    on the bump-to-min-order is DELETED. A positive-EV candidate whose venue minimum
+#    exceeds 2% of bankroll now TRADES THE MINIMUM (no artificial cap). The honest
+#    economic blocks remain: EV non-positive at the venue minimum, OR the venue minimum
+#    exceeds the free-cash bound.
 # ===========================================================================
-def test_below_min_order_when_min_order_exceeds_bankroll_cap_is_distinct_reason():
-    """min order = 1000 shares * 0.03 = $30, which exceeds 2% of a $900 bankroll ($18).
-    The robust ΔU at min order is still POSITIVE, but the bump is not admissible within
-    the bankroll cap. The kernel raises _StakeBelowMinOrder and the decision body emits
-    a DISTINCT SUBMIT_ABORTED_BELOW_MIN_ORDER with ReversalReason.MIN_ORDER — NOT
-    EDGE_REVERSED. The regret ledger must record the true (sizing) cause."""
+def test_min_order_above_old_2pct_cap_now_trades_minimum_no_artificial_cap():
+    """min order = 1000 shares * 0.03 = $30, which exceeds the DELETED 2%-of-$900 cap
+    ($18). The robust ΔU at min order is POSITIVE and (no free-cash bound) the minimum is
+    affordable. Under the NO-CAPS law the kernel now BUMPS to the venue minimum and the
+    order goes out — it is NOT aborted by an artificial percentage cap."""
     row = _snapshot_row(yes_asks=(("0.03", "100000000"),), min_order="1000")
     proof = _proof_from_row(
         direction="buy_yes", row=row, token_id="yes-1",
         q_posterior=0.08, q_lcb_5pct=0.05,
     )
-    decision, stake, price = _recapture(proof, bankroll=900.0, mult=0.125)
+    floor: dict[str, object] = {}
+    stake, price = _kernel(proof, bankroll=900.0, mult=0.125, floor_out=floor)
 
-    assert decision.state == CandidateLifecycleState.SUBMIT_ABORTED_BELOW_MIN_ORDER
-    assert decision.state != CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED
-    assert decision.reversal_reason == ReversalReason.MIN_ORDER
-    assert decision.may_submit is False
-    assert stake == 0.0 and price is None
-    # The reason maps to a distinct receipt string (the regret ledger taxonomy).
-    assert (
-        era._SUBMIT_ABORT_RECEIPT_REASON[decision.state]
-        == "SUBMIT_ABORTED_BELOW_MIN_ORDER"
-    )
+    assert stake == 30.0, f"the $30 venue minimum must trade (no 2% cap), got {stake}"
+    assert price is not None
+    assert floor.get("stake_floor") == "VENUE_MIN_ORDER"
+    assert float(floor.get("stake_floor_delta_u_at_min_order")) > 0.0
 
 
-def test_kernel_raises_distinct_exception_for_bankroll_cap_fail():
-    """At the kernel boundary the bankroll-cap-fail case raises the DISTINCT
-    _StakeBelowMinOrder, never a bare ValueError (which the live body would mislabel
-    KELLY_PROOF_MISSING) and never a silent (0.0, None) (which GATE 3 would mislabel
-    EDGE_REVERSED)."""
+def test_min_order_exceeds_free_cash_bound_is_honest_below_min_order():
+    """The ONLY cash-side block on the bump is now the HONEST free-cash bound: a $30 venue
+    minimum with only $10 free cash cannot be afforded. The kernel raises the DISTINCT
+    _StakeBelowMinOrder naming the free-cash reason (not a percentage cap), which the
+    decision body maps to SUBMIT_ABORTED_BELOW_MIN_ORDER / ReversalReason.MIN_ORDER."""
     import pytest
 
     row = _snapshot_row(yes_asks=(("0.03", "100000000"),), min_order="1000")
@@ -236,8 +236,37 @@ def test_kernel_raises_distinct_exception_for_bankroll_cap_fail():
         direction="buy_yes", row=row, token_id="yes-1",
         q_posterior=0.08, q_lcb_5pct=0.05,
     )
-    with pytest.raises(era._StakeBelowMinOrder):
-        _kernel(proof, bankroll=900.0, mult=0.125)
+    with pytest.raises(era._StakeBelowMinOrder, match="free_cash"):
+        era._robust_marginal_utility_stake_and_price(
+            family_key="fam",
+            selected_proof=proof,
+            all_proofs=(proof,),
+            extra_exposure_by_bin_id={},
+            bankroll_usd=900.0,
+            kelly_multiplier=0.125,
+            free_cash_usd=10.0,
+        )
+
+    # And through the full decision body the abort is the DISTINCT, honest sizing reason.
+    decision, stake, price = era._evaluate_submit_recapture_for_selected(
+        family_key="fam",
+        selected_proof=proof,
+        all_proofs=(proof,),
+        extra_exposure_by_bin_id={},
+        bankroll_usd=900.0,
+        kelly_multiplier=0.125,
+        forecast_still_current=True,
+        free_cash_usd=10.0,
+    )
+    assert decision.state == CandidateLifecycleState.SUBMIT_ABORTED_BELOW_MIN_ORDER
+    assert decision.state != CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED
+    assert decision.reversal_reason == ReversalReason.MIN_ORDER
+    assert decision.may_submit is False
+    assert stake == 0.0 and price is None
+    assert (
+        era._SUBMIT_ABORT_RECEIPT_REASON[decision.state]
+        == "SUBMIT_ABORTED_BELOW_MIN_ORDER"
+    )
 
 
 # ===========================================================================

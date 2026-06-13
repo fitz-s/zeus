@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.events.live_order_aggregate import LiveOrderAggregateLedger
+from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
 from src.events.live_order_reconcile import (
     append_reconcile_recovered_fill,
     append_user_trade_observed,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def append_confirmed_trade_facts_to_edli(
@@ -221,6 +224,17 @@ def append_rest_filled_orphan_trade_facts_to_edli(
                     AND existing.event_type = 'UserTradeObserved'
                     AND json_extract(existing.payload_json, '$.trade_id') = trade.trade_id
                )
+           AND NOT EXISTS (
+                 -- Mirror of the ledger guard in _require_user_channel_submit_binding:
+                 -- a terminal RECONCILED projection rejects every user-channel append,
+                 -- so selecting such aggregates only manufactures a per-minute retry
+                 -- loop (observed live 2026-06-12). The class must be unselectable.
+                 SELECT 1
+                   FROM edli_live_order_projection proj
+                  WHERE proj.aggregate_id = exec.aggregate_id
+                    AND proj.current_state = 'RECONCILED'
+                    AND COALESCE(proj.pending_reconcile, 0) = 0
+               )
          ORDER BY trade.observed_at ASC, trade.trade_fact_id ASC
          LIMIT ?
         """,
@@ -229,40 +243,61 @@ def append_rest_filled_orphan_trade_facts_to_edli(
 
     ledger = LiveOrderAggregateLedger(conn)
     appended = 0
+    skipped_invalid = 0
     for row in rows:
         observed_at = _parse_dt(_row_get(row, "observed_at"), default=default_now)
         if observed_at.timestamp() > grace_cutoff:
             continue  # still inside the user-channel grace window
         message_hash = _message_hash(row)
-        append_reconcile_recovered_fill(
-            ledger,
-            aggregate_id=str(_row_get(row, "aggregate_id")),
-            event_id=str(_row_get(row, "event_id")),
-            final_intent_id=str(_row_get(row, "final_intent_id")),
-            venue_order_id=str(_row_get(row, "venue_order_id")),
-            occurred_at=observed_at,
-            payload={
-                "raw_user_channel_message_hash": message_hash,
-                "trade_id": str(_row_get(row, "trade_id")),
-                "filled_size": str(_row_get(row, "filled_size")),
-                "fill_price": str(_row_get(row, "fill_price")),
-                "avg_fill_price": str(_row_get(row, "fill_price")),
-                "transaction_hash": _row_get(row, "tx_hash"),
-                "source_trade_fact_id": int(_row_get(row, "trade_fact_id")),
-                "source_trade_fact_authority": (
-                    f"venue_trade_facts:{_row_get(row, 'trade_source')}:"
-                    f"{_row_get(row, 'state')}"
-                ),
-                "venue_command_state": str(_row_get(row, "command_state")),
-                "recovery_basis": (
-                    "ws_user_confirmed_missing_after_grace;"
-                    f"grace_minutes={float(grace_minutes):g};"
-                    "cmd_terminal_fill_state+rest_trade_fact"
-                ),
-            },
-        )
+        try:
+            _append_one_recovered_fill(ledger, row, observed_at, message_hash, grace_minutes)
+        except LiveOrderAggregateError as exc:
+            # Poison-pill immunity (task #13 shape): one ledger-rejected row must
+            # never abort the batch — the remaining recoverable orphans would
+            # starve behind it forever. Validation raises BEFORE any event insert,
+            # so nothing partial was written for this row.
+            skipped_invalid += 1
+            logger.warning(
+                "rest-filled orphan bridge: skipped ledger-rejected row aggregate=%s trade=%s: %s",
+                _row_get(row, "aggregate_id"), _row_get(row, "trade_id"), exc,
+            )
+            continue
         appended += 1
+    if skipped_invalid:
+        logger.warning(
+            "rest-filled orphan bridge: %d row(s) skipped as ledger-rejected this scan", skipped_invalid
+        )
     return appended
+
+
+def _append_one_recovered_fill(ledger, row, observed_at, message_hash, grace_minutes) -> None:
+    append_reconcile_recovered_fill(
+        ledger,
+        aggregate_id=str(_row_get(row, "aggregate_id")),
+        event_id=str(_row_get(row, "event_id")),
+        final_intent_id=str(_row_get(row, "final_intent_id")),
+        venue_order_id=str(_row_get(row, "venue_order_id")),
+        occurred_at=observed_at,
+        payload={
+            "raw_user_channel_message_hash": message_hash,
+            "trade_id": str(_row_get(row, "trade_id")),
+            "filled_size": str(_row_get(row, "filled_size")),
+            "fill_price": str(_row_get(row, "fill_price")),
+            "avg_fill_price": str(_row_get(row, "fill_price")),
+            "transaction_hash": _row_get(row, "tx_hash"),
+            "source_trade_fact_id": int(_row_get(row, "trade_fact_id")),
+            "source_trade_fact_authority": (
+                f"venue_trade_facts:{_row_get(row, 'trade_source')}:"
+                f"{_row_get(row, 'state')}"
+            ),
+            "venue_command_state": str(_row_get(row, "command_state")),
+            "recovery_basis": (
+                "ws_user_confirmed_missing_after_grace;"
+                f"grace_minutes={float(grace_minutes):g};"
+                "cmd_terminal_fill_state+rest_trade_fact"
+            ),
+        },
+    )
 
 
 def _ensure_trades_attached_if_needed(

@@ -409,6 +409,18 @@ state_machines:
     states:
       - ROLLBACK
     invariant_tests: []
+  calibration_fitter_pooling_verdicts:
+    owner: scripts/fit_bias_scale.py
+    description: >
+      Era-pooling verdict vocabulary written into the state/bias_scale_fit.json
+      calibration artifact by the --era-mode fitter (statistical calibration
+      addendum 2026-06-13 C1/D1). NOT a money-path state machine — offline
+      fitter report strings; live use of the artifact is operator-gated.
+      Registered because the "PARTIAL" substring in EB_PARTIAL_POOLING fires the
+      semantic classifier's PARTIAL-prefix state check.
+    states:
+      - EB_PARTIAL_POOLING
+    invariant_tests: []
   decision_integrity_quarantine_reason_codes:
     owner: src/state/decision_integrity_quarantine.py
     description: >
@@ -616,6 +628,14 @@ state_machines:
       - FSR_SOURCE_RUN_NOT_COMPLETE
       - FSR_PARTIAL_DEAD_LETTER
       - RETRY_EXECUTABLE_SNAPSHOT_PENDING
+      # External deep-review fixes 2026-06-12 (event_reactor_adapter twin-authority /
+      # fail-open repairs). Each is a TYPED TRANSIENT money-path reason base registered
+      # in src/events/reactor.py::TRANSIENT_MONEY_PATH_REASONS; the candidate requeues
+      # with a fresh-substrate re-decision rather than sizing on a stale/unwitnessed/
+      # unlicensed authority. Not venue order states; never prove fill.
+      - LIVE_DEPTH_AUTHORITY_MISSING          # FINDING-A: fresh-price witness lacks the swept depth
+      - BANKROLL_FREE_CASH_MISSING            # FINDING-B: live bankroll provider with unresolvable free cash
+      - QLCB_COVERAGE_AUTHORITY_FAULT         # FINDING-C: coverage shrinker threw (fail-closed in live)
     invariant_tests:
       - tests/events/test_forecast_snapshot_ready.py
       - tests/events/test_reactor.py

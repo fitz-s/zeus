@@ -656,7 +656,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # These are NOT in the world-db BULK lock universe; each is either
         # read-only or writes a separate DB (risk_state.db).
         "src/ingest_main.py",           # RO: reads condition_id for UMA listener, no write
-        "src/main.py",                  # read_only_ro_uri: live boot verifies zeus-forecasts.db user_version with mode=ro + query_only
+        "src/main.py",                  # read_only_ro_uri: live boot structural checks on zeus-forecasts.db with mode=ro + query_only
         "src/data/replacement_forecast_live_dry_run.py",  # read_only_ro_uri: replacement switch dry-run inventory opens forecasts DB mode=ro + query_only; SELECT-only
         "src/observability/status_summary.py",  # RO: status dashboard read-only
         "src/engine/position_belief.py",  # read_only_ro_uri: K1 single belief authority — held-position belief reads forecast_posteriors mode=ro, short-lived, SELECT-only (settlement-losses incident 2026-06-12)
@@ -678,6 +678,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- calibration bake-off + settlement backfill (2026-06-02, operator-invoked offline) ---
         "scripts/fit_settlement_sigma_floor.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over settlement_outcomes(VERIFIED); writes settlement_sigma_floor.json only; EMPIRICAL σ-floor offline fit (q1000 2026-06-05)
         "scripts/fit_sigma_scale.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over forecast_posteriors ⋈ settlement_outcomes(VERIFIED); writes state/sigma_scale_fit.json only; MLE σ-scale (k) + uniform-mixture (w) offline fit (operator law 2026-06-12, docs/operations/c3_sigma_calibration_surface_2026-06-12.md)
+        "scripts/fit_bias_scale.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over forecast_posteriors ⋈ settlement_outcomes(VERIFIED); writes state/bias_scale_fit.json only; JOINT per-city bias b_loc + global scale k interval-censored categorical MLE + EB shrinkage (statistical_calibration_authority_2026-06-12 Task 1.1 / Migration Step 1; supersedes the variance-only k that absorbed center bias)
+        "scripts/measure_member_correlation.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over forecast_posteriors.provenance_json (AIFS member bin-probs) + raw_model_forecasts + settlement_outcomes(VERIFIED); writes state/member_correlation_fit.json only; within/between-family ICC + N_eff offline measurement (statistical_calibration_authority_2026-06-12.txt Task 3.1)
         "scripts/replay_exit_path_comparison.py",  # read_only_ro_uri: opens trades DB via file:...?mode=ro&immutable=1 uri; SELECT-only over position_current + position_events(MONITOR_REFRESHED/SETTLED); replays legacy-vs-canonical exit decisions per stored monitor refresh (HOLD_VALUE_EXIT_COSTS flag monkeypatched in-process); writes docs/evidence/exit_path_replay md only (Wave-2 item 3 flip verification 2026-06-12)
         "scripts/measure_wu_obs_latency.py",  # read_only_ro_uri: opens world+trades DBs via file:...?mode=ro uri; SELECT-only over observation_instants + settlement_day_observation_authority; writes config/wu_obs_latency.json + evidence md only (day0 first-principles 2026-06-10)
         "scripts/measure_wu_metar_divergence.py",  # read_only_ro_uri: opens world DB via file:...?mode=ro uri; SELECT-only over observation_instants; writes config/wu_metar_divergence.json + evidence md only (anomaly-threshold calibration 2026-06-10)
@@ -859,6 +861,12 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- e2e fill verification script (2026-06-10) ---
         "scripts/verify_fill_e2e.py",  # read_only_ro_uri: opens trades+world DBs with mode=ro uri; SELECT-only; operator diagnostic; never daemon path
         "scripts/verify_pipeline_liveness.py",  # read_only_ro_uri: data-supply e2e liveness check (forecasts+world, mode=ro, SELECT-only); antibody for the 2026-06-10 10h download dead-zone incident
+        # --- big-direction ops file (2026-06-12): READ-ONLY money-funnel heartbeat ---
+        "scripts/zeus_status.py",  # read_only_ro_uri: money-funnel heartbeat CLI; opens all 3 live DBs via file:...?mode=ro + PRAGMA query_only=ON; SELECT-only; never writes
+        # --- big-direction ops file (2026-06-12): schema cheatsheet generator (READ-ONLY) ---
+        "scripts/generate_schema_cheatsheet.py",  # read_only_ro_uri: schema-cheatsheet generator; opens all 3 live DBs via file:...?mode=ro; reads sqlite_master + PRAGMA table_info only; writes docs/reference/schema_cheatsheet.md
+        # --- fee reconciliation evidence (2026-06-12): READ-ONLY fills scan ---
+        "scripts/reconcile_realized_fees.py",  # read_only_ro_uri: venue_order_facts trade-level fee fields + position_current cost-basis arithmetic via file:...?mode=ro; SELECT-only; writes state/fee_reconciliation.json
     }
 )
 
