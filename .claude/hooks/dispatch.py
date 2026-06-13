@@ -1577,6 +1577,132 @@ def _run_advisory_check_pre_branch_create_in_primary(
         return None
 
 
+# Main checkout that LIVE daemons run from. Hard-coded: the guard's whole job
+# is to detect "this git command would mutate the main tree's branch/state".
+_MAIN_TREE = Path("/Users/leofitz/zeus").resolve()
+
+
+def _run_advisory_check_maintree_git_state_guard(
+    payload: dict[str, Any],
+) -> str | None:
+    """BLOCKING: branch-mutating git in the MAIN tree (live-daemon checkout).
+
+    Failure #3 (operator directive 2026-06-12): an agent ran
+    `git fetch && git checkout -B <branch>` against the MAIN tree, hijacking
+    the live checkout's branch out from under running daemons. This guard
+    blocks the branch-/HEAD-/working-tree-mutating git subcommands when the
+    command's EFFECTIVE repo dir is the main tree:
+
+        git checkout ...        git switch ...
+        git branch -b/-B/-d/-D/-f/-m ...
+        git reset --hard ...
+
+    Effective-dir resolution:
+      * `git -C <path> ...`  -> <path> is the target dir.
+      * bare `git ...`       -> the hook process cwd is the target dir.
+    A target that resolves INTO a linked worktree (.claude/worktrees/*, or any
+    dir whose --git-dir contains /worktrees/) is EXEMPT — agents own those.
+
+    Non-mutating reads (`git branch` with no create/delete/force/move flag,
+    `git branch --show-current`, `git status`, ...) never match.
+
+    Bypass (human operator deliberate action): MAINTREE_GIT_BYPASS=1, inline
+    in the command or in the hook env — same convention as the cotenant guard.
+    The agent_worktree_merge.py helper sets this for its sanctioned ff-only
+    merge into the session branch.
+    """
+    command = _command_from_payload(payload)
+    if not command:
+        return None
+    import re
+
+    # Find each `git [global-opts] <subcommand> [args...]` segment. Tolerate the
+    # same global options the cotenant guard tolerates (-C/-c/--git-dir/--work-tree).
+    seg = re.search(
+        r"\bgit((?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+))*)"
+        r"\s+(checkout|switch|branch|reset)\b([^;&|]*)",
+        command,
+    )
+    if not seg:
+        return None
+    git_opts = seg.group(1) or ""
+    subcmd = seg.group(2)
+    sub_args = seg.group(3) or ""
+
+    # Decide whether THIS subcommand is actually branch/HEAD/tree-mutating.
+    mutating = False
+    if subcmd in ("checkout", "switch"):
+        mutating = True
+    elif subcmd == "branch":
+        # Only create/force/delete/move/copy variants mutate refs.
+        if re.search(r"(?:^|\s)-(?:b|B|d|D|f|m|M|c|C)\b", sub_args):
+            mutating = True
+    elif subcmd == "reset":
+        if re.search(r"(?:^|\s)--hard\b", sub_args):
+            mutating = True
+    if not mutating:
+        return None
+
+    # Resolve the effective target dir.
+    c_match = re.search(r"-C\s+(\S+)", git_opts)
+    if c_match:
+        target = c_match.group(1).strip("'\"")
+        try:
+            target_dir = Path(target).resolve()
+        except OSError:
+            target_dir = Path(target)
+    else:
+        target_dir = Path.cwd().resolve()
+
+    # Exempt linked worktrees (path-based fast check + git-dir confirmation).
+    target_str = str(target_dir)
+    if "/.claude/worktrees/" in target_str or "/worktrees/" in target_str:
+        return None
+    try:
+        gd = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=5, cwd=target_str,
+        )
+        if "/worktrees/" in gd.stdout:
+            return None  # linked worktree — agent owns it
+        # Confirm the target actually IS the main tree (not some unrelated repo).
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5, cwd=target_str,
+        )
+        toplevel = Path(top.stdout.strip()).resolve() if top.stdout.strip() else None
+    except (subprocess.TimeoutExpired, OSError):
+        toplevel = None
+
+    # Only fire when the effective target is the live main tree.
+    is_main = (target_dir == _MAIN_TREE) or (toplevel == _MAIN_TREE)
+    if not is_main:
+        return None
+
+    # Bypass: inline assignment in the command OR exported hook env.
+    inline_bypass = re.search(r"\bMAINTREE_GIT_BYPASS=1\b", command) is not None
+    if inline_bypass or os.environ.get("MAINTREE_GIT_BYPASS", "").strip() == "1":
+        return (
+            "ADVISORY (MAINTREE_GIT_BYPASS=1): branch-mutating git on the MAIN "
+            "tree allowed by explicit bypass. The live daemons run from this "
+            "checkout — confirm no daemon depends on the current HEAD before "
+            "switching."
+        )
+
+    print(
+        f"BLOCKED [maintree_git_state_guard]: `git {subcmd}` would mutate the "
+        f"MAIN tree's branch/HEAD/working state ({_MAIN_TREE}). LIVE daemons run "
+        f"from this checkout — switching its branch out from under them is the "
+        f"2026-06-12 incident (an agent ran `git fetch && git checkout -B` here "
+        f"and hijacked the live branch). Agents work in their OWN linked "
+        f"worktree (.claude/worktrees/agent-*) and never mutate the main tree's "
+        f"git state. Use scripts/agent_worktree_merge.py to land work on the "
+        f"session branch. Deliberate operator action: prefix MAINTREE_GIT_BYPASS=1.",
+        file=sys.stderr,
+    )
+    return _BLOCK_SENTINEL
+
+
 # ---------------------------------------------------------------------------
 # Advisory check dispatcher
 # ---------------------------------------------------------------------------
@@ -1596,6 +1722,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "invariant_test": _run_advisory_check_invariant_test,
     "secrets_scan": _run_advisory_check_secrets_scan,
     "cotenant_staging_guard": _run_advisory_check_cotenant_staging_guard,
+    "maintree_git_state_guard": _run_advisory_check_maintree_git_state_guard,
     "pre_checkout_uncommitted_overlap": _run_advisory_check_pre_checkout_uncommitted_overlap,
     "pr_create_loc_accumulation": _run_advisory_check_pr_create_loc_accumulation,
     "pre_merge_comment_check": _run_advisory_check_pre_merge_comment_check,

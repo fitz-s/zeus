@@ -53,6 +53,27 @@ hooks:
     telemetry:
       ritual_signal_emitted: true
 
+  - id: maintree_git_state_guard
+    event: PreToolUse
+    matcher: Bash
+    intent: >
+      BLOCK branch-/HEAD-/working-tree-mutating git (checkout, switch,
+      branch -b/-B/-d/-D/-f/-m, reset --hard) when the effective repo dir is
+      the MAIN tree (/Users/leofitz/zeus), including `git -C <main> ...` and
+      bare invocations whose cwd is the main tree. Failure #3 (operator
+      directive 2026-06-12): an agent ran `git fetch && git checkout -B` in
+      the MAIN tree and hijacked the live checkout's branch out from under
+      running daemons. Linked worktrees (.claude/worktrees/*) are EXEMPT —
+      agents own those. Bypass for deliberate operator action:
+      MAINTREE_GIT_BYPASS=1 (also used by scripts/agent_worktree_merge.py for
+      its sanctioned ff-only merge into the session branch).
+    blocked_when:
+      - branch_mutating_git_in_main_tree
+    severity: BLOCKING
+    sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
   - id: pre_checkout_uncommitted_overlap
     event: PreToolUse
     matcher: Bash

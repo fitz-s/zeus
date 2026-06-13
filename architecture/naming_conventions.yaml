@@ -53,6 +53,7 @@ file_naming:
         - watch_
         - extract_
       exceptions:
+        agent_worktree_merge.py: subagent merge-back helper (operator directive 2026-06-12); `agent_` prefix names the actor whose worktree branch is merged into the session branch
         _yaml_bootstrap.py: import bootstrap helper for script entrypoints
         _tigge_common.py: shared helpers for extract_tigge_* extractors (Phase 7B-followup extraction)
         _zpkt_scope.py: shared scope helper for Packet Runtime (zpkt) CLI and pre-commit hook

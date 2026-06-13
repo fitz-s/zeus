@@ -262,6 +262,21 @@ scripts:
     canonical_command: DO_NOT_RUN
     required_tests: [tests/test_backfill_completeness_guardrails.py]
     reason: "Imported by observation backfill scripts to write P2 4.4.B-lite completeness manifests and enforce fail thresholds."
+  agent_worktree_merge.py:
+    class: utility
+    module_owner: scripts
+    status: active
+    write_targets: [git_refs, worktree_files]
+    required_tests: [tests/test_cotenant_staging_guard.py]
+    reason: >
+      Subagent merge-back helper (operator directive 2026-06-12). Run by a
+      subagent as its LAST step from INSIDE its own linked worktree; fast-
+      forwards the session branch (the branch checked out in the MAIN tree) to
+      the agent's committed HEAD, but ONLY for a pure conflict-free ff against a
+      clean main tree (daemon-equivalent to a normal commit). Refuses if run
+      from the main tree or on a dirty worktree; defers non-ff cases to the
+      orchestrator (MERGE_PENDING). Sets MAINTREE_GIT_BYPASS=1 for its single
+      sanctioned `git -C <main> merge --ff-only` call. No canonical DB writes.
   antibody_scan.py: {class: diagnostic}
   apply_recommended_controls.py: {class: repair, apply_flag: explicit_import_only, target_db: state/control_plane.json}
   audit_architecture_alignment.py: {class: diagnostic}
