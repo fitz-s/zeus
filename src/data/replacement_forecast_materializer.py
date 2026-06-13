@@ -1,14 +1,18 @@
 """Materialize replacement forecast shadow posterior rows into forecast DB.
 
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-06-13
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md (the probability chain
 #   §1d-§1e fused-N-direct + settlement sigma floor); FIX 1/FIX 2/FIX 5 (operator-reviewed
 #   2026-06-09): explicit replacement_q_mode authority, settlement-sigma-floor coherence in the
 #   fused-q path, and capture-status provenance. 2026-06-09 (q_lcb materialization): real per-bin
 #   q_lcb_json/q_ucb_json on the fused path via fused-center parameter-uncertainty bootstrap
 #   (root-cause /tmp/candidate_missing_rootcause.md — NULL bounds force the Wilson-over-AIFS-votes
-#   fallback that under-certifies below ask and discards every candidate).
+#   fallback that under-certifies below ask and discards every candidate). 2026-06-13 (q_ucb
+#   symmetry): the soft-anchor (CAPTURE_MISSING) fallback now emits a GENUINE Wilson UPPER bound
+#   alongside its lower twin (same inputs/z), so EVERY materialized posterior carries BOTH bounds
+#   and the tradeable-latest reader's both-bounds predicate has a uniform carrier shape; the
+#   distinct wilson_aifs_member_votes basis keeps the row non-live-eligible (no fabricated edge).
 """
 
 from __future__ import annotations
@@ -1246,6 +1250,26 @@ def _wilson_lower_bound(successes: float, trials: float, *, z: float = _QLCB_WIL
     return max(0.0, min(1.0, (center - margin) / denom))
 
 
+def _wilson_upper_bound(successes: float, trials: float, *, z: float = _QLCB_WILSON_Z) -> float:
+    """One-sided Wilson UPPER bound for a binomial proportion (successes/trials).
+
+    The exact symmetric counterpart of ``_wilson_lower_bound``: identical Wilson centre/denom,
+    ``(center + margin) / denom`` instead of ``- margin``. z=1.645 -> ~95% one-sided (the SAME z
+    the LCB uses, so the two bounds are the same-confidence two-sided interval ends, not a mixed
+    pair). A genuine binomial bound on the AIFS support fraction — NOT a fabricated value and NOT a
+    copy of the point or the LCB. Returns 1.0 for trials<=0 (no evidence -> widest honest upper).
+    """
+    if trials <= 0.0:
+        return 1.0
+    successes = min(max(float(successes), 0.0), float(trials))
+    p_hat = successes / float(trials)
+    z2 = z * z
+    denom = 1.0 + z2 / float(trials)
+    center = p_hat + z2 / (2.0 * float(trials))
+    margin = z * ((p_hat - (p_hat * p_hat) + z2 / (4.0 * float(trials))) / float(trials)) ** 0.5
+    return max(0.0, min(1.0, (center + margin) / denom))
+
+
 def _build_soft_anchor_wilson_lcb(
     *,
     aifs_probabilities: Mapping[str, float],
@@ -1272,6 +1296,45 @@ def _build_soft_anchor_wilson_lcb(
             continue
         lb = _wilson_lower_bound(float(prob) * mc, mc)
         out[bin_id] = min(max(lb, 0.0), max(float(q_pt), 0.0))
+    return out
+
+
+def _build_soft_anchor_wilson_ucb(
+    *,
+    aifs_probabilities: Mapping[str, float],
+    member_count: float,
+    q_point: Mapping[str, float],
+) -> dict[str, float]:
+    """Per-bin Wilson-over-AIFS-member-votes q_ucb for the soft-anchor (no-fusion) path.
+
+    The genuine one-sided Wilson UPPER bound — the EXACT symmetric counterpart of
+    ``_build_soft_anchor_wilson_lcb`` from the IDENTICAL inputs (the AIFS member-vote support
+    fraction × member_count, same z). This is the honest upper band of the soft-anchor support, so
+    a CAPTURE_MISSING posterior (no fused inputs -> no fused-center bootstrap upper band) is still
+    born with BOTH bounds instead of a half-bound. It is NOT a fabrication: not q_ucb=q_point, not a
+    constant, not a copy of q_lcb. The carrier honesty is preserved upstream — the basis string
+    stays ``wilson_aifs_member_votes`` (distinct from the certified fused bootstrap marker) and the
+    q_mode is CAPTURE_MISSING, so this row remains structurally NON-live-eligible (the credential
+    reader's exact-basis gate AND the q-mode gate both reject it). The bound exists for shadow
+    accrual, coverage measurement, and so the tradeable-latest reader's both-bounds predicate is the
+    SAME shape on every row (a fused row never falls out of the reader window behind a run of
+    half-bounded CAPTURE_MISSING rows).
+
+    Clipped to [q_point[bin], 1.0] (an upper bound can never sit below the point mass). Bins absent
+    from the AIFS vote map get q_ucb clipped up from the no-evidence Wilson upper (successes=0), so
+    they are still >= q_point — an honest wide upper where there is no vote support.
+
+    Raises on a non-finite member_count (caller fail-softs to NULL — never WORSE than status quo).
+    """
+    mc = float(member_count)
+    if not (math.isfinite(mc) and mc > 0.0):
+        raise ValueError(f"member_count must be positive-finite, got {member_count}")
+    out: dict[str, float] = {}
+    for bin_id, q_pt in q_point.items():
+        prob = aifs_probabilities.get(bin_id)
+        successes = 0.0 if prob is None else float(prob) * mc
+        ub = _wilson_upper_bound(successes, mc)
+        out[bin_id] = max(min(ub, 1.0), min(max(float(q_pt), 0.0), 1.0))
     return out
 
 
@@ -1764,37 +1827,59 @@ def _insert_posterior(
                 )
             except Exception:
                 pass
-    # SOFT-ANCHOR Q_LCB FALLBACK (2026-06-12) — PROMOTE the Wilson-over-AIFS-votes bound into the
-    # materializer so NO posterior is born with a NULL q_lcb. Reached ONLY when the fused-center
-    # bootstrap did not produce a bound (q_lcb_map is None): flag-off, no BAYES_PRECISION_FUSION
-    # override (CAPTURE_MISSING — the persisted current capture was absent), predictive_sigma None,
-    # or a fused-q build failure. The bound is the SAME estimator the live decision path computed at
-    # read time (single-authority law) — built from the AIFS member-vote probabilities the soft-anchor
-    # posterior already carries — now computed ONCE here with its OWN basis. FAIL-SOFT: any error
-    # leaves q_lcb_map None (NULL written, status-quo Wilson read-time fallback) — never WORSE.
-    # The DISTINCT basis means the calibration credential reader does NOT treat this as the certified
-    # bootstrap basis, so a CAPTURE_MISSING / SOFT_ANCHOR row is STILL not live-eligible (correct:
-    # n=21<min_n=30 settled CAPTURE_MISSING cells → insufficient coverage to license).
+    # SOFT-ANCHOR Q_LCB/Q_UCB FALLBACK (2026-06-12; q_ucb added 2026-06-13) — PROMOTE the
+    # Wilson-over-AIFS-votes BOUNDS into the materializer so NO posterior is born with a NULL bound.
+    # Reached ONLY when the fused-center bootstrap did not produce a bound (q_lcb_map is None):
+    # flag-off, no BAYES_PRECISION_FUSION override (CAPTURE_MISSING — the persisted current capture
+    # was absent), predictive_sigma None, or a fused-q build failure. The bounds are the SAME
+    # estimator the live decision path computed at read time (single-authority law) — built from the
+    # AIFS member-vote probabilities the soft-anchor posterior already carries — now computed ONCE
+    # here with their OWN basis.
+    #
+    # Q_UCB ROOT FIX (2026-06-13): the soft-anchor path used to build ONLY the one-sided q_lcb and
+    # leave q_ucb NULL, so 100% of CAPTURE_MISSING rows (the entire q_ucb-less population on the
+    # 06-14 surface: 158/158, fingerprinted by replacement_q_mode=CAPTURE_MISSING +
+    # q_lcb_basis=wilson_aifs_member_votes) were born HALF-BOUNDED. A fused row never exists on this
+    # path (the fused inputs mu*/center_sigma are genuinely absent — no honest FUSED upper band can
+    # be built), so the operator's "input genuinely missing -> mark non-tradeable, do NOT serve a
+    # half-bound" rule governs: the row carries BOTH genuine Wilson bounds (the upper is the exact
+    # symmetric counterpart of the lower, same inputs/z) and STAYS non-tradeable by basis + q_mode.
+    # The bounds are built ATOMICALLY (both-or-neither): a half-bound is never written.
+    #
+    # FAIL-SOFT: any error leaves q_lcb_map AND q_ucb_map None (NULL written, status-quo Wilson
+    # read-time fallback) — never WORSE. The DISTINCT basis means the calibration credential reader
+    # does NOT treat this as the certified bootstrap basis, so a CAPTURE_MISSING / SOFT_ANCHOR row is
+    # STILL not live-eligible (correct: n=21<min_n=30 settled CAPTURE_MISSING cells → insufficient
+    # coverage to license).
     if q_lcb_map is None:
         try:
             _aifs_probs = dict(result.aifs_probabilities.probabilities)
             _member_count = float(len(result.aifs_probabilities.member_values_c)) or 51.0
-            q_lcb_map = _build_soft_anchor_wilson_lcb(
+            _soft_lcb = _build_soft_anchor_wilson_lcb(
                 aifs_probabilities=_aifs_probs,
                 member_count=_member_count,
                 q_point=q,
             )
+            _soft_ucb = _build_soft_anchor_wilson_ucb(
+                aifs_probabilities=_aifs_probs,
+                member_count=_member_count,
+                q_point=q,
+            )
+            # Atomic both-or-neither: only publish once BOTH bounds built (q_ucb is the genuine
+            # symmetric Wilson upper, never a half-bound). The bundle reader's both-bounds
+            # tradeable-grade predicate then sees a consistent carrier shape on every row.
+            q_lcb_map = _soft_lcb
+            q_ucb_map = _soft_ucb
             q_lcb_basis = _QLCB_SOFT_ANCHOR_BASIS
-            # No q_ucb on this path — the Wilson member-vote bound is one-sided (a lower bound only).
-            # q_ucb stays NULL; the bundle reader handles a present-lcb / absent-ucb posterior.
         except Exception as _wexc:
             q_lcb_map = None
+            q_ucb_map = None
             q_lcb_basis = None
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                    "replacement_0_1 soft-anchor Wilson q_lcb fallback skipped "
-                    "(fail-soft to NULL, read-time Wilson unchanged): %s",
+                    "replacement_0_1 soft-anchor Wilson q_lcb/q_ucb fallback skipped "
+                    "(fail-soft to NULL bounds, read-time Wilson unchanged): %s",
                     _wexc,
                 )
             except Exception:
@@ -1914,9 +1999,15 @@ def _insert_posterior(
             if q_lcb_basis == _QLCB_SOFT_ANCHOR_BASIS
             else "absent_no_calibrated_lcb_available"
         ),
+        # q_ucb role is BASIS-AWARE, symmetric with q_lcb_json_role: the soft-anchor Wilson upper
+        # bound (built alongside its lower twin when the fused-center bootstrap did not run) must
+        # NOT be mislabeled as the certified bootstrap ucb. q_ucb is published only when q_lcb was
+        # (atomic both-or-neither per path), so the basis fully determines the role.
         "q_ucb_json_role": (
             "fused_center_bootstrap_ucb"
-            if q_ucb_map is not None
+            if (q_ucb_map is not None and q_lcb_basis == _QLCB_BASIS)
+            else "wilson_aifs_member_votes_ucb"
+            if (q_ucb_map is not None and q_lcb_basis == _QLCB_SOFT_ANCHOR_BASIS)
             else "absent_no_calibrated_ucb_available"
         ),
         "q_lcb_basis": q_lcb_basis,
