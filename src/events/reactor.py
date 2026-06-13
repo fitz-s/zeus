@@ -878,14 +878,33 @@ class OpportunityEventReactor:
         Horizons (in precedence order):
           (c) OPERATOR_DISARM — the operator env kill-switch is set. Checked first
               so a disarm terminalizes everything in-flight immediately.
+          (b) MARKET_VENUE_CLOSED — the venue market has entered POST_TRADING
+              (RESOLVED). For a Polymarket weather family this is the F1 12:00-UTC
+              close of target_date (authority: src/strategy/market_phase). Once the
+              venue market is closed the family can produce no fresh executable book
+              (capture freezes at the last pre-close snapshot) and no receipt, so a
+              transient EXECUTABLE_SNAPSHOT_STALE block on it can NEVER clear — it
+              must terminalize at the venue close, not requeue.
           (a) TIMELINESS_FLOOR_PAST — the event is no longer timely. Delegates to
               the SINGLE existing timeliness authority (EventStore._is_timely):
               a forecast-decision event whose target LOCAL day is strictly past
-              has crossed its market horizon (it can neither produce a receipt nor
-              needs the reactor). This is the SAME predicate fetch_pending applies
-              on its read floor — no second clock, no new venue probe. (a) also
-              serves as the authoritative "market closed/settled" signal (horizon
-              (b)); the settlement-day-end floor IS the market-closed authority.
+              has crossed its market horizon. This is the SAME predicate
+              fetch_pending applies on its read floor — no second clock.
+
+        WHY (b) EXISTS — the local-day floor (a) is NOT the market-closed signal.
+        The prior design assumed "(a) subsumes market-closed (b): the
+        settlement-day-end floor IS the market-closed authority." That assumption
+        was FALSE: the venue closes at 12:00 UTC of target_date (POST_TRADING),
+        which is EARLIER than the target-LOCAL-day end for every city whose local
+        day extends past 12:00 UTC (UTC+, and UTC- before noon-local). In the window
+        [venue_close, local_day_end) the book is gone but (a) still reports the
+        event timely → an EXECUTABLE_SNAPSHOT_STALE block requeued FOREVER (measured
+        live 2026-06-13 15:48Z: 679 events / 51 families pinned at processed=0;
+        docs/evidence/no_order_root_2026-06-13/diagnosis.md). (b) closes that gap by
+        asking the venue-close authority directly. It invents NO new clock and runs
+        NO venue probe — it reuses the SAME market_phase POST_TRADING anchor the
+        reactor's EVENT_BOUND_MARKET_PHASE_CLOSED gate uses, applied at the horizon
+        locus. It is a SEMANTIC horizon (venue close), never an attempt cap.
 
         Non-forecast-decision events (no city+target_date) have no timeliness
         floor of their own — for them only the operator disarm horizon applies;
@@ -896,6 +915,16 @@ class OpportunityEventReactor:
         # (c) Operator disarm — highest precedence kill-switch.
         if _operator_disarm_active():
             return ("OPERATOR_DISARM", f"{_TRANSIENT_DISARM_ENV} set")
+
+        # (b) Venue-close floor — the market has entered POST_TRADING/RESOLVED. A
+        # closed market yields no fresh book and no receipt, so a transient block on
+        # it cannot clear; terminalize at the venue close (which precedes the
+        # local-day floor (a) for most cities). Fail-soft: an unresolvable
+        # tz/date returns None (NOT closed) so the event keeps requeueing — never
+        # burned on a missing predicate.
+        venue_closed = self._venue_market_closed_horizon(event, decision_time=decision_time)
+        if venue_closed is not None:
+            return venue_closed
 
         # (a) Timeliness floor — reuse the store's single authority. _is_timely
         # returns True for non-forecast-decision events (no floor) and for any
@@ -911,6 +940,60 @@ class OpportunityEventReactor:
                 timely = True
             if not timely:
                 return ("TIMELINESS_FLOOR_PAST", "target local day strictly past")
+        return None
+
+    def _venue_market_closed_horizon(
+        self, event: OpportunityEvent, *, decision_time: datetime
+    ) -> tuple[str, str] | None:
+        """Horizon (b): the venue market is in POST_TRADING/RESOLVED at decision_time.
+
+        For a forecast-decision family (city + target_date), consult the canonical
+        market_phase authority with the F1 12:00-UTC fallback close anchor — the
+        SAME authority the reactor's EVENT_BOUND_MARKET_PHASE_CLOSED gate uses, so
+        the two sites cannot disagree on the venue-close instant. No venue probe, no
+        snapshot read: the phase is derived purely from city timezone + target_date
+        + decision_time + the F1 anchor.
+
+        Returns ``("MARKET_VENUE_CLOSED", detail)`` iff the phase is POST_TRADING or
+        RESOLVED; otherwise None (the family is still live, or the inputs are
+        unresolvable → fail-soft requeue, never a premature terminal).
+        """
+        if event.event_type not in _FORECAST_DECISION_EVENT_TYPES:
+            return None
+        payload = _payload_dict(event)
+        city = str(payload.get("city") or "").strip()
+        target_date = str(payload.get("target_date") or "").strip()
+        if not city or not target_date:
+            return None
+        try:
+            from datetime import date as _date_cls
+
+            from src.config import runtime_cities_by_name
+            from src.strategy.market_phase import (
+                MarketPhase,
+                _f1_fallback_end_utc,
+                market_phase_for_decision,
+            )
+
+            city_config = runtime_cities_by_name().get(city)
+            tz = getattr(city_config, "timezone", None) if city_config is not None else None
+            if not tz:
+                return None
+            target_local_date = _date_cls.fromisoformat(target_date)
+            phase = market_phase_for_decision(
+                target_local_date=target_local_date,
+                city_timezone=tz,
+                decision_time_utc=decision_time.astimezone(UTC),
+                polymarket_start_utc=None,
+                polymarket_end_utc=_f1_fallback_end_utc(target_local_date),
+            )
+        except Exception:
+            # Fail-soft: an unresolvable city/tz/date must NOT terminalize a family
+            # that might still be live. Requeue (None); the local-day floor (a) is
+            # the backstop terminal once the whole local day ends.
+            return None
+        if phase in (MarketPhase.POST_TRADING, MarketPhase.RESOLVED):
+            return ("MARKET_VENUE_CLOSED", f"venue market phase {phase.value} (F1 12:00-UTC close)")
         return None
 
     @staticmethod

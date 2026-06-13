@@ -39,6 +39,18 @@ def _processing_status(conn: sqlite3.Connection, event_id: str) -> str:
     ).fetchone()[0]
 
 
+# A transient-REQUEUE test must price its decision at a VENUE-OPEN instant so the
+# family is genuinely still tradeable (a fresh book is still capturable) and the
+# venue-close horizon (reactor._venue_market_closed_horizon, 2026-06-13 zero-order
+# reactor-stall fix) does NOT terminalize it. The _forecast_event fixture's snapshot
+# becomes available at 2026-05-24T18:01Z, which is AFTER a 2026-05-24 market's
+# 12:00Z venue close — so those requeue tests use a 2026-05-25 TARGET (closes 12:00Z
+# 05-25) paired with this 05-25T06:10Z decision time (SETTLEMENT_DAY, pre-close,
+# after the snapshot is available). The previous 18:10Z-on-05-24 only "requeued"
+# because the reactor used to ignore the venue close until local-day-end.
+_DT_VENUE_OPEN = datetime(2026, 5, 25, 6, 10, tzinfo=timezone.utc)
+
+
 def _day0_event(key_suffix: str = "a"):
     payload = Day0ExtremeUpdatedPayload(
         city="Chicago",
@@ -68,10 +80,10 @@ def _day0_event(key_suffix: str = "a"):
     )
 
 
-def _forecast_event(key_suffix: str = "a"):
+def _forecast_event(key_suffix: str = "a", target_date: str = "2026-05-24"):
     payload = ForecastSnapshotReadyPayload(
         city="Chicago",
-        target_date="2026-05-24",
+        target_date=target_date,
         metric="high",
         source_id="opendata",
         source_run_id="run-1",
@@ -96,7 +108,7 @@ def _forecast_event(key_suffix: str = "a"):
     )
     return make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
-        entity_key=f"Chicago|2026-05-24|high|{key_suffix}",
+        entity_key=f"Chicago|{target_date}|high|{key_suffix}",
         source="forecast_live",
         observed_at="2026-05-24T18:00:00+00:00",
         available_at="2026-05-24T18:01:00+00:00",
@@ -269,11 +281,11 @@ def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_afte
     it instead of losing it. This is the #42b fix for the live reactor never running the kernel.
     """
     conn, store = _store()
-    event = _forecast_event()
+    event = _forecast_event(target_date="2026-05-25")
     store.insert_or_ignore(event)
     present = {"v": False}
     reactor = _retry_reactor(store, present)
-    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    dt = _DT_VENUE_OPEN
 
     def _status():
         return conn.execute(
@@ -302,11 +314,11 @@ def test_executable_snapshot_block_terminalizes_at_timeliness_horizon():
     indefinitely; it terminalizes only when its EVENT HORIZON (timeliness floor)
     has passed — labeled MONEY_PATH_HORIZON_EXPIRED."""
     conn, store = _store()
-    event = _forecast_event()
+    event = _forecast_event(target_date="2026-05-25")
     store.insert_or_ignore(event)
     present = {"v": False}  # never captured
     reactor = _retry_reactor(store, present)
-    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    dt = _DT_VENUE_OPEN  # venue-open (SETTLEMENT_DAY): requeues while still tradeable
 
     def _status():
         return conn.execute(
@@ -319,9 +331,10 @@ def test_executable_snapshot_block_terminalizes_at_timeliness_horizon():
         reactor.process_pending(decision_time=dt)
         assert _status() == "pending"
 
-    # Timeliness horizon passes (Chicago 2026-05-24 boundary is 2026-05-25T05:00Z).
-    # Drive the requeue disposition at the past time to assert the explicit horizon
-    # terminal (in production the read floor + archive sweep also reclaim it).
+    # Market horizon passes (Chicago 2026-05-24: the F1 12:00-UTC venue close is the
+    # earliest horizon; the local-day floor is 2026-05-25T05:00Z). Drive the requeue
+    # disposition at a past time to assert the explicit horizon terminal (in
+    # production the read floor + archive sweep also reclaim it).
     from src.events.reactor import ReactorResult
 
     horizon_past = datetime(2026, 5, 26, 0, 0, tzinfo=timezone.utc)
@@ -346,7 +359,7 @@ def test_source_captured_after_decision_time_is_retryable_not_consumed():
     the event is requeued and retried next cycle (decision_time advances past the source's
     available time) rather than consumed at the money-path stage. Mirrors the snapshot retry.
     """
-    payload = json.loads(_forecast_event().payload_json)
+    payload = json.loads(_forecast_event(target_date="2026-05-25").payload_json)
 
     def _submit(event, _decision_time):
         return EventSubmissionReceipt(
@@ -362,7 +375,7 @@ def test_source_captured_after_decision_time_is_retryable_not_consumed():
         )
 
     conn, store = _store()
-    event = _forecast_event()
+    event = _forecast_event(target_date="2026-05-25")
     store.insert_or_ignore(event)
     reactor = OpportunityEventReactor(
         store,
@@ -374,7 +387,7 @@ def test_source_captured_after_decision_time_is_retryable_not_consumed():
         config=ReactorConfig(),
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
-    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
 
     assert result.processed == 0
     assert result.retried == 1
@@ -389,7 +402,7 @@ def test_stale_executable_snapshot_receipt_is_retryable_not_consumed():
     """A selected executable price can expire between pre-submit identity gating and JIT scoring.
     That is a transient market-data freshness race, not a terminal trade-score failure.
     """
-    payload = json.loads(_forecast_event().payload_json)
+    payload = json.loads(_forecast_event(target_date="2026-05-25").payload_json)
 
     def _submit(event, _decision_time):
         return EventSubmissionReceipt(
@@ -403,13 +416,13 @@ def test_stale_executable_snapshot_receipt_is_retryable_not_consumed():
             trade_score_positive=False,
             reason=(
                 "EXECUTABLE_SNAPSHOT_STALE:"
-                "freshness_deadline=2026-05-24T18:09:59+00:00:"
-                "decision_time=2026-05-24T18:10:00+00:00"
+                "freshness_deadline=2026-05-24T06:09:59+00:00:"
+                "decision_time=2026-05-24T06:10:00+00:00"
             ),
         )
 
     conn, store = _store()
-    event = _forecast_event()
+    event = _forecast_event(target_date="2026-05-25")
     store.insert_or_ignore(event)
     reactor = OpportunityEventReactor(
         store,
@@ -421,7 +434,7 @@ def test_stale_executable_snapshot_receipt_is_retryable_not_consumed():
         config=ReactorConfig(),
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
-    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
 
     assert result.processed == 0
     assert result.rejected == 0
@@ -446,7 +459,7 @@ def test_sqlite_lock_during_live_certificate_build_is_retryable_not_consumed():
     The event must stay pending for the next cycle; non-lock certificate failures
     remain terminal through the existing rejection path.
     """
-    payload = json.loads(_forecast_event().payload_json)
+    payload = json.loads(_forecast_event(target_date="2026-05-25").payload_json)
 
     def _submit(event, _decision_time):
         return EventSubmissionReceipt(
@@ -462,7 +475,7 @@ def test_sqlite_lock_during_live_certificate_build_is_retryable_not_consumed():
         )
 
     conn, store = _store()
-    event = _forecast_event()
+    event = _forecast_event(target_date="2026-05-25")
     store.insert_or_ignore(event)
     reactor = OpportunityEventReactor(
         store,
@@ -474,7 +487,7 @@ def test_sqlite_lock_during_live_certificate_build_is_retryable_not_consumed():
         config=ReactorConfig(),
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
-    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
 
     assert result.processed == 0
     assert result.rejected == 0
@@ -574,7 +587,7 @@ def test_sqlite_lock_during_post_submit_begin_is_retryable_not_dead_lettered(tmp
 
 def test_stale_unbound_executable_snapshot_receipt_is_retryable_not_consumed():
     """Stale JIT price failures may return before the adapter can build a bound final intent."""
-    payload = json.loads(_forecast_event().payload_json)
+    payload = json.loads(_forecast_event(target_date="2026-05-25").payload_json)
 
     def _submit(event, _decision_time):
         return EventSubmissionReceipt(
@@ -588,13 +601,13 @@ def test_stale_unbound_executable_snapshot_receipt_is_retryable_not_consumed():
             trade_score_positive=True,
             reason=(
                 "EXECUTABLE_SNAPSHOT_STALE:"
-                "freshness_deadline=2026-05-24T18:09:59+00:00:"
-                "decision_time=2026-05-24T18:10:00+00:00"
+                "freshness_deadline=2026-05-24T06:09:59+00:00:"
+                "decision_time=2026-05-24T06:10:00+00:00"
             ),
         )
 
     conn, store = _store()
-    event = _forecast_event()
+    event = _forecast_event(target_date="2026-05-25")
     store.insert_or_ignore(event)
     reactor = OpportunityEventReactor(
         store,
@@ -606,7 +619,7 @@ def test_stale_unbound_executable_snapshot_receipt_is_retryable_not_consumed():
         config=ReactorConfig(),
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
-    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
 
     assert result.processed == 0
     assert result.rejected == 0
@@ -627,7 +640,7 @@ def test_stale_unbound_executable_snapshot_receipt_is_retryable_not_consumed():
 
 def test_stale_bound_receipt_on_executor_reject_path_is_retryable_not_consumed():
     """Any post-submit stale executable-price reason is transient, independent of reject branch."""
-    payload = json.loads(_forecast_event().payload_json)
+    payload = json.loads(_forecast_event(target_date="2026-05-25").payload_json)
 
     def _submit(event, _decision_time):
         return EventSubmissionReceipt(
@@ -657,7 +670,7 @@ def test_stale_bound_receipt_on_executor_reject_path_is_retryable_not_consumed()
         )
 
     conn, store = _store()
-    event = _forecast_event()
+    event = _forecast_event(target_date="2026-05-25")
     store.insert_or_ignore(event)
     reactor = OpportunityEventReactor(
         store,
@@ -669,7 +682,7 @@ def test_stale_bound_receipt_on_executor_reject_path_is_retryable_not_consumed()
         config=ReactorConfig(real_order_submit_enabled=False),
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
-    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
 
     assert result.processed == 0
     assert result.rejected == 0

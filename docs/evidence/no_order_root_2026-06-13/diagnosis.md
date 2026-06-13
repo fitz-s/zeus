@@ -76,3 +76,74 @@ the RiskGuard lock is fixed.
 2. **DROP the K-cut Layer-A gate removal** — those gates are the honest K, not the disease.
 3. **Calibration #2 (C1/C3)** is the path to real direction-legal near-center alpha.
 4. Re-measure throughput once GREEN is reliable.
+
+---
+
+## RESIDUAL ROOT (2026-06-13 ~15:50Z, post warm-lane reconstruct fix e996229068): reactor processed=0, retried climbing
+
+After the warm-lane index-seek reconstruct fix restored fresh captures (257 markets
+fresh, families_needing_refresh 165→2), the reactor STILL reported `processed=0`,
+`retried=71→90` for 8+ min. Every claimed event transient-requeued with
+`EXECUTABLE_SNAPSHOT_STALE`.
+
+### Single root cause (measured, read-only live DBs)
+The reactor's transient-block horizon authority (`_transient_horizon_terminal` →
+`EventStore._is_timely` → `_strictly_past_in_tz`, src/events/reactor.py:868 /
+src/events/event_store.py:728) uses the **target-LOCAL-day-end** (city-local midnight of
+`target_date + 1`) as the market-closed proxy. But the Polymarket weather market actually
+closes at the **F1 venue close = 12:00 UTC of target_date** (POST_TRADING; authority
+src/strategy/market_phase.py). For every city whose local day extends past 12:00 UTC, there
+is a multi-hour window `[12:00Z, local_day_end)` in which:
+  - the venue book is GONE (capture freezes at the last pre-close snapshot ~11:28Z), so the
+    bound snapshot is unbreakably price-stale (`_snapshot_price_stale_reason`,
+    event_reactor_adapter.py:13196 — correctly rejects the 11:28Z book at a 15:48Z decision);
+  - BUT `_is_timely` still returns True (target local day not strictly past), so
+    `_transient_horizon_terminal` returns None → the event requeues forever as the
+    *transient* `EXECUTABLE_SNAPSHOT_STALE` and never reaches a terminal.
+
+The reactor's own terminal phase gate `EVENT_BOUND_MARKET_PHASE_CLOSED`
+(event_reactor_adapter.py:2391) — which DOES use the venue `market_end_at`/F1-12:00-UTC
+anchor — is ordered AFTER the stale-price short-circuit (event_reactor_adapter.py:2348), so
+it never runs for these families: the stale check returns a transient reason first.
+
+The design comment at reactor.py:387-391 asserts "(a) [local-day floor] also subsumes the
+market-closed horizon (b)". **That assumption is false** — the venue close (12:00 UTC) is
+EARLIER than local-day-end. That is the entire bug.
+
+### Live evidence (read-only, NOW=2026-06-13T15:48Z)
+Classifying all 303 pending forecast-decision families (2633 pending events):
+  - **A** local-day strictly-past (should already terminal): 830 events / 104 families
+  - **B** VENUE-CLOSED (market_close_at=12:00Z passed) but NOT local-day-past — THE STUCK
+    WINDOW: **679 events / 51 families**. Every one has `market_close_at =
+    2026-06-13T12:00:00+00:00` and a last snapshot frozen ~11:27–11:36Z. Examples: Manila /
+    Beijing / Shanghai / KL / Madrid / Milan / Paris … 2026-06-13.
+  - **C** genuinely live/tradeable: 1128 events / 149 families.
+The 679 B-window events (plus the 830 A-window) crowd the claim round-robin and pin the
+reactor at processed=0. The two task-named stuck conditions
+(0xad2290…=Manila 33°C, 0x520c937…=Manila 34°C, both 06-13 high) are B-window members:
+market_close_at=12:00Z, latest snapshot 11:28:26Z.
+
+### Prime hypothesis (wrong-DB topology read) — REFUTED
+`_event_family_market_topology_rows(forecasts_conn, …)` reads from the forecasts DB
+correctly: `forecasts_conn = get_forecasts_connection_read_only()` connects to
+`zeus-forecasts.db`; `_market_events_table_ref` resolves to its bare `main.market_events`
+(no `forecasts` schema attached on a single-DB read), which IS zeus-forecasts.market_events.
+Verified live: forecasts.market_events has 11 Beijing-06-13-high rows and the Manila
+condition rows; the topology lookup returns them. reconstruct→None is NOT a missing-topology
+failure — it is downstream of the venue close (no fresh executable snapshot to bind because
+the market closed). The K1-DB-split read is correct.
+
+### The fix (minimal, single-authority, no freshness relaxed)
+Add a **venue-close (POST_TRADING) horizon** to `_transient_horizon_terminal`, computed via
+the SAME canonical `market_phase` authority the `EVENT_BOUND_MARKET_PHASE_CLOSED` gate uses
+(`market_phase_for_decision` with the F1 12:00-UTC fallback end — derivable from
+city+target_date+decision_time, NO venue probe, NO snapshot). A forecast-decision family in
+POST_TRADING/RESOLVED has crossed its market horizon and dead-letters with
+`MONEY_PATH_HORIZON_EXPIRED:MARKET_VENUE_CLOSED:<last_reason>`. This:
+  - terminalizes ONLY genuinely-closed families (post the 12:00-UTC venue close); live
+    pre-close families (C window, SETTLEMENT_DAY/PRE_SETTLEMENT_DAY) are untouched;
+  - does NOT weaken the 30s price-freshness staleness check — it routes a closed-market
+    family to a correct terminal instead of an unbreakable requeue;
+  - is a SEMANTIC horizon (venue close), not an attempt cap (NO-CAPS law preserved);
+  - invents no new clock — it is the existing venue-close authority, applied at the horizon
+    locus that previously only knew the (later, wrong) local-day floor.

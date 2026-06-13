@@ -87,6 +87,13 @@ def _status(conn: sqlite3.Connection, event_id: str) -> str:
     ).fetchone()[0]
 
 
+# _DT = 2026-05-24T18:10Z. The block-side bookkeeping tests (substrate-refresh /
+# cycle-advance enqueue, recorded at the pre-submit block BEFORE any horizon
+# disposition) are horizon-independent and use _DT directly. The two REQUEUE-
+# asserting tests pair _DT with a 2026-05-25 target so the event is VENUE-OPEN at
+# _DT (PRE_SETTLEMENT_DAY for 05-25) — otherwise the venue-close horizon
+# (reactor._venue_market_closed_horizon, 2026-06-13 zero-order reactor-stall fix)
+# correctly terminalizes the already-closed family and there is nothing to requeue.
 _DT = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
 
 
@@ -123,7 +130,12 @@ def test_snapshot_block_invokes_refresher_then_event_processes_next_cycle():
     the SAME cycle's handling; on the NEXT cycle, with the refreshed substrate present, the event
     PROCESSES instead of requeueing forever."""
     conn, store = _store()
-    event = _forecast_event()
+    # Target 2026-05-25 so the event (available 2026-05-24T18:01Z) is VENUE-OPEN at
+    # the _DT decision time (PRE_SETTLEMENT_DAY for 05-25): the family is genuinely
+    # tradeable, so a transient block must REQUEUE, not terminalize at the
+    # venue-close horizon. (A 05-24 target would close at 12:00Z 05-24 — already
+    # POST_TRADING at 18:10Z — and correctly dead-letter instead of requeue.)
+    event = _forecast_event(target_date="2026-05-25")
     store.insert_or_ignore(event)
     present = {"v": False}
     calls: list[tuple] = []
@@ -141,7 +153,7 @@ def test_snapshot_block_invokes_refresher_then_event_processes_next_cycle():
     assert r1.retried == 1
     assert r1.processed == 0
     assert _status(conn, event.event_id) == "pending"
-    assert calls == [("Chicago", "2026-05-24", "high")]
+    assert calls == [("Chicago", "2026-05-25", "high")]
     assert r1.snapshot_refreshes == 1
 
     # Cycle 2: substrate now fresh -> the event PROCESSES (no longer a no-opportunity window).
@@ -154,7 +166,9 @@ def test_refresher_failure_event_still_requeues_failsoft_one_warning(caplog):
     """Fail-soft: a refresher that RAISES must not break the cycle — the event still requeues
     (horizon-bounded) and exactly ONE warning is logged for the failed refresh."""
     conn, store = _store()
-    event = _forecast_event()
+    # Target 2026-05-25 -> venue-open at _DT (see the companion test): a transient
+    # block must REQUEUE, not terminalize at the venue-close horizon.
+    event = _forecast_event(target_date="2026-05-25")
     store.insert_or_ignore(event)
     present = {"v": False}
 
