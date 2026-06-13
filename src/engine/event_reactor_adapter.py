@@ -13548,10 +13548,19 @@ def _maker_quote_execution_price_from_snapshot(
         fee_deducted=True,
         currency="probability_units",
     )
-    # A maker rest fills only when the book comes to it; the conservative resting
-    # prior is applied by mode-consistent EV. p_fill_lcb here is 0.0 (no visible
-    # crossing depth) so the legacy taker fill-LCB never inflates a maker quote.
-    p_fill_lcb = 0.0
+    # A maker rest fills when the book comes to it — its fill probability is the
+    # MAKER resting-fill prior, NOT the taker visible-depth LCB (which is 0 here
+    # because there is no own ask to cross). Returning 0.0 was a taker-shaped value
+    # that zeroed trade_score = p_fill_lcb x edge for EVERY maker buy_no regardless
+    # of edge, structurally strangling the maker NO harvest in a system that is
+    # fundamentally a maker ("我们的系统本质上是maker制作的"). The conservative maker
+    # fill prior is the lane-correct admission probability; the maker/taker LANE
+    # choice (a separate decision) still consults the full mode-consistent EV seam.
+    # This is the SAME maker fill authority that seam owns — one authority, used
+    # lane-appropriately, never the taker ladder on a maker quote.
+    from src.strategy.live_inference.mode_consistent_ev import MAKER_FILL_PROBABILITY_PRIOR
+
+    p_fill_lcb = float(MAKER_FILL_PROBABILITY_PRIOR)
     # All-in cost == the quote (zero taker fee on a rest); NOT ask + tick.
     c_cost_95pct = float(quote)
     return execution_price, p_fill_lcb, c_cost_95pct
