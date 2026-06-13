@@ -639,23 +639,32 @@ def _replacement_settlement_sigma_floor_lookup(
 _SIGMA_SCALE_FIT_PATH = "state/sigma_scale_fit.json"
 
 
-def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float]:
-    """C3 calibration surface 2026-06-12 — FITTED σ_pred scale (k) + uniform-mixture weight (w).
+def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float, float]:
+    """C3 calibration surface — FITTED σ_pred scale (k) + uniform-mixture weight (w) + σ-floor (floor_steps).
 
     OPERATOR LAW (2026-06-12) "没有一个人可以在没有数学支持下决定一个 hard coded value": the σ-scale
     factor must be FITTED by math, never operator-picked or hardcoded. This reads the fitted artifact
-    ``state/sigma_scale_fit.json`` (written ONLY by scripts/fit_sigma_scale.py — MLE over settled cells)
-    and returns ``(k, w)`` for the given settlement unit family ('C' / 'F'):
-      q_adjusted(bin) = (1 - w) · Normal(σ_pred · k) + w · uniform(1/n_bins).
+    ``state/sigma_scale_fit.json`` (written ONLY by the σ-scale fitter — MLE over settled cells)
+    and returns ``(k, w, floor_steps)`` for the given settlement unit family ('C' / 'F'):
+      σ_core = max(σ_impl · k, floor_steps · step)   [step = per-cell bin width in settlement units]
+      q_adjusted(bin) = (1 - w) · Normal(σ_core) + w · uniform(1/n_bins).
 
-    Returns ``(k, w)`` where:
-      - artifact present AND family entry has fitted=True with finite k≥1, 0≤w≤1 → (k, w).
-      - artifact missing, malformed, family absent, or family fitted=False (REFUSED, e.g. F today,
-        n<60) → (1.0, 0.0) INERT (byte-identical to pre-scale behavior).
+    ``floor_steps`` (σ-refit report 2026-06-13, task #69) is the GATE-2 fix: an ABSOLUTE σ-floor in
+    step units that replaces the multiplicative widen — the realized ring dispersion is ~constant in
+    absolute (step) terms (~1.8 steps in BOTH C and F families), so a floor widens over-sharp forecasts
+    UP TO the realized dispersion and leaves already-wide forecasts alone (regime-aware → holdout-stationary).
+
+    Returns ``(k, w, floor_steps)`` where:
+      - artifact present AND family entry has fitted=True → (k, w, floor_steps), each field clamped.
+      - ``floor_steps`` is ABSENT from the artifact (the current live state/sigma_scale_fit.json) → 0.0,
+        so ``max(σ_impl·k, 0.0·step) = σ_impl·k`` is BYTE-IDENTICAL to pre-floor behavior. The live q
+        does NOT change until the operator swaps the artifact for one carrying ``floor_steps``.
+      - artifact missing, malformed, family absent, or family fitted=False (REFUSED, e.g. F when
+        n<60) → (1.0, 0.0, 0.0) INERT (byte-identical to pre-scale behavior).
 
     Precedent: the settlement sigma floor artifact (#20) is read the same fail-soft way. The fit
     artifact's per-family ``fitted`` flag is the enable: a family is corrected ONLY when math licensed
-    it. FAIL-SOFT: any error → (1.0, 0.0). Never raises.
+    it. FAIL-SOFT: any error → (1.0, 0.0, 0.0). Never raises.
     """
     try:
         import os  # noqa: PLC0415
@@ -665,21 +674,26 @@ def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float]:
             repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             path = os.path.join(repo, _SIGMA_SCALE_FIT_PATH)
         if not os.path.exists(path):
-            return 1.0, 0.0
+            return 1.0, 0.0, 0.0
         with open(path, "r", encoding="utf-8") as fh:
             artifact = json.load(fh)
         fam = (artifact.get("families") or {}).get(str(unit).upper())
         if not isinstance(fam, dict) or not fam.get("fitted"):
-            return 1.0, 0.0
+            return 1.0, 0.0, 0.0
         k = float(fam.get("k", 1.0))
         w = float(fam.get("w", 0.0))
+        # floor_steps ABSENT ⇒ 0.0 (strict backward compatibility: the live artifact has no such key,
+        # so the floor term is inert and q is unchanged). A non-finite / negative value is also inert.
+        floor_steps = float(fam.get("floor_steps", 0.0))
         if not (math.isfinite(k) and k > 0.0):
             k = 1.0
         if not (math.isfinite(w) and 0.0 <= w <= 1.0):
             w = 0.0
-        return k, w
+        if not (math.isfinite(floor_steps) and floor_steps >= 0.0):
+            floor_steps = 0.0
+        return k, w, floor_steps
     except Exception:
-        return 1.0, 0.0
+        return 1.0, 0.0, 0.0
 
 
 def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequest") -> str:
@@ -1435,6 +1449,11 @@ def _insert_posterior(
     # family unfitted / w=0.0); float applied w when the mixture fires. Both come from the SAME
     # state/sigma_scale_fit.json family entry (MLE-fitted, operator law 2026-06-12).
     uniform_mixture_w_applied: float | None = None
+    # FITTED absolute σ-floor (step units) provenance (σ-refit report 2026-06-13, task #69). None when
+    # the floor is inert (artifact has no floor_steps key — the current live state — or the floor did
+    # not bind because the forecast was already wider); the applied floor_steps (e.g. 1.80) when it
+    # widened σ to floor_steps·step. From the SAME state/sigma_scale_fit.json family entry as k/w.
+    sigma_floor_steps_applied: float | None = None
     # Catch-all (open-ended bin) sigma-floor exemption (2026-06-10, Paris >=26C incident). Records
     # which open-ended bins had their floored mass capped at the un-floored predictive-sigma mass
     # so the floor could not inflate the tail. Empty tuple when no cap bit (no floor / no open-ended
@@ -1487,13 +1506,32 @@ def _insert_posterior(
             # The C-only restriction is enforced by the artifact (F family unfitted → (1.0,0.0)); the
             # explicit unit gate is kept as defense-in-depth so k can never touch an F family.
             _city_unit = _city_settlement_unit_from_bins(request)
-            _k, _uniform_w = _replacement_sigma_scale_lookup(_city_unit)
+            _k, _uniform_w, _floor_steps = _replacement_sigma_scale_lookup(_city_unit)
             if _city_unit != "C":
                 _k, _uniform_w = 1.0, 0.0  # defense-in-depth: only C families are corrected today
             if _k > 1.0:
                 _sigma_pred = _sigma_pred * _k
                 _sigma_used = _sigma_pred
                 sigma_scale_k_applied = _k
+            # ABSOLUTE σ-FLOOR in step units (σ-refit report 2026-06-13, task #69, GATE-2 fix).
+            # σ_core = max(σ_impl·k, floor_steps·step) where step = request.settlement_step_c (the SAME
+            # per-cell bin width the integrator's _half_step = step/2 derives from — reused, not
+            # recomputed, so the floor is the SAME physical dispersion across C/F unit families). The
+            # realized ring dispersion is ~constant in absolute (step) terms; the floor widens an
+            # over-sharp forecast UP TO that dispersion and never narrows a forecast already wider
+            # (max() only widens). STRICT BACKWARD COMPATIBILITY: the live artifact has NO floor_steps
+            # key ⇒ _floor_steps == 0.0 ⇒ floor_value == 0.0 ⇒ max(σ_used, 0.0) == σ_used (UNCHANGED).
+            # Applied unconditionally (NOT gated on _k>1) because the floor must be able to bind even at
+            # k=1.0 (the refit's form is k=1.0 + absolute floor). m / the second-Normal is inert at w=0.
+            # The floor widens _sigma_used ONLY and leaves _sigma_pred (the honest un-floored σ) intact,
+            # exactly like the settlement σ-floor below — so the catch-all coherence cap (which caps
+            # open-ended bins at their honest, un-floored mass) still bars the floor from inflating a
+            # far catch-all (Paris >=26 incident invariant).
+            if _floor_steps > 0.0:
+                _floor_value = float(_floor_steps) * float(request.settlement_step_c)
+                if math.isfinite(_floor_value) and _floor_value > _sigma_used:
+                    _sigma_used = _floor_value
+                    sigma_floor_steps_applied = float(_floor_steps)
             _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
                 request, metric=metric
             )
@@ -1712,10 +1750,12 @@ def _insert_posterior(
             settlement_sigma_floor_c = None
             replacement_sigma_basis = None
             settlement_sigma_floor_catchall_capped = ()
-            # The fused-q (incl. any σ-scale / uniform-mixture) was discarded → soft-anchor q has
-            # neither applied. Reset both provenance fields so they cannot misreport on the fallback q.
+            # The fused-q (incl. any σ-scale / uniform-mixture / σ-floor) was discarded → soft-anchor q
+            # has none applied. Reset all three provenance fields so they cannot misreport on the
+            # fallback q.
             sigma_scale_k_applied = None
             uniform_mixture_w_applied = None
+            sigma_floor_steps_applied = None
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
@@ -1853,6 +1893,10 @@ def _insert_posterior(
         # Authority: docs/operations/c3_sigma_calibration_surface_2026-06-12.md
         "sigma_scale_k_applied": sigma_scale_k_applied,
         "uniform_mixture_w_applied": uniform_mixture_w_applied,
+        # FITTED absolute σ-floor (step units) provenance (σ-refit report 2026-06-13, task #69). None
+        # when inert (live artifact has no floor_steps key, or the floor did not bind); the applied
+        # floor_steps when σ_core was lifted to floor_steps·step. Same artifact family entry as k/w.
+        "sigma_floor_steps_applied": sigma_floor_steps_applied,
         # Catch-all exemption (2026-06-10): open-ended bins whose floored mass was capped at the
         # un-floored predictive-sigma mass (the floor may only flatten, never inflate a catch-all).
         "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),

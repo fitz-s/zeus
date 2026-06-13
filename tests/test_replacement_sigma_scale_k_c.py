@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-06-13
 # Authority basis: OPERATOR LAW 2026-06-12 "没有一个人可以在没有数学支持下决定一个 hard coded value" — the
 #   σ-scale correction factor must be FITTED, never operator-picked. The materializer reads the FITTED
 #   artifact state/sigma_scale_fit.json (k AND uniform-mixture w), written only by scripts/fit_sigma_scale.py.
@@ -260,12 +260,13 @@ def test_sigma_floor_enforced_after_scaling(monkeypatch, tmp_path) -> None:
 
 def test_reader_missing_returns_inert(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(mod, "_SIGMA_SCALE_FIT_PATH", str(tmp_path / "nope.json"))
-    assert mod._replacement_sigma_scale_lookup("C") == (1.0, 0.0)
+    # 3-tuple (k, w, floor_steps); floor_steps=0.0 ⇒ absolute σ-floor inert (σ-refit task #69).
+    assert mod._replacement_sigma_scale_lookup("C") == (1.0, 0.0, 0.0)
 
 
 def test_reader_unfitted_family_returns_inert(monkeypatch, tmp_path) -> None:
     _write_artifact(tmp_path, monkeypatch, {"C": {"fitted": False, "k": 9.0, "w": 0.9}})
-    assert mod._replacement_sigma_scale_lookup("C") == (1.0, 0.0)
+    assert mod._replacement_sigma_scale_lookup("C") == (1.0, 0.0, 0.0)
 
 
 def test_reader_out_of_range_clamps_to_inert(monkeypatch, tmp_path) -> None:
@@ -273,15 +274,16 @@ def test_reader_out_of_range_clamps_to_inert(monkeypatch, tmp_path) -> None:
         "C": {"fitted": True, "k": float("nan"), "w": 0.1},
         "F": {"fitted": True, "k": 2.0, "w": 5.0},  # w out of [0,1]
     })
-    assert mod._replacement_sigma_scale_lookup("C") == (1.0, 0.1)  # bad k -> 1.0, valid w kept
-    assert mod._replacement_sigma_scale_lookup("F") == (2.0, 0.0)  # bad w -> 0.0, valid k kept
+    # No floor_steps key in these fixtures ⇒ floor_steps=0.0 (strict backward compatibility).
+    assert mod._replacement_sigma_scale_lookup("C") == (1.0, 0.1, 0.0)  # bad k -> 1.0, valid w kept
+    assert mod._replacement_sigma_scale_lookup("F") == (2.0, 0.0, 0.0)  # bad w -> 0.0, valid k kept
 
 
 def test_reader_malformed_json_returns_inert(monkeypatch, tmp_path) -> None:
     path = tmp_path / "sigma_scale_fit.json"
     path.write_text("{not valid json")
     monkeypatch.setattr(mod, "_SIGMA_SCALE_FIT_PATH", str(path))
-    assert mod._replacement_sigma_scale_lookup("C") == (1.0, 0.0)
+    assert mod._replacement_sigma_scale_lookup("C") == (1.0, 0.0, 0.0)
 
 
 # ---------------------------------------------------------------------------
