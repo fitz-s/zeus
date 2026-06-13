@@ -10659,22 +10659,54 @@ def _canonical_probability_and_fdr_proof(
                 p_values[(condition_id, "buy_no")] = _no_p_value
                 prefilter[(condition_id, "buy_no")] = _no_prefilter
         else:
-            # scan_full_hypothesis_family skips a bin entirely when its YES side has no
-            # executable market. Emit neutral, non-actionable values for BOTH directions:
-            # the directions are then rejected downstream by the missing native execution
-            # price (EXECUTABLE_NATIVE_ASK_MISSING), not by a family-level fail-closed
-            # raise. q_lcb_no is 0.0 here (no samples => no native NO authority), never a
-            # YES-complement (Hidden #4: native NO needs native evidence).
-            for direction in ("buy_yes", "buy_no"):
-                q_point = yes_posterior if direction == "buy_yes" else 0.0
-                p_values[(condition_id, direction)] = 1.0
-                _set_qlcb_provenance(
-                    lcb_by_direction,
-                    (condition_id, direction),
-                    q_point,
-                    source="FORECAST_BOOTSTRAP",
-                )
-                prefilter[(condition_id, direction)] = False
+            # The YES side has no executable market, so scan_full_hypothesis_family
+            # skipped its buy_yes hypothesis. THE BUY_YES LEG is correctly non-actionable
+            # (rejected downstream by EXECUTABLE_NATIVE_ASK_MISSING). But the native-NO
+            # authority q_lcb_no = lower_quantile(1 - q_yes^(b)) = 1 - q_ucb_yes is a
+            # FORECAST quantity, defined for EVERY MECE bin from the calibrated posterior
+            # (forecast_yes_probability_samples is market-INDEPENDENT — same engine that
+            # produces yes_posterior above), INDEPENDENT of the YES token's executability.
+            #
+            # The OLD code hardcoded q_lcb_no=0.0 here under the false premise "no YES
+            # executable market => no native NO authority". That premise is WRONG: the
+            # NO posterior comes from the FORECAST, not from whether anyone quotes YES.
+            # The favorite-longshot NO harvest (strategy of record) lives exactly on far
+            # bins whose YES side has no ask; zeroing q_lcb_no structurally extinguished
+            # it (286/286 bins q_lcb_no=0 -> 0 buy_no ever cleared -> 0 orders). The NO
+            # leg is still gated downstream by its OWN native NO execution data (a missing
+            # native NO ask -> EXECUTABLE_NATIVE_ASK_MISSING) and its own edge-positivity;
+            # never a YES-complement price (Hidden #4: native NO needs native NO evidence,
+            # which the NO token's own ask ladder provides).
+            yes_samples_fc = analysis.forecast_yes_probability_samples(index, edge_n_bootstrap())
+            q_lcb_yes_fc, q_lcb_no = _side_q_lcb_from_yes_samples(
+                yes_samples_fc, q_yes_point=yes_posterior
+            )
+            # buy_yes: no executable YES market -> non-actionable (p=1.0); carry the honest
+            # forecast YES bound for provenance (it is rejected downstream regardless).
+            p_values[(condition_id, "buy_yes")] = 1.0
+            prefilter[(condition_id, "buy_yes")] = False
+            _set_qlcb_provenance(
+                lcb_by_direction,
+                (condition_id, "buy_yes"),
+                q_lcb_yes_fc,
+                source="FORECAST_BOOTSTRAP",
+            )
+            # buy_no: honest forecast native-NO bound; admissibility from its OWN native
+            # NO cost + q_lcb_no — the SAME _native_no_edge_positivity reconciliation the
+            # executable branch uses (never a YES-complement price).
+            _set_qlcb_provenance(
+                lcb_by_direction,
+                (condition_id, "buy_no"),
+                q_lcb_no,
+                source="FORECAST_BOOTSTRAP",
+            )
+            _no_p_value, _no_prefilter = _native_no_edge_positivity(
+                native_costs=native_costs,
+                condition_id=condition_id,
+                q_lcb_no=q_lcb_no,
+            )
+            p_values[(condition_id, "buy_no")] = _no_p_value
+            prefilter[(condition_id, "buy_no")] = _no_prefilter
 
     # EMOS-CI LIVE OVERRIDE (Option B, 2026-06-02, /tmp/design_emos_ci.md §6).
     # Replace the MC q_5pct (lcb_by_direction) with the coverage-honest EMOS analytic CI

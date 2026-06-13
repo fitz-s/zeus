@@ -880,11 +880,31 @@ class MarketAnalysis:
         RNG: only ``self._rng`` is touched (member resample + transfer noise). The cost
         RNG ``self._cost_rng`` is NOT drawn here — c_b sampling stays in
         ``_bootstrap_bin`` — so existing bit-identical CI tests are preserved.
+
+        The two guards below protect the buy_yes EDGE consumers (the executable
+        q_lcb_yes leg and ``_bootstrap_bin``), which legitimately need a YES market to
+        subtract the executable cost. The COMPUTATION itself (member resample + MAP
+        Platt + posterior) is market-INDEPENDENT; the native-NO authority reuses it
+        without the guard via :meth:`forecast_yes_probability_samples`.
         """
         if self.p_market is None:
             raise ValueError("buy_yes bootstrap requires executable YES-side market prices")
         if not self.is_executable_bin(bin_idx):
             raise ValueError(f"buy_yes bootstrap requires executable support index {bin_idx}")
+        return self.forecast_yes_probability_samples(bin_idx, n)
+
+    def forecast_yes_probability_samples(self, bin_idx: int, n: int) -> np.ndarray:
+        """Market-INDEPENDENT forecast YES probability samples ``q_yes^(b)`` for ``bin_idx``.
+
+        Byte-identical computation to :meth:`bin_yes_probability_samples` (shared cache,
+        same RNG sequence) but WITHOUT the executable-market guard. The native-NO
+        authority ``q_lcb_no = lower_quantile(1 - q_yes^(b)) = 1 - q_ucb_yes`` (Hidden #3)
+        is a FORECAST quantity defined for EVERY MECE bin — ``p_post[bin_idx]`` exists
+        regardless of whether anyone is quoting the YES token. A non-executable YES side
+        must gate ONLY the buy_yes leg; it must NEVER zero the buy_no native-NO bound
+        (the favorite-longshot NO harvest lives exactly on far bins with no YES ask, where
+        zeroing q_lcb_no structurally extinguishes the strategy of record).
+        """
         cache_key = ("yes_samples", bin_idx, n)
         cached = self._yes_sample_cache.get(cache_key)
         if cached is not None:
