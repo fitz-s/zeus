@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused/audited: 2026-06-08
+# Last reused/audited: 2026-06-13
 # Authority basis: operator Point-1 directive 2026-06-08 — move BAYES_PRECISION_FUSION/replacement_0_1
 #   forecast PRODUCTION (raw-input download + light shadow materialization) OFF the
 #   live-trading daemon (src/main.py) INTO the forecast-live (data) daemon. The
@@ -337,6 +337,43 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
+def _extras_cycle_incomplete(cfg: dict[str, object]) -> bool:
+    """R4b: cheap probe to decide whether the current-cycle BPF extras still need work.
+
+    Returns True (run the extras fan-out) when: the current probe-resolved cycle has
+    fewer raw_model_forecasts rows than a conservative threshold (suggesting the previous
+    tick's extras fetch was partial — failed rows, new cities, etc.). Returns True on any
+    error so the caller fails-open (safe default = run the extras).
+
+    Threshold: if a full pass covers ~50 cities × 2 target_dates × N_models × 2 metrics,
+    a conservative floor of 200 rows/cycle means "extras clearly incomplete". Below that,
+    we re-run. This avoids the 288-ticks/day re-scan while still healing partial failures.
+    """
+    _EXTRAS_COMPLETE_THRESHOLD = 200
+    try:
+        cycle = _probe_resolved_available_cycle()
+        if cycle is None:
+            return True  # no cycle known; fail-open
+        forecast_db = cfg.get("forecast_db")
+        if forecast_db is None:
+            return True
+        from datetime import timezone as _tz  # noqa: PLC0415
+        from src.state.db import _connect  # noqa: PLC0415
+        conn = _connect(Path(str(forecast_db)))
+        try:
+            cycle_iso = cycle.astimezone(_tz.utc).isoformat()
+            row = conn.execute(
+                "SELECT COUNT(*) FROM raw_model_forecasts WHERE source_cycle_time = ?",
+                (cycle_iso,),
+            ).fetchone()
+            count = int(row[0]) if row else 0
+            return count < _EXTRAS_COMPLETE_THRESHOLD
+        finally:
+            conn.close()
+    except Exception:
+        return True  # fail-open: if we can't probe, run the extras
+
+
 def _per_leg_downloaded_cycle(forecast_db: Path, source_id: str) -> datetime | None:
     """Per-leg high-water mark of downloaded raw-input cycles (None = unknown → fetch).
 
@@ -472,9 +509,23 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     # q_lcb NULL = honest no-edge = no orders, while every extras row sat unfetched).
     # Idempotent per persisted (model, city, target, metric, cycle, endpoint) row;
     # flag-gated + fail-soft inside — it never breaks the poll.
-    bayes_precision_fusion_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
-    if bayes_precision_fusion_report is not None:
-        report["bayes_precision_fusion_extras_status"] = bayes_precision_fusion_report.get("status")
+    #
+    # R4b (2026-06-13): gate the extras fan-out so the 5-min poll does NOT re-drive the full
+    # download on every tick. The extras are only needed when (a) a new cycle leg was actually
+    # fetched this tick (fetch_aifs_cycle or fetch_anchor_cycle is not None), OR (b) the
+    # current-cycle's extras are incomplete (cheap count probe < expected threshold).
+    # When the current cycle's rows are already complete, skip — the next genuine publish
+    # (<=4h away) will re-trigger. This kills the 288-ticks/day re-scan and the failed-row
+    # re-attempt amplification. Fail-open: any probe error -> run the extras (safe default).
+    _should_run_extras = (fetch_aifs_cycle is not None or fetch_anchor_cycle is not None)
+    if not _should_run_extras:
+        _should_run_extras = _extras_cycle_incomplete(cfg)
+    if _should_run_extras:
+        bayes_precision_fusion_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
+        if bayes_precision_fusion_report is not None:
+            report["bayes_precision_fusion_extras_status"] = bayes_precision_fusion_report.get("status")
+    else:
+        report["bayes_precision_fusion_extras_status"] = "EXTRAS_CURRENT_CYCLE_COMPLETE_SKIPPED"
     # Task #32 — PARTIAL-fusion UPGRADE TRIGGER. The extras fetch above may have just landed a
     # decorrelated provider's current value (single_runs row) for a scope whose latest posterior
     # was fused from a strictly smaller instrument set. This availability-poll lane already KNOWS
