@@ -58,9 +58,10 @@ def ensure_table(conn: sqlite3.Connection) -> None:
 def _ensure_disposition_nullable(conn: sqlite3.Connection) -> None:
     """Rebuild the table when a legacy DB still carries ``disposition TEXT NOT NULL``.
 
-    CREATE TABLE IF NOT EXISTS cannot relax constraints on a pre-existing table,
-    so a live DB created under the original two-terminal-states DDL silently keeps
-    NOT NULL while the code writes NULL-disposition accumulating rows. That made
+    Idempotent DDL (the IF-NOT-EXISTS form above) is unable to relax constraints
+    on a pre-existing table, so a live DB created under the original
+    two-terminal-states DDL silently keeps NOT NULL while the code writes
+    NULL-disposition accumulating rows. That made
     every `_increment_failure_count` insert fail, froze attempt_count at 1, and
     made the quarantine threshold unreachable (infinite retry storm, 2026-06-12).
     SQLite cannot ALTER a column constraint; the sanctioned path is a rebuild.

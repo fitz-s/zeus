@@ -409,6 +409,18 @@ state_machines:
     states:
       - ROLLBACK
     invariant_tests: []
+  calibration_fitter_pooling_verdicts:
+    owner: scripts/fit_bias_scale.py
+    description: >
+      Era-pooling verdict vocabulary written into the state/bias_scale_fit.json
+      calibration artifact by the --era-mode fitter (statistical calibration
+      addendum 2026-06-13 C1/D1). NOT a money-path state machine — offline
+      fitter report strings; live use of the artifact is operator-gated.
+      Registered because the "PARTIAL" substring in EB_PARTIAL_POOLING fires the
+      semantic classifier's PARTIAL-prefix state check.
+    states:
+      - EB_PARTIAL_POOLING
+    invariant_tests: []
   decision_integrity_quarantine_reason_codes:
     owner: src/state/decision_integrity_quarantine.py
     description: >
