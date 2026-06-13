@@ -1,4 +1,4 @@
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-13
 # Authority basis: coverage SLUG-discovery fix / wiring verdict 2026-06-03;
 #   2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED root-cause fix — substrate refresh admits
 #   non-tradeable family-identity bins to capture + max_outcomes=0 UNLIMITED sentinel
@@ -860,8 +860,13 @@ def _persist_market_events_to_db(
                         )
             conn.commit()
             if inserted == 0 and results:
-                logger.warning(
-                    "market_scanner: 0 rows inserted out of %d events — possible constraint storm",
+                # All rows were duplicate-ignored (INSERT OR IGNORE, UNIQUE on
+                # condition_id) — normal steady-state when the table is already
+                # current. This is NOT a constraint storm (no locked errors are
+                # generated; no data loss). Log at INFO with honest wording.
+                # A real error would raise before reaching this point.
+                logger.info(
+                    "market_scanner: all %d events already in market_events (INSERT OR IGNORE, table current)",
                     len(results),
                 )
         finally:

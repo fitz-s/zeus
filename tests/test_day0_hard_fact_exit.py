@@ -97,7 +97,7 @@ def _position(**over):
 def _set_metar_memo(monkeypatch, value):
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit._metar_rounded_extreme",
-        lambda city_name, target_date, metric: value,
+        lambda city_name, target_date, metric, **kwargs: value,
     )
 
 
