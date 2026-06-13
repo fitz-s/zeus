@@ -1716,6 +1716,11 @@ try:
 except Exception:  # noqa: BLE001 - fail-open per dispatcher charter
     _run_advisory_check_citation_grep_gate = None  # type: ignore[assignment]
 
+try:
+    from codegraph_context_inject import _run_advisory_check_codegraph_context_inject  # type: ignore[import-not-found]
+except Exception:  # noqa: BLE001 - fail-open per dispatcher charter
+    _run_advisory_check_codegraph_context_inject = None  # type: ignore[assignment]
+
 
 # Map hook_id -> advisory check function
 _ADVISORY_HANDLERS: dict[str, Any] = {
@@ -1746,6 +1751,9 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
 # self-test logs "no handler" and hook falls open; safe per ADVISORY-only charter).
 if _run_advisory_check_citation_grep_gate is not None:
     _ADVISORY_HANDLERS["citation_grep_gate"] = _run_advisory_check_citation_grep_gate
+
+if _run_advisory_check_codegraph_context_inject is not None:
+    _ADVISORY_HANDLERS["codegraph_context_inject"] = _run_advisory_check_codegraph_context_inject
 
 
 def _run_advisory_check(
