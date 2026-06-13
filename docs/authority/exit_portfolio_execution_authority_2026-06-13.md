@@ -81,6 +81,13 @@ Allocate f_k ≥ 0 + cash s, s+Σf_k=1, max Σ_j q_j·log(s + f_j/p_j). Solution
 **This REPLACES per-bin "edge > threshold" sizing** — bins COMPETE, the threshold
 s* is endogenous. The current capital_efficiency_lcb_ev per-candidate gate +
 fixed kelly_multiplier is the wrong structure (each bin sized in isolation).
+CORRECTION (build #63, verified 400k random families): the superiority is NOT a
+notional inequality `Σ horse-race f ≤ Σ per-candidate f` — that is FALSE (per-bin
+Kelly (q−p)/(1−p) UNDER-bets exclusive bins; horse-race can commit several × more
+in the overround case). The provable invariant is GROWTH-DOMINANCE:
+expected-log-growth(horse-race) ≥ expected-log-growth(any per-candidate sizing),
+zero violations over 400k random families. Horse-race fixes BOTH over- and
+under-betting because it maximizes the exact joint log-growth objective.
 
 ### P2. Cross-family correlation (same-day weather regimes). Second-order Kelly =
 QP: `max_f μ^T f − ½ f^T M f`, μ=E[X], M=E[XX^T]. Binary moments:
