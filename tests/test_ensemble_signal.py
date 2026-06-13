@@ -363,7 +363,7 @@ class TestEnsembleBoundaryErrors:
 
         Invariant: an UnknownError path (not the legitimate 'settings
         attribute missing' path) must propagate. We simulate by making
-        settings.bias_correction_enabled True and having
+        settings.baseline_bias_correction_enabled True and having
         _apply_bias_correction raise RuntimeError; the EnsembleSignal
         constructor must NOT silently continue with bias_corrected=False."""
         from unittest.mock import patch
@@ -381,7 +381,7 @@ class TestEnsembleBoundaryErrors:
                  EnsembleSignal, "_apply_bias_correction",
                  side_effect=RuntimeError("Bias correction database fault"),
              ):
-            fake_settings.bias_correction_enabled = True
+            fake_settings.baseline_bias_correction_enabled = True
             with pytest.raises(RuntimeError, match="Bias correction database fault"):
                 EnsembleSignal(members, times, NYC, TARGET_DATE, NYC_SEMANTICS)
 

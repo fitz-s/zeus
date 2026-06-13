@@ -28,6 +28,7 @@ test_trust_policy:
   # Machine-readable registry: 122 tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/riskguard/test_no_network_io_under_conn.py: {created: "2026-06-13", last_used: "2026-06-13", note: "T0-1 conn-across-IO RED-on-revert RT: in riskguard._tick_once the bankroll NETWORK fetch (bankroll_provider.current) MUST precede opening either write-class DB conn (_get_runtime_trade_connection/get_connection); sentinel fires on conn-open, asserts fetch recorded first. Authority: t0_live_problem_report_2026-06-13 T0-1 + dimension-#4"}
     tests/test_fit_bias_scale.py: {created: "2026-06-12", last_used: "2026-06-12", note: "Task 1.1 identifiability + bias-absorption regression: joint (b_loc,k) interval-censored categorical MLE recovers known (b=+1.2,k=1.1); k-only fit on same data inflates k>1.1 (proves k_wrong^2=k_true^2+(delta/sigma)^2); Monte-Carlo pins the theorem; EB shrinkage pulls low-n city toward pool"}
     tests/calibration/test_member_correlation.py: {created: "2026-06-12", last_used: "2026-06-12", note: "Unit tests for measure_member_correlation.py: ANOVA ICC estimator on BetaBinomial synthetic data recovers known ρ_w to within 0.05; between-family ρ_b monotonicity; N_eff authority formula edge cases (statistical_calibration_authority_2026-06-12.txt Task 3.1)"}
     tests/test_boot_guard_pin_shape.py: {created: "2026-06-03", last_used: "2026-06-03"}
@@ -772,6 +773,10 @@ test_trust_policy:
 
 categories:
   core_law_antibody:
+    # T0-1 conn-across-IO ordering invariant (2026-06-13): riskguard._tick_once
+    # must fetch the bankroll (wallet NETWORK fetch) BEFORE opening any
+    # write-class DB conn. RED-on-revert relationship test.
+    - tests/riskguard/test_no_network_io_under_conn.py
     # fill-bridge retry-storm pair (2026-06-13): legacy NOT NULL disposition rebuild
     # + orphan bridge terminal-RECONCILED exclusion + poison-row batch immunity.
     - tests/test_fill_bridge_dispositions_migration.py
@@ -1577,7 +1582,7 @@ high_sensitivity_skips:
     reason: Bias/calibration cross-module invariants are skipped only when runtime data/config makes them inapplicable.
     skip_count: 6
     reason_patterns:
-      - "bias_correction_enabled = false"
+      - "baseline_bias_correction_enabled = false"
       - "No calibration pairs in database"
     sunset: Replace DB-dependent skips with fixtures or explicit advisory status.
   tests/test_instrument_invariants.py:

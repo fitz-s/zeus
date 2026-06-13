@@ -125,7 +125,7 @@ class Settings:
             "exit",
             "riskguard",
             "execution",
-            "bias_correction_enabled",
+            "baseline_bias_correction_enabled",
             "feature_flags",
         ]
         for key in required:
@@ -144,9 +144,21 @@ class Settings:
     # src.runtime.bankroll_provider.current().
 
     @property
-    def bias_correction_enabled(self) -> bool:
-        """Whether bias correction is enabled. Strict — missing key = startup KeyError (B001)."""
-        return bool(self._data["bias_correction_enabled"])
+    def baseline_bias_correction_enabled(self) -> bool:
+        """Whether LEGACY BASELINE/diagnostics-chain bias correction is enabled.
+
+        Strict — missing key = startup KeyError (B001).
+
+        NAME-COLLISION FIX (T0-3, 2026-06-13): renamed from the bare
+        ``bias_correction_enabled`` to disambiguate from the LIVE EDLI-chain flag
+        ``edli.edli_bias_correction_enabled`` (settings.json ``edli`` block). The
+        two flags are distinct: this top-level one gates the legacy baseline /
+        diagnostics chain (main.py, harvester.py settlement attribution,
+        ensemble_signal.py) and is OFF; the edli one gates the live forecast
+        chain and is ON. The near-identical names previously read as a
+        twin-authority false positive. Value/semantics unchanged.
+        """
+        return bool(self._data["baseline_bias_correction_enabled"])
 
     @property
     def feature_flags(self) -> dict:

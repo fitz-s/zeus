@@ -155,7 +155,7 @@
     "fill_timeout_seconds": 600,
     "cancel_if_not_filled": true
   },
-  "bias_correction_enabled": false,
+  "baseline_bias_correction_enabled": false,
   "feature_flags": {
     "CANONICAL_EXIT_PATH": false,
     "HOLD_VALUE_EXIT_COSTS": false,

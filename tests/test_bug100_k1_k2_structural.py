@@ -183,11 +183,11 @@ def test_b001_startup_raises_on_missing_key(tmp_path, monkeypatch):
 
     # Load a valid settings.json, strip a required key, write to tmp.
     original = json.loads((REPO_ROOT / "config" / "settings.json").read_text())
-    stripped = {k: v for k, v in original.items() if k != "bias_correction_enabled"}
+    stripped = {k: v for k, v in original.items() if k != "baseline_bias_correction_enabled"}
     tmp_file = tmp_path / "settings.json"
     tmp_file.write_text(json.dumps(stripped))
 
-    with pytest.raises(KeyError, match="bias_correction_enabled"):
+    with pytest.raises(KeyError, match="baseline_bias_correction_enabled"):
         Settings(path=tmp_file)
 
 
