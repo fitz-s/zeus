@@ -1,3 +1,11 @@
+# Created: 2026-06-06
+# Last reused/audited: 2026-06-13
+# Authority basis: workflow A3 diagnosis 2026-06-13, task #62 (Manila/Shanghai/Wellington
+#   class). Scope the ReplacementForecastCandidateView bin-id requirement to what actually
+#   consumes it: drop the absolutist :bin fail-close that masked the canonical bare-direction
+#   producer as a hard reject (UNKNOWN_REVIEW_REQUIRED, zero orders). Single-q-authority
+#   regime (2026-06-12) made the baseline provenance-only; the candidate bin stays optional
+#   because the downstream DIRECTION-LAW recheck no-ops on a bare candidate.
 """Pure pre-intent hook for replacement forecast shadow/veto evidence.
 
 This module is side-effect-free: it consumes an already-read B0 candidate and
@@ -78,15 +86,31 @@ class ReplacementForecastCandidateView:
                 raise ValueError("q values must be in [0, 1]")
         if self.baseline_kelly_fraction < 0.0 or self.candidate_kelly_fraction < 0.0:
             raise ValueError("kelly fractions must be non-negative")
-        # FIX-3 (§0.5) structural guard: the directional tokens must be well-formed
-        # so the posterior-derived DIRECTION LAW recheck at the flip boundary has a
-        # parseable side+bin to validate. A malformed direction is unconstructable.
+        # FIX-3 (§0.5) structural guard: the directional tokens must be WELL-FORMED
+        # — the side must be canonical buy_yes/buy_no so the posterior-derived
+        # DIRECTION LAW recheck at the flip boundary has a parseable side. A
+        # malformed direction (e.g. 'foo') is unconstructable.
+        #
+        # task #62 (2026-06-13): the bin-id requirement is SCOPED to what actually
+        # consumes it. The canonical producer (replacement_forecast_hook_factory
+        # ._candidate_view_from_proof) stamps the baseline VERBATIM from
+        # ``proof.direction`` which is canonically BARE (buy_no/buy_yes) system-wide,
+        # and the candidate is bare whenever no replacement_bundle has bound a bin
+        # (the no-bundle first call site). Under the 2026-06-12 single-q-authority
+        # regime the baseline is PROVENANCE-ONLY — its bin is never read downstream —
+        # so requiring a ``:bin`` on it (added 2026-06-07, cbc454e17e) was an
+        # absolutist fail-close masking a missing INTERNAL transform as a hard reject,
+        # sending real tradeable families to UNKNOWN_REVIEW_REQUIRED (zero orders).
+        # For the candidate, the bin is OPTIONAL here: the downstream DIRECTION-LAW
+        # recheck (_lawful_direction_for_candidate) already no-ops when the candidate
+        # carries no bin id (returns None -> skips the flip-veto), so a bare candidate
+        # is admissible and still passes the q_lcb>price and DIRECTION-LAW honest
+        # gates. We therefore keep the side-well-formedness check for BOTH fields and
+        # DROP the bin-required raise.
         for field_name in ("baseline_direction", "candidate_direction"):
-            side, bin_id = _split_direction(str(getattr(self, field_name)))
+            side, _bin_id = _split_direction(str(getattr(self, field_name)))
             if side not in {"buy_yes", "buy_no"}:
                 raise ValueError(f"{field_name} side must be buy_yes or buy_no")
-            if not bin_id:
-                raise ValueError(f"{field_name} must carry a bin id as side:bin")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "ReplacementForecastCandidateView":
