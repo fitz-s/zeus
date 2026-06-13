@@ -2045,6 +2045,120 @@ def _forecast_only_phase_admits(evidence: "_market_phase_evidence.MarketPhaseEvi
     return evidence.phase in _FORECAST_ONLY_ADMIT_PHASES
 
 
+def _selection_eb_shrinkage_enabled() -> bool:
+    """C2 (task #60): replacement EB-shrinkage selection gate flag.
+
+    DEFAULT FALSE. When OFF the live trading-path gate is the CURRENT BH/FDR
+    behavior (which consumes degenerate {0,1} p-values — a no-op multiplicity
+    correction); the EB-shrinkage quantities are still COMPUTED and stamped on
+    receipts as shadow logging. When ON, the posterior expected-log-utility
+    license (authority statistical_calibration_addendum_2026-06-13 A2/D3)
+    REPLACES the BH decision: trade iff the shrunk posterior edge clears e_min
+    with P(e>e_min|D) >= pi_min AND posterior expected log growth > 0.
+
+    Honest math, not a throttle (NO-CAPS law): the license never adds an
+    artificial cap — a confident, growth-positive edge is always admitted.
+    """
+    try:
+        return bool(settings["edli"].get("replacement_selection_eb_shrinkage_enabled", False))
+    except Exception:
+        return False
+
+
+def _selection_pi_min() -> float:
+    """Posterior probability threshold P(e>e_min|D) for the EB license (A2: 0.90)."""
+    try:
+        return float(settings["edli"].get("replacement_selection_pi_min", 0.90))
+    except Exception:
+        return 0.90
+
+
+@dataclass(frozen=True)
+class _SelectionShrinkageVerdict:
+    """Shadow/decision output of the C2 EB-shrinkage selection stage."""
+
+    lfsr: float | None
+    edge_shrunk: float | None
+    edge_shrunk_posterior_sd: float | None
+    selection_authority: str
+    eb_licensed: bool | None  # None when not computable (no executable universe)
+
+
+def _compute_selection_shrinkage(
+    *,
+    proofs: "list[_CandidateProof]",
+    selected_token_id: str,
+    selected_q_posterior: float,
+    selected_price: float,
+    authority_on: bool,
+) -> _SelectionShrinkageVerdict:
+    """Compute the C2 posterior lfsr + EB-shrunk edge for the SELECTED candidate.
+
+    The candidate universe is the family's executable bins (mutually-exclusive →
+    one family cluster, so EB tau^2 is family-clustered per the Fable refinement).
+    Per-candidate edge ê = q_lcb_5pct − price; the per-candidate posterior SD is
+    derived from the one-sided 5% LCB gap s ≈ (q_posterior − q_lcb_5pct)/z_{0.95}.
+
+    Returns the shadow quantities (always) plus the EB license verdict (when an
+    executable universe exists). selection_authority names the gate that decided:
+    "EB_SHRINKAGE" when the flag is ON, "BH_FDR" when OFF (current behavior).
+    Fail-soft: any construction error leaves the quantities None and authority
+    "BH_FDR" so the live BH path is never disturbed by shadow computation.
+    """
+    from src.strategy.selection_shrinkage import (
+        eb_shrink_edges,
+        lfsr as _lfsr,
+        select_license,
+    )
+
+    authority = "EB_SHRINKAGE" if authority_on else "BH_FDR"
+    try:
+        z95 = 1.6448536269514722  # Phi^{-1}(0.95): the 5% one-sided LCB z
+        e_hat: list[float] = []
+        s_each: list[float] = []
+        token_order: list[str] = []
+        for cp in proofs:
+            if cp.execution_price is None:
+                continue
+            price = float(cp.execution_price.value)
+            edge = float(cp.q_lcb_5pct) - price
+            gap = float(cp.q_posterior) - float(cp.q_lcb_5pct)
+            # SD proxy from the one-sided 5% LCB gap; floored so a degenerate
+            # zero-width bound does not divide-by-zero or claim infinite certainty.
+            sd = max(gap / z95, 1e-4)
+            e_hat.append(edge)
+            s_each.append(sd)
+            token_order.append(cp.token_id)
+        if selected_token_id not in token_order:
+            # The selected bin had no executable price in the universe — cannot
+            # shrink. Shadow quantities stay None; BH remains the authority.
+            return _SelectionShrinkageVerdict(None, None, None, "BH_FDR", None)
+        sel_idx = token_order.index(selected_token_id)
+        res = eb_shrink_edges(e_hat, s_each)  # single family → family-clustered tau^2
+        edge_shrunk = float(res.shrunk_mean[sel_idx])
+        edge_shrunk_sd = float(res.posterior_sd[sel_idx])
+        # lfsr on the SHRUNK posterior edge (normal approx N(m, V_jj)).
+        sign_rate = float(_lfsr(e_hat=edge_shrunk, s=max(edge_shrunk_sd, 1e-9)))
+        lic = select_license(
+            edge_shrunk=edge_shrunk,
+            edge_shrunk_posterior_sd=edge_shrunk_sd,
+            q_posterior=float(selected_q_posterior),
+            price=float(selected_price),
+            e_min=0.0,
+            pi_min=_selection_pi_min(),
+        )
+        return _SelectionShrinkageVerdict(
+            lfsr=sign_rate,
+            edge_shrunk=edge_shrunk,
+            edge_shrunk_posterior_sd=edge_shrunk_sd,
+            selection_authority=authority,
+            eb_licensed=bool(lic.licensed),
+        )
+    except Exception:
+        # Fail-soft: shadow computation must never disturb the live BH path.
+        return _SelectionShrinkageVerdict(None, None, None, "BH_FDR", None)
+
+
 def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
@@ -2694,6 +2808,36 @@ def _build_event_bound_no_submit_receipt_core(
             family_complete=True,
         )
     hypothesis_id = f"{family.family_id}:{selected_token_id}"
+    # C2 (task #60): compute the posterior lfsr + EB-shrunk selected edge over the
+    # family's executable bins. Shadow-only when the flag is OFF (BH still gates);
+    # the EB expected-log-utility license REPLACES the BH decision when ON. The
+    # vacuous {0,1}-p-value BH gate below (evaluate_fdr_full_family) consumes the
+    # degenerate edge-positivity p-values set at lines ~9854/9876 — a no-op
+    # multiplicity correction the addendum (A2) condemns as a BLOCKER.
+    _eb_authority_on = _selection_eb_shrinkage_enabled()
+    _shrink = _compute_selection_shrinkage(
+        proofs=proofs,
+        selected_token_id=selected_token_id,
+        selected_q_posterior=proof.q_posterior,
+        selected_price=execution_price.value,
+        authority_on=_eb_authority_on,
+    )
+
+    def _with_shrink(receipt: EventSubmissionReceipt) -> EventSubmissionReceipt:
+        """Stamp the C2 shadow selection-shrinkage columns onto a post-gate receipt.
+
+        Every receipt produced at or after the selection gate carries the shadow
+        quantities so settlement grading can run the winner's-curse slope
+        diagnostic. Pure dataclass_replace — never alters the decision.
+        """
+        return dataclass_replace(
+            receipt,
+            lfsr=_shrink.lfsr,
+            edge_shrunk=_shrink.edge_shrunk,
+            edge_shrunk_posterior_sd=_shrink.edge_shrunk_posterior_sd,
+            selection_authority=_shrink.selection_authority,
+        )
+
     try:
         fdr = evaluate_fdr_full_family(
             family_id=family.family_id,
@@ -2707,7 +2851,7 @@ def _build_event_bound_no_submit_receipt_core(
             },
         )
     except (TypeError, ValueError) as exc:
-        return EventSubmissionReceipt(
+        return _with_shrink(EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
@@ -2730,13 +2874,24 @@ def _build_event_bound_no_submit_receipt_core(
             native_quote_available=True,
             source_status="MATCH",
             family_complete=False,
-        )
-    if not fdr.passed:
+        ))
+    # GATE DECISION (C2): the EB expected-log-utility license is the DECISION
+    # authority when the flag is ON; otherwise the current BH/FDR pass is. When
+    # ON but the EB universe was not computable (eb_licensed is None), fail-soft
+    # back to the BH verdict so a missing executable universe is never a silent
+    # admit. Shadow quantities are stamped on the receipt either way.
+    if _eb_authority_on and _shrink.eb_licensed is not None:
+        _gate_passed = _shrink.eb_licensed
+        _gate_reject_reason = "SELECTION_EB_UNLICENSED"
+    else:
+        _gate_passed = fdr.passed
+        _gate_reject_reason = "FDR_REJECTED"
+    if not _gate_passed:
         return EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
-            reason="FDR_REJECTED",
+            reason=_gate_reject_reason,
             city=family.city,
             target_date=family.target_date,
             metric=family.metric,
@@ -2758,6 +2913,10 @@ def _build_event_bound_no_submit_receipt_core(
             fdr_pass=False,
             fdr_family_id=fdr.fdr_family_id,
             fdr_hypothesis_count=fdr.attempted_hypotheses,
+            lfsr=_shrink.lfsr,
+            edge_shrunk=_shrink.edge_shrunk,
+            edge_shrunk_posterior_sd=_shrink.edge_shrunk_posterior_sd,
+            selection_authority=_shrink.selection_authority,
         )
     kelly_cost_basis_id = f"edli_cost:{event.event_id}:{selected_token_id}"
     try:
@@ -2969,7 +3128,7 @@ def _build_event_bound_no_submit_receipt_core(
         if _recapture.may_submit and _chosen_stake_price is not None:
             execution_price = _chosen_stake_price
     except (TypeError, ValueError) as exc:
-        return EventSubmissionReceipt(
+        return _with_shrink(EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
@@ -2992,7 +3151,7 @@ def _build_event_bound_no_submit_receipt_core(
             native_quote_available=True,
             source_status="MATCH",
             family_complete=True,
-        )
+        ))
     if not _recapture.may_submit:
         # S6: the submit recapture aborted. The receipt reason is DERIVED from the
         # engine's terminal lifecycle state (SUBMIT_ABORTED_PRICE_MOVED /
@@ -3007,7 +3166,7 @@ def _build_event_bound_no_submit_receipt_core(
         )
         _abort_reason = _SUBMIT_ABORT_RECEIPT_REASON[_recapture.state]
         _abort_detail = _recapture.detail or _abort_reason
-        return EventSubmissionReceipt(
+        return _with_shrink(EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
@@ -3038,13 +3197,15 @@ def _build_event_bound_no_submit_receipt_core(
             kelly_price_fee_deducted=execution_price.fee_deducted,
             kelly_size_usd=kelly.size_usd,
             kelly_cost_basis_id=kelly_cost_basis_id,
-        )
+        ))
     risk = evaluate_riskguard(
         risk_decision_id=f"edli_risk:{event.event_id}:{selected_token_id}",
         level=get_current_level(),
     )
     if not risk.passed:
-        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="RISK_GUARD_BLOCKED")
+        return _with_shrink(
+            EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="RISK_GUARD_BLOCKED")
+        )
     # Task #107 INV-K7 (same-cycle in-flight reservation): this bet has now
     # passed Kelly + RiskGuard. Reserve its stake in the per-cycle ledger so the
     # NEXT event in this reactor cycle nets it — a just-emitted EDLI entry is
@@ -3255,7 +3416,7 @@ def _build_event_bound_no_submit_receipt_core(
             "CALIBRATION_AUTHORITY_MISSING:",
             1,
         )
-        return EventSubmissionReceipt(
+        return _with_shrink(EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
@@ -3266,11 +3427,13 @@ def _build_event_bound_no_submit_receipt_core(
             family_id=family.family_id,
             source_status="MATCH",
             family_complete=True,
+        ))
+    return _with_shrink(
+        _event_submission_receipt_from_typed_receipt_payload(
+            raw_receipt,
+            event,
+            decision_proof_bundle=proof_bundle,
         )
-    return _event_submission_receipt_from_typed_receipt_payload(
-        raw_receipt,
-        event,
-        decision_proof_bundle=proof_bundle,
     )
 
 

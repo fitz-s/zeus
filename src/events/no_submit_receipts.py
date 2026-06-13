@@ -117,6 +117,7 @@ class EdliNoSubmitReceiptLedger:
                 executable_snapshot_id, final_intent_id, side_effect_status,
                 q_live, q_lcb_5pct, c_fee_adjusted, c_cost_95pct, p_fill_lcb,
                 trade_score, fdr_family_id, fdr_hypothesis_count,
+                lfsr, edge_shrunk, edge_shrunk_posterior_sd, selection_authority,
                 kelly_cost_basis_id, kelly_decision_id, risk_decision_id, kelly_size_usd,
                 projection_hash, receipt_json, receipt_hash, created_at, schema_version,
                 mainstream_agreement_pass, mainstream_agreement_fail_reason,
@@ -131,6 +132,7 @@ class EdliNoSubmitReceiptLedger:
                 :executable_snapshot_id, :final_intent_id, :side_effect_status,
                 :q_live, :q_lcb_5pct, :c_fee_adjusted, :c_cost_95pct, :p_fill_lcb,
                 :trade_score, :fdr_family_id, :fdr_hypothesis_count,
+                :lfsr, :edge_shrunk, :edge_shrunk_posterior_sd, :selection_authority,
                 :kelly_cost_basis_id, :kelly_decision_id, :risk_decision_id, :kelly_size_usd,
                 :projection_hash, :receipt_json, :receipt_hash, :created_at, :schema_version,
                 :mainstream_agreement_pass, :mainstream_agreement_fail_reason,
@@ -162,6 +164,14 @@ class EdliNoSubmitReceiptLedger:
                 "trade_score": receipt.trade_score,
                 "fdr_family_id": receipt.fdr_family_id,
                 "fdr_hypothesis_count": receipt.fdr_hypothesis_count,
+                # C2 selection-shrinkage shadow columns (task #60). None on
+                # legacy / gate-reject receipts that never reached candidate-
+                # proof generation; populated by the adapter on every replacement
+                # -path candidate receipt.
+                "lfsr": receipt.lfsr,
+                "edge_shrunk": receipt.edge_shrunk,
+                "edge_shrunk_posterior_sd": receipt.edge_shrunk_posterior_sd,
+                "selection_authority": receipt.selection_authority,
                 "kelly_cost_basis_id": receipt.kelly_cost_basis_id,
                 "kelly_decision_id": receipt.kelly_decision_id,
                 "risk_decision_id": receipt.risk_decision_id,
@@ -314,6 +324,19 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # decided is first-class decision provenance, recoverable from the blob forever.
     if payload.get("submit_lane") is None:
         payload.pop("submit_lane", None)
+    # C2 selection-shrinkage shadow fields (task #60): ALWAYS excluded from
+    # receipt_json — never hashed. Their canonical home is the queryable COLUMNS
+    # (lfsr / edge_shrunk / edge_shrunk_posterior_sd / selection_authority).
+    # Reason (same as envelope_json): the C2 quantities are populated on EVERY
+    # gate receipt the moment the code deploys — even with the replacement flag
+    # OFF — so serializing them would change receipt_json (and therefore
+    # receipt_hash) for a pre-C2 shadow receipt RETRIED after deploy, raising
+    # EdliReceiptHashDriftError on the money path for the SAME (event_id,
+    # final_intent_id) key. Excluding them keeps receipt_hash byte-identical to
+    # the pre-C2 baseline (true shadow-inertness when the flag is OFF) while the
+    # full selection-stage decision stays queryable in SQL via the columns.
+    for _c2_field in ("lfsr", "edge_shrunk", "edge_shrunk_posterior_sd", "selection_authority"):
+        payload.pop(_c2_field, None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

@@ -285,6 +285,29 @@ class EventSubmissionReceipt:
     # None in receipt_json keeps existing receipt_hash byte-stable, and readers MUST
     # tolerate its absence (only NEW writes carry/enforce it).
     submit_lane: str | None = None
+    # C2 SELECTION SHRINKAGE SHADOW (task #60, 2026-06-13). The trading-path
+    # FDR/BH gate consumes degenerate {0,1} p-values (a no-op multiplicity
+    # correction; event_reactor_adapter.py:9854/9876) and, even with continuous
+    # p-values, mutually-exclusive bins violate PRDS so BH is invalid and FDR is
+    # the wrong objective (not bankroll log growth). The replacement (authority
+    # statistical_calibration_addendum_2026-06-13 A2/D3) is the posterior
+    # local-false-sign-rate + correlation-aware EB selection shrinkage +
+    # expected-log-utility license. These columns carry the NEW quantities on
+    # every adapter receipt:
+    #   lfsr                     — posterior P(edge <= 0 | D), the p-value
+    #                              replacement (small = confident positive edge).
+    #   edge_shrunk              — winner's-curse-corrected (EB-shrunk) edge.
+    #   edge_shrunk_posterior_sd — posterior SD of the shrunk edge.
+    #   selection_authority      — which gate DECIDED: "BH_FDR" (flag OFF, the
+    #                              current behavior) | "EB_SHRINKAGE" (flag ON).
+    # When the replacement flag is OFF these are SHADOW-only (computed + stamped,
+    # selection unchanged). DECISION provenance, so serialized into receipt_json;
+    # None on legacy / gate-reject receipts; omit-when-None keeps existing
+    # receipt_hash byte-stable, mirroring submit_lane / envelope_json travel.
+    lfsr: float | None = None
+    edge_shrunk: float | None = None
+    edge_shrunk_posterior_sd: float | None = None
+    selection_authority: str | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:

@@ -1046,6 +1046,14 @@ tables:
       - {name: mainstream_source, type: TEXT, nullable: true}
       - {name: mainstream_fetched_at_utc, type: TEXT, nullable: true}
       - {name: alpha_gap, type: REAL, nullable: true}
+      # C2 selection-shrinkage shadow columns (task #60, 2026-06-13): the
+      # writer INSERTs these on every adapter receipt (no_submit_receipts.py),
+      # added to CREATE_TABLE + _ensure_column so a stale live DB FATALs at boot
+      # rather than silently failing writes (same R4/#175 antibody intent).
+      - {name: lfsr, type: REAL, nullable: true}
+      - {name: edge_shrunk, type: REAL, nullable: true}
+      - {name: edge_shrunk_posterior_sd, type: REAL, nullable: true}
+      - {name: selection_authority, type: TEXT, nullable: true}
     notes: >
       EDLI v1 durable accepted no-submit receipt ledger. Rows preserve the
       event-bound proof projection without asserting executor or venue submission.

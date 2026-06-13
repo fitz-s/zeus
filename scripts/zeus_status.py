@@ -402,6 +402,106 @@ def _screen_edges(fc: sqlite3.Connection, tr: sqlite3.Connection, today: str) ->
 
 
 # --------------------------------------------------------------------------
+# Section: SELECTION (C2 winner's-curse slope diagnostic) — read-only
+# --------------------------------------------------------------------------
+def section_selection() -> dict:
+    """Winner's-curse slope diagnostic (authority addendum 2026-06-13 D3).
+
+    When >= 20 SETTLED traded receipts carry a non-NULL edge_shrunk, regress
+    realized PnL/contract on the shrunk edge and report slope + intercept. A
+    slope near 1 means the EB-shrunk edge is an unbiased predictor of realized
+    edge (winner's curse corrected); slope << 1 means still under-shrinking;
+    intercept != 0 means residual center bias. This is the settlement-graded
+    monitor that licenses flipping replacement_selection_eb_shrinkage_enabled.
+
+    Join: edli_no_submit_receipts (WORLD: token_id, edge_shrunk,
+    selection_authority) <-> position_current settled rows (TRADES: token_id,
+    realized_pnl_usd, shares). Read-only, fail-soft per section.
+    """
+    out: dict = {}
+    try:
+        wconn = ro(WORLD_DB)
+        try:
+            cols = {
+                r[1]
+                for r in wconn.execute("PRAGMA table_info(edli_no_submit_receipts)").fetchall()
+            }
+            if "edge_shrunk" not in cols:
+                # Pre-migration window: the column is added on the next daemon
+                # boot (_ensure_column). Honest status, not an error.
+                out["status"] = "edge_shrunk column not yet migrated on this DB"
+                out["receipts_with_edge_shrunk"] = 0
+                return out
+            receipts = wconn.execute(
+                "SELECT token_id, edge_shrunk, selection_authority "
+                "FROM edli_no_submit_receipts "
+                "WHERE edge_shrunk IS NOT NULL AND token_id IS NOT NULL"
+            ).fetchall()
+        finally:
+            wconn.close()
+        shrunk_by_token: dict[str, float] = {}
+        authority_by_token: dict[str, str] = {}
+        for r in receipts:
+            shrunk_by_token[r["token_id"]] = float(r["edge_shrunk"])
+            if r["selection_authority"]:
+                authority_by_token[r["token_id"]] = r["selection_authority"]
+        out["receipts_with_edge_shrunk"] = len(shrunk_by_token)
+        if not shrunk_by_token:
+            out["status"] = "no receipts carry edge_shrunk yet (shadow not populated)"
+            return out
+
+        tconn = ro(TRADES_DB)
+        try:
+            settled = tconn.execute(
+                "SELECT token_id, realized_pnl_usd, shares FROM position_current "
+                "WHERE phase='settled' AND realized_pnl_usd IS NOT NULL "
+                "  AND shares IS NOT NULL AND shares > 0 AND token_id IS NOT NULL"
+            ).fetchall()
+        finally:
+            tconn.close()
+
+        xs: list[float] = []  # shrunk edge
+        ys: list[float] = []  # realized pnl / contract
+        for s in settled:
+            tok = s["token_id"]
+            if tok not in shrunk_by_token:
+                continue
+            try:
+                pnl_per_contract = float(s["realized_pnl_usd"]) / float(s["shares"])
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+            xs.append(shrunk_by_token[tok])
+            ys.append(pnl_per_contract)
+
+        n = len(xs)
+        out["settled_traded_with_edge_shrunk"] = n
+        if n < 20:
+            out["status"] = f"need >=20 settled traded receipts with edge_shrunk (have {n})"
+            return out
+
+        # Ordinary least-squares slope + intercept (no numpy dependency).
+        mean_x = sum(xs) / n
+        mean_y = sum(ys) / n
+        sxx = sum((x - mean_x) ** 2 for x in xs)
+        sxy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+        if sxx <= 0.0:
+            out["status"] = "degenerate: zero variance in shrunk edge"
+            return out
+        slope = sxy / sxx
+        intercept = mean_y - slope * mean_x
+        out["slope"] = round(slope, 4)
+        out["intercept"] = round(intercept, 5)
+        out["n"] = n
+        out["interpretation"] = (
+            "slope~1 = unbiased (winner's curse corrected); "
+            "slope<<1 = under-shrinking; intercept!=0 = residual center bias"
+        )
+    except sqlite3.Error as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+# --------------------------------------------------------------------------
 # Section: POSITIONS (zeus_trades.db)
 # --------------------------------------------------------------------------
 def section_positions() -> dict:
@@ -511,6 +611,7 @@ def collect() -> dict:
         "price_holes": section_price_holes(),
         "positions": section_positions(),
         "orders": section_orders(),
+        "selection": section_selection(),
     }
 
 
@@ -677,6 +778,22 @@ def render_text(data: dict) -> str:
                 f"   {(r['kind'] or '?'):<14} {(r['side'] or ''):<4} "
                 f"sz={sz:<6} px={pr:<6} {(r['state'] or ''):<14} ({r['age']})"
             )
+    L.append("")
+
+    # SELECTION (C2 winner's-curse slope diagnostic)
+    sel = data.get("selection", {})
+    if sel.get("error"):
+        L.append(f"SELECTION ERR {sel['error']}")
+    elif "slope" in sel:
+        L.append(
+            f"SELECTION slope={sel['slope']} intercept={sel['intercept']} "
+            f"n={sel['n']}  (target slope~1; <<1=under-shrink, intercept!=0=center bias)"
+        )
+    else:
+        L.append(
+            "SELECTION " + str(sel.get("status", "n/a"))
+            + f"  (receipts_with_edge_shrunk={sel.get('receipts_with_edge_shrunk', 0)})"
+        )
     return "\n".join(L)
 
 
