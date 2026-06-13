@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 23
+  catalog_size: 22
   sunset_default: 90d
 
 hooks:
@@ -355,18 +355,3 @@ hooks:
     telemetry:
       ritual_signal_emitted: true
     owner_module: .claude/hooks/citation_grep_gate.py
-
-  - id: codegraph_context_inject
-    event: UserPromptSubmit
-    matcher: "*"
-    intent: >
-      Inject a strong codegraph-first banner + real file:line context on
-      code-task prompts so agents use the live graph before grep/Read.
-      ADVISORY: emits additionalContext; never blocks. Fail-open with an
-      "index missing" hint when codegraph is uninitialized.
-    blocked_when: []
-    severity: ADVISORY
-    sunset_date: 2026-09-12
-    telemetry:
-      ritual_signal_emitted: true
-    owner_module: .claude/hooks/codegraph_context_inject.py

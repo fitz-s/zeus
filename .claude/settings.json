@@ -4,18 +4,6 @@
     "baseRef": "head"
   },
   "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py codegraph_context_inject",
-            "description": "[hook v2 ADVISORY] Inject codegraph-first banner + file:line context on code-task prompts; fail-open with index-missing hint (sunset 2026-09-12)"
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "matcher": "Bash",
