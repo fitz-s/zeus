@@ -29,6 +29,7 @@ test_trust_policy:
   # Tests not in this list require audit before running.
   trusted_tests:
     tests/test_fit_bias_scale.py: {created: "2026-06-12", last_used: "2026-06-12", note: "Task 1.1 identifiability + bias-absorption regression: joint (b_loc,k) interval-censored categorical MLE recovers known (b=+1.2,k=1.1); k-only fit on same data inflates k>1.1 (proves k_wrong^2=k_true^2+(delta/sigma)^2); Monte-Carlo pins the theorem; EB shrinkage pulls low-n city toward pool"}
+    tests/calibration/test_member_correlation.py: {created: "2026-06-12", last_used: "2026-06-12", note: "Unit tests for measure_member_correlation.py: ANOVA ICC estimator on BetaBinomial synthetic data recovers known ρ_w to within 0.05; between-family ρ_b monotonicity; N_eff authority formula edge cases (statistical_calibration_authority_2026-06-12.txt Task 3.1)"}
     tests/test_boot_guard_pin_shape.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_boot_guard_settings_object.py: {created: "2026-06-03", last_used: "2026-06-03", note: "W0-T2+T3: Settings-object antibody + --validate-boot"}
     tests/test_edli_market_channel_refresh_authority.py: {created: "2026-06-03", last_used: "2026-06-03", note: "P1-1: scan_authority=VERIFIED contract; trigger reason separate (relationship test)"}

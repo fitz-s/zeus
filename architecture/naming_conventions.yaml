@@ -80,6 +80,8 @@ file_naming:
         fit_bias_scale.py: joint per-city bias + global scale calibration fitter; fit_ prefix retained to mirror fit_sigma_scale.py / fit_settlement_sigma_floor.py operator-facing calibration artifact terminology (statistical_calibration_authority_2026-06-12 Task 1.1)
         fit_settlement_sigma_floor.py: empirical settlement sigma-floor fitter retained to match operator-facing calibration artifact terminology
 
+        measure_member_correlation.py: ensemble-member ICC/N_eff measurement fitter; measure_ prefix mirrors operator-facing calibration artifact terminology (statistical_calibration_authority_2026-06-12 Task 3.1)
+
         healthcheck.py: established operator entrypoint
         heartbeat_dispatcher.py: established runtime dispatcher
         history_lore_audit.py: harness-debate audit utility; word order retained to match the audited `history_lore.yaml` surface
