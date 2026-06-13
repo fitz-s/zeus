@@ -241,14 +241,30 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
 
 
 def _row_is_tradeable_grade(row_map: Mapping[str, Any]) -> bool:
-    """A posterior row is tradeable-grade (live-eligible) iff it has certified bounds AND a
-    fused-Normal q-mode. NULL bounds OR a non-fused mode (BAYES_PRECISION_FUSION_CAPTURE_MISSING,
-    FUSED_NORMAL_BOUNDS_MISSING, SOFT_ANCHOR_FALLBACK, ...) => SHADOW-only, never live.
+    """A posterior row is tradeable-grade (live-eligible) iff it has BOTH certified bounds
+    (q_lcb_json AND q_ucb_json non-NULL) AND a fused-Normal q-mode. NULL on EITHER bound, or a
+    non-fused mode (BAYES_PRECISION_FUSION_CAPTURE_MISSING, FUSED_NORMAL_BOUNDS_MISSING,
+    SOFT_ANCHOR_FALLBACK, ...) => SHADOW-only, never live.
 
     This is the read-side mirror of the live gate's eligibility predicate; it is what makes a
     newer bounds-less SHADOW row NOT clobber an older tradeable row on the LIVE path.
+
+    TWIN-AUTHORITY KILL (2026-06-13, carrier defect): the live bounds gate
+    (event_reactor_adapter._replacement_authority_probability_and_fdr_proof, the
+    ``_needs_bounds``/``_bounds_ok`` block) requires BOTH ``q_lcb`` AND ``q_ucb`` to be
+    non-empty mappings. This predicate previously required only ``q_lcb_json``, so a row with
+    q_lcb present but ``q_ucb_json`` NULL (a 13:08Z row HAS q_ucb, its 13:09Z sibling MISSING it
+    — the freshest-row twin-authority defect; observed live on Wellington 06-14) was selected as
+    "tradeable-grade" and served. The adapter then either rejected the WHOLE family
+    (FUSED_NORMAL_BOUNDS_MISSING) or silently fail-closed every buy_no to q_lcb_no=0.0
+    (``_replacement_no_lcb_for_bin`` returns 0.0 when ``q_ucb`` is absent). Requiring q_ucb_json
+    here makes the existing tradeable-latest selection serve the freshest row that carries BOTH
+    bounds — automatically, with no new code path — and closes the reader/adapter predicate gap
+    that is the structural root (not just the Wellington instance).
     """
     if not row_map.get("q_lcb_json"):
+        return False
+    if not row_map.get("q_ucb_json"):
         return False
     provenance = _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
     mode = provenance.get("replacement_q_mode")
