@@ -80,6 +80,7 @@ file_naming:
         fill_obs_dst_gaps.py: established obs_v2 targeted fill helper; fill_ prefix kept for explicit gap-repair semantics
         fit_bias_scale.py: joint per-city bias + global scale calibration fitter; fit_ prefix retained to mirror fit_sigma_scale.py / fit_settlement_sigma_floor.py operator-facing calibration artifact terminology (statistical_calibration_authority_2026-06-12 Task 1.1)
         fit_settlement_sigma_floor.py: empirical settlement sigma-floor fitter retained to match operator-facing calibration artifact terminology
+        fit_opportunity_growth_rate.py: future-opportunity g* daily-log-growth fitter (exit capability E3, consult-3 Q1 task #52); fit_ prefix mirrors fit_sigma_scale.py / fit_bias_scale.py operator-facing artifact terminology
 
         measure_member_correlation.py: ensemble-member ICC/N_eff measurement fitter; measure_ prefix mirrors operator-facing calibration artifact terminology (statistical_calibration_authority_2026-06-12 Task 3.1)
 
