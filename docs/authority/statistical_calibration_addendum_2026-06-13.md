@@ -161,3 +161,42 @@ the member-vote shape carries ~14× less evidence than N=51 pretended.
 
 Every fitted artifact keeps the standing licensing law: CI-width on the DECISION
 scale (`1.96·max se(π_ij) < ε_edge/2`), never n≥30.
+
+---
+
+## D. DOUBLE-REVIEW REFINEMENTS (Fable 5 independent same-prompt run, 2026-06-13)
+
+Cross-validation: CONVERGENT on every load-bearing result (full convergence
+table: `consult2_crossvalidation_fable5_2026-06-13.md`). Both sources rank the
+priority IDENTICALLY: Q1 era > Q3 multiplicity > Q2 fusion > Q4 execution.
+Adopted refinements (supersede the corresponding lines above where they differ):
+
+- **D1 (refines A5)**: ALWAYS fit EB partial pooling; never use the era test as
+  a pool/no-pool switch (pretest-estimator risk unbounded near the null). The
+  LRT/score/boundary tests are reported diagnostics. Σ̂_era→0 recovers full
+  pooling automatically; newest era converges to its own MLE as n grows.
+- **D2 (refines A6)**: preferred QUARANTINED treatment = CAR interval-widening
+  (observe ambiguity set A_i → censoring interval [min A_i, max A_i]); unbiased
+  and strictly more efficient than exclusion; composes directly with the
+  interval-censored likelihood. Exclusion = fallback when A_i unrecoverable or
+  directional. Fractional weighting biased for ANY w>0 (proof in both sources).
+- **D3 (refines A2)**: Tweedie's formula as the nonparametric shrinkage upgrade
+  at daily N≥200 candidates; e-BH on betting e-values is the only admissible
+  FDR-style gate if risk policy demands one; winner's-curse slope diagnostic
+  (realized PnL/contract vs shrunk edge, slope≈1 target) goes into the
+  settlement-graded monitoring set.
+- **D4 (resolves the A7 Ledoit–Wolf divergence)**: keep LW but floor ρ≥0.5
+  (autocorrelated walk-forward residuals make LW UNDER-shrink), cap weights to
+  [0, 2/M], move off 1/M only with ≥10·M complete days + bootstrap CI excluding
+  1/M, and drop a provider explicitly when OOS MSE ratio ≥4 rather than trusting
+  the covariance. GPT's factor/constant-correlation target remains the bake-off
+  challenger after era residualization.
+- **D5 (refines A8)**: adverse-selection markdown A(δ_d) with pessimistic prior
+  A=0.5·δ_d until ≥20 own fills per depth bucket; maker switch licensed by
+  P[δ_eff > e₀(1−G)/F] > 0.6 under MC over the (λ_e, λ_f) posteriors; λ_f prior
+  from tape trade-throughs with queue discount c∈(0.3,0.7); Lomax fill
+  probability 1−(β/(β+H))^α.
+- **D6 (sharpens A5's decay condemnation)**: exact EWMA contamination share
+  s = λ^{n1}(1−λ^{n0})/(1−λ^{n1+n0}) — at λ=0.999, n1=400 fresh rows, n0=4000
+  old rows the estimate is still 66% dead-regime; AND the local-level filter
+  absorbs the jump by inflating q̂, degrading the smooth stretches too.
