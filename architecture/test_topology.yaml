@@ -743,6 +743,7 @@ test_trust_policy:
     tests/test_fee_authority.py: {created: "2026-06-12", last_used: "2026-06-12", note: "fee schedule-vs-realized data-semantics antibody: realized-fill evidence governs EV fee fraction; schedule CAP only as thin/stale fallback"}
     tests/test_cotenant_staging_guard.py: {created: "2026-06-12", last_used: "2026-06-12", note: "BLOCKING cotenant hook antibody: broad-add forms block, inline/env bypass honored, git -C worktree exemption (external review 2026-06-12)"}
     tests/test_fill_bridge_dispositions_migration.py: {created: "2026-06-13", last_used: "2026-06-13", note: "fill-bridge retry-storm pair antibody: ensure_table rebuilds legacy NOT NULL disposition (CREATE IF NOT EXISTS cannot relax constraints — quarantine was unreachable live 2026-06-12); orphan bridge excludes terminal-RECONCILED aggregates + poison row never aborts batch"}
+    tests/test_day0_connection_burst_antibody.py: {created: "2026-06-13", last_used: "2026-06-13", note: "lock-storm regression 347f713d antibody: monitoring phase with composite conn opens ZERO independent world connections; kill-memo recovery raises typed error on absent conn (no silent connection fallback)"}
     tests/test_preflight_restart_check_reads_edli_flags.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 1 RT: preflight_restart_check.py reads flags from correct scope (edli_v1/feature_flags), not top-level cfg dict"}
     tests/test_bayes_precision_fusion_covariance_uses_common_target_dates_only.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: covariance rows aligned by target_date not positional index — the critical date-alignment stat bug"}
     tests/test_bayes_precision_fusion_covariance_rejects_equal_length_misaligned_histories.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: equal-length but fully date-misaligned histories must not yield a learned off-diagonal covariance"}
@@ -774,6 +775,7 @@ categories:
     # fill-bridge retry-storm pair (2026-06-13): legacy NOT NULL disposition rebuild
     # + orphan bridge terminal-RECONCILED exclusion + poison-row batch immunity.
     - tests/test_fill_bridge_dispositions_migration.py
+    - tests/test_day0_connection_burst_antibody.py
     - tests/test_solar_append_future_window.py
     - tests/test_architecture_contracts.py
     - tests/test_assumptions_validation.py
