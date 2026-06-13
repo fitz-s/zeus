@@ -3306,6 +3306,7 @@ def _refresh_pending_family_snapshots(
     forecasts_conn,
     *,
     consumer_name: str = "edli_reactor_v1",
+    now_utc: datetime | None = None,
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
 
@@ -3330,8 +3331,15 @@ def _refresh_pending_family_snapshots(
     from src.data.polymarket_client import PolymarketClient
     from src.engine.event_reactor_adapter import _event_family_market_topology_rows
     from src.state.db import get_trade_connection
+    from src.strategy.market_phase import (
+        family_venue_closed as _family_venue_closed,
+    )
 
-    now_utc = datetime.now(timezone.utc)
+    # Injected-now (tests / replay): the venue-close warm-skip and the snapshot
+    # freshness window both key off this single decision clock. Defaults to
+    # wall-clock UTC in production; a test passes a frozen instant so the
+    # venue-close skip is deterministic against fixed-date fixtures.
+    now_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
     now_iso = now_utc.isoformat()
 
     # Step 1: Collect distinct (city, target_date, metric) for pending events.
@@ -3496,6 +3504,7 @@ def _refresh_pending_family_snapshots(
     #         Families with ANY stale/missing bin still proceed to Gamma fetch.
     fresh_skipped = 0
     no_topology = 0
+    venue_closed_skipped = 0
     gamma_refresh_families: list[tuple[str, str, str]] = []
     cached_topology_markets: list[dict] = []
     cached_topology_families = 0
@@ -3526,6 +3535,36 @@ def _refresh_pending_family_snapshots(
                     snapshot_reserve_s,
                 )
                 break
+            # VENUE-CLOSE WARM-SKIP (2026-06-13): a family whose Polymarket weather
+            # market has already entered POST_TRADING/RESOLVED (the F1 12:00-UTC
+            # close of target_date) can produce no fresh executable book — its
+            # capture froze at the last pre-close snapshot and Gamma returns an
+            # empty event list. Re-probing it (topology lookup + Gamma slug fetch)
+            # burns the bounded time-box that LIVE families (PRE_SETTLEMENT_DAY /
+            # SETTLEMENT_DAY) need, starving the live inventory of fresh snapshots.
+            #
+            # This is the EARLIER-than-strictly-past horizon: the venue closes at
+            # 12:00 UTC of target_date, hours before the target LOCAL-day end that
+            # the claim floor (EventStore._strictly_past_in_tz) and the prior STEP-4
+            # comment relied on. So a same-day-but-venue-closed family (e.g. a
+            # 2026-06-13 family at 17:44Z, post the 12:00Z close, pre local
+            # midnight) passes the claim floor and reaches this lane — exactly the
+            # 202/319 closed families measured live 2026-06-13 17:51Z that the
+            # 'gamma_slug_timebox_unattempted' tail re-probed for nothing.
+            #
+            # Authority: market_phase.family_venue_closed reuses the SAME F1
+            # 12:00-UTC POST_TRADING anchor (market_open_at_decision /
+            # market_phase_for_decision) the reactor's _venue_market_closed_horizon
+            # uses — single authority, no new clock. Fail-SOFT: an unresolvable
+            # city/tz/date returns False (NOT closed) so an uncertain family is
+            # KEPT, never dropped (a tradeable family must never be skipped). This
+            # is a focus/efficiency skip, NOT a cap or admission relaxation — it
+            # removes only families whose venue is provably closed.
+            if _family_venue_closed(
+                city=city, target_date=target_date, now_utc=now_utc
+            ):
+                venue_closed_skipped += 1
+                continue
             payload = {"city": city, "target_date": target_date, "metric": metric}
             topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
             if not topology_rows:
@@ -3587,14 +3626,17 @@ def _refresh_pending_family_snapshots(
         if not gamma_refresh_families and not cached_topology_markets:
             logger.info(
                 "refresh_pending_family_snapshots: all families fresh, skipped. "
-                "families=%d fresh_skipped=%d no_topology=%d cached_topology_incomplete=%d",
-                len(families), fresh_skipped, no_topology, cached_topology_incomplete,
+                "families=%d fresh_skipped=%d no_topology=%d venue_closed_skipped=%d "
+                "cached_topology_incomplete=%d",
+                len(families), fresh_skipped, no_topology, venue_closed_skipped,
+                cached_topology_incomplete,
             )
             return {
                 "status": "all_fresh",
                 "families_checked": len(families),
                 "fresh_skipped": fresh_skipped,
                 "no_topology": no_topology,
+                "venue_closed_skipped": venue_closed_skipped,
                 "cached_topology_incomplete": cached_topology_incomplete,
             }
 
@@ -3984,6 +4026,7 @@ def _refresh_pending_family_snapshots(
                 "cached_topology_incomplete": cached_topology_incomplete,
                 "no_topology": no_topology,
                 "fresh_skipped": fresh_skipped,
+                "venue_closed_skipped": venue_closed_skipped,
                 "gamma_slug_attempted": gamma_slug_attempted,
                 "gamma_slug_empty": gamma_slug_empty,
                 "gamma_slug_http_non_200": gamma_slug_http_non_200,
@@ -4025,6 +4068,7 @@ def _refresh_pending_family_snapshots(
         "cached_topology_incomplete": cached_topology_incomplete,
         "no_topology": no_topology,
         "fresh_skipped": fresh_skipped,
+        "venue_closed_skipped": venue_closed_skipped,
         "topology_budget_exhausted": int(topology_budget_exhausted),
         "topology_deferred_families": topology_deferred_families,
         "skipped_not_found": skipped_not_found,

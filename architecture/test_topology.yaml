@@ -159,6 +159,7 @@ test_trust_policy:
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_edli_live_bridge_allocator_refresh.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/money_path/test_edli_bankroll_warm_cycle.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/money_path/test_edli_market_substrate_warm_cycle.py: {created: "2026-06-01", last_used: "2026-06-13", note: "Warm-lane decoupling + venue-close warm-skip (2026-06-13) relationship tests: a pending family whose Polymarket venue market is POST_TRADING (F1 12:00-UTC close of target_date, EARLIER than EventStore._strictly_past_in_tz local-day end) is SKIPPED so the bounded time-box serves LIVE families, not closed 06-13 re-probes (the gamma_slug_timebox_unattempted clog starving live 06-14/06-15 inventory). Venue-open ⇒ refreshed; venue-closed ⇒ venue_closed_skipped++ no submit; UNRESOLVABLE family ⇒ fail-soft KEPT (uncertain⇒keep, never drop a tradeable family). Authority single F1 anchor = market_phase.family_venue_closed (complement of market_open_at_decision), shared with reactor _venue_market_closed_horizon. RED-on-revert: drop the skip → closed family refreshes (venue_closed_skipped==0)."}
     tests/money_path/test_edli_durable_fill_bridge_scan.py: {created: "2026-06-01", last_used: "2026-06-03"}
     tests/state/test_edli_table_ownership.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # task_2026-05-04_oracle_kelly_evidence_rebuild antibodies (A1-A7).
