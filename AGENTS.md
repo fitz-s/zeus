@@ -31,13 +31,17 @@ as baseline_q_lcb_reference receipt provenance; regime law
 docs/authority/regime_unification_2026-06-12.md U1):
 `51 ENS members -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> α-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly -> Position Size`
 
-**TOPOLOGY NAVIGATION:**
-Before modifying code, run the topology doctor. It returns additional context
-`python3 scripts/topology_doctor.py --navigation --task "<your task>" --files <files>`
+**STRUCTURAL CONTEXT + GOVERNANCE GATES:**
+For structural lookup (which files a task touches, callers/callees, traces, "how
+does X work") use **codegraph** (`codegraph_context` / `codegraph_trace`) — the
+default, before grep/Read. `topology_doctor.py --navigation` is LEGACY routing
+(substring task-matching, superseded by codegraph) and is not a required gate.
 
-For pipeline-impacting tasks (pricing, data, risk, settlement), also load the
-boot profile and answer the proof questions before modifying code:
+The topology gates that ARE required before modifying code stay required: for
+pipeline-impacting tasks (pricing, data, risk, settlement), load the boot
+profile and answer the proof questions before modifying code:
 `python3 scripts/topology_doctor.py --task-boot-profiles`
+For governed files, run `--planning-lock` / `--map-maintenance`.
 
 Read this file first to establish the money path, then route directly to the specific execution module or manifest governing your task.
 
@@ -239,15 +243,22 @@ PRs: only milestone-level changes open a PR against main. Everything else stays 
 
 ## 3. Navigation & Task Routing
 
-**Step 1 — Run the topology digest for your task.** This is not optional. The
-digest returns your scoped change set, forbidden files, safety gates, and stop
-conditions — information that grep cannot provide.
+**Step 1 — Structural context comes from codegraph.** For which files a task
+touches, callers/callees, traces, and "how does X work", query **codegraph**
+(`codegraph_context` / `codegraph_trace`) first — it is the live graph and is
+faster/cheaper than grep. The governance facts that grep cannot provide —
+required law, forbidden files, safety gates, stop conditions — come from the
+boot profiles (`--task-boot-profiles`) and the required gates (`--planning-lock`,
+`--map-maintenance`), NOT from navigation routing.
+
+`topology_doctor.py --navigation` is LEGACY (substring task-matching). Its
+route-card output below is retained for reference only:
 
 ```
 python3 scripts/topology_doctor.py --navigation --task "<your task>" --files <files>
 ```
 
-The output contains:
+The (legacy) output contains:
 - `required_law` — invariants you must not violate
 - `allowed_files` — the files you may change
 - `forbidden_files` — do not touch
@@ -371,17 +382,18 @@ it is not a current per-city truth table.
 
 ### Additional topology commands
 
-- `python3 scripts/topology_doctor.py --navigation --task "<task>" --intent <intent> --write-intent <write-intent> --files <files>` — typed-intent navigation, the canonical pre-edit gate
-- `python3 scripts/topology_doctor.py --planning-lock --changed-files <files>` — check if changes require planning evidence
-- `python3 scripts/topology_doctor.py --map-maintenance --changed-files <files>` — check companion registry updates
+- Structural context (which files a task touches, callers/callees, traces) → **codegraph** (`codegraph_context` / `codegraph_trace`), the default structural-lookup tool. `topology_doctor.py --navigation` is LEGACY routing (substring task-matching, superseded by codegraph) — not a required gate.
+- `python3 scripts/topology_doctor.py --planning-lock --changed-files <files>` — REQUIRED gate: does this change need planning evidence?
+- `python3 scripts/topology_doctor.py --map-maintenance --changed-files <files>` — REQUIRED gate: companion registry updates
 - `python3 scripts/topology_doctor.py --code-review-graph-status --json` — Code Review Graph freshness
 
 ### Code Review Graph
 
-Three stages. Stage 1 (required): typed-intent admission via
-`python3 scripts/topology_doctor.py --navigation --task "<task>"
---intent <intent> --write-intent <write-intent> --files <files> --json`
-— emits admission status, risk tier, gate budget, and blocking reasons.
+Three stages. Stage 1 (structural context): use **codegraph** for file
+discovery, callers, callees, and traces. The governance admission that still
+matters — planning evidence, map maintenance, authority order — comes from the
+REQUIRED gates (`--planning-lock`, `--map-maintenance`) and the boot profiles,
+NOT from `--navigation` routing (legacy, substring-matched).
 Stage 1.5 (required for new task classes): read
 `architecture/task_boot_profiles.yaml` and `architecture/fatal_misreads.yaml`
 directly for the relevant task class — these are the canonical semantic-boot
