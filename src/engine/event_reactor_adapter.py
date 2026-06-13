@@ -7247,6 +7247,15 @@ def _opportunity_book_from_proofs(
             locked_opportunity_conn=locked_opportunity_conn,
         )
     )
+    # Horse-race Kelly SHADOW compute (task #63 / authority §P1). The full family
+    # {(p_k, q_k)} vector is in scope HERE (the evaluations tuple) — the single point
+    # where mutually-exclusive bin competition can be solved jointly. SHADOW-ONLY this
+    # pass: compute the closed-form portfolio-correct allocation and log it beside the
+    # live per-candidate sizing; the live decision below is UNTOUCHED, byte-identical.
+    # The flag (_replacement_horse_race_kelly_enabled) governs only a FUTURE live
+    # replacement; while it is OFF the shadow log is observe-only. Fail-silent.
+    _shadow_log_horse_race_allocation(family_id=family_id, evaluations=evaluations)
+
     # The live decision is the ΔU ranker's pick (selected_proof). The book RECORDS
     # it as the single selected_candidate_id (operator directive 2026-06-08;
     # spec §14 item 7/8) rather than re-deciding via legacy scalar-Kelly. The
@@ -9794,6 +9803,96 @@ def _replacement_q_james_stein_enabled() -> bool:
         return bool(settings["edli"].get("replacement_q_james_stein_enabled", False))
     except Exception:
         return False
+
+
+def _replacement_horse_race_kelly_enabled() -> bool:
+    """Horse-race Kelly flag (consult-3 Q2/P1, task #63, default FALSE).
+
+    When OFF (default): the family's closed-form horse-race allocation is COMPUTED
+    and SHADOW-LOGGED on zeus.replacement_qlcb_shadow (per-bin f_k* + s_cash) next to
+    the live per-candidate sizing, but the LIVE sizing is byte-identical to prior
+    behavior — no live size, selection, or receipt value changes.
+    When ON: (future pass) the horse-race allocation replaces the per-candidate
+    edge>threshold sizing at the family-decision point. This pass is SHADOW-ONLY.
+
+    Authority: docs/authority/exit_portfolio_execution_authority_2026-06-13.md §P1.
+    The endogenous cash threshold s* is the structural cap (NO artificial max-exposure
+    cap is layered on top — NO-caps law). Flip only on operator word after the shadow
+    artifact licenses the allocation forward."""
+    try:
+        return bool(settings["edli"].get("replacement_horse_race_kelly_enabled", False))
+    except Exception:
+        return False
+
+
+def _shadow_log_horse_race_allocation(
+    *,
+    family_id: str,
+    evaluations: tuple["CandidateEvaluation", ...],
+) -> None:
+    """Compute the family's closed-form horse-race Kelly allocation and SHADOW-LOG it.
+
+    SHADOW-ONLY (task #63 / authority §P1). Mirrors ``_apply_james_stein_blend_family``:
+    builds the aligned ``{(p_k, q_k)}`` vector from the family's executable buy_yes
+    evaluations (p_k = effective YES execution price, q_k = conservative q_lcb_5pct),
+    runs ``horse_race_allocation``, and logs the per-bin f_k* + s_cash on the
+    ``zeus.replacement_qlcb_shadow`` logger. Returns None; NEVER mutates the live
+    evaluations / sizing / selection. Fail-silent — a shadow logger must never break a
+    live decision.
+
+    Scope: YES-side bins only (the horse-race is the mutually-exclusive YES-bin
+    water-filling). The vector is the partition over the family's settlement bins, so
+    YES legs are the natural axis; NO legs are unions and are handled by the dominance
+    LP / QP in a later pass.
+    """
+    import logging as _logging
+
+    from src.strategy.horse_race_kelly import horse_race_allocation as _horse_race_allocation
+
+    _logger = _logging.getLogger("zeus.replacement_qlcb_shadow")
+    try:
+        cond_ids: list[str] = []
+        bin_labels: list[str] = []
+        p_vals: list[float] = []
+        q_vals: list[float] = []
+        for ev in evaluations:
+            # YES-side, priced, with a usable conservative posterior.
+            if str(ev.direction or "") != "buy_yes":
+                continue
+            price = ev.execution_price
+            if price is None or not (0.0 < float(price) < 1.0):
+                continue
+            q_lcb = float(ev.q_lcb_5pct)
+            if not (0.0 <= q_lcb <= 1.0):
+                continue
+            cond_ids.append(str(ev.condition_id or ""))
+            bin_labels.append(str(ev.bin_label or "?"))
+            p_vals.append(float(price))
+            q_vals.append(q_lcb)
+
+        K = len(p_vals)
+        if K < 2:
+            # Single-bin families have no cross-bin competition to shadow.
+            return
+
+        alloc = _horse_race_allocation(p=p_vals, q=q_vals)
+        per_bin = ";".join(
+            f"{bin_labels[i]}:p={p_vals[i]:.4f},q={q_vals[i]:.4f},f={alloc.f[i]:.4f}"
+            for i in range(K)
+        )
+        _logger.info(
+            "horse_race_shadow family=%s K=%d regime=%s active=%d s_cash=%.4f "
+            "elg=%.5f bins=[%s]",
+            family_id,
+            K,
+            alloc.regime,
+            alloc.active_count,
+            alloc.s_cash,
+            alloc.expected_log_growth,
+            per_bin,
+        )
+    except Exception:  # noqa: BLE001 — shadow compute is non-critical; never break decisions
+        return
 
 
 def _market_anchor_alpha() -> float:

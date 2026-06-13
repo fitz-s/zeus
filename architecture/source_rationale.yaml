@@ -1801,6 +1801,14 @@ files:
     downstream:
     - src/engine/evaluator.py
     - src/engine/replay.py
+  src/strategy/horse_race_kelly.py:
+    zone: K3_extension
+    authority_role: portfolio_sizing_law
+    why: Closed-form K-bin mutually-exclusive horse-race Kelly allocation (consult-3 Q2/P1, task #63). The portfolio-correct replacement for per-candidate edge>threshold sizing — within one event family the K YES bins COMPETE for capital and the cash threshold s* is ENDOGENOUS (water-fill), not a fixed per-candidate kelly_multiplier or edge gate. Pure functions (horse_race_allocation closed form + active-set fixed point; portfolio_qp_allocation P2 cross-family QP; dominance_lp_check P5 arbitrage pre-check). q input = q_lcb (conservative posterior, q_lcb+Kelly law). SHADOW-ONLY wiring this pass — the live sizing path is unchanged while replacement_horse_race_kelly_enabled is false. Authority docs/authority/exit_portfolio_execution_authority_2026-06-13.md P1-P2,P5.
+    hazards:
+    - MULTI_BIN_MUTUALLY_EXCLUSIVE_OVERALLOCATION
+    downstream:
+    - src/engine/event_reactor_adapter.py
   src/strategy/kelly.py:
     zone: K3_extension
     authority_role: sizing_law
