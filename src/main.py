@@ -469,8 +469,8 @@ def _run_schema_guards() -> list:
     (name, passed, detail).
 
     Checks:
-      world_db_schema    — PRAGMA user_version + assert_schema_current
-      forecasts_db_schema — PRAGMA user_version + assert_schema_current_forecasts
+      world_db_schema    — assert_schema_current (structural no-op) + canonical table presence
+      forecasts_db_schema — assert_schema_current_forecasts (structural no-op) + canonical table presence
       world_registry     — assert_db_matches_registry(WORLD)
       forecasts_registry — assert_db_matches_registry(FORECASTS)
     """
@@ -497,8 +497,7 @@ def _run_schema_guards() -> list:
         try:
             conn.execute("PRAGMA query_only = ON")
             assert_schema_current(conn)
-            row = conn.execute("PRAGMA user_version").fetchone()
-            results.append(("world_db_schema", True, f"user_version={row[0] if row else '?'} — OK"))
+            results.append(("world_db_schema", True, "schema structural check — OK"))
         finally:
             conn.close()
     except Exception as exc:
@@ -512,8 +511,7 @@ def _run_schema_guards() -> list:
         try:
             conn.execute("PRAGMA query_only = ON")
             assert_schema_current_forecasts(conn)
-            row = conn.execute("PRAGMA user_version").fetchone()
-            results.append(("forecasts_db_schema", True, f"user_version={row[0] if row else '?'} — OK"))
+            results.append(("forecasts_db_schema", True, "schema structural check — OK"))
         finally:
             conn.close()
     except Exception as exc:
@@ -4677,7 +4675,7 @@ def _startup_world_schema_ready_check() -> None:
 
     Mirrors _startup_freshness_check retry pattern (30 × 10s = 5 min).
     Fail-closed: raises SystemExit if direct world or forecast DB schema checks
-    cannot prove current `PRAGMA user_version` after retries.
+    fail after retries.
     This is the Phase 2→Phase 3 enforcement promotion per architect audit A-2.
 
     K1 split 2026-05-11: this function now delegates to _startup_db_schema_ready_check,
@@ -4690,10 +4688,21 @@ def _startup_world_schema_ready_check() -> None:
 
 
 def _startup_world_db_schema_ready_check() -> str:
-    """Read-only world DB schema currency check for live startup."""
+    """Read-only world DB structural schema check for live startup.
+
+    Verifies presence of a minimal set of canonical world tables via
+    sqlite_master (read-only).  Missing DB or missing tables fail closed.
+    B2 (2026-05-28) cancelled the schema-version counter mechanism entirely.
+    """
     import sqlite3
 
     from src.state.db import ZEUS_WORLD_DB_PATH, assert_schema_current
+
+    _CANONICAL_WORLD_TABLES = frozenset({
+        "decision_events",
+        "position_current",
+        "trade_decisions",
+    })
 
     if not ZEUS_WORLD_DB_PATH.exists():
         raise FileNotFoundError(f"{ZEUS_WORLD_DB_PATH} does not exist")
@@ -4705,23 +4714,29 @@ def _startup_world_db_schema_ready_check() -> str:
     try:
         conn.execute("PRAGMA query_only = ON")
         assert_schema_current(conn)
-        row = conn.execute("PRAGMA user_version").fetchone()
-        return str(row[0] if row else "unknown")
+        present = frozenset(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        )
+        missing = _CANONICAL_WORLD_TABLES - present
+        if missing:
+            raise RuntimeError(
+                f"world DB missing canonical tables: {sorted(missing)}"
+            )
+        return "ready"
     finally:
         conn.close()
 
 
 def _startup_world_db_schema_prepare() -> str:
-    """Idempotently migrate an existing world DB before read-only boot proof.
+    """Idempotently run init_schema() on the world DB before read-only boot proof.
 
-    Live boot previously proved schema currency in read-only mode before any
-    sanctioned world DB initialization could run. A merged SCHEMA_VERSION bump
-    could therefore wedge the daemon indefinitely until an operator ran manual
-    schema preparation. This helper keeps the final authority as the read-only
-    user_version proof while allowing existing stale world DBs to pass through
-    the normal idempotent init_schema() path first. This may perform bounded
-    startup DDL on ``state/zeus-world.db`` when code has advanced ahead of the
-    DB user_version; missing DBs and future-schema DBs still fail closed.
+    Runs the idempotent init_schema() unconditionally so that ensure_table
+    migrations added without a version bump are always executed on live DBs.
+    Missing DBs still fail closed. B2 (2026-05-28) cancelled the schema-version
+    counter mechanism entirely.
     """
     import src.state.db as db_module
 
@@ -4729,37 +4744,32 @@ def _startup_world_db_schema_prepare() -> str:
     if not path.exists():
         raise FileNotFoundError(f"{path} does not exist")
 
-    # B2 (2026-05-28): SCHEMA_VERSION counter cancelled. Run idempotent init_schema()
-    # unconditionally as a preparatory step; PRAGMA user_version is set by init_schema
-    # to the frozen value 43 and is used for logging only.
     conn = db_module.get_world_connection(write_class="live")
     try:
-        row = conn.execute("PRAGMA user_version").fetchone()
-        current_version = int(row[0]) if row and row[0] is not None else 0
-        # B2 says init_schema runs UNCONDITIONALLY (idempotent preparatory DDL);
-        # an early return on user_version==43 made every ensure_table migration
-        # added without a version bump unreachable on live DBs forever — the
-        # 2026-06-12 nullable-disposition rebuild never executed (retry storm).
-        if current_version != 43:
-            logger.warning(
-                "world DB schema stale at live boot: user_version=%s — running idempotent init_schema()",
-                current_version,
-            )
         db_module.init_schema(conn)
         conn.commit()
-        row = conn.execute("PRAGMA user_version").fetchone()
-        prepared_version = int(row[0]) if row and row[0] is not None else 0
-        logger.info("world DB schema prepared at live boot: user_version=%s", prepared_version)
-        return str(prepared_version)
+        logger.info("world DB schema prepared at live boot: init_schema complete")
+        return "prepared"
     finally:
         conn.close()
 
 
 def _startup_forecasts_schema_ready_check() -> str:
-    """Read-only forecast DB schema currency check for forecast-live split authority."""
+    """Read-only forecasts DB structural schema check for forecast-live split authority.
+
+    Verifies presence of a minimal set of canonical forecast tables via
+    sqlite_master (read-only).  Missing DB or missing tables fail closed.
+    B2 (2026-05-28) cancelled the schema-version counter mechanism entirely.
+    """
     import sqlite3
 
     from src.state.db import ZEUS_FORECASTS_DB_PATH, assert_schema_current_forecasts
+
+    _CANONICAL_FORECASTS_TABLES = frozenset({
+        "ensemble_snapshots",
+        "settlement_outcomes",
+        "source_run",
+    })
 
     if not ZEUS_FORECASTS_DB_PATH.exists():
         raise FileNotFoundError(f"{ZEUS_FORECASTS_DB_PATH} does not exist")
@@ -4771,8 +4781,18 @@ def _startup_forecasts_schema_ready_check() -> str:
     try:
         conn.execute("PRAGMA query_only = ON")
         assert_schema_current_forecasts(conn)
-        row = conn.execute("PRAGMA user_version").fetchone()
-        return str(row[0] if row else "unknown")
+        present = frozenset(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        )
+        missing = _CANONICAL_FORECASTS_TABLES - present
+        if missing:
+            raise RuntimeError(
+                f"forecasts DB missing canonical tables: {sorted(missing)}"
+            )
+        return "ready"
     finally:
         conn.close()
 
@@ -4793,25 +4813,16 @@ def _startup_db_schema_ready_check() -> None:
     for attempt in range(1, BOOT_RETRY_MAX_ATTEMPTS + 1):
         missing = []
         try:
-            prepared_world_schema_version = _startup_world_db_schema_prepare()
-            logger.info(
-                "world DB schema prepared/unchanged before proof: user_version=%s",
-                prepared_world_schema_version,
-            )
-            world_schema_version = _startup_world_db_schema_ready_check()
-            logger.info(
-                "world DB schema current: user_version=%s",
-                world_schema_version,
-            )
+            _startup_world_db_schema_prepare()
+            logger.info("world DB schema prepared (init_schema complete)")
+            _startup_world_db_schema_ready_check()
+            logger.info("world DB schema structural check: ready")
         except Exception as exc:
             logger.warning("world DB schema readiness check failed: %s — retrying", exc)
             missing.append("world")
         try:
-            forecast_schema_version = _startup_forecasts_schema_ready_check()
-            logger.info(
-                "forecasts DB schema current: user_version=%s",
-                forecast_schema_version,
-            )
+            _startup_forecasts_schema_ready_check()
+            logger.info("forecasts DB schema structural check: ready")
         except Exception as exc:
             logger.warning("forecasts DB schema readiness check failed: %s — retrying", exc)
             missing.append("forecasts")
@@ -4828,7 +4839,7 @@ def _startup_db_schema_ready_check() -> None:
 
     raise SystemExit(
         "FATAL: DB schema readiness not proven within 5 min "
-        "(zeus-world.db + zeus-forecasts.db user_version). "
+        "(zeus-world.db + zeus-forecasts.db structural table checks). "
         "Check direct DB schema initialization and launchctl list com.zeus.forecast-live"
     )
 
@@ -8913,7 +8924,7 @@ def main():
     _startup_world_schema_ready_check()
 
     # Daemon is a read-only consumer of world DB. Schema currency was proven
-    # above by direct read-only user_version checks on the canonical DB files.
+    # above by direct read-only structural checks on the canonical DB files.
     # Opening without write_class avoids the v4 LIVE flock and never acquires
     # a SQLite writer lock for read-only ops below — so a concurrent ingest
     # or backfill cannot starve daemon startup.

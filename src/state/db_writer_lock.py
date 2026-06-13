@@ -656,7 +656,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # These are NOT in the world-db BULK lock universe; each is either
         # read-only or writes a separate DB (risk_state.db).
         "src/ingest_main.py",           # RO: reads condition_id for UMA listener, no write
-        "src/main.py",                  # read_only_ro_uri: live boot verifies zeus-forecasts.db user_version with mode=ro + query_only
+        "src/main.py",                  # read_only_ro_uri: live boot structural checks on zeus-forecasts.db with mode=ro + query_only
         "src/data/replacement_forecast_live_dry_run.py",  # read_only_ro_uri: replacement switch dry-run inventory opens forecasts DB mode=ro + query_only; SELECT-only
         "src/observability/status_summary.py",  # RO: status dashboard read-only
         "src/engine/position_belief.py",  # read_only_ro_uri: K1 single belief authority — held-position belief reads forecast_posteriors mode=ro, short-lived, SELECT-only (settlement-losses incident 2026-06-12)

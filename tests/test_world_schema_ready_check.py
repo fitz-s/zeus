@@ -17,10 +17,8 @@ from pathlib import Path
 
 import pytest
 
-# B2 (2026-05-28): SCHEMA_VERSION / SCHEMA_FORECASTS_VERSION constants removed from src/state/db.py.
-# Frozen values for fixture use: world DB user_version=43, forecasts DB user_version=7.
-_SCHEMA_VERSION = 43
-_SCHEMA_FORECASTS_VERSION = 7
+# B2 (2026-05-28): SCHEMA_VERSION / SCHEMA_FORECASTS_VERSION constants and PRAGMA user_version
+# mechanism removed entirely. Schema currency is now proven via structural table presence.
 
 
 class TestWorldSchemaReadyCheck:
@@ -86,8 +84,8 @@ class TestWorldSchemaReadyCheck:
         fn = self._get_fn()
         fn()
 
-    def test_world_schema_ready_check_reads_world_db_user_version(self, tmp_path, monkeypatch):
-        """World schema proof comes from zeus-world.db, not legacy sentinel age."""
+    def test_world_schema_ready_check_uses_canonical_table_presence(self, tmp_path, monkeypatch):
+        """World schema proof comes from canonical table presence in zeus-world.db."""
         import sqlite3
 
         import src.state.db as db_module
@@ -95,10 +93,12 @@ class TestWorldSchemaReadyCheck:
 
         world_db = tmp_path / "zeus-world.db"
         with sqlite3.connect(world_db) as conn:
-            conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            conn.execute("CREATE TABLE decision_events (id INTEGER PRIMARY KEY)")
+            conn.execute("CREATE TABLE position_current (id INTEGER PRIMARY KEY)")
+            conn.execute("CREATE TABLE trade_decisions (id INTEGER PRIMARY KEY)")
         monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
 
-        assert _startup_world_db_schema_ready_check() == str(_SCHEMA_VERSION)
+        assert _startup_world_db_schema_ready_check() == "ready"
 
     def test_stale_forecasts_sentinel_ignored_when_forecasts_db_schema_current(self, tmp_path, monkeypatch):
         """Legacy forecasts_schema_ready.json no longer gates live startup."""
@@ -164,8 +164,8 @@ class TestWorldSchemaReadyCheck:
         assert "zeus-forecasts.db" in msg
         assert "forecast-live" in msg
 
-    def test_forecasts_schema_ready_check_reads_forecasts_db_user_version(self, tmp_path, monkeypatch):
-        """Forecast schema proof comes from zeus-forecasts.db, not legacy sentinel age."""
+    def test_forecasts_schema_ready_check_uses_canonical_table_presence(self, tmp_path, monkeypatch):
+        """Forecast schema proof comes from canonical table presence in zeus-forecasts.db."""
         import sqlite3
 
         import src.state.db as db_module
@@ -173,10 +173,12 @@ class TestWorldSchemaReadyCheck:
 
         forecasts_db = tmp_path / "zeus-forecasts.db"
         with sqlite3.connect(forecasts_db) as conn:
-            conn.execute(f"PRAGMA user_version = {_SCHEMA_FORECASTS_VERSION}")
+            conn.execute("CREATE TABLE ensemble_snapshots (id INTEGER PRIMARY KEY)")
+            conn.execute("CREATE TABLE settlement_outcomes (id INTEGER PRIMARY KEY)")
+            conn.execute("CREATE TABLE source_run (id INTEGER PRIMARY KEY)")
         monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_db)
 
-        assert _startup_forecasts_schema_ready_check() == str(_SCHEMA_FORECASTS_VERSION)
+        assert _startup_forecasts_schema_ready_check() == "ready"
 
     def test_function_exists_in_main(self):
         """Structural: _startup_world_schema_ready_check must exist in src/main.py."""
@@ -196,8 +198,8 @@ class TestWorldSchemaReadyCheck:
             "conn = get_world_connection()"
         )
 
-    def test_world_schema_prepare_runs_before_read_only_proof(self, monkeypatch):
-        """Live boot must repair stale world schema before read-only user_version proof."""
+    def test_world_schema_prepare_runs_before_structural_proof(self, monkeypatch):
+        """Live boot must run init_schema prepare step before read-only structural proof."""
         import src.control.freshness_gate as fg_module
         import src.main as main_module
 
@@ -220,28 +222,28 @@ class TestWorldSchemaReadyCheck:
 
         assert calls == ["prepare", "read_only_proof"]
 
-    def test_world_schema_prepare_upgrades_stale_existing_world_db(self, tmp_path, monkeypatch):
-        """A bumped SCHEMA_VERSION must not wedge live before init_schema() can run."""
+    def test_world_schema_prepare_runs_init_schema_unconditionally(self, tmp_path, monkeypatch):
+        """init_schema runs unconditionally — no version gating; returns 'prepared'."""
         import sqlite3
 
         import src.state.db as db_module
         from src.main import _startup_world_db_schema_prepare
 
         world_db = tmp_path / "zeus-world.db"
-        with sqlite3.connect(world_db) as conn:
-            conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION - 1}")
+        # Create an empty DB — no tables, no user_version seeding
+        sqlite3.connect(world_db).close()
         monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
 
-        assert _startup_world_db_schema_prepare() == str(_SCHEMA_VERSION)
-        with sqlite3.connect(world_db) as conn:
-            row = conn.execute("PRAGMA user_version").fetchone()
-            tail = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tail_stress_scenarios'"
-            ).fetchone()
+        calls = []
+        monkeypatch.setattr(
+            db_module, "get_world_connection",
+            lambda write_class=None: sqlite3.connect(world_db),
+        )
+        monkeypatch.setattr(db_module, "init_schema", lambda conn: calls.append("init"))
 
-        assert row is not None
-        assert row[0] == _SCHEMA_VERSION
-        assert tail == (1,)
+        result = _startup_world_db_schema_prepare()
+        assert result == "prepared"
+        assert calls == ["init"]
 
     def test_v2_schema_uses_savepoint_inside_caller_owned_transaction(self, tmp_path):
         """The v2 schema owner must not require a caller-owned transaction commit.
@@ -325,21 +327,20 @@ class TestWorldSchemaReadyCheck:
             conn.close()
 
 
-def test_world_db_schema_prepare_runs_init_schema_even_when_version_current(monkeypatch, tmp_path):
-    """Antibody (2026-06-13): the early return on user_version==43 made every
-    ensure_table migration added without a version bump UNREACHABLE on live DBs
-    (the nullable-disposition rebuild never executed -> fill-bridge retry storm).
-    B2 design: init_schema is idempotent and runs UNCONDITIONALLY at boot."""
+def test_world_db_schema_prepare_calls_init_schema_unconditionally(monkeypatch, tmp_path):
+    """Antibody (2026-06-13): init_schema runs UNCONDITIONALLY at every boot — no version
+    gating. The old early-return on user_version==43 made every ensure_table migration
+    added without a version bump UNREACHABLE on live DBs (the nullable-disposition rebuild
+    never executed -> fill-bridge retry storm). B2 design: no version counter; pure idempotent
+    init_schema on every prepare call. Return value is always 'prepared'."""
     import sqlite3
 
     import src.main as main_module
     import src.state.db as db_module
 
     db_path = tmp_path / "world.db"
-    seed = sqlite3.connect(db_path)
-    seed.execute("PRAGMA user_version = 43")
-    seed.commit()
-    seed.close()
+    # Create an empty DB — no tables, no user_version seeding needed
+    sqlite3.connect(db_path).close()
 
     calls = []
     monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", db_path)
@@ -349,8 +350,11 @@ def test_world_db_schema_prepare_runs_init_schema_even_when_version_current(monk
     )
     monkeypatch.setattr(db_module, "init_schema", lambda conn: calls.append("init"))
 
-    main_module._startup_world_db_schema_prepare()
+    result = main_module._startup_world_db_schema_prepare()
+    assert result == "prepared", (
+        "_startup_world_db_schema_prepare must return 'prepared' (no version counter)"
+    )
     assert calls == ["init"], (
-        "init_schema must run even when user_version is already current — "
-        "idempotent ensure_table migrations are otherwise unreachable on live DBs"
+        "init_schema must run unconditionally — no version gating; "
+        "idempotent ensure_table migrations must always execute"
     )

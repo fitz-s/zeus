@@ -28,8 +28,8 @@ from src.state.db import (
     init_schema,
     init_schema_forecasts,
 )
-SCHEMA_VERSION = 43          # B2: frozen PRAGMA user_version written by init_schema
-SCHEMA_FORECASTS_VERSION = 7  # B2: frozen PRAGMA user_version written by init_schema_forecasts
+# B2 (2026-05-28) + operator directive 2026-06-13: PRAGMA user_version mechanism removed.
+# Schema currency is proven via canonical table presence.
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -392,11 +392,15 @@ def test_release_gate_fails_on_loaded_sha_mismatch(tmp_path: Path) -> None:
     assert any(result.name == "loaded_sha" and result.status == "FAIL" for result in report.results)
 
 
-def test_release_gate_fails_on_old_world_schema(tmp_path: Path) -> None:
+def test_release_gate_fails_on_missing_world_canonical_tables(tmp_path: Path) -> None:
+    """Gate must FAIL when world DB is missing canonical tables (structural check)."""
     args = _make_gate_args(tmp_path)
+    # Replace world DB with one that has no tables at all
     conn = sqlite3.connect(str(args.world_db))
     try:
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+        conn.execute("DROP TABLE IF EXISTS decision_events")
+        conn.execute("DROP TABLE IF EXISTS position_current")
+        conn.execute("DROP TABLE IF EXISTS trade_decisions")
         conn.commit()
     finally:
         conn.close()
@@ -463,12 +467,14 @@ def test_release_gate_fails_when_forecasts_db_missing(tmp_path: Path) -> None:
     assert any(r.name == "forecasts_schema" and r.status == FAIL for r in report.results)
 
 
-def test_release_gate_fails_when_forecasts_schema_stale(tmp_path: Path) -> None:
-    """Gate must FAIL if forecasts DB user_version != SCHEMA_FORECASTS_VERSION. (review5.23 P0-1)"""
+def test_release_gate_fails_when_forecasts_canonical_tables_missing(tmp_path: Path) -> None:
+    """Gate must FAIL if forecasts DB is missing canonical tables (structural check). (review5.23 P0-1)"""
     args = _make_gate_args(tmp_path)
     conn = sqlite3.connect(str(args.forecasts_db))
     try:
-        conn.execute(f"PRAGMA user_version = {SCHEMA_FORECASTS_VERSION - 1}")
+        conn.execute("DROP TABLE IF EXISTS ensemble_snapshots")
+        conn.execute("DROP TABLE IF EXISTS settlement_outcomes")
+        conn.execute("DROP TABLE IF EXISTS source_run")
         conn.commit()
     finally:
         conn.close()

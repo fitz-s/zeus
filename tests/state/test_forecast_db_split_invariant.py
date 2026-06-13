@@ -43,14 +43,16 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 # ---------------------------------------------------------------------------
-# REL-1: init_schema_forecasts on fresh :memory: creates all authority tables,
-#         sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION,
-#         and creates at minimum the critical indexes.
+# REL-1: init_schema_forecasts on fresh :memory: creates all authority tables
+#         and at minimum the critical indexes.
 # ---------------------------------------------------------------------------
 
 def test_rel1_init_schema_forecasts_tables_and_version():
-    """init_schema_forecasts must create all forecast-authority tables + version."""
-    SCHEMA_FORECASTS_VERSION = 7  # B2: frozen; counter cancelled
+    """init_schema_forecasts must create all forecast-authority tables.
+
+    B2 + operator directive 2026-06-13: PRAGMA user_version mechanism removed.
+    Schema currency proven via structural table presence only.
+    """
     from src.state.db import init_schema_forecasts
 
     conn = sqlite3.connect(":memory:")
@@ -67,12 +69,6 @@ def test_rel1_init_schema_forecasts_tables_and_version():
     missing = set(FORECAST_TABLES) - existing
     assert not missing, (
         f"REL-1: init_schema_forecasts missing tables: {sorted(missing)}"
-    )
-
-    # PRAGMA user_version must equal SCHEMA_FORECASTS_VERSION.
-    ver = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert ver == SCHEMA_FORECASTS_VERSION, (
-        f"REL-1: user_version={ver!r} expected {SCHEMA_FORECASTS_VERSION}"
     )
 
     conn.close()
