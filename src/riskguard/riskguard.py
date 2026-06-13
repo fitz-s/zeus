@@ -1406,6 +1406,30 @@ def _tick_once() -> RiskLevel:
     """
     zeus_conn: sqlite3.Connection | None = None
     risk_conn: sqlite3.Connection | None = None
+
+    # P0-A bankroll truth chain (architect memo §7): trailing-loss math must
+    # use the on-chain wallet, NOT the config constant routed through
+    # PortfolioState.bankroll. When the wallet is unreachable AND no fresh
+    # cache exists, fail-closed at DATA_DEGRADED rather than silently falling
+    # back to retired config-literal capital.
+    #
+    # CONN-ACROSS-IO INVARIANT (T0-1, dimension-#4): this fetch is hoisted ABOVE
+    # the zeus_conn/risk_conn opens. `bankroll_provider.current()` is 30s-cached,
+    # but on a STALE cache it performs a Polymarket wallet NETWORK fetch; with the
+    # ~60s tick that network IO previously fired roughly every other tick WHILE
+    # both write-class conns were held (the conn-across-IO lock-contention class —
+    # the report's unconfirmed "2113 RISK_GUARD_BLOCKED/17h"). Fetching before any
+    # conn opens guarantees NO network IO ever happens while a write-class conn is
+    # held. The 30s cache, the fail-closed-to-DATA_DEGRADED contract (the
+    # `bankroll_of_record is None` branch below, which still runs after risk_conn
+    # opens so the DATA_DEGRADED attestation row can be written), the short
+    # busy_timeout, and the WAL-leak fix are all preserved; ONLY the fetch POINT
+    # moves earlier. The captured value is identical to what the old in-conn call
+    # returned and flows to the same downstream consumers (current_bankroll_usd,
+    # the details_json bankroll_truth block, the component log).
+    # Relationship test: tests/riskguard/test_no_network_io_under_conn.py.
+    bankroll_of_record = bankroll_provider.current()
+
     try:
         zeus_conn = _get_runtime_trade_connection()
         # Short per-attempt wait so a contended metrics read FAILS FAST and the
@@ -1426,12 +1450,10 @@ def _tick_once() -> RiskLevel:
         thresholds = settings["riskguard"]
         portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
 
-        # P0-A bankroll truth chain (architect memo §7): trailing-loss math must
-        # use the on-chain wallet, NOT the config constant routed through
-        # PortfolioState.bankroll. When the wallet is unreachable AND no fresh
-        # cache exists, fail-closed at DATA_DEGRADED rather than silently falling
-        # back to retired config-literal capital.
-        bankroll_of_record = bankroll_provider.current()
+        # Bankroll truth was fetched BEFORE the conns opened (see the hoisted
+        # `bankroll_provider.current()` above — conn-across-IO invariant T0-1).
+        # The fail-closed write below needs risk_conn, so the None-handling stays
+        # here; the network fetch itself no longer runs under a held conn.
         if bankroll_of_record is None:
             now_ts = datetime.now(timezone.utc).isoformat()
             risk_conn.execute(

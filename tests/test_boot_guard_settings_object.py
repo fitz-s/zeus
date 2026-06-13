@@ -204,7 +204,7 @@ _BASE_SETTINGS = {
     "exit": {},
     "riskguard": {},
     "execution": {},
-    "bias_correction_enabled": False,
+    "baseline_bias_correction_enabled": False,
     "feature_flags": {},
 }
 

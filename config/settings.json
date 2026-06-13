@@ -281,7 +281,7 @@
     "fill_timeout_seconds": 600,
     "cancel_if_not_filled": true
   },
-  "bias_correction_enabled": false,
+  "baseline_bias_correction_enabled": false,
   "feature_flags": {
     "full_transport_live_enabled": false,
     "_full_transport_live_enabled_note": "Zeus #64 FT-ship F1/F2 (2026-05-26): when ON, BOTH the entry evaluator (evaluator.py period_extrema + ens-signal branches) AND monitor_refresh use p_raw_vector_with_error_model (bias-corrected + residual-widened MC, error_model_family='full_transport_v1') instead of plain p_raw. FAIL-OPEN: flag ON but no VERIFIED model_bias_ens_v2 row for the bucket → falls back to plain p_raw + WARNING log (trading continues). GFS crosscheck site NOT wired (wrong model family for GFS members). Operator pre-promote checklist: run 'python scripts/promote_model_bias_ens_v2.py inspect', validate shadow LogLoss/RPS, run promote --commit. Default OFF.",

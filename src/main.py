@@ -5061,17 +5061,19 @@ def _startup_data_health_check(conn):
     are easy to forget. The warnings persist until the actions are taken.
     """
     try:
-        # 1. Bias correction reminder
-        bias_enabled = settings.bias_correction_enabled
+        # 1. Bias correction reminder (legacy baseline/diagnostics chain flag,
+        # renamed from bias_correction_enabled → baseline_bias_correction_enabled
+        # in T0-3 to disambiguate from edli.edli_bias_correction_enabled).
+        bias_enabled = settings.baseline_bias_correction_enabled
         bias_data = conn.execute(
             "SELECT COUNT(*) FROM model_bias WHERE source='ecmwf' AND n_samples >= 20"
         ).fetchone()[0]
 
         if not bias_enabled and bias_data > 0:
             logger.warning(
-                "⚠ DEFERRED ACTION: bias_correction_enabled=false but %d ECMWF bias "
+                "⚠ DEFERRED ACTION: baseline_bias_correction_enabled=false but %d ECMWF bias "
                 "entries ready. To activate: 1) Recompute calibration_pairs with bias "
-                "correction 2) Refit Platt models 3) Set bias_correction_enabled=true "
+                "correction 2) Refit Platt models 3) Set baseline_bias_correction_enabled=true "
                 "4) Run test_cross_module_invariants.py",
                 bias_data,
             )

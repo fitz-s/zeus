@@ -496,7 +496,10 @@ class EnsembleSignal:
         # instead of a ghost degraded signal.
         try:
             from src.config import settings
-            bias_enabled = settings.bias_correction_enabled
+            # T0-3: renamed from settings.bias_correction_enabled to disambiguate
+            # the legacy baseline chain from edli.edli_bias_correction_enabled.
+            # Semantics unchanged.
+            bias_enabled = settings.baseline_bias_correction_enabled
         except (ImportError, AttributeError):
             bias_enabled = False  # config surface genuinely unavailable
         if bias_enabled:

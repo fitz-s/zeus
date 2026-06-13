@@ -105,9 +105,9 @@ def test_calibration_pairs_use_same_bias_correction_as_live():
     """
     from src.config import settings
 
-    bias_enabled = settings.bias_correction_enabled
+    bias_enabled = settings.baseline_bias_correction_enabled
     if not bias_enabled:
-        pytest.skip("bias_correction_enabled = false. No invariant to check.")
+        pytest.skip("baseline_bias_correction_enabled = false. No invariant to check.")
 
     from src.state.db import get_connection, init_schema
 
@@ -119,7 +119,7 @@ def test_calibration_pairs_use_same_bias_correction_as_live():
     if "bias_corrected" not in cols:
         conn.close()
         pytest.fail(
-            "bias_correction_enabled=true but calibration_pairs has no "
+            "baseline_bias_correction_enabled=true but calibration_pairs has no "
             "'bias_corrected' column. Pairs were computed without bias correction."
         )
 
@@ -150,9 +150,9 @@ def test_model_bias_table_not_empty_if_bias_enabled():
     """If bias correction is enabled, model_bias table must have data."""
     from src.config import settings
 
-    bias_enabled = settings.bias_correction_enabled
+    bias_enabled = settings.baseline_bias_correction_enabled
     if not bias_enabled:
-        pytest.skip("bias_correction_enabled = false.")
+        pytest.skip("baseline_bias_correction_enabled = false.")
 
     from src.state.db import get_connection
 
@@ -161,7 +161,7 @@ def test_model_bias_table_not_empty_if_bias_enabled():
     conn.close()
 
     if count == 0:
-        pytest.fail("bias_correction_enabled=true but model_bias has 0 ECMWF rows.")
+        pytest.fail("baseline_bias_correction_enabled=true but model_bias has 0 ECMWF rows.")
 
 
 def test_platt_models_consistent_with_bias_flag():
@@ -169,9 +169,9 @@ def test_platt_models_consistent_with_bias_flag():
     on bias-corrected calibration pairs."""
     from src.config import settings
 
-    bias_enabled = settings.bias_correction_enabled
+    bias_enabled = settings.baseline_bias_correction_enabled
     if not bias_enabled:
-        pytest.skip("bias_correction_enabled = false.")
+        pytest.skip("baseline_bias_correction_enabled = false.")
 
     from src.state.db import get_connection
 
@@ -183,7 +183,7 @@ def test_platt_models_consistent_with_bias_flag():
     if "trained_with_bias_correction" not in cols:
         conn.close()
         pytest.fail(
-            "bias_correction_enabled=true but platt_models has no "
+            "baseline_bias_correction_enabled=true but platt_models has no "
             "'trained_with_bias_correction' column."
         )
 
