@@ -7191,6 +7191,19 @@ def _generate_candidate_proofs(
             pass
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
+
+    # JAMES-STEIN BLEND (C3, addendum A10, flag default OFF).
+    # Operates on the full YES-probability vector over the family's bins.
+    # Applied AFTER calibrated q (q_by_condition), BEFORE q_lcb is derived.
+    # When flag OFF: shadow-logs q_js + lambda_js on zeus.replacement_qlcb_shadow.
+    # When flag ON:  q_by_condition is replaced with the JS-blended values.
+    # Symmetric estimator — NOT a one-sided cap. The market_anchor cap is separate.
+    q_by_condition = _apply_james_stein_blend_family(
+        family=family,
+        q_by_condition=q_by_condition,
+        rows_by_direction=rows_by_direction,
+    )
+
     # FIX A (direction law; incident 0b5c305e26524042, 2026-06-10 Milan-24C;
     # docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md): resolve the
     # family forecast center ONCE — fusion provenance (anchor_value_c /
@@ -7872,6 +7885,105 @@ def _direction_law_reason_for_candidate(
         mu_settled=mu_settled,
         settle_value=settle_value,
     )
+
+
+def _apply_james_stein_blend_family(
+    *,
+    family,
+    q_by_condition: dict[str, float],
+    rows_by_direction: dict,
+) -> dict[str, float]:
+    """Apply (or shadow-log) the James-Stein blend over the full family q vector.
+
+    Returns a (possibly modified) copy of ``q_by_condition``.
+    When ``replacement_q_james_stein_enabled`` is False: shadow-logs q_js + lambda_js
+    and returns the original dict unchanged (byte-identical to prior behavior).
+    When True: returns a new dict with JS-blended YES probabilities.
+
+    Requires K >= 3 bins (JS inadmissibility guard). Falls through silently when:
+      * fewer than 3 bins have both a model q and a market price,
+      * the artifact is missing / stale (N_eff falls back to N=51 from load_member_correlation),
+      * any exception in the blend (fail-open: original q returned).
+    """
+    import logging as _logging
+
+    import numpy as _np
+
+    from src.strategy.james_stein_blend import james_stein_toward_market, load_member_correlation
+
+    _js_enabled = _replacement_q_james_stein_enabled()
+    _logger = _logging.getLogger("zeus.replacement_qlcb_shadow")
+
+    try:
+        candidates = list(family.candidates)
+        # Build aligned vectors: condition_ids, q_model (YES), q_market (YES ask price).
+        # YES all-in execution price = market's YES probability (mirrors market_anchor logic).
+        cond_ids: list[str] = []
+        q_model_vals: list[float] = []
+        q_mkt_vals: list[float] = []
+        for cand in candidates:
+            cid = str(cand.condition_id or "")
+            q_model_yes = q_by_condition.get(cid)
+            if q_model_yes is None:
+                continue
+            # YES all-in price from snapshot: best ask on the YES token row
+            yes_row = rows_by_direction.get((cid, "buy_yes"))
+            if yes_row is None:
+                continue
+            yes_ask = _optional_float(yes_row.get("orderbook_top_ask"))
+            if yes_ask is None or not (0.0 < yes_ask < 1.0):
+                continue
+            cond_ids.append(cid)
+            q_model_vals.append(float(q_model_yes))
+            q_mkt_vals.append(float(yes_ask))
+
+        K = len(cond_ids)
+        if K < 3:
+            # Not enough bins with market prices — JS inadmissible or insufficient data.
+            return q_by_condition
+
+        q_model_arr = _np.array(q_model_vals, dtype=float)
+        q_mkt_arr = _np.array(q_mkt_vals, dtype=float)
+
+        # Normalize model vector (should already sum to ~1 over family; guard float drift)
+        model_total = float(_np.sum(q_model_arr))
+        if model_total > 1e-9:
+            q_model_arr = q_model_arr / model_total
+
+        # Normalize market prices to a proper probability simplex
+        mkt_total = float(_np.sum(q_mkt_arr))
+        if mkt_total > 1e-9:
+            q_mkt_arr = q_mkt_arr / mkt_total
+        else:
+            return q_by_condition
+
+        _n_eff, _neff_src = load_member_correlation()
+        q_js, lambda_js, blend_src = james_stein_toward_market(
+            q_model_arr, q_mkt_arr, _n_eff
+        )
+
+        _logger.info(
+            "js_blend family=%s K=%d n_eff=%.3f lambda=%.4f src=%s neff_src=%s",
+            getattr(family, "family_id", "?"),
+            K,
+            _n_eff,
+            lambda_js,
+            blend_src,
+            _neff_src,
+        )
+
+        if not _js_enabled:
+            # Flag OFF: shadow only, return original dict unchanged.
+            return q_by_condition
+
+        # Flag ON: build updated q_by_condition with JS-blended YES probabilities.
+        updated = dict(q_by_condition)
+        for i, cid in enumerate(cond_ids):
+            updated[cid] = float(q_js[i])
+        return updated
+
+    except Exception:  # noqa: BLE001 — JS blend is non-critical; never break decisions
+        return q_by_condition
 
 
 def _market_anchor_no_lcb_for_candidate(
@@ -9492,6 +9604,35 @@ def _replacement_q_market_anchor_enabled() -> bool:
         return False
 
 
+def _replacement_neff_width_correction_enabled() -> bool:
+    """N_eff width correction flag (C3, addendum A10, default FALSE).
+
+    When OFF: q_lcb math is byte-identical to prior behavior (N=51 raw member count).
+    A corrected width is SHADOW-LOGGED on the zeus.replacement_qlcb_shadow logger for
+    observation, but the live q_lcb value is unchanged.
+    When ON: the N_eff-corrected q_lcb (wider interval, lower bound) replaces the raw
+    q_lcb in the decision path. Flip only on operator word after artifact validation."""
+    try:
+        return bool(settings["edli"].get("replacement_neff_width_correction_enabled", False))
+    except Exception:
+        return False
+
+
+def _replacement_q_james_stein_enabled() -> bool:
+    """James-Stein blend flag (C3, addendum A10, default FALSE).
+
+    When OFF: JS blend is computed and SHADOW-LOGGED on zeus.replacement_qlcb_shadow
+    (q_js and lambda_js per family) wherever a market snapshot is available, but the
+    live q values are byte-identical to prior behavior.
+    When ON: the JS-blended q replaces the calibrated q BEFORE q_lcb is derived.
+    JS is a symmetric estimator — NOT a one-sided cap. The market_anchor cap stays
+    as a separate untouched authority. Flip only on operator word."""
+    try:
+        return bool(settings["edli"].get("replacement_q_james_stein_enabled", False))
+    except Exception:
+        return False
+
+
 def _market_anchor_alpha() -> float:
     """Conservative per-decision α for the market-anchor cap, from the SINGLE legacy
     registry (config edge.base_alpha). The calibration level is not threaded to this
@@ -10025,21 +10166,58 @@ def _side_q_lcb_from_yes_samples(
     probability lower bound that exceeds its own point — the edge_ci_lower-as-q_lcb
     signature (Hidden #2) — unconstructable on BOTH sides.
     """
+    import logging as _logging
+
+    from src.strategy.james_stein_blend import load_member_correlation
     from src.strategy.probability_uncertainty import (
         lower_quantile,
         no_side_samples,
         probability_uncertainty_from_samples,
     )
 
+    # N_eff width correction (C3): load N_eff once; always compute for shadow logging.
+    # Flag ON  → corrected q_lcb replaces raw q_lcb on the live decision path.
+    # Flag OFF → corrected value is shadow-logged only; q_lcb is byte-identical to prior.
+    _neff_enabled = _replacement_neff_width_correction_enabled()
+    _n_eff, _neff_src = load_member_correlation()
+
     # YES authority: q_lcb is a pure function of the probability samples (never cost).
-    pu_yes = probability_uncertainty_from_samples(yes_samples)
+    # Pass n_eff_override always so the corrected value is computed for shadow logging.
+    pu_yes = probability_uncertainty_from_samples(yes_samples, n_eff_override=_n_eff)
     q_point_yes = float(min(max(q_yes_point, 0.0), 1.0))
     q_lcb_yes = float(min(pu_yes.q_lcb, q_point_yes))
 
+    # Shadow-log and optionally promote the N_eff corrected YES bound.
+    if pu_yes.q_lcb_neff_corrected is not None and pu_yes.neff_correction_source is not None:
+        _logging.getLogger("zeus.replacement_qlcb_shadow").debug(
+            "neff_width_correction YES: q_lcb=%.4f q_lcb_neff=%.4f src=%s neff_src=%s",
+            q_lcb_yes,
+            pu_yes.q_lcb_neff_corrected,
+            pu_yes.neff_correction_source,
+            _neff_src,
+        )
+        if _neff_enabled:
+            q_lcb_yes = float(min(pu_yes.q_lcb_neff_corrected, q_point_yes))
+
     # NO authority (Hidden #3): lower tail of (1 - q_yes_samples) == 1 - q_ucb_yes.
-    q_lcb_no_raw = lower_quantile(no_side_samples(yes_samples))
+    # Compute NO samples once; reuse for both raw q_lcb and N_eff correction.
+    _no_arr = no_side_samples(yes_samples)
+    q_lcb_no_raw = lower_quantile(_no_arr)
     q_point_no = float(min(max(1.0 - q_yes_point, 0.0), 1.0))
     q_lcb_no = float(min(max(q_lcb_no_raw, 0.0), q_point_no))
+
+    # N_eff correction on NO side (same correlation structure as YES side).
+    pu_no_shadow = probability_uncertainty_from_samples(_no_arr, n_eff_override=_n_eff)
+    if pu_no_shadow.q_lcb_neff_corrected is not None and pu_no_shadow.neff_correction_source is not None:
+        _logging.getLogger("zeus.replacement_qlcb_shadow").debug(
+            "neff_width_correction NO: q_lcb=%.4f q_lcb_neff=%.4f neff_src=%s",
+            q_lcb_no,
+            pu_no_shadow.q_lcb_neff_corrected,
+            _neff_src,
+        )
+        if _neff_enabled:
+            q_lcb_no = float(min(max(pu_no_shadow.q_lcb_neff_corrected, 0.0), q_point_no))
+
     return q_lcb_yes, q_lcb_no
 
 
