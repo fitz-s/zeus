@@ -207,7 +207,7 @@ def test_monitor_refresh_emos_regime_skips_legacy_calibrators(monkeypatch):
     monkeypatch.setattr(monitor_refresh, "lead_days_to_date_start", lambda *args, **kwargs: 2.0)
     monkeypatch.setattr(monitor_refresh, "_build_all_bins", lambda *args, **kwargs: (bins, 1))
     monkeypatch.setattr(monitor_refresh, "_resolve_unified_exit_bias_native", boom)
-    monkeypatch.setattr(monitor_refresh, "_resolve_ft_error_model", boom)
+    # _resolve_ft_error_model removed 2026-06-14 (dead FT shadow) — can no longer run.
     monkeypatch.setattr(monitor_refresh, "_monitor_calibrator_for_ens_result", boom)
     monkeypatch.setattr(monitor_refresh, "calibrate_and_normalize", boom)
     monkeypatch.setattr(monitor_refresh, "_check_persistence_anomaly", lambda *args, **kwargs: 1.0)

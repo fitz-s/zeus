@@ -49,20 +49,7 @@ if TYPE_CHECKING:
 from src.calibration.manager import edge_threshold_multiplier, get_calibrator
 from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
-# Zeus #64 FT-ship F1 (2026-05-26): full_transport_live entry-path wiring.
-# These imports enable the evaluator to call p_raw_vector_with_error_model and
-# reconstruct a PredictiveErrorModel from model_bias_ens — mirroring the
-# logic already present in monitor_refresh._resolve_ft_error_model.
-# Cannot import _resolve_ft_error_model directly: monitor_refresh imports evaluator
-# (circular). Logic is inlined below as _resolve_ft_error_model_for_entry().
-# Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
 from src.calibration.ens_bias_repo import read_bias_model as _read_bias_model_for_entry
-from src.calibration.ens_error_model import (
-    PredictiveErrorModel as _PredictiveErrorModel,
-    predictive_error_from_posterior as _predictive_error_from_posterior,
-    p_raw_vector_with_error_model as _p_raw_vector_with_error_model,
-)
-from src.calibration.ens_bias_model import PosteriorBias as _PosteriorBias
 from src.config import (
     CONFIG_DIR,
     City,
@@ -3474,85 +3461,6 @@ def _resolve_unified_entry_bias_native(
         return None
 
 
-def _resolve_ft_error_model_for_entry(
-    conn,
-    city,
-    target_date: str,
-    metric_str: str,
-    lead_hours: float | None = None,
-) -> "_PredictiveErrorModel | None":
-    """Entry-path analogue of monitor_refresh._resolve_ft_error_model.
-
-    Zeus #64 FT-ship F1 (2026-05-26): resolves a PredictiveErrorModel from
-    model_bias_ens for the entry evaluator so the full_transport_live flag
-    drives BOTH the monitor refresh path AND the entry p_raw computation
-    symmetrically.
-
-    Cannot reuse monitor_refresh._resolve_ft_error_model directly: monitor_refresh
-    imports evaluator (circular).  The logic is byte-equivalent to the monitor
-    version; any future change to the resolution algorithm must be applied to both.
-
-    SEV-1 fix (2026-05-29): ``lead_hours`` param added. When provided (and flag ON),
-    the computed lead_bucket is passed to read_bias_model so the correct per-bucket
-    row is served (fail-closed: returns None if no row for that bucket). When absent
-    (legacy callers), no bucket filter is applied — behaviour is unchanged for
-    flag-OFF or callers that don't yet pass lead_hours.
-
-    Returns None on flag-OFF, missing config, or missing model row (fail-open —
-    caller falls back to plain p_raw_vector_from_maxes).  Logging mirrors the
-    monitor version so operators see the same WARNING on both paths.
-    Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
-    """
-    if not bool(settings["feature_flags"].get("full_transport_live_enabled", False)):
-        return None
-    try:
-        cfg = entry_forecast_config()
-        track = track_for_metric(cfg, metric_str)
-        live_data_version = data_version_for_track(track)
-    except Exception:
-        return None
-    # 2026-05-27 bugfix: target_date is already a string (MarketCandidate.target_date: str);
-    # prior call `target_date.isoformat()` raised AttributeError → outer except swallowed
-    # the trace → ALL opening_hunt candidates silently dropped (49→0 trades blocker).
-    season = season_from_date(str(target_date), lat=city.lat)
-    _FT_FAMILY = "full_transport_v1"
-    # SEV-1: compute lead_bucket from lead_hours when available (flag-gated: no-op when OFF).
-    _lb: str | None = None
-    if lead_hours is not None:
-        try:
-            from src.calibration.lead_bucket import lead_bucket as _lb_fn  # noqa: PLC0415
-            _lb = _lb_fn(float(lead_hours))
-        except Exception:
-            _lb = None
-    row = _read_bias_model_for_entry(
-        conn,
-        city=city.name,
-        season=season,
-        metric=metric_str,
-        live_data_version=live_data_version,
-        month=None,
-        error_model_family=_FT_FAMILY,
-        lead_bucket=_lb,
-    )
-    if row is None:
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
-            "full_transport_live entry: flag ON but no VERIFIED model_bias_ens row for "
-            "city=%r season=%r metric=%r live_data_version=%r family=%r — plain p_raw",
-            city.name, season, metric_str, live_data_version, _FT_FAMILY,
-        )
-        return None
-    posterior = _PosteriorBias(
-        bias=float(row["bias_c"]),
-        sd=float(row["bias_sd_c"]),
-        weight_live=0.0,
-        n_live=0,
-        disagreement_high=False,
-        heterogeneity_var=float(row["heterogeneity_var_c2"]),
-    )
-    return _predictive_error_from_posterior(posterior, float(row["residual_sd_c"]))
-
-
 def evaluate_candidate(
     candidate: MarketCandidate,
     conn,
@@ -4304,19 +4212,6 @@ def evaluate_candidate(
                     rejection_reason_enum=NoTradeReason.EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID,
                     rejection_reason_detail="EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID",
                 )]
-            # Zeus #64 FT-ship F1 (2026-05-26): full_transport_live entry wiring.
-            # Attempt to resolve a VERIFIED PredictiveErrorModel; falls back to plain
-            # p_raw_vector_from_maxes when flag OFF, model absent, or conn unavailable.
-            # GFS crosscheck site (gfs_p = p_raw_vector_from_maxes below) is NOT wired:
-            # model_bias_ens is trained on TIGGE ENS members; applying it to GFS
-            # members would be a wrong-error-model regression.
-            # Authority: FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
-            # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row
-            # is resolved. lead_days is already computed above (line ~3867).
-            _ft_model = _resolve_ft_error_model_for_entry(
-                conn, city, target_date, temperature_metric.temperature_metric,
-                lead_hours=lead_days * 24.0,
-            )
             # D2 unify: bias-SHIFT only (no residual widening) when the new flag is ON;
             # takes precedence over the legacy ft model. Identity-Platt set downstream.
             _unified_bias_native = _resolve_unified_entry_bias_native(
@@ -4332,17 +4227,6 @@ def evaluate_candidate(
                     n_mc=ensemble_n_mc(),
                 )
                 _unified_bias_applied = True
-            elif _ft_model is not None:
-                p_raw = _p_raw_vector_with_error_model(
-                    member_extrema,
-                    _ft_model,
-                    city,
-                    settlement_semantics,
-                    bins,
-                    member_unit=ens_result.get("members_unit", city.settlement_unit or "F"),
-                    n_mc=ensemble_n_mc(),
-                    rng=None,
-                )
             else:
                 p_raw = p_raw_vector_from_maxes(
                     member_extrema,
@@ -4373,13 +4257,6 @@ def evaluate_candidate(
             )
         else:
             assert ens is not None
-            # Zeus #64 FT-ship F1 (2026-05-26): ens-signal branch FT wiring.
-            # Same error-model resolution as the period_extrema branch above.
-            # SEV-1 fix (2026-05-29): pass lead_hours for per-bucket row selection.
-            _ft_model_ens = _resolve_ft_error_model_for_entry(
-                conn, city, target_date, temperature_metric.temperature_metric,
-                lead_hours=lead_days * 24.0,
-            )
             # D2 unify: bias-SHIFT only (no residual widening) when the new flag is ON.
             _unified_bias_native = _resolve_unified_entry_bias_native(
                 conn, city, target_date, temperature_metric.temperature_metric,
@@ -4395,18 +4272,6 @@ def evaluate_candidate(
                 )
                 _unified_bias_applied = True
                 analysis_member_extrema = _shifted
-            elif _ft_model_ens is not None:
-                p_raw = _p_raw_vector_with_error_model(
-                    ens.member_extrema,
-                    _ft_model_ens,
-                    city,
-                    settlement_semantics,
-                    bins,
-                    member_unit=city.settlement_unit or "F",
-                    n_mc=ensemble_n_mc(),
-                    rng=None,
-                )
-                analysis_member_extrema = ens.member_extrema
             else:
                 p_raw = ens.p_raw_vector(bins, n_mc=ensemble_n_mc())
                 analysis_member_extrema = ens.member_extrema
