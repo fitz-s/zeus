@@ -54,8 +54,6 @@ from src.events.opportunity_event import OpportunityEvent, assert_available_for_
 from src.state.db import world_write_mutex
 from src.strategy.live_inference.live_admission import (
     live_buy_no_conservative_evidence_rejection_reason,
-    live_capital_efficiency_rejection_reason,
-    live_lcb_consistency_rejection_reason,
 )
 
 UTC = timezone.utc
@@ -2093,19 +2091,12 @@ def _receipt_money_path_blocker(
         for value in (receipt.q_live, receipt.q_lcb_5pct, receipt.c_fee_adjusted, receipt.trade_score, receipt.direction)
     )
     if has_live_admission_inputs:
-        lcb_consistency_reason = live_lcb_consistency_rejection_reason(
-            q_direction=receipt.q_live,
-            q_lcb=receipt.q_lcb_5pct,
-        )
-        if lcb_consistency_reason is not None:
-            return "TRADE_SCORE", lcb_consistency_reason
-        capital_efficiency_reason = live_capital_efficiency_rejection_reason(
-            q_lcb=receipt.q_lcb_5pct,
-            execution_price=receipt.c_fee_adjusted,
-            trade_score=receipt.trade_score,
-        )
-        if capital_efficiency_reason is not None:
-            return "TRADE_SCORE", capital_efficiency_reason
+        # C1/C2 redundant re-checks DELETED 2026-06-14 (gate-mass collapse Tier-C):
+        # live_lcb_consistency + live_capital_efficiency are already enforced upstream
+        # at candidate_evaluation.py (admitted requires both admissible) and the receipt
+        # carries verbatim copies, so neither could ever fire for an admitted candidate.
+        # The buy_no stanza below STAYS — its same_bin_yes_posterior /
+        # settlement_coverage_status come from a distinct receipt-provenance path.
         buy_no_conservative_reason = live_buy_no_conservative_evidence_rejection_reason(
             direction=receipt.direction,
             q_direction=receipt.q_live,

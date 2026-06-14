@@ -46,8 +46,19 @@
 #         trade_decisions.applied_validations_json (no code consumer, but operator-SQL telemetry). ALL THREE need operator OK.
 #  [GATED-SCHEMA] Enum/reason-member trim (A5-A16; SHOULDER family needs scaffold-deadness verify first): coordinate
 #         enum edit + no_trade_events CHECK migration + fingerprint re-pin in ONE wave (the T0.1 forecast_posteriors pattern).
-#  [GATED-DECISION] Tier C (redundant re-checks C1/C2), Tier D (time-bans D1/D2, q-haircuts D3/D4/D5), Tier E (shoulder
-#          $2000 cap split) + precedent-family collapses (soft-anchor 5→1). Real decision-impact — per-item operator OK required.
+#  [DONE+VERIFIED] WAVE C/D (operator authorized "all" 2026-06-14, proof-workflow wf_a216fb16 per-item first):
+#         C1+C2 (events/reactor.py redundant lcb-consistency + capital-efficiency re-checks — byte-identical, upstream
+#         candidate_evaluation gates already enforce; buy_no Shanghai stanza preserved). D1+D2 (is_reentry_blocked 20-min +
+#         is_token_on_cooldown 1-hr time-bans deleted from portfolio.py + evaluator consumers; enum members REENTRY_BLOCKED/
+#         TOKEN_COOLDOWN KEPT to avoid schema-CHECK drift; tests repointed; antibody guards added). D3 (source-quality km
+#         haircut), D4 (DDD Rail-2 km discount — Rail-1 HALT kept), D5 (global-heat risk_throttle — only the heat branch;
+#         gross/variance branches were NOT redundant, plan WRONG_READ corrected). SIZING IMPACT (operator no-caps law,
+#         intended): partial-run +~2x (D3), DISCOUNT +0-10% (D4), heat>0.25 +~2x (D5); can compound. Verified: zero net-new
+#         test failures vs HEAD (4 pre-existing confirmed via stash), schema fingerprint unchanged, money-path green. Goes
+#         live on daemon restart (operator-gated). Tier E (shoulder $2000 cap split) + soft-anchor 5→1 still pending.
+#  [GATED-HOLD] FT (full_transport_live_enabled A17/A18+monitor wiring): proof verdict ENTANGLED_HOLD — flag-default-OFF
+#         shadow build but whole-removal kills the documented promote path (and promote_model_bias_ens_v2.py named in the
+#         config note does not exist on disk). Operator go/no-go required; elif-only delete is half-baked (orphans resolver).
 #  [NEVER] §6 traps (8 items, KEEP): market_anchor=True, bias_decay_kelly_haircut=True(fallback-live), edli_arm_gate_emit
 #          (fail-close boot guard), emos ladder rungs, buy_no receipt re-check (Shanghai provenance), CROSSCHECK×5
 #          (operator ruling), shoulder Gate-1 correlation, + 8 untraced UNCERTAIN. DO NOT REMOVE.

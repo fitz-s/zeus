@@ -2953,7 +2953,9 @@ def test_inv_strategy_policy_is_read_before_anti_churn_rejection(monkeypatch):
     _stub_full_family_scan(monkeypatch)
     monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges, raising=False)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
-    monkeypatch.setattr(evaluator_module, "is_reentry_blocked", lambda *args, **kwargs: True)
+    # D1/D2 time-bans removed 2026-06-14; force the surviving ANTI_CHURN path
+    # (Layer-7 inflight dedup) to preserve this ordering invariant test.
+    monkeypatch.setattr(evaluator_module, "_layer7_dedup_fires", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         evaluator_module,
         "resolve_strategy_policy",

@@ -9,7 +9,7 @@ Wave 3 (2026-06-02): evaluate_exit_triggers deleted (dead twin). Tests repointed
 import pytest
 from src.state.portfolio import (
     Position, PortfolioState, ExitContext,
-    is_reentry_blocked, is_token_on_cooldown, has_same_city_range_open,
+    has_same_city_range_open,
     remove_position,
 )
 
@@ -109,46 +109,23 @@ class TestBuyNoConsecutiveCycles:
         assert not decision.should_exit  # Hold: -0.11 is not deeply negative (-0.15)
 
 
-class TestReentryBlocked:
-    def test_range_reentry_blocked_after_reversal(self):
-        """Exit via EDGE_REVERSAL → same range blocked for 20min."""
-        state = PortfolioState(bankroll=100.0)
-        pos = _pos()
-        state.positions.append(pos)
+class TestTimeBansRemoved:
+    """Layers 5 (is_reentry_blocked, 20-min reversal time-ban) and 6
+    (is_token_on_cooldown, 1-hr post-fail time-ban) were DELETED 2026-06-14 under
+    the operator no-caps law (time-bans are not derived from belief/quote/edge/
+    Kelly/arm). This is the removal antibody: the functions must stay gone so a
+    later session cannot silently re-introduce a wall-clock churn cap. Honest
+    inflight dedup (Layer 7) is verified by TestSameCityRange / layer-7 tests."""
 
-        remove_position(state, "t1", exit_reason="EDGE_REVERSAL")
+    def test_reentry_time_ban_function_removed(self):
+        import src.state.portfolio as pf
+        assert not hasattr(pf, "is_reentry_blocked"), (
+            "is_reentry_blocked (20-min time-ban) must stay removed — operator no-caps law")
 
-        assert is_reentry_blocked(
-            state, "NYC", "62°F or higher", "2026-04-01", minutes=20
-        ) is True
-
-    def test_different_range_not_blocked(self):
-        state = PortfolioState(bankroll=100.0)
-        pos = _pos()
-        state.positions.append(pos)
-        remove_position(state, "t1", exit_reason="EDGE_REVERSAL")
-
-        assert is_reentry_blocked(
-            state, "NYC", "58-59°F", "2026-04-01", minutes=20
-        ) is False
-
-
-class TestVoidedTokenCooldown:
-    def test_voided_token_blocked(self):
-        state = PortfolioState(bankroll=100.0)
-        pos = _pos()
-        state.positions.append(pos)
-        remove_position(state, "t1", exit_reason="UNFILLED_ORDER")
-
-        assert is_token_on_cooldown(state, "no456", hours=1.0) is True
-
-    def test_non_voided_not_blocked(self):
-        state = PortfolioState(bankroll=100.0)
-        pos = _pos()
-        state.positions.append(pos)
-        remove_position(state, "t1", exit_reason="EDGE_REVERSAL")
-
-        assert is_token_on_cooldown(state, "no456", hours=1.0) is False
+    def test_token_cooldown_time_ban_function_removed(self):
+        import src.state.portfolio as pf
+        assert not hasattr(pf, "is_token_on_cooldown"), (
+            "is_token_on_cooldown (1-hr time-ban) must stay removed — operator no-caps law")
 
 
 class TestEVGate:

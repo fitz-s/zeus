@@ -131,8 +131,6 @@ from src.state.portfolio import (
     cluster_exposure_result_for_bankroll,
     has_same_token_open,
     has_inflight_exit_for_token,
-    is_reentry_blocked,
-    is_token_on_cooldown,
     portfolio_heat_for_bankroll,
 )
 from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
@@ -5829,9 +5827,9 @@ def evaluate_candidate(
                 rejection_reason_detail=source_quality_rejection,
             ))
             continue
-        source_quality_haircut = _source_quality_kelly_haircut(strategy_key, ens_result)
-        if source_quality_haircut != 1.0:
-            decision_validations.append(f"partial_source_kelly_haircut_{source_quality_haircut:g}x")
+        # D3 source-quality Kelly haircut DELETED 2026-06-14 (operator no-caps law:
+        # sizing = q_lcb + Kelly only, no continuous data-availability haircut). The
+        # BINARY _source_quality_policy_rejection gate above STAYS (no-data => no-trade).
         # LIVE-PROB-P0 per-edge phantom gate (operator binding spec §B, 2026-05-23):
         # probability_edge_bin_sanity fires only when edge bin is sub-floor, gap>=min_edge_gap,
         # ratio >= odds_ratio_threshold, AND settled_member_support < min_edge_bin_member_support.
@@ -5990,40 +5988,12 @@ def evaluate_candidate(
             ))
             continue
 
-        # Anti-churn layers 5, 6, 7
-        if is_reentry_blocked(portfolio, city.name, edge.bin.label, target_date):
-            decisions.append(EdgeDecision(
-                False,
-                edge=edge,
-                decision_id=_decision_id(),
-                rejection_stage="ANTI_CHURN",
-                rejection_reasons=[NoTradeReason.REENTRY_BLOCKED.value],
-                selected_method=selected_method,
-                applied_validations=[*decision_validations, "anti_churn"],
-                decision_snapshot_id=snapshot_id,
-                edge_source=edge_source,
-                strategy_key=strategy_key,
-                rejection_reason_enum=NoTradeReason.REENTRY_BLOCKED,
-                rejection_reason_detail="REENTRY_BLOCKED",
-            ))
-            continue
+        # Anti-churn Layer 7 only. Layers 5 (is_reentry_blocked, 20-min reversal
+        # time-ban) + 6 (is_token_on_cooldown, 1-hr post-fail time-ban) DELETED
+        # 2026-06-14 (operator no-caps law: time-bans not derived from
+        # belief/quote/edge/Kelly/arm). REENTRY_BLOCKED / TOKEN_COOLDOWN enum members
+        # retained (schema CHECK-pin coupling); no emitter now.
         check_token = tokens["token_id"] if edge.direction == "buy_yes" else tokens["no_token_id"]
-        if is_token_on_cooldown(portfolio, check_token):
-            decisions.append(EdgeDecision(
-                False,
-                edge=edge,
-                decision_id=_decision_id(),
-                rejection_stage="ANTI_CHURN",
-                rejection_reasons=[NoTradeReason.TOKEN_COOLDOWN.value],
-                selected_method=selected_method,
-                applied_validations=[*decision_validations, "anti_churn"],
-                decision_snapshot_id=snapshot_id,
-                edge_source=edge_source,
-                strategy_key=strategy_key,
-                rejection_reason_enum=NoTradeReason.TOKEN_COOLDOWN,
-                rejection_reason_detail="TOKEN_COOLDOWN",
-            ))
-            continue
         # Layer 7 (v2): token-keyed dedup gate with decision-time DB read.
         # Probe-6 (2026-05-17): execution_facts absent → venue_commands join path
         # in has_inflight_exit_for_token (venue_trade_facts → venue_commands).
@@ -6071,7 +6041,6 @@ def evaluate_candidate(
         # operator can disable without redeploying code. Skipped entirely when
         # conn is None (legacy test paths exercise evaluate_candidate without
         # a DB; production always passes a live connection).
-        ddd_discount = 0.0
         if conn is not None and _strict_feature_flag("ddd_v2_enabled", default=True):
             metric_name = temperature_metric.temperature_metric
             if metric_name == "high":
@@ -6135,16 +6104,10 @@ def evaluate_candidate(
                 ))
                 continue
 
-            # Rail 2 DISCOUNT path — keep the discount value; applied to km below.
-            # Note: result.discount is already max(mismatch_rate, raw_discount)
-            # so it composes oracle penalty cleanly. We subtract the
-            # mismatch_rate component because oracle.penalty_multiplier already
-            # encodes that gate; only the *additional* DDD-derived shortfall
-            # discount layers on top of Kelly here.
-            raw_ddd = ddd_result.diagnostic.get("final_discount_pre_mismatch") or 0.0
-            ddd_discount = float(raw_ddd)
-            if ddd_discount > 0.0:
-                decision_validations.append(f"ddd_v2_discount_{ddd_discount:.4f}")
+            # D4: Rail-2 DISCOUNT Kelly-discount capture DELETED 2026-06-14 (no-caps
+            # law). Rail-1 HALT above is the only honest DDD gate retained; the
+            # DISCOUNT action no longer haircuts Kelly. evaluate_ddd_for_decision
+            # still runs to enforce HALT.
 
         # Kelly sizing
         decision_validations.extend(["kelly_sizing", "dynamic_multiplier"])
@@ -6225,9 +6188,10 @@ def evaluate_candidate(
         if current_variance_exp is not None and current_variance_exp > 0.10:  # Variance saturation
             risk_throttle *= 0.5
             decision_validations.append(f"regime_throttled_variance_50pct:{current_variance_exp:.3f}")
-        if current_heat > 0.25: # Global heat saturation
-            risk_throttle *= 0.5
-            decision_validations.append("global_heat_throttled_50pct")
+        # D5: global-heat risk_throttle *= 0.5 DELETED 2026-06-14 — redundant double-
+        # count of portfolio_heat, which dynamic_kelly_mult already attenuates via
+        # 1/(1+heat) (kelly.py). The gross_exp / variance_exp branches above are
+        # distinct cluster quantities (NOT ingested by Kelly) and STAY.
 
         try:
             # A6 (PLAN.md §A6): pass strategy_key=None so dynamic_kelly_mult
@@ -6360,14 +6324,11 @@ def evaluate_candidate(
                 f"oracle_penalty_observed_{oracle.penalty_multiplier:g}x"
             )
 
-        # DDD v2 Rail 2 discount: reduce Kelly by the remaining multiplier. Applied
-        # AFTER oracle penalty so the two compose multiplicatively. ddd_discount
-        # is 0.0 unless Rail 2 fired (Rail 1 already short-circuited with HALT).
-        if ddd_discount > 0.0:
-            # Remaining Kelly multiplier after the discount is (1 - ddd_discount);
-            # de-obfuscated from the value-identical (1/x - 1) * x (§0.2 / FIX-5a).
-            km *= max(0.0, one_minus(ddd_discount))
-        km *= source_quality_haircut
+        # D4 DDD Rail-2 continuous discount + D3 source-quality haircut DELETED
+        # 2026-06-14 (operator no-caps law: no continuous Kelly haircuts). DDD Rail-1
+        # HALT (binary no-trade on catastrophic coverage) is untouched above; the
+        # binary source-quality rejection gate is untouched above. Kelly size = q_lcb
+        # + fractional-Kelly only.
         
         # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.
         try:
