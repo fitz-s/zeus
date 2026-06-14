@@ -10379,15 +10379,38 @@ def _canonical_probability_and_fdr_proof(
                 p_values[(condition_id, "buy_no")] = _no_p_value
                 prefilter[(condition_id, "buy_no")] = _no_prefilter
         else:
-            # PROFITABLE-ERA GATE (restored 2026-06-13). The YES side has no executable
-            # market, so scan_full_hypothesis_family emitted no buy_yes hypothesis. BOTH
-            # directions are non-actionable here: q_lcb_no = 0.0 (NOT a forecast-derived
-            # 1 - q_ucb_yes). Settled-data replay (n=485) proved the forecast-NO that commit
-            # 745aa10c6f put here admits the loss class on 404/413 (97.8%) of bins that
-            # actually WON (mean q_lcb_no(winner)=0.784) — the documented HK/Karachi/KL
-            # "NO on winning ring bin" real-capital loss. The executable-YES native-NO path
-            # (FINDING-D, commit 99d63a30ac) and the maker-quote lane are UNCHANGED; this
-            # gate fires only when the YES side is genuinely non-executable.
+            # scan_full_hypothesis_family skips a bin entirely when its YES side has no
+            # executable market. Emit neutral, non-actionable values for BOTH directions:
+            # the directions are then rejected downstream by the missing native execution
+            # price (EXECUTABLE_NATIVE_ASK_MISSING), not by a family-level fail-closed
+            # raise. q_lcb_no is 0.0 here (no samples => no native NO authority), never a
+            # YES-complement (Hidden #4: native NO needs native evidence).
+            #
+            # LOSS-CLASS GATE — DO NOT re-derive a forecast q_lcb_no here (settled-data
+            # replay 2026-06-13, n=485, 98.1% admit). A NON-executable-YES bin is one
+            # scan_full_hypothesis_family could not score (no YES quote/depth → it is a
+            # FAR bin off the forecast center). Computing a forecast-derived q_lcb_no for
+            # buy_no on such a bin re-opens the favorite-longshot NO harvest that the
+            # settled record proves is the real-capital loss class: of 485 settled
+            # winning bins, the forecast-derived NO lower bound (1 - q_ucb_yes) on the bin
+            # that ACTUALLY WON was > 0.5 on 476/485 (98.1%) — i.e. it would have bought
+            # NO on the winner = a guaranteed loss; mean q_lcb_no(winner) = 0.787 while
+            # the forecast under-rated the winner (mean q_yes_pt(winner) = 0.179). This is
+            # the documented HK/Karachi/KL "NO on winning ring bin" loss. The forecast-NO
+            # else-branch was introduced by commit 745aa10c6f (2026-06-12 22:18Z,
+            # "un-zero buy_no q_lcb on non-executable-YES bins") via
+            # analysis.forecast_yes_probability_samples + _side_q_lcb_from_yes_samples
+            # reconciled through _native_no_edge_positivity — and is the regression that
+            # admits this class. It is REVERTED to the profitable-era gate (q_lcb_no=0.0 /
+            # p=1.0 / prefilter=False). The EXECUTABLE-YES path above is UNCHANGED: it
+            # keeps the mid-price, mainstream-agreed native NO (1 - q_ucb_yes) reconciled
+            # via _native_no_edge_positivity that produced Zeus's GOOD fills (HK 30°C NO,
+            # Karachi 37°C NO, 0.2-0.6 band). The far buy_no is harvested ONLY when its
+            # OWN YES side is executable (so the NO bound is anchored to a scored bin),
+            # never on a forecast extrapolation into a non-executable far bin.
+            # Antibodies (RED on re-introducing the forecast-NO else-branch):
+            #   tests/engine/test_no_loss_class_nonexecutable_yes_gate.py
+            #   tests/engine/test_no_calibration_loss_class_coverage.py
             for direction in ("buy_yes", "buy_no"):
                 q_point = yes_posterior if direction == "buy_yes" else 0.0
                 p_values[(condition_id, direction)] = 1.0
