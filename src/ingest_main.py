@@ -976,37 +976,63 @@ def _automation_analysis_cycle():
 # Phase 2: Source health probe (§2.1) — appended END of scheduled-jobs section
 # ---------------------------------------------------------------------------
 
+# Lock-contention retry budget for the ALL-source probe. The forecast-live
+# daemon refreshes its OpenData subset under the SAME "source_health" advisory
+# lock on the SAME 10-minute cadence; a single non-retried skip here permanently
+# STARVES the all-source probe — and open_meteo_archive / wu_pws are refreshed
+# ONLY here, so their last_success_at never advances, drifts > 6h stale, and the
+# boot freshness gate disables DAY0_CAPTURE (killing the entire settlement-day
+# edge lane). The contending forecast-live write is sub-second, so retry briefly
+# instead of abandoning the cycle. ~6 × 2.5s = up to 15s, well under the 10-min
+# interval. (2026-06-14 day0-edge-lane revival.)
+_SOURCE_HEALTH_LOCK_RETRIES = 6
+_SOURCE_HEALTH_LOCK_RETRY_SLEEP_S = 2.5
+
+
 @_scheduler_job("ingest_source_health_probe")
 def _source_health_probe_tick():
     """Source health probe every 10 minutes (design §2.1).
 
     Probes all upstream sources and writes state/source_health.json.
-    Acquires advisory lock so only one process probes at a time.
+    Acquires advisory lock so only one process probes at a time — retrying
+    briefly on contention (see ``_SOURCE_HEALTH_LOCK_RETRIES``) rather than
+    abandoning the cycle, because this is the SOLE refresher of
+    open_meteo_archive / wu_pws and a skipped cycle starves DAY0_CAPTURE.
     """
+    import time as _time
     from src.data.dual_run_lock import acquire_lock
     from src.data.source_health_probe import probe_all_sources, write_source_health
     from src.config import state_path
     import json
     from pathlib import Path as _Path
 
-    with acquire_lock("source_health") as acquired:
-        if not acquired:
-            logger.info("ingest _source_health_probe_tick skipped_lock_held")
-            return
+    for _attempt in range(_SOURCE_HEALTH_LOCK_RETRIES):
+        with acquire_lock("source_health") as acquired:
+            if acquired:
+                # Load prior state for accumulation of consecutive_failures
+                prior_state: dict = {}
+                try:
+                    existing = state_path("source_health.json")
+                    if _Path(existing).exists():
+                        data = json.loads(_Path(existing).read_text())
+                        prior_state = data.get("sources", {})
+                except Exception:
+                    pass
 
-        # Load prior state for accumulation of consecutive_failures
-        prior_state: dict = {}
-        try:
-            existing = state_path("source_health.json")
-            if _Path(existing).exists():
-                data = json.loads(_Path(existing).read_text())
-                prior_state = data.get("sources", {})
-        except Exception:
-            pass
+                results = probe_all_sources(10.0, _prior_state=prior_state)
+                write_source_health(results)
+                logger.info("Source health probe complete: %d sources", len(results))
+                return
+        # Lock released by the context exit; the contending forecast-live
+        # OpenData refresh holds it for < 1s — wait and retry so the all-source
+        # probe is not starved into staleness.
+        _time.sleep(_SOURCE_HEALTH_LOCK_RETRY_SLEEP_S)
 
-        results = probe_all_sources(10.0, _prior_state=prior_state)
-        write_source_health(results)
-        logger.info("Source health probe complete: %d sources", len(results))
+    logger.warning(
+        "ingest _source_health_probe_tick skipped_lock_held after %d retries "
+        "(open_meteo_archive/wu_pws refresh starved -> DAY0_CAPTURE freshness risk)",
+        _SOURCE_HEALTH_LOCK_RETRIES,
+    )
 
 
 # ---------------------------------------------------------------------------
