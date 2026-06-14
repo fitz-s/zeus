@@ -1,5 +1,5 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-05-22
+# Last reused/audited: 2026-06-14
 # Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
 # Authority basis: Architecture code review 2026-05-22 — P1/P2 findings
 #   F1: day0_nowcast_entry strategy authority
@@ -49,8 +49,12 @@ class TestF1Day0NowcastStrategyAuthority:
         assert profile is not None
         assert profile.key == "day0_nowcast_entry"
 
-    def test_day0_nowcast_not_authorized_in_no_trade_reason(self) -> None:
-        assert hasattr(NoTradeReason, "DAY0_NOWCAST_NOT_AUTHORIZED")
+    # Removed 2026-06-14 (PR #408, commit 445a44a6b7 "gate-mass collapse: delete
+    # shadow-candidate framework + dead enum members"): the NoTradeReason member
+    # DAY0_NOWCAST_NOT_AUTHORIZED had zero production consumers (dead since it was
+    # added) and was deleted in the operator-mandated gate-mass collapse. The F1
+    # finding's live substance — day0_nowcast_entry being a named, routable strategy
+    # — remains covered by the registry and _strategy_key_for tests below.
 
     def test_strategy_key_for_returns_day0_nowcast_entry_not_none(self) -> None:
         """Finding 1 regression: was returning None, causing STRATEGY_KEY_UNCLASSIFIED."""

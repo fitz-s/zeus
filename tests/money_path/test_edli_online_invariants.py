@@ -1000,7 +1000,15 @@ def test_market_discovery_constructs_public_clob_with_bounded_timeout(monkeypatc
 def test_market_discovery_uses_full_weather_discovery_with_slug_fallback():
     source = Path("src/main.py").read_text()
     start = source.index("def _market_discovery_cycle")
-    end = source.index("def _capture_boot_state", start)
+    # Scope the slice to the _market_discovery_cycle function ONLY. The afternoon
+    # same-day snapshot capture (_afternoon_snapshot_capture_cycle, added 2026-06-14
+    # commit 54e7b0f34c) is a separate, capture-only sibling that legitimately calls
+    # the bare find_slug_pattern_weather_markets for the SETTLEMENT_DAY window — it is
+    # NOT the primary discovery cycle this antibody guards. Ending at the next
+    # top-level def keeps the "not the bare slug path" assertion bound to the cycle
+    # it was written for (previously ended at the distant _capture_boot_state, which
+    # swept in the unrelated sibling and produced a false failure).
+    end = source.index("def _afternoon_snapshot_capture_cycle", start)
     discovery_source = source[start:end]
     assert "find_weather_markets" in discovery_source
     assert "include_slug_pattern=True" in discovery_source
