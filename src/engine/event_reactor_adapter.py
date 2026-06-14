@@ -11057,6 +11057,17 @@ def _market_analysis_from_event_snapshot(
 
     bins = list(family.bins)
     raw_members = _snapshot_members(snapshot)
+    # === Q-KERNEL REBUILD STAGE 0 — receipt-spine producer (2026-06-14) =====================
+    # READ-ONLY observability: capture the predictive center/dispersion the calibrated branch
+    # already computed so the stash below (just before `return MarketAnalysis`) can write them
+    # onto the THREADED payload under `_edli_spine_*` — the keys the read seam at
+    # _generate_candidate_proofs already lifts (consult_build_spec.md:994-1033). These two locals
+    # hold the EMOS / honest-raw predictive N(mu, sigma); branches that compute no explicit
+    # predictive center (Platt / day0) leave them None and the stash derives the empirical
+    # mean/std of the SAME member array the live bootstrap already draws from. This NEVER feeds
+    # back into q, sizing, or submit — it only records already-computed values.
+    _spine_mu_native: float | None = None
+    _spine_sigma_native: float | None = None
     # §4.1 (CI_HONESTY_AND_SCORE_GATE_RULING_2026-06-01): hoist bias correction so
     # both the p_raw path AND the bootstrap (member_maxes) consume the SAME corrected
     # surface.  Pre-fix: correction was applied inside _snapshot_p_raw (local rebind)
@@ -11148,6 +11159,9 @@ def _market_analysis_from_event_snapshot(
         representativeness_sigma = 0.0  # the EMOS sampler carries the predictive sigma
         payload["_edli_q_source"] = "emos"
         _emos_sampler = _make_emos_bootstrap_sampler(_emos_mu_native, _emos_sigma_native)
+        # Stage-0 spine: EMOS IS the predictive N(mu, sigma); record its native center/dispersion.
+        _spine_mu_native = _emos_mu_native
+        _spine_sigma_native = _emos_sigma_native
     elif _emos_regime:
         # HONEST RAW (universal, #110 / operator 2026-06-05) with a CALIBRATED σ-FLOOR (residual
         # under-dispersion fix, counterfactual 2026-06-05). EMOS did not serve this non-day0 cell —
@@ -11193,6 +11207,9 @@ def _market_analysis_from_event_snapshot(
             p_raw = np.asarray(_hrq, dtype=float)
             p_cal = np.asarray(_hrq, dtype=float)
             _emos_sampler = _make_emos_bootstrap_sampler(_hr_mu, _hr_sigma)
+            # Stage-0 spine: honest-raw IS the predictive N(xbar, floored sigma).
+            _spine_mu_native = _hr_mu
+            _spine_sigma_native = _hr_sigma
         else:
             p_raw = _snapshot_p_raw(
                 snapshot, family=family, bins=bins, members=members, payload=payload,
@@ -11332,6 +11349,76 @@ def _market_analysis_from_event_snapshot(
         snapshot=snapshot, family=family, payload=payload, unit=unit, bins=bins,
         day0_exempt=is_day0,
     )
+    # === Q-KERNEL REBUILD STAGE 0 — receipt-spine producer stash (2026-06-14) ===============
+    # READ-ONLY observability: at the single point where the predictive center/dispersion, the
+    # raw member array, the debiased member array, and the final calibrated q vector are ALL in
+    # scope, write them onto the THREADED payload under the `_edli_spine_*` keys the read seam at
+    # _generate_candidate_proofs already lifts onto provenance_capture (which feeds
+    # _build_decision_receipt_spine -> DecisionReceipt.from_q_build). This is the producer half of
+    # the Stage-0 receipt spine (consult_build_spec.md:994-1033). Behavior contract: every value
+    # written here is ALREADY-COMPUTED by the live decision above; nothing is fed back into q,
+    # sizing, or submit — the MarketAnalysis returned below is unchanged byte-for-byte. Fail-soft:
+    # any error stashes nothing and never disturbs the decision.
+    #
+    # Drift resolved (spec_vs_live_drift_ledger module note): "stash already-computed values
+    # only". mu/sigma come from the calibrated predictive N(mu, sigma) when the EMOS / honest-raw
+    # branch computed it; the Platt / day0 branches compute no explicit predictive center, so the
+    # spine records the empirical mean/std of the SAME member array the live bootstrap and the
+    # direction-law family center already derive from (_direction_law_family_center /
+    # _make_*_bootstrap_sampler) — not an invented number, the already-implied center of the
+    # member envelope the q-build integrated. Branches with no q vector or no member array write
+    # only the keys they DO have (the consumer guard tolerates partial).
+    try:
+        _spine_q_list: list[float] | None = None
+        try:
+            _spine_q_arr = np.asarray(p_cal, dtype=float).ravel()
+            if _spine_q_arr.size and np.isfinite(_spine_q_arr).all():
+                _spine_q_list = [float(x) for x in _spine_q_arr.tolist()]
+        except Exception:  # noqa: BLE001 — observation only
+            _spine_q_list = None
+
+        _spine_raw_list: list[float] | None = None
+        try:
+            _spine_raw_arr = np.asarray(raw_members, dtype=float).ravel()
+            if _spine_raw_arr.size and np.isfinite(_spine_raw_arr).all():
+                _spine_raw_list = [float(x) for x in _spine_raw_arr.tolist()]
+        except Exception:  # noqa: BLE001 — observation only
+            _spine_raw_list = None
+
+        # `members` is the array actually fed to MarketAnalysis (member_maxes): the DEBIASED /
+        # corrected array on the Platt path, the raw array on EMOS / honest-raw / day0. It is the
+        # debiased member envelope the receipt records.
+        _spine_debiased_list: list[float] | None = None
+        try:
+            _spine_deb_arr = np.asarray(members, dtype=float).ravel()
+            if _spine_deb_arr.size and np.isfinite(_spine_deb_arr).all():
+                _spine_debiased_list = [float(x) for x in _spine_deb_arr.tolist()]
+        except Exception:  # noqa: BLE001 — observation only
+            _spine_debiased_list = None
+
+        # mu/sigma: predictive N(mu, sigma) when the calibrated branch produced it; else the
+        # empirical center/dispersion of the integrated member array (already-implied, not new).
+        _spine_mu = _spine_mu_native
+        _spine_sigma = _spine_sigma_native
+        if _spine_mu is None and _spine_debiased_list:
+            _spine_mu = float(sum(_spine_debiased_list) / len(_spine_debiased_list))
+        if _spine_sigma is None and _spine_debiased_list and len(_spine_debiased_list) >= 2:
+            _m = float(sum(_spine_debiased_list) / len(_spine_debiased_list))
+            _var = sum((v - _m) ** 2 for v in _spine_debiased_list) / (len(_spine_debiased_list) - 1)
+            _spine_sigma = float(_var ** 0.5)
+
+        if _spine_mu is not None:
+            payload["_edli_spine_mu_native"] = float(_spine_mu)
+        if _spine_sigma is not None:
+            payload["_edli_spine_sigma_native"] = float(_spine_sigma)
+        if _spine_raw_list is not None:
+            payload["_edli_spine_raw_members_native"] = _spine_raw_list
+        if _spine_debiased_list is not None:
+            payload["_edli_spine_debiased_members_native"] = _spine_debiased_list
+        if _spine_q_list is not None:
+            payload["_edli_spine_q_vector"] = _spine_q_list
+    except Exception:  # noqa: BLE001 — Stage-0 spine is observability-only; never alter a decision
+        pass
     return MarketAnalysis(
         p_raw=np.asarray(p_raw, dtype=float),
         p_cal=np.asarray(p_cal, dtype=float),
