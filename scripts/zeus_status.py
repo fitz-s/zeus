@@ -412,7 +412,9 @@ def section_selection() -> dict:
     slope near 1 means the EB-shrunk edge is an unbiased predictor of realized
     edge (winner's curse corrected); slope << 1 means still under-shrinking;
     intercept != 0 means residual center bias. This is the settlement-graded
-    monitor that licenses flipping replacement_selection_eb_shrinkage_enabled.
+    winner's-curse diagnostic over the EB-shrinkage SHADOW columns (the
+    decision-replacement flag was removed 2026-06-13; the live selection gate is
+    the BH/FDR pass unconditionally — these columns remain shadow telemetry).
 
     Join: edli_no_submit_receipts (WORLD: token_id, edge_shrunk,
     selection_authority) <-> position_current settled rows (TRADES: token_id,
