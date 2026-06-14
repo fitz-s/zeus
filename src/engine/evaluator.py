@@ -6312,18 +6312,6 @@ def evaluate_candidate(
             km = km / policy.threshold_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
 
-        # Oracle penalty was previously applied here as a separate
-        # multiplication. Post-A6 the oracle factor is folded into
-        # phase_aware_kelly_multiplier (above), so this block intentionally
-        # has no live behavior — kept as a no-op shell that logs CAUTION
-        # cases for backward-compat with existing log consumers expecting
-        # the "strategy_policy_threshold_*" annotation. Removable in the
-        # follow-up cleanup PR.
-        if oracle.penalty_multiplier < 1.0:
-            decision_validations.append(
-                f"oracle_penalty_observed_{oracle.penalty_multiplier:g}x"
-            )
-
         # D4 DDD Rail-2 continuous discount + D3 source-quality haircut DELETED
         # 2026-06-14 (operator no-caps law: no continuous Kelly haircuts). DDD Rail-1
         # HALT (binary no-trade on catastrophic coverage) is untouched above; the
