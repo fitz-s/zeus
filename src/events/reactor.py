@@ -123,6 +123,28 @@ EDLI_PROCESSING_REACTOR_MODES = frozenset({"live", "live_no_submit", "submit_dis
 # source-truth dead-letter treatment as a forecast snapshot event.
 _FORECAST_DECISION_EVENT_TYPES = frozenset({"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"})
 
+# VENUE-CLOSE HORIZON eligibility (freshness-throughput starvation fix 2026-06-14,
+# #92 / docs/evidence/deadloop_2026-06-14/binding_wall.md). The geometric
+# venue-close terminal (horizon b) applies to EVERY family-keyed event that binds a
+# (city, target_date) weather market — NOT only the forecast-decision lane.
+# DAY0_EXTREME_UPDATED is family-keyed (carries city + target_date + metric) but is
+# NOT a forecast-decision type, so the prior horizon scope (forecast-decision types
+# only) NEVER terminalized a past-close DAY0 event: EventStore._is_timely returns
+# True for non-forecast-decision types (event_store.py L803) AND the venue-close
+# horizon skipped them (reactor L959), so a past-close DAY0 event whose market
+# settled at the F1 12:00-UTC close requeued FOREVER on EXECUTABLE_SNAPSHOT_BLOCKED.
+# Live 2026-06-14 19:36Z (daemon pid 8058): 4903 of 5180 pending events were
+# past-close DAY0_EXTREME_UPDATED (target_date 06-12/06-13), monopolizing the
+# reactor working set so the ~277 live 06-15 families were starved (processed≈0).
+# The venue-close predicate is purely geometric (city tz + target_date + F1 anchor)
+# and returns None for any live future-close family, so widening the scope can NEVER
+# terminalize a genuinely-live family — it only sweeps the dead past-close clog out
+# of the working set. The forecast-decision set keeps its other (non-horizon)
+# semantics (source-truth treatment, _is_timely floor) unchanged.
+_VENUE_CLOSE_HORIZON_EVENT_TYPES = _FORECAST_DECISION_EVENT_TYPES | frozenset(
+    {"DAY0_EXTREME_UPDATED"}
+)
+
 Gate = Callable[[OpportunityEvent], bool]
 ExecutableSnapshotGate = Callable[[OpportunityEvent, datetime], bool]
 Reject = Callable[[OpportunityEvent, str, str], None]
@@ -904,11 +926,18 @@ class OpportunityEventReactor:
         reactor's EVENT_BOUND_MARKET_PHASE_CLOSED gate uses, applied at the horizon
         locus. It is a SEMANTIC horizon (venue close), never an attempt cap.
 
-        Non-forecast-decision events (no city+target_date) have no timeliness
-        floor of their own — for them only the operator disarm horizon applies;
-        absent that they requeue until consumed by another terminal path. They
-        cannot leak the queue: the cross-city round-robin in fetch_pending
-        interleaves fresh events fairly (see _note_transient_requeue docstring).
+        Non-family-keyed events (no city+target_date) have no timeliness floor of
+        their own — for them only the operator disarm horizon applies; absent that
+        they requeue until consumed by another terminal path. They cannot leak the
+        queue: the cross-city round-robin in fetch_pending interleaves fresh events
+        fairly (see _note_transient_requeue docstring).
+
+        FAMILY-KEYED COVERAGE (2026-06-14, #92): the venue-close horizon (b) now
+        covers DAY0_EXTREME_UPDATED in addition to the forecast-decision lane (see
+        _VENUE_CLOSE_HORIZON_EVENT_TYPES). The timeliness floor (a) still applies only
+        to the forecast-decision lane (EventStore._is_timely L803), so for a past-close
+        DAY0 family the venue-close horizon (b) — which fires EARLIER and is geometric
+        — is the terminal that sweeps it out of the working set.
         """
         # (c) Operator disarm — highest precedence kill-switch.
         if _operator_disarm_active():
@@ -945,18 +974,25 @@ class OpportunityEventReactor:
     ) -> tuple[str, str] | None:
         """Horizon (b): the venue market is in POST_TRADING/RESOLVED at decision_time.
 
-        For a forecast-decision family (city + target_date), consult the canonical
+        For a family-keyed event (city + target_date), consult the canonical
         market_phase authority with the F1 12:00-UTC fallback close anchor — the
         SAME authority the reactor's EVENT_BOUND_MARKET_PHASE_CLOSED gate uses, so
         the two sites cannot disagree on the venue-close instant. No venue probe, no
         snapshot read: the phase is derived purely from city timezone + target_date
         + decision_time + the F1 anchor.
 
+        SCOPE (freshness-throughput starvation fix 2026-06-14, #92): applies to every
+        ``_VENUE_CLOSE_HORIZON_EVENT_TYPES`` member — the forecast-decision lane AND
+        ``DAY0_EXTREME_UPDATED`` (also family-keyed). A past-close DAY0 event has a
+        real venue close (its market settled at the F1 12:00-UTC anchor) and must
+        terminalize at that horizon; before this fix it was scoped out and requeued
+        forever, clogging the working set (see ``_VENUE_CLOSE_HORIZON_EVENT_TYPES``).
+
         Returns ``("MARKET_VENUE_CLOSED", detail)`` iff the phase is POST_TRADING or
         RESOLVED; otherwise None (the family is still live, or the inputs are
         unresolvable → fail-soft requeue, never a premature terminal).
         """
-        if event.event_type not in _FORECAST_DECISION_EVENT_TYPES:
+        if event.event_type not in _VENUE_CLOSE_HORIZON_EVENT_TYPES:
             return None
         payload = _payload_dict(event)
         city = str(payload.get("city") or "").strip()

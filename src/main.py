@@ -7256,6 +7256,30 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             return False
         if not topology_rows:
             return False
+        # FAMILY-IDENTITY RE-INJECTION (freshness-throughput starvation fix
+        # 2026-06-14, #92 / binding_wall.md). _event_family_market_topology_rows
+        # binds city/target_date/temperature_metric in its WHERE clause but does NOT
+        # SELECT them, so the returned rows carry NO city/target_date/metric columns.
+        # reconstruct_weather_market_from_static_topology reads first.get("city") /
+        # ("target_date") / ("temperature_metric") and returns None at market_scanner
+        # L3535 (`if not (slug and city_name and target_date and metric)`) whenever
+        # they are absent — which is ALWAYS for this path. That silent None made the
+        # decision-triggered refresher return False for EVERY family (marker
+        # "decision_triggered_targeted_refresh" at ZERO live 2026-06-14), so a STALE
+        # live family could NEVER get a fresh row and requeued forever. The warm-job
+        # lane (refresh_pending_family_snapshots, main.py ~3580) already re-injects
+        # these three fields before calling reconstruct; mirror it here so the
+        # decision-time refresh actually reconstructs and captures. Additive: a row
+        # already carrying the fields is unchanged.
+        topology_rows = [
+            {
+                **dict(trow),
+                "city": city,
+                "target_date": target_date,
+                "temperature_metric": metric,
+            }
+            for trow in topology_rows
+        ]
 
         _clob_timeout = max(
             1.0,

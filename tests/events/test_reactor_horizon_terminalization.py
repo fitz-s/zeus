@@ -34,7 +34,11 @@ import sqlite3
 from datetime import datetime, timezone
 
 from src.events.event_store import EventStore
-from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
+from src.events.opportunity_event import (
+    Day0ExtremeUpdatedPayload,
+    ForecastSnapshotReadyPayload,
+    make_opportunity_event,
+)
 from src.events.reactor import (
     EventSubmissionReceipt,
     OpportunityEventReactor,
@@ -595,6 +599,121 @@ def test_venue_open_before_close_still_requeues_no_premature_terminal():
     assert res.dead_lettered == 0, (
         "a pre-venue-close (SETTLEMENT_DAY) family is still tradeable — it must "
         "requeue, never terminalize one cycle early"
+    )
+    assert res.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+
+
+# ---------------------------------------------------------------------------
+# 6. DAY0 past-close clog (freshness-throughput starvation fix 2026-06-14, #92).
+#    A DAY0_EXTREME_UPDATED event is family-keyed (city+target_date) and has a real
+#    venue close, but is NOT a forecast-decision type — so EventStore._is_timely
+#    returns True for it ALWAYS (no local-day floor) and the prior venue-close
+#    horizon scoped it OUT. A past-close DAY0 event therefore requeued FOREVER on
+#    EXECUTABLE_SNAPSHOT_BLOCKED, monopolizing the working set (live 2026-06-14:
+#    4903/5180 pending were past-close DAY0). The venue-close horizon must now
+#    terminalize it; a live future-close DAY0 family must NOT terminalize.
+# ---------------------------------------------------------------------------
+
+def _day0_payload(*, city: str, target_date: str, metric: str = "high"):
+    return Day0ExtremeUpdatedPayload(
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        settlement_source="ogimet",
+        station_id="STN-1",
+        observation_time=f"{target_date}T06:00:00+00:00",
+        observation_available_at=f"{target_date}T06:05:00+00:00",
+        raw_value=21.4,
+        rounded_value=21,
+    )
+
+
+def _day0_event(*, city: str, target_date: str, metric: str = "high", suffix: str = "d0"):
+    payload = _day0_payload(city=city, target_date=target_date, metric=metric)
+    return make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key=f"{city}|{target_date}|{metric}|{suffix}",
+        source="day0",
+        observed_at=f"{target_date}T06:00:00+00:00",
+        available_at=f"{target_date}T06:05:00+00:00",
+        received_at=f"{target_date}T06:06:00+00:00",
+        causal_snapshot_id=None,
+        payload=payload,
+        priority=120,
+    )
+
+
+def test_day0_past_close_family_terminalizes_at_venue_horizon():
+    """RELATIONSHIP (reactor<->market_phase): a past-close DAY0_EXTREME_UPDATED family
+    MUST terminalize at the venue-close horizon (MARKET_VENUE_CLOSED), not requeue
+    forever. Manila 2026-06-13 closes at the F1 12:00-UTC anchor; at _DT_VENUE_CLOSED_
+    NOT_LOCAL_PAST (14:00Z) and beyond the venue is POST_TRADING.
+
+    RED-on-revert: with the horizon scoped to forecast-decision types only,
+    _venue_market_closed_horizon returns None for DAY0 (event_store._is_timely also
+    returns True for it), so NO horizon fires and the event requeues — exactly the
+    4903-event past-close DAY0 clog that starved live 06-15 families (processed≈0)."""
+    conn, store = _store()
+    event = _day0_event(city="Manila", target_date="2026-06-13")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(conn, store, _SNAPSHOT_STALE_REASON)
+
+    reactor._transient_requeue_reasons[event.event_id] = "EXECUTABLE_SNAPSHOT_BLOCKED"
+    from src.events.reactor import ReactorResult
+
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=_DT_VENUE_CLOSED_NOT_LOCAL_PAST,
+        result=res,
+    )
+
+    assert res.dead_lettered == 1, (
+        "a past-close DAY0 family must terminalize at the venue-close horizon, not "
+        "requeue forever and clog the working set"
+    )
+    assert res.retried == 0
+    assert _status(conn, event.event_id) == "dead_letter"
+    row = conn.execute(
+        "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED", row[0]
+    assert "MARKET_VENUE_CLOSED" in (row[1] or ""), row[1]
+    # Carries the last honest transient cause (never an attempt count).
+    assert "EXECUTABLE_SNAPSHOT_BLOCKED" in (row[1] or ""), row[1]
+    assert "attempt" not in (row[1] or "").lower()
+
+
+def test_day0_live_future_close_family_does_not_terminalize():
+    """RELATIONSHIP (no over-termination): a LIVE future-close DAY0 family MUST NOT
+    terminalize — the venue-close predicate is purely geometric and returns None
+    before the F1 12:00-UTC close, so the event requeues. This pins that the widened
+    horizon scope cannot burn a genuinely-live DAY0 family one cycle early.
+
+    Manila 2026-06-13 at _DT_VENUE_OPEN (11:00Z) is BEFORE the 12:00Z venue close
+    (SETTLEMENT_DAY, still tradeable)."""
+    conn, store = _store()
+    event = _day0_event(city="Manila", target_date="2026-06-13", suffix="d0-live")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(conn, store, _SNAPSHOT_STALE_REASON)
+
+    reactor._transient_requeue_reasons[event.event_id] = "EXECUTABLE_SNAPSHOT_BLOCKED"
+    from src.events.reactor import ReactorResult
+
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=_DT_VENUE_OPEN,
+        result=res,
+    )
+
+    assert res.dead_lettered == 0, (
+        "a live future-close DAY0 family must requeue, never terminalize one cycle early"
     )
     assert res.retried == 1
     assert _status(conn, event.event_id) == "pending"
