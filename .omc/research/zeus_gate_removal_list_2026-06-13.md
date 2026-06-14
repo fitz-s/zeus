@@ -56,9 +56,19 @@
 #         intended): partial-run +~2x (D3), DISCOUNT +0-10% (D4), heat>0.25 +~2x (D5); can compound. Verified: zero net-new
 #         test failures vs HEAD (4 pre-existing confirmed via stash), schema fingerprint unchanged, money-path green. Goes
 #         live on daemon restart (operator-gated). Tier E (shoulder $2000 cap split) + soft-anchor 5→1 still pending.
-#  [GATED-HOLD] FT (full_transport_live_enabled A17/A18+monitor wiring): proof verdict ENTANGLED_HOLD — flag-default-OFF
-#         shadow build but whole-removal kills the documented promote path (and promote_model_bias_ens_v2.py named in the
-#         config note does not exist on disk). Operator go/no-go required; elif-only delete is half-baked (orphans resolver).
+#  [DONE+VERIFIED] CLEANUP BATCH (operator-authorized 2026-06-14, FT-depth investigated first): A19 oracle-telemetry no-op
+#         (e52168e9), tail-shape SHADOW dead log-branch (5eddd8a9), shoulder cluster-cap Gate-2 $2000 notional cap SPLIT —
+#         Gate-1 correlation kept (013b0831), and FT full_transport whole-wiring removal — evaluator+monitor_refresh+flag+2
+#         test files (06e28761). FT verdict was REMOVE not hold: full_transport_v1 = 0 DB rows, superseded by live
+#         edli_per_city_v1, U1-RETIRE, promote script doesn't exist. All byte-identical/direction-neutral; zero net-new test
+#         failures, schema fingerprint unchanged. NOT committed to remote.
+#  [SUPERSEDED] This plan's per-item classifications were re-investigated at FT-depth 2026-06-14 (workflows wh3gjgo1j +
+#         worfmboc9) — several plan reads were WRONG (soft-anchor NOT byte-collapsible; crosscheck undercounted; §6 B7/B8
+#         wrong file/line; A3 boot-guard already deleted). The investigation outputs are the authority now, not this doc.
+#  [INVESTIGATED-PENDING-DECISION] Remaining: (a) schema-enum wave — 8 dead members need a destructive no_trade_events CHECK
+#         rebuild + fingerprint re-pin (operator chose 'investigate migration first'); (b) rulings held for deeper probe —
+#         shadow-candidate framework (promote/delete), crosscheck relax-vs-keep, EQE promotion, A3 CI-artifact. KEEP set
+#         confirmed: soft-anchor 5 flags + 13 §6 traps (load-bearing).
 #  [NEVER] §6 traps (8 items, KEEP): market_anchor=True, bias_decay_kelly_haircut=True(fallback-live), edli_arm_gate_emit
 #          (fail-close boot guard), emos ladder rungs, buy_no receipt re-check (Shanghai provenance), CROSSCHECK×5
 #          (operator ruling), shoulder Gate-1 correlation, + 8 untraced UNCERTAIN. DO NOT REMOVE.
