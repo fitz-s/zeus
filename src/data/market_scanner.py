@@ -1646,10 +1646,17 @@ def _slug_pattern_target_dates(now_utc: datetime) -> list[str]:
         max_target_offset_days = 2
     now = now_utc.astimezone(timezone.utc)
     today = now.date()
-    first_offset = 1 if now.hour >= 12 else 0
+    # Afternoon-capture fix (2026-06-14): always include today in slug discovery.
+    # The prior `first_offset = 1 if now.hour >= 12 else 0` excluded today after
+    # UTC noon, so newly-opened same-day markets (tagged AFTER noon or not yet
+    # tagged) could not be discovered via slug fallback during the afternoon window.
+    # After 12:00 UTC markets that resolved at 12:00Z simply return empty/404 from
+    # Gamma — the budget guard (request_limit, deadline) bounds the cost; no DoS
+    # risk. Same-day markets with endDate > 12:00Z (e.g. explicit local-midnight
+    # endDate) are now correctly discoverable throughout the full settlement window.
     return [
         (today + timedelta(days=offset)).strftime("%Y-%m-%d")
-        for offset in range(first_offset, max_target_offset_days + 1)
+        for offset in range(0, max_target_offset_days + 1)
     ]
 
 

@@ -333,12 +333,54 @@ def test_live_slug_pattern_market_reader_never_runs_tag_scan(monkeypatch):
     assert calls == [("slug", ["2026-05-20"]), ("persist", 1)]
 
 
-def test_default_slug_pattern_dates_skip_expired_and_cover_opening_hunt_horizon():
-    """Opening-hunt markets can open two future calendar dates before settlement."""
+def test_default_slug_pattern_dates_always_includes_today_and_covers_opening_hunt_horizon():
+    """Afternoon-capture fix (2026-06-14): today is ALWAYS included in slug discovery,
+    even after UTC noon.  Opening-hunt markets cover two future calendar dates.
 
-    dates = ms._slug_pattern_target_dates(_NOW)
+    Before the fix: first_offset = 1 when hour >= 12, so today was excluded at UTC noon,
+    preventing same-day market discovery via slug fallback in the afternoon window.
+    After the fix: first_offset = 0 always, so today + future dates are enumerated.
+    """
 
-    assert dates == ["2026-05-20", "2026-05-21"]
+    # UTC noon — previously excluded today; after fix must include it.
+    dates_noon = ms._slug_pattern_target_dates(_NOW)  # _NOW = 2026-05-19 12:00 UTC
+    assert "2026-05-19" in dates_noon, (
+        "afternoon-capture regression: today must be in slug dates even at/after UTC noon"
+    )
+    assert dates_noon == ["2026-05-19", "2026-05-20", "2026-05-21"]
+
+    # UTC morning — always included today before the fix too; must still be present.
+    morning = _NOW.replace(hour=6)
+    dates_morning = ms._slug_pattern_target_dates(morning)
+    assert "2026-05-19" in dates_morning
+    assert dates_morning == ["2026-05-19", "2026-05-20", "2026-05-21"]
+
+
+def test_afternoon_slug_discovery_includes_today_with_hours_to_local_eod_in_range():
+    """RED-ON-REVERT: for a same-day market with hours-to-local-EOD in (0, 12],
+    the capture schedule includes afternoon instants (UTC 12:00-23:59).
+
+    This test verifies the mechanism that _slug_pattern_target_dates always returns
+    today's date, ensuring the afternoon capture job can discover same-day markets
+    that are still within their trading window (hours_to_resolution > 0 and ≤ 12).
+
+    Failure mode on revert: if first_offset = 1 when hour >= 12, today is excluded
+    from the slug date list after UTC noon, so same-day markets in the settlement
+    window (open books, hours_to_resolution in (0, 12]) cannot be discovered via
+    slug pattern fallback and capture stops at 11:29 UTC.
+    """
+    from datetime import date
+
+    # Simulate 17:30 UTC — deep in the afternoon window
+    afternoon_utc = datetime(2026, 5, 19, 17, 30, 0, tzinfo=timezone.utc)
+    dates = ms._slug_pattern_target_dates(afternoon_utc)
+
+    today_str = date(2026, 5, 19).strftime("%Y-%m-%d")
+    assert today_str in dates, (
+        f"REGRESSION: today ({today_str}) must be in slug discovery dates at 17:30 UTC. "
+        "Without this, same-day markets with hours_to_resolution in (0, 12] cannot "
+        "be discovered after UTC noon and afternoon capture breaks."
+    )
 
 
 # ---------------------------------------------------------------------------
