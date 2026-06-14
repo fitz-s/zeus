@@ -253,3 +253,89 @@ def test_fitter_fail_closed_on_thin_cell():
     thin = _synth_records(-1.8, n=fit.MIN_N - 1, seed=4)  # cold but below MIN_N
     res = fit.gate_cell(thin)
     assert res["activated"] is False, "a cold but thin cell must fail closed (insufficient data)"
+
+
+# ---------------------------------------------------------------------------
+# (E) ONE-SIGNED CONTRACT (pr408 review C1+C2 #3 HIGH): offset<0 + every train delta<0.
+# ---------------------------------------------------------------------------
+def test_fitter_persists_offset_sign_and_median_residual():
+    """The artifact carries offset_sign_ok + median_residual_c so the one-signed contract is
+    auditable from the artifact (median_residual_c == the stored offset)."""
+    fit = importlib.import_module("scripts.fit_emos_mu_offset")
+    cold = _synth_records(-1.8, n=22, seed=1)
+    res = fit.gate_cell(cold)
+    assert "offset_sign_ok" in res and "median_residual_c" in res
+    assert res["offset_sign_ok"] is True
+    assert res["median_residual_c"] == pytest.approx(res["offset_c"])
+    assert res["activated"] is True
+    # the OOS block records that every train delta was a cold (<0) shift
+    assert res["oos"]["all_train_deltas_cold"] is True
+
+
+def test_fitter_skewed_cell_cold_mean_positive_median_not_activated():
+    """A cell with a COLD mean but a NON-NEGATIVE median offset must NOT activate — applying
+    it (offset_c>=0) would COOL the center. The one-signed gate records offset_sign_ok=False
+    and all_train_deltas_cold=False; activation is refused. (The loader/consumer tests below
+    are the isolated RED-on-revert for the offset_c>=0 refusal.)"""
+    import datetime as dt
+
+    fit = importlib.import_module("scripts.fit_emos_mu_offset")
+    # Construct a skewed residual distribution: cold MEAN (a few large-cold outliers) but a
+    # NON-NEGATIVE MEDIAN (most days warm-ish). median(res) >= 0 → offset_sign_ok False.
+    base = dt.date(2026, 3, 1)
+    recs = []
+    n = 24
+    for i in range(n):
+        settled = 20.0
+        # majority slightly warm (mu-settled = +0.2), a minority strongly cold to drag the mean down
+        resid = +0.2 if i % 4 != 0 else -8.0
+        recs.append({"city": "C", "season": "MAM", "date": base + dt.timedelta(days=i),
+                     "mu": settled + resid, "sig": 1.5, "settled": settled})
+    res = fit.gate_cell(recs)
+    import numpy as _np
+    assert _np.median([r["mu"] - r["settled"] for r in recs]) >= 0.0, "fixture must have non-cold median"
+    assert res["offset_sign_ok"] is False
+    assert res["activated"] is False, "a non-cold-median offset must never activate (one-signed)"
+
+
+def test_accessor_refuses_activated_nonnegative_offset(monkeypatch):
+    """RED-on-revert: an ACTIVATED cell whose stored offset_c >= 0 (corrupt/hand-edited
+    artifact, or a sign bug) is REFUSED — None without required, EmosMuOffsetError with
+    required. Reverting (dropping the sign check) would serve the wrong-direction offset."""
+    table = {
+        "_meta": {}, "cells": {
+            "Bad|MAM|high": {"offset_c": 0.75, "activated": True, "n": 20,
+                             "offset_sign_ok": False, "median_residual_c": 0.75, "oos": {}},
+            "Zero|MAM|high": {"offset_c": 0.0, "activated": True, "n": 20,
+                              "offset_sign_ok": False, "median_residual_c": 0.0, "oos": {}},
+        },
+    }
+    monkeypatch.setattr(emos_mod, "_mu_offset_cache", table, raising=False)
+    for city in ("Bad", "Zero"):
+        assert emos_mod.emos_mu_offset(city, "MAM", "high") is None
+        with pytest.raises(emos_mod.EmosMuOffsetError, match="WRONG_SIGN"):
+            emos_mod.emos_mu_offset(city, "MAM", "high", required=True)
+
+
+def test_build_emos_q_does_not_apply_nonnegative_offset(monkeypatch):
+    """RED-on-revert: even if a wrong-sign offset somehow reached build_emos_q, the seam guard
+    refuses it — the center is the UNCORRECTED EMOS μ* (no cooling). Reverting (applying any
+    non-None offset) would shift the center the wrong way."""
+    bad_table = {
+        "_meta": {}, "cells": {
+            "Tokyo|MAM|high": {"offset_c": 0.90, "activated": True, "n": 20,
+                               "offset_sign_ok": False, "median_residual_c": 0.90, "oos": {}},
+        },
+    }
+    monkeypatch.setattr(emos_mod, "_mu_offset_cache", bad_table, raising=False)
+    q_bad = qb.build_emos_q(city="Tokyo", season="MAM", metric="high", lead_days=3.0,
+                            members_native=_MEMBERS_C, unit="C", bins=_BINS)
+    # empty/clean table → uncorrected baseline
+    monkeypatch.setattr(emos_mod, "_mu_offset_cache", {"_meta": {}, "cells": {}}, raising=False)
+    q_base = qb.build_emos_q(city="Tokyo", season="MAM", metric="high", lead_days=3.0,
+                             members_native=_MEMBERS_C, unit="C", bins=_BINS)
+    a, b = _TOKYO_MAM["params"][0], _TOKYO_MAM["params"][1]
+    expected_mu = a + b * float(np.mean(_MEMBERS_C))
+    # the wrong-sign offset is NOT applied: center equals the uncorrected EMOS μ* (=baseline)
+    assert q_bad[1] == pytest.approx(expected_mu, abs=1e-9)
+    assert q_bad[1] == pytest.approx(q_base[1], abs=1e-9)

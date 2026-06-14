@@ -8,6 +8,17 @@ from __future__ import annotations
 
 import math
 
+# SINGLE VOCABULARY (pr408 review C1+C2 #1 CRITICAL, 2026-06-14): the settlement-backward
+# coverage admission predicates live in ONE home (the K3 module) and are imported here so
+# the live-admission gate reads the SAME contract as the ARM gate and the cert credential —
+# never a re-derived status-name allowlist. The prior {LICENSED, UNLICENSED} allowlist
+# EXCLUDED INSUFFICIENT_DATA and rejected thin-settlement cold cells at submit; these
+# predicates make INSUFFICIENT_DATA license-by-default exactly as the K3 design requires.
+from src.calibration.settlement_backward_coverage import (
+    settlement_coverage_allows_arm,
+    settlement_coverage_refutes_claim,
+)
+
 
 # Operator objective: real participating trades must settle with stable win-rate
 # greater than 51% after costs. Positive-EV low-probability lottery legs remain
@@ -25,19 +36,25 @@ LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
 LIVE_BUY_NO_MATERIAL_YES_POSTERIOR = 0.20
 LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES = frozenset({"EMOS_ANALYTIC", "SETTLEMENT_ISOTONIC"})
 
-# SINGLE AUTHORITY (twin-authority reconciliation #7, 2026-06-11): the settlement-backward
-# coverage verdict statuses that LICENSE a fused-bootstrap q_lcb for live. ONE home — this
-# module — consumed by BOTH the admission gate below AND the adapter's cert credential
-# (event_reactor_adapter re-exports it as _FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES).
-# LICENSED  = realized settled win-rate backs the claimed q_lcb within tolerance.
-# UNLICENSED = the record refuted the raw claim and the K3 shrink to realized-minus-1pp
-#              was the verdict's output — the (shrunk) q_lcb is settled-record-backed.
-# INSUFFICIENT_DATA (and None/UNEVALUATED) carry NO realized backing → never license.
-# Category inversion this kills: before reconciliation a record-BACKED bootstrap q_lcb
-# kept source=FORECAST_BOOTSTRAP → admission rejected, while a record-REFUTED one got
-# shrunk → branded SETTLEMENT_ISOTONIC → admission accepted. The verdict, not the brand,
-# is the evidence.
-SETTLEMENT_COVERAGE_LICENSING_STATUSES = frozenset({"LICENSED", "UNLICENSED"})
+# SINGLE AUTHORITY (twin-authority reconciliation #7, 2026-06-11; pr408 #1 CRITICAL,
+# 2026-06-14): the settlement-backward coverage verdict statuses under which the buy-NO
+# material-bin conservative-evidence gate admits a fused-bootstrap q_lcb. ANY REAL VERDICT
+# is settled-record evidence the gate honors:
+#   LICENSED          = realized settled win-rate backs the claimed q_lcb within tolerance.
+#   INSUFFICIENT_DATA = thin/absent per-day claim history — license-by-default (RULE 1:
+#                       lack of data is NOT proof of overconfidence; the EMOS/MC q_lcb
+#                       already carries its own conservative LCB floor). pr408 #1: the prior
+#                       allowlist OMITTED this, rejecting every thin-settlement cold cell.
+#   UNLICENSED        = the record refuted the raw claim and the K3 shrink to realized-1pp
+#                       was the verdict's output — the (shrunk) q_lcb is settled-backed.
+# Built from the K3 admission predicates (allows_arm ∪ refutes_claim = all real verdicts)
+# so this set can never drift from the ARM gate / cert credential vocabulary. None /
+# UNEVALUATED carry NO verdict at all → not in this set → not admitted by this gate.
+# Category inversion this kills: a record-BACKED bootstrap q_lcb must not be rejected while
+# a record-REFUTED (re-branded) one is accepted. The verdict, not the brand, is the evidence.
+SETTLEMENT_COVERAGE_LICENSING_STATUSES = frozenset(
+    {"LICENSED", "INSUFFICIENT_DATA", "UNLICENSED"}
+)
 
 
 def live_win_rate_floor_rejection_reason(
@@ -204,13 +221,18 @@ def live_buy_no_conservative_evidence_rejection_reason(
     the family's settlement-backward coverage VERDICT status — the SAME flag-
     independent verdict the cert credential licenses on (computed once per family on
     the replacement path; the caller threads the status string, keeping this module
-    pure). When the q_lcb source is not in the allow-list, a verdict in
-    SETTLEMENT_COVERAGE_LICENSING_STATUSES ({LICENSED, UNLICENSED}) admits: the
-    settled record evaluated this scope and backed the (possibly shrunk) claim.
-    INSUFFICIENT_DATA / None reject exactly as before, with the status appended to
-    the reason for provenance. This is reconciliation, not gate-weakening: the
-    evidence bar (settled-record backing) is unchanged — only the vocabulary the
-    gate reads is unified with the cert layer's.
+    pure). When the q_lcb source is not in the allow-list, ANY real settled-record
+    verdict admits — read through the K3 admission predicates so this gate can never
+    drift from the ARM gate / cert vocabulary:
+      * LICENSED / INSUFFICIENT_DATA  → ``settlement_coverage_allows_arm`` (the record
+        did not refute; INSUFFICIENT_DATA is license-by-default — pr408 #1 CRITICAL fix:
+        the prior allow-list OMITTED it, blocking every thin-settlement cold cell).
+      * UNLICENSED                    → ``settlement_coverage_refutes_claim`` (the record
+        evaluated the scope and the K3 shrink to realized-1pp is the verdict's output —
+        the resulting q_lcb is settled-record-backed).
+    None / UNEVALUATED (no verdict at all) reject, with the status appended to the reason
+    for provenance. This is reconciliation, not gate-weakening: the evidence bar (a real
+    settled-record verdict) is unchanged — only the vocabulary is unified with the K3 layer.
     """
 
     if direction != "buy_no":
@@ -241,15 +263,17 @@ def live_buy_no_conservative_evidence_rejection_reason(
     if yes_posterior >= material_floor:
         source = str(q_lcb_calibration_source or "").strip()
         if source not in allowed_lcb_sources:
-            # Twin-authority reconciliation #7 (2026-06-11): a settlement-backward
-            # coverage verdict the settled record evaluated (LICENSED, or UNLICENSED
-            # where the shrink was the verdict's output) is settled-record backing —
-            # the SAME evidence bar the source allow-list expresses, read from the
-            # cert layer's vocabulary instead of the q_lcb brand. Kills the category
-            # inversion where a record-BACKED bootstrap q_lcb was rejected while a
-            # record-REFUTED one (re-branded by the shrink) was accepted.
+            # Twin-authority reconciliation #7 (2026-06-11) + pr408 #1 CRITICAL
+            # (2026-06-14): a settlement-backward coverage verdict the settled record
+            # produced is settled-record backing — read through the K3 predicates so this
+            # gate honors the SAME contract as the ARM gate and cert credential. A
+            # non-refuting verdict (LICENSED or INSUFFICIENT_DATA — license-by-default on
+            # thin data) admits; UNLICENSED (refuted → shrunk) is also settled-backed and
+            # admits. Only None / UNEVALUATED (no verdict) falls through to reject. Kills
+            # BOTH the category inversion (record-BACKED bootstrap rejected while a
+            # re-branded record-REFUTED one accepted) AND the thin-data block.
             status = str(settlement_coverage_status or "").strip()
-            if status in SETTLEMENT_COVERAGE_LICENSING_STATUSES:
+            if settlement_coverage_allows_arm(status) or settlement_coverage_refutes_claim(status):
                 return None
             # FIX-4 (§2): the conservative_edge>confidence_gap waiver is DELETED.
             # It admitted a material-YES buy_no on a self-referential test of the

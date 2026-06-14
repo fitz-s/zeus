@@ -232,6 +232,14 @@ from src.strategy.live_inference.live_admission import (
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
 )
+# pr408 #1 CRITICAL (2026-06-14): the live calibration credential licenses through the K3
+# admission predicates (allows_arm = LICENSED/INSUFFICIENT_DATA license-by-default;
+# refutes_claim = UNLICENSED), NOT a status-name allowlist that excluded INSUFFICIENT_DATA
+# and rejected thin-settlement cold cells at submit as FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED.
+from src.calibration.settlement_backward_coverage import (
+    settlement_coverage_allows_arm,
+    settlement_coverage_refutes_claim,
+)
 from src.strategy import market_phase_evidence as _market_phase_evidence
 # The §7 robust marginal-expected-log-utility ranker IS the single live decision
 # surface (operator directive 2026-06-08; spec §6/§14.7/§14.8). _selected_candidate_proof
@@ -368,6 +376,14 @@ class _CandidateProof:
     # escalation deadline for REST decisions (None on legacy one-shot proofs).
     rest_then_cross_policy: str | None = None
     rest_escalation_deadline_minutes: float | None = None
+    # SHADOW TELEMETRY (pr408 review C1+C2 #2 CRITICAL, 2026-06-14): the
+    # would_fail_unlicensed_tail_shadow flag records whether the cheap-tail unlicensed
+    # disagreement guard WOULD have fired for this candidate. It is OBSERVABILITY ONLY —
+    # it NEVER zeros the score, fails the prefilter, sets a no-trade reason, or alters
+    # size. The forbidden one-sided fail-CLOSED tail gate (operator law 3) that killed
+    # +edge cheap trades was removed from the live path; this shadow keeps the signal for
+    # settlement-graded study without touching the live decision.
+    would_fail_unlicensed_tail_shadow: bool = False
 
 
 @dataclass(frozen=True)
@@ -863,9 +879,16 @@ def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertifica
         raise ValueError(
             "EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"
         )
-    # FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE is the licensed replacement credential — it
-    # ADMITS for live (its n_samples is the settled coverage n, which is >0 by the
-    # licensing rule; the empty-sample guard below still applies as a belt-and-braces).
+    # FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE is the licensed replacement credential — it ADMITS
+    # for live. pr408 #1 CRITICAL (2026-06-14): a thin-history INSUFFICIENT_DATA license is
+    # admitted-by-default and carries n_samples==0 (no settled claim-days yet) BY DESIGN — the
+    # empty-sample guard must NOT block it (doing so was the second half of the cold-cell
+    # submit blocker: license-by-default upstream, then reject on n==0 here). The empty-sample
+    # belt-and-braces still applies to LICENSED / UNLICENSED-shrunk credentials, whose n is the
+    # settled coverage count (>0 by the licensing rule).
+    coverage_status = str(payload.get("coverage_status") or "").strip()
+    if coverage_status == "INSUFFICIENT_DATA":
+        return
     if n_samples is not None and n_samples <= 0:
         raise ValueError(f"EDLI_LIVE_CALIBRATION_EMPTY_SAMPLE_BLOCKED:authority={authority or 'missing'}")
 
@@ -7273,6 +7296,30 @@ def _opportunity_book_from_proofs(
     )
 
 
+def _coverage_unlicensed_tail_shadow(
+    *,
+    q_lcb: float | int | None,
+    execution_price: float | int | None,
+    q_lcb_calibration_source: str | None,
+) -> bool:
+    """SHADOW-ONLY (pr408 #2): would the cheap-tail unlicensed disagreement guard have fired?
+
+    True iff the old fail-CLOSED tail guard WOULD have rejected (price<0.05, q_lcb>2x price,
+    unlicensed source). Pure telemetry — the caller stamps it on the proof for settlement-
+    graded study. It is NEVER consulted for score / prefilter / no-trade-reason / size. The
+    ONE definition of the tail concern stays in live_admission.coverage_unlicensed_tail_
+    rejection_reason; this wraps it as a boolean so no second copy of the rule exists.
+    """
+    return (
+        coverage_unlicensed_tail_rejection_reason(
+            q_lcb=q_lcb,
+            execution_price=execution_price,
+            q_lcb_calibration_source=q_lcb_calibration_source,
+        )
+        is not None
+    )
+
+
 def _generate_candidate_proofs(
     *,
     event: OpportunityEvent,
@@ -7587,32 +7634,31 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = direction_law_reason
-            # FIX B — COVERAGE_UNLICENSED_TAIL (fail-closed tail licensing): the
-            # K3 coverage gate leaves INSUFFICIENT_DATA bands UNCHANGED (fail-open),
-            # so an unlicensed (FORECAST_BOOTSTRAP) q_lcb could overrule the market
-            # in a longshot. price < 0.05 with q_lcb > 2x price now requires a
-            # settlement-licensed source (EMOS_ANALYTIC / SETTLEMENT_ISOTONIC).
-            coverage_unlicensed_tail_reason = coverage_unlicensed_tail_rejection_reason(
+            # SHADOW-ONLY — COVERAGE_UNLICENSED_TAIL (pr408 review C1+C2 #2 CRITICAL,
+            # 2026-06-14): the old fail-CLOSED tail guard zeroed score / failed prefilter
+            # on cheap-tail (price<0.05, q_lcb>2x price) unlicensed candidates. That is a
+            # forbidden ONE-SIDED gate (operator law 3) — the explicit fail-closed dual of
+            # K3's fail-open — and it killed +edge cheap trades under INSUFFICIENT_DATA.
+            # REMOVED from the live score / prefilter / no-trade-reason / size path. The
+            # concern is preserved ONLY as shadow telemetry on the proof; it NEVER
+            # score-zeros, NEVER becomes a live reason, NEVER alters size.
+            would_fail_unlicensed_tail_shadow = _coverage_unlicensed_tail_shadow(
                 q_lcb=q_lcb,
                 execution_price=execution_price.value if execution_price is not None else None,
                 q_lcb_calibration_source=q_lcb_source,
             )
-            if coverage_unlicensed_tail_reason is not None:
-                score = 0.0
-                if missing_reason is None:
-                    missing_reason = coverage_unlicensed_tail_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             # A structurally non-tradeable candidate must not enter the FDR family
             # as a "passed" hypothesis. Force prefilter False so it can never be
             # selected. (The S4-removed market-disagreement scalar demotion is no
             # longer one of these triggers — the marginal-utility ranker's §13
-            # ΔU<=0 gate subsumes the cheap-NO-overconfidence demotion.)
+            # ΔU<=0 gate subsumes the cheap-NO-overconfidence demotion. The unlicensed-tail
+            # concern is shadow-only now and is deliberately NOT a prefilter trigger.)
             if (
                 capital_efficiency_reason is not None
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
-                or coverage_unlicensed_tail_reason is not None
             ):
                 passed_prefilter = False
             proofs.append(
@@ -7668,6 +7714,8 @@ def _generate_candidate_proofs(
                     rest_escalation_deadline_minutes=(
                         mode_ev.escalation_deadline_minutes if mode_ev is not None else None
                     ),
+                    # pr408 #2: shadow-only unlicensed-tail signal (NEVER gates).
+                    would_fail_unlicensed_tail_shadow=would_fail_unlicensed_tail_shadow,
                 )
             )
     return tuple(proofs)
@@ -9434,9 +9482,21 @@ def _replacement_family_coverage_verdict(
     Returns the family-representative ``CoverageVerdict`` (the buy_yes leg of the first
     candidate whose q_lcb is present), or ``None`` when the check could not run / the scope
     has no realized data at all. INSUFFICIENT_DATA is a real verdict (returned, not None) —
-    the credential treats it as "no realized backing" and blocks; only a structural failure
-    to evaluate returns None. FAIL-CLOSED: any error returns None (→ UNEVALUATED → blocked).
+    a thin-history cold cell yields INSUFFICIENT_DATA which the credential admits-by-default
+    (pr408 #1). Only a non-structural inability to even set up the check returns None
+    (→ UNEVALUATED → blocked).
+
+    STRUCTURAL FAULT (pr408 #1 CRITICAL): when the coverage SAFETY gate is ON, a
+    read/parse/schema fault in the observation build must NOT collapse into INSUFFICIENT_DATA
+    or a swallowed None — it raises ``QLCB_COVERAGE_AUTHORITY_FAULT`` and is allowed to
+    PROPAGATE (fail closed). The per-candidate ``except`` below catches only NON-fault errors
+    (e.g. a single malformed candidate) so the scan can try the next candidate; a coverage
+    authority fault is re-raised.
     """
+    # The fault distinction is live only when the coverage SAFETY gate is ON (same gate the
+    # shrink helper uses). With the gate OFF the observation build keeps its inert fail-open
+    # default, so a read fault → INSUFFICIENT_DATA → admitted-by-default (byte-identical today).
+    fail_closed = _q_lcb_settlement_coverage_gate_enabled()
     try:
         from src.calibration.qlcb_provenance import _qlcb_float
         from src.calibration.settlement_backward_coverage import (
@@ -9468,13 +9528,19 @@ def _replacement_family_coverage_verdict(
                 bin=bin_obj,
                 direction="buy_yes",
                 claimed_q_lcb=claimed,
+                fail_closed_on_fault=fail_closed,
             )
             verdict = settlement_backward_coverage_check(
                 city=family.city, metric=metric, season=season,
                 q_lcb=claimed, observations=obs, min_n=30,
             )
             return verdict
-        except Exception:
+        except Exception as exc:
+            # A coverage AUTHORITY fault (structural read/schema fault with the safety gate
+            # on) must fail CLOSED — propagate, never swallow to None or try the next candidate
+            # (a real fault is not a per-candidate hiccup). Other errors skip this candidate.
+            if "QLCB_COVERAGE_AUTHORITY_FAULT" in str(exc):
+                raise
             continue
     return None
 
@@ -9518,18 +9584,33 @@ def _build_replacement_calibration_credential(
         season = season_from_date(str(getattr(family, "target_date", "")), lat=lat)
     except Exception:
         season = None
-    coverage: dict[str, Any] = {"status": None, "coverage_ratio": None, "n": None, "shrink": None}
+    coverage: dict[str, Any] = {
+        "status": None, "coverage_ratio": None, "n": None,
+        "shrink": None, "shrink_applied": False,
+    }
     if coverage_verdict is not None:
         try:
             shrink = float(coverage_verdict.q_lcb_in) - float(coverage_verdict.q_lcb_out)
         except (TypeError, ValueError):
             shrink = None
+        # pr408 #1 CRITICAL: an UNLICENSED verdict only LICENSES the credential when the shrink
+        # was ACTUALLY applied to the live leg — i.e. the coverage gate flag is ON (the only
+        # condition under which _maybe_apply_settlement_coverage_to_lcb mutated lcb_by_direction
+        # above) AND the verdict produced a real downward shrink (q_lcb_out < q_lcb_in). With the
+        # flag OFF the unshrunk overconfident bound would serve live, so it must NOT license.
+        shrink_applied = bool(
+            _q_lcb_settlement_coverage_gate_enabled()
+            and str(coverage_verdict.status) == "UNLICENSED"
+            and shrink is not None
+            and shrink > 0.0
+        )
         coverage = {
             "status": str(coverage_verdict.status),
             "coverage_ratio": coverage_verdict.coverage_ratio,
             "realized_win_rate": coverage_verdict.realized_win_rate,
             "n": int(coverage_verdict.n_settlement_observations),
             "shrink": shrink,
+            "shrink_applied": shrink_applied,
         }
     return {
         "q_mode": q_mode,
@@ -9542,16 +9623,17 @@ def _build_replacement_calibration_credential(
     }
 
 
-# Coverage statuses that LICENSE the replacement calibration credential for live. These are
-# EXACTLY the statuses arm_gate_coverage_blocks() does NOT block on the status leg
-# (LICENSED, and UNLICENSED where the shrink was applied — a verdict the settled record
-# backed). INSUFFICIENT_DATA (no realized backing) is excluded → UNEVALUATED → blocked,
-# matching the ARM gate's "coverage_ratio is None → block" rule.
+# SINGLE AUTHORITY (twin-authority reconciliation #7, 2026-06-11): the set of statuses the
+# buy-NO admission gate honors has ONE home — live_admission.SETTLEMENT_COVERAGE_LICENSING_
+# STATUSES. This alias keeps the cert-layer name and pins the single-source registry entry
+# (#11); it must never regrow an inline frozenset literal.
 #
-# SINGLE AUTHORITY (twin-authority reconciliation #7, 2026-06-11): the set itself now has
-# ONE home — live_admission.SETTLEMENT_COVERAGE_LICENSING_STATUSES — read by BOTH the
-# buy-NO admission gate and this cert credential. This alias keeps the cert-layer name;
-# it must never regrow an inline frozenset literal (registry entry #11).
+# pr408 #1 CRITICAL (2026-06-14): the cert credential's PER-STATUS licensing decision
+# (_replacement_calibration_payload_from_credential) no longer reads this set directly — it
+# dispatches to the K3 predicates (settlement_coverage_allows_arm /_refutes_claim) because the
+# decision is now status-AND-shrink-aware (LICENSED/INSUFFICIENT_DATA license-by-default;
+# UNLICENSED licenses ONLY when the shrink was actually applied). The set remains the buy-NO
+# gate's vocabulary and the single-authority anchor.
 _FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES = SETTLEMENT_COVERAGE_LICENSING_STATUSES
 
 
@@ -9563,16 +9645,39 @@ def _replacement_calibration_payload_from_credential(
 ) -> dict[str, Any]:
     """Turn the stamped credential facts into the certificate calibration payload.
 
-    Emits authority=FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE when a coverage VERDICT licensed the
-    scope (status in LICENSED/UNLICENSED); otherwise FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED
-    (no verdict, or INSUFFICIENT_DATA) so the gate rejects with the distinct reason. The
-    payload carries the full provenance the receipt/verifier round-trips, plus the fields
-    the verifier's _validate_calibration_payload requires (horizon_profile == forecast's,
-    training_cutoff / model_available_at <= decision_time, a non-empty model_hash).
+    AUTHORITY (pr408 review C1+C2 #1 CRITICAL, 2026-06-14) — HONOR the K3 design:
+      * LICENSED / INSUFFICIENT_DATA (``settlement_coverage_allows_arm``) → admit with
+        authority=FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE. INSUFFICIENT_DATA is
+        license-by-default (thin/absent settled claim history is NOT proof of
+        overconfidence — RULE 1; the MC/EMOS q_lcb already carries its own conservative
+        LCB floor). This is the fix: the prior mapping sent INSUFFICIENT_DATA to
+        UNEVALUATED→REJECTED, blocking every thin-settlement cold cell at submit.
+      * UNLICENSED (``settlement_coverage_refutes_claim``) → admit ONLY when the selected
+        leg's q_lcb was ACTUALLY shrunk (coverage gate flag ON and q_lcb_out < q_lcb_in,
+        recorded as ``coverage.shrink_applied``). An UNLICENSED verdict whose shrink was
+        NOT applied (flag OFF) is a proven-overconfident bound serving UNSHRUNK → block as
+        UNEVALUATED. (Mirrors arm_gate_coverage_blocks, which refuses UNLICENSED outright;
+        here we additionally LICENSE the case where the shrink made the bound honest.)
+      * None / unknown / no verdict → UNEVALUATED → reject with the distinct reason.
+    The INSUFFICIENT_DATA / UNLICENSED status string is preserved on the cert (coverage_status)
+    for observability regardless of the licensing decision. The payload carries the full
+    provenance the receipt/verifier round-trips, plus the fields _validate_calibration_payload
+    requires (horizon_profile == forecast's, training_cutoff/model_available_at <= decision_time,
+    a non-empty model_hash).
     """
     coverage = credential.get("coverage") or {}
     status = coverage.get("status")
-    licensed = isinstance(status, str) and status in _FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES
+    status_str = status if isinstance(status, str) else ""
+    if settlement_coverage_allows_arm(status_str):
+        # LICENSED or INSUFFICIENT_DATA: a real non-refuting verdict admits.
+        licensed = True
+    elif settlement_coverage_refutes_claim(status_str):
+        # UNLICENSED: admit ONLY if the shrink was actually applied to the live leg
+        # (otherwise the unshrunk overconfident bound would serve live → block).
+        licensed = bool(coverage.get("shrink_applied"))
+    else:
+        # None / UNEVALUATED / unknown: no verdict → never license.
+        licensed = False
     authority = (
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
         if licensed
@@ -9623,6 +9728,22 @@ def _replacement_calibration_payload_from_credential(
         "n_samples": n_samples,
         "authority": authority,
     }
+
+
+def _q_lcb_settlement_coverage_gate_enabled() -> bool:
+    """The K3 settlement-coverage SHRINK flag — the SINGLE read shared by the shrink helper
+    (_maybe_apply_settlement_coverage_to_lcb) and the credential's shrink_applied fact.
+
+    pr408 #1: an UNLICENSED verdict only LICENSES the live credential when the shrink was
+    ACTUALLY applied to the live leg, which happens iff THIS flag is ON (it is the only gate
+    under which _maybe_apply_settlement_coverage_to_lcb mutates lcb_by_direction). Reading the
+    flag the same way here keeps the two seams in lockstep. A config read fault keeps the OFF
+    default (no shrink applied → UNLICENSED does not license), matching the helper's behavior.
+    """
+    try:
+        return bool(settings["edli"].get("q_lcb_settlement_coverage_gate_enabled", False))
+    except Exception:
+        return False
 
 
 def _replacement_authority_enabled() -> bool:
@@ -12169,6 +12290,12 @@ def _per_day_claimed_qlcb_by_date(
     FAIL-OPEN: any error / unavailable history yields an EMPTY dict (→ the caller produces
     an empty stream → INSUFFICIENT_DATA → q_lcb unchanged, no shrink, no ARM block). This
     is the RULE-1 inert default: absence of claim history is never a reason to suppress.
+
+    NOTE (pr408 #1 CRITICAL): the claim-history stream (edli_no_submit_receipts on world.db)
+    is a SOFT observability input — its absence/unreachability is GENUINELY thin (no per-day
+    claim history yet), NOT a structural fault of the settlement-coverage AUTHORITY. The
+    fail-CLOSED fault distinction lives in ``_settlement_coverage_observations`` over the
+    AUTHORITATIVE settlement_outcomes read, not here.
     """
     import json as _json
 
@@ -12225,6 +12352,7 @@ def _settlement_coverage_observations(
     bin: Bin,
     direction: str,
     claimed_q_lcb: float,
+    fail_closed_on_fault: bool = False,
 ):
     """Build the (PER-DAY claimed_q_lcb, won) CALIBRATION stream for ONE (bin, direction).
 
@@ -12247,9 +12375,19 @@ def _settlement_coverage_observations(
     that (band, day) — so n counts INDEPENDENT settled CLAIM-days, exactly what min_n
     should gate on.
 
-    Returns a list[CoverageObservation]. FAIL-OPEN: any error / unit mismatch / absent
+    Returns a list[CoverageObservation].
+
+    FAIL-OPEN (default, ``fail_closed_on_fault=False``): any error / unit mismatch / absent
     claim history yields an EMPTY stream (→ INSUFFICIENT_DATA → q_lcb unchanged, no shrink,
     no ARM block). RULE 1: absence of claim history is never a reason to suppress.
+
+    FAIL-CLOSED (``fail_closed_on_fault=True``, set when the coverage SAFETY gate is ON):
+    a STRUCTURAL fault — the claim-history read, or the settlement_outcomes query EXECUTION
+    (a read/parse/schema fault) — raises ``QLCB_COVERAGE_AUTHORITY_FAULT`` rather than
+    collapsing into "no data → INSUFFICIENT_DATA". A genuine thin cell (queries SUCCEED but
+    return < min_n matched settled claim-days) still yields a short/empty stream →
+    INSUFFICIENT_DATA (non-blocking). Per-row parse / UnitMismatch errors are individual
+    observations skipped, NOT cohort-structural faults. (pr408 review C1+C2 #1 CRITICAL.)
     """
     from types import SimpleNamespace
 
@@ -12260,6 +12398,9 @@ def _settlement_coverage_observations(
     obs: list = []
     band_template = _coverage_band_template(getattr(bin, "label", None))
     # Per-day ACTUAL claimed q_lcb history for THIS band (empty → INSUFFICIENT_DATA inert).
+    # This soft observability read is fail-open by design: no claim history is genuinely
+    # thin (RULE 1), never a structural fault. The fail-closed distinction is over the
+    # AUTHORITATIVE settlement_outcomes read below.
     claimed_by_date = _per_day_claimed_qlcb_by_date(
         city=city, metric=metric, direction=direction, band_template=band_template
     )
@@ -12273,7 +12414,13 @@ def _settlement_coverage_observations(
             "AND authority = 'VERIFIED'",
             (str(city), str(metric).lower()),
         ).fetchall()
-    except Exception:
+    except Exception as exc:
+        # A failed settlement_outcomes EXECUTION is a structural read/schema fault, NOT thin
+        # data. Fail closed when the safety gate is on; else keep the legacy inert default.
+        if fail_closed_on_fault:
+            raise ValueError(
+                f"QLCB_COVERAGE_AUTHORITY_FAULT:settlement_query:{type(exc).__name__}:{exc}"
+            ) from exc
         return obs
     for row in rows:
         try:
@@ -12376,6 +12523,10 @@ def _maybe_apply_settlement_coverage_to_lcb(
                 continue
             try:
                 claimed = _qlcb_float(lcb_by_direction[key])
+                # Gate is ON here → a structural read/schema fault in the observation build
+                # raises QLCB_COVERAGE_AUTHORITY_FAULT (it no longer silently degrades to an
+                # empty stream → INSUFFICIENT_DATA, which would mask a broken read as thin
+                # data and serve the UNSHRUNK bound). pr408 #1 makes FINDING-C's intent real.
                 obs = _settlement_coverage_observations(
                     forecast_conn=forecast_conn,
                     city=family.city,
@@ -12383,6 +12534,7 @@ def _maybe_apply_settlement_coverage_to_lcb(
                     bin=bin_obj,
                     direction=direction,
                     claimed_q_lcb=claimed,
+                    fail_closed_on_fault=True,
                 )
                 verdict = settlement_backward_coverage_check(
                     city=family.city, metric=metric, season=season,

@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-14
 # Authority basis: Operator-gated funnel #1 unlock (2026-06-10) — first-class calibration
 #   authority for replacement-chain candidates (FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE). Tears
 #   down the Platt-cohort wall: replacement candidates' q never passes through Platt, so the
@@ -7,7 +7,10 @@
 #   RELATIONSHIP tests (Fitz methodology): they assert the cross-function invariant
 #   credential-state -> certificate-authority -> live-gate-verdict holds across the boundary
 #   between the calibration-authority builder, the live admission gate, and the verifier.
-"""Four-quadrant relationship matrix for the replacement calibration credential.
+#   pr408 review C1+C2 #1 CRITICAL (2026-06-14): the credential now HONORS the K3 design —
+#   INSUFFICIENT_DATA is admitted-by-default (was UNEVALUATED→blocked, the cold-cell submit
+#   blocker), and UNLICENSED admits ONLY when the shrink was actually applied to the leg.
+"""Quadrant relationship matrix for the replacement calibration credential.
 
 The credential bridges three modules whose boundary the bug lived at:
   (1) the live replacement builder stamps `payload[_REPLACEMENT_CALIBRATION_CREDENTIAL_KEY]`,
@@ -15,10 +18,11 @@ The credential bridges three modules whose boundary the bug lived at:
   (3) `_assert_event_bound_calibration_live_admitted` (the live gate) admits/rejects it,
   (4) the verifier's APPROVED_CALIBRATION_AUTHORITIES round-trips the admitted authority.
 
-The four quadrants (mission part 3):
-  Q1 replacement + bounds + coverage verdict  -> admitted, FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE
+The quadrants (pr408 #1 corrected):
+  Q1 replacement + bounds + LICENSED / INSUFFICIENT_DATA / UNLICENSED-shrunk -> admitted,
+     FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE (INSUFFICIENT_DATA is license-by-default)
   Q2 replacement + NO bounds                   -> IDENTITY_FALLBACK reject (unchanged)
-  Q3 replacement + bounds, NO coverage verdict -> FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED reject
+  Q3 replacement + bounds, NO verdict (None) OR UNLICENSED-unshrunk -> UNEVALUATED reject
   Q4 legacy candidate, no Platt bucket         -> IDENTITY_FALLBACK reject (unchanged)
 """
 from __future__ import annotations
@@ -29,7 +33,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.config import runtime_cities_by_name
+from src.config import runtime_cities_by_name, settings
 from src.decision_kernel.verifier import APPROVED_CALIBRATION_AUTHORITIES
 from src.engine import event_reactor_adapter as adapter
 from src.engine.event_reactor_adapter import (
@@ -42,6 +46,15 @@ from src.engine.event_reactor_adapter import (
     _replacement_family_coverage_verdict,
 )
 from src.types.market import Bin
+
+
+@pytest.fixture
+def _coverage_gate_on(monkeypatch):
+    """Turn the K3 coverage SHRINK flag ON so an UNLICENSED verdict's shrink is 'applied'
+    (the credential licenses UNLICENSED only when the shrink actually moved the live leg)."""
+    edli = dict(settings._data["edli"])
+    edli["q_lcb_settlement_coverage_gate_enabled"] = True
+    monkeypatch.setitem(settings._data, "edli", edli)
 
 DECISION_TIME = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
 _CITY = "Chicago"
@@ -106,19 +119,28 @@ def _render_payload(credential):
 
 
 # ---------------------------------------------------------------------------
-# Q1 — replacement + bounds + coverage verdict -> admitted with new authority
+# Q1 — replacement + bounds + an ADMITTING coverage verdict -> new authority
+#   LICENSED: admitted unconditionally.
+#   UNLICENSED-shrunk (flag on + q_lcb_out<q_lcb_in): admitted (the shrunk q_lcb is honest).
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("status", ["LICENSED", "UNLICENSED"])
-def test_q1_replacement_with_bounds_and_coverage_is_admitted(status):
+def test_q1_replacement_with_bounds_and_coverage_is_admitted(status, _coverage_gate_on):
     bundle = _replacement_bundle(
         q_lcb={"bin-a": 0.80},
         q_lcb_basis="fused_center_bootstrap_p05",
         q_mode="FUSED_NORMAL_FULL",
     )
+    # UNLICENSED admits ONLY when the shrink was actually applied: a real downward shrink
+    # (q_lcb_out < q_lcb_in) with the coverage gate ON. LICENSED needs no shrink.
+    verdict = (
+        _coverage_verdict("UNLICENSED", q_lcb_in=0.80, q_lcb_out=0.66)
+        if status == "UNLICENSED"
+        else _coverage_verdict("LICENSED")
+    )
     credential = _build_replacement_calibration_credential(
         replacement_bundle=bundle,
         q_mode="FUSED_NORMAL_FULL",
-        coverage_verdict=_coverage_verdict(status),
+        coverage_verdict=verdict,
         family=_family(),
     )
     assert credential is not None
@@ -140,6 +162,70 @@ def test_q1_replacement_with_bounds_and_coverage_is_admitted(status):
 
     # the verifier's approved set round-trips it
     assert FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY in APPROVED_CALIBRATION_AUTHORITIES
+
+
+def test_q1_insufficient_data_is_admitted_by_default():
+    """pr408 #1 CRITICAL: a thin-history INSUFFICIENT_DATA verdict (n=0, no realized backing)
+    is admitted-by-default — authority FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE, the live gate does
+    NOT raise, and the empty-sample guard does NOT block on n_samples==0. RED-on-revert:
+    restoring the {LICENSED,UNLICENSED} mapping sends this to UNEVALUATED→REJECTED."""
+    bundle = _replacement_bundle(
+        q_lcb={"bin-a": 0.80},
+        q_lcb_basis="fused_center_bootstrap_p05",
+        q_mode="FUSED_NORMAL_FULL",
+    )
+    credential = _build_replacement_calibration_credential(
+        replacement_bundle=bundle,
+        q_mode="FUSED_NORMAL_FULL",
+        coverage_verdict=_coverage_verdict("INSUFFICIENT_DATA", n=0, ratio=None, realized=None),
+        family=_family(),
+    )
+    cal_payload, _clock = _render_payload(credential)
+    assert cal_payload["authority"] == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
+    assert cal_payload["coverage_status"] == "INSUFFICIENT_DATA"  # preserved for observability
+    assert cal_payload["n_samples"] == 0
+    cert = SimpleNamespace(payload=cal_payload)
+    _assert_event_bound_calibration_live_admitted(cert)  # must NOT raise (admitted-by-default)
+
+
+def test_q1_unlicensed_unshrunk_is_blocked(monkeypatch):
+    """An UNLICENSED verdict whose shrink was NOT applied to the live leg is the unshrunk
+    overconfident bound serving live — it must BLOCK as UNEVALUATED, not license. Two
+    unshrunk shapes, both blocked: (1) the coverage gate is OFF (the shrink never reached
+    the leg) even with q_lcb_out<q_lcb_in; (2) the gate is ON but the verdict produced no
+    real shrink (q_lcb_out == q_lcb_in)."""
+    bundle = _replacement_bundle(
+        q_lcb={"bin-a": 0.80},
+        q_lcb_basis="fused_center_bootstrap_p05",
+        q_mode="FUSED_NORMAL_FULL",
+    )
+    # (1) gate OFF → shrink_applied False even though q_lcb_out < q_lcb_in.
+    edli_off = dict(settings._data["edli"])
+    edli_off["q_lcb_settlement_coverage_gate_enabled"] = False
+    monkeypatch.setitem(settings._data, "edli", edli_off)
+    credential = _build_replacement_calibration_credential(
+        replacement_bundle=bundle,
+        q_mode="FUSED_NORMAL_FULL",
+        coverage_verdict=_coverage_verdict("UNLICENSED", q_lcb_in=0.80, q_lcb_out=0.66),
+        family=_family(),
+    )
+    cal_payload, _clock = _render_payload(credential)
+    assert cal_payload["authority"] == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
+    with pytest.raises(ValueError, match="FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"):
+        _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
+
+    # (2) gate ON but the verdict produced no real shrink (q_lcb_out == q_lcb_in).
+    edli_on = dict(settings._data["edli"])
+    edli_on["q_lcb_settlement_coverage_gate_enabled"] = True
+    monkeypatch.setitem(settings._data, "edli", edli_on)
+    credential2 = _build_replacement_calibration_credential(
+        replacement_bundle=bundle,
+        q_mode="FUSED_NORMAL_FULL",
+        coverage_verdict=_coverage_verdict("UNLICENSED", q_lcb_in=0.80, q_lcb_out=0.80),
+        family=_family(),
+    )
+    cal_payload2, _clock2 = _render_payload(credential2)
+    assert cal_payload2["authority"] == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
 
 
 # ---------------------------------------------------------------------------
@@ -169,21 +255,11 @@ def test_q2_replacement_without_bounds_yields_no_credential(q_lcb, q_lcb_basis, 
 
 
 # ---------------------------------------------------------------------------
-# Q3 — replacement + bounds, NO coverage verdict -> UNEVALUATED reject (distinct)
+# Q3 — replacement + bounds, NO coverage verdict (None) -> UNEVALUATED reject (distinct).
+#   pr408 #1: INSUFFICIENT_DATA is NO LONGER here (it admits-by-default, see Q1). Only the
+#   absence of ANY verdict (None — the machinery could not evaluate the scope) blocks.
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "coverage_verdict",
-    [
-        None,                                    # coverage machinery never evaluated the scope
-        "INSUFFICIENT_DATA",                     # no realized backing (thin data)
-    ],
-)
-def test_q3_replacement_bounds_no_coverage_verdict_is_unevaluated_blocked(coverage_verdict):
-    verdict = (
-        None
-        if coverage_verdict is None
-        else _coverage_verdict("INSUFFICIENT_DATA", n=0, ratio=None, realized=None)
-    )
+def test_q3_replacement_bounds_no_coverage_verdict_is_unevaluated_blocked():
     bundle = _replacement_bundle(
         q_lcb={"bin-a": 0.80},
         q_lcb_basis="fused_center_bootstrap_p05",
@@ -192,7 +268,7 @@ def test_q3_replacement_bounds_no_coverage_verdict_is_unevaluated_blocked(covera
     credential = _build_replacement_calibration_credential(
         replacement_bundle=bundle,
         q_mode="FUSED_NORMAL_PARTIAL",
-        coverage_verdict=verdict,
+        coverage_verdict=None,  # no verdict at all
         family=_family(),
     )
     assert credential is not None  # bounds present -> credential built
@@ -309,7 +385,10 @@ def test_family_coverage_verdict_insufficient_data_below_min_n():
     )
     assert verdict is not None
     assert verdict.status == "INSUFFICIENT_DATA"
-    # an INSUFFICIENT_DATA verdict -> UNEVALUATED credential -> blocked (Q3 path)
+    # pr408 #1 CRITICAL: an INSUFFICIENT_DATA verdict is admitted-by-default — the credential
+    # is FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE (NOT UNEVALUATED). The cold thin-history cell now
+    # reaches live admission instead of being blocked. RED-on-revert: restoring the old
+    # mapping sends it to UNEVALUATED.
     credential = _build_replacement_calibration_credential(
         replacement_bundle=_replacement_bundle(
             q_lcb={"bin-a": 0.80},
@@ -321,7 +400,10 @@ def test_family_coverage_verdict_insufficient_data_below_min_n():
         family=family,
     )
     cal_payload, _clock = _render_payload(credential)
-    assert cal_payload["authority"] == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
+    assert cal_payload["authority"] == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
+    assert cal_payload["coverage_status"] == "INSUFFICIENT_DATA"
+    # the live gate ADMITS it even with n_samples==0 (empty-sample guard honors INSUFFICIENT_DATA)
+    _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
 
 
 def test_family_coverage_verdict_none_when_no_candidate_lcb():
@@ -337,6 +419,63 @@ def test_family_coverage_verdict_none_when_no_candidate_lcb():
         family=family, forecast_conn=conn, lcb_by_direction=QlcbByDirection()
     )
     assert verdict is None
+
+
+# ---------------------------------------------------------------------------
+# pr408 #1 CRITICAL: a STRUCTURAL coverage fault must NOT collapse into INSUFFICIENT_DATA.
+# ---------------------------------------------------------------------------
+class _SettlementQueryBoomConn:
+    """A forecast_conn whose settlement_outcomes query EXECUTION raises (a read/schema fault).
+    With claim history present, the verdict path reaches this query — a structural fault, not
+    thin data."""
+
+    def execute(self, *args, **kwargs):
+        raise sqlite3.OperationalError("no such table: settlement_outcomes")
+
+
+def _family_one_yes_lcb():
+    bin_obj = Bin(70, 71, "F", "70-71°F")
+    candidate = SimpleNamespace(condition_id="cond-1", bin=bin_obj)
+    family = SimpleNamespace(
+        city=_CITY, metric=_METRIC, target_date=_TARGET_DATE, candidates=(candidate,)
+    )
+    from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
+
+    lcb = QlcbByDirection()
+    _set_qlcb_provenance(lcb, ("cond-1", "buy_yes"), 0.80, source="FORECAST_BOOTSTRAP")
+    return family, lcb
+
+
+def test_structural_coverage_fault_raises_not_insufficient_data(monkeypatch):
+    """A structural settlement read/schema fault, with the coverage SAFETY gate ON, raises
+    QLCB_COVERAGE_AUTHORITY_FAULT (fail closed) — it must NOT degrade to INSUFFICIENT_DATA
+    (which would mask a broken read as thin data and admit-by-default an unverified bound).
+    RED-on-revert: swallowing the fault to None/INSUFFICIENT_DATA removes the raise."""
+    edli_on = dict(settings._data["edli"])
+    edli_on["q_lcb_settlement_coverage_gate_enabled"] = True
+    monkeypatch.setitem(settings._data, "edli", edli_on)
+    # claim history present so the path REACHES the settlement query (not short-circuited thin)
+    monkeypatch.setattr(adapter, "_per_day_claimed_qlcb_by_date", lambda **kw: {_TARGET_DATE: 0.80})
+    family, lcb = _family_one_yes_lcb()
+    with pytest.raises(ValueError, match=r"QLCB_COVERAGE_AUTHORITY_FAULT:settlement_query"):
+        _replacement_family_coverage_verdict(
+            family=family, forecast_conn=_SettlementQueryBoomConn(), lcb_by_direction=lcb
+        )
+
+
+def test_structural_coverage_fault_inert_when_gate_off(monkeypatch):
+    """Gate OFF: a structural fault stays inert (the legacy fail-open default) — the verdict is
+    a non-blocking INSUFFICIENT_DATA, byte-identical to today. The fail-closed behavior is
+    scoped to the SAFETY gate being ON."""
+    edli_off = dict(settings._data["edli"])
+    edli_off["q_lcb_settlement_coverage_gate_enabled"] = False
+    monkeypatch.setitem(settings._data, "edli", edli_off)
+    monkeypatch.setattr(adapter, "_per_day_claimed_qlcb_by_date", lambda **kw: {_TARGET_DATE: 0.80})
+    family, lcb = _family_one_yes_lcb()
+    verdict = _replacement_family_coverage_verdict(
+        family=family, forecast_conn=_SettlementQueryBoomConn(), lcb_by_direction=lcb
+    )
+    assert verdict is not None and verdict.status == "INSUFFICIENT_DATA"
 
 
 # ---------------------------------------------------------------------------

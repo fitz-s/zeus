@@ -1,6 +1,9 @@
 # Created: 2026-06-04
 # Lifecycle: created=2026-06-04; last_reviewed=2026-06-14; last_reused=2026-06-14
-# 2026-06-14 (D4 emos_mu_bias_probe.md + law 8): build_emos_q now applies the airport-settlement-honest
+# 2026-06-14 (pr408 review C1+C2 #3 HIGH): build_emos_q enforces the one-signed μ-offset contract at the
+#   seam — applies μ_corr = μ* − offset_c ONLY when offset_c<0 (a cold center is WARMED); a non-negative
+#   offset is never applied (defense-in-depth atop the loader's refusal). Prior:
+# 2026-06-14 (D4 emos_mu_bias_probe.md + law 8): build_emos_q applies the airport-settlement-honest
 #   EMOS μ-OFFSET correction (src.calibration.emos.emos_mu_offset) to the °C center BEFORE the σ-floor
 #   and F→C unit handling — μ_corr = μ* − offset_c for `activated` (cold + OOS-do-no-harm) cells only;
 #   absent/unactivated → uncorrected center (fail-closed). Reuse with scripts/fit_emos_mu_offset.py.
@@ -97,8 +100,12 @@ def build_emos_q(
     # cold AND OOS do-no-harm pass) carry a correction; an absent table / unactivated cell → None → the
     # uncorrected center (today's behavior, fail-closed — never crashes a live size). σ is UNCHANGED (the
     # σ-floor still governs dispersion); this shifts ONLY the center, in °C, BEFORE any F→C unit handling.
+    # ONE-SIGNED CONTRACT (pr408 review C1+C2 #3 HIGH, 2026-06-14): the offset must be
+    # strictly negative (μ_corr = μ* − offset_c WARMS a cold center). The loader already
+    # refuses an activated offset_c ≥ 0, but guard here too (defense-in-depth at the seam):
+    # a non-negative offset would COOL the center the wrong way, so apply NO correction.
     _mu_off_c = emos_mu_offset(city, season, str(metric).lower(), required=False)
-    if _mu_off_c is not None:
+    if _mu_off_c is not None and float(_mu_off_c) < 0.0:
         mu_c = mu_c - float(_mu_off_c)
 
     # EMPIRICAL settlement σ-floor (loop-breaker, investigation 2026-06-05; iron rule 5). The EMOS

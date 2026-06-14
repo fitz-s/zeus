@@ -1,6 +1,8 @@
 # Created: 2026-06-02
-# Last reused or audited: 2026-06-07
-# Authority basis: EMOS shadow-ledger task; PIECE 1 spec.
+# Last reused or audited: 2026-06-14
+# Authority basis (2026-06-14): pr408 review C1+C2 #3 HIGH — emos_mu_offset enforces the
+#   one-signed contract: an activated cell with offset_c>=0 is refused (None / EmosMuOffsetError),
+#   so a wrong-sign offset can never COOL the center. Prior basis: EMOS shadow-ledger task; PIECE 1 spec.
 #   Model: mu=a+b*xbar; sigma2=exp(c+d*log(S2)+e*lead_days).
 #   Table: state/emos_calibration.json, schema _meta + cells{"City|SEASON": {params,n,served}}.
 #   served=="raw" or missing cell → return None (caller falls back to raw ensemble).
@@ -316,11 +318,19 @@ def emos_mu_offset(
     center (offset_c < 0) is WARMED toward settlement; the correction is one-signed-honest (the fitter
     never activates a warm cell, so this never cools one). Metric is lowercased to match the cell key.
 
-    FAIL-CLOSED: an absent/malformed table, a missing cell, an unactivated cell, a non-finite offset, or
-    (when ``required``) any defect → no correction (None) / EmosMuOffsetError. An unactivated cell is the
-    common case (most cells are EMOS-absorbed or warm) and returns None WITHOUT raising even under
-    ``required`` — "no honest correction for this cell" is a valid, expected state, NOT an artifact defect.
-    Cached + thread-safe like the EMOS table.
+    ONE-SIGNED CONTRACT (pr408 review C1+C2 #3 HIGH, 2026-06-14): an ACTIVATED cell whose stored
+    ``offset_c >= 0`` is REFUSED — a non-negative offset would COOL the center (μ_corr = μ* − offset_c
+    with offset_c ≥ 0 shifts μ* DOWN/unchanged), the wrong direction for a cold-bias correction. The
+    fitter must never activate such a cell; if one is present (corrupt/hand-edited artifact, or a sign
+    bug), the loader returns None (no correction) and raises EmosMuOffsetError under ``required`` so a
+    candidate cannot silently serve a center pushed the wrong way. This is the consumer half of the
+    producer's one-signed gate (scripts/fit_emos_mu_offset.py).
+
+    FAIL-CLOSED: an absent/malformed table, a missing cell, an unactivated cell, a non-finite offset, a
+    NON-NEGATIVE activated offset, or (when ``required``) any defect → no correction (None) /
+    EmosMuOffsetError. An unactivated cell is the common case (most cells are EMOS-absorbed or warm) and
+    returns None WITHOUT raising even under ``required`` — "no honest correction for this cell" is a
+    valid, expected state, NOT an artifact defect. Cached + thread-safe like the EMOS table.
     """
     try:
         table = load_mu_offset_table(required=required)
@@ -351,6 +361,18 @@ def emos_mu_offset(
         if not math.isfinite(off):
             if required:
                 raise EmosMuOffsetError(f"EMOS_MU_OFFSET_NON_FINITE:{key}:offset_c={off}")
+            return None
+        # ONE-SIGNED CONTRACT: an activated cell MUST carry a strictly-cold (negative) offset.
+        # A non-negative offset on an activated cell would COOL the center — refuse it.
+        if not (off < 0.0):
+            if required:
+                raise EmosMuOffsetError(
+                    f"EMOS_MU_OFFSET_WRONG_SIGN:{key}:offset_c={off}:expected<0"
+                )
+            logger.warning(
+                "emos_mu_offset(%r,%r,%r): activated cell has non-cold offset_c=%s (>=0) — "
+                "one-signed contract refuses it (no correction)", city, season, metric, off,
+            )
             return None
         return off
     except EmosMuOffsetError:
