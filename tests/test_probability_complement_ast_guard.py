@@ -34,10 +34,8 @@ LIVE_PROBABILITY_PATHS = (
     "src/events/opportunity_selector.py",
     "src/events/reactor.py",
     "src/state/db.py",
-    "src/strategy/candidates/center_sell_model_no.py",
-    "src/strategy/candidates/imminent_open_capture_posterior_collapse.py",
-    "src/strategy/candidates/opening_inertia_relaxation.py",
-    "src/strategy/candidates/settlement_capture_shadow.py",
+    # src/strategy/candidates/* removed 2026-06-14 (shadow-candidate framework
+    # deletion — gate-mass-collapse wave); their entries dropped from this scan list.
     "src/strategy/exit_family_optimizer.py",
     "src/strategy/live_inference/live_admission.py",
     "src/strategy/market_analysis.py",

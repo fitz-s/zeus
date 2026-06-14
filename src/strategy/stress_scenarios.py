@@ -13,11 +13,15 @@ Six required scenarios (verbatim from 04_PHASE_3_SHOULDER.md §"Stress scenarios
   6. correlated city crash (assume all cities in cluster realize same-direction tail)
 
 Rejection rule: a shoulder candidate that fails ANY stress scenario (i.e.,
-posterior_stressed × payoff - fee_adjusted_cost > 0 is invalid) is rejected
-with NoTradeReason.SHOULDER_STRESS_FAIL. Results written to tail_stress_scenarios table.
+posterior_stressed × payoff - fee_adjusted_cost > 0 is invalid) would be rejected.
+Results written to tail_stress_scenarios table.
 
 SCAFFOLD — run_stress_tests body raises NotImplementedError.
 Production logic wired in T2 production pass.
+
+NOTE (2026-06-14): the former NoTradeReason.SHOULDER_STRESS_FAIL enum member was
+removed in the gate-mass-collapse wave (it had no live emitter — this scaffold
+never emitted it). This module remains an unwired scaffold.
 """
 
 from __future__ import annotations

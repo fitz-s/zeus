@@ -36,9 +36,12 @@ from typing import FrozenSet
 import pytest
 
 # ---------------------------------------------------------------------------
-# Migration plan: 69 callsites -> canonical NoTradeReason member value
-# Source: T2_NO_TRADE_EVENTS_SCAFFOLD.md §3
-# All lines verified against git show origin/main:src/engine/evaluator.py
+# Migration plan: 77 callsites -> canonical NoTradeReason member value
+# Source: T2_NO_TRADE_EVENTS_SCAFFOLD.md §3 (original 70) + 2026-06-14
+#   gate-mass-collapse reconciliation (+10 live evaluator emitters that were
+#   false orphans once the shadow-candidate exempt set shrank).
+# Original 70 rows' linenos verified against git show origin/main:src/engine/evaluator.py;
+# the +10 reconciliation rows carry current-tree linenos.
 # StrEnum uses auto() so values are lowercased member names.
 # ---------------------------------------------------------------------------
 MIGRATION_TABLE: list[tuple[int, str, str]] = [
@@ -56,7 +59,6 @@ MIGRATION_TABLE: list[tuple[int, str, str]] = [
     (2144, "[str(e)] SourceNotEnabled", "ens_source_not_enabled"),
     (2152, "[str(e)] generic Exception", "ens_fetch_failed"),
     (2160, "ENS fetch failed or < 51 members", "ens_fetch_insufficient_members"),
-    (2170, "ENS fetch failed or < 51 members", "ens_fetch_insufficient_members"),
     (2178, "DEGRADED_FORECAST_FALLBACK", "forecast_source_degraded"),
     (2191, "Forecast source evidence incomplete", "forecast_evidence_incomplete"),
     (2207, "[str(e)] KeyError/TypeError ens_times", "ens_times_parse_error"),
@@ -64,7 +66,6 @@ MIGRATION_TABLE: list[tuple[int, str, str]] = [
     (2242, "No Day0 forecast hours remain for target date", "day0_no_forecast_hours_remain"),
     (2253, "ENS fetch failed, < 51 members, or insufficient finite required-hour members", "ens_insufficient_required_hour_members"),
     (2277, "[str(e)] ValueError EnsembleSignal ctor", "ens_signal_construction_failed"),
-    (2300, "No Day0 forecast hours remain for target date", "day0_no_forecast_hours_remain"),
     (2309, "Day0 low observation unavailable", "day0_low_observation_unavailable"),
     (2340, "Day0 low slot rejected: causality_status=", "day0_low_causality_rejected"),
     (2361, "Day0 current observation became unavailable before signal routing", "day0_current_obs_unavailable"),
@@ -88,7 +89,6 @@ MIGRATION_TABLE: list[tuple[int, str, str]] = [
     (2950, "[str(e)] EmptyOrderbookError", "market_empty_orderbook"),
     (2963, "[str(e)] generic exception clob loop", "market_liquidity_error"),
     (2989, "crosscheck unavailable:", "crosscheck_unavailable"),
-    (3007, "crosscheck unavailable", "crosscheck_unavailable"),
     (3032, "GFS crosscheck unavailable", "gfs_crosscheck_unavailable"),
     (3067, "crosscheck unavailable:", "crosscheck_unavailable"),
     (3083, "CONFLICT", "model_conflict"),
@@ -112,9 +112,24 @@ MIGRATION_TABLE: list[tuple[int, str, str]] = [
     (3804, "[str(exc)] ValueError _size_at_execution_price_boundary", "execution_price_sizing_error"),
     (3822, "< $", "size_below_minimum"),
     (3850, "[reason] check_position_allowed", "risk_limits_exceeded"),
+    # ── Live evaluator emitters reconciled into the plan 2026-06-14 ───────────
+    # (gate-mass-collapse wave): these members have real evaluator.py emitters
+    # (linenos against current src/engine/evaluator.py). Previously absent from
+    # the migration plan, surfacing as false orphans once the shadow-candidate
+    # exempt set shrank. Each row's lineno points at the live emit site.
+    (5527, "MUTUALLY_EXCLUSIVE_FAMILY_DEDUP (family dedup)", "mutually_exclusive_family_dedup"),
+    (5669, "PARTIAL_SOURCE_QUALITY_REJECTED", "partial_source_quality_rejected"),
+    (1415, "PASSIVE_FILL_MODEL_MISSING (passive sizing helper)", "passive_fill_model_missing"),
+    (5710, "PROBABILITY_EDGE_BIN_UNSUPPORTED (edge-bin sanity)", "probability_edge_bin_unsupported"),
+    (5708, "PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT", "probability_low_price_edge_bin_disagreement"),
+    (5199, "PROBABILITY_SANITY_GATE (validate_high_distribution)", "probability_sanity_gate"),
+    (5712, "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD (edge-bin sanity)", "probability_tail_shape_anomaly_hard"),
+    (6248, "SHOULDER_CLUSTER_CAP_EXCEEDED", "shoulder_cluster_cap_exceeded"),
+    (1427, "STRATEGY_ECONOMIC_FLOOR (economic floor helper)", "strategy_economic_floor"),
+    (1419, "ULTRA_LOW_PRICE_NOT_AUTHORIZED (ultra-low-price helper)", "ultra_low_price_not_authorized"),
 ]
 
-assert len(MIGRATION_TABLE) == 70, f"Migration table must have 70 rows, got {len(MIGRATION_TABLE)}"
+assert len(MIGRATION_TABLE) == 77, f"Migration table must have 77 rows, got {len(MIGRATION_TABLE)}"
 
 
 def _get_evaluator_path() -> pathlib.Path:
@@ -214,42 +229,20 @@ def test_inv_evaluator_callsite_count() -> None:
 
 
 
-# Shadow-candidate reasons added by wave/stochastic-datagated-20260522.
-# These are written by candidate.evaluate() (shadow dispatch path), NOT by
-# evaluator.py rejection_reasons=[...] callsites. They legitimately have no
-# MIGRATION_TABLE entry — adding them to the evaluator callsite plan would be
-# category-wrong (they belong in the shadow-candidate evidence pipeline, not
-# the T2 evaluator migration). Added 2026-05-22 by wave critic MAJOR-2 fix.
+# Non-evaluator-callsite reasons: emitted by live code paths OTHER than
+# evaluator.py rejection_reasons=[...] callsites, so MIGRATION_TABLE coverage
+# would be category-wrong for them. The original shadow-candidate research-harness
+# reasons (19 members) were DELETED 2026-06-14 in the gate-mass-collapse wave
+# (src/strategy/candidates/* + shadow_candidate_dispatch.py removed), so they no
+# longer exist as enum members and are gone from this exempt set. The two
+# survivors below are live, non-evaluator-emitted reasons:
+#   - probability_tail_shape_anomaly_shadow: emitted in shadow mode by
+#     src/signal/probability_sanity.py (reason_code string), not via evaluator.
+#   - shoulder_no_trade_gate: emitted by src/contracts/shoulder_strategy_vnext.py
+#     (no_trade_reason=...), consumed by the backtest harness, not via evaluator.
 _SHADOW_CANDIDATE_REASONS: FrozenSet[str] = frozenset({
-    # CenterSellParity (pre-wave — no evaluator callsite)
-    "center_pair_parity_book_unavailable",
-    "center_pair_parity_no_edge",
-    # CenterSellModelNo (S4)
-    "center_sell_model_no_calibration_unavailable",
-    "center_sell_model_no_no_edge",
-    # CrossMarketCorrelationHedge (G3)
-    "corr_hedge_objective_below_cost",
-    # ShoulderBuyEVT (S5)
-    "evt_tail_model_unwired",
-    # ImminentOpenCapturePosteriorCollapse (S3)
-    "imminent_calibration_unavailable",
-    "imminent_no_edge",
-    # LiquidityProvisionWithHeartbeat (G2)
-    "liqprov_adverse_selection_unwired",
-    # SettlementCaptureShadow — physical interval gates (pre-wave shadow)
-    "physical_envelope_unwired",
-    "physical_interval_data_gated",
-    "physical_interval_overlap",
-    "physical_interval_unprofitable",
-    "resolution_typed_outcome_unavailable",
-    "settlement_capture_not_locked",
-    # ShoulderBuyEVT (S5)
-    "shoulder_buy_lower_bound_not_positive",
-    # ShoulderImpossibleTailCapture (pre-wave shadow)
-    "shoulder_physical_bound_not_excludes_tail",
-    # WeatherEventArbitrage (G1)
-    "weather_alert_edge_nonpositive",
-    "weather_alert_lr_table_missing",
+    "probability_tail_shape_anomaly_shadow",
+    "shoulder_no_trade_gate",
 })
 
 

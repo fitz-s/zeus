@@ -96,7 +96,6 @@ class NoTradeReason(StrEnum):
     SELECTED_EDGE_MISSING_SUPPORT_INDEX = auto()
     SELECTED_EDGE_NO_TOKEN_PAYLOAD = auto()
     STRATEGY_KEY_UNCLASSIFIED = auto()
-    DAY0_NOWCAST_NOT_AUTHORIZED = auto()
     CONFIDENCE_BAND_INSUFFICIENT = auto()
     CENTER_BUY_ULTRA_LOW_PRICE = auto()
 
@@ -119,86 +118,24 @@ class NoTradeReason(StrEnum):
     STRATEGY_ECONOMIC_FLOOR = auto()
     PASSIVE_FILL_MODEL_MISSING = auto()
     ULTRA_LOW_PRICE_NOT_AUTHORIZED = auto()
-    SUBSTRATE_TOPOLOGY_INCOMPLETE = auto()
-    SNAPSHOT_CAPTURE_SEMANTIC_MISMATCH = auto()
     PARTIAL_SOURCE_QUALITY_REJECTED = auto()
     RISK_LIMITS_EXCEEDED = auto()
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = auto()
 
     # ── Shoulder strategy gates (Phase 3 T2) ─────────────────────────────────
-    # 6 SHOULDER_* members per 04_PHASE_3_SHOULDER.md §"NoTradeReason additions"
-    SHOULDER_STRESS_FAIL = auto()
-    SHOULDER_REGIME_MISMATCH = auto()
-    SHOULDER_NATIVE_NO_DEPTH_INSUFFICIENT = auto()
-    SHOULDER_DAY0_BOUND_NOT_ELIMINATED = auto()
+    # Live shoulder gates with real evaluator emitters. The 4 data-gated
+    # SHOULDER_* members (STRESS_FAIL, REGIME_MISMATCH, NATIVE_NO_DEPTH_INSUFFICIENT,
+    # DAY0_BOUND_NOT_ELIMINATED) were removed 2026-06-14 — no live emitter.
     SHOULDER_NO_TRADE_GATE = auto()
     SHOULDER_CLUSTER_CAP_EXCEEDED = auto()
 
-    # ── Phase 4 T2/T3 candidate strategy gates ────────────────────────────────
-    # 4 members per 05_PHASE_4_FDR_FAMILY_CANDIDATES.md §"NoTradeReason additions"
-    STALE_QUOTE_FILL_INFEASIBLE = auto()       # stale_quote_detector: book hash stale post info-event
-    RESOLUTION_DISPUTED = auto()               # resolution_window_maker: venue resolution status contested
-    LIQPROV_HEARTBEAT_ABSENT = auto()          # liquidity_provision_with_heartbeat: fill_probability field absent (legacy; no longer emitted post-adverse-selection reframe)
-    LIQPROV_ADVERSE_SELECTION_UNWIRED = auto() # liquidity_provision_with_heartbeat: AS(q,τ) from full-market CLOB data not wired → data-gated no_trade
-    WEATHER_ALERT_SOURCE_UNTRUSTED = auto()    # weather_event_arbitrage: external alert feed not wired/trusted
-    WEATHER_ALERT_LR_TABLE_MISSING = auto()   # weather_event_arbitrage: alert LR table absent (not yet fitted)
-    WEATHER_ALERT_EDGE_NONPOSITIVE = auto()   # weather_event_arbitrage: p'⁻ − ask − φ ≤ 0; posterior below ask+fee
-    RESOLUTION_TYPED_OUTCOME_UNAVAILABLE = auto()  # resolution_window_maker: typed SettlementOutcome not wired on context (data-gated)
-
-    # ── Phase 4 T4 candidate strategy gates ────────────────────────────────────
-    # 2 members per 05_PHASE_4_FDR_FAMILY_CANDIDATES.md §T4 deferred candidates
-    CORR_HEDGE_REGIME_UNAVAILABLE = auto()     # cross_market_correlation_hedge: regime UNKNOWN or store not fit
-    CORR_HEDGE_OBJECTIVE_BELOW_COST = auto()  # cross_market_correlation_hedge: w*ᵀe−(λ/2)w*ᵀΣw* ≤ 0; eᵀΣ⁻¹e ≤ cost gate
-    NEGRISK_FAMILY_INCOMPLETE = auto()         # neg_risk_basket: full token book per family unavailable
-    NEGRISK_NO_PROFITABLE_BASKET = auto()      # neg_risk_basket: book present but max(Π_Y(q*),Π_N(q*)) <= 0
-
-    # ── center_sell parity arb candidate gates ─────────────────────────────────
-    CENTER_PAIR_PARITY_BOOK_UNAVAILABLE = auto()  # center_sell: binary_book_snapshot absent on analysis
-    CENTER_PAIR_PARITY_NO_EDGE = auto()           # center_sell: a_YES+a_NO+fees >= 1 at q*; no deterministic arb
-
-    # ── center_sell model-NO calibrated stochastic candidate gates (2026-05-22) ──
-    # Authority: STRATEGY_TAXONOMY_DIRECTIVE §6 + zeus_strategy_spec §8.2
-    # Theorem: enter iff 1 − p⁺_i − b_i − phi(b_i) > 0; p⁺ = calibrated upper bound.
-    CENTER_SELL_MODEL_NO_CALIBRATION_UNAVAILABLE = auto()  # center_sell_model_no: calibration inputs (cal_p_hats, cal_outcomes) absent → no_trade
-    CENTER_SELL_MODEL_NO_NO_EDGE = auto()                  # center_sell_model_no: 1−p⁺−b−phi ≤ 0; calibrated NO edge non-positive
-
-    # ── shoulder_buy_evt data-gate and theorem gate (2026-05-22) ──────────────
-    # DATA-GATED: EVT tail model covariates or calibration set not yet wired.
-    # Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §8 + zeus_strategy_spec.md §12
-    EVT_TAIL_MODEL_UNWIRED = auto()                     # shoulder_buy_evt: covariates/raw_prob/cal_set absent
-    SHOULDER_BUY_LOWER_BOUND_NOT_POSITIVE = auto()      # shoulder_buy_evt: p⁻_u − a_YES − phi ≤ 0; no edge
-
-    # ── shoulder_impossible_tail_capture data-gate (2026-05-22) ────────────────
-    # DATA-GATED: physical envelope input (Δ_phys⁺/Δ_phys⁻ from station/season empirical
-    # envelope) is not yet wired. Emitted until the envelope feed lands.
-    # Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §7 + zeus_strategy_spec.md §11.4
-    PHYSICAL_ENVELOPE_UNWIRED = auto()            # shoulder_impossible_tail_capture: Δ_phys⁺/⁻ not wired
-
-    # ── Physical bound theorem failure gate ────────────────────────────────────
-    SHOULDER_PHYSICAL_BOUND_NOT_EXCLUDES_TAIL = auto()  # physical bound >= threshold; theorem fails
-
-    # ── imminent_open_capture posterior-collapse candidate gates (2026-05-22) ──
-    # Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §9 + zeus_strategy_spec.md §10
-    IMMINENT_CALIBRATION_UNAVAILABLE = auto()  # cal_p_hats empty or analysis absent → fail-closed
-    IMMINENT_NO_EDGE = auto()                  # p⁻−ask−phi≤0 AND 1−p⁺−bid−phi≤0; no theorem applies
-
-    # ── settlement_capture shadow: physical-interval theorem (STRATEGY_TAXONOMY_DIRECTIVE §1) ──
-    PHYSICAL_INTERVAL_DATA_GATED = auto()      # settlement_capture_shadow: Δ_phys⁺/QC input absent → no_trade until data wired
-    PHYSICAL_INTERVAL_OVERLAP = auto()         # settlement_capture_shadow: I_t overlaps B_i but neither ⊆ nor disjoint → ambiguous
-    PHYSICAL_INTERVAL_UNPROFITABLE = auto()    # settlement_capture_shadow: I_t⊆B_i or disjoint but a+phi≥1 → no positive profit
-    SETTLEMENT_CAPTURE_NOT_LOCKED = auto()     # settlement_capture_shadow: edge is not observation-locked (day0_nowcast scope)
-
-    # ── C1: shoulder_buy × weather_event joint tail Bayes (§13) ───────────────
-    # Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §13
-    JOINT_EVT_ALERT_UNWIRED = auto()          # c1_joint_tail_bayes: EVT tail model OR alert feed not wired → data-gated no_trade
-    JOINT_EVT_ALERT_LR_MISSING = auto()       # c1_joint_tail_bayes: LR table lookup returned None for (alertType, city, season, leadTime)
-    JOINT_EVT_TAIL_NO_EDGE = auto()           # c1_joint_tail_bayes: p⁻_tail(X,A) − a_YES − phi ≤ 0; joint posterior below ask+fee
-
-    # ── C2: opening_inertia × stale_quote opening-stale-FOK (§14) ─────────────
-    # Authority: STRATEGY_TAXONOMY_DIRECTIVE.md §14
-    OPENING_STALE_FOK_UNWIRED = auto()        # c2_opening_stale_fok: opening posterior (p⁻) OR stale-quote inputs not wired → data-gated
-    OPENING_STALE_FOK_NO_EDGE = auto()        # c2_opening_stale_fok: EV = Pr(F)·(p⁻ − a0 − phi) ≤ 0; no positive expected return
-
+    # ── Shadow-candidate strategy gates: REMOVED 2026-06-14 ───────────────────
+    # The Phase 4 T2/T3/T4 candidate gates + center_sell/shoulder_buy_evt/
+    # shoulder_impossible_tail/imminent/settlement_capture/C1/C2 reason members
+    # (30 members) were emitted ONLY by the shadow-candidate research harness
+    # (src/strategy/candidates/*, src/engine/shadow_candidate_dispatch.py),
+    # deleted in the same gate-mass-collapse wave. 0 live emitters, 0 DB rows.
+    # Authority: shadow-candidate framework removal (operator no-shadow law).
 
     # ── Probability sanity (day0 HIGH distribution gate) ─────────────────────
     PROBABILITY_SANITY_GATE = auto()            # validate_high_distribution failed before Kelly sizing
