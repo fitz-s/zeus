@@ -1,6 +1,11 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-14
-# Authority basis: docs/evidence/deadloop_2026-06-14/qlcb_suppression.md + operator
+# Authority basis: docs/evidence/pr408_review/chatgpt_deep_review_2026-06-14.md C1+C2 #1 CRITICAL
+#   (live admission must HONOR the K3 INSUFFICIENT_DATA license-by-default; the explicit
+#   settlement_coverage_allows_arm / settlement_coverage_refutes_claim predicates below are the
+#   SINGLE vocabulary the live-admission credential reads, replacing a status-name allowlist that
+#   excluded INSUFFICIENT_DATA and rejected thin-settlement cold cells at submit).
+#   docs/evidence/deadloop_2026-06-14/qlcb_suppression.md + operator
 #   RULE 1 (every q_lcb<price rejection is OUR DEFECT until settlement proves otherwise).
 #   2026-06-14 REBUILD: the prior check measured CLIMATOLOGY, not CALIBRATION. The live
 #   observation stream stamped ONE constant claimed_q_lcb on every settled day and graded
@@ -94,6 +99,55 @@ _SHRINK_MARGIN = 0.01
 _ARM_RATIO_TOL = 0.10
 
 CoverageStatus = Literal["LICENSED", "UNLICENSED", "INSUFFICIENT_DATA"]
+
+
+# ---------------------------------------------------------------------------
+# SINGLE-VOCABULARY ADMISSION PREDICATES (pr408 review C1+C2 #1 CRITICAL, 2026-06-14).
+#
+# The K3 design is explicit (module docstring + arm_gate_coverage_blocks): a settled-record
+# verdict that is LICENSED (calibrated/conservative) or INSUFFICIENT_DATA (thin/absent
+# claim history) is NON-BLOCKING; only UNLICENSED (PROVEN overconfident) refutes a claim.
+# These two predicates ARE that contract — every live-admission consumer (the buy-NO
+# conservative-evidence gate AND the replacement calibration credential in
+# event_reactor_adapter) reads THESE, never a re-derived status-name allowlist. A prior
+# allowlist `{LICENSED, UNLICENSED}` EXCLUDED INSUFFICIENT_DATA and so rejected every
+# thin-settlement cold cell at submit (FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED) — the exact
+# blocker this contract kills.
+#
+# allows_arm: the status does NOT refute the claim → arming/admission may proceed on the
+#   (possibly shrunk) q_lcb. {LICENSED, INSUFFICIENT_DATA}. INSUFFICIENT_DATA is
+#   license-by-default: lack of per-day claim history is NOT proof of overconfidence
+#   (RULE 1; blocking on it is the default-deny suppression the rebuild forbids).
+# refutes_claim: the settled record PROVED the claim overconfident → block. {UNLICENSED}.
+#
+# They are EXHAUSTIVE + MUTUALLY EXCLUSIVE over the three real statuses (one is True, the
+# other False, for each of LICENSED / UNLICENSED / INSUFFICIENT_DATA). A None / unknown /
+# unevaluated status satisfies NEITHER — it is not an admitting verdict, but it is also not
+# a refutation; the caller decides how to treat "no verdict at all" (the credential treats
+# it as UNEVALUATED → blocked, distinct from a real INSUFFICIENT_DATA verdict).
+# ---------------------------------------------------------------------------
+_ARM_ALLOWING_STATUSES = frozenset({"LICENSED", "INSUFFICIENT_DATA"})
+_CLAIM_REFUTING_STATUSES = frozenset({"UNLICENSED"})
+
+
+def settlement_coverage_allows_arm(status: str | None) -> bool:
+    """True iff a settled-record VERDICT status permits arming/admission (non-refuting).
+
+    {LICENSED, INSUFFICIENT_DATA}. INSUFFICIENT_DATA is license-by-default (thin/absent
+    claim history is not proof of overconfidence — RULE 1). None / UNEVALUATED / unknown
+    → False (no admitting verdict), but that is NOT a refutation (see ``refutes_claim``).
+    """
+    return str(status or "").strip() in _ARM_ALLOWING_STATUSES
+
+
+def settlement_coverage_refutes_claim(status: str | None) -> bool:
+    """True iff a settled-record VERDICT status PROVES the claimed q_lcb overconfident.
+
+    {UNLICENSED} only. The settled record evaluated the scope with n >= min_n and realized
+    materially below the claim. None / INSUFFICIENT_DATA / LICENSED → False (no proof of
+    overconfidence — thin data is not a refutation, RULE 1).
+    """
+    return str(status or "").strip() in _CLAIM_REFUTING_STATUSES
 
 
 @dataclass(frozen=True)
@@ -294,7 +348,11 @@ def arm_gate_coverage_blocks(verdict: CoverageVerdict) -> tuple[bool, str]:
 
     Returns (blocked, reason). blocked=False + reason="" means the gate passes.
     """
-    if verdict.status == "UNLICENSED":
+    # SINGLE-VOCABULARY dispatch (pr408 #1): the refutation rule lives in ONE predicate,
+    # shared with the live-admission credential, so the two seams can never diverge on what
+    # "the settled record refutes the claim" means. UNLICENSED is the only refuting status;
+    # LICENSED / INSUFFICIENT_DATA do NOT block (license-by-default on thin data).
+    if settlement_coverage_refutes_claim(verdict.status):
         return (
             True,
             f"coverage UNLICENSED (proven overconfident): realized="

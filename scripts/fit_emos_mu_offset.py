@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # Created: 2026-06-14
 # Last reused or audited: 2026-06-14
-# Authority basis: D4 emos_mu_bias_probe.md (the EMOS-served μ* lands COLD for per-city cold cities:
+# Authority basis: pr408 review C1+C2 #3 HIGH (2026-06-14): ENFORCE the one-signed μ-offset
+#   contract — activation now additionally requires offset_c<0 AND every walk-forward train
+#   delta used for OOS <0, and persists offset_sign_ok + median_residual_c. Plus:
+#   D4 emos_mu_bias_probe.md (the EMOS-served μ* lands COLD for per-city cold cities:
 #   Tokyo|MAM median −1.89°C, n verified-settled) + law 8 (the live center must be airport-settlement
 #   honest). Discriminating probe (scripts/probe_emos_mu_correction_D4.py, run 2026-06-14): applying
 #   the S2 grid-representativeness de-bias to x̄ BEFORE the EMOS formula OVER-corrects every city by
@@ -192,21 +195,34 @@ def load_rows(db_path: str, emos_cells: dict, *, asof: _dt.date, metric: str = "
 def gate_cell(cr: list) -> dict:
     """Walk-forward do-no-harm gate for one (city,season) cell's residual records.
 
-    Returns dict(activated, offset_c, n, mean_residual_c, oos{...}). δ = median(all residuals);
-    activated only when the walk-forward OOS shows the offset reduces |mean residual| by ≥ RES_MARGIN
-    AND mean CRPS by ≥ CRPS_MARGIN over ≥ MIN_OOS held-out days, AND the cell is materially cold
-    (mean residual < COLD_THRESHOLD) with n ≥ MIN_N.
+    Returns dict(activated, offset_c, n, mean_residual_c, median_residual_c, offset_sign_ok,
+    oos{...}). δ = median(all residuals); activated only when ALL hold:
+      * the cell is materially cold (mean residual < COLD_THRESHOLD) with n ≥ MIN_N;
+      * the walk-forward OOS shows the offset reduces |mean residual| by ≥ RES_MARGIN AND mean
+        CRPS by ≥ CRPS_MARGIN over ≥ MIN_OOS held-out days, without over-correcting; AND
+      * ONE-SIGNED CONTRACT (pr408 review C1+C2 #3 HIGH, 2026-06-14): the stored offset is
+        STRICTLY NEGATIVE (offset_c < 0 — only a cold center is WARMED; an offset ≥ 0 would
+        COOL the center, the wrong direction) AND EVERY walk-forward TRAIN delta used for the
+        OOS evaluation is < 0. A skewed cell (cold MEAN but non-negative MEDIAN, or a train
+        window whose median flipped warm) is rejected — the correction must never push a
+        center the wrong way. ``offset_sign_ok`` records whether the stored offset is < 0.
     """
     cr = sorted(cr, key=lambda r: r["date"])
     n = len(cr)
     res_all = np.array([r["mu"] - r["settled"] for r in cr], dtype=float)
     mean_res = float(res_all.mean()) if n else 0.0
     offset = float(np.median(res_all)) if n else 0.0  # robust per-cell shift (intercept recal)
+    # ONE-SIGNED: only a strictly-cold (negative) median offset is a legitimate WARMing shift.
+    offset_sign_ok = bool(offset < 0.0)
 
     out = {
         "offset_c": round(offset, 4),
         "n": int(n),
         "mean_residual_c": round(mean_res, 4),
+        # median_residual_c == the stored offset (δ = median residual); persisted explicitly so
+        # the one-signed contract is auditable from the artifact without recomputation.
+        "median_residual_c": round(offset, 4),
+        "offset_sign_ok": offset_sign_ok,
         "activated": False,
         "oos": None,
     }
@@ -214,11 +230,13 @@ def gate_cell(cr: list) -> dict:
         return out  # not materially cold / too thin → never activate (fail-closed, leave alone)
 
     b0_res, c_res, b0_crps, c_crps = [], [], [], []
+    train_deltas: list[float] = []
     for i, r in enumerate(cr):
         train = [p for p in cr[:i] if (r["date"] - p["date"]).days >= EMBARGO_DAYS]
         if len(train) < MIN_TRAIN:
             continue
         delta = float(np.median([p["mu"] - p["settled"] for p in train]))
+        train_deltas.append(delta)
         y = r["settled"]
         b0_res.append(r["mu"] - y)
         c_res.append((r["mu"] - delta) - y)
@@ -232,18 +250,28 @@ def gate_cell(cr: list) -> dict:
     res_after = float(np.mean(c_res))
     crps_before = float(np.mean(b0_crps))
     crps_after = float(np.mean(c_crps))
+    # ONE-SIGNED: every train delta that actually warmed a held-out day must be a COLD (<0)
+    # shift. If any OOS train window's median flipped warm, the offset is not one-signed-honest.
+    all_train_deltas_cold = bool(train_deltas) and all(d < 0.0 for d in train_deltas)
     out["oos"] = {
         "n": len(c_res),
         "res_before": round(res_before, 4),
         "res_after": round(res_after, 4),
         "crps_before": round(crps_before, 4),
         "crps_after": round(crps_after, 4),
+        "all_train_deltas_cold": all_train_deltas_cold,
     }
     improves_res = abs(res_after) <= abs(res_before) - RES_MARGIN
     improves_crps = crps_after <= crps_before - CRPS_MARGIN
     # Anti-overcorrection: the corrected OOS residual must not FLIP to a larger-magnitude warm bias.
     not_overcorrected = abs(res_after) < abs(res_before)
-    out["activated"] = bool(improves_res and improves_crps and not_overcorrected)
+    out["activated"] = bool(
+        improves_res
+        and improves_crps
+        and not_overcorrected
+        and offset_sign_ok               # stored offset strictly cold
+        and all_train_deltas_cold        # every OOS train delta strictly cold
+    )
     return out
 
 
