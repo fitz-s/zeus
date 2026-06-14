@@ -736,7 +736,10 @@ class TestAnomalyPausePersistence:
             "Tokyo", "2026-06-10", detail="paris-class",
             now=datetime(2026, 6, 10, 4, 0, tzinfo=UTC), conn=conn,
         )
-        assert oa.is_day0_family_paused("Tokyo", "2026-06-10", conn=conn) is True
+        assert oa.is_day0_family_paused(
+            "Tokyo", "2026-06-10",
+            now=datetime(2026, 6, 10, 4, 30, tzinfo=UTC), conn=conn,
+        ) is True
 
         # SIMULATED RESTART: in-process registry wiped; durable flags remain.
         oa._reset_registry_for_tests()

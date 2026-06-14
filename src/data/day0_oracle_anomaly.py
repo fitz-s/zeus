@@ -650,20 +650,61 @@ def check_wu_metar_divergence(
             ),
         )
     threshold, threshold_provenance = divergence_threshold_for_city(city_name, unit)
+    # METAR-SIDE START-COVERAGE GATE (symmetric twin of the WU-side gate above and
+    # of the METAR-END gate at 635; diagnosis 2026-06-14). The daily LOW forms in
+    # the pre-dawn / early-morning window. When the METAR fast lane's window for
+    # the local day STARTS late (first sample more than the coverage grace after
+    # local midnight — the common case when the daemon booted mid-day), its
+    # running min is a MIDDAY floor, not the daily low: it never observed the cold
+    # extreme that WU's full-coverage window did. Comparing the two then reads a
+    # pure coverage gap as divergence and false-pauses the family — the live
+    # signature is high matched to <0.1 unit while low was off by 3-10 units (the
+    # one-extreme COVERAGE signature, not the both-extreme TAMPER signature, exactly
+    # as the WU-side gate's 171/174-vs-3 split). The low is a comparable quantity
+    # ONLY when METAR's window also started at local-day onset; otherwise WU's
+    # full-coverage low is authoritative and the cross-check simply could not run
+    # on the low (module doctrine: absence of the cross-check is visibility loss,
+    # not an anomaly). The HIGH stays compared — it forms within the covered late
+    # window and the METAR-END gate vouches for it — so real high-side tampering is
+    # still caught. Coverage notion reuses the SINGLE authority
+    # observation_client._compute_day0_coverage_status (same grace as WU); only a
+    # late START (WINDOW_INCOMPLETE) excludes the low, a thin-but-early window
+    # (LOW_COVERAGE) still observed the dawn low and stays comparable.
+    from zoneinfo import ZoneInfo
+
+    from src.data.observation_client import _compute_day0_coverage_status
+
+    metar_low_comparable = False
+    metar_low_coverage = "WINDOW_INCOMPLETE"
+    if truncated.first_obs_time is not None:
+        try:
+            _metar_first_local = truncated.first_obs_time.astimezone(
+                ZoneInfo(str(getattr(city, "timezone")))
+            )
+            metar_low_coverage = _compute_day0_coverage_status(
+                _metar_first_local, truncated.sample_count
+            )
+            metar_low_comparable = metar_low_coverage != "WINDOW_INCOMPLETE"
+        except Exception:  # noqa: BLE001 — tz/helper failure -> not comparable (never a pause)
+            metar_low_comparable = False
     high_delta = (
         abs(float(wu_high_so_far) - float(truncated.high_so_far))
         if wu_high_so_far is not None and truncated.high_so_far is not None
         else None
     )
-    low_delta = (
+    low_delta_raw = (
         abs(float(wu_low_so_far) - float(truncated.low_so_far))
         if wu_low_so_far is not None and truncated.low_so_far is not None
         else None
     )
+    # Only a low difference observed by BOTH windows can conclude divergence; an
+    # uncovered METAR low window contributes nothing to the divergence test.
+    low_delta = low_delta_raw if metar_low_comparable else None
     diverged = any(delta is not None and delta > threshold for delta in (high_delta, low_delta))
     detail = (
         f"unit={unit} threshold={threshold} threshold_provenance={threshold_provenance} "
-        f"high_delta={high_delta} low_delta={low_delta} "
+        f"high_delta={high_delta} low_delta={low_delta} low_delta_raw={low_delta_raw} "
+        f"metar_low_coverage={metar_low_coverage} "
         f"wu_last_obs={wu_last_obs_time.isoformat()} metar_samples={truncated.sample_count}"
     )
     return DivergenceVerdict(
