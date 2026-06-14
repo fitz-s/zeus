@@ -3515,6 +3515,105 @@ def _candidate_book_for_envelope(opportunity_book_dict: Any) -> list[dict[str, A
     return out or None
 
 
+def _build_decision_receipt_spine(
+    spine_inputs: dict[str, Any] | None,
+    receipt: EventSubmissionReceipt,
+) -> "DecisionReceipt | None":
+    """Assemble the Stage-0 decision-receipt spine from already-computed live values.
+
+    READ-ONLY / observability-only (q-kernel rebuild Stage 0, consult_build_spec.md:994-1033).
+    ``spine_inputs`` is the dict lifted from the THREADED payload onto provenance_capture
+    inside ``_generate_candidate_proofs`` (key ``decision_receipt_spine_inputs``). Every input
+    is a value the CURRENT live path already produced:
+      - mu_native / sigma_native / member arrays / q vector: from the q-build's payload stash.
+      - q_source: the receipt's #120 calibrator-provenance field.
+      - rounding_rule: the city's settlement-semantics rounding (WMO half-up vs HK truncate)
+        — the SAME authority the q integrator uses; read here only to record it.
+      - sizing_authority: the receipt's selection_authority (which gate sized the stake).
+
+    The DecisionReceipt builder DERIVES the coherence fields (envelope min/max, q_sum) from
+    these arrays, so a spine that misrepresents its own forecast/q is unconstructable — the
+    corrected transformation, not a post-hoc detector. Returns None when no q-build spine was
+    stashed (gate-reject receipts that never reached q integration); never raises into the
+    caller (the caller is already wrapped fail-soft).
+    """
+    from src.decision.decision_receipt import DecisionReceipt  # lazy: no import cycle
+
+    if not spine_inputs:
+        return None
+    # The q-build stashes these only when it ran; their absence means this receipt never
+    # reached q integration (early gate reject) and there is no forecast spine to emit.
+    if (
+        "_edli_spine_q_vector" not in spine_inputs
+        and "_edli_spine_mu_native" not in spine_inputs
+    ):
+        return None
+
+    raw_members = spine_inputs.get("_edli_spine_raw_members_native")
+    debiased_members = spine_inputs.get("_edli_spine_debiased_members_native")
+    q_vector = spine_inputs.get("_edli_spine_q_vector")
+
+    # applied_debias_native: the native-unit mean shift the live correction applied, when it
+    # ran. Derived from the raw vs debiased member means (the correction shifts the mean by a
+    # constant), so it is consistent with the debiased envelope the receipt also carries.
+    applied_debias_native = None
+    try:
+        if (
+            isinstance(raw_members, (list, tuple))
+            and isinstance(debiased_members, (list, tuple))
+            and raw_members
+            and debiased_members
+        ):
+            _raw_mean = sum(float(m) for m in raw_members) / len(raw_members)
+            _deb_mean = sum(float(m) for m in debiased_members) / len(debiased_members)
+            applied_debias_native = float(_deb_mean - _raw_mean)
+    except Exception:  # noqa: BLE001 — observation only
+        applied_debias_native = None
+
+    # q_source: prefer the receipt's #120 field; fall back to the q-build stash (covers
+    # receipt paths that have not yet lifted q_source onto the receipt object).
+    q_source = receipt.q_source if receipt.q_source is not None else spine_inputs.get("_edli_q_source")
+
+    # rounding_rule: the city's settlement-semantics rounding. Read-only; the q integrator is
+    # the authority that USES it, here we only record which rule that family settles under.
+    rounding_rule = None
+    day0_observed_extreme_native = None
+    try:
+        city_obj = runtime_cities_by_name().get(str(spine_inputs.get("city") or "")) or None
+        if city_obj is not None:
+            from src.contracts.settlement_semantics import SettlementSemantics
+            rounding_rule = SettlementSemantics.for_city(city_obj).rounding_rule
+    except Exception:  # noqa: BLE001 — observation only
+        rounding_rule = None
+    # day0 observed running extreme, when the live day0 lane recorded one on the payload.
+    for _k in (
+        "_edli_spine_day0_observed_extreme_native",
+        "_edli_day0_observed_extreme_native",
+    ):
+        _v = spine_inputs.get(_k)
+        if _v is not None:
+            try:
+                day0_observed_extreme_native = float(_v)
+            except (TypeError, ValueError):
+                day0_observed_extreme_native = None
+            break
+
+    return DecisionReceipt.from_q_build(
+        q_source=q_source,
+        q_vector=q_vector if isinstance(q_vector, (list, tuple)) else None,
+        mu_native=spine_inputs.get("_edli_spine_mu_native"),
+        sigma_native=spine_inputs.get("_edli_spine_sigma_native"),
+        raw_members_native=raw_members if isinstance(raw_members, (list, tuple)) else None,
+        debiased_members_native=(
+            debiased_members if isinstance(debiased_members, (list, tuple)) else None
+        ),
+        applied_debias_native=applied_debias_native,
+        day0_observed_extreme_native=day0_observed_extreme_native,
+        rounding_rule=rounding_rule,
+        sizing_authority=getattr(receipt, "selection_authority", None),
+    )
+
+
 def build_event_bound_no_submit_receipt(
     event: OpportunityEvent,
     *,
@@ -3576,6 +3675,22 @@ def build_event_bound_no_submit_receipt(
     _belief = provenance_capture.get("edli_belief")
     if _belief is not None and receipt.belief_payload is None:
         receipt = dataclass_replace(receipt, belief_payload=_belief)
+    # === Q-KERNEL REBUILD STAGE 0 — emit the decision-receipt spine (2026-06-14) =========
+    # READ-ONLY, observability-only: assemble the DecisionReceipt spine from the inputs the
+    # live q-build already lifted onto provenance_capture (decision_receipt_spine_inputs) plus
+    # the receipt's own q_source / sizing provenance, and attach the flattened 19-column row
+    # to provenance_capture so the spine is reconstructable forecast -> q -> route -> size
+    # (consult_build_spec.md:994-1033). This NEVER mutates the receipt that drives the
+    # decision/size/submit. Fail-soft: any error leaves the decision untouched (mirrors the
+    # envelope wrapper's contract).
+    try:
+        _spine = _build_decision_receipt_spine(
+            provenance_capture.get("decision_receipt_spine_inputs"), receipt
+        )
+        if _spine is not None:
+            provenance_capture["decision_receipt_spine"] = _spine.to_row()
+    except Exception:  # noqa: BLE001 — observability must never alter or fail a decision
+        pass
     if receipt.envelope_json is not None:
         return receipt
     try:
@@ -7392,6 +7507,32 @@ def _generate_candidate_proofs(
                     "condition_ids": _cond_ids,
                 }
         except Exception:  # noqa: BLE001 — belief capture is non-critical; never break the decision
+            pass
+    # === Q-KERNEL REBUILD STAGE 0 — lift the receipt-spine inputs (2026-06-14) ===========
+    # READ-ONLY: the q-build (_market_analysis_from_event_snapshot) already stashed the
+    # forecast/q spine onto the THREADED payload under payload["_edli_spine_*"]. Lift those
+    # values onto provenance_capture here (the same site that captures the belief) so the
+    # receipt wrapper can assemble the DecisionReceipt — the threaded payload is the only
+    # object that carries them (the wrapper's _payload(event) re-parse does NOT). This copies
+    # already-computed values and feeds NOTHING back into the decision. (spec:994-1033.)
+    if provenance_capture is not None:
+        try:
+            _spine_inputs = {
+                k: payload.get(k)
+                for k in (
+                    "_edli_spine_mu_native",
+                    "_edli_spine_sigma_native",
+                    "_edli_spine_raw_members_native",
+                    "_edli_spine_debiased_members_native",
+                    "_edli_spine_q_vector",
+                    "_edli_q_source",
+                )
+                if k in payload
+            }
+            if _spine_inputs:
+                _spine_inputs["city"] = str(family.city)
+                provenance_capture["decision_receipt_spine_inputs"] = _spine_inputs
+        except Exception:  # noqa: BLE001 — observability only; never break the decision
             pass
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
