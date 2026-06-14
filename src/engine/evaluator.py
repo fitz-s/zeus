@@ -5208,26 +5208,10 @@ def evaluate_candidate(
                 rejection_reason_enum=NoTradeReason.PROBABILITY_SANITY_GATE,
                 rejection_reason_detail=_san_reason,
             )]
-    elif temperature_metric.is_high():
-        # P0-D shadow telemetry: run validate_high_distribution for non-day0 HIGH
-        # strategies (center_buy, opening_inertia, imminent_open_capture) — log only,
-        # do NOT block.  Gated to is_high() because validate_high_distribution is a
-        # HIGH-metric validator; LOW candidates are excluded here.
-        # Promotes to hard gate after replay confirms threshold calibration.
-        _shadow_settled = settlement_semantics.round_values(analysis_member_extrema)
-        _shadow_ok, _shadow_reason = validate_high_distribution(
-            bins=bins,
-            p_raw=p_raw,
-            p_cal=p_cal,
-            member_samples=_shadow_settled,
-            market_prices=p_market,
-            strategy_key=f"shadow:{city.name}:{target_date}:{selected_method}",
-        )
-        if not _shadow_ok:
-            logger.warning(
-                "[PROBABILITY_SANITY_SHADOW] strategy=%s city=%s date=%s metric=high reason=%s",
-                selected_method, city.name, target_date, _shadow_reason,
-            )
+    # P0-D non-day0 HIGH validate_high_distribution SHADOW (log-only) DELETED 2026-06-14
+    # (gate-mass collapse: log-only shadow, no telemetry sink, no promotion path). Non-day0
+    # HIGH is already covered by the per-edge probability_edge_bin_sanity gate below. The
+    # day0 HIGH hard gate (above) is untouched.
 
     # LIVE-PROB-P0 (2026-05-23): symmetric cumulative tail-mass discrepancy gate.
     # Covers ALL temperature_metric (HIGH and LOW), ALL non-day0 strategies.
