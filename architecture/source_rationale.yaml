@@ -1656,6 +1656,10 @@ files:
     zone: K3_extension
     authority_role: package_marker
     why: Marks calibration namespace.
+  src/calibration/anchor_representativeness_debias.py:
+    zone: K3_extension
+    authority_role: calibration_offset_loader
+    why: Read-only fail-soft loader for the fitted per-city anchor representativeness de-bias δ_city (state/anchor_representativeness_debias.json, produced by scripts/fit_anchor_representativeness_debias.py). get_city_debias_c returns δ_city ONLY for an activated, do-no-harm-gated HIGH cell (else None → family-level fallback). Consumed at src/data/replacement_forecast_materializer.py:1455 as bias_shift_c (law-8 foundation fix, cold_bias_metadata_root.md). No DB writes; no live I/O at call time (module-cached artifact read).
   src/calibration/day0_horizon_calibration.py:
     zone: K3_extension
     authority_role: day0_horizon_platt_calibration

@@ -1448,11 +1448,32 @@ def _insert_posterior(
     metric: str,
     anchor_id: int,
 ) -> int:
-    # Wave-2 item 7 (2026-06-12): the per-city EB bias-correction of the center is
+    # Wave-2 item 7 (2026-06-12): the per-city EB bias-correction of the center was
     # DELETED — settlement-refuted as a wrong-set over-correction (2026-06-09 wiring
-    # audit, commit ff7f33dd5b). The center is never shifted by this layer; the
-    # zero-prior veto and downstream q_lcb floor are unchanged.
-    bias_shift_c = None
+    # audit, commit ff7f33dd5b) because it was fit on the thin live single_runs anchor
+    # (~6 settled dates → n_prior 1–4/city → overfit, net-WORSE per percity_corrected_oos.md).
+    #
+    # law-8 foundation fix (2026-06-14, cold_bias_metadata_root.md): the ROOT is a per-city
+    # 9km grid-cell-vs-settlement-station REPRESENTATIVENESS offset (Tokyo −2.18°C … Karachi
+    # +2.48°C, two-sign, lead-stable, raw-anchor-resident). It is correctable ONLY by a per-city
+    # de-bias, and SAFE only when fit on the FULL previous_runs history (n=23..890/city) with an
+    # activation guard (n>=n_min) + EB shrink toward 0 by SE + a do-no-harm walk-forward gate.
+    # The fitted, auditable artifact state/anchor_representativeness_debias.json carries δ_city;
+    # the loader (src/calibration/anchor_representativeness_debias.py) returns δ_city ONLY for an
+    # activated, gate-passing HIGH cell, else None. ARTIFACT-GATED, not a shadow flag: when the
+    # artifact is absent (current live state — gitignored generated file) the loader returns None
+    # → bias_shift_c stays None → BYTE-IDENTICAL to today. It goes live the moment the operator
+    # places the fitted artifact in state/ and restarts (same posture as the σ-floor artifact).
+    # SIGN: δ_city = anchor − settlement; applied below as corrected = raw − δ_city, so a cold
+    # anchor (δ<0) warms and a hot anchor (δ>0) cools; the corrected center feeds the fusion prior
+    # → the de-bias propagates into the fused μ*. FAIL-SOFT: any error → None (family-level fallback).
+    bias_shift_c: float | None
+    try:
+        from src.calibration.anchor_representativeness_debias import get_city_debias_c  # noqa: PLC0415
+
+        bias_shift_c = get_city_debias_c(request.city, metric)
+    except Exception:
+        bias_shift_c = None
     # THE_PATH member-vote smoothing: flag-gated additive Laplace/Dirichlet alpha so the AIFS
     # member prior is strictly positive on every bin and the soft_anchor.py:197-198 zero-prior
     # -inf veto can never make a bin un-hittable. None when flag OFF -> byte-identical to today.
