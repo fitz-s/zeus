@@ -5901,13 +5901,11 @@ def evaluate_candidate(
                     _eb_rej.near_tail_p_market = _eb_telemetry_dict.get("near_tail_p_market")
                     decisions.append(_eb_rej)
                     continue
-                else:  # shadow
-                    logger.warning(
-                        "[PROB_EDGE_BIN_SANITY_SHADOW] strategy=%s city=%s date=%s bin_idx=%s "
-                        "support=%.4f reason=%s",
-                        selected_method, city.name, target_date, bin_idx,
-                        _eb_telemetry_dict.get("edge_bin_member_support", 0.0), _eb_reason,
-                    )
+                # shadow mode = phantom detected but NON-blocking: the
+                # PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW reason is still stamped as
+                # probability_sanity_reason telemetry below (no EdgeDecision, no
+                # continue). Dead log-only else-branch removed 2026-06-14 (gate-mass
+                # collapse); the dead enum member rides the schema-enum wave.
             # Carry telemetry dict forward so loop-at-exit can stamp it on all decisions
             # (both rejection path above and pass-through path here reach this point
             # only on shadow mode or pass — bind to local _edge_bin_telemetry).
