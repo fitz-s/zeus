@@ -339,3 +339,25 @@ hooks:
     telemetry:
       ritual_signal_emitted: true
     owner_module: .claude/hooks/citation_grep_gate.py
+
+  - id: no_edge_rule1_guard
+    event: Stop
+    matcher: "*"
+    intent: >
+      RULE 1 enforcement (operator directive 2026-06-14). BLOCK + redirect when
+      the final assistant message concludes "no edge" / "market efficient" /
+      "honest no-edge". RULE 1 (inviolable): a no-edge verdict is presumed OUR
+      DEFECT until settlement proves otherwise; tradeable alpha is ASSUMED to
+      exist. The guard re-drives the agent (exit 2 -> stderr fed back) to
+      root-cause the suppression and attack OTHER approaches rather than
+      stopping on a no-edge conclusion. Loop-safe: when stop_hook_active it
+      degrades to a non-blocking reminder. Bypass: ZEUS_NO_EDGE_GUARD_OFF=1
+      (operator deliberate override only).
+    blocked_when:
+      - final_message_concludes_no_edge
+    severity: BLOCKING
+    bypass_env: ZEUS_NO_EDGE_GUARD_OFF
+    sunset_date: 2026-12-14
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: .claude/hooks/dispatch.py

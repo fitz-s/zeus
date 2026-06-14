@@ -60,6 +60,18 @@
         ]
       }
     ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py no_edge_rule1_guard",
+            "description": "RULE 1 guard (operator 2026-06-14): block + redirect when the final message concludes 'no edge'/'market efficient' — no-edge is OUR defect; root-cause the suppression, find other approaches. Bypass ZEUS_NO_EDGE_GUARD_OFF=1."
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "*",

@@ -1798,6 +1798,98 @@ def _run_advisory_check_maintree_git_state_guard(
 
 
 # ---------------------------------------------------------------------------
+# RULE 1 guard — no-edge conclusion is OUR DEFECT (operator directive 2026-06-14)
+# ---------------------------------------------------------------------------
+
+# Phrases that encode the forbidden "no edge / market efficient" CONCLUSION.
+# RULE 1 (operator, inviolable): a no-edge verdict is presumed OUR DEFECT until
+# settlement proves otherwise; tradeable alpha is ASSUMED to exist. The agent
+# does not get to stop on "no edge" — it must root-cause the suppression and try
+# other approaches.
+_NO_EDGE_PHRASES = (
+    "no edge", "no-edge", "no actionable edge", "no tradeable edge",
+    "no tradable edge", "no real edge", "no genuine edge", "no exploitable edge",
+    "no tradeable alpha", "no alpha", "lack edge", "lacks edge", "lacking edge",
+    "genuinely lack", "market is efficient", "market efficient",
+    "markets are efficient", "efficient market", "honest no-edge",
+    "honestly no edge", "honest no edge",
+)
+
+
+def _last_assistant_text(transcript_path: str) -> str:
+    """Return the text of the most recent assistant message in the transcript."""
+    if not transcript_path:
+        return ""
+    try:
+        lines = Path(transcript_path).read_text(errors="ignore").splitlines()
+    except Exception:
+        return ""
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if obj.get("type") != "assistant" and obj.get("role") != "assistant":
+            continue
+        msg = obj.get("message", obj)
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            return " ".join(
+                c.get("text", "")
+                for c in content
+                if isinstance(c, dict) and c.get("type") == "text"
+            )
+        if isinstance(content, str):
+            return content
+    return ""
+
+
+def _run_advisory_check_no_edge_rule1_guard(
+    payload: dict[str, Any],
+) -> str | None:
+    """Stop: BLOCK + redirect when the final assistant message concludes 'no
+    edge' / 'market efficient'. RULE 1 (operator): no-edge is presumed OUR
+    DEFECT until settlement proves otherwise; tradeable alpha is assumed to
+    exist. Loop-safe: when already inside a stop-hook re-drive
+    (stop_hook_active) it degrades to a non-blocking reminder. Bypass:
+    ZEUS_NO_EDGE_GUARD_OFF=1 (operator deliberate override only)."""
+    if os.environ.get("ZEUS_NO_EDGE_GUARD_OFF", "").strip() == "1":
+        return None
+    text = _last_assistant_text(payload.get("transcript_path", ""))
+    if not text:
+        return None
+    low = text.lower()
+    hit = next((p for p in _NO_EDGE_PHRASES if p in low), None)
+    if hit is None:
+        return None
+    msg = (
+        "RULE 1 VIOLATION — your message concluded with the forbidden framing "
+        f"(matched: {hit!r}).\n"
+        "RULE 1 (inviolable): a 'no edge' / 'market efficient' / 'honest no-edge' "
+        "verdict is PRESUMED OUR DEFECT until settlement proves otherwise. "
+        "Tradeable alpha is ASSUMED to exist; you do NOT get to conclude it is absent.\n"
+        "REDIRECT NOW — do not stop on this conclusion. Find OTHER approaches:\n"
+        "  - root-cause the SUPPRESSION (which gate / cap / q_lcb floor / metadata "
+        "pushed q_lcb below price?),\n"
+        "  - attack a DIFFERENT market / temperature band / horizon / mechanism,\n"
+        "  - a different data angle, microstructure, or mispricing source,\n"
+        "  - re-examine whether OUR forecast metadata (bin / station / representativeness "
+        "offset) is wrong (law 8).\n"
+        "Keep driving toward real settlement-graded alpha. Never present a no-edge "
+        "conclusion as the answer."
+    )
+    if payload.get("stop_hook_active"):
+        # Already inside a stop-hook continuation — degrade to a non-blocking
+        # reminder so the guard cannot infinite-loop.
+        return msg
+    print(msg, file=sys.stderr)
+    return _BLOCK_SENTINEL
+
+
+# ---------------------------------------------------------------------------
 # Advisory check dispatcher
 # ---------------------------------------------------------------------------
 
@@ -1836,6 +1928,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "pre_branch_create_in_primary": _run_advisory_check_pre_branch_create_in_primary,
     "monitor_arm_overdue_advisor": _run_advisory_check_monitor_arm_overdue_advisor,
     "pr_monitor_arm_ack": _run_advisory_check_pr_monitor_arm_ack,
+    "no_edge_rule1_guard": _run_advisory_check_no_edge_rule1_guard,
 }
 
 # External-module handlers registered conditionally (None if import failed → boot
