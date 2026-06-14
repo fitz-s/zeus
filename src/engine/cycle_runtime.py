@@ -1013,11 +1013,6 @@ def _reprice_decision_from_executable_snapshot(
     decision,
     snapshot_fields: dict,
     final_intent_context: dict | None = None,
-    *,
-    _shadow_market_slug: str = "",
-    _shadow_temperature_metric: str = "",
-    _shadow_target_date: str = "",
-    _shadow_observation_time: str = "",
 ) -> float | None:
     """Reprice a selected entry decision from the executable snapshot book.
 
@@ -1156,92 +1151,6 @@ def _reprice_decision_from_executable_snapshot(
         _vnext_wide_spread = bool(_vnext_metrics.wide_spread_display_substitution)
     except Exception:
         _vnext_wide_spread = False
-    # ---------------------------------------------------------------------------
-    # Track L-1: shadow candidate dispatch (fail-open, flag-gated, default OFF)
-    # PROMOTION_PIPELINE_DESIGN §4: reuses already-computed _vnext_metrics;
-    # any exception is caught and logged — the live decision is never affected.
-    # Natural key params threaded from outer execute_discovery_phase loop via
-    # _shadow_market_slug / _shadow_temperature_metric / _shadow_target_date /
-    # _shadow_observation_time — ExecutableMarketSnapshot does NOT carry them.
-    # ---------------------------------------------------------------------------
-    _vnext_metrics_computed = locals().get("_vnext_metrics")
-    try:
-        from src.engine.shadow_candidate_dispatch import dispatch_shadow_candidates
-        if _vnext_metrics_computed is not None and _shadow_market_slug:
-            from types import SimpleNamespace as _SimpleNamespace
-            from src.contracts.decision_natural_key import make_decision_natural_key
-            _shadow_nk = make_decision_natural_key(
-                market_slug=_shadow_market_slug,
-                temperature_metric=_shadow_temperature_metric,
-                target_date=_shadow_target_date,
-                observation_time=_shadow_observation_time,
-                decision_seq=0,
-            )
-            # FIX 2: populate opening_ticks + m0 from snapshot history so
-            # OpeningInertiaRelaxation's λ-estimation branch runs on real data.
-            # Fail-open: any exception leaves opening_ticks/m0 absent → no-λ path.
-            _opening_ticks: list[tuple[float, float]] | None = None
-            _m0: float | None = None
-            try:
-                _snap_cid = str(getattr(snapshot, "condition_id", None) or "")
-                _snap_msa = getattr(snapshot, "market_start_at", None)
-                if _snap_cid and conn is not None:
-                    import sqlite3 as _sqlite3
-                    _hist_cur = conn.execute(
-                        """
-                        SELECT captured_at, orderbook_top_bid, orderbook_top_ask
-                        FROM executable_market_snapshots
-                        WHERE condition_id = ?
-                        ORDER BY captured_at ASC
-                        LIMIT 50
-                        """,
-                        (_snap_cid,),
-                    )
-                    _hist_rows = _hist_cur.fetchall()
-                    if _hist_rows and _snap_msa is not None:
-                        from datetime import timezone as _tz
-                        _msa_dt = _snap_msa if hasattr(_snap_msa, "tzinfo") else None
-                        if _msa_dt is not None:
-                            _ticks: list[tuple[float, float]] = []
-                            for _r_cap, _r_bid, _r_ask in _hist_rows:
-                                try:
-                                    from datetime import datetime as _dt
-                                    _cap_dt = _dt.fromisoformat(str(_r_cap).replace("Z", "+00:00"))
-                                    if _cap_dt.tzinfo is None:
-                                        continue
-                                    _t_sec = (_cap_dt.astimezone(_tz.utc) - _msa_dt.astimezone(_tz.utc)).total_seconds()
-                                    if _t_sec < 0:
-                                        continue
-                                    _bid = float(_r_bid) if _r_bid is not None else None
-                                    _ask = float(_r_ask) if _r_ask is not None else None
-                                    if _bid is not None and _ask is not None:
-                                        _ticks.append((_t_sec, (_bid + _ask) / 2.0))
-                                except Exception:
-                                    continue
-                            if _ticks:
-                                _opening_ticks = _ticks
-                                _m0 = _ticks[0][1]
-            except Exception:
-                pass  # fail-open: no-λ path in OpeningInertiaRelaxation unchanged
-            dispatch_shadow_candidates(
-                analysis=_SimpleNamespace(
-                    metrics=_vnext_metrics_computed,
-                    opening_ticks=_opening_ticks,
-                    m0=_m0,
-                ),
-                natural_key=_shadow_nk,
-                observed_at=_shadow_observation_time,
-                # world_conn intentionally omitted: dispatch self-opens a world-DB
-                # connection via get_world_connection(). Passing the live trade-DB
-                # conn here caused K1 ghost-split (MAJOR-1): decision_events lives
-                # in WORLD, not trade-DB → "no such table" → fail-open → 0 rows.
-                decision_time=datetime.now(tz=timezone.utc),
-            )
-    except Exception:
-        logger.exception(
-            "shadow_candidate_dispatch: outer guard caught exception — "
-            "live cycle unaffected."
-        )
     _reprice_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
     strategy_key_for_live_quality = _resolve_strategy_key(decision)
     # W2 is post-only passive maker sizing. Live strategy decisions consume
@@ -5966,24 +5875,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             if callable(_reprice_fn):
                                 snapshot_best_ask = _reprice_fn(conn, d, snapshot_fields, final_intent_context)
                             else:
-                                # Derive observation_time for shadow dispatch (natural key only;
-                                # not used in live pricing). candidate.observation carries it.
-                                _cand_obs = candidate.observation
-                                if isinstance(_cand_obs, dict):
-                                    _shadow_obs_time = str(_cand_obs.get("observation_time", "") or "")
-                                elif _cand_obs is not None:
-                                    _shadow_obs_time = str(getattr(_cand_obs, "observation_time", "") or "")
-                                else:
-                                    _shadow_obs_time = ""
                                 snapshot_best_ask = _reprice_decision_from_executable_snapshot(
                                     conn,
                                     d,
                                     snapshot_fields,
                                     final_intent_context,
-                                    _shadow_market_slug=str(candidate.slug or ""),
-                                    _shadow_temperature_metric=str(candidate.temperature_metric or ""),
-                                    _shadow_target_date=str(candidate.target_date or ""),
-                                    _shadow_observation_time=_shadow_obs_time,
                                 )
                         except Exception as exc:
                             summary["no_trades"] += 1
