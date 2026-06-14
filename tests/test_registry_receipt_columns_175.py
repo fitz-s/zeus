@@ -1,10 +1,12 @@
 # Created: 2026-06-04
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-06-13
 # Authority basis: docs/operations/CONSOLIDATED_AUDIT_AND_PLAN_2026-06-04.md
 #                  R4/#175 — the receipt writer's _ensure_column-migrated columns
 #                  must be in required_columns so a stale live DB FATALs at boot
 #                  instead of silently failing 37 receipt writes as no-trades.
-# Lifecycle: created=2026-06-04; last_reviewed=2026-06-05; last_reused=2026-06-05
+#                  2026-06-13 (C2 task #60): +lfsr/edge_shrunk/edge_shrunk_posterior_sd/
+#                  selection_authority to _MIGRATED_COLS (writer INSERTs them).
+# Lifecycle: created=2026-06-04; last_reviewed=2026-06-13; last_reused=2026-06-13
 # Purpose: Boot-guard antibody — _ensure_column-migrated receipt columns must be in required_columns so a stale live DB FATALs at boot, not silently fail receipt writes as no-trades (R4/#175).
 # Reuse: Re-run when the edli_no_submit_receipts schema or assert_db_matches_registry column set changes.
 """Boot-guard antibody for the edli_no_submit_receipts column-drift defect.
@@ -54,6 +56,11 @@ _MIGRATED_COLS = [
     "mainstream_source",
     "mainstream_fetched_at_utc",
     "alpha_gap",
+    # C2 selection-shrinkage shadow columns (task #60, 2026-06-13).
+    "lfsr",
+    "edge_shrunk",
+    "edge_shrunk_posterior_sd",
+    "selection_authority",
 ]
 
 

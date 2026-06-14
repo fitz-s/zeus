@@ -1,5 +1,7 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-06-01
+# Last reused/audited: 2026-06-13
+# Authority basis (2026-06-13 add): docs/operations/live_inventory_warm_skip_2026-06-13.md —
+#   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (inline _refresh_pending_family_snapshots
 #   coupling) + _edli_bankroll_warm_cycle precedent (#45 follow-up, the decoupled-warm pattern) +
 #   src/main.py:_refresh_pending_family_snapshots (universe Gamma scan + per-token CLOB capture,
@@ -51,12 +53,30 @@ import inspect
 import json
 import re
 import sqlite3
+from datetime import date, datetime, time, timezone
 from types import SimpleNamespace
 
 import pytest
 
 import src.main as main_module
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+
+
+def _venue_open_now(target_date: str) -> datetime:
+    """A frozen decision-clock instant at which a family's venue market is still
+    OPEN (NOT POST_TRADING) — 06:00 UTC of ``target_date``, six hours before the
+    F1 12:00-UTC venue close.
+
+    The warm lane now skips families whose venue market has entered POST_TRADING
+    (``_refresh_pending_family_snapshots`` venue-close warm-skip, 2026-06-13). To
+    keep the fixed-date fixtures below exercising the live-family path, the tests
+    inject this venue-OPEN ``now`` instead of wall-clock (which would make every
+    fixed past-date fixture venue-closed → skipped). Clock-relative-by-injection:
+    the family's phase is pinned by the date+now pair, not by when the test runs.
+    """
+    return datetime.combine(
+        date.fromisoformat(target_date), time(6, 0, 0), tzinfo=timezone.utc
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -762,7 +782,9 @@ def test_pending_family_refresh_reserves_time_for_direct_gamma_lookup(monkeypatc
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = main_module._refresh_pending_family_snapshots(
+        conn, _FakeConn(), now_utc=_venue_open_now("2026-06-09")
+    )
 
     assert result["status"] == "refreshed"
     assert result["topology_budget_exhausted"] == 1
@@ -893,7 +915,9 @@ def test_pending_family_refresh_direct_gamma_lookup_drains_multiple_families(mon
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = main_module._refresh_pending_family_snapshots(
+        conn, _FakeConn(), now_utc=_venue_open_now("2026-06-09")
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == len(families)
@@ -1068,7 +1092,9 @@ def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeyp
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(world_conn, forecasts_conn)
+    result = main_module._refresh_pending_family_snapshots(
+        world_conn, forecasts_conn, now_utc=_venue_open_now("2026-06-07")
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 0
@@ -1143,7 +1169,9 @@ def test_pending_family_refresh_falls_back_to_gamma_when_static_topology_incompl
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(world_conn, forecasts_conn)
+    result = main_module._refresh_pending_family_snapshots(
+        world_conn, forecasts_conn, now_utc=_venue_open_now("2026-06-07")
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 1
@@ -1209,7 +1237,9 @@ def test_pending_family_refresh_matches_gamma_with_canonical_city_alias(monkeypa
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(world_conn, forecasts_conn)
+    result = main_module._refresh_pending_family_snapshots(
+        world_conn, forecasts_conn, now_utc=_venue_open_now("2026-06-07")
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 1
@@ -1367,3 +1397,195 @@ def _pending_family_conn(event_id: str, city: str, target_date: str, metric: str
         (event_id, now),
     )
     return conn
+
+
+def _venue_close_relationship_harness(monkeypatch):
+    """Wire a single Hong Kong / 2026-06-07 pending family through the warm
+    refresh with all venue-I/O mocked. Returns a callable
+    ``run(now_utc) -> (result, submitted)`` so a single fixture can be driven at
+    both a venue-OPEN and a venue-CLOSED decision clock."""
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+    topology_rows = [
+        {
+            "market_slug": "highest-temperature-in-hong-kong-on-june-7-2026",
+            "city": "Hong Kong",
+            "target_date": "2026-06-07",
+            "temperature_metric": "high",
+            "condition_id": "cond-1",
+            "token_id": "yes-1",
+            "range_label": "31C",
+        }
+    ]
+    cached_market = {
+        "slug": "highest-temperature-in-hong-kong-on-june-7-2026",
+        "city": SimpleNamespace(name="Hong Kong"),
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": "cond-1",
+                "market_id": "cond-1",
+                "token_id": "yes-1",
+                "no_token_id": "no-1",
+                "question_id": "q-1",
+            }
+        ],
+    }
+
+    import src.data.market_scanner as scanner
+    import src.data.polymarket_client as polymarket_client
+    import src.engine.event_reactor_adapter as adapter
+    import src.state.db as state_db
+
+    monkeypatch.setattr(
+        adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows
+    )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(
+        scanner,
+        "reconstruct_weather_market_from_static_topology",
+        lambda *a, **k: cached_market,
+    )
+    monkeypatch.setattr(
+        scanner,
+        "_gamma_get",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Gamma should not be called")),
+    )
+    monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [])
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+
+    def run(now_utc):
+        submitted: list[list[dict]] = []
+
+        def _refresh(_conn, *, markets, **_kwargs):
+            submitted.append(markets)
+            return {"attempted": len(markets), "inserted": len(markets)}
+
+        monkeypatch.setattr(
+            scanner, "refresh_executable_market_substrate_snapshots", _refresh
+        )
+        # Fresh pending family per run so a prior run's cursor / state does not leak.
+        world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
+        result = main_module._refresh_pending_family_snapshots(
+            world_conn, forecasts_conn, now_utc=now_utc
+        )
+        return result, submitted
+
+    return run
+
+
+def test_warm_lane_skips_venue_closed_family_keeps_venue_open_family(monkeypatch):
+    """RELATIONSHIP (warm lane ↔ market_phase venue-close authority): the SAME
+    pending family must be SKIPPED when its venue market is POST_TRADING and
+    REFRESHED when the venue is still open — the only thing that differs is the
+    decision clock, which both sites read through the F1 12:00-UTC anchor.
+
+    This is the live-inventory-focus invariant (2026-06-13): a 2026-06-07 family
+    re-probed AFTER its 12:00-UTC venue close (the closed-06-13 families measured
+    pinning the warm time-box) wastes the bounded budget the live PRE_SETTLEMENT /
+    SETTLEMENT families need. Venue-closed ⇒ skip (no topology lookup, no Gamma,
+    no CLOB submit); venue-open ⇒ flow through unchanged.
+
+    RED-on-revert: remove the ``family_venue_closed`` warm-skip in
+    ``_refresh_pending_family_snapshots`` and the venue-CLOSED branch refreshes the
+    family (``venue_closed_skipped == 0``, ``submitted`` non-empty) — this test goes
+    red. Fail-soft direction is pinned separately (an unresolvable family is kept).
+    """
+    run = _venue_close_relationship_harness(monkeypatch)
+
+    # Venue OPEN: 06:00 UTC of target_date, before the 12:00-UTC close → refreshed.
+    open_now = datetime(2026, 6, 7, 6, 0, tzinfo=timezone.utc)
+    open_result, open_submitted = run(open_now)
+    assert open_result["status"] == "refreshed"
+    assert open_result["venue_closed_skipped"] == 0
+    assert open_result["cached_topology_families"] == 1
+    assert len(open_submitted) == 1
+
+    # Venue CLOSED: 18:00 UTC of target_date, after the 12:00-UTC close but BEFORE
+    # Hong Kong local midnight (UTC+8 → local-day end is 16:00Z of 06-07's next
+    # boundary), so EventStore._strictly_past_in_tz alone would NOT skip it — the
+    # venue-close anchor is what makes this family skippable.
+    closed_now = datetime(2026, 6, 7, 18, 0, tzinfo=timezone.utc)
+    closed_result, closed_submitted = run(closed_now)
+    assert closed_result["venue_closed_skipped"] == 1
+    # The closed family produced NO refresh work: no topology family, no submit.
+    assert closed_result.get("cached_topology_families", 0) == 0
+    assert closed_submitted == []
+    # all-fresh / no-work status (never "refreshed") because the only family was skipped.
+    assert closed_result["status"] != "refreshed"
+
+
+def test_warm_lane_venue_close_skip_is_failsoft_on_unresolvable_family(monkeypatch):
+    """Fail-SOFT direction of the venue-close warm-skip: an UNRESOLVABLE family
+    (city not in the runtime registry) must be KEPT (not skipped) even past the
+    F1 close instant — uncertain ⇒ keep, never drop a possibly-tradeable family.
+
+    Pins the asymmetry: ``family_venue_closed`` returns False on an unresolvable
+    city, so the warm lane processes it normally. RED-on-revert of a hypothetical
+    fail-CLOSED variant (skip on unresolvable) would drop this family and fail."""
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+    cached_market = {
+        "slug": "highest-temperature-in-atlantis-on-june-7-2026",
+        "city": SimpleNamespace(name="Atlantis"),
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": "cond-x",
+                "market_id": "cond-x",
+                "token_id": "yes-x",
+                "no_token_id": "no-x",
+                "question_id": "q-x",
+            }
+        ],
+    }
+    topology_rows = [
+        {
+            "market_slug": "highest-temperature-in-atlantis-on-june-7-2026",
+            "city": "Atlantis",
+            "target_date": "2026-06-07",
+            "temperature_metric": "high",
+            "condition_id": "cond-x",
+            "token_id": "yes-x",
+            "range_label": "31C",
+        }
+    ]
+
+    import src.data.market_scanner as scanner
+    import src.data.polymarket_client as polymarket_client
+    import src.engine.event_reactor_adapter as adapter
+    import src.state.db as state_db
+
+    submitted: list[list[dict]] = []
+
+    monkeypatch.setattr(
+        adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows
+    )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(
+        scanner,
+        "reconstruct_weather_market_from_static_topology",
+        lambda *a, **k: cached_market,
+    )
+    monkeypatch.setattr(scanner, "_gamma_get", lambda *a, **k: None)
+    monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [])
+    monkeypatch.setattr(
+        scanner,
+        "refresh_executable_market_substrate_snapshots",
+        lambda _c, *, markets, **_k: submitted.append(markets) or {"attempted": 1, "inserted": 1},
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+
+    world_conn = _pending_family_conn("event-1", "Atlantis", "2026-06-07", "high")
+    # Decision clock well past the F1 close — a RESOLVABLE family here would skip,
+    # but the unresolvable city must be KEPT (fail-soft).
+    closed_now = datetime(2026, 6, 7, 18, 0, tzinfo=timezone.utc)
+    result = main_module._refresh_pending_family_snapshots(
+        world_conn, forecasts_conn, now_utc=closed_now
+    )
+
+    assert result["venue_closed_skipped"] == 0
+    assert result["status"] == "refreshed"
+    assert len(submitted) == 1

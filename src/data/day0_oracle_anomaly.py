@@ -1,9 +1,19 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-13
 # Authority basis: operator green-light 2026-06-10 item E (WU-vs-METAR
 #   divergence detector, fail-closed family pause); Paris CDG sensor-tampering
 #   incident April 2026 (/tmp/weather_source_research.md §5: trader manipulated
 #   a sensor, Polymarket switched Paris settlement to Le Bourget).
+#   + 2026-06-13 WU-SIDE COVERAGE GATE (symmetric twin of the existing
+#   METAR-side coverage gate): the per-city threshold was measured on
+#   timestamp-MATCHED same-station readings, but the runtime compares each
+#   feed's RUNNING EXTREME; when WU's live timeseries window never observed the
+#   local-day extreme (first sample after the coverage grace window), its
+#   running extreme is set by a different sample than METAR's -> a 2-9 unit
+#   coverage gap that is NOT tampering -> 174 day0 families false-paused
+#   (171/174 moved exactly ONE extreme = coverage; 3 moved both = real
+#   tamper). The detector now refuses to conclude when WU coverage_status != OK.
+#   Authority: docs/evidence/day0_oracle_false_pause_2026-06-13/diagnosis.md.
 """Day0 settlement-oracle anomaly guard: WU vs METAR divergence.
 
 The settlement reference (WU) and the fast lane (aviationweather.gov METAR)
@@ -511,6 +521,19 @@ def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> Non
             wu_last_obs_time = None
     except (TypeError, ValueError):
         wu_last_obs_time = None
+    # WU-side coverage status travels to the detector so it can refuse to
+    # conclude when WU's live timeseries window never observed the local-day
+    # extreme it would be compared on (diagnosis 2026-06-13). Only a genuinely
+    # WU-sourced context carries a meaningful WU coverage claim; if the obs path
+    # fell through to the METAR fast lane (source != "wu_api"), there is no WU
+    # side to validate a tamper against -> treat as no WU coverage (inconclusive,
+    # never a pause). The string is the existing Day0 classifier value.
+    wu_source = str(getattr(wu_obs, "source", "") or "")
+    wu_coverage_status = (
+        str(getattr(wu_obs, "coverage_status", "") or "")
+        if wu_source == "wu_api"
+        else "NO_WU_SIDE"
+    )
     verdict = check_wu_metar_divergence(
         city=city,
         target_date=target_date,
@@ -518,6 +541,7 @@ def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> Non
         wu_high_so_far=getattr(wu_obs, "high_so_far", None),
         wu_low_so_far=getattr(wu_obs, "low_so_far", None),
         wu_last_obs_time=wu_last_obs_time,
+        wu_coverage_status=wu_coverage_status,
     )
     if not verdict.compared:
         with _WU_CHECK_MEMO_LOCK:
@@ -543,14 +567,34 @@ def check_wu_metar_divergence(
     wu_high_so_far: Optional[float],
     wu_low_so_far: Optional[float],
     wu_last_obs_time: Optional[datetime],
+    wu_coverage_status: Optional[str] = None,
 ) -> DivergenceVerdict:
     """Compare WU running extremes against METAR extremes over the SAME window.
 
     Caller supplies the WU side (from the existing settlement-bound WU obs
-    context — high_so_far / low_so_far / observation_time). The METAR side is
-    recomputed here truncated at wu_last_obs_time so latency cannot masquerade
-    as divergence. Returns a verdict; flagging is the caller's choice (the
-    fast-lane wiring flags + pauses on diverged=True).
+    context — high_so_far / low_so_far / observation_time / coverage_status).
+    The METAR side is recomputed here truncated at wu_last_obs_time so latency
+    cannot masquerade as divergence. Returns a verdict; flagging is the caller's
+    choice (the fast-lane wiring flags + pauses on diverged=True).
+
+    WU-SIDE COVERAGE GATE (matched-basis correction, diagnosis 2026-06-13):
+    the per-city threshold (config/wu_metar_divergence.json) was measured on
+    timestamp-MATCHED same-station readings — both feeds observed the SAME
+    instants. The runtime instead compares each feed's RUNNING EXTREME. When
+    WU's live timeseries.json window does NOT cover the local-day extreme it is
+    being compared on (its first sample lands after local-midnight + the
+    coverage grace window, so it never observed the pre-dawn LOW / the window
+    is too sparse), WU's running extreme is set by a different sample than
+    METAR's — a 2-9 unit cadence/coverage gap that is NOT tampering. The live
+    proof: 171/174 false flags moved exactly ONE extreme with a clean integer
+    gap (the un-observed one); only 3 moved both (the tamper signature). This
+    is the SYMMETRIC twin of the existing METAR-side coverage gate below: a
+    family may be paused only when WU actually observed the extreme it is
+    compared on. ``wu_coverage_status`` is the EXISTING Day0 coverage classifier
+    (observation_client._compute_day0_coverage_status): "OK" means the window
+    reached local-day start with enough samples; "WINDOW_INCOMPLETE" /
+    "LOW_COVERAGE" mean it did not -> NOT comparable -> NONE verdict (never a
+    pause). ``None`` (caller did not thread it) preserves the legacy behavior.
     """
     from src.data.day0_fast_obs import running_extremes_for_local_day
 
@@ -560,6 +604,17 @@ def check_wu_metar_divergence(
         return DivergenceVerdict(
             city=city_name, target_date=str(target_date), unit=unit,
             compared=False, diverged=False, detail="wu_side_unavailable",
+        )
+    # WU-side coverage gate (symmetric with the METAR-side gate below). When the
+    # WU window did not observe the full local day, its running extreme is not a
+    # comparable quantity — absence of evidence is not an anomaly, and it must
+    # not pause trading (the module's NONE-verdict doctrine, header lines 27-28).
+    if wu_coverage_status is not None and str(wu_coverage_status).strip().upper() != "OK":
+        return DivergenceVerdict(
+            city=city_name, target_date=str(target_date), unit=unit,
+            compared=False, diverged=False,
+            wu_last_obs_time=wu_last_obs_time.astimezone(UTC).isoformat(),
+            detail=f"wu_side_insufficient_coverage (wu_coverage_status={wu_coverage_status})",
         )
     truncated = running_extremes_for_local_day(
         metar_reports, city=city, target_date=target_date, as_of=wu_last_obs_time.astimezone(UTC)
@@ -595,20 +650,61 @@ def check_wu_metar_divergence(
             ),
         )
     threshold, threshold_provenance = divergence_threshold_for_city(city_name, unit)
+    # METAR-SIDE START-COVERAGE GATE (symmetric twin of the WU-side gate above and
+    # of the METAR-END gate at 635; diagnosis 2026-06-14). The daily LOW forms in
+    # the pre-dawn / early-morning window. When the METAR fast lane's window for
+    # the local day STARTS late (first sample more than the coverage grace after
+    # local midnight — the common case when the daemon booted mid-day), its
+    # running min is a MIDDAY floor, not the daily low: it never observed the cold
+    # extreme that WU's full-coverage window did. Comparing the two then reads a
+    # pure coverage gap as divergence and false-pauses the family — the live
+    # signature is high matched to <0.1 unit while low was off by 3-10 units (the
+    # one-extreme COVERAGE signature, not the both-extreme TAMPER signature, exactly
+    # as the WU-side gate's 171/174-vs-3 split). The low is a comparable quantity
+    # ONLY when METAR's window also started at local-day onset; otherwise WU's
+    # full-coverage low is authoritative and the cross-check simply could not run
+    # on the low (module doctrine: absence of the cross-check is visibility loss,
+    # not an anomaly). The HIGH stays compared — it forms within the covered late
+    # window and the METAR-END gate vouches for it — so real high-side tampering is
+    # still caught. Coverage notion reuses the SINGLE authority
+    # observation_client._compute_day0_coverage_status (same grace as WU); only a
+    # late START (WINDOW_INCOMPLETE) excludes the low, a thin-but-early window
+    # (LOW_COVERAGE) still observed the dawn low and stays comparable.
+    from zoneinfo import ZoneInfo
+
+    from src.data.observation_client import _compute_day0_coverage_status
+
+    metar_low_comparable = False
+    metar_low_coverage = "WINDOW_INCOMPLETE"
+    if truncated.first_obs_time is not None:
+        try:
+            _metar_first_local = truncated.first_obs_time.astimezone(
+                ZoneInfo(str(getattr(city, "timezone")))
+            )
+            metar_low_coverage = _compute_day0_coverage_status(
+                _metar_first_local, truncated.sample_count
+            )
+            metar_low_comparable = metar_low_coverage != "WINDOW_INCOMPLETE"
+        except Exception:  # noqa: BLE001 — tz/helper failure -> not comparable (never a pause)
+            metar_low_comparable = False
     high_delta = (
         abs(float(wu_high_so_far) - float(truncated.high_so_far))
         if wu_high_so_far is not None and truncated.high_so_far is not None
         else None
     )
-    low_delta = (
+    low_delta_raw = (
         abs(float(wu_low_so_far) - float(truncated.low_so_far))
         if wu_low_so_far is not None and truncated.low_so_far is not None
         else None
     )
+    # Only a low difference observed by BOTH windows can conclude divergence; an
+    # uncovered METAR low window contributes nothing to the divergence test.
+    low_delta = low_delta_raw if metar_low_comparable else None
     diverged = any(delta is not None and delta > threshold for delta in (high_delta, low_delta))
     detail = (
         f"unit={unit} threshold={threshold} threshold_provenance={threshold_provenance} "
-        f"high_delta={high_delta} low_delta={low_delta} "
+        f"high_delta={high_delta} low_delta={low_delta} low_delta_raw={low_delta_raw} "
+        f"metar_low_coverage={metar_low_coverage} "
         f"wu_last_obs={wu_last_obs_time.isoformat()} metar_samples={truncated.sample_count}"
     )
     return DivergenceVerdict(

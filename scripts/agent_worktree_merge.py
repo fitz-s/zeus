@@ -198,7 +198,37 @@ def main() -> int:
     )
 
     if not is_ff:
-        # Session branch advanced since the agent branched. Defer to orchestrator.
+        # NOT a fast-forward. Two distinct causes — distinguish them, because one
+        # is benign (session merely advanced) and one is DANGEROUS (the agent
+        # branched from a lineage the daemon does NOT run, e.g. origin/main while
+        # live is a divergent live/iteration-* branch). A 3-way merge of a
+        # divergent base can ship the agent base's OLDER state over a live
+        # regression fix (verified 2026-06-13: K1 loss-class case).
+        mb = _git(["merge-base", session_tip, agent_head], cwd).stdout.strip()
+        divergent = mb not in ("", session_tip)  # session_tip not an ancestor => divergent base
+        if divergent:
+            print(
+                "MERGE_DIVERGENT_REFUSED: agent branch '%s' was created from a lineage\n"
+                "that has DIVERGED from the live session branch '%s'.\n"
+                "  agent HEAD:    %s\n  session tip:   %s\n  merge-base:    %s\n"
+                "A 3-way merge here can silently ship the agent base's older state over\n"
+                "fixes that exist only on the live branch. This is the branch-divergence\n"
+                "root cause (2026-06-13): the agent must be re-based onto the live branch\n"
+                "the daemon runs before its work can land. Do NOT --no-ff this blindly.\n"
+                "Remediation (orchestrator, main tree idle/clean): cherry-pick or rebase\n"
+                "the agent's commits onto '%s', verify against live, then land."
+                % (
+                    agent_branch or "(detached)",
+                    main_branch,
+                    agent_head,
+                    session_tip[:10],
+                    mb[:10] if mb else "(none)",
+                    main_branch,
+                )
+            )
+            return 4  # distinct code: divergent-base refusal (do not auto-merge)
+
+        # Benign non-ff: session advanced linearly past the agent's branch point.
         print(
             "MERGE_PENDING: session branch '%s' (tip %s) has advanced beyond the "
             "agent's branch point; a non-fast-forward merge is required and is the "
@@ -273,14 +303,66 @@ def main() -> int:
             return 3
 
         new_tip = _git(["rev-parse", main_branch], MAIN_TREE).stdout.strip()
+
+        # 8) SELF-CLEANUP: the agent's commits are now reachable from the session
+        #    branch (we just fast-forwarded to agent_head). The worktree + branch
+        #    are spent. Remove them so nothing accumulates. This is the step whose
+        #    absence let even *merged* worktrees/branches pile up (the GC keyed on
+        #    origin/main and skipped anything "ahead"). We run it from the MAIN
+        #    tree, post-merge, with the agent's commits proven in the session tip.
+        cleanup_note = _self_cleanup(top, agent_branch, agent_head, new_tip)
+
         print(
             "MERGE_OK: fast-forwarded session branch '%s' to agent work.\n"
-            "  merged sha: %s\n  agent branch: %s"
-            % (main_branch, new_tip, agent_branch or "(detached)")
+            "  merged sha: %s\n  agent branch: %s\n  %s"
+            % (main_branch, new_tip, agent_branch or "(detached)", cleanup_note)
         )
         return 0
     finally:
         _release_lock()
+
+
+def _self_cleanup(
+    worktree_path: Path, agent_branch: str, agent_head: str, new_tip: str
+) -> str:
+    """Remove the spent agent worktree + branch after a confirmed merge.
+
+    Safety: only runs when the agent's HEAD is provably an ancestor of the new
+    session tip (i.e. the work is truly merged). Operates from the MAIN tree so
+    we are not deleting the worktree we are standing in. Failure here is
+    non-fatal — the SessionStart/SubagentStop reaper backstop will catch it.
+    """
+    # Confirm the merge really contains the agent's commits before removing.
+    anc = _git(["merge-base", "--is-ancestor", agent_head, new_tip], MAIN_TREE)
+    if anc.returncode != 0:
+        return "CLEANUP_SKIPPED: agent HEAD not yet ancestor of session tip."
+
+    env = dict(os.environ)
+    env["MAINTREE_GIT_BYPASS"] = "1"  # branch -D below is a sanctioned ref op
+
+    notes: list[str] = []
+    rm = _git(
+        ["-C", str(MAIN_TREE), "worktree", "remove", "--force", str(worktree_path)],
+        MAIN_TREE,
+    )
+    if rm.returncode == 0:
+        notes.append("worktree removed")
+    else:
+        notes.append("worktree remove deferred (reaper backstop will retry)")
+
+    if agent_branch:
+        bd = _git(
+            ["-C", str(MAIN_TREE), "branch", "-D", agent_branch],
+            MAIN_TREE,
+            env=env,
+        )
+        if bd.returncode == 0:
+            notes.append(f"branch {agent_branch} deleted")
+        else:
+            notes.append(f"branch {agent_branch} delete deferred")
+
+    _git(["-C", str(MAIN_TREE), "worktree", "prune"], MAIN_TREE)
+    return "CLEANUP: " + ", ".join(notes)
 
 
 if __name__ == "__main__":

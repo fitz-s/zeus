@@ -281,12 +281,12 @@ class TestStoreRoundTrip:
         conn.close()
 
     def test_bias_corrected_fallback_reads_settings(self, tmp_path, monkeypatch):
-        """ZDM-01: when bias_corrected=None, harvest reads settings.bias_correction_enabled."""
+        """ZDM-01: when bias_corrected=None, harvest reads settings.baseline_bias_correction_enabled."""
         conn = self._get_test_conn(tmp_path)
 
         from src.execution.harvester import harvest_settlement
         from src.config import Settings
-        monkeypatch.setattr(Settings, "bias_correction_enabled", True, raising=True)
+        monkeypatch.setattr(Settings, "baseline_bias_correction_enabled", True, raising=True)
 
         city = NYC
         n = harvest_settlement(
@@ -307,7 +307,7 @@ class TestStoreRoundTrip:
         ).fetchall()
         assert len(rows) == 3
         assert all(row["bias_corrected"] == 1 for row in rows), \
-            "Fallback path should read bias_correction_enabled=True from settings"
+            "Fallback path should read baseline_bias_correction_enabled=True from settings"
         conn.close()
 
 

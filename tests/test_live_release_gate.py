@@ -124,7 +124,6 @@ def _make_gate_args(
     source = tmp_path / "source_health.json"
     status = tmp_path / "status_summary.json"
     proof = tmp_path / "paper_proof.json"
-    arm = tmp_path / "arm_gate_artifact.json"
     settings = tmp_path / "settings.json"
 
     _make_world_db(world_db)
@@ -143,20 +142,6 @@ def _make_gate_args(
             **{key: True for key in PAPER_PROOF_KEYS},
         },
     )
-    _write_json(
-        arm,
-        {
-            "schema": "edli_arm_gate_v1",
-            "commit_sha": loaded_sha,
-            "measurement_cmd_hash": "test-measurement",
-            "capital_weighted_ev": 0.01,
-            "production_n": 1,
-            "per_city_n": {"London": 1},
-            "ev_sigma": 1.0,
-            "date_coverage": {"n_pairs": 1, "pairs": [["London", "2026-06-01"]]},
-            "coverage_licensed": True,
-        },
-    )
     argv = [
         "--expected-sha", "sha-a",
         "--loaded-sha-file", str(loaded),
@@ -166,7 +151,6 @@ def _make_gate_args(
         "--source-health-json", str(source),
         "--status-json", str(status),
         "--paper-proof-json", str(proof),
-        "--arm-artifact-json", str(arm),
         "--source-max-age-seconds", str(24 * 60 * 60),
         "--status-max-age-seconds", str(24 * 60 * 60),
     ]
@@ -283,41 +267,12 @@ def test_release_gate_live_blocks_pending_reconcile(tmp_path: Path) -> None:
     )
 
 
-# Wave-2 item 5: the canary qualifying-lane exemptions (no paper proof, no arm-gate
-# artifact consumption) are DELETED with the canary mode. edli_live is the single live
-# mode and consumes the arm-gate + promotion artifacts — covered by the live tests below.
-
-
-def test_release_gate_live_still_requires_arm_gate_artifact(tmp_path: Path) -> None:
-    args = _make_gate_args(tmp_path, settings_payload=_settings_for_stage("edli_live"))
-    args.stage = "edli_live"
-    args.arm_artifact_json.write_text(
-        json.dumps(
-            {
-                "schema": "edli_arm_gate_v1",
-                "commit_sha": "sha-a",
-                "measurement_cmd_hash": "test-measurement",
-                "capital_weighted_ev": 0.0,
-                "production_n": 0,
-                "per_city_n": {},
-                "ev_sigma": 0.0,
-                "date_coverage": {"n_pairs": 0, "pairs": []},
-                "coverage_licensed": False,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    report = evaluate_release_gate(args)
-
-    assert report.status == FAIL
-    assert report.submit_allowed is False
-    assert any(
-        result.name == "edli_arm_gate_artifact"
-        and result.status == FAIL
-        and "EV_NOT_POSITIVE" in result.detail
-        for result in report.results
-    )
+# Wave-2 item 5: the canary qualifying-lane exemptions (no paper proof) are DELETED
+# with the canary mode. edli_live is the single live mode and consumes the promotion
+# artifact — covered by the live tests above. (The edli_arm_gate settlement-evidence
+# CI check was removed 2026-06-13: artifact triple-DENIED, emit job flag-OFF, and the
+# FATAL boot guard it protected was already a no-op; the real arm gate is
+# edli_live_operator_authorized.)
 
 
 def test_release_gate_legacy_still_requires_paper_live_unknown(tmp_path: Path) -> None:

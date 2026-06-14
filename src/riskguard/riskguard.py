@@ -1073,6 +1073,101 @@ def _sync_riskguard_strategy_gate_actions(
     }
 
 
+def _refresh_riskguard_auxiliary_bookkeeping(
+    zeus_conn: sqlite3.Connection,
+    *,
+    recommended_strategy_gate_reasons: dict[str, list[str]],
+    now: str,
+) -> tuple[dict, dict, dict]:
+    """Run the RiskGuard AUXILIARY bookkeeping writes/reads, lock-tolerantly.
+
+    Root cause (live 2026-06-13, docs/evidence/no_order_root_2026-06-13/diagnosis.md):
+    the RiskGuard tick computes its risk LEVEL purely from READS (settlement /
+    realized-exit / Brier / loss snapshots, already gathered before this call).
+    These two bookkeeping operations — ``_sync_riskguard_strategy_gate_actions``
+    (DELETE/INSERT into ``risk_actions``) and ``refresh_strategy_health``
+    (DELETE+INSERT into ``strategy_health``) — are WRITE transactions on the
+    zeus_trades write lock. When a concurrent writer (reactor / ingest, in
+    another process) holds that WAL write lock, these AUXILIARY writes raise
+    ``"database is locked"``. The pre-fix code let that bubble to the top-level
+    tick handler, which RETRIED then DEGRADED to DATA_DEGRADED — vetoing every
+    post-Kelly tradeable bet on the GREEN-only entry gate even though risk was
+    perfectly KNOWABLE (the level reads had all succeeded). This is the
+    no-conn-across-IO / writer-contention storm class (9f70e9c581).
+
+    THE LEVEL MUST NOT DEGRADE because a bookkeeping write lost the WAL write
+    lock. So a ``"database is locked"`` here is caught, the zeus_conn write txn is
+    rolled back (so the locked/partial bookkeeping txn never carries into the
+    tick's final ``zeus_conn.commit()``), and the tick proceeds to compute and
+    persist a FRESH FULL risk_state row from the reads it already has.
+
+    FAIL-CLOSED IS PRESERVED (AGENTS.md risk-levels law): only the SPURIOUS
+    writer-contention lock on these two bookkeeping operations is absorbed — a
+    bookkeeping write losing the WAL lock is NOT a "missing or stale truth input".
+    A lock (or any other failure) on the genuine truth READS happens EARLIER in
+    ``_tick_once`` and still propagates to the top-level handler → retry →
+    DATA_DEGRADED. A NON-lock OperationalError here (e.g. a genuine schema fault)
+    is re-raised loudly — never swallowed.
+
+    Returns ``(durable_action_status, strategy_health_refresh,
+    strategy_health_snapshot)``. On a caught lock the three carry a
+    ``skipped_dependency_lock`` status so the tick's observability fields record
+    that the bookkeeping was skipped this cycle (the LEVEL is unaffected).
+    """
+    try:
+        durable_action_status = _sync_riskguard_strategy_gate_actions(
+            zeus_conn,
+            recommended_strategy_gate_reasons,
+            issued_at=now,
+        )
+        strategy_health_refresh = refresh_strategy_health(zeus_conn, as_of=now)
+        strategy_health_snapshot = query_strategy_health_snapshot(
+            zeus_conn,
+            now=now,
+        )
+        return durable_action_status, strategy_health_refresh, strategy_health_snapshot
+    except sqlite3.OperationalError as exc:
+        if not _is_sqlite_database_locked(exc):
+            # A genuine bookkeeping fault (e.g. schema corruption) must NOT be
+            # masked as a lock — propagate so the top-level handler surfaces it.
+            raise
+        # The bookkeeping write lost the WAL write lock to a concurrent writer.
+        # Roll back the (locked/partial) zeus_conn write txn so it cannot poison
+        # the tick's final zeus_conn.commit(); the risk LEVEL is computed from the
+        # reads we ALREADY have, so we still write a fresh full risk_state row.
+        try:
+            zeus_conn.rollback()
+        except Exception:  # noqa: BLE001 — best-effort; rollback of a stub/locked conn
+            pass
+        logger.warning(
+            "RiskGuard auxiliary bookkeeping (risk_actions / strategy_health) lost the "
+            "zeus_trades write lock to a concurrent writer (database is locked); SKIPPING "
+            "the bookkeeping refresh this cycle and proceeding with the level computed from "
+            "the metric reads. The risk LEVEL is NOT degraded by a bookkeeping write lock. "
+            "error=%s",
+            exc,
+        )
+        skipped = {
+            "status": "skipped_dependency_lock",
+            "emitted_count": 0,
+            "expired_count": 0,
+        }
+        skipped_refresh = {
+            "status": "skipped_dependency_lock",
+            "table": "strategy_health",
+            "rows_written": 0,
+            "as_of": now,
+            "settlement_authority_missing_tables": [],
+        }
+        skipped_snapshot = {
+            "status": "skipped_dependency_lock",
+            "table": "strategy_health",
+            "by_strategy": {},
+            "stale_strategy_keys": [],
+        }
+        return skipped, skipped_refresh, skipped_snapshot
+
+
 def init_risk_db(conn: sqlite3.Connection) -> None:
     """Create risk_state tables."""
     conn.executescript("""
@@ -1311,6 +1406,30 @@ def _tick_once() -> RiskLevel:
     """
     zeus_conn: sqlite3.Connection | None = None
     risk_conn: sqlite3.Connection | None = None
+
+    # P0-A bankroll truth chain (architect memo §7): trailing-loss math must
+    # use the on-chain wallet, NOT the config constant routed through
+    # PortfolioState.bankroll. When the wallet is unreachable AND no fresh
+    # cache exists, fail-closed at DATA_DEGRADED rather than silently falling
+    # back to retired config-literal capital.
+    #
+    # CONN-ACROSS-IO INVARIANT (T0-1, dimension-#4): this fetch is hoisted ABOVE
+    # the zeus_conn/risk_conn opens. `bankroll_provider.current()` is 30s-cached,
+    # but on a STALE cache it performs a Polymarket wallet NETWORK fetch; with the
+    # ~60s tick that network IO previously fired roughly every other tick WHILE
+    # both write-class conns were held (the conn-across-IO lock-contention class —
+    # the report's unconfirmed "2113 RISK_GUARD_BLOCKED/17h"). Fetching before any
+    # conn opens guarantees NO network IO ever happens while a write-class conn is
+    # held. The 30s cache, the fail-closed-to-DATA_DEGRADED contract (the
+    # `bankroll_of_record is None` branch below, which still runs after risk_conn
+    # opens so the DATA_DEGRADED attestation row can be written), the short
+    # busy_timeout, and the WAL-leak fix are all preserved; ONLY the fetch POINT
+    # moves earlier. The captured value is identical to what the old in-conn call
+    # returned and flows to the same downstream consumers (current_bankroll_usd,
+    # the details_json bankroll_truth block, the component log).
+    # Relationship test: tests/riskguard/test_no_network_io_under_conn.py.
+    bankroll_of_record = bankroll_provider.current()
+
     try:
         zeus_conn = _get_runtime_trade_connection()
         # Short per-attempt wait so a contended metrics read FAILS FAST and the
@@ -1331,12 +1450,10 @@ def _tick_once() -> RiskLevel:
         thresholds = settings["riskguard"]
         portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
 
-        # P0-A bankroll truth chain (architect memo §7): trailing-loss math must
-        # use the on-chain wallet, NOT the config constant routed through
-        # PortfolioState.bankroll. When the wallet is unreachable AND no fresh
-        # cache exists, fail-closed at DATA_DEGRADED rather than silently falling
-        # back to retired config-literal capital.
-        bankroll_of_record = bankroll_provider.current()
+        # Bankroll truth was fetched BEFORE the conns opened (see the hoisted
+        # `bankroll_provider.current()` above — conn-across-IO invariant T0-1).
+        # The fail-closed write below needs risk_conn, so the None-handling stays
+        # here; the network fetch itself no longer runs under a held conn.
         if bankroll_of_record is None:
             now_ts = datetime.now(timezone.utc).isoformat()
             risk_conn.execute(
@@ -1473,24 +1590,36 @@ def _tick_once() -> RiskLevel:
             ]
             recommended_control_reasons["review_strategy_gates"] = review_gate_reasons
 
-        # Refresh and query strategy health FIRST to compute canonical PnL
+        # Refresh and query strategy health FIRST to compute canonical PnL.
+        # These are AUXILIARY bookkeeping writes/reads (risk_actions +
+        # strategy_health). They run lock-tolerantly: a writer-contention
+        # "database is locked" on these bookkeeping WRITES must NOT degrade the
+        # risk LEVEL, which is computed entirely from the metric READS already
+        # gathered above. See _refresh_riskguard_auxiliary_bookkeeping +
+        # docs/evidence/no_order_root_2026-06-13/diagnosis.md. Fail-closed is
+        # preserved — a lock on the genuine truth READS earlier still degrades.
         now = datetime.now(timezone.utc).isoformat()
-        durable_action_status = _sync_riskguard_strategy_gate_actions(
+        (
+            durable_action_status,
+            strategy_health_refresh,
+            strategy_health_snapshot,
+        ) = _refresh_riskguard_auxiliary_bookkeeping(
             zeus_conn,
-            recommended_strategy_gate_reasons,
-            issued_at=now,
-        )
-        strategy_health_refresh = refresh_strategy_health(zeus_conn, as_of=now)
-        strategy_health_snapshot = query_strategy_health_snapshot(
-            zeus_conn,
+            recommended_strategy_gate_reasons=recommended_strategy_gate_reasons,
             now=now,
         )
 
         total_realized_pnl = sum(bucket.get("realized_pnl_30d", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
         total_unrealized_pnl = sum(bucket.get("unrealized_pnl", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
 
-        if total_unrealized_pnl == 0.0 and strategy_health_snapshot.get("status") in ("missing_table", "empty", "fresh", "stale"):
-            # Fallback for unrealized PnL
+        if total_unrealized_pnl == 0.0 and strategy_health_snapshot.get("status") in (
+            "missing_table", "empty", "fresh", "stale", "skipped_dependency_lock"
+        ):
+            # Fallback for unrealized PnL — also covers the cycle where the
+            # strategy_health bookkeeping was SKIPPED because the auxiliary write
+            # lost the zeus_trades WAL write lock (skipped_dependency_lock): the
+            # observability PnL still reads from in-memory portfolio positions so
+            # a writer-contention skip never silently zeroes unrealized PnL.
             total_unrealized_pnl = sum(float(getattr(p, "unrealized_pnl", 0.0)) for p in getattr(portfolio, "positions", []))
 
         total_pnl = total_realized_pnl + total_unrealized_pnl

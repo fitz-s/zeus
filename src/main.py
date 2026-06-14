@@ -3306,6 +3306,7 @@ def _refresh_pending_family_snapshots(
     forecasts_conn,
     *,
     consumer_name: str = "edli_reactor_v1",
+    now_utc: datetime | None = None,
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
 
@@ -3330,8 +3331,15 @@ def _refresh_pending_family_snapshots(
     from src.data.polymarket_client import PolymarketClient
     from src.engine.event_reactor_adapter import _event_family_market_topology_rows
     from src.state.db import get_trade_connection
+    from src.strategy.market_phase import (
+        family_venue_closed as _family_venue_closed,
+    )
 
-    now_utc = datetime.now(timezone.utc)
+    # Injected-now (tests / replay): the venue-close warm-skip and the snapshot
+    # freshness window both key off this single decision clock. Defaults to
+    # wall-clock UTC in production; a test passes a frozen instant so the
+    # venue-close skip is deterministic against fixed-date fixtures.
+    now_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
     now_iso = now_utc.isoformat()
 
     # Step 1: Collect distinct (city, target_date, metric) for pending events.
@@ -3496,6 +3504,7 @@ def _refresh_pending_family_snapshots(
     #         Families with ANY stale/missing bin still proceed to Gamma fetch.
     fresh_skipped = 0
     no_topology = 0
+    venue_closed_skipped = 0
     gamma_refresh_families: list[tuple[str, str, str]] = []
     cached_topology_markets: list[dict] = []
     cached_topology_families = 0
@@ -3526,6 +3535,36 @@ def _refresh_pending_family_snapshots(
                     snapshot_reserve_s,
                 )
                 break
+            # VENUE-CLOSE WARM-SKIP (2026-06-13): a family whose Polymarket weather
+            # market has already entered POST_TRADING/RESOLVED (the F1 12:00-UTC
+            # close of target_date) can produce no fresh executable book — its
+            # capture froze at the last pre-close snapshot and Gamma returns an
+            # empty event list. Re-probing it (topology lookup + Gamma slug fetch)
+            # burns the bounded time-box that LIVE families (PRE_SETTLEMENT_DAY /
+            # SETTLEMENT_DAY) need, starving the live inventory of fresh snapshots.
+            #
+            # This is the EARLIER-than-strictly-past horizon: the venue closes at
+            # 12:00 UTC of target_date, hours before the target LOCAL-day end that
+            # the claim floor (EventStore._strictly_past_in_tz) and the prior STEP-4
+            # comment relied on. So a same-day-but-venue-closed family (e.g. a
+            # 2026-06-13 family at 17:44Z, post the 12:00Z close, pre local
+            # midnight) passes the claim floor and reaches this lane — exactly the
+            # 202/319 closed families measured live 2026-06-13 17:51Z that the
+            # 'gamma_slug_timebox_unattempted' tail re-probed for nothing.
+            #
+            # Authority: market_phase.family_venue_closed reuses the SAME F1
+            # 12:00-UTC POST_TRADING anchor (market_open_at_decision /
+            # market_phase_for_decision) the reactor's _venue_market_closed_horizon
+            # uses — single authority, no new clock. Fail-SOFT: an unresolvable
+            # city/tz/date returns False (NOT closed) so an uncertain family is
+            # KEPT, never dropped (a tradeable family must never be skipped). This
+            # is a focus/efficiency skip, NOT a cap or admission relaxation — it
+            # removes only families whose venue is provably closed.
+            if _family_venue_closed(
+                city=city, target_date=target_date, now_utc=now_utc
+            ):
+                venue_closed_skipped += 1
+                continue
             payload = {"city": city, "target_date": target_date, "metric": metric}
             topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
             if not topology_rows:
@@ -3587,14 +3626,17 @@ def _refresh_pending_family_snapshots(
         if not gamma_refresh_families and not cached_topology_markets:
             logger.info(
                 "refresh_pending_family_snapshots: all families fresh, skipped. "
-                "families=%d fresh_skipped=%d no_topology=%d cached_topology_incomplete=%d",
-                len(families), fresh_skipped, no_topology, cached_topology_incomplete,
+                "families=%d fresh_skipped=%d no_topology=%d venue_closed_skipped=%d "
+                "cached_topology_incomplete=%d",
+                len(families), fresh_skipped, no_topology, venue_closed_skipped,
+                cached_topology_incomplete,
             )
             return {
                 "status": "all_fresh",
                 "families_checked": len(families),
                 "fresh_skipped": fresh_skipped,
                 "no_topology": no_topology,
+                "venue_closed_skipped": venue_closed_skipped,
                 "cached_topology_incomplete": cached_topology_incomplete,
             }
 
@@ -3984,6 +4026,7 @@ def _refresh_pending_family_snapshots(
                 "cached_topology_incomplete": cached_topology_incomplete,
                 "no_topology": no_topology,
                 "fresh_skipped": fresh_skipped,
+                "venue_closed_skipped": venue_closed_skipped,
                 "gamma_slug_attempted": gamma_slug_attempted,
                 "gamma_slug_empty": gamma_slug_empty,
                 "gamma_slug_http_non_200": gamma_slug_http_non_200,
@@ -4025,6 +4068,7 @@ def _refresh_pending_family_snapshots(
         "cached_topology_incomplete": cached_topology_incomplete,
         "no_topology": no_topology,
         "fresh_skipped": fresh_skipped,
+        "venue_closed_skipped": venue_closed_skipped,
         "topology_budget_exhausted": int(topology_budget_exhausted),
         "topology_deferred_families": topology_deferred_families,
         "skipped_not_found": skipped_not_found,
@@ -4185,6 +4229,100 @@ def _market_discovery_cycle() -> None:
     finally:
         _market_substrate_refresh_lock.release()
         _market_discovery_lock.release()
+
+
+@_scheduler_job("afternoon_snapshot_capture")
+def _afternoon_snapshot_capture_cycle() -> None:
+    """30-min dedicated capture for same-day SETTLEMENT_DAY markets (hours_to_resolution ≤12).
+
+    Afternoon-capture fix (2026-06-14): the universe-wide market_discovery runs every
+    5 min and the EDLI warm cycle runs every 20s — both target PENDING families and the
+    full weather universe.  Neither explicitly targets the sub-12h same-day window that
+    corresponds to the nowcast decision window (cities whose local-afternoon aligns with
+    the pre-12:00 UTC capture window).  This job fills that gap by:
+
+      1. Running a slug-pattern–only discovery scoped to TODAY (the slug fix above ensures
+         today is always in the target-date list after UTC noon).
+      2. Filtering to markets with hours_to_resolution in (0, 12] — the same-day
+         afternoon window.
+      3. Calling the standard rate-limited refresh_executable_market_substrate_snapshots
+         so orderbook top-bid/ask + depth are recorded at ≥30-min cadence through the
+         settlement window for every active same-day market.
+
+    SAFETY / THROTTLE: reuses the existing CLOB capture path (refresh_executable_market_
+    substrate_snapshots with a conservative 60s wall-clock budget).  max_outcomes=4 per
+    city (the standard cap).  max_instances=1/coalesce prevents stacked CLOB fan-out.
+    The job runs only when there are same-day markets open (hours_to_resolution > 0);
+    if today's markets are already closed (past 12:00 UTC) find_slug_pattern_weather_
+    markets returns [] and the job is a sub-100ms no-op.  NOT a trading or decision
+    path — capture only, no belief/flag/order change.
+    """
+    acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+    if not acquired:
+        logger.info("afternoon_snapshot_capture: skipped — substrate refresh already running")
+        return
+    try:
+        from src.data.market_scanner import (
+            find_slug_pattern_weather_markets,
+            refresh_executable_market_substrate_snapshots,
+        )
+        from src.data.polymarket_client import PolymarketClient
+        from src.state.db import get_trade_connection
+
+        # Slug-pattern–only fetch scoped to same-day markets with ≤12h to resolution.
+        # hours_to_resolution ≤12 catches the SETTLEMENT_DAY window; >0 excludes
+        # already-expired markets (end_at <= now) which Gamma returns empty for.
+        # find_slug_pattern_weather_markets always includes today (slug fix above).
+        now_utc = datetime.now(timezone.utc)
+        events = find_slug_pattern_weather_markets(min_hours_to_resolution=0.0)
+        same_day_events = [
+            e for e in events
+            if isinstance(e, dict)
+            and e.get("hours_to_resolution") is not None
+            and 0 < float(e["hours_to_resolution"]) <= 12.0
+        ]
+        if not same_day_events:
+            logger.debug("afternoon_snapshot_capture: no same-day markets open (hours_to_resolution ≤12), skipping")
+            return
+        conn = get_trade_connection(write_class="live")
+        try:
+            _clob_timeout = max(
+                1.0,
+                float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
+            )
+            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+                summary = refresh_executable_market_substrate_snapshots(
+                    conn,
+                    markets=same_day_events,
+                    clob=clob,
+                    captured_at=now_utc,
+                    scan_authority="VERIFIED",
+                    refresh_reason="afternoon_snapshot_capture",
+                    # Conservative 60s budget — same-day markets are a subset of the
+                    # universe, so this runs well within the interval (30 min).  The
+                    # standard per-city cap (ZEUS_MARKET_DISCOVERY_SNAPSHOT_MAX_OUTCOMES)
+                    # applies — no unbounded fan-out.
+                    budget_seconds=float(
+                        os.environ.get("ZEUS_AFTERNOON_CAPTURE_BUDGET_SECONDS", "60.0")
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        logger.info(
+            "afternoon_snapshot_capture: same_day_markets=%d executable_snapshots=%s",
+            len(same_day_events),
+            summary,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
+        logger.error(
+            "afternoon_snapshot_capture: capture raised (non-fatal): %r", exc
+        )
+    finally:
+        try:
+            _market_substrate_refresh_lock.release()
+        except RuntimeError:
+            pass
 
 
 @_scheduler_job("new_listing_scout")
@@ -5017,17 +5155,19 @@ def _startup_data_health_check(conn):
     are easy to forget. The warnings persist until the actions are taken.
     """
     try:
-        # 1. Bias correction reminder
-        bias_enabled = settings.bias_correction_enabled
+        # 1. Bias correction reminder (legacy baseline/diagnostics chain flag,
+        # renamed from bias_correction_enabled → baseline_bias_correction_enabled
+        # in T0-3 to disambiguate from edli.edli_bias_correction_enabled).
+        bias_enabled = settings.baseline_bias_correction_enabled
         bias_data = conn.execute(
             "SELECT COUNT(*) FROM model_bias WHERE source='ecmwf' AND n_samples >= 20"
         ).fetchone()[0]
 
         if not bias_enabled and bias_data > 0:
             logger.warning(
-                "⚠ DEFERRED ACTION: bias_correction_enabled=false but %d ECMWF bias "
+                "⚠ DEFERRED ACTION: baseline_bias_correction_enabled=false but %d ECMWF bias "
                 "entries ready. To activate: 1) Recompute calibration_pairs with bias "
-                "correction 2) Refit Platt models 3) Set bias_correction_enabled=true "
+                "correction 2) Refit Platt models 3) Set baseline_bias_correction_enabled=true "
                 "4) Run test_cross_module_invariants.py",
                 bias_data,
             )
@@ -6582,107 +6722,6 @@ def _edli_mainstream_warm_cycle() -> None:
     )
 
 
-@_scheduler_job("arm_gate_emit")
-def _arm_gate_emit_cycle() -> None:
-    """Iron-rule-4 antibody: AUTO-RE-EMIT the settlement-grounded ARM-gate artifact.
-
-    THE BREAK THIS MAKES IMPOSSIBLE: the settlement→ARM-evidence loop was WIRED
-    (producer ``scripts/measure_arm_gate_settlement.py --emit-artifact`` +
-    consumer ``_assert_edli_arm_gate_artifact`` / ``verify_edli_arm_gate_artifact``)
-    but never AUTOMATED — nothing RAN the producer. So
-    ``state/edli_arm_gate_artifact.json`` could go missing, or its ``commit_sha``
-    could fall behind the running HEAD on every deploy. Either makes the live/canary
-    boot gate fail-closed (``ARM_GATE_ARTIFACT_MISSING`` / ``COMMIT_SHA_MISMATCH``) —
-    the system is structurally un-armable AND cannot even boot. This job re-emits
-    the artifact on startup (re-stamping ``commit_sha`` to the running HEAD) and on
-    a ~6h interval (refreshing as settlements accrue), so the break can never recur.
-
-    HONESTY PRESERVED: it runs the SAME producer, which is DENIED-safe by
-    construction — it NEVER emits an ARM_ELIGIBLE artifact on denied/insufficient
-    data (ev<=0 / coverage_licensed:false → the consumer rejects). This job does
-    NOT touch the arm verdict logic, the arm threshold, or config — it only
-    re-stamps + refreshes the evidence the consumer already enforces.
-
-    SUBPROCESS (not in-process): the producer does heavy aggregation reading
-    state/zeus-world.db (receipts) + state/zeus-forecasts.db (settlements). Running
-    it as a child process avoids any world/forecasts DB-lock contention with the
-    live reactor running under world_write_mutex in THIS process.
-
-    Not a DB writer (writes a FILE, not a table) — the @_scheduler_job decorator is
-    the only wiring needed (B047 observability); it owns no db_table_ownership entry,
-    so it is OUT of assert_writer_jobs_registered's scope and cannot trip that
-    FATAL boot guard. Flag-gated by ``edli_arm_gate_emit_enabled`` (default True so
-    the antibody is ACTIVE; explicit False == today's no-op for a safe rollback).
-
-    FAILURE ISOLATION: the @_scheduler_job decorator already swallows + marks
-    FAILED on any raise, but this fn additionally wraps the producer call in
-    try/except and RETURNS on failure (fail-soft, mirroring the warm jobs) so a
-    transient git/DB/subprocess hiccup never crashes the daemon and never leaves a
-    half-written artifact (the producer writes atomically via os.replace).
-    """
-    edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled"):
-        return
-    if not bool(edli_cfg.get("edli_arm_gate_emit_enabled", False)):
-        # Flag-OFF/default: strict no-op. This settlement measurement is not part
-        # of the live trading critical path and must not compete with reactor or
-        # price-substrate DB traffic.
-        return
-
-    artifact_path = str(edli_cfg.get("edli_arm_gate_artifact_path") or "").strip()
-    if not artifact_path:
-        logger.error(
-            "arm_gate_emit: edli_arm_gate_artifact_path unset — cannot emit (the boot "
-            "gate reads this same key; arming stays blocked). No-op this tick."
-        )
-        return
-
-    repo_root = Path(__file__).resolve().parent.parent
-    producer = repo_root / "scripts" / "measure_arm_gate_settlement.py"
-    try:
-        completed = subprocess.run(
-            [sys.executable, str(producer), "--emit-artifact", artifact_path],
-            cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-            timeout=float(edli_cfg.get("edli_arm_gate_emit_timeout_seconds", 30)),
-        )
-    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick / next boot retries
-        logger.error(
-            "arm_gate_emit: producer subprocess raised (non-fatal; artifact NOT "
-            "refreshed this tick, consumers stay fail-closed): %r",
-            exc,
-        )
-        return
-
-    if completed.returncode != 0:
-        logger.error(
-            "arm_gate_emit: producer exited rc=%d (non-fatal; artifact NOT refreshed "
-            "this tick). stderr tail: %s",
-            completed.returncode,
-            (completed.stderr or "")[-500:],
-        )
-        return
-
-    # ANTI-SILENT-SINK (2026-06-09, same class as the materializer-queue fix): on SUCCESS the
-    # producer's captured output was discarded entirely, so any WARNING it emitted (degraded
-    # inputs, partial settlement coverage) reached no log. Re-emit WARNING/ERROR lines.
-    try:
-        for _stream in (completed.stderr or "", completed.stdout or ""):
-            for _line in _stream.splitlines():
-                if "WARNING" in _line or "ERROR" in _line:
-                    logger.warning("arm_gate_emit[producer] %s", _line.strip()[:500])
-    except Exception:
-        pass
-
-    logger.info(
-        "arm_gate_emit: re-emitted ARM-gate artifact → %s (commit_sha re-stamped to "
-        "running HEAD; verdict remains the producer's honest settlement-grounded "
-        "DENIED/ELIGIBLE — never fabricated)",
-        artifact_path,
-    )
-
-
 @_scheduler_job("world_wal_checkpoint")
 def _world_wal_checkpoint_cycle() -> None:
     """Periodic zeus-world.db WAL TRUNCATE backstop (2026-06-04, part 2).
@@ -7217,6 +7256,30 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             return False
         if not topology_rows:
             return False
+        # FAMILY-IDENTITY RE-INJECTION (freshness-throughput starvation fix
+        # 2026-06-14, #92 / binding_wall.md). _event_family_market_topology_rows
+        # binds city/target_date/temperature_metric in its WHERE clause but does NOT
+        # SELECT them, so the returned rows carry NO city/target_date/metric columns.
+        # reconstruct_weather_market_from_static_topology reads first.get("city") /
+        # ("target_date") / ("temperature_metric") and returns None at market_scanner
+        # L3535 (`if not (slug and city_name and target_date and metric)`) whenever
+        # they are absent — which is ALWAYS for this path. That silent None made the
+        # decision-triggered refresher return False for EVERY family (marker
+        # "decision_triggered_targeted_refresh" at ZERO live 2026-06-14), so a STALE
+        # live family could NEVER get a fresh row and requeued forever. The warm-job
+        # lane (refresh_pending_family_snapshots, main.py ~3580) already re-injects
+        # these three fields before calling reconstruct; mirror it here so the
+        # decision-time refresh actually reconstructs and captures. Additive: a row
+        # already carrying the fields is unchanged.
+        topology_rows = [
+            {
+                **dict(trow),
+                "city": city,
+                "target_date": target_date,
+                "temperature_metric": metric,
+            }
+            for trow in topology_rows
+        ]
 
         _clob_timeout = max(
             1.0,
@@ -9128,6 +9191,16 @@ def main():
             max_instances=1,
             coalesce=True,
         )
+        # AFTERNOON CAPTURE — legacy_cron mode (2026-06-14): see EDLI registration below.
+        scheduler.add_job(
+            _afternoon_snapshot_capture_cycle,
+            "interval",
+            minutes=30,
+            id="afternoon_snapshot_capture",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 120.0),
+            max_instances=1,
+            coalesce=True,
+        )
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("enabled"):
         scheduler.add_job(
             _edli_event_reactor_cycle,
@@ -9272,30 +9345,6 @@ def main():
         # blocked all trades. They now run on the forecast-live daemon's lane, download
         # cron-driven at publish time (00Z/12Z + release_lag) — see
         # src/ingest/forecast_live_daemon.py and src/data/replacement_forecast_production.py.
-        # IRON-RULE-4 ANTIBODY (2026-06-04): AUTO-RE-EMIT the settlement-grounded
-        # ARM-gate artifact (state/edli_arm_gate_artifact.json). The producer/consumer
-        # loop existed but was never AUTOMATED — nothing RAN the producer, so the
-        # artifact could go missing or its commit_sha fall behind HEAD on a deploy →
-        # the boot gate (_assert_edli_arm_gate_artifact) fail-closes ARM_GATE_ARTIFACT_
-        # MISSING / COMMIT_SHA_MISMATCH → un-armable AND un-bootable in canary/live.
-        # This job re-stamps on startup (~40s after boot, after the warm jobs) and
-        # refreshes every 6h as 06-04/05/06/07 settle. DENIED-safe: it runs the same
-        # producer, which NEVER emits ARM_ELIGIBLE on denied data — it does not touch
-        # the arm verdict/threshold. Writes a FILE (no DB table) so it is out of
-        # assert_writer_jobs_registered's scope. Flag-gated by edli_arm_gate_emit_enabled
-        # (default True; explicit False == today's no-op for safe rollback). Fail-soft:
-        # a producer error logs + marks the @_scheduler_job FAILED but never crashes
-        # the daemon. SUBPROCESS so the heavy world/forecasts aggregation never
-        # contends with the live reactor's world_write_mutex in THIS process.
-        scheduler.add_job(
-            _arm_gate_emit_cycle,
-            "interval",
-            hours=6,
-            id="arm_gate_emit",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 40.0),
-            max_instances=1,
-            coalesce=True,
-        )
         # STRUCTURAL FIX (2026-05-31, #52 follow-up): executable_market_snapshots
         # (EMS) substrate refresh in EDLI modes. market_discovery is the ONLY
         # universe-wide writer of executable_market_snapshots (architecture/
@@ -9323,6 +9372,22 @@ def main():
             minutes=5,
             id="market_discovery",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 90.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # AFTERNOON CAPTURE (2026-06-14): dedicated 30-min capture for same-day
+        # SETTLEMENT_DAY markets (hours_to_resolution ≤12).  The universe-wide
+        # market_discovery and EDLI warm cycle target PENDING families; neither
+        # explicitly sweeps the sub-12h same-day window.  This job ensures
+        # orderbook snapshots are recorded at ≥30-min cadence through the local-
+        # afternoon / pre-close window for backtesting and microstructure analysis.
+        # Capture-only (no decision/order); fail-soft; max_instances=1/coalesce.
+        scheduler.add_job(
+            _afternoon_snapshot_capture_cycle,
+            "interval",
+            minutes=30,
+            id="afternoon_snapshot_capture",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 120.0),
             max_instances=1,
             coalesce=True,
         )

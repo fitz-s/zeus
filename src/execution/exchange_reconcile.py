@@ -2006,6 +2006,32 @@ def _record_position_drift_findings(
                 resolved_at=observed_at,
             )
             continue
+        # TERMINAL-CHAIN-CLOSED PHANTOM (2026-06-13, settled-external absorber completion):
+        # the swept-winner external close is proven ON-CHAIN — venue size 0 against a
+        # terminal (voided/settled/admin_closed) chain-holdings row, with no live sell lock.
+        # Task #31's calendar absorber lives only on the refresh path AND is blind during the
+        # window before the market's target local day is +24h past; that blind window froze
+        # the Denver latch 2026-06-13. Absorb directly from the on-chain evidence here on the
+        # FULL-SWEEP path so the finding is never re-recorded and the latch is never frozen.
+        # A non-terminal disappearance (no terminal chain-holdings row) never matches and
+        # still routes to the operator-ack path — the theft/bug surface is preserved.
+        if _absorb_terminal_chain_closed_phantom(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            closed_position_size=closed_position_size,
+            open_sell_locked_size=open_sell_locked_size,
+            observed_at=observed_at,
+            settled_terminal=_day_end_terminal_evidence_for_token(conn, token, observed_at),
+            confirmed_wallet_size=confirmed_wallet_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution=_TERMINAL_CHAIN_CLOSED_RESOLUTION,
+                resolved_at=observed_at,
+            )
+            continue
         findings.append(
             record_finding(
                 conn,
@@ -2159,6 +2185,109 @@ def _order_ids_for_unrecorded_trade_findings(conn: sqlite3.Connection) -> frozen
 
 _SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS = 24.0
 _SETTLED_EXTERNAL_RESOLUTION = "position_drift_settled_external_suppressed"
+# A swept winner whose terminal CLOSE is already proven ON-CHAIN: the position
+# terminally closed locally (a position_current row with phase in
+# {settled,admin_closed,voided} and chain_state in {synced,exit_pending_missing} —
+# the closed-position-holdings view) AND its CTF tokens have left the wallet
+# (exchange size 0). That pair is itself terminal-close proof and does NOT depend
+# on the market-calendar +24h buffer, which is blind during the window between the
+# external sweep and the calendar tick (the 2026-06-13 latch-freeze regression).
+_TERMINAL_CHAIN_CLOSED_RESOLUTION = "position_drift_terminal_chain_closed_phantom_suppressed"
+
+
+def _absorb_terminal_chain_closed_phantom(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    exchange_size: Decimal,
+    closed_position_size: Decimal,
+    open_sell_locked_size: Decimal,
+    observed_at: datetime,
+    settled_terminal: Mapping[str, str] | None = None,
+    confirmed_wallet_size: Decimal = Decimal("0"),
+) -> bool:
+    """Recognize a terminal-chain-closed swept-winner phantom from evidence in hand.
+
+    K=1 (make the CATEGORY impossible, not the instance): the operator's standing
+    third-party auto-redeemer sweeps every settled winner off the shared wallet. After
+    the sweep the venue reports exchange size 0, while a terminal local position
+    (phase voided/settled/admin_closed, chain_state synced/exit_pending_missing — the
+    closed-position-holdings view) still asserts an expected on-chain CTF holding. That
+    dangling terminal-holding double-counts against a venue-zero balance and re-records
+    position_drift forever, freezing the M5 submit latch.
+
+    The settled-external absorber (task #31, _market_calendar_terminal_evidence) recognizes
+    this only via the calendar AND only once the market's target local day is >= 24h past,
+    AND it lived ONLY on the 1-minute refresh path — never on the full sweep that
+    run_ws_gap_reconcile_and_clear actually runs. The 2026-06-13 Denver freeze fell in both
+    gaps: the full-sweep path had no settled absorber at all, so the phantom (5bbc2be2) was
+    re-recorded every sweep and the latch stayed frozen.
+
+    This absorber closes both gaps. It runs on BOTH paths, and it pairs TWO independent
+    terminal signals so it stays strictly fail-closed:
+      (1) ON-CHAIN terminal close: venue size 0 against a terminal (voided/settled/
+          admin_closed) chain-holding row, no live sell lock — the tokens are provably gone
+          from the wallet; AND
+      (2) MARKET settledness: the token's market is calendar-terminal (its target local day
+          has ENDED — buffer_hours=0, because signal (1) already proves the tokens left, so
+          the venue-lag margin the +24h buffer guards against is redundant).
+
+    Requiring (2) is what distinguishes a SETTLED-winner sweep (market resolved; the
+    third-party redeemer claimed it) from an OPERATOR-MANUAL open-market sale (market still
+    open — no calendar evidence). The latter has no ``settled_terminal`` and stays
+    fail-closed on the strict operator-ack path. (See test_reconcile_operator_external_close:
+    its ``condition-m5`` market is absent from the registry, so settled_terminal is None.)
+
+    On match: register token_suppression('settled_position') with terminal-close evidence so
+    the suppression door (_token_is_suppressed_external) keeps it resolved on every future
+    sweep. Idempotent (the suppression door short-circuits the next sweep). Books NO synthetic
+    money: settlement P&L stays with the settlement organs and the Confirm-pending-deposit
+    check; only the drift/latch accounting is corrected.
+    """
+
+    # (1) On-chain terminal close.
+    if exchange_size > Decimal("0"):
+        return False
+    if open_sell_locked_size > Decimal("0"):
+        return False
+    if closed_position_size <= Decimal("0"):
+        return False
+    # (2) Market settledness (day-end calendar evidence). Fail-closed when absent: an
+    # open-market disappearance is NOT a settled sweep and stays on the operator-ack path.
+    if not settled_terminal:
+        return False
+
+    from src.state.db import record_token_suppression  # noqa: PLC0415
+
+    record_token_suppression(
+        conn,
+        token_id=token_id,
+        suppression_reason="settled_position",
+        source_module="exchange_reconcile.terminal_chain_closed_phantom_absorber",
+        condition_id=(settled_terminal.get("condition_id") or None),
+        evidence={
+            "absorber": "terminal_chain_closed_phantom",
+            "exchange_size": str(exchange_size),
+            "closed_position_token_size": str(closed_position_size),
+            "confirmed_wallet_size": str(confirmed_wallet_size),
+            "open_sell_locked_size": str(open_sell_locked_size),
+            "closed_position_evidence_class": "terminal_position_current_chain_holdings",
+            "reason": "venue_zero_against_terminal_chain_holding_on_settled_market_is_external_close",
+            **dict(settled_terminal),
+        },
+    )
+    logger.warning(
+        "terminal_chain_closed_phantom: token %s on settled market %s has a terminal "
+        "chain-holding (%s) but venue size %s and no open sell lock — the swept-winner "
+        "external close is proven on-chain on a day-ended market; registered "
+        "token_suppression('settled_position') and resolving the drift finding "
+        "(day-end sufficient, no +24h wait, no synthetic money booked)",
+        token_id,
+        settled_terminal.get("market_slug") or settled_terminal.get("condition_id") or "?",
+        closed_position_size,
+        exchange_size,
+    )
+    return True
 
 
 def _condition_ids_for_tokens(
@@ -2207,9 +2336,10 @@ def _market_calendar_terminal_evidence(
     *,
     observed_at: datetime,
     conditions_by_token: Mapping[str, str] | None = None,
+    buffer_hours: float = _SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS,
 ) -> dict[str, dict[str, str]]:
     """token_id -> market-calendar terminal evidence, for tokens whose market's target
-    local day ended >= _SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS ago.
+    local day ended >= ``buffer_hours`` ago (default _SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS).
 
     Authority: the canonical market registry (zeus-forecasts market_events: slug, city,
     target_date) + the city timezone from src.config — never a slug parse, never a venue
@@ -2220,6 +2350,12 @@ def _market_calendar_terminal_evidence(
     only through the condition bridge. FAIL-CLOSED: registry unreadable, token unmatched,
     or timezone unknown -> the token is simply not classified terminal (the drift finding
     stays open and the operator-ack path remains the only door).
+
+    ``buffer_hours`` is the venue-lag safety margin the calendar absorber adds before a
+    market-day-end alone is trusted as terminal. The terminal-chain-closed-phantom absorber
+    passes ``buffer_hours=0``: when the on-chain terminal close is ALSO proven (venue 0 vs a
+    terminal voided/settled chain-holding), the venue-lag margin is redundant — the chain has
+    already proven the tokens are gone, so day-end is sufficient.
 
     Read-only, short-lived connection (three-phase contract: no connection outlives the
     lookup, nothing is held across any other I/O).
@@ -2269,7 +2405,7 @@ def _market_calendar_terminal_evidence(
                 continue
             local_day_end = datetime.combine(target + _timedelta(days=1), _time(0, 0), tzinfo=tz)
             terminal_after = local_day_end.astimezone(timezone.utc) + _timedelta(
-                hours=_SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS
+                hours=buffer_hours
             )
             if observed_at.astimezone(timezone.utc) < terminal_after:
                 continue
@@ -2298,6 +2434,29 @@ def _market_calendar_terminal_evidence(
         return {}
 
 
+def _day_end_terminal_evidence_for_token(
+    conn: sqlite3.Connection,
+    token_id: str,
+    observed_at: datetime,
+) -> dict[str, str] | None:
+    """Day-end (zero venue-lag buffer) market-calendar terminal evidence for one token.
+
+    Used by the terminal-chain-closed-phantom absorber on the full-sweep path: the on-chain
+    terminal close is already proven, so the market only needs to have RESOLVED (its target
+    local day has ended) to confirm a settled-winner sweep rather than an open-market
+    operator sale. Resolves the condition_id bridge first (NO-side holdings), then asks the
+    canonical registry with buffer_hours=0. Fail-closed: returns None when the market is not
+    in the registry / not yet day-ended / timezone unknown."""
+
+    evidence = _market_calendar_terminal_evidence(
+        (token_id,),
+        observed_at=observed_at,
+        conditions_by_token=_condition_ids_for_tokens(conn, (token_id,)),
+        buffer_hours=0.0,
+    )
+    return evidence.get(token_id)
+
+
 def _resolve_position_drift_tokens_from_current_truth(
     conn: sqlite3.Connection,
     *,
@@ -2306,12 +2465,22 @@ def _resolve_position_drift_tokens_from_current_truth(
     open_orders: list[Any] | None = None,
     observed_at: datetime,
 ) -> None:
+    conditions_by_token = _condition_ids_for_tokens(
+        conn, tuple(sorted(str(item) for item in token_ids))
+    )
     calendar_terminal = _market_calendar_terminal_evidence(
         token_ids,
         observed_at=observed_at,
-        conditions_by_token=_condition_ids_for_tokens(
-            conn, tuple(sorted(str(item) for item in token_ids))
-        ),
+        conditions_by_token=conditions_by_token,
+    )
+    # Day-end (zero venue-lag buffer) variant for the terminal-chain-closed-phantom absorber:
+    # the on-chain terminal close is already proven, so the market only needs to have RESOLVED
+    # (target local day ended), not aged the extra +24h venue-lag margin.
+    day_end_terminal = _market_calendar_terminal_evidence(
+        token_ids,
+        observed_at=observed_at,
+        conditions_by_token=conditions_by_token,
+        buffer_hours=0.0,
     )
     exchange = _exchange_positions_by_token(positions)
     confirmed_journal = _journal_positions_by_token(
@@ -2426,6 +2595,29 @@ def _resolve_position_drift_tokens_from_current_truth(
                 conn,
                 token,
                 resolution="position_drift_recent_fill_suppressed",
+                resolved_at=observed_at,
+            )
+            continue
+        # TERMINAL-CHAIN-CLOSED PHANTOM (2026-06-13): on-chain proof of the swept-winner
+        # external close — venue size 0 against a terminal (voided/settled/admin_closed)
+        # chain-holdings row, no live sell lock. Takes precedence over the calendar branch
+        # below because the on-chain evidence is direct and immediate, closing the blind
+        # window before the market's target local day is +24h past (the Denver latch freeze
+        # 2026-06-13). Same money-neutral, suppression-door-idempotent contract.
+        if _absorb_terminal_chain_closed_phantom(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            closed_position_size=closed_position_size,
+            open_sell_locked_size=open_sell_locked_size,
+            observed_at=observed_at,
+            settled_terminal=day_end_terminal.get(token),
+            confirmed_wallet_size=confirmed_wallet_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution=_TERMINAL_CHAIN_CLOSED_RESOLUTION,
                 resolved_at=observed_at,
             )
             continue

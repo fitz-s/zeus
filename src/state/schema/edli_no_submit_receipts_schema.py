@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS edli_no_submit_receipts (
     trade_score REAL,
     fdr_family_id TEXT,
     fdr_hypothesis_count INTEGER NOT NULL DEFAULT 0,
+    lfsr REAL,
+    edge_shrunk REAL,
+    edge_shrunk_posterior_sd REAL,
+    selection_authority TEXT,
     kelly_cost_basis_id TEXT,
     kelly_decision_id TEXT,
     risk_decision_id TEXT,
@@ -97,6 +101,20 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     # receipt_hash stays byte-stable. Authority:
     # docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md.
     _ensure_column(conn, "envelope_json", "TEXT")
+    # C2 (task #60, 2026-06-13): selection-shrinkage shadow columns. The
+    # vacuous {0,1}-p-value BH/FDR gate (event_reactor_adapter.py:9854/9876) is
+    # replaced by posterior lfsr + correlation-aware EB selection shrinkage +
+    # expected-log-utility license (authority statistical_calibration_addendum
+    # _2026-06-13 A2/D3). When the replacement flag is OFF these are SHADOW-only
+    # (computed and stamped, BH behavior unchanged); when ON they drive the
+    # license. Nullable / no DEFAULT so existing-row receipt_hash stays
+    # byte-stable (omit-when-None in receipt_json, mirroring envelope_json /
+    # alpha_gap). fdr_* columns are KEPT for provenance. selection_authority is
+    # the typed name of the gate that decided ("BH_FDR" | "EB_SHRINKAGE").
+    _ensure_column(conn, "lfsr", "REAL")
+    _ensure_column(conn, "edge_shrunk", "REAL")
+    _ensure_column(conn, "edge_shrunk_posterior_sd", "REAL")
+    _ensure_column(conn, "selection_authority", "TEXT")
     conn.execute(CREATE_EVENT_INDEX_SQL)
     conn.execute(CREATE_DECISION_TIME_INDEX_SQL)
     conn.execute(CREATE_PROBABILITY_AUTHORITY_INDEX_SQL)

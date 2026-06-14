@@ -204,7 +204,6 @@ def test_prune_working_set_expires_stale_fsr_before_skip_snapshot(monkeypatch):
         main,
         "_settings_section",
         lambda name, default=None: {
-            "reactor_prune_enabled": True,
             "reactor_prune_interval_seconds": 0,
             "reactor_prune_batch_limit": 10,
         }

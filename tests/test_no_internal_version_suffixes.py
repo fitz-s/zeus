@@ -184,7 +184,6 @@ GRANDFATHER: frozenset[str] = frozenset(
         "cp_v2_table",
         "create_v2_sql",
         "cwa_no_collector_v0",
-        "ddd_v2_discount_",
         "ddd_v2_enabled",
         "ddd_v2_fail_closed",
         "ddd_v2_halt",

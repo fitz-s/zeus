@@ -45,7 +45,7 @@ from src.analysis.promotion_proof_router import (
 )
 from src.analysis.promotion_readiness import ReadinessVerdict
 from src.contracts.evidence_tier import EvidenceTier
-from src.strategy.candidates import (
+from src.contracts.deterministic_edge import (
     DeterministicEdgeDecision,
     LegIntent,
     VectorEdgeDecision,

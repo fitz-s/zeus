@@ -232,6 +232,14 @@ from src.strategy.live_inference.live_admission import (
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
 )
+# pr408 #1 CRITICAL (2026-06-14): the live calibration credential licenses through the K3
+# admission predicates (allows_arm = LICENSED/INSUFFICIENT_DATA license-by-default;
+# refutes_claim = UNLICENSED), NOT a status-name allowlist that excluded INSUFFICIENT_DATA
+# and rejected thin-settlement cold cells at submit as FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED.
+from src.calibration.settlement_backward_coverage import (
+    settlement_coverage_allows_arm,
+    settlement_coverage_refutes_claim,
+)
 from src.strategy import market_phase_evidence as _market_phase_evidence
 # The §7 robust marginal-expected-log-utility ranker IS the single live decision
 # surface (operator directive 2026-06-08; spec §6/§14.7/§14.8). _selected_candidate_proof
@@ -368,6 +376,14 @@ class _CandidateProof:
     # escalation deadline for REST decisions (None on legacy one-shot proofs).
     rest_then_cross_policy: str | None = None
     rest_escalation_deadline_minutes: float | None = None
+    # SHADOW TELEMETRY (pr408 review C1+C2 #2 CRITICAL, 2026-06-14): the
+    # would_fail_unlicensed_tail_shadow flag records whether the cheap-tail unlicensed
+    # disagreement guard WOULD have fired for this candidate. It is OBSERVABILITY ONLY —
+    # it NEVER zeros the score, fails the prefilter, sets a no-trade reason, or alters
+    # size. The forbidden one-sided fail-CLOSED tail gate (operator law 3) that killed
+    # +edge cheap trades was removed from the live path; this shadow keeps the signal for
+    # settlement-graded study without touching the live decision.
+    would_fail_unlicensed_tail_shadow: bool = False
 
 
 @dataclass(frozen=True)
@@ -863,9 +879,16 @@ def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertifica
         raise ValueError(
             "EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"
         )
-    # FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE is the licensed replacement credential — it
-    # ADMITS for live (its n_samples is the settled coverage n, which is >0 by the
-    # licensing rule; the empty-sample guard below still applies as a belt-and-braces).
+    # FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE is the licensed replacement credential — it ADMITS
+    # for live. pr408 #1 CRITICAL (2026-06-14): a thin-history INSUFFICIENT_DATA license is
+    # admitted-by-default and carries n_samples==0 (no settled claim-days yet) BY DESIGN — the
+    # empty-sample guard must NOT block it (doing so was the second half of the cold-cell
+    # submit blocker: license-by-default upstream, then reject on n==0 here). The empty-sample
+    # belt-and-braces still applies to LICENSED / UNLICENSED-shrunk credentials, whose n is the
+    # settled coverage count (>0 by the licensing rule).
+    coverage_status = str(payload.get("coverage_status") or "").strip()
+    if coverage_status == "INSUFFICIENT_DATA":
+        return
     if n_samples is not None and n_samples <= 0:
         raise ValueError(f"EDLI_LIVE_CALIBRATION_EMPTY_SAMPLE_BLOCKED:authority={authority or 'missing'}")
 
@@ -2045,6 +2068,108 @@ def _forecast_only_phase_admits(evidence: "_market_phase_evidence.MarketPhaseEvi
     return evidence.phase in _FORECAST_ONLY_ADMIT_PHASES
 
 
+def _selection_pi_min() -> float:
+    """Posterior probability threshold P(e>e_min|D) for the EB-shrinkage SHADOW
+    license computation (A2: 0.90).
+
+    The EB-shrinkage decision-replacement flag was REMOVED 2026-06-13 in the
+    q-shadow gate-mass collapse: the live selection gate is the BH/FDR pass
+    UNCONDITIONALLY. This threshold now parameterizes only the shadow telemetry
+    (lfsr / edge_shrunk / edge_shrunk_posterior_sd / selection_authority stamped
+    on edli_no_submit_receipts for the winner's-curse slope diagnostic); it never
+    influences the live decision."""
+    try:
+        return float(settings["edli"].get("replacement_selection_pi_min", 0.90))
+    except Exception:
+        return 0.90
+
+
+@dataclass(frozen=True)
+class _SelectionShrinkageVerdict:
+    """Shadow/decision output of the C2 EB-shrinkage selection stage."""
+
+    lfsr: float | None
+    edge_shrunk: float | None
+    edge_shrunk_posterior_sd: float | None
+    selection_authority: str
+    eb_licensed: bool | None  # None when not computable (no executable universe)
+
+
+def _compute_selection_shrinkage(
+    *,
+    proofs: "list[_CandidateProof]",
+    selected_token_id: str,
+    selected_q_posterior: float,
+    selected_price: float,
+    authority_on: bool,
+) -> _SelectionShrinkageVerdict:
+    """Compute the C2 posterior lfsr + EB-shrunk edge for the SELECTED candidate.
+
+    The candidate universe is the family's executable bins (mutually-exclusive →
+    one family cluster, so EB tau^2 is family-clustered per the Fable refinement).
+    Per-candidate edge ê = q_lcb_5pct − price; the per-candidate posterior SD is
+    derived from the one-sided 5% LCB gap s ≈ (q_posterior − q_lcb_5pct)/z_{0.95}.
+
+    Returns the shadow quantities (always) plus the EB license verdict (when an
+    executable universe exists). selection_authority names the gate that decided:
+    "EB_SHRINKAGE" when the flag is ON, "BH_FDR" when OFF (current behavior).
+    Fail-soft: any construction error leaves the quantities None and authority
+    "BH_FDR" so the live BH path is never disturbed by shadow computation.
+    """
+    from src.strategy.selection_shrinkage import (
+        eb_shrink_edges,
+        lfsr as _lfsr,
+        select_license,
+    )
+
+    authority = "EB_SHRINKAGE" if authority_on else "BH_FDR"
+    try:
+        z95 = 1.6448536269514722  # Phi^{-1}(0.95): the 5% one-sided LCB z
+        e_hat: list[float] = []
+        s_each: list[float] = []
+        token_order: list[str] = []
+        for cp in proofs:
+            if cp.execution_price is None:
+                continue
+            price = float(cp.execution_price.value)
+            edge = float(cp.q_lcb_5pct) - price
+            gap = float(cp.q_posterior) - float(cp.q_lcb_5pct)
+            # SD proxy from the one-sided 5% LCB gap; floored so a degenerate
+            # zero-width bound does not divide-by-zero or claim infinite certainty.
+            sd = max(gap / z95, 1e-4)
+            e_hat.append(edge)
+            s_each.append(sd)
+            token_order.append(cp.token_id)
+        if selected_token_id not in token_order:
+            # The selected bin had no executable price in the universe — cannot
+            # shrink. Shadow quantities stay None; BH remains the authority.
+            return _SelectionShrinkageVerdict(None, None, None, "BH_FDR", None)
+        sel_idx = token_order.index(selected_token_id)
+        res = eb_shrink_edges(e_hat, s_each)  # single family → family-clustered tau^2
+        edge_shrunk = float(res.shrunk_mean[sel_idx])
+        edge_shrunk_sd = float(res.posterior_sd[sel_idx])
+        # lfsr on the SHRUNK posterior edge (normal approx N(m, V_jj)).
+        sign_rate = float(_lfsr(e_hat=edge_shrunk, s=max(edge_shrunk_sd, 1e-9)))
+        lic = select_license(
+            edge_shrunk=edge_shrunk,
+            edge_shrunk_posterior_sd=edge_shrunk_sd,
+            q_posterior=float(selected_q_posterior),
+            price=float(selected_price),
+            e_min=0.0,
+            pi_min=_selection_pi_min(),
+        )
+        return _SelectionShrinkageVerdict(
+            lfsr=sign_rate,
+            edge_shrunk=edge_shrunk,
+            edge_shrunk_posterior_sd=edge_shrunk_sd,
+            selection_authority=authority,
+            eb_licensed=bool(lic.licensed),
+        )
+    except Exception:
+        # Fail-soft: shadow computation must never disturb the live BH path.
+        return _SelectionShrinkageVerdict(None, None, None, "BH_FDR", None)
+
+
 def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
@@ -2199,11 +2324,23 @@ def _build_event_bound_no_submit_receipt_core(
             # pre-refresh rows (snapshot_token_maps + topology feed the decision engine;
             # family_rows feeds _generate_candidate_proofs). Verify consistency before
             # re-running the staleness gate.
+            # POST-REFRESH RE-ELECT — fresh_at=None (NOT decision_time). The targeted
+            # refresher above just did a live NET CLOB fetch and inserted rows with
+            # captured_at ≈ now() > decision_time. Passing fresh_at=decision_time would
+            # apply the `captured_at <= decision_time` ceiling (_latest_snapshot_rows_
+            # for_event_family L12921) and EXCLUDE the very rows we just fetched, re-electing
+            # the stale pre-refresh row → _snapshot_price_stale_reason fires again → permanent
+            # STALE requeue loop (dead-decision-loop root cause, 2026-06-14: 0 receipts since
+            # 06-12 while the refresher kept landing fresher books the re-elect could not see).
+            # The captured_at ceiling guards NO-LOOK-AHEAD for replay/identity callers; here the
+            # refresh deliberately advances the book past decision_time, so the latest row IS the
+            # honest one. No-look-ahead is still enforced: the stale recheck below grades the
+            # re-elected row's freshness_deadline against the unchanged decision_time.
             refreshed_family_rows = _latest_snapshot_rows_for_event_family(
                 trade_conn,
                 event,
                 condition_ids=family_condition_ids,
-                fresh_at=decision_time,
+                fresh_at=None,
                 require_fresh=False,
             )
             if refreshed_family_rows:
@@ -2694,6 +2831,36 @@ def _build_event_bound_no_submit_receipt_core(
             family_complete=True,
         )
     hypothesis_id = f"{family.family_id}:{selected_token_id}"
+    # C2 (task #60): compute the posterior lfsr + EB-shrunk selected edge over the
+    # family's executable bins. SHADOW-ONLY: the BH/FDR pass is the unconditional
+    # live selection gate. The EB-shrinkage decision-replacement flag was REMOVED
+    # 2026-06-13 in the q-shadow gate-mass collapse; ``authority_on=False`` pins the
+    # shadow stamp to selection_authority="BH_FDR" (byte-identical to the prior
+    # flag-OFF live path) while the lfsr / edge_shrunk quantities are still computed
+    # and stamped on edli_no_submit_receipts for the winner's-curse slope diagnostic.
+    _shrink = _compute_selection_shrinkage(
+        proofs=proofs,
+        selected_token_id=selected_token_id,
+        selected_q_posterior=proof.q_posterior,
+        selected_price=execution_price.value,
+        authority_on=False,
+    )
+
+    def _with_shrink(receipt: EventSubmissionReceipt) -> EventSubmissionReceipt:
+        """Stamp the C2 shadow selection-shrinkage columns onto a post-gate receipt.
+
+        Every receipt produced at or after the selection gate carries the shadow
+        quantities so settlement grading can run the winner's-curse slope
+        diagnostic. Pure dataclass_replace — never alters the decision.
+        """
+        return dataclass_replace(
+            receipt,
+            lfsr=_shrink.lfsr,
+            edge_shrunk=_shrink.edge_shrunk,
+            edge_shrunk_posterior_sd=_shrink.edge_shrunk_posterior_sd,
+            selection_authority=_shrink.selection_authority,
+        )
+
     try:
         fdr = evaluate_fdr_full_family(
             family_id=family.family_id,
@@ -2707,7 +2874,7 @@ def _build_event_bound_no_submit_receipt_core(
             },
         )
     except (TypeError, ValueError) as exc:
-        return EventSubmissionReceipt(
+        return _with_shrink(EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
@@ -2730,13 +2897,18 @@ def _build_event_bound_no_submit_receipt_core(
             native_quote_available=True,
             source_status="MATCH",
             family_complete=False,
-        )
-    if not fdr.passed:
+        ))
+    # GATE DECISION: the BH/FDR pass is the unconditional live selection authority
+    # (the EB-shrinkage decision-replacement flag was REMOVED 2026-06-13). Shadow
+    # quantities are stamped on the receipt regardless.
+    _gate_passed = fdr.passed
+    _gate_reject_reason = "FDR_REJECTED"
+    if not _gate_passed:
         return EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
-            reason="FDR_REJECTED",
+            reason=_gate_reject_reason,
             city=family.city,
             target_date=family.target_date,
             metric=family.metric,
@@ -2758,6 +2930,10 @@ def _build_event_bound_no_submit_receipt_core(
             fdr_pass=False,
             fdr_family_id=fdr.fdr_family_id,
             fdr_hypothesis_count=fdr.attempted_hypotheses,
+            lfsr=_shrink.lfsr,
+            edge_shrunk=_shrink.edge_shrunk,
+            edge_shrunk_posterior_sd=_shrink.edge_shrunk_posterior_sd,
+            selection_authority=_shrink.selection_authority,
         )
     kelly_cost_basis_id = f"edli_cost:{event.event_id}:{selected_token_id}"
     try:
@@ -2969,7 +3145,7 @@ def _build_event_bound_no_submit_receipt_core(
         if _recapture.may_submit and _chosen_stake_price is not None:
             execution_price = _chosen_stake_price
     except (TypeError, ValueError) as exc:
-        return EventSubmissionReceipt(
+        return _with_shrink(EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
@@ -2992,7 +3168,7 @@ def _build_event_bound_no_submit_receipt_core(
             native_quote_available=True,
             source_status="MATCH",
             family_complete=True,
-        )
+        ))
     if not _recapture.may_submit:
         # S6: the submit recapture aborted. The receipt reason is DERIVED from the
         # engine's terminal lifecycle state (SUBMIT_ABORTED_PRICE_MOVED /
@@ -3007,7 +3183,7 @@ def _build_event_bound_no_submit_receipt_core(
         )
         _abort_reason = _SUBMIT_ABORT_RECEIPT_REASON[_recapture.state]
         _abort_detail = _recapture.detail or _abort_reason
-        return EventSubmissionReceipt(
+        return _with_shrink(EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
@@ -3038,13 +3214,15 @@ def _build_event_bound_no_submit_receipt_core(
             kelly_price_fee_deducted=execution_price.fee_deducted,
             kelly_size_usd=kelly.size_usd,
             kelly_cost_basis_id=kelly_cost_basis_id,
-        )
+        ))
     risk = evaluate_riskguard(
         risk_decision_id=f"edli_risk:{event.event_id}:{selected_token_id}",
         level=get_current_level(),
     )
     if not risk.passed:
-        return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="RISK_GUARD_BLOCKED")
+        return _with_shrink(
+            EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="RISK_GUARD_BLOCKED")
+        )
     # Task #107 INV-K7 (same-cycle in-flight reservation): this bet has now
     # passed Kelly + RiskGuard. Reserve its stake in the per-cycle ledger so the
     # NEXT event in this reactor cycle nets it — a just-emitted EDLI entry is
@@ -3255,7 +3433,7 @@ def _build_event_bound_no_submit_receipt_core(
             "CALIBRATION_AUTHORITY_MISSING:",
             1,
         )
-        return EventSubmissionReceipt(
+        return _with_shrink(EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
@@ -3266,11 +3444,13 @@ def _build_event_bound_no_submit_receipt_core(
             family_id=family.family_id,
             source_status="MATCH",
             family_complete=True,
+        ))
+    return _with_shrink(
+        _event_submission_receipt_from_typed_receipt_payload(
+            raw_receipt,
+            event,
+            decision_proof_bundle=proof_bundle,
         )
-    return _event_submission_receipt_from_typed_receipt_payload(
-        raw_receipt,
-        event,
-        decision_proof_bundle=proof_bundle,
     )
 
 
@@ -7116,6 +7296,30 @@ def _opportunity_book_from_proofs(
     )
 
 
+def _coverage_unlicensed_tail_shadow(
+    *,
+    q_lcb: float | int | None,
+    execution_price: float | int | None,
+    q_lcb_calibration_source: str | None,
+) -> bool:
+    """SHADOW-ONLY (pr408 #2): would the cheap-tail unlicensed disagreement guard have fired?
+
+    True iff the old fail-CLOSED tail guard WOULD have rejected (price<0.05, q_lcb>2x price,
+    unlicensed source). Pure telemetry — the caller stamps it on the proof for settlement-
+    graded study. It is NEVER consulted for score / prefilter / no-trade-reason / size. The
+    ONE definition of the tail concern stays in live_admission.coverage_unlicensed_tail_
+    rejection_reason; this wraps it as a boolean so no second copy of the rule exists.
+    """
+    return (
+        coverage_unlicensed_tail_rejection_reason(
+            q_lcb=q_lcb,
+            execution_price=execution_price,
+            q_lcb_calibration_source=q_lcb_calibration_source,
+        )
+        is not None
+    )
+
+
 def _generate_candidate_proofs(
     *,
     event: OpportunityEvent,
@@ -7191,6 +7395,7 @@ def _generate_candidate_proofs(
             pass
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
+
     # FIX A (direction law; incident 0b5c305e26524042, 2026-06-10 Milan-24C;
     # docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md): resolve the
     # family forecast center ONCE — fusion provenance (anchor_value_c /
@@ -7429,32 +7634,31 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = direction_law_reason
-            # FIX B — COVERAGE_UNLICENSED_TAIL (fail-closed tail licensing): the
-            # K3 coverage gate leaves INSUFFICIENT_DATA bands UNCHANGED (fail-open),
-            # so an unlicensed (FORECAST_BOOTSTRAP) q_lcb could overrule the market
-            # in a longshot. price < 0.05 with q_lcb > 2x price now requires a
-            # settlement-licensed source (EMOS_ANALYTIC / SETTLEMENT_ISOTONIC).
-            coverage_unlicensed_tail_reason = coverage_unlicensed_tail_rejection_reason(
+            # SHADOW-ONLY — COVERAGE_UNLICENSED_TAIL (pr408 review C1+C2 #2 CRITICAL,
+            # 2026-06-14): the old fail-CLOSED tail guard zeroed score / failed prefilter
+            # on cheap-tail (price<0.05, q_lcb>2x price) unlicensed candidates. That is a
+            # forbidden ONE-SIDED gate (operator law 3) — the explicit fail-closed dual of
+            # K3's fail-open — and it killed +edge cheap trades under INSUFFICIENT_DATA.
+            # REMOVED from the live score / prefilter / no-trade-reason / size path. The
+            # concern is preserved ONLY as shadow telemetry on the proof; it NEVER
+            # score-zeros, NEVER becomes a live reason, NEVER alters size.
+            would_fail_unlicensed_tail_shadow = _coverage_unlicensed_tail_shadow(
                 q_lcb=q_lcb,
                 execution_price=execution_price.value if execution_price is not None else None,
                 q_lcb_calibration_source=q_lcb_source,
             )
-            if coverage_unlicensed_tail_reason is not None:
-                score = 0.0
-                if missing_reason is None:
-                    missing_reason = coverage_unlicensed_tail_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             # A structurally non-tradeable candidate must not enter the FDR family
             # as a "passed" hypothesis. Force prefilter False so it can never be
             # selected. (The S4-removed market-disagreement scalar demotion is no
             # longer one of these triggers — the marginal-utility ranker's §13
-            # ΔU<=0 gate subsumes the cheap-NO-overconfidence demotion.)
+            # ΔU<=0 gate subsumes the cheap-NO-overconfidence demotion. The unlicensed-tail
+            # concern is shadow-only now and is deliberately NOT a prefilter trigger.)
             if (
                 capital_efficiency_reason is not None
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
-                or coverage_unlicensed_tail_reason is not None
             ):
                 passed_prefilter = False
             proofs.append(
@@ -7510,6 +7714,8 @@ def _generate_candidate_proofs(
                     rest_escalation_deadline_minutes=(
                         mode_ev.escalation_deadline_minutes if mode_ev is not None else None
                     ),
+                    # pr408 #2: shadow-only unlicensed-tail signal (NEVER gates).
+                    would_fail_unlicensed_tail_shadow=would_fail_unlicensed_tail_shadow,
                 )
             )
     return tuple(proofs)
@@ -7708,7 +7914,12 @@ def _mode_consistent_ev_for_proof(
     execution_price: ExecutionPrice | None,
     c_cost_95pct: float | None,
     p_fill_lcb: float,
-    penalty: float = 0.01,
+    # penalty removed 2026-06-14 (RULE 1, trade_score_suppression.md): the flat 0.01
+    # was a phantom 2-prob-cent edge floor with NO cost basis — the real fee is already
+    # in c_cost_95pct (fee_deducted) and the real tick is enforced separately. It was the
+    # dominant live suppressor (Karachi 40C +edge → score −0.00076), harshest exactly
+    # where the model disagrees with a cheap market. Honest cost (fee + tick) is preserved.
+    penalty: float = 0.0,
     minutes_to_event_end: float | None = None,
     unexpired_family_rest: bool = False,
     escalated_after_rest: bool = False,
@@ -9276,9 +9487,21 @@ def _replacement_family_coverage_verdict(
     Returns the family-representative ``CoverageVerdict`` (the buy_yes leg of the first
     candidate whose q_lcb is present), or ``None`` when the check could not run / the scope
     has no realized data at all. INSUFFICIENT_DATA is a real verdict (returned, not None) —
-    the credential treats it as "no realized backing" and blocks; only a structural failure
-    to evaluate returns None. FAIL-CLOSED: any error returns None (→ UNEVALUATED → blocked).
+    a thin-history cold cell yields INSUFFICIENT_DATA which the credential admits-by-default
+    (pr408 #1). Only a non-structural inability to even set up the check returns None
+    (→ UNEVALUATED → blocked).
+
+    STRUCTURAL FAULT (pr408 #1 CRITICAL): when the coverage SAFETY gate is ON, a
+    read/parse/schema fault in the observation build must NOT collapse into INSUFFICIENT_DATA
+    or a swallowed None — it raises ``QLCB_COVERAGE_AUTHORITY_FAULT`` and is allowed to
+    PROPAGATE (fail closed). The per-candidate ``except`` below catches only NON-fault errors
+    (e.g. a single malformed candidate) so the scan can try the next candidate; a coverage
+    authority fault is re-raised.
     """
+    # The fault distinction is live only when the coverage SAFETY gate is ON (same gate the
+    # shrink helper uses). With the gate OFF the observation build keeps its inert fail-open
+    # default, so a read fault → INSUFFICIENT_DATA → admitted-by-default (byte-identical today).
+    fail_closed = _q_lcb_settlement_coverage_gate_enabled()
     try:
         from src.calibration.qlcb_provenance import _qlcb_float
         from src.calibration.settlement_backward_coverage import (
@@ -9310,13 +9533,19 @@ def _replacement_family_coverage_verdict(
                 bin=bin_obj,
                 direction="buy_yes",
                 claimed_q_lcb=claimed,
+                fail_closed_on_fault=fail_closed,
             )
             verdict = settlement_backward_coverage_check(
                 city=family.city, metric=metric, season=season,
                 q_lcb=claimed, observations=obs, min_n=30,
             )
             return verdict
-        except Exception:
+        except Exception as exc:
+            # A coverage AUTHORITY fault (structural read/schema fault with the safety gate
+            # on) must fail CLOSED — propagate, never swallow to None or try the next candidate
+            # (a real fault is not a per-candidate hiccup). Other errors skip this candidate.
+            if "QLCB_COVERAGE_AUTHORITY_FAULT" in str(exc):
+                raise
             continue
     return None
 
@@ -9360,18 +9589,33 @@ def _build_replacement_calibration_credential(
         season = season_from_date(str(getattr(family, "target_date", "")), lat=lat)
     except Exception:
         season = None
-    coverage: dict[str, Any] = {"status": None, "coverage_ratio": None, "n": None, "shrink": None}
+    coverage: dict[str, Any] = {
+        "status": None, "coverage_ratio": None, "n": None,
+        "shrink": None, "shrink_applied": False,
+    }
     if coverage_verdict is not None:
         try:
             shrink = float(coverage_verdict.q_lcb_in) - float(coverage_verdict.q_lcb_out)
         except (TypeError, ValueError):
             shrink = None
+        # pr408 #1 CRITICAL: an UNLICENSED verdict only LICENSES the credential when the shrink
+        # was ACTUALLY applied to the live leg — i.e. the coverage gate flag is ON (the only
+        # condition under which _maybe_apply_settlement_coverage_to_lcb mutated lcb_by_direction
+        # above) AND the verdict produced a real downward shrink (q_lcb_out < q_lcb_in). With the
+        # flag OFF the unshrunk overconfident bound would serve live, so it must NOT license.
+        shrink_applied = bool(
+            _q_lcb_settlement_coverage_gate_enabled()
+            and str(coverage_verdict.status) == "UNLICENSED"
+            and shrink is not None
+            and shrink > 0.0
+        )
         coverage = {
             "status": str(coverage_verdict.status),
             "coverage_ratio": coverage_verdict.coverage_ratio,
             "realized_win_rate": coverage_verdict.realized_win_rate,
             "n": int(coverage_verdict.n_settlement_observations),
             "shrink": shrink,
+            "shrink_applied": shrink_applied,
         }
     return {
         "q_mode": q_mode,
@@ -9384,16 +9628,17 @@ def _build_replacement_calibration_credential(
     }
 
 
-# Coverage statuses that LICENSE the replacement calibration credential for live. These are
-# EXACTLY the statuses arm_gate_coverage_blocks() does NOT block on the status leg
-# (LICENSED, and UNLICENSED where the shrink was applied — a verdict the settled record
-# backed). INSUFFICIENT_DATA (no realized backing) is excluded → UNEVALUATED → blocked,
-# matching the ARM gate's "coverage_ratio is None → block" rule.
+# SINGLE AUTHORITY (twin-authority reconciliation #7, 2026-06-11): the set of statuses the
+# buy-NO admission gate honors has ONE home — live_admission.SETTLEMENT_COVERAGE_LICENSING_
+# STATUSES. This alias keeps the cert-layer name and pins the single-source registry entry
+# (#11); it must never regrow an inline frozenset literal.
 #
-# SINGLE AUTHORITY (twin-authority reconciliation #7, 2026-06-11): the set itself now has
-# ONE home — live_admission.SETTLEMENT_COVERAGE_LICENSING_STATUSES — read by BOTH the
-# buy-NO admission gate and this cert credential. This alias keeps the cert-layer name;
-# it must never regrow an inline frozenset literal (registry entry #11).
+# pr408 #1 CRITICAL (2026-06-14): the cert credential's PER-STATUS licensing decision
+# (_replacement_calibration_payload_from_credential) no longer reads this set directly — it
+# dispatches to the K3 predicates (settlement_coverage_allows_arm /_refutes_claim) because the
+# decision is now status-AND-shrink-aware (LICENSED/INSUFFICIENT_DATA license-by-default;
+# UNLICENSED licenses ONLY when the shrink was actually applied). The set remains the buy-NO
+# gate's vocabulary and the single-authority anchor.
 _FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES = SETTLEMENT_COVERAGE_LICENSING_STATUSES
 
 
@@ -9405,16 +9650,39 @@ def _replacement_calibration_payload_from_credential(
 ) -> dict[str, Any]:
     """Turn the stamped credential facts into the certificate calibration payload.
 
-    Emits authority=FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE when a coverage VERDICT licensed the
-    scope (status in LICENSED/UNLICENSED); otherwise FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED
-    (no verdict, or INSUFFICIENT_DATA) so the gate rejects with the distinct reason. The
-    payload carries the full provenance the receipt/verifier round-trips, plus the fields
-    the verifier's _validate_calibration_payload requires (horizon_profile == forecast's,
-    training_cutoff / model_available_at <= decision_time, a non-empty model_hash).
+    AUTHORITY (pr408 review C1+C2 #1 CRITICAL, 2026-06-14) — HONOR the K3 design:
+      * LICENSED / INSUFFICIENT_DATA (``settlement_coverage_allows_arm``) → admit with
+        authority=FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE. INSUFFICIENT_DATA is
+        license-by-default (thin/absent settled claim history is NOT proof of
+        overconfidence — RULE 1; the MC/EMOS q_lcb already carries its own conservative
+        LCB floor). This is the fix: the prior mapping sent INSUFFICIENT_DATA to
+        UNEVALUATED→REJECTED, blocking every thin-settlement cold cell at submit.
+      * UNLICENSED (``settlement_coverage_refutes_claim``) → admit ONLY when the selected
+        leg's q_lcb was ACTUALLY shrunk (coverage gate flag ON and q_lcb_out < q_lcb_in,
+        recorded as ``coverage.shrink_applied``). An UNLICENSED verdict whose shrink was
+        NOT applied (flag OFF) is a proven-overconfident bound serving UNSHRUNK → block as
+        UNEVALUATED. (Mirrors arm_gate_coverage_blocks, which refuses UNLICENSED outright;
+        here we additionally LICENSE the case where the shrink made the bound honest.)
+      * None / unknown / no verdict → UNEVALUATED → reject with the distinct reason.
+    The INSUFFICIENT_DATA / UNLICENSED status string is preserved on the cert (coverage_status)
+    for observability regardless of the licensing decision. The payload carries the full
+    provenance the receipt/verifier round-trips, plus the fields _validate_calibration_payload
+    requires (horizon_profile == forecast's, training_cutoff/model_available_at <= decision_time,
+    a non-empty model_hash).
     """
     coverage = credential.get("coverage") or {}
     status = coverage.get("status")
-    licensed = isinstance(status, str) and status in _FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES
+    status_str = status if isinstance(status, str) else ""
+    if settlement_coverage_allows_arm(status_str):
+        # LICENSED or INSUFFICIENT_DATA: a real non-refuting verdict admits.
+        licensed = True
+    elif settlement_coverage_refutes_claim(status_str):
+        # UNLICENSED: admit ONLY if the shrink was actually applied to the live leg
+        # (otherwise the unshrunk overconfident bound would serve live → block).
+        licensed = bool(coverage.get("shrink_applied"))
+    else:
+        # None / UNEVALUATED / unknown: no verdict → never license.
+        licensed = False
     authority = (
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
         if licensed
@@ -9465,6 +9733,22 @@ def _replacement_calibration_payload_from_credential(
         "n_samples": n_samples,
         "authority": authority,
     }
+
+
+def _q_lcb_settlement_coverage_gate_enabled() -> bool:
+    """The K3 settlement-coverage SHRINK flag — the SINGLE read shared by the shrink helper
+    (_maybe_apply_settlement_coverage_to_lcb) and the credential's shrink_applied fact.
+
+    pr408 #1: an UNLICENSED verdict only LICENSES the live credential when the shrink was
+    ACTUALLY applied to the live leg, which happens iff THIS flag is ON (it is the only gate
+    under which _maybe_apply_settlement_coverage_to_lcb mutates lcb_by_direction). Reading the
+    flag the same way here keeps the two seams in lockstep. A config read fault keeps the OFF
+    default (no shrink applied → UNLICENSED does not license), matching the helper's behavior.
+    """
+    try:
+        return bool(settings["edli"].get("q_lcb_settlement_coverage_gate_enabled", False))
+    except Exception:
+        return False
 
 
 def _replacement_authority_enabled() -> bool:
@@ -10037,9 +10321,11 @@ def _side_q_lcb_from_yes_samples(
     q_lcb_yes = float(min(pu_yes.q_lcb, q_point_yes))
 
     # NO authority (Hidden #3): lower tail of (1 - q_yes_samples) == 1 - q_ucb_yes.
-    q_lcb_no_raw = lower_quantile(no_side_samples(yes_samples))
+    _no_arr = no_side_samples(yes_samples)
+    q_lcb_no_raw = lower_quantile(_no_arr)
     q_point_no = float(min(max(1.0 - q_yes_point, 0.0), 1.0))
     q_lcb_no = float(min(max(q_lcb_no_raw, 0.0), q_point_no))
+
     return q_lcb_yes, q_lcb_no
 
 
@@ -10225,13 +10511,37 @@ def _canonical_probability_and_fdr_proof(
             # price (EXECUTABLE_NATIVE_ASK_MISSING), not by a family-level fail-closed
             # raise. q_lcb_no is 0.0 here (no samples => no native NO authority), never a
             # YES-complement (Hidden #4: native NO needs native evidence).
+            #
+            # LOSS-CLASS GATE — DO NOT re-derive a forecast q_lcb_no here (settled-data
+            # replay 2026-06-13, n=485, 98.1% admit). A NON-executable-YES bin is one
+            # scan_full_hypothesis_family could not score (no YES quote/depth → it is a
+            # FAR bin off the forecast center). Computing a forecast-derived q_lcb_no for
+            # buy_no on such a bin re-opens the favorite-longshot NO harvest that the
+            # settled record proves is the real-capital loss class: of 485 settled
+            # winning bins, the forecast-derived NO lower bound (1 - q_ucb_yes) on the bin
+            # that ACTUALLY WON was > 0.5 on 476/485 (98.1%) — i.e. it would have bought
+            # NO on the winner = a guaranteed loss; mean q_lcb_no(winner) = 0.787 while
+            # the forecast under-rated the winner (mean q_yes_pt(winner) = 0.179). This is
+            # the documented HK/Karachi/KL "NO on winning ring bin" loss. The forecast-NO
+            # else-branch was introduced by commit 745aa10c6f (2026-06-12 22:18Z,
+            # "un-zero buy_no q_lcb on non-executable-YES bins") via
+            # analysis.forecast_yes_probability_samples + _side_q_lcb_from_yes_samples
+            # reconciled through _native_no_edge_positivity — and is the regression that
+            # admits this class. It is REVERTED to the profitable-era gate (q_lcb_no=0.0 /
+            # p=1.0 / prefilter=False). The EXECUTABLE-YES path above is UNCHANGED: it
+            # keeps the mid-price, mainstream-agreed native NO (1 - q_ucb_yes) reconciled
+            # via _native_no_edge_positivity that produced Zeus's GOOD fills (HK 30°C NO,
+            # Karachi 37°C NO, 0.2-0.6 band). The far buy_no is harvested ONLY when its
+            # OWN YES side is executable (so the NO bound is anchored to a scored bin),
+            # never on a forecast extrapolation into a non-executable far bin.
+            # Antibodies (RED on re-introducing the forecast-NO else-branch):
+            #   tests/engine/test_no_loss_class_nonexecutable_yes_gate.py
+            #   tests/engine/test_no_calibration_loss_class_coverage.py
             for direction in ("buy_yes", "buy_no"):
                 q_point = yes_posterior if direction == "buy_yes" else 0.0
                 p_values[(condition_id, direction)] = 1.0
                 _set_qlcb_provenance(
-                    lcb_by_direction,
-                    (condition_id, direction),
-                    q_point,
+                    lcb_by_direction, (condition_id, direction), q_point,
                     source="FORECAST_BOOTSTRAP",
                 )
                 prefilter[(condition_id, direction)] = False
@@ -11943,6 +12253,102 @@ def _maybe_override_lcb_with_emos_ci(
                 pass
 
 
+def _coverage_band_template(label: str | None) -> str | None:
+    """Date-stripped band identity for a market question label.
+
+    A market question carries the band AND the target date:
+      "Will the highest temperature in Singapore be 31°C on May 31?"
+    The BAND (the calibration cohort that pools across days) is everything BEFORE the
+    trailing "on <Month Day>?". Stripping the date yields a stable per-band key that is
+    identical across the days the same band traded:
+      "Will the highest temperature in Singapore be 31°C"
+    Returns None when the label is empty (→ no per-day claim history → INSUFFICIENT_DATA).
+    """
+    if not label:
+        return None
+    import re as _re
+
+    stripped = _re.sub(r"\s+on\s+[A-Za-z]+\s+\d{1,2}\??\s*$", "", str(label)).strip()
+    return stripped or None
+
+
+def _per_day_claimed_qlcb_by_date(
+    *,
+    city: str,
+    metric: str,
+    direction: str,
+    band_template: str | None,
+):
+    """Per-day ACTUAL claimed q_lcb history for ONE (city, metric, direction, band).
+
+    Reads ``edli_no_submit_receipts`` (zeus-world.db, READ-ONLY) — the per-decision
+    no-submit receipt stream stamps the q_lcb the model CLAIMED that day
+    (``q_lcb_5pct``) alongside the band question (``bin_label``), city, metric,
+    direction, and target_date inside ``receipt_json``. Returns a dict
+    ``{target_date: claimed_q_lcb}`` keyed on the SETTLEMENT target_date — the per-day
+    claim history the calibration check needs (each day a DISTINCT claimed band, NOT one
+    constant). When a (city, metric, direction, band) traded multiple receipts on one
+    target_date, the LAST-written receipt's claim is kept (the decision that stood).
+
+    INV-37: a single-DB READ on world.db via a short read-only connection (no cross-DB
+    WRITE transaction; the ATTACH+SAVEPOINT discipline governs cross-DB writes, not reads).
+    FAIL-OPEN: any error / unavailable history yields an EMPTY dict (→ the caller produces
+    an empty stream → INSUFFICIENT_DATA → q_lcb unchanged, no shrink, no ARM block). This
+    is the RULE-1 inert default: absence of claim history is never a reason to suppress.
+
+    NOTE (pr408 #1 CRITICAL): the claim-history stream (edli_no_submit_receipts on world.db)
+    is a SOFT observability input — its absence/unreachability is GENUINELY thin (no per-day
+    claim history yet), NOT a structural fault of the settlement-coverage AUTHORITY. The
+    fail-CLOSED fault distinction lives in ``_settlement_coverage_observations`` over the
+    AUTHORITATIVE settlement_outcomes read, not here.
+    """
+    import json as _json
+
+    if not band_template:
+        return {}
+    out: dict[str, float] = {}
+    try:
+        from src.state.db import get_world_connection_read_only
+
+        conn = get_world_connection_read_only()
+    except Exception:
+        return {}
+    try:
+        rows = conn.execute(
+            "SELECT receipt_json, q_lcb_5pct, created_at FROM edli_no_submit_receipts "
+            "WHERE direction = ? AND q_lcb_5pct IS NOT NULL ORDER BY created_at ASC",
+            (str(direction),),
+        ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    want_city = str(city)
+    want_metric = str(metric).lower()
+    for receipt_json, qlcb, _created_at in rows:
+        try:
+            doc = _json.loads(receipt_json)
+        except Exception:
+            continue
+        if str(doc.get("city") or "") != want_city:
+            continue
+        if str(doc.get("metric") or "").lower() != want_metric:
+            continue
+        if _coverage_band_template(doc.get("bin_label")) != band_template:
+            continue
+        target_date = doc.get("target_date")
+        if not target_date:
+            continue
+        try:
+            out[str(target_date)] = float(qlcb)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _settlement_coverage_observations(
     *,
     forecast_conn: sqlite3.Connection,
@@ -11951,14 +12357,42 @@ def _settlement_coverage_observations(
     bin: Bin,
     direction: str,
     claimed_q_lcb: float,
+    fail_closed_on_fault: bool = False,
 ):
-    """Build the (claimed_q_lcb, won) coverage stream for ONE (bin, direction).
+    """Build the (PER-DAY claimed_q_lcb, won) CALIBRATION stream for ONE (bin, direction).
 
-    Backward coverage: for every SETTLED outcome of this (city, metric), grade
-    "had I traded THIS bin in THIS direction, would the settled value have won?"
-    via the spine grade_receipt — the Direction Law + BinKind + unit antibodies are
-    inherited, not re-rolled. Returns a list[CoverageObservation]. FAIL-OPEN: any
-    error / unit mismatch yields an empty stream (→ INSUFFICIENT_DATA → no shrink).
+    2026-06-14 REBUILD (qlcb_suppression.md + RULE 1). The prior implementation stamped
+    ONE CONSTANT ``claimed_q_lcb`` on every settled day and graded a FIXED bin against the
+    whole pooled (city, metric) history, so the downstream isotonic degenerated to
+    ``np.mean(ys)`` = the UNCONDITIONAL bin base rate (CLIMATOLOGY). It then shrank any
+    forecast concentrating above that base rate to base_rate-0.01 — destroying forecast
+    skill (Singapore high 31°C: +0.060 ev/$ -> -0.730 ev/$).
+
+    This rebuild measures CALIBRATION: it pairs, per SETTLED day, the q_lcb the model
+    ACTUALLY CLAIMED that day (read from edli_no_submit_receipts) with whether the band
+    realized (graded via the spine grade_receipt — Direction Law + BinKind + unit
+    antibodies inherited, not re-rolled). The claimed band now VARIES day to day, so the
+    isotonic reads a genuine claimed->realized calibration curve, not a single pooled mean.
+
+    The per-day claim history is matched on (city, metric, direction, BAND) where BAND is
+    the date-stripped market question (``_coverage_band_template``). A settled day enters
+    the stream ONLY when BOTH a VERIFIED settlement AND a per-day claimed q_lcb exist for
+    that (band, day) — so n counts INDEPENDENT settled CLAIM-days, exactly what min_n
+    should gate on.
+
+    Returns a list[CoverageObservation].
+
+    FAIL-OPEN (default, ``fail_closed_on_fault=False``): any error / unit mismatch / absent
+    claim history yields an EMPTY stream (→ INSUFFICIENT_DATA → q_lcb unchanged, no shrink,
+    no ARM block). RULE 1: absence of claim history is never a reason to suppress.
+
+    FAIL-CLOSED (``fail_closed_on_fault=True``, set when the coverage SAFETY gate is ON):
+    a STRUCTURAL fault — the claim-history read, or the settlement_outcomes query EXECUTION
+    (a read/parse/schema fault) — raises ``QLCB_COVERAGE_AUTHORITY_FAULT`` rather than
+    collapsing into "no data → INSUFFICIENT_DATA". A genuine thin cell (queries SUCCEED but
+    return < min_n matched settled claim-days) still yields a short/empty stream →
+    INSUFFICIENT_DATA (non-blocking). Per-row parse / UnitMismatch errors are individual
+    observations skipped, NOT cohort-structural faults. (pr408 review C1+C2 #1 CRITICAL.)
     """
     from types import SimpleNamespace
 
@@ -11967,20 +12401,43 @@ def _settlement_coverage_observations(
     from src.types.temperature import UnitMismatchError
 
     obs: list = []
+    band_template = _coverage_band_template(getattr(bin, "label", None))
+    # Per-day ACTUAL claimed q_lcb history for THIS band (empty → INSUFFICIENT_DATA inert).
+    # This soft observability read is fail-open by design: no claim history is genuinely
+    # thin (RULE 1), never a structural fault. The fail-closed distinction is over the
+    # AUTHORITATIVE settlement_outcomes read below.
+    claimed_by_date = _per_day_claimed_qlcb_by_date(
+        city=city, metric=metric, direction=direction, band_template=band_template
+    )
+    if not claimed_by_date:
+        return obs
     try:
         rows = forecast_conn.execute(
-            "SELECT settlement_value, settlement_unit FROM settlement_outcomes "
+            "SELECT target_date, settlement_value, settlement_unit FROM settlement_outcomes "
             "WHERE city = ? AND temperature_metric = ? "
-            "AND settlement_value IS NOT NULL AND settlement_unit IS NOT NULL",
+            "AND settlement_value IS NOT NULL AND settlement_unit IS NOT NULL "
+            "AND authority = 'VERIFIED'",
             (str(city), str(metric).lower()),
         ).fetchall()
-    except Exception:
+    except Exception as exc:
+        # A failed settlement_outcomes EXECUTION is a structural read/schema fault, NOT thin
+        # data. Fail closed when the safety gate is on; else keep the legacy inert default.
+        if fail_closed_on_fault:
+            raise ValueError(
+                f"QLCB_COVERAGE_AUTHORITY_FAULT:settlement_query:{type(exc).__name__}:{exc}"
+            ) from exc
         return obs
     for row in rows:
         try:
-            settled_value = float(row[0])
-            settled_unit = str(row[1])
-        except (TypeError, ValueError):
+            target_date = str(row[0])
+            settled_value = float(row[1])
+            settled_unit = str(row[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        # Only settled days for which the model ACTUALLY claimed a q_lcb on THIS band
+        # enter the calibration stream — the per-day pairing is the whole rebuild.
+        day_claim = claimed_by_date.get(target_date)
+        if day_claim is None:
             continue
         # settlement_outcomes.settlement_value is WMO-rounded at write time, so no
         # semantics object is needed (grade_receipt grades the stored value as-is).
@@ -11994,7 +12451,7 @@ def _settlement_coverage_observations(
             continue
         except Exception:
             continue
-        obs.append(CoverageObservation(q_lcb=float(claimed_q_lcb), won=bool(graded.won)))
+        obs.append(CoverageObservation(q_lcb=float(day_claim), won=bool(graded.won)))
     return obs
 
 
@@ -12071,6 +12528,10 @@ def _maybe_apply_settlement_coverage_to_lcb(
                 continue
             try:
                 claimed = _qlcb_float(lcb_by_direction[key])
+                # Gate is ON here → a structural read/schema fault in the observation build
+                # raises QLCB_COVERAGE_AUTHORITY_FAULT (it no longer silently degrades to an
+                # empty stream → INSUFFICIENT_DATA, which would mask a broken read as thin
+                # data and serve the UNSHRUNK bound). pr408 #1 makes FINDING-C's intent real.
                 obs = _settlement_coverage_observations(
                     forecast_conn=forecast_conn,
                     city=family.city,
@@ -12078,6 +12539,7 @@ def _maybe_apply_settlement_coverage_to_lcb(
                     bin=bin_obj,
                     direction=direction,
                     claimed_q_lcb=claimed,
+                    fail_closed_on_fault=True,
                 )
                 verdict = settlement_backward_coverage_check(
                     city=family.city, metric=metric, season=season,
@@ -13076,10 +13538,19 @@ def _maker_quote_execution_price_from_snapshot(
         fee_deducted=True,
         currency="probability_units",
     )
-    # A maker rest fills only when the book comes to it; the conservative resting
-    # prior is applied by mode-consistent EV. p_fill_lcb here is 0.0 (no visible
-    # crossing depth) so the legacy taker fill-LCB never inflates a maker quote.
-    p_fill_lcb = 0.0
+    # A maker rest fills when the book comes to it — its fill probability is the
+    # MAKER resting-fill prior, NOT the taker visible-depth LCB (which is 0 here
+    # because there is no own ask to cross). Returning 0.0 was a taker-shaped value
+    # that zeroed trade_score = p_fill_lcb x edge for EVERY maker buy_no regardless
+    # of edge, structurally strangling the maker NO harvest in a system that is
+    # fundamentally a maker ("我们的系统本质上是maker制作的"). The conservative maker
+    # fill prior is the lane-correct admission probability; the maker/taker LANE
+    # choice (a separate decision) still consults the full mode-consistent EV seam.
+    # This is the SAME maker fill authority that seam owns — one authority, used
+    # lane-appropriately, never the taker ladder on a maker quote.
+    from src.strategy.live_inference.mode_consistent_ev import MAKER_FILL_PROBABILITY_PRIOR
+
+    p_fill_lcb = float(MAKER_FILL_PROBABILITY_PRIOR)
     # All-in cost == the quote (zero taker fee on a rest); NOT ask + tick.
     c_cost_95pct = float(quote)
     return execution_price, p_fill_lcb, c_cost_95pct
@@ -13583,8 +14054,10 @@ def _robust_trade_score_from_generated_inputs(
         c_95pct=ExecutionPrice(c_cost_95pct, "ask", fee_deducted=True, currency="probability_units"),
         c_stress=ExecutionPrice(c_cost_95pct, "ask", fee_deducted=True, currency="probability_units"),
         p_fill_lcb=p_fill_lcb,
-        penalty=0.01,
-        stress_penalty=0.01,
+        # phantom 0.01 penalty removed 2026-06-14 (RULE 1) — see trade_score_suppression.md.
+        # Honest cost (real fee in c_95pct fee_deducted + real tick) is preserved.
+        penalty=0.0,
+        stress_penalty=0.0,
     )
     return float(receipt.score)
 

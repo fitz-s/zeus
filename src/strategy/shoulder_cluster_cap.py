@@ -1,17 +1,16 @@
 # Created: 2026-05-21
-# Last reused or audited: 2026-05-21
-# Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md §2 T3 + AUTHORITY_GPT_ROUND_1_DOSSIER.md §7.5
+# Last reused or audited: 2026-06-14
+# Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md §2 T3 + AUTHORITY_GPT_ROUND_1_DOSSIER.md §7.5; Gate-2 $-cap removed 2026-06-14 (operator no-caps law)
 
 """shoulder_cluster_cap — check_shoulder_cluster_cap function.
 
-Implements the weather-system cluster cap per dossier §7.5:
+Implements the weather-system cluster correlation gate per dossier §7.5:
   "No same-direction shoulder sell across multiple cities under one heat dome/cold front."
 
-Two-gate design:
-  Gate 1 (cross-city presence): if any DIFFERENT city already has a same-direction
-    entry in this cluster, REFUSE — regardless of $ amount.
-  Gate 2 ($ cap): if the total existing notional_usd + proposed_notional exceeds
-    SHOULDER_CLUSTER_HARD_CAP_USD, REFUSE.
+Single honest gate (cross-city presence): if any DIFFERENT city already has a
+  same-direction entry in this cluster, REFUSE — regardless of $ amount.
+  (Gate 2, the $2000 SHOULDER_CLUSTER_HARD_CAP_USD notional cap, was DELETED
+  2026-06-14 under the operator no-caps law — artificial notional ceilings are banned.)
 
 UNKNOWN regime (empty cluster string) → always allow (plan §5 R-1).
 
@@ -27,11 +26,6 @@ from datetime import date, datetime
 from typing import Optional
 
 from src.types import BinEdge
-
-# Hard dollar cap per cluster per side.
-# Operator-tunable post-T3 via config; defaulting to a conservative value.
-# This cap is secondary to the cross-city presence gate (Gate 1).
-SHOULDER_CLUSTER_HARD_CAP_USD: float = 2000.0
 
 logger = logging.getLogger(__name__)
 
@@ -203,16 +197,15 @@ def check_shoulder_cluster_cap(
     (Invariant 4: wasted compute is the failure mode). Called only for
     is_shoulder edges — caller must gate on edge.bin.is_shoulder.
 
-    Design: Gate 1 (cross-city presence) is checked first because it is cheaper
-    and more restrictive per dossier §7.5 "No same-direction shoulder sell across
-    multiple cities". Gate 2 ($ cap) is the fallback for single-city accumulation.
+    Design: Gate 1 (cross-city presence) per dossier §7.5 "No same-direction
+    shoulder sell across multiple cities" is the sole honest control. Gate 2
+    ($2000 notional cap) was removed 2026-06-14 under the operator no-caps law.
     """
     # UNKNOWN regime or empty cluster → no aggregation, always allow.
     if not cluster:
         return (True, "")
 
     from src.state.shoulder_exposure_ledger import (
-        read_cluster_exposure,
         read_distinct_cities_in_cluster,
     )
 
@@ -232,17 +225,7 @@ def check_shoulder_cluster_cap(
                 ),
             )
 
-    # Gate 2: $ hard cap check.
-    existing_total = read_cluster_exposure(cluster, side, conn=conn)
-    projected_total = existing_total + proposed_notional
-    if projected_total > SHOULDER_CLUSTER_HARD_CAP_USD:
-        return (
-            False,
-            (
-                f"shoulder_cluster_cap: projected cluster {side!r} notional "
-                f"${projected_total:.2f} exceeds hard cap "
-                f"${SHOULDER_CLUSTER_HARD_CAP_USD:.2f} for cluster {cluster!r}"
-            ),
-        )
-
+    # Gate 2 ($2000 hard notional cap) DELETED 2026-06-14 (operator no-caps law:
+    # artificial notional ceilings are banned; sizing = q_lcb + Kelly only). Gate 1
+    # cross-city correlation presence (above) is the honest retained control.
     return (True, "")

@@ -154,6 +154,73 @@ def _command_from_payload(payload: dict[str, Any]) -> str:
     return payload.get("tool_input", {}).get("command", "")
 
 
+def _git_subcmd_at_command_position(command: str, subcmds: tuple[str, ...]):
+    """Return the re.Match for `git <subcmd> <args>` when git RUNS as a command
+    (not when it is an ARGUMENT to echo/grep/printf or sits inside a string),
+    else None. A BLOCKING safety gate must not UNDER-block, so this is deliberately
+    broad about command position. It splits the command on every separator that
+    starts a new simple command — `; & | newline ( ) { }`, `$(`, backtick, the
+    `do/then/else` control-structure bodies, and `bash|sh|zsh -c "` — then, per
+    segment, strips leading env-assignments, command wrappers
+    (time/command/exec/nice/env/sudo/xargs), and redirects before checking the
+    HEAD. So `( git checkout )`, `a && git checkout`, `bash -c "git checkout"`,
+    `time git reset --hard`, `FOO=x git switch`, `if true; then git checkout`,
+    `/usr/bin/git checkout` all match; `echo git checkout`, `grep 'git checkout'`
+    (git is not at a segment head) do not. Capture groups: (1)=git global opts,
+    (2)=subcmd, (3)=trailing args — same shape callers used with the old
+    `\\bgit(...)\\s+(subcmd)(...)` regex. Replaces the bare `\\bgit` matcher AND
+    the interim `(?:^|[;&|]...)` anchor, whose lead-in under-blocked shell-wrapped
+    git (2026-06-13 final-review CRITICAL-1)."""
+    import re
+    # Line-continuations join so `git \<nl>checkout` stays one token (HIGH-2).
+    command = command.replace("\\\r\n", " ").replace("\\\n", " ")
+    # Segment on every separator that starts a new command context, incl. `eval`
+    # (its string arg is a fresh command; HIGH-1).
+    segments = re.split(
+        r"(?:[;&|\n(){}`]|\$\(|\beval\b|\bdo\b|\bthen\b|\belse\b|(?:bash|sh|zsh)\s+-c)",
+        command,
+    )
+    # EXEC wrappers run their ARGUMENT as a command, so a wrapped `git <subcmd>`
+    # executes locally -> must block. EVERY OTHER leading word is a program that
+    # takes git as an ARGUMENT (python/node/man/type/echo/grep/ssh/...) -> must
+    # ALLOW. The prior "unknown word => wrapper" inversion over-blocked Zeus-
+    # idiomatic `python scripts/x.py git checkout` (final-review HIGH-OB-1); a
+    # bounded exec-wrapper allowlist is the correct model. `find`/`xargs`/`parallel`
+    # are wrappers (their -exec/-I arg git runs). Inside a wrapper the flag/
+    # positional arity is unknowable, so we block-bias: find git anywhere in the
+    # wrapped remainder (under-block is the dangerous direction for this gate).
+    EXEC_WRAPPERS = {
+        "time", "timeout", "eval", "stdbuf", "nice", "ionice", "nohup", "setsid",
+        "chrt", "sudo", "doas", "env", "command", "builtin", "exec", "xargs",
+        "parallel", "flock", "script", "watch", "find",
+    }
+    opt = r"(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+)"
+    subs = "|".join(subcmds)
+    git_head = re.compile(r"^(?:/\S*/)?git((?:\s+" + opt + r")*)\s+(" + subs + r")\b([^;&|]*)")
+    git_any = re.compile(r"(?:^|\s)(?:/\S*/)?git((?:\s+" + opt + r")*)\s+(" + subs + r")\b([^;&|]*)")
+    for seg in segments:
+        if "git" not in seg:
+            continue
+        # Flatten quotes (don't change head command-vs-arg semantics); strip
+        # leading env-assignments + redirects to expose the command head.
+        s = re.sub(r"[\"']", " ", seg).strip()
+        while True:
+            lead = re.match(r"(?:[A-Za-z_]\w*=\S+|\d*[<>]+\s*\S+)\s+", s)
+            if not lead:
+                break
+            s = s[lead.end():]
+        m = git_head.match(s)
+        if m:
+            return m  # head IS `git <subcmd>` -> runs locally
+        head = re.match(r"\S+", s)
+        if head and head.group(0).rsplit("/", 1)[-1] in EXEC_WRAPPERS:
+            m2 = git_any.search(s[head.end():])
+            if m2:
+                return m2  # exec-wrapper runs the wrapped `git <subcmd>`
+        # else: non-wrapper program head -> git is its ARGUMENT -> ALLOW
+    return None
+
+
 def _file_path_from_payload(payload: dict[str, Any]) -> str:
     """Extract file_path from Edit/Write/MultiEdit/NotebookEdit payload."""
     tool_input = payload.get("tool_input", {})
@@ -168,7 +235,13 @@ def _run_advisory_check_invariant_test(
     if not command:
         return None
     import re
-    if not re.search(r"\bgit\b.*\bcommit\b", command):
+    # Command-position anchor + `commit` as the subcommand. Bare `\bgit\b.*\bcommit\b`
+    # false-fired on `git log --grep=commit` and `echo git ... commit` (2026-06-13 audit).
+    if not re.search(
+        r"(?:^|[;&|]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:/\S*/)?git"
+        r"(?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+))*\s+commit\b",
+        command,
+    ):
         return None
     return (
         "ADVISORY: git commit detected. Invariant tests (pytest baseline) "
@@ -185,7 +258,13 @@ def _run_advisory_check_secrets_scan(
     if not command:
         return None
     import re
-    if not re.search(r"\bgit\b.*\bcommit\b", command):
+    # Command-position anchor + `commit` subcommand (see invariant_test). Bare
+    # `\bgit\b.*\bcommit\b` false-fired on `git log --grep=commit` (2026-06-13 audit).
+    if not re.search(
+        r"(?:^|[;&|]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:/\S*/)?git"
+        r"(?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+))*\s+commit\b",
+        command,
+    ):
         return None
     return (
         "ADVISORY: git commit detected. Staged content will be scanned by "
@@ -216,15 +295,13 @@ def _run_advisory_check_cotenant_staging_guard(
     # Tolerate git global options between `git` and `add` (`git -C <path> add`,
     # `git -c k=v add`, `--git-dir=`/`--work-tree=`) — external review 2026-06-12
     # found those forms slipped past the bare `git\s+add` matcher.
-    add_match = re.search(
-        r"\bgit((?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+))*)"
-        r"\s+add\b([^;&|]*)",
-        command,
-    )
+    # git add RUNS as a command (subshell/wrapper-aware); not git-as-argument.
+    # See _git_subcmd_at_command_position. Groups: (1)=opts (2)="add" (3)=add args.
+    add_match = _git_subcmd_at_command_position(command, ("add",))
     if not add_match:
         return None
     git_opts = add_match.group(1) or ""
-    add_args = add_match.group(2)
+    add_args = add_match.group(3)
     # Broad-staging forms: -A/--all, -u/--update, and repo-/dir-wide pathspecs
     # (`.`, `./`, `:/`) at the end of the add segment.
     if not re.search(
@@ -767,8 +844,12 @@ def _run_advisory_check_pr_thread_reply_waste(
 
     # --- Detection patterns ---------------------------------------------------
 
-    # 1. gh pr comment <number>
-    if re.search(r"(?:^|\s)gh\s+pr\s+comment\s+\d+", command):
+    # 1. gh pr comment <number> (command-position anchored — `(?:^|\s)` matched
+    #    `echo gh pr comment 5`; 2026-06-13 audit)
+    if re.search(
+        r"(?:^|[;&|]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:/\S*/)?gh\s+pr\s+comment\s+\d+",
+        command,
+    ):
         matched = True
     # 2. GraphQL addPullRequestReviewThreadReply
     elif "addPullRequestReviewThreadReply" in command:
@@ -1066,7 +1147,13 @@ def _run_advisory_check_post_merge_cleanup(
 
     tool_input = payload.get("tool_input", {})
     command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
-    if not _re.search(r"gh\s+pr\s+merge(?:\s|$)", command):
+    # Command-position anchor: bare `gh\s+pr\s+merge` matched `echo "gh pr merge"`
+    # and `--jq` strings (2026-06-13 audit). Still catches `a && gh pr merge`,
+    # `/usr/bin/gh pr merge`.
+    if not _re.search(
+        r"(?:^|[;&|]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:/\S*/)?gh\s+pr\s+merge(?:\s|$)",
+        command,
+    ):
         return None
 
     tool_response = payload.get("tool_response", {})
@@ -1528,8 +1615,13 @@ def _run_advisory_check_pre_branch_create_in_primary(
         if payload.get("tool_name", "") != "Bash":
             return None
         cmd = _command_from_payload(payload)
+        # Command-position anchor (see maintree_git_state_guard): bare `\bgit`
+        # matched `echo git checkout -b x` (2026-06-13 audit). Still catches
+        # `FOO=x git checkout -b`, `a && git switch -c`, `/usr/bin/git worktree add`.
         if not re.search(
-            r"\bgit\s+(checkout\s+-b|switch\s+-c|worktree\s+add)\b", cmd
+            r"(?:^|[;&|]\s*)(?:[A-Za-z_]\w*=\S+\s+)*(?:/\S*/)?git"
+            r"\s+(checkout\s+-b|switch\s+-c|worktree\s+add)\b",
+            cmd,
         ):
             return None
         if os.environ.get("ZEUS_PRIMARY_BRANCH_OK"):
@@ -1618,10 +1710,12 @@ def _run_advisory_check_maintree_git_state_guard(
 
     # Find each `git [global-opts] <subcommand> [args...]` segment. Tolerate the
     # same global options the cotenant guard tolerates (-C/-c/--git-dir/--work-tree).
-    seg = re.search(
-        r"\bgit((?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+))*)"
-        r"\s+(checkout|switch|branch|reset)\b([^;&|]*)",
-        command,
+    # git RUNS as a command (subshell/wrapper/redirect-aware), NOT git-as-argument.
+    # Replaces the interim `(?:^|[;&|]...)` anchor that under-blocked `$(git checkout)`,
+    # `bash -c "git checkout"`, `( git checkout )`, `time git reset --hard`, etc.
+    # (2026-06-13 final-review CRITICAL-1). Groups: (1)=opts (2)=subcmd (3)=args.
+    seg = _git_subcmd_at_command_position(
+        command, ("checkout", "switch", "branch", "reset")
     )
     if not seg:
         return None
@@ -1704,6 +1798,98 @@ def _run_advisory_check_maintree_git_state_guard(
 
 
 # ---------------------------------------------------------------------------
+# RULE 1 guard — no-edge conclusion is OUR DEFECT (operator directive 2026-06-14)
+# ---------------------------------------------------------------------------
+
+# Phrases that encode the forbidden "no edge / market efficient" CONCLUSION.
+# RULE 1 (operator, inviolable): a no-edge verdict is presumed OUR DEFECT until
+# settlement proves otherwise; tradeable alpha is ASSUMED to exist. The agent
+# does not get to stop on "no edge" — it must root-cause the suppression and try
+# other approaches.
+_NO_EDGE_PHRASES = (
+    "no edge", "no-edge", "no actionable edge", "no tradeable edge",
+    "no tradable edge", "no real edge", "no genuine edge", "no exploitable edge",
+    "no tradeable alpha", "no alpha", "lack edge", "lacks edge", "lacking edge",
+    "genuinely lack", "market is efficient", "market efficient",
+    "markets are efficient", "efficient market", "honest no-edge",
+    "honestly no edge", "honest no edge",
+)
+
+
+def _last_assistant_text(transcript_path: str) -> str:
+    """Return the text of the most recent assistant message in the transcript."""
+    if not transcript_path:
+        return ""
+    try:
+        lines = Path(transcript_path).read_text(errors="ignore").splitlines()
+    except Exception:
+        return ""
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if obj.get("type") != "assistant" and obj.get("role") != "assistant":
+            continue
+        msg = obj.get("message", obj)
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            return " ".join(
+                c.get("text", "")
+                for c in content
+                if isinstance(c, dict) and c.get("type") == "text"
+            )
+        if isinstance(content, str):
+            return content
+    return ""
+
+
+def _run_advisory_check_no_edge_rule1_guard(
+    payload: dict[str, Any],
+) -> str | None:
+    """Stop: BLOCK + redirect when the final assistant message concludes 'no
+    edge' / 'market efficient'. RULE 1 (operator): no-edge is presumed OUR
+    DEFECT until settlement proves otherwise; tradeable alpha is assumed to
+    exist. Loop-safe: when already inside a stop-hook re-drive
+    (stop_hook_active) it degrades to a non-blocking reminder. Bypass:
+    ZEUS_NO_EDGE_GUARD_OFF=1 (operator deliberate override only)."""
+    if os.environ.get("ZEUS_NO_EDGE_GUARD_OFF", "").strip() == "1":
+        return None
+    text = _last_assistant_text(payload.get("transcript_path", ""))
+    if not text:
+        return None
+    low = text.lower()
+    hit = next((p for p in _NO_EDGE_PHRASES if p in low), None)
+    if hit is None:
+        return None
+    msg = (
+        "RULE 1 VIOLATION — your message concluded with the forbidden framing "
+        f"(matched: {hit!r}).\n"
+        "RULE 1 (inviolable): a 'no edge' / 'market efficient' / 'honest no-edge' "
+        "verdict is PRESUMED OUR DEFECT until settlement proves otherwise. "
+        "Tradeable alpha is ASSUMED to exist; you do NOT get to conclude it is absent.\n"
+        "REDIRECT NOW — do not stop on this conclusion. Find OTHER approaches:\n"
+        "  - root-cause the SUPPRESSION (which gate / cap / q_lcb floor / metadata "
+        "pushed q_lcb below price?),\n"
+        "  - attack a DIFFERENT market / temperature band / horizon / mechanism,\n"
+        "  - a different data angle, microstructure, or mispricing source,\n"
+        "  - re-examine whether OUR forecast metadata (bin / station / representativeness "
+        "offset) is wrong (law 8).\n"
+        "Keep driving toward real settlement-graded alpha. Never present a no-edge "
+        "conclusion as the answer."
+    )
+    if payload.get("stop_hook_active"):
+        # Already inside a stop-hook continuation — degrade to a non-blocking
+        # reminder so the guard cannot infinite-loop.
+        return msg
+    print(msg, file=sys.stderr)
+    return _BLOCK_SENTINEL
+
+
+# ---------------------------------------------------------------------------
 # Advisory check dispatcher
 # ---------------------------------------------------------------------------
 
@@ -1736,10 +1922,13 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "session_start_visibility": _run_advisory_check_session_start_visibility,
     "worktree_create_advisor": _run_advisory_check_worktree_create_advisor,
     "worktree_remove_advisor": _run_advisory_check_worktree_remove_advisor,
-    "maintenance_worker_dry_run_floor": _run_advisory_check_maintenance_worker_dry_run_floor,
+    # maintenance_worker_dry_run_floor DELETED 2026-06-13 — advisory-only (no deny
+    # path = zero enforcement value), fired 38x/session, false-fired on read-only
+    # commands and the global non-Zeus ~/.claude/settings.json. Top noise source.
     "pre_branch_create_in_primary": _run_advisory_check_pre_branch_create_in_primary,
     "monitor_arm_overdue_advisor": _run_advisory_check_monitor_arm_overdue_advisor,
     "pr_monitor_arm_ack": _run_advisory_check_pr_monitor_arm_ack,
+    "no_edge_rule1_guard": _run_advisory_check_no_edge_rule1_guard,
 }
 
 # External-module handlers registered conditionally (None if import failed → boot
@@ -1799,8 +1988,12 @@ def _boot_self_test() -> None:
         print(f"[hook integrity] WARN: self-test error: {exc}", file=sys.stderr)
 
 
-# Run self-test at module load (not only __main__)
-_boot_self_test()
+# Self-test is NOT run at module import. That re-validated the entire registry on
+# EVERY hook invocation (~14 dispatch.py spawns per Bash command), re-parsing
+# registry.yaml a second time per call for zero behavior benefit (it only prints
+# to stderr, never raises, falls open). It now runs only on explicit request
+# (`dispatch.py boot_self_test_only`) and once per session via a SessionStart hook.
+# Performance only — hook decisions are unaffected.
 
 
 # ---------------------------------------------------------------------------
@@ -1848,8 +2041,48 @@ def main(hook_id: str) -> int:
         return 0
 
 
+def main_multi(hook_ids: list[str]) -> int:
+    """Run several hook ids in ONE process (perf: replaces N python spawns per
+    tool call with 1). Reads stdin once. Aggregates: if ANY check blocks, exit 2
+    (each blocking check already wrote its reason to stderr); otherwise emit the
+    non-blocking advisories as ONE combined additionalContext. Functionally
+    equivalent to N separate dispatch.py calls, minus (N-1) interpreter starts and
+    minus the N-way advisory fan-out into model context. No registry lookup needed:
+    _run_advisory_check resolves the handler by id; an unknown id falls open."""
+    try:
+        raw = sys.stdin.read()
+        payload: dict[str, Any] = json.loads(raw) if raw.strip() else {}
+    except Exception:
+        payload = {}
+    event: str = payload.get("hook_event_name", "")
+    advisories: list[str] = []
+    blocked = False
+    for hook_id in hook_ids:
+        try:
+            ctx = _run_advisory_check({"id": hook_id}, payload)
+            if ctx == _BLOCK_SENTINEL:
+                _emit_signal(hook_id, event, "block", "blocking_check", payload)
+                blocked = True  # reason already on stderr; keep running for parity
+            else:
+                _emit_signal(hook_id, event, "allow", "advisory_check", payload)
+                if ctx:
+                    advisories.append(ctx)
+        except Exception as exc:
+            _emit_signal(hook_id, event, "error", f"dispatch_crash: {exc}", payload)
+    if blocked:
+        return 2
+    if advisories:
+        return _emit_advisory("__multi__", event, "\n\n".join(advisories))
+    return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: dispatch.py <hook_id>", file=sys.stderr)
+        print("Usage: dispatch.py <hook_id> | --multi <id>...", file=sys.stderr)
         sys.exit(1)
+    if sys.argv[1] in ("boot_self_test_only", "self_test", "--self-test"):
+        _boot_self_test()
+        sys.exit(0)
+    if sys.argv[1] == "--multi":
+        sys.exit(main_multi(sys.argv[2:]))
     sys.exit(main(sys.argv[1]))

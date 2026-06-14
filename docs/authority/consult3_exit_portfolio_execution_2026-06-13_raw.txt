@@ -1,0 +1,4421 @@
+Scope, verdict, and confidence
+
+No repository URLs or “Source to review” URLs were provided, so this is a clean-room mathematical design review. I inspected standard public references for the log-growth/Kelly objective, robust Kelly, forecast combination, time-uniform sequential alarms, and queue-position valuation. The core expected-log-wealth results below are first-principles derivations; Claude Code must verify all implementation details against the local exchange API, fee model, order-book schema, and bankroll accounting.
+
+Verdict: implement in this order: Q1 exit policy first, Q2 portfolio Kelly second, Q4 constant elimination third, Q3 dynamic re-quoting fourth unless execution slippage is already a top loss driver. The largest mathematical blocker is that the requested exit(q_t, b_t, c, t_remaining, posterior_cov, g*, fees) signature is not sufficient for log-optimal partial exits: it must also know current position size, liquid wealth, other portfolio scenario exposure, and executable bid-depth curve. Cost basis c is sunk under log utility except for taxes/accounting constraints.
+
+Confidence: high for Q1 exact fixed-position formulas, Q2 horse-race Kelly, and the “stop-loss is not distinct” result; medium-high for the Q2 mean-variance and robust portfolio prescriptions because they depend on locally fitted joint outcome scenarios; medium for Q3 because queue/fill/adverse-selection models are exchange-microstructure dependent and must be validated by replay.
+
+Primary references inspected: Kelly’s original log-growth formulation, https://www.princeton.edu/~wbialek/rome/refs/kelly_56.pdf
+, which states that side information can maximize exponential capital growth under arbitrary odds. 
+Princeton University
+ Breiman’s favorable-games paper is the standard asymptotic optimality reference, https://projecteuclid.org/proceedings/berkeley-symposium-on-mathematical-statistics-and-probability/Proceedings-of-the-Fourth-Berkeley-Symposium-on-Mathematical-Statistics-and/Chapter/Optimal-Gambling-Systems-for-Favorable-Games/bsmsp/1200512159
+. Distributionally robust Kelly is directly aligned with the uncertainty problem here; Boyd’s page states the worst-case expected-log-growth formulation and finite-outcome tractability results, https://web.stanford.edu/~boyd/papers/robust_kelly.html
+. 
+Stanford University
+ Time-uniform alarms below use the nonnegative-supermartingale/confidence-sequence literature, https://arxiv.org/abs/1808.03204
+. 
+arXiv
+ Queue-position valuation is grounded in price-time/FIFO queueing and adverse selection; Moallemi and Yuan explicitly model price-time priority, FIFO queues, queue-position value, and adverse-selection costs, https://moallemi.com/ciamac/papers/queue-value-2016.pdf
+. 
+Moallemi
++1
+ Forecast blending/market-as-forecaster recommendations are consistent with the forecast-combination literature, including linear pools, calibration, accuracy/diversity issues, and proper probabilistic scoring, https://arxiv.org/pdf/2205.04216
+. 
+arXiv
++1
+
+Design findings for Claude Code
+
+Because no repo files were provided, “location” below names the proposed module/symbol rather than a verified file path.
+
+BLOCKER — Q1 / API design — proposed exit_policy.exit(...)
+
+Issue: exit(q_t, b_t, c, t_remaining, posterior_cov, g*, fees) cannot determine the optimal partial-exit fraction. Expected-log decisions are wealth-relative and scenario-relative. The function must know at least position_units, liquid_wealth_excluding_position, executable bid depth, and current portfolio scenario exposure.
+
+Impact: a system can sell too much of tiny positions and too little of concentrated positions even with the same (q_t, b_t). Cost basis c can also introduce a false “stop-loss” dependency.
+
+Fix direction: change the signature to:
+
+Python
+Run
+exit_fraction(
+    q_or_posterior_samples,
+    bid_depth_curve,
+    position_units,
+    wealth_ex_position,
+    t_remaining_days,
+    future_liquidity_value_or_g_star,
+    fees,
+    other_portfolio_scenarios=None,
+    market_forecast=None,
+    calibration_state=None,
+)
+
+Use c only for tax/accounting or realized-P&L reporting, not for the economic exit decision.
+
+HIGH — Q1 / model risk — proposed calibration.blended_exit_belief
+
+Issue: with a miscalibrated agent posterior, the pure Bayesian sell-dominance rule can systematically refuse exits because it trusts q_t while the market is informative.
+
+Impact: the system holds losers whenever the model is stale, biased, or missing information already incorporated in the book.
+
+Fix direction: fit a blended belief using the market as a second forecaster, and add an anytime-valid calibration alarm that suspends agent-posterior authority when out-of-sample likelihood evidence crosses a cost-derived threshold.
+
+HIGH — Q2 / sizing — proposed portfolio_kelly.solve_joint_kelly
+
+Issue: per-candidate sizing ignores mutual exclusivity within an event, positive same-day correlations across events, and bankroll lockup.
+
+Impact: positions look individually small but can be collectively overbet on the same latent weather regime or event family.
+
+Fix direction: exact horse-race Kelly inside each K-bin event; scenario/robust Kelly across event families; liquidity-reservation dynamic program for asynchronous opportunities.
+
+HIGH — Q1/Q2/Q3 / liquidity — proposed execution.depth_aware_value
+
+Issue: “no price impact” is explicitly unsafe at size. Bid/ask top-of-book prices are not executable for full desired size.
+
+Impact: exit, entry, and quote decisions overstate log value.
+
+Fix direction: every decision must consume a depth curve and compute marginal executable prices. The correct objective uses integrated sale/buy proceeds, not a scalar bid/ask.
+
+MEDIUM — Q3 / re-quoting — proposed execution.dynamic_quote_policy
+
+Issue: a one-shot maker/taker threshold ignores state changes, queue progress, and cancel-replace optionality.
+
+Impact: stale resting orders can remain live after posterior/book jumps; conversely, useful queue priority can be thrown away by naïve chasing.
+
+Fix direction: event-driven Bellman re-decision; queue-aware Erlang fill transforms; replay-based estimate of dynamic option value over one-shot.
+
+MEDIUM — Q4 / constants — proposed ops_constants.fit_decision_constants
+
+Issue: operational constants should not be fixed hours/counts/percentiles.
+
+Impact: hidden overfitting and brittle behavior across market regimes.
+
+Fix direction: convert each constant into a fitted stochastic rate or a cost-derived posterior decision threshold.
+
+Q1 — Exit / take-profit / stop-loss policy
+Q1.0 Assumptions and notation
+
+For a held YES or held NO side, define the held side’s terminal payout indicator
+
+Y∈{0,1},q
+t
+	​
+
+=P
+t
+	​
+
+(Y=1).
+
+A long YES has Y=1 if its bin occurs. A long NO has Y=1 if the bin does not occur. Everything below applies to either side after this conversion.
+
+Let:
+
+W>0
+
+be current wealth excluding this position’s future payoff and excluding sale proceeds from this position. Let:
+
+n>0
+
+be contracts held. Let:
+
+z=n/W
+
+be position units per current outside wealth. If contract payout is USD 1, n is also max gross dollars of payout.
+
+Let sale at the bid produce net executable cash per contract:
+
+v(b,fees,x)
+
+for the marginal contract at sold fraction x. With no depth effect, v=b−ϕ
+sell
+	​
+
+. With displayed depth, the total net sale proceeds from selling fraction x∈[0,1] are:
+
+S(x)=∫
+0
+xn
+	​
+
+v(u)du.
+
+Let settlement net payouts per remaining contract be:
+
+A
+1
+	​
+
+=1−ϕ
+settle,win
+	​
+
+,A
+0
+	​
+
+=−ϕ
+settle,lose
+	​
+
+,
+
+usually A
+1
+	​
+
+=1,A
+0
+	​
+
+=0.
+
+Let released sale capital have certainty-equivalent future multiplier:
+
+M(T)=e
+g
+⋆
+T
+,
+
+where g
+⋆
+ is expected log-growth per day for capital released into the future opportunity set and T is remaining time in days. If future opportunity capacity is limited, replace M(T) by the marginal liquidity value from Q2(d), not a constant.
+
+Q1(a) Sell dominance: when selling at bid strictly dominates holding to settlement
+Boxed rule: sell-all versus hold-to-settlement
+
+With no further decisions before settlement and no price impact beyond the executable sale value v, selling all strictly dominates holding to settlement iff:
+
+Δ
+sell-hold
+	​
+
+=log(W+nvM(T))−[q
+t
+	​
+
+log(W+nA
+1
+	​
+
+)+(1−q
+t
+	​
+
+)log(W+nA
+0
+	​
+
+)]>0.
+	​
+
+
+Equivalently, in wealth-normalized form:
+
+log(1+zvM)>q
+t
+	​
+
+log(1+zA
+1
+	​
+
+)+(1−q
+t
+	​
+
+)log(1+zA
+0
+	​
+
+).
+	​
+
+
+For the usual binary contract A
+1
+	​
+
+=1,A
+0
+	​
+
+=0:
+
+v>
+zM(T)
+(1+z)
+q
+t
+	​
+
+−1
+	​
+
+.
+	​
+
+
+For an infinitesimal position z→0:
+
+v>
+M(T)
+q
+t
+	​
+
+	​
+
+.
+	​
+
+
+This is the clean take-away: with no opportunity value and tiny size, sell only if net bid exceeds posterior win probability; with finite size, log utility accepts a bid below q
+t
+	​
+
+ because selling removes binary variance; with future opportunities, the threshold is reduced by e
+−g
+⋆
+T
+.
+
+Cost basis is not in the rule
+
+The entry cost c does not appear. Under expected-log utility, absent taxes or external accounting constraints, c is sunk. Two positions with identical current wealth, size, bid, posterior, fees, and remaining time have the same optimal action even if one was entered at 0.20 and the other at 0.80.
+
+If taxes matter, after-tax sale proceeds replace v. If accounting constraints affect available bankroll, they change W. They still do not create a pure “because I am down X%” rule.
+
+What role does remaining variance of q play?
+
+There are two different “variance” concepts.
+
+First, posterior parameter uncertainty about q: for a fixed sell/hold-to-settlement action, expected log utility is linear in the predictive probability q. If Q is a posterior random variable for the win probability and q
+t
+	​
+
+=E[Q], then:
+
+E
+Q
+	​
+
+[QL
+1
+	​
+
++(1−Q)L
+0
+	​
+
+]=q
+t
+	​
+
+L
+1
+	​
+
++(1−q
+t
+	​
+
+)L
+0
+	​
+
+.
+
+So posterior variance does not affect the non-robust expected-utility comparison. It matters only if you use robust/ambiguity-adjusted Kelly, in which case replace q
+t
+	​
+
+ by a conservative/blended q
+exit
+	​
+
+ derived below.
+
+Second, future information variance: q
+s
+	​
+
+=P(Y=1∣F
+s
+	​
+
+) is a martingale, so if you commit now to holding until settlement,
+
+E
+t
+	​
+
+[q
+τ
+	​
+
+]=q
+t
+	​
+
+
+and future variance again does not affect fixed-action hold value. But if you are allowed to revisit the exit after future observations, variance has option value. The correct dynamic comparison is a Snell envelope:
+
+V(t,q,b,n,W)=max{U
+sell now
+	​
+
+,E
+t
+	​
+
+[V(t+Δ,Q
+t+Δ
+	​
+
+,B
+t+Δ
+	​
+
+,n,W)]}.
+	​
+
+
+A one-step normal approximation makes the information option explicit. Let:
+
+H(q)=L
+0
+	​
+
++qD,L
+y
+	​
+
+=log(W+nA
+y
+	​
+
+),D=L
+1
+	​
+
+−L
+0
+	​
+
+,S=log(W+nvM),
+
+and suppose Q
+′
+∼N(q,σ
+q
+2
+	​
+
+) at the next observation time. The boundary where hold value equals sale value is:
+
+q
+0
+	​
+
+=
+D
+S−L
+0
+	​
+
+	​
+
+.
+
+Then:
+
+E[max(S,H(Q
+′
+))]=SΦ(−d)+(L
+0
+	​
+
++Dq)Φ(d)+Dσ
+q
+	​
+
+ϕ(d),d=
+σ
+q
+	​
+
+q−q
+0
+	​
+
+	​
+
+.
+	​
+
+
+The final term Dσ
+q
+	​
+
+ϕ(d) is the local value of being able to wait for the next posterior jump. This is not a hand-set buffer; it is computed from the fitted transition distribution of posterior jumps.
+
+Q1(b) Take-profit threshold with opportunity cost
+
+“Take profit” is just the sell-dominance rule in the high-bid region. There is no separate percentage gain target.
+
+Boxed take-profit rule
+
+For sale-all take-profit, define the hold certainty-equivalent sale value:
+
+v
+TP
+	​
+
+(q,z,T)=
+ze
+g
+⋆
+T
+exp(qlog(1+zA
+1
+	​
+
+)+(1−q)log(1+zA
+0
+	​
+
+))−1
+	​
+
+.
+	​
+
+
+Sell when:
+
+v
+net bid
+	​
+
+≥v
+TP
+	​
+
+.
+	​
+
+
+For the usual A
+1
+	​
+
+=1,A
+0
+	​
+
+=0:
+
+v
+net bid
+	​
+
+≥
+ze
+g
+⋆
+T
+(1+z)
+q
+−1
+	​
+
+	​
+
+
+and for small z:
+
+v
+net bid
+	​
+
+≥qe
+−g
+⋆
+T
+.
+	​
+
+
+Thus, if q=0.97, g
+⋆
+T is material, and bid is 0.95, early sale can be optimal even though posterior expected payout exceeds the bid. The system should estimate g
+⋆
+ from future opportunity logs, not set it manually.
+
+Estimating g
+⋆
+
+From historical logs, for each time t, reconstruct the opportunity set arriving over [t,t+T]. Solve the same log-optimal allocation problem that would have been available with one additional dollar of liquid capital. Estimate:
+
+g
+⋆
+(T)=
+T
+1
+	​
+
+E[log
+W
+T
+without $1 released
+	​
+
+W
+T
+with $1 released
+	​
+
+	​
+
+].
+	​
+
+
+In practice use posterior samples from replay:
+
+g
+	​
+
+⋆
+(T)=
+T
+1
+	​
+
+B
+1
+	​
+
+b=1
+∑
+B
+	​
+
+log
+W
+T,b
+0
+	​
+
+W
+T,b
++
+	​
+
+	​
+
+.
+
+Licensing rule: use the take-profit opportunity adjustment only when the posterior confidence interval for g
+⋆
+T is narrow enough that the sell/hold sign is invariant over the interval. No fixed minimum sample count is needed.
+
+Q1(c) Stop-loss: prove whether it is distinct
+Boxed result
+With a correct posterior and log utility, a stop-loss rule distinct from sell-dominance does not exist.
+	​
+
+
+A “stop-loss” is optimal only when the updated state satisfies the same sell-dominance condition above.
+
+Proof
+
+Let the Markov decision state be:
+
+S
+t
+	​
+
+=(W
+t
+	​
+
+,n
+t
+	​
+
+,q
+t
+	​
+
+,b
+t
+	​
+
+,T
+t
+	​
+
+,fees,depth,future opportunity value).
+
+Expected-log utility satisfies the Bellman principle:
+
+V(S
+t
+	​
+
+)=
+a∈A(S
+t
+	​
+
+)
+max
+	​
+
+E
+t
+	​
+
+[logW
+T
+	​
+
+∣S
+t
+	​
+
+,a].
+
+The conditional distribution of future wealth given S
+t
+	​
+
+ does not depend on the historical entry price c, except through current wealth W
+t
+	​
+
+, remaining units n
+t
+	​
+
+, and taxes/constraints if present. Therefore any rule that says “sell because loss from cost basis exceeds L%” cannot be optimal for all histories with the same S
+t
+	​
+
+ but different c. It violates state sufficiency.
+
+A posterior moving against the position changes q
+t
+	​
+
+. The optimal response is already captured by:
+
+log(W+nvM)>q
+t
+	​
+
+log(W+nA
+1
+	​
+
+)+(1−q
+t
+	​
+
+)log(W+nA
+0
+	​
+
+).
+The pathology: miscalibrated posterior refuses exits
+
+The above proof assumes q
+t
+	​
+
+ is correct. If the agent is miscalibrated, it can keep saying “still winning” while the market correctly disagrees. The correction is not a hand-set stop-loss; it is to weaken or suspend posterior authority.
+
+Correction 1: market-as-second-forecaster blended exit belief
+
+Let m
+t
+	​
+
+ be the market-implied probability for the held side, preferably from executable mid/depth and adjusted for fees and spread:
+
+m
+t
+	​
+
+≈
+2
+bid
+held
+	​
+
++ask
+held
+	​
+
+	​
+
+
+when both sides are reliable, or a bid/ask interval otherwise.
+
+Fit a calibration/stacking model on historical resolved snapshots:
+
+Y
+i
+	​
+
+∼Bernoulli(π
+i
+	​
+
+),logitπ
+i
+	​
+
+=β
+0
+	​
+
++β
+a
+	​
+
+logit(q
+i
+agent
+	​
+
+)+β
+m
+	​
+
+logit(m
+i
+	​
+
+)+β
+τ
+⊤
+	​
+
+x
+i
+	​
+
++u
+family/city/bin
+	​
+
+.
+	​
+
+
+Then:
+
+q
+exit
+	​
+
+=E
+β,u
+	​
+
+[σ(β
+0
+	​
+
++β
+a
+	​
+
+logitq
+t
+	​
+
++β
+m
+	​
+
+logitm
+t
+	​
+
++β
+τ
+⊤
+	​
+
+x
+t
+	​
+
++u)].
+	​
+
+
+Use q
+exit
+	​
+
+, not raw q
+t
+	​
+
+, in the exit rule. If robust sizing is required, use a posterior lower functional of q
+exit
+	​
+
+, with the quantile level derived in Q4 rather than fixed at 5%.
+
+This is a proper-scoring-rule problem: choose the blend that maximizes out-of-sample predictive log score, then evaluate realized trading log-growth. Forecast-combination references emphasize that weights should be estimated and that accuracy/diversity/calibration matter, not merely averaged by hand; see https://arxiv.org/pdf/2205.04216
+. 
+arXiv
++1
+
+Correction 2: anytime-valid alarm
+
+For resolved forecasts i=1,…,n, compare the agent forecast q
+i
+	​
+
+ to an alternative r
+i
+	​
+
+, such as the fitted market blend. Define the likelihood-ratio e-process:
+
+E
+n
+	​
+
+=
+i=1
+∏
+n
+	​
+
+q
+i
+Y
+i
+	​
+
+	​
+
+(1−q
+i
+	​
+
+)
+1−Y
+i
+	​
+
+r
+i
+Y
+i
+	​
+
+	​
+
+(1−r
+i
+	​
+
+)
+1−Y
+i
+	​
+
+	​
+
+.
+	​
+
+
+More robustly, integrate over alternatives:
+
+E
+n
+	​
+
+=∫
+i=1
+∏
+n
+	​
+
+q
+i
+Y
+i
+	​
+
+	​
+
+(1−q
+i
+	​
+
+)
+1−Y
+i
+	​
+
+r
+θ,i
+Y
+i
+	​
+
+	​
+
+(1−r
+θ,i
+	​
+
+)
+1−Y
+i
+	​
+
+	​
+
+dΠ(θ).
+	​
+
+
+Under the null that the agent’s q
+i
+	​
+
+ are conditionally correct, E
+n
+	​
+
+ is a nonnegative martingale with unit expectation. Ville-style time-uniform control follows from the nonnegative-supermartingale literature; see https://arxiv.org/abs/1808.03204
+. 
+arXiv
+
+Suspension rule:
+
+suspend raw agent posterior authority if E
+n
+	​
+
+≥h
+⋆
+,
+	​
+
+
+where h
+⋆
+ is not fixed at “20” or “1/0.05”; derive it from the false-alarm versus missed-miscalibration utility cost in Q4.
+
+Q1(d) Partial exits
+Boxed objective
+
+For selling fraction x∈[0,1], with total sale proceeds S(x) and opportunity multiplier M:
+
+U(x)=qlog(W+MS(x)+n(1−x)A
+1
+	​
+
+)+(1−q)log(W+MS(x)+n(1−x)A
+0
+	​
+
+).
+	​
+
+
+The optimal fraction is:
+
+x
+⋆
+=arg
+0≤x≤1
+max
+	​
+
+U(x).
+	​
+
+
+If S(x) is concave because bid depth worsens with size, this remains a one-dimensional concave optimization under normal book conditions.
+
+First-order condition
+
+At an interior optimum:
+
+q
+W+MS(x)+n(1−x)A
+1
+	​
+
+MS
+′
+(x)−nA
+1
+	​
+
+	​
+
++(1−q)
+W+MS(x)+n(1−x)A
+0
+	​
+
+MS
+′
+(x)−nA
+0
+	​
+
+	​
+
+=0.
+	​
+
+
+Boundary rules:
+
+U
+′
+(0)≤0⇒x
+⋆
+=0,U
+′
+(1)≥0⇒x
+⋆
+=1.
+	​
+
+Closed form for constant executable bid and usual payout
+
+If S(x)=xnv, A
+1
+	​
+
+=1,A
+0
+	​
+
+=0, r=vM, and z=n/W:
+
+If r≥1, sale dominates settlement in both states, so:
+
+x
+⋆
+=1.
+	​
+
+
+If 0<r<1, the interior root is:
+
+x
+0
+	​
+
+=
+zr(1−r)
+(1−q)r(1+z)−q(1−r)
+	​
+
+.
+	​
+
+
+Then:
+
+x
+⋆
+=min{1,max{0,x
+0
+	​
+
+}}.
+	​
+
+
+This is the exact partial-exit rule for one isolated binary position under constant bid depth.
+
+Q1 reference implementation: exit and calibration
+Python
+Run
+import numpy as np
+from scipy.optimize import minimize, minimize_scalar, brentq
+from scipy.special import expit, logit
+from scipy.stats import norm
+
+EPS = 1e-12
+
+def _clip_prob(q, eps=1e-9):
+    return float(np.clip(q, eps, 1.0 - eps))
+
+def sell_all_dominance_gap(
+    q,
+    net_bid,
+    position_units,
+    wealth_ex_position,
+    t_remaining_days=0.0,
+    g_star=0.0,
+    win_payout=1.0,
+    lose_payout=0.0,
+):
+    """
+    Positive gap means selling the entire position at net_bid strictly dominates
+    holding to settlement. position_units is max payout units, not cost basis.
+    """
+    q = _clip_prob(q)
+    n = float(position_units)
+    W = float(wealth_ex_position)
+    if n <= 0 or W <= 0:
+        raise ValueError("position_units and wealth_ex_position must be positive")
+
+    M = np.exp(g_star * t_remaining_days)
+    w_sell = W + n * net_bid * M
+    w_win = W + n * win_payout
+    w_lose = W + n * lose_payout
+    if min(w_sell, w_win, w_lose) <= 0:
+        return -np.inf
+
+    u_sell = np.log(w_sell)
+    u_hold = q * np.log(w_win) + (1.0 - q) * np.log(w_lose)
+    return u_sell - u_hold
+
+def take_profit_net_bid_threshold(
+    q,
+    position_units,
+    wealth_ex_position,
+    t_remaining_days=0.0,
+    g_star=0.0,
+    win_payout=1.0,
+    lose_payout=0.0,
+):
+    """
+    Minimum net executable bid per contract for sell-all dominance.
+    """
+    q = _clip_prob(q)
+    n = float(position_units)
+    W = float(wealth_ex_position)
+    z = n / W
+    M = np.exp(g_star * t_remaining_days)
+    if z <= 1e-12:
+        return (q * win_payout + (1.0 - q) * lose_payout) / M
+    hold_ce_gross = np.exp(
+        q * np.log1p(z * win_payout)
+        + (1.0 - q) * np.log1p(z * lose_payout)
+    )
+    return (hold_ce_gross - 1.0) / (z * M)
+
+def exit_fraction_binary(
+    q,
+    bid,
+    position_units,
+    wealth_ex_position,
+    t_remaining_days=0.0,
+    g_star=0.0,
+    sell_fee_per_contract=0.0,
+    win_payout=1.0,
+    lose_payout=0.0,
+    q_sd=0.0,
+    z_quantile=0.0,
+    depth=None,
+):
+    """
+    Returns fraction of current position to sell.
+
+    depth: optional list [(qty, net_bid_before_fee), ...] sorted from best to worse.
+           Quantities are contract units available at each level.
+           If depth is None, bid - sell_fee_per_contract is assumed executable
+           for the whole position. That assumption must be disabled in production
+           when displayed depth is finite.
+    """
+    q_eff = _clip_prob(q - z_quantile * q_sd)
+    n = float(position_units)
+    W = float(wealth_ex_position)
+    if n <= 0:
+        return 0.0
+    if W <= 0:
+        raise ValueError("wealth_ex_position must be positive")
+
+    Mopp = float(np.exp(g_star * t_remaining_days))
+
+    if depth is None:
+        net = max(0.0, float(bid) - float(sell_fee_per_contract))
+
+        def sale_cash(x):
+            return n * float(x) * net * Mopp
+
+    else:
+        levels = [(float(qty), float(px)) for qty, px in depth if qty > 0]
+
+        def sale_cash(x):
+            qty_to_sell = n * float(np.clip(x, 0.0, 1.0))
+            rem = qty_to_sell
+            cash = 0.0
+            for qty, px in levels:
+                take = min(rem, qty)
+                if take <= 0:
+                    break
+                cash += take * max(0.0, px - sell_fee_per_contract)
+                rem -= take
+            # Do not assume hidden liquidity.
+            if rem > 1e-9:
+                return -np.inf
+            return cash * Mopp
+
+    def utility(x):
+        C = sale_cash(x)
+        if not np.isfinite(C):
+            return -np.inf
+        w1 = W + C + n * (1.0 - x) * win_payout
+        w0 = W + C + n * (1.0 - x) * lose_payout
+        if w1 <= 0 or w0 <= 0:
+            return -np.inf
+        return q_eff * np.log(w1) + (1.0 - q_eff) * np.log(w0)
+
+    res = minimize_scalar(lambda x: -utility(x), bounds=(0.0, 1.0), method="bounded")
+    candidates = [(0.0, utility(0.0)), (1.0, utility(1.0))]
+    if res.success:
+        candidates.append((float(res.x), utility(float(res.x))))
+    return max(candidates, key=lambda t: t[1])[0]
+
+def one_step_information_option_value(q, sigma_q, sale_log_value, hold_log_lose, hold_log_win):
+    """
+    Normal approximation to E[max(S, H(Q'))] - max(S, H(q)).
+    Use Monte Carlo from posterior transition samples in production.
+    """
+    q = _clip_prob(q)
+    sigma_q = max(float(sigma_q), 0.0)
+    S = float(sale_log_value)
+    L0 = float(hold_log_lose)
+    L1 = float(hold_log_win)
+    D = L1 - L0
+    if sigma_q <= 0 or abs(D) <= 1e-12:
+        return max(S, L0 + q * D) - max(S, L0 + q * D)
+
+    q0 = (S - L0) / D
+    d = (q - q0) / sigma_q
+    expected_max = (
+        S * norm.cdf(-d)
+        + (L0 + D * q) * norm.cdf(d)
+        + D * sigma_q * norm.pdf(d)
+    )
+    return expected_max - max(S, L0 + q * D)
+
+def fit_blended_logistic_forecaster(y, q_agent, q_market, l2=1e-4):
+    """
+    Logistic stacking model:
+        logit P(Y=1) = beta0 + beta_a logit(q_agent) + beta_m logit(q_market)
+
+    Returns beta and approximate covariance from inverse Hessian.
+    Add hierarchical effects locally if enough data by family/city/bin.
+    """
+    y = np.asarray(y, dtype=float)
+    qa = np.clip(np.asarray(q_agent, dtype=float), 1e-6, 1 - 1e-6)
+    qm = np.clip(np.asarray(q_market, dtype=float), 1e-6, 1 - 1e-6)
+    X = np.column_stack([np.ones_like(y), logit(qa), logit(qm)])
+
+    def nll(beta):
+        eta = X @ beta
+        # stable logistic negative log-likelihood with L2 penalty
+        loss = np.sum(np.logaddexp(0.0, eta) - y * eta)
+        loss += 0.5 * l2 * np.sum(beta[1:] ** 2)
+        return loss
+
+    def grad(beta):
+        p = expit(X @ beta)
+        g = X.T @ (p - y)
+        g[1:] += l2 * beta[1:]
+        return g
+
+    res = minimize(nll, np.zeros(X.shape[1]), jac=grad, method="BFGS")
+    if not res.success:
+        raise RuntimeError(res.message)
+    beta = res.x
+    cov = np.asarray(res.hess_inv)
+    return beta, cov
+
+def predict_blended_q(q_agent, q_market, beta, beta_cov=None, n_mc=0, rng=None):
+    qa = _clip_prob(q_agent)
+    qm = _clip_prob(q_market)
+    x = np.array([1.0, logit(qa), logit(qm)])
+    if beta_cov is None or n_mc <= 0:
+        return _clip_prob(expit(x @ beta))
+    rng = np.random.default_rng(rng)
+    draws = rng.multivariate_normal(np.asarray(beta), np.asarray(beta_cov), size=n_mc)
+    return _clip_prob(np.mean(expit(draws @ x)))
+Q1 CI-width licensing rules
+
+Use CI-width rules tied to decision margins, not sample counts.
+
+Exit sign license: estimate posterior distribution of
+
+Δ
+sell-hold
+	​
+
+.
+
+The exit decision is licensed if the entire credible interval for Δ lies on one side of zero after including fee/depth uncertainty. If the interval straddles zero, use partial exit from the robust objective or do nothing unless liquidity risk dominates.
+
+Opportunity-cost license: use g
+⋆
+ only if the credible interval for v
+TP
+	​
+
+ is narrower than the distance from current net bid to the sell boundary. Otherwise set g
+⋆
+=0 for conservative exit, or use the Q2(d) liquidity value with uncertainty.
+
+Blended-forecast license: deploy market blending only when out-of-sample log-score improvement over raw agent posterior has a positive credible interval. If not licensed, still run the anytime alarm in shadow mode.
+
+Depth license: sale fraction is licensed only over displayed or historically fillable depth whose executable-price interval does not change the sign of the utility derivative at the chosen fraction.
+
+Q1 failure modes and diagnostics
+
+Cost-basis anchoring: exits correlate with P&L since entry after controlling for current q,b,n,W,T. Diagnostic: logistic regression of exit decisions on cost basis should have zero coefficient after current state controls.
+
+Posterior-market disagreement: agent refuses exits where market-implied probability is persistently lower. Diagnostic: calibration reliability curves stratified by agent-market spread.
+
+Depth hallucination: exit simulator assumes top bid for full size. Diagnostic: compare simulated sale price versus actual VWAP through displayed depth.
+
+Overtrading from opportunity value: inflated g
+⋆
+ causes premature exits. Diagnostic: replay released-capital opportunities; realized log growth must match predicted g
+⋆
+ within CI.
+
+Future-information overvaluation: if the one-step option premium is computed from overestimated posterior jump variance, exits are delayed. Diagnostic: posterior jump transition calibration by time-to-settlement bucket.
+
+Q2 — Portfolio Kelly across correlated binary contracts
+Q2.0 General joint Kelly problem
+
+For candidate position i, let f
+i
+	​
+
+ be the fraction of current wealth spent on that position. Let X
+i
+	​
+
+ be net payoff per dollar staked:
+
+X
+i
+	​
+
+=
+p
+i
+	​
+
+A
+i
+	​
+
+(Y
+i
+	​
+
+)
+	​
+
+−1,
+
+where p
+i
+	​
+
+ is executable effective cost per contract and A
+i
+	​
+
+(Y
+i
+	​
+
+) is net settlement payout. For a YES side with payout 1 and no settlement fee:
+
+X
+i
+	​
+
+={
+1/p
+i
+	​
+
+−1,
+−1,
+	​
+
+Y
+i
+	​
+
+=1,
+Y
+i
+	​
+
+=0.
+	​
+
+
+For a finite set of joint scenarios s, probabilities π
+s
+	​
+
+, and payoff vectors X
+s
+	​
+
+∈R
+N
+, exact Kelly is:
+
+f∈C
+max
+	​
+
+s
+∑
+	​
+
+π
+s
+	​
+
+log(1+X
+s
+⊤
+	​
+
+f)
+	​
+
+
+subject to:
+
+1+X
+s
+⊤
+	​
+
+f>0∀s,
+	​
+
+
+plus long-only, leverage, depth, and bankroll-lock constraints. This is a concave optimization problem.
+
+Q2(a) Exact K-bin mutually exclusive event: horse-race Kelly
+
+For one event family with K mutually exclusive ordered bins, exactly one state k occurs. A YES contract on bin k costs effective price p
+k
+	​
+
+ and pays 1 if k occurs.
+
+Allocate fractions f
+k
+	​
+
+≥0 and cash s≥0, with:
+
+s+
+k=1
+∑
+K
+	​
+
+f
+k
+	​
+
+=1.
+
+If state j occurs:
+
+W
+j
+	​
+
+/W
+0
+	​
+
+=s+
+p
+j
+	​
+
+f
+j
+	​
+
+	​
+
+.
+
+The exact problem is:
+
+s,f
+max
+	​
+
+j=1
+∑
+K
+	​
+
+q
+j
+	​
+
+log(s+
+p
+j
+	​
+
+f
+j
+	​
+
+	​
+
+),s+
+j
+∑
+	​
+
+f
+j
+	​
+
+=1, s,f
+j
+	​
+
+≥0.
+	​
+
+Boxed closed-form allocation
+
+Let effective prices be p
+k
+	​
+
+. If the book is not overround:
+
+k
+∑
+	​
+
+p
+k
+	​
+
+≤1,
+
+then the no-cash all-active Kelly solution is:
+
+f
+k
+⋆
+	​
+
+=q
+k
+	​
+
+,s
+⋆
+=0.
+	​
+
+
+If the book is overround, find cash fraction s
+⋆
+∈[0,1] and active set:
+
+A(s)={k:q
+k
+	​
+
+/p
+k
+	​
+
+>s}
+
+satisfying:
+
+s
+⋆
+=
+1−∑
+k∈A
+	​
+
+p
+k
+	​
+
+1−∑
+k∈A
+	​
+
+q
+k
+	​
+
+	​
+
+.
+	​
+
+
+Then:
+
+f
+k
+⋆
+	​
+
+=(q
+k
+	​
+
+−p
+k
+	​
+
+s
+⋆
+)
++
+	​
+
+,s
+⋆
+=1−
+k
+∑
+	​
+
+f
+k
+⋆
+	​
+
+.
+	​
+
+No-bet region
+
+If:
+
+k
+max
+	​
+
+p
+k
+	​
+
+q
+k
+	​
+
+	​
+
+≤1,
+	​
+
+
+then:
+
+f
+k
+⋆
+	​
+
+=0,s
+⋆
+=1.
+	​
+
+
+This is the correct replacement for per-bin “edge > threshold” rules. Bins compete with each other; the threshold s
+⋆
+ is endogenous.
+
+Q2(b) Cross-family correlation: tractable approximation and error bound
+
+For many contracts across families, exact joint enumeration can be large. Let:
+
+Z=f
+⊤
+X.
+
+The log expansion around f=0 is:
+
+log(1+Z)=Z−
+2
+Z
+2
+	​
+
++R
+3
+	​
+
+(Z).
+
+Define:
+
+μ=E[X],M=E[XX
+⊤
+].
+
+Then the second-order Kelly approximation is:
+
+f∈C
+max
+	​
+
+μ
+⊤
+f−
+2
+1
+	​
+
+f
+⊤
+Mf.
+	​
+
+
+This is a quadratic program.
+
+Moment construction from binary marginals and correlations
+
+For two binary indicators Y
+i
+	​
+
+,Y
+j
+	​
+
+:
+
+Cov(Y
+i
+	​
+
+,Y
+j
+	​
+
+)=R
+ij
+	​
+
+q
+i
+	​
+
+(1−q
+i
+	​
+
+)q
+j
+	​
+
+(1−q
+j
+	​
+
+)
+	​
+
+.
+
+Then:
+
+E[Y
+i
+	​
+
+Y
+j
+	​
+
+]=q
+i
+	​
+
+q
+j
+	​
+
++Cov(Y
+i
+	​
+
+,Y
+j
+	​
+
+),
+
+clipped or projected to the Fréchet bounds:
+
+max(0,q
+i
+	​
+
++q
+j
+	​
+
+−1)≤E[Y
+i
+	​
+
+Y
+j
+	​
+
+]≤min(q
+i
+	​
+
+,q
+j
+	​
+
+).
+
+For YES contracts with payouts h
+i
+	​
+
+,h
+j
+	​
+
+ and costs p
+i
+	​
+
+,p
+j
+	​
+
+:
+
+X
+i
+	​
+
+=
+p
+i
+	​
+
+h
+i
+	​
+
+	​
+
+Y
+i
+	​
+
+−1,
+
+so:
+
+M
+ij
+	​
+
+=
+p
+i
+	​
+
+p
+j
+	​
+
+h
+i
+	​
+
+h
+j
+	​
+
+	​
+
+E[Y
+i
+	​
+
+Y
+j
+	​
+
+]−
+p
+i
+	​
+
+h
+i
+	​
+
+	​
+
+q
+i
+	​
+
+−
+p
+j
+	​
+
+h
+j
+	​
+
+	​
+
+q
+j
+	​
+
++1.
+	​
+
+
+Within one mutually exclusive event, for i
+
+=j:
+
+E[Y
+i
+	​
+
+Y
+j
+	​
+
+]=0,Cov(Y
+i
+	​
+
+,Y
+j
+	​
+
+)=−q
+i
+	​
+
+q
+j
+	​
+
+.
+
+Use the exact horse-race formula inside the family rather than the QP whenever possible.
+
+Error bound
+
+If:
+
+∣f
+⊤
+X
+s
+	​
+
+∣≤ρ<1∀s,
+
+then the Taylor remainder obeys:
+
+	​
+
+log(1+f
+⊤
+X
+s
+	​
+
+)−f
+⊤
+X
+s
+	​
+
++
+2
+1
+	​
+
+(f
+⊤
+X
+s
+	​
+
+)
+2
+	​
+
+≤
+3(1−ρ)
+∣f
+⊤
+X
+s
+	​
+
+∣
+3
+	​
+
+.
+	​
+
+
+Therefore:
+
+∣G
+exact
+	​
+
+(f)−G
+QP
+	​
+
+(f)∣≤E[
+3(1−ρ)
+∣f
+⊤
+X∣
+3
+	​
+
+].
+	​
+
+Licensing the approximation
+
+The QP is licensed only when all three hold:
+
+Positivity: posterior upper bound for ρ is <1.
+
+Approximation error: the posterior upper bound on the Taylor remainder is smaller than the current objective margin between the chosen portfolio and the nearest materially different feasible portfolio.
+
+Stability: the chosen active set is invariant over posterior draws of (q,R,fees,depth).
+
+If any condition fails, solve exact scenario Kelly by Monte Carlo scenarios or use robust finite-scenario Kelly.
+
+Q2(c) Fractional / robust Kelly
+Distributionally robust finite-scenario Kelly
+
+Let Π be a credible set of joint scenario distributions. Robust Kelly is:
+
+f∈C
+max
+	​
+
+π∈Π
+min
+	​
+
+s
+∑
+	​
+
+π
+s
+	​
+
+log(1+X
+s
+⊤
+	​
+
+f).
+	​
+
+
+This is the natural “posterior uncertainty” correction to full Kelly. Boyd’s robust Kelly formulation explicitly chooses bets to maximize worst-case expected log growth over a distributional uncertainty set and notes finite-outcome tractability for useful sets, https://web.stanford.edu/~boyd/papers/robust_kelly.html
+. 
+Stanford University
+
+Practical tractable version
+
+Generate B posterior samples of joint scenario probabilities:
+
+π
+(1)
+,…,π
+(B)
+.
+
+Solve:
+
+f,τ
+max
+	​
+
+τ
+	​
+
+
+subject to:
+
+τ≤
+s
+∑
+	​
+
+π
+s
+(b)
+	​
+
+log(1+X
+s
+⊤
+	​
+
+f)∀b,
+	​
+
+1+X
+s
+⊤
+	​
+
+f>0∀s,f∈C.
+
+This is a concave maximization expressible as minimizing a convex objective with concave superlevel constraints. It is directly implementable with nonlinear constrained optimization for moderate dimension.
+
+Fractional Kelly tie-break
+
+Two defensible designs exist:
+
+Fixed fractional Kelly: f=λf
+Kelly
+	​
+
+.
+
+Distributionally robust Kelly: solve worst-case expected log growth over posterior credible distributions.
+
+Pick distributionally robust Kelly as the default because it uses the actual posterior covariance and correlation uncertainty rather than compressing all uncertainty into a scalar λ. Use scalar fractional Kelly only as a fallback when posterior scenario generation is not yet reliable. Fit λ by out-of-sample realized log growth, not by convention.
+
+Q2(d) Sequential arrivals and bankroll reservation
+
+Opportunities arrive asynchronously; capital committed earlier is locked until settlement. A fixed reserve fraction is not Kelly-consistent. The reserve is a shadow price of liquidity.
+
+Let V(t,w) be the value of liquid wealth w at time t, excluding already locked positions. Suppose opportunities arrive with fitted intensity λ(t) and mark M describing its edge/depth/payoff scenario. For an opportunity mark m, let G(a;m) be expected log-utility increment from allocating amount a.
+
+The HJB equation is:
+
+∂
+t
+	​
+
+V(t,w)+λ(t)E
+m
+	​
+
+[
+a∈A(w,m)
+max
+	​
+
+{G(a;m)+V(t,w−a)}−V(t,w)]=0.
+	​
+
+
+Terminal condition at no-more-opportunities horizon T:
+
+V(T,w)=logw.
+	​
+
+
+For a current opportunity, allocate a
+⋆
+ by:
+
+a
+⋆
+=arg
+a
+max
+	​
+
+{G
+now
+	​
+
+(a)+V(t,w−a)}.
+	​
+
+
+The liquidity reservation cost of spending a now is:
+
+Ψ
+t
+	​
+
+(a;w)=V(t,w)−V(t,w−a).
+	​
+
+
+So the current bet must beat the shadow cost Ψ
+t
+	​
+
+, not a hand-set “keep 30% cash” rule.
+
+Estimators
+
+Fit:
+
+λ(t,city,event type)
+
+from opportunity timestamps using a nonhomogeneous Poisson or Hawkes model. Fit the mark distribution from logged candidate opportunities, including skipped ones:
+
+m=(edge,depth,time-to-settlement,correlation cluster,fees).
+
+License the reservation policy if the credible interval for the value difference:
+
+V
+reserve
+	​
+
+−V
+spend-now
+	​
+
+
+does not straddle zero in replay.
+
+Q2(e) YES on one bin plus NO on adjacent bin can be growth-optimal
+Boxed result
+Yes, simultaneously holding YES on bin a and NO on adjacent bin b can be growth-optimal.
+	​
+
+
+Reason: NO on bin b is a bet on the union of all states except b. YES on adjacent bin a
+
+=b is an additional tilt inside that union. These are not redundant unless prices make one payoff dominated by a cheaper replication.
+
+Payoff by state for YES(a) + NO(b):
+
+State	YES(a)	NO(b)	Combined payoff
+a	1	1	2
+b	0	0	0
+other	0	1	1
+
+If both marginal derivatives of expected log utility are positive at the current portfolio and neither payoff is dominated by cheaper state claims, the concave optimum can assign positive size to both.
+
+Dominance / arbitrage checks before Kelly
+
+Represent every available contract as a state payoff vector A
+⋅j
+	​
+
+∈R
+K
+ with ask cost c
+j
+	​
+
+. For a candidate portfolio h with payoff vector Ah and cost c
+⊤
+h, solve the LP:
+
+x≥0
+min
+	​
+
+c
+⊤
+xs.t.Ax≥Ah.
+	​
+
+
+If the optimum is less than c
+⊤
+h, the candidate is dominated and must not be entered.
+
+Run these event-level checks:
+
+YES+NO same bin: buy YES(k) and NO(k) if total ask cost <1 after fees and depth; it pays 1 in all states.
+
+All YES basket: buy one YES in every bin if total executable ask <1; it pays 1 in all states.
+
+NO(k) replication: NO(k) pays the same as a basket of YES on all bins except k. Buy the cheaper representation.
+
+Pair replication: YES(a)+NO(b) equals 2⋅YES(a)+∑
+j
+
+=a,b
+	​
+
+YES(j). Compare executable basket cost to pair cost.
+
+Only after dominance checks should joint Kelly decide sizing.
+
+Q2 reference implementation
+Python
+Run
+import numpy as np
+from scipy.optimize import minimize
+
+def horse_race_kelly(q, p, tol=1e-10):
+    """
+    Exact Kelly fractions for a mutually exclusive K-outcome YES market.
+    q: posterior probabilities, sums to 1.
+    p: effective ask prices per $1 payout, including fees.
+    Returns (f, cash).
+    """
+    q = np.asarray(q, dtype=float)
+    p = np.asarray(p, dtype=float)
+    q = q / q.sum()
+    if np.any(p <= 0):
+        raise ValueError("all prices must be positive")
+
+    K = len(q)
+    ratios = q / p
+
+    # Underround or fair enough: no-cash all-active solution.
+    if p.sum() <= 1.0 + tol:
+        f = q.copy()
+        return f, max(0.0, 1.0 - f.sum())
+
+    order = np.argsort(-ratios)
+    best = None
+
+    # Scan active sets ordered by q/p.
+    for m in range(K + 1):
+        A = order[:m]
+        Q_A = q[A].sum() if m else 0.0
+        P_A = p[A].sum() if m else 0.0
+        if P_A >= 1.0 - tol:
+            continue
+
+        s = (1.0 - Q_A) / (1.0 - P_A)
+        if s < -tol or s > 1.0 + tol:
+            continue
+
+        min_active = ratios[A].min() if m else np.inf
+        max_inactive = ratios[order[m:]].max() if m < K else -np.inf
+
+        if min_active + tol >= s and s + tol >= max_inactive:
+            f = np.maximum(q - p * s, 0.0)
+            cash = 1.0 - f.sum()
+            wealth = cash + f / p
+            if np.any(wealth[q > tol] <= 0):
+                obj = -np.inf
+            else:
+                obj = np.sum(q[q > tol] * np.log(wealth[q > tol]))
+            if best is None or obj > best[0]:
+                best = (obj, f, cash)
+
+    if best is None:
+        return np.zeros_like(q), 1.0
+
+    return best[1], best[2]
+
+def binary_second_moment(q, p, corr=None, payout=None):
+    """
+    Build mu and M=E[XX'] for YES-like binary contracts.
+    X_i = payout_i/p_i * Y_i - 1.
+    corr is correlation matrix of indicators Y. It must be valid/projected locally.
+    """
+    q = np.asarray(q, dtype=float)
+    p = np.asarray(p, dtype=float)
+    N = len(q)
+    if payout is None:
+        payout = np.ones(N)
+    payout = np.asarray(payout, dtype=float)
+    if corr is None:
+        corr = np.eye(N)
+    corr = np.asarray(corr, dtype=float)
+
+    scale = payout / p
+    mu = scale * q - 1.0
+
+    EYij = np.outer(q, q)
+    sd = np.sqrt(q * (1.0 - q))
+    EYij += corr * np.outer(sd, sd)
+
+    # Enforce exact diagonal and Frechet bounds.
+    for i in range(N):
+        EYij[i, i] = q[i]
+    lower = np.maximum(0.0, q[:, None] + q[None, :] - 1.0)
+    upper = np.minimum(q[:, None], q[None, :])
+    EYij = np.minimum(np.maximum(EYij, lower), upper)
+
+    M = np.outer(scale, scale) * EYij
+    M -= np.outer(scale * q, np.ones(N))
+    M -= np.outer(np.ones(N), scale * q)
+    M += 1.0
+    return mu, M
+
+def kelly_qp(mu, M, payoff_states=None, budget=1.0, bounds=None, eps=1e-9):
+    """
+    Second-order Kelly approximation:
+        maximize mu'f - 0.5 f'Mf
+    with optional exact positivity constraints 1 + X_s f >= eps.
+    """
+    mu = np.asarray(mu, dtype=float)
+    M = np.asarray(M, dtype=float)
+    N = len(mu)
+    if bounds is None:
+        bounds = [(0.0, budget) for _ in range(N)]
+
+    def obj(f):
+        return -(mu @ f - 0.5 * f @ M @ f)
+
+    def grad(f):
+        return -(mu - M @ f)
+
+    cons = [{"type": "ineq", "fun": lambda f: budget - np.sum(f)}]
+    if payoff_states is not None:
+        X = np.asarray(payoff_states, dtype=float)
+        for s in range(X.shape[0]):
+            cons.append({
+                "type": "ineq",
+                "fun": lambda f, xs=X[s]: 1.0 + xs @ f - eps
+            })
+
+    x0 = np.zeros(N)
+    res = minimize(obj, x0, jac=grad, bounds=bounds, constraints=cons, method="SLSQP")
+    if not res.success:
+        raise RuntimeError(res.message)
+    return res.x
+
+def exact_scenario_kelly(payoff_states, probs, budget=1.0, bounds=None, eps=1e-9):
+    """
+    Exact finite-scenario Kelly:
+        maximize sum_s p_s log(1 + X_s f).
+    """
+    X = np.asarray(payoff_states, dtype=float)
+    probs = np.asarray(probs, dtype=float)
+    probs = probs / probs.sum()
+    N = X.shape[1]
+    if bounds is None:
+        bounds = [(0.0, budget) for _ in range(N)]
+
+    def obj(f):
+        w = 1.0 + X @ f
+        if np.any(w <= eps):
+            return 1e100
+        return -np.sum(probs * np.log(w))
+
+    def grad(f):
+        w = 1.0 + X @ f
+        return -(X.T @ (probs / w))
+
+    cons = [{"type": "ineq", "fun": lambda f: budget - np.sum(f)}]
+    for s in range(X.shape[0]):
+        cons.append({
+            "type": "ineq",
+            "fun": lambda f, xs=X[s]: 1.0 + xs @ f - eps
+        })
+
+    res = minimize(obj, np.zeros(N), jac=grad, bounds=bounds, constraints=cons, method="SLSQP")
+    if not res.success:
+        raise RuntimeError(res.message)
+    return res.x
+
+def robust_kelly_from_probability_samples(payoff_states, prob_samples, budget=1.0, bounds=None, eps=1e-9):
+    """
+    Robust Kelly over posterior samples of scenario probabilities:
+        maximize tau
+        s.t. tau <= sum_s pi_b[s] log(1+X_s f) for all b.
+    """
+    X = np.asarray(payoff_states, dtype=float)
+    P = np.asarray(prob_samples, dtype=float)
+    P = P / P.sum(axis=1, keepdims=True)
+    B, S = P.shape
+    N = X.shape[1]
+    if bounds is None:
+        bounds_f = [(0.0, budget) for _ in range(N)]
+    else:
+        bounds_f = bounds
+    bounds_all = bounds_f + [(-np.inf, np.inf)]
+
+    def obj(y):
+        return -y[-1]
+
+    cons = [{"type": "ineq", "fun": lambda y: budget - np.sum(y[:N])}]
+
+    for s in range(S):
+        cons.append({
+            "type": "ineq",
+            "fun": lambda y, xs=X[s]: 1.0 + xs @ y[:N] - eps
+        })
+
+    for b in range(B):
+        cons.append({
+            "type": "ineq",
+            "fun": lambda y, pb=P[b]: np.sum(pb * np.log(1.0 + X @ y[:N])) - y[-1]
+        })
+
+    y0 = np.zeros(N + 1)
+    y0[-1] = 0.0
+    res = minimize(obj, y0, bounds=bounds_all, constraints=cons, method="SLSQP")
+    if not res.success:
+        raise RuntimeError(res.message)
+    return res.x[:N], res.x[-1]
+
+def taylor_remainder_bound(payoff_states, f):
+    X = np.asarray(payoff_states, dtype=float)
+    z = X @ np.asarray(f, dtype=float)
+    rho = np.max(np.abs(z))
+    if rho >= 1.0:
+        return np.inf
+    return np.mean(np.abs(z) ** 3 / (3.0 * (1.0 - rho)))
+Q2 CI-width licensing rules
+
+Horse-race exact formula: license when posterior interval for each active-set inequality q
+k
+	​
+
+/p
+k
+	​
+
+>s
+⋆
+ does not cross the active threshold. If active-set uncertainty remains, compute expected log over posterior samples and use robust allocation.
+
+Correlation matrix: license a fitted R only when the credible interval for portfolio log-growth difference between correlated and independent sizing does not straddle zero. Otherwise use block-independent conservative correlation, not per-candidate sizing.
+
+QP approximation: license only if Taylor remainder upper credible bound is below the utility margin to the next portfolio.
+
+Robust Kelly: license robust posterior set if the worst-case solution’s expected log-growth CI exceeds cash/no-bet by a cost-derived margin.
+
+Sequential reserve: license only when replay CI for the reservation policy beats “spend all currently positive-edge opportunities” after opportunity-cost accounting.
+
+Q2 failure modes and diagnostics
+
+Invalid correlation matrix: pairwise estimated correlations violate positive semidefiniteness or Fréchet bounds. Diagnostic: eigenvalues of implied joint covariance and feasibility projection error.
+
+Overlapping contracts double-counted: YES and NO representations of the same event both included without state payoff normalization. Diagnostic: state payoff matrix rank/dominance LP.
+
+False diversification across same-day weather: correlations underfit shared regimes. Diagnostic: realized same-day loss clusters versus simulated cluster loss distribution.
+
+QP overbetting: ρ close to 1, Taylor approximation invalid. Diagnostic: exact scenario objective materially below QP objective in Monte Carlo replay.
+
+Reserve model selection bias: only accepted opportunities logged. Diagnostic: opportunity logger must record skipped candidates and book snapshots.
+
+Q3 — Dynamic re-quoting
+
+The one-shot rule supplied by the prompt is:
+
+rest maker iff δ>
+F
+e
+0
+	​
+
+(1−G)
+	​
+
+,
+
+with:
+
+F=1−e
+−λ
+f
+	​
+
+H
+,G=
+λ
+f
+	​
+
++λ
+e
+	​
+
+λ
+f
+	​
+
+	​
+
+(1−e
+−(λ
+f
+	​
+
++λ
+e
+	​
+
+)H
+).
+
+This assumes exponential fill time from a fresh queue position. Dynamic re-quoting adds state and optionality.
+
+Q3(a) Re-decision cadence and event triggers
+Boxed result
+With zero observation cost and observable state changes, fixed-interval re-evaluation is not optimal.
+	​
+
+
+The optimal policy is event-driven plus deterministic boundary timers.
+
+Recompute when any state variable that enters the value function changes:
+
+order-book touch/depth changes;
+
+own queue position changes due to trades/cancels ahead;
+
+posterior q
+t
+	​
+
+ jumps after physical observation updates;
+
+fee/depth/exposure constraint changes;
+
+time H decays enough that the current action boundary can flip.
+
+If no state changes occur, only H changes deterministically. Schedule the next timer at the earliest root of:
+
+V
+current action
+	​
+
+(H)=
+a
+
+=a
+current
+	​
+
+max
+	​
+
+V
+a
+	​
+
+(H).
+	​
+
+
+This is not a fixed cadence; it is a boundary-crossing time.
+
+Regret-bound trigger
+
+Let Q(s,a) be the action value. At last decision state s
+0
+	​
+
+, chosen action a
+0
+	​
+
+ had margin:
+
+m
+0
+	​
+
+=Q(s
+0
+	​
+
+,a
+0
+	​
+
+)−
+a
+
+=a
+0
+	​
+
+max
+	​
+
+Q(s
+0
+	​
+
+,a).
+
+If Q is locally Lipschitz:
+
+∣Q(s,a)−Q(s
+0
+	​
+
+,a)∣≤L
+⊤
+∣s−s
+0
+	​
+
+∣,
+
+then action a
+0
+	​
+
+ remains certified optimal while:
+
+2L
+⊤
+∣s−s
+0
+	​
+
+∣<m
+0
+	​
+
+.
+	​
+
+
+Trigger recomputation when:
+
+2L
+⊤
+∣s−s
+0
+	​
+
+∣≥m
+0
+	​
+
+.
+	​
+
+
+If a cheaper approximate trigger is needed, pick its threshold by minimizing replayed expected regret plus compute/API cost. Do not hard-code “every 30 seconds.”
+
+Q3(b) Cancel-replace: chase the touch or keep queue position?
+
+Queue position has economic value. In price-time/FIFO books, earlier orders at the same price execute first; Moallemi and Yuan explicitly note price-time priority, FIFO ordering, and queue-position value in limit order books, https://moallemi.com/ciamac/papers/queue-value-2016.pdf
+. 
+Moallemi
++1
+
+Erlang queue-progress model
+
+If there are r effective queue units ahead and contra-side depletion events arrive as a Poisson process with rate μ, the time to fill is Erlang:
+
+T
+r
+	​
+
+∼Erlang(r,μ).
+
+Fill probability before horizon H:
+
+F
+r
+	​
+
+(H)=P(T
+r
+	​
+
+≤H)=1−e
+−μH
+j=0
+∑
+r−1
+	​
+
+j!
+(μH)
+j
+	​
+
+.
+	​
+
+
+Edge-decay transform:
+
+G
+r
+	​
+
+(H)=E[e
+−λ
+e
+	​
+
+T
+r
+	​
+
+1{T
+r
+	​
+
+≤H}]=(
+μ+λ
+e
+	​
+
+μ
+	​
+
+)
+r
+[1−e
+−(μ+λ
+e
+	​
+
+)H
+j=0
+∑
+r−1
+	​
+
+j!
+((μ+λ
+e
+	​
+
+)H)
+j
+	​
+
+].
+	​
+
+
+For r=1, these reduce to the one-shot exponential F,G.
+
+Queue-aware rest value
+
+Include adverse-selection markdown A
+r
+	​
+
+. The maker value relative to crossing is:
+
+V
+rest
+	​
+
+(r,δ,H)=F
+r
+	​
+
+(H)δ−e
+0
+	​
+
+(1−G
+r
+	​
+
+(H))−A
+r
+	​
+
+(H).
+	​
+
+
+Rest is preferred to crossing iff:
+
+δ>
+F
+r
+	​
+
+(H)
+e
+0
+	​
+
+(1−G
+r
+	​
+
+(H))+A
+r
+	​
+
+(H)
+	​
+
+.
+	​
+
+Chase versus hold condition
+
+Let old resting order have state (r
+o
+	​
+
+,δ
+o
+	​
+
+,A
+o
+	​
+
+). If canceled and replaced at the new touch, the order gets state (r
+n
+	​
+
+,δ
+n
+	​
+
+,A
+n
+	​
+
+) and cancel/replace cost C
+cr
+	​
+
+. Chasing is optimal iff:
+
+V
+rest
+	​
+
+(r
+n
+	​
+
+,δ
+n
+	​
+
+,H)−C
+cr
+	​
+
+>max{V
+rest
+	​
+
+(r
+o
+	​
+
+,δ
+o
+	​
+
+,H),0}.
+	​
+
+
+Holding queue is optimal iff:
+
+V
+rest
+	​
+
+(r
+o
+	​
+
+,δ
+o
+	​
+
+,H)≥max{0,V
+rest
+	​
+
+(r
+n
+	​
+
+,δ
+n
+	​
+
+,H)−C
+cr
+	​
+
+}.
+	​
+
+
+Crossing is optimal iff both rest values are negative.
+
+Queue-position value is:
+
+QPV=V
+rest
+	​
+
+(r
+o
+	​
+
+,δ
+o
+	​
+
+,H)−V
+rest
+	​
+
+(r
+n
+	​
+
+,δ
+n
+	​
+
+,H).
+	​
+
+
+Do not chase the touch unless price improvement and fill/adverse-selection improvements exceed QPV.
+
+Q3(c) Quote laddering
+
+Assume a depth-indexed price improvement δ and fill intensity:
+
+λ(δ)=λ
+0
+	​
+
+e
+−κδ
+.
+
+Let adverse-selection markdown A(δ) be fitted and increasing in depth. For one infinitesimal slice, fill probability is:
+
+F(δ,H)=1−e
+−λ
+0
+	​
+
+e
+−κδ
+H
+.
+
+Expected per-unit maker surplus is:
+
+m(δ)=F(δ,H)[e
+0
+	​
+
++δ−A(δ)].
+	​
+
+
+Single-level optimum solves:
+
+F(δ,H)[1−A
+′
+(δ)]+[e
+0
+	​
+
++δ−A(δ)]F
+′
+(δ,H)=0,
+	​
+
+
+where:
+
+F
+′
+(δ,H)=−κλ
+0
+	​
+
+e
+−κδ
+Hexp[−λ
+0
+	​
+
+e
+−κδ
+H].
+	​
+
+Ladder shape
+
+For discrete levels ℓ=1,…,L, choose sizes u
+ℓ
+	​
+
+≥0. Let Z
+ℓ
+	​
+
+(ω) be the net return contribution of one unit at level ℓ under fill scenario ω. The exact ladder objective is:
+
+u
+max
+	​
+
+E
+ω
+	​
+
+[log(1+
+ℓ=1
+∑
+L
+	​
+
+u
+ℓ
+	​
+
+Z
+ℓ
+	​
+
+(ω))],0≤u
+ℓ
+	​
+
+≤D
+ℓ
+	​
+
+,
+ℓ
+∑
+	​
+
+u
+ℓ
+	​
+
+≤Q.
+	​
+
+
+Interior KKT condition:
+
+E
+ω
+	​
+
+[
+1+∑
+j
+	​
+
+u
+j
+	​
+
+Z
+j
+	​
+
+(ω)
+Z
+ℓ
+	​
+
+(ω)
+	​
+
+]=η
+	​
+
+
+for all active levels not at capacity.
+
+When laddering strictly beats a single level
+
+Laddering strictly beats a single level if and only if the optimized multi-level objective exceeds the best single-level objective after costs:
+
+G
+ladder
+⋆
+	​
+
+>
+ℓ
+max
+	​
+
+G
+single,ℓ
+⋆
+	​
+
+.
+	​
+
+
+Mechanistically this requires at least one of:
+
+finite capacity at the best level, so its marginal value falls below another level;
+
+fill events across levels not perfectly correlated, so log utility values diversification of fill timing/price;
+
+adverse selection rises sharply near the touch while fill probability decays smoothly with depth, producing multiple levels with similar marginal value.
+
+Without capacity, risk, or covariance differences, a linear expected-value objective would choose one level. Laddering is not automatically optimal; it must be licensed by replayed log-growth improvement.
+
+Q3(d) Dynamic policy value versus one-shot
+Boxed proof
+
+Let Π
+dyn
+	​
+
+ be the set of dynamic cancel/replace policies. Let π
+one-shot
+	​
+
+ be the policy “make one maker/taker decision and never revise.” Since:
+
+π
+one-shot
+	​
+
+∈Π
+dyn
+	​
+
+,
+
+we have:
+
+V
+dyn
+	​
+
+(s)=
+π∈Π
+dyn
+	​
+
+sup
+	​
+
+J(s,π)≥J(s,π
+one-shot
+	​
+
+)=V
+one-shot
+	​
+
+(s).
+	​
+
+
+The value gap is the option value of re-quoting.
+
+Empirical upper bound
+
+Let state jumps arrive with total intensity Λ. At a jump from s
+−
+ to s
++
+, define stale-action regret:
+
+B(s
+−
+,s
++
+)=[
+a
+max
+	​
+
+Q(s
++
+,a)−Q(s
++
+,a
+old
+	​
+
+)]
++
+	​
+
+.
+
+Then:
+
+0≤V
+dyn
+	​
+
+−V
+one-shot
+	​
+
+≤E
+	​
+
+τ
+j
+	​
+
+≤H
+∑
+	​
+
+B(S
+τ
+j
+−
+	​
+
+	​
+
+,S
+τ
+j
+	​
+
+	​
+
+)
+	​
+
+.
+	​
+
+
+Estimate this upper bound from book/posterior replay. The one-shot rule is adequate only if the upper CI for this option value is below cancel/replace cost plus implementation complexity cost.
+
+Q3 reference implementation
+Python
+Run
+import numpy as np
+from scipy.special import gammainc
+from scipy.optimize import minimize
+
+def erlang_fill_transforms(shape, mu, lambda_edge, H):
+    """
+    shape: positive integer effective queue units to fill.
+    mu: queue depletion rate.
+    lambda_edge: exponential edge decay rate.
+    H: horizon in same time units.
+    Returns F_r(H), G_r(H).
+    """
+    r = int(max(1, shape))
+    mu = float(mu)
+    le = float(lambda_edge)
+    H = float(H)
+    if mu <= 0 or H <= 0:
+        return 0.0, 0.0
+
+    F = gammainc(r, mu * H)
+    rate = mu + le
+    G = (mu / rate) ** r * gammainc(r, rate * H)
+    return float(F), float(G)
+
+def queue_rest_value(shape, delta, H, e0, mu, lambda_edge, adverse=0.0):
+    F, G = erlang_fill_transforms(shape, mu, lambda_edge, H)
+    return F * delta - e0 * (1.0 - G) - adverse
+
+def chase_hold_cross_decision(
+    old_shape,
+    old_delta,
+    old_adverse,
+    new_shape,
+    new_delta,
+    new_adverse,
+    H,
+    e0,
+    mu,
+    lambda_edge,
+    cancel_replace_cost=0.0,
+):
+    v_old = queue_rest_value(old_shape, old_delta, H, e0, mu, lambda_edge, old_adverse)
+    v_new = queue_rest_value(new_shape, new_delta, H, e0, mu, lambda_edge, new_adverse) - cancel_replace_cost
+    v_cross = 0.0
+    vals = {"hold_queue": v_old, "chase_touch": v_new, "cross": v_cross}
+    return max(vals, key=vals.get), vals
+
+def single_level_surplus(delta, H, e0, lambda0, kappa, adverse_fn):
+    lam = lambda0 * np.exp(-kappa * delta)
+    F = 1.0 - np.exp(-lam * H)
+    return F * (e0 + delta - adverse_fn(delta))
+
+def optimize_ladder_exact(fill_probs, returns_if_filled, max_sizes, total_size):
+    """
+    Exact independent Bernoulli-fill ladder optimizer for a small number of levels.
+    For production, replace independent Bernoulli scenarios with historical joint fill scenarios.
+    """
+    fill_probs = np.asarray(fill_probs, dtype=float)
+    ret = np.asarray(returns_if_filled, dtype=float)
+    max_sizes = np.asarray(max_sizes, dtype=float)
+    L = len(fill_probs)
+
+    # Enumerate 2^L fill scenarios.
+    scenarios = np.array(
+        [[(mask >> j) & 1 for j in range(L)] for mask in range(1 << L)],
+        dtype=float
+    )
+    probs = np.ones(1 << L)
+    for j in range(L):
+        probs *= np.where(scenarios[:, j] > 0, fill_probs[j], 1.0 - fill_probs[j])
+    Z = scenarios * ret[None, :]
+
+    def obj(u):
+        w = 1.0 + Z @ u
+        if np.any(w <= 1e-12):
+            return 1e100
+        return -np.sum(probs * np.log(w))
+
+    def grad(u):
+        w = 1.0 + Z @ u
+        return -(Z.T @ (probs / w))
+
+    bounds = [(0.0, float(m)) for m in max_sizes]
+    cons = [{"type": "ineq", "fun": lambda u: total_size - np.sum(u)}]
+    res = minimize(obj, np.zeros(L), jac=grad, bounds=bounds, constraints=cons, method="SLSQP")
+    if not res.success:
+        raise RuntimeError(res.message)
+    return res.x, -res.fun
+
+def event_trigger_certified(margin, lipschitz, state_delta):
+    """
+    Returns True if recomputation is required by the 2 L |ds| >= margin rule.
+    """
+    lhs = 2.0 * np.dot(np.asarray(lipschitz, dtype=float), np.abs(np.asarray(state_delta, dtype=float)))
+    return lhs >= margin
+Q3 CI-width licensing rules
+
+Fill intensity: use queue-aware maker decisions only when the CI for the threshold
+
+F
+r
+	​
+
+e
+0
+	​
+
+(1−G
+r
+	​
+
+)+A
+r
+	​
+
+	​
+
+
+is narrower than the current price-improvement margin.
+
+Cancel-replace: chase only when the CI for V
+new
+	​
+
+−V
+old
+	​
+
+−C
+cr
+	​
+
+ is positive.
+
+Laddering: deploy laddering only when replay CI for G
+ladder
+⋆
+	​
+
+−max
+ℓ
+	​
+
+G
+single,ℓ
+⋆
+	​
+
+ is positive after extra cancel/replace complexity.
+
+Dynamic over one-shot: implement dynamic re-quoting only when replay CI for option value exceeds implementation and cancellation cost.
+
+Q3 failure modes and diagnostics
+
+Queue position unobserved: exchange does not expose true FIFO rank. Diagnostic: infer rank from market-by-order data or use conservative posterior over rank.
+
+Fill intensity nonstationarity: λ
+f
+	​
+
+ changes by city/time/event. Diagnostic: posterior predictive checks of fill time by bucket.
+
+Adverse selection hidden: fills are more likely when posterior is wrong. Diagnostic: conditional outcome calibration for maker fills versus unfilled orders.
+
+Cancel penalties/API latency: theoretical chasing ignores real cancel latency. Diagnostic: measure time from cancel request to exchange acknowledgment and include stale-fill risk.
+
+Independent ladder fills false: sweeps fill multiple levels together. Diagnostic: estimate joint fill scenarios from book replay, not independent Bernoulli unless validated.
+
+Q4 — Decision-relevant constant elimination
+Q4.0 General program
+
+Every constant should be replaced by:
+
+θ
+⋆
+=arg
+θ
+max
+	​
+
+E
+posterior/replay
+	​
+
+[realized log utility under policy π
+θ
+	​
+
+]−implementation/latency/error cost.
+	​
+
+
+For a decision with uncertain utility gain Δ, the unified license is:
+
+license action⟺C
++
+	​
+
+E[Δ
++
+	​
+
+]>C
+−
+	​
+
+E[(−Δ)
++
+	​
+
+]+C
+impl
+	​
+
+.
+	​
+
+
+Here C
++
+	​
+
+ and C
+−
+	​
+
+ are estimated opportunity and harm multipliers. If Δ∼N(μ,σ
+2
+), define z=μ/σ. Then:
+
+E[Δ
++
+	​
+
+]=σ[ϕ(z)+zΦ(z)],
+E[(−Δ)
++
+	​
+
+]=σ[ϕ(z)−zΦ(−z)].
+
+So k in:
+
+μ>kσ
+
+is not arbitrary; it solves:
+
+C
++
+	​
+
+[ϕ(k)+kΦ(k)]=C
+−
+	​
+
+[ϕ(k)−kΦ(−k)]+
+σ
+C
+impl
+	​
+
+	​
+
+.
+	​
+
+
+If C
++
+	​
+
+=C
+−
+	​
+
+ and C
+impl
+	​
+
+=0, then k=0: pure Bayes expected utility says act when posterior mean gain is positive. Positive k is justified only by asymmetric harm, implementation cost, multiple-decision externality, drawdown constraint, or model-risk premium.
+
+Q4(a) Staleness windows from information decay
+Model
+
+Let latent true state θ
+t
+	​
+
+ drive decision edge. A simple state-space model is:
+
+θ
+t+Δ
+	​
+
+=θ
+t
+	​
+
++η
+t
+	​
+
+,η
+t
+	​
+
+∼N(0,QΔ),
+y
+i
+	​
+
+=θ
+t
+i
+	​
+
+	​
+
++ϵ
+i
+	​
+
+,ϵ
+i
+	​
+
+∼N(0,R
+source
+	​
+
+).
+
+If latest observation age is a, posterior variance grows as:
+
+P(a)=P
+0
+	​
+
++Qa
+	​
+
+
+for Brownian drift, or by the corresponding Kalman prediction step for OU/state-space dynamics.
+
+Decision-regret staleness rule
+
+Let a
+stale
+	​
+
+ be the action chosen using stale data of age a. The expected stale-data regret is:
+
+R
+stale
+	​
+
+(a)=E[
+u
+max
+	​
+
+U(u,θ
+t
+	​
+
+)−U(a
+stale
+	​
+
+,θ
+t
+	​
+
+)∣data age=a].
+	​
+
+
+Let C
+wait
+	​
+
+(a) be expected cost of waiting for fresher data. The staleness boundary is:
+
+a
+⋆
+=inf{a:R
+stale
+	​
+
+(a)≥C
+wait
+	​
+
+(a)}.
+	​
+
+
+No fixed “reject older than X hours.”
+
+Estimators from logs
+
+Use logs containing observation timestamps, source, value, later revised/final value, decisions, and outcomes. Fit Q and R by Kalman-filter marginal likelihood or posterior sampling. Estimate R
+stale
+	​
+
+(a) by replay: force decisions to use observations truncated to age a, compare with decisions using fresh data.
+
+Licensing rule: apply the learned staleness boundary only if the CI for a
+⋆
+ is narrower than the current distance from the boundary. Otherwise take the safer action: wait, reduce size, or use market-blended posterior.
+
+Q4(b) Conservative-bound percentile α
+Single binary bet: LCB full Kelly versus fractional Kelly
+
+For a binary contract priced p, full Kelly stake fraction is:
+
+f
+⋆
+(q)=
+1−p
+q−p
+	​
+
+	​
+
+
+when q>p, otherwise zero.
+
+If using a lower confidence bound:
+
+q
+LCB
+	​
+
+(α)=
+q
+^
+	​
+
+−z
+α
+	​
+
+σ
+q
+	​
+
+,
+
+then full Kelly on q
+LCB
+	​
+
+ gives:
+
+f
+LCB
+	​
+
+=
+1−p
+q
+^
+	​
+
+−z
+α
+	​
+
+σ
+q
+	​
+
+−p
+	​
+
+.
+
+Full Kelly on 
+q
+^
+	​
+
+ with scalar fraction λ gives:
+
+f
+λ
+	​
+
+=λ
+1−p
+q
+^
+	​
+
+−p
+	​
+
+.
+
+They are equal only when:
+
+λ(α)=1−
+q
+^
+	​
+
+−p
+z
+α
+	​
+
+σ
+q
+	​
+
+	​
+
+.
+	​
+
+Boxed conclusion
+LCB Kelly equals fractional Kelly only for one isolated binary bet and only with edge-dependent λ.
+	​
+
+
+It is not generally equivalent for portfolios, correlated bets, finite depth, or nonlinear posterior credible sets.
+
+Choosing α
+
+Choose α by realized or posterior expected log-growth:
+
+α
+⋆
+=arg
+α
+max
+	​
+
+i∈validation
+∑
+	​
+
+log(1+f
+i
+	​
+
+(q
+LCB,i
+	​
+
+(α))X
+i
+	​
+
+).
+	​
+
+
+Use prequential rolling validation or posterior predictive replay. No fixed “5th percentile.”
+
+Licensing rule: deploy α
+⋆
+ only if the CI for growth difference versus neighboring α values is positive. If not, use robust Kelly posterior samples rather than a percentile rule.
+
+Q4(c) Re-evaluation cadences from jump/decay rates
+
+Suppose edge/book state jumps with intensity λ
+j
+	​
+
+. If polling interval is Δ, average detection delay after a jump is Δ/2. Let r be the expected utility-regret rate while stale. Polling costs C
+p
+	​
+
+ per poll. Regret plus polling cost per unit time:
+
+L(Δ)=
+2
+λ
+j
+	​
+
+rΔ
+	​
+
++
+Δ
+C
+p
+	​
+
+	​
+
+.
+	​
+
+
+Minimizing gives:
+
+Δ
+⋆
+=
+λ
+j
+	​
+
+r
+2C
+p
+	​
+
+	​
+
+	​
+
+.
+	​
+
+
+If the exchange provides event streams with negligible marginal cost, then C
+p
+	​
+
+≈0 and the optimum is event-driven, not fixed-interval polling.
+
+Estimators:
+
+λ
+j
+	​
+
+=
+observed time
+#decision-relevant jumps
+	​
+
+,
+
+with nonhomogeneous or Hawkes extensions by time/event type. Estimate r from replayed stale-action value loss per unit delay. Estimate C
+p
+	​
+
+ from API cost, rate-limit cost, compute latency, and operational error cost.
+
+Licensing rule: replace existing cadence only when CI for L(Δ
+old
+	​
+
+)−L(Δ
+⋆
+) is positive.
+
+Q4(d) Minimum-evidence licensing
+
+Minimum-evidence rules should not be counts. They should be decision-specific uncertainty rules.
+
+For any proposed model feature, threshold, or policy change, define utility gain:
+
+Δ=U(new policy)−U(current policy).
+
+License if:
+
+C
++
+	​
+
+E[Δ
++
+	​
+
+]>C
+−
+	​
+
+E[(−Δ)
++
+	​
+
+]+C
+impl
+	​
+
+.
+	​
+
+
+For normal approximation, this maps to:
+
+σ
+Δ
+	​
+
+μ
+Δ
+	​
+
+	​
+
+>k
+⋆
+	​
+
+
+where k
+⋆
+ is solved from the cost equation above. This derives k; it is not chosen as “2 sigma” by habit.
+
+Estimators from operational logs:
+
+Δ: paired replay or A/B shadow decisions.
+
+σ
+Δ
+	​
+
+: block bootstrap by day/city/weather regime to preserve correlation.
+
+C
+−
+	​
+
+: realized drawdown/liquidity/model-error loss from false-positive changes.
+
+C
++
+	​
+
+: opportunity loss from false negatives.
+
+C
+impl
+	​
+
+: engineering risk, latency, cancel fees, operational complexity, measured in log-growth units.
+
+Q4 reference implementation
+Python
+Run
+import numpy as np
+from scipy.optimize import brentq
+from scipy.stats import norm
+
+def expected_positive_part_normal(mu, sigma):
+    sigma = max(float(sigma), 1e-12)
+    z = mu / sigma
+    return sigma * (norm.pdf(z) + z * norm.cdf(z))
+
+def expected_negative_part_normal(mu, sigma):
+    sigma = max(float(sigma), 1e-12)
+    z = mu / sigma
+    return sigma * (norm.pdf(z) - z * norm.cdf(-z))
+
+def license_gain_normal(mu, sigma, c_plus=1.0, c_minus=1.0, c_impl=0.0):
+    """
+    Cost-derived license rule:
+        c_plus E[Delta_+] > c_minus E[(-Delta)_+] + c_impl
+    """
+    ep = expected_positive_part_normal(mu, sigma)
+    en = expected_negative_part_normal(mu, sigma)
+    return c_plus * ep > c_minus * en + c_impl
+
+def k_from_cost_ratio(c_plus=1.0, c_minus=1.0, c_impl_over_sigma=0.0):
+    """
+    Solves for k in mu > k sigma under the truncated-normal utility license.
+    """
+    def f(k):
+        return (
+            c_plus * (norm.pdf(k) + k * norm.cdf(k))
+            - c_minus * (norm.pdf(k) - k * norm.cdf(-k))
+            - c_impl_over_sigma
+        )
+
+    # Expand bracket if necessary.
+    lo, hi = -10.0, 10.0
+    if f(lo) > 0:
+        return lo
+    if f(hi) < 0:
+        return hi
+    return brentq(f, lo, hi)
+
+def optimal_poll_interval(poll_cost, jump_intensity, stale_regret_rate):
+    """
+    Delta* = sqrt(2 C_p / (lambda_j r)).
+    Units must be consistent.
+    """
+    poll_cost = float(poll_cost)
+    jump_intensity = float(jump_intensity)
+    stale_regret_rate = float(stale_regret_rate)
+    if poll_cost <= 0:
+        return 0.0
+    if jump_intensity <= 0 or stale_regret_rate <= 0:
+        return np.inf
+    return np.sqrt(2.0 * poll_cost / (jump_intensity * stale_regret_rate))
+
+def staleness_boundary(regret_fn, wait_cost_fn, lo=0.0, hi=72.0):
+    """
+    Finds first age where stale-data regret exceeds wait cost.
+    regret_fn(age) and wait_cost_fn(age) return log-utility units.
+    """
+    def gap(a):
+        return regret_fn(a) - wait_cost_fn(a)
+
+    if gap(lo) >= 0:
+        return lo
+    if gap(hi) < 0:
+        return np.inf
+    return brentq(gap, lo, hi)
+
+def lcb_fractional_equivalent_lambda(q_hat, p, sigma_q, z_alpha):
+    """
+    For one isolated binary bet:
+        full Kelly on q_hat - z sigma equals lambda times full Kelly on q_hat.
+    """
+    edge = q_hat - p
+    if edge <= 0:
+        return 0.0
+    return max(0.0, min(1.0, 1.0 - z_alpha * sigma_q / edge))
+Local verification checklist for Claude Code
+Data and accounting
+
+Verify current bankroll definition: liquid cash, locked stake, marked-to-market positions, and worst-case settlement exposure.
+
+Confirm whether binary contract fees apply on entry, exit, settlement, profit, or notional.
+
+Confirm whether cost basis affects taxes or only reporting. If only reporting, remove it from decision logic.
+
+Confirm order-book data includes sufficient displayed depth for expected position sizes.
+
+Confirm whether exchange matching is FIFO, pro-rata, or unknown. Queue formulas require FIFO or a fitted equivalent.
+
+Q1 exit
+
+Add position_units, wealth_ex_position, and bid_depth_curve to the exit API.
+
+Unit-test the sell-all threshold against brute-force expected-log utility.
+
+Unit-test partial-exit closed form against numeric optimization for constant bid.
+
+Replay historical positions with x=0, x=1, and optimized x^\star; compare realized log growth.
+
+Fit blended agent/market calibration and report out-of-sample log-score improvement.
+
+Run anytime alarm in shadow mode and inspect alarm dates versus known model failures.
+
+Verify that after controlling for current state, cost basis has no effect on exit recommendations.
+
+Q2 portfolio
+
+Implement exact horse-race Kelly for each K-bin event.
+
+Compare exact horse-race allocation to current per-candidate sizing on historical snapshots.
+
+Build state payoff matrices for YES and NO contracts; run dominance LP before Kelly.
+
+Estimate same-day correlation matrix and project to a valid feasible covariance/joint model.
+
+Compare QP approximation to exact scenario Monte Carlo; record Taylor remainder bound.
+
+Implement robust Kelly over posterior scenario samples.
+
+Replay bankroll trajectories with current sizing, exact event Kelly, QP cross-family Kelly, and robust Kelly.
+
+Fit opportunity arrival/mark distribution from all candidates, including skipped candidates.
+
+Backtest liquidity-reservation DP versus fixed reserve and no reserve.
+
+Q3 execution
+
+Estimate fill intensities by price level, queue rank proxy, time-to-deadline, and event type.
+
+Estimate adverse-selection markdown by comparing maker fills to contemporaneous crossed fills conditional on posterior edge.
+
+Validate Erlang queue model against empirical fill-time distributions.
+
+Implement event-driven re-decision on book change, posterior jump, queue progress, and deterministic boundary crossing.
+
+Replay one-shot versus dynamic re-quoting; compute option-value CI.
+
+Compare chase versus hold decisions with actual fill outcomes and adverse-selection outcomes.
+
+Test ladder optimizer with historical joint fill scenarios, not only independent Bernoulli fills.
+
+Q4 constants
+
+Inventory all constants: staleness windows, retry windows, alert thresholds, percentile choices, polling intervals, minimum evidence counts.
+
+For each, define the utility gain Δ and the governing stochastic rate/noise process.
+
+Fit rate/noise models from logs.
+
+Replace count thresholds with CI-width or posterior-gain licensing.
+
+Estimate false-positive, false-negative, and implementation costs in log-growth units.
+
+Add dashboards showing current margin to each learned boundary and CI width.
+
+Priority ranking by expected impact
+1. BLOCKER / highest impact: implement Q1 exit capability
+
+Current dominant failure is “entry-only system.” A mathematically imperfect exit policy is likely better than no exit policy if it uses depth, fees, current posterior, and wealth-relative sizing. Start with the exact sell/hold and partial-exit formulas. Add market blending quickly because miscalibration is the main reason a pure posterior exit can fail.
+
+Deliverable: exit_fraction_binary with depth-aware proceeds, position-size awareness, blended q
+exit
+	​
+
+, and CI-licensed sell/hold margin.
+
+2. HIGH: replace per-candidate sizing with exact event Kelly and portfolio risk
+
+Exact horse-race Kelly for K-bin events is closed-form and should be implemented before more elaborate cross-family models. It directly fixes overbetting across mutually exclusive bins. Then add same-day correlation via scenario/robust Kelly.
+
+Deliverable: horse_race_kelly, dominance LP, and robust scenario Kelly.
+
+3. HIGH: eliminate constants that directly gate money decisions
+
+Staleness windows, conservative percentiles, and re-evaluation cadences should become fitted utility boundaries. This reduces hidden regime brittleness.
+
+Deliverable: constant inventory plus one learned replacement each for staleness, LCB percentile, and polling cadence.
+
+4. MEDIUM-HIGH: dynamic re-quoting
+
+Dynamic re-quoting can be valuable, but only after exit and sizing are fixed. Its benefit is execution-dependent and must be replay-licensed. Implement event-driven re-decision and queue-aware hold/chase before laddering.
+
+Deliverable: queue-aware rest value, chase/hold/cross policy, and one-shot versus dynamic replay report.
+
+5. MEDIUM: quote laddering
+
+Laddering is not generically optimal. It is valuable only when capacity, fill covariance, or adverse-selection shape supports it. Keep it behind a replay-licensed feature flag.
+
+Deliverable: discrete ladder optimizer using historical joint fill scenarios.
+
+Sources inspected and access gaps
+
+Inspected:
+
+Kelly 1956, “A New Interpretation of Information Rate,” https://www.princeton.edu/~wbialek/rome/refs/kelly_56.pdf
+. 
+Princeton University
+
+Breiman 1961, “Optimal Gambling Systems for Favorable Games,” Project Euclid page, https://projecteuclid.org/proceedings/berkeley-symposium-on-mathematical-statistics-and-probability/Proceedings-of-the-Fourth-Berkeley-Symposium-on-Mathematical-Statistics-and/Chapter/Optimal-Gambling-Systems-for-Favorable-Games/bsmsp/1200512159
+.
+
+Sun and Boyd, “Distributional Robust Kelly Gambling,” https://web.stanford.edu/~boyd/papers/robust_kelly.html
+ and https://arxiv.org/abs/1812.10371
+. 
+Stanford University
++1
+
+Howard, Ramdas, McAuliffe, Sekhon, “Time-uniform Chernoff bounds via nonnegative supermartingales,” https://arxiv.org/abs/1808.03204
+. 
+arXiv
+
+Moallemi and Yuan, “A Model for Queue Position Valuation in a Limit Order Book,” https://moallemi.com/ciamac/papers/queue-value-2016.pdf
+. 
+Moallemi
++2
+Moallemi
++2
+
+Wang et al., “Forecast combinations: an over 50-year review,” https://arxiv.org/pdf/2205.04216
+. 
+arXiv
++1
+
+Access gaps:
+
+No task-specific repository, PR, file, or source URL was provided under “Source to review.”
+
+One Wiley page for Kelly returned an internal error in the browser tool, but the Princeton-hosted Kelly PDF was accessible.
+
+One University of Washington forecast-combination page returned a 502, but the arXiv forecast-combination review was accessible.
+
+I did not run local tests or inspect the local codebase; all verification steps above are for Claude Code to execute locally.

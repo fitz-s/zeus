@@ -1656,6 +1656,10 @@ files:
     zone: K3_extension
     authority_role: package_marker
     why: Marks calibration namespace.
+  src/calibration/anchor_representativeness_debias.py:
+    zone: K3_extension
+    authority_role: calibration_offset_loader
+    why: Read-only fail-soft loader for the fitted per-city anchor representativeness de-bias δ_city (state/anchor_representativeness_debias.json, produced by scripts/fit_anchor_representativeness_debias.py). get_city_debias_c returns δ_city ONLY for an activated, do-no-harm-gated HIGH cell (else None → family-level fallback). Consumed at src/data/replacement_forecast_materializer.py:1455 as bias_shift_c (law-8 foundation fix, cold_bias_metadata_root.md). No DB writes; no live I/O at call time (module-cached artifact read).
   src/calibration/day0_horizon_calibration.py:
     zone: K3_extension
     authority_role: day0_horizon_platt_calibration
@@ -1801,6 +1805,14 @@ files:
     downstream:
     - src/engine/evaluator.py
     - src/engine/replay.py
+  src/strategy/horse_race_kelly.py:
+    zone: K3_extension
+    authority_role: portfolio_sizing_law
+    why: Closed-form K-bin mutually-exclusive horse-race Kelly allocation (consult-3 Q2/P1, task #63). The portfolio-correct replacement for per-candidate edge>threshold sizing — within one event family the K YES bins COMPETE for capital and the cash threshold s* is ENDOGENOUS (water-fill), not a fixed per-candidate kelly_multiplier or edge gate. Pure functions (horse_race_allocation closed form + active-set fixed point; portfolio_qp_allocation P2 cross-family QP; dominance_lp_check P5 arbitrage pre-check). q input = q_lcb (conservative posterior, q_lcb+Kelly law). SHADOW-ONLY wiring this pass — the live sizing path is unchanged while replacement_horse_race_kelly_enabled is false. Authority docs/authority/exit_portfolio_execution_authority_2026-06-13.md P1-P2,P5.
+    hazards:
+    - MULTI_BIN_MUTUALLY_EXCLUSIVE_OVERALLOCATION
+    downstream:
+    - src/engine/event_reactor_adapter.py
   src/strategy/kelly.py:
     zone: K3_extension
     authority_role: sizing_law

@@ -1,21 +1,18 @@
-# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
-# Purpose: Antibody — P0-D shadow sanity telemetry for non-day0 HIGH strategies
-# Reuse: Verify P0-D elif block in evaluator.py line ~4571 is intact before relying on this test
+# Lifecycle: created=2026-05-23; last_reviewed=2026-06-14; last_reused=2026-06-14
+# Purpose: Antibody — the non-day0 HIGH validate_high_distribution SHADOW was REMOVED
+#   2026-06-14 (gate-mass collapse). This file now pins (a) the shadow stays gone, and
+#   (b) the day0 HIGH hard gate still blocks.
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §P0-D
-"""P0-D antibody: shadow sanity telemetry for non-day0 forecast strategies.
+"""P0-D: day0 HIGH hard gate + non-day0 shadow-removal antibody.
 
 End-to-end tests driving evaluate_candidate (the real production entry point).
 
 Covers:
-  - Non-day0 pathological distribution → evaluate_candidate LOGS
-    [PROBABILITY_SANITY_SHADOW] AND returns a non-rejection (shadow, not block).
+  - Non-day0 pathological distribution → NO [PROBABILITY_SANITY_SHADOW] log and no
+    block on it (the log-only shadow was deleted 2026-06-14; per-edge
+    probability_edge_bin_sanity covers non-day0 HIGH).
   - Day0 HIGH same pathological distribution → evaluate_candidate returns
     PROBABILITY_SANITY_GATE rejection (hard gate preserved).
-
-RED/GREEN cycle (see inline REPORT comments):
-  P0-D shadow: delete the else-block (lines 4571-4588 of evaluator.py) →
-    test_non_day0_shadow_logs_and_does_not_block must FAIL because no
-    [PROBABILITY_SANITY_SHADOW] line appears in caplog.  Restore → PASS.
 """
 from __future__ import annotations
 
@@ -239,7 +236,9 @@ def _patch_non_day0_path(monkeypatch) -> None:
         ]
 
     monkeypatch.setattr(ev_mod, "scan_full_hypothesis_family", _fake_scan)
-    monkeypatch.setattr(ev_mod, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    # fdr_filter was refactored off the evaluator module surface; raising=False keeps this
+    # stale patch tolerant (matches tests/test_pnl_flow_and_audit.py's pattern).
+    monkeypatch.setattr(ev_mod, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
     monkeypatch.setattr(ev_mod, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(ev_mod, "kelly_size", lambda p_posterior, entry_price, bankroll, kelly_mult, **kw: entry_price)
     monkeypatch.setattr(ev_mod, "check_position_allowed", lambda **kwargs: (True, "OK"))
@@ -265,38 +264,32 @@ def _run_evaluate(monkeypatch, discovery_mode: str):
 
 
 # ---------------------------------------------------------------------------
-# P0-D shadow: non-day0 logs but does not block
+# P0-D non-day0 shadow REMOVED 2026-06-14 — antibody: stays gone
 # ---------------------------------------------------------------------------
 
-def test_non_day0_shadow_logs_and_does_not_block(monkeypatch, caplog):
-    """Non-day0 candidate with pathological distribution → evaluate_candidate
-    logs [PROBABILITY_SANITY_SHADOW] and does NOT return a PROBABILITY_SANITY_GATE
-    rejection.  Shadow is log-only; trade path continues.
-
-    RED when shadow else-block deleted: no [PROBABILITY_SANITY_SHADOW] in caplog
-    → assert fails.
-    GREEN when shadow block present: warning emitted, test passes.
+def test_non_day0_shadow_removed_no_log_no_block(monkeypatch, caplog):
+    """The non-day0 HIGH validate_high_distribution SHADOW (log-only) was DELETED
+    2026-06-14 (gate-mass collapse: log-only, no telemetry sink, no promotion path).
+    Antibody: a non-day0 HIGH pathological candidate must NOT emit
+    [PROBABILITY_SANITY_SHADOW] and must NOT block on it. Non-day0 HIGH coverage lives
+    in the per-edge probability_edge_bin_sanity gate, not this removed family shadow.
     """
     _patch_non_day0_path(monkeypatch)
 
     with caplog.at_level(logging.WARNING, logger="src.engine.evaluator"):
         decisions = _run_evaluate(monkeypatch, discovery_mode="center_buy")
 
-    # Shadow log must appear
     shadow_lines = [
         r.message for r in caplog.records
         if "[PROBABILITY_SANITY_SHADOW]" in r.message
     ]
-    assert len(shadow_lines) >= 1, (
-        f"[PROBABILITY_SANITY_SHADOW] log line must appear for non-day0 "
-        f"pathological distribution; caplog records: {[r.message for r in caplog.records]}"
+    assert not shadow_lines, (
+        f"non-day0 PROBABILITY_SANITY_SHADOW telemetry must stay removed; got: {shadow_lines}"
     )
-
-    # Must NOT be a hard-gate rejection
-    assert len(decisions) >= 1
+    # And it must never have been a hard-gate rejection on this path.
     for d in decisions:
         assert d.rejection_reason_enum != NoTradeReason.PROBABILITY_SANITY_GATE, (
-            "Shadow branch must NOT block (non-day0); got PROBABILITY_SANITY_GATE rejection"
+            "non-day0 path must not block on the removed shadow"
         )
 
 

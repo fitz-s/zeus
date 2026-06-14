@@ -177,7 +177,9 @@ def analyze_etl_freshness(conn: sqlite3.Connection) -> str:
 def analyze_bias_readiness(conn: sqlite3.Connection) -> str:
     try:
         from src.config import settings
-        bias_enabled = settings.bias_correction_enabled
+        # T0-3: renamed from settings.bias_correction_enabled (legacy baseline
+        # chain) to disambiguate from edli.edli_bias_correction_enabled.
+        bias_enabled = settings.baseline_bias_correction_enabled
     except Exception:
         bias_enabled = False
 
@@ -213,7 +215,7 @@ def analyze_bias_readiness(conn: sqlite3.Connection) -> str:
     )
 
     status_lines = [
-        f"  bias_correction_enabled: **{bias_enabled}**",
+        f"  baseline_bias_correction_enabled: **{bias_enabled}**",
         f"  model_bias ECMWF rows (n≥20): **{n_bias_rows}**",
         f"  calibration_pairs bias_corrected=1: **{n_pairs_with_flag if n_pairs_with_flag is not None else 'unknown'}**"
         + ("" if n_pairs_status == "ok" else f" ({n_pairs_status})"),
@@ -227,7 +229,7 @@ def analyze_bias_readiness(conn: sqlite3.Connection) -> str:
     elif bias_enabled and n_bias_rows > 0 and n_pairs_with_flag > 0 and n_active_bias_models and n_active_bias_models > 0:
         status = "✅ **Bias correction 可以激活**"
     elif not bias_enabled and n_bias_rows > 0 and n_pairs_with_flag > 0 and n_active_bias_models and n_active_bias_models > 0:
-        status = "⚠️ bias_correction_enabled=false，但数据已就绪——可考虑开启"
+        status = "⚠️ baseline_bias_correction_enabled=false，但数据已就绪——可考虑开启"
     elif n_bias_rows == 0:
         status = "🔴 model_bias 样本不足，无法激活 bias correction"
     else:

@@ -3269,37 +3269,13 @@ def cluster_exposure_for_bankroll(
 
 
 
-# --- Churn defense: Layers 5, 6, 7 ---
-
-def is_reentry_blocked(
-    state: PortfolioState, city: str, bin_label: str,
-    target_date: str, minutes: int = 20,
-) -> bool:
-    """Layer 5: Block re-entry into a range recently exited via reversal."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
-    reversal_reasons = {
-        "EDGE_REVERSAL", "BUY_NO_EDGE_EXIT", "ENSEMBLE_CONFLICT",
-        "DAY0_OBSERVATION_REVERSAL",
-    }
-    for ex in state.recent_exits:
-        if (ex["city"] == city and ex["bin_label"] == bin_label
-                and ex["target_date"] == target_date
-                and ex["exit_reason"] in reversal_reasons
-                and ex["exited_at"] >= cutoff):
-            return True
-    return False
-
-
-def is_token_on_cooldown(state: PortfolioState, token_id: str, hours: float = 1.0) -> bool:
-    """Layer 6: Block rebuy of tokens voided within the last hour."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    voided_reasons = {"UNFILLED_ORDER", "EXIT_FAILED"}
-    for ex in state.recent_exits:
-        if ((ex["token_id"] == token_id or ex["no_token_id"] == token_id)
-                and ex["exit_reason"] in voided_reasons
-                and ex["exited_at"] >= cutoff):
-            return True
-    return False
+# --- Churn defense: Layer 7 (honest dedup) ---
+# Layers 5 (is_reentry_blocked, 20-min reversal time-ban) and 6 (is_token_on_cooldown,
+# 1-hr post-fail time-ban) DELETED 2026-06-14 (operator no-caps law: time-bans are not
+# derived from belief/quote/edge/Kelly/arm). Layer 7 below (same-token / same-range
+# inflight dedup) is honest and STAYS. recent_exits + _track_exit are retained (replay/
+# audit). NoTradeReason.REENTRY_BLOCKED / TOKEN_COOLDOWN enum members are left in place
+# (schema-fingerprint / no_trade_events CHECK-pin coupling) — they simply have no emitter.
 
 
 def has_same_city_range_open(state: PortfolioState, city: str, bin_label: str) -> bool:

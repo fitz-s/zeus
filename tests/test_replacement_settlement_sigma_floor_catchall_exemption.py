@@ -65,7 +65,7 @@ def _force_wide_floor(monkeypatch, floor_c: float) -> None:
     # RELATIONSHIP test isolates the floor↔catch-all interaction alone — the scale/mixture is an
     # independent correction (tested in test_replacement_sigma_scale_k_c.py). Same rationale as the
     # floor-json patch above: the test must not depend on a live artifact that evolves with data.
-    monkeypatch.setattr(mod, "_replacement_sigma_scale_lookup", lambda unit: (1.0, 0.0))
+    monkeypatch.setattr(mod, "_replacement_sigma_scale_lookup", lambda unit: (1.0, 0.0, 0.0))
 
 
 # ---------------------------------------------------------------------------

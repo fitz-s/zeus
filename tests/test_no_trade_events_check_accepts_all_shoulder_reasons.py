@@ -1,5 +1,5 @@
 # Created: 2026-05-21
-# Last reused or audited: 2026-05-21
+# Last reused or audited: 2026-06-14
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md §2 T2 + 04_PHASE_3_SHOULDER.md §"NoTradeReason additions"
 # Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
 # Purpose: C1 antibody — no_trade_events table CHECK constraint accepts all SHOULDER_* NoTradeReason values
@@ -53,9 +53,14 @@ def test_c1_check_constraint_includes_all_shoulder_reason_strings():
 
     table_sql = row[0]
     shoulder_members = [m for m in NoTradeReason if m.name.startswith("SHOULDER_")]
-    # Updated 2026-05-22: 8 members (was 7) — +SHOULDER_BUY_LOWER_BOUND_NOT_POSITIVE (shoulder_buy_evt v30)
-    assert len(shoulder_members) == 8, (
-        f"Expected 8 SHOULDER_* members, got {len(shoulder_members)}"
+    # Updated 2026-06-14 (PR #408, commit 445a44a6b7 "gate-mass collapse: delete
+    # shadow-candidate framework + dead enum members"): 2 live members remain
+    # (SHOULDER_NO_TRADE_GATE, SHOULDER_CLUSTER_CAP_EXCEEDED). The other 6 were
+    # dead enum members deleted in the operator-mandated gate-mass collapse. This
+    # probe's real assertion is below: every LIVE SHOULDER_* value must appear in
+    # the enum-derived CHECK SQL — the count is just a tripwire on accidental drift.
+    assert len(shoulder_members) == 2, (
+        f"Expected 2 SHOULDER_* members, got {len(shoulder_members)}"
     )
 
     missing_in_check = []

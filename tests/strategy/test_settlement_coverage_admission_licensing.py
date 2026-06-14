@@ -1,25 +1,28 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-06-14
 # Authority basis: production defect (15:03Z+ burst, 2026-06-11): 12 of 21 families'
 #   best candidates (ev/$ +0.04..+0.30; Atlanta q_lcb=0.7842 price=0.6021, HK
 #   0.7613/0.6318, Warsaw, Moscow, Busan, Helsinki, Shanghai, Mexico City, Cape Town,
 #   Karachi, London, San Francisco) killed ONLY by
 #   ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING: yes_posterior=0.205..0.267
 #   max=0.200 source=FORECAST_BOOTSTRAP — while the settlement-backward coverage
-#   verdict for the SAME families said the settled record BACKED the claim. Twin-
-#   authority instance #7: the cert layer licenses on the verdict
-#   (_FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES = {LICENSED, UNLICENSED}); the
-#   admission gate one step earlier still used the OLD source-brand vocabulary
-#   {EMOS_ANALYTIC, SETTLEMENT_ISOTONIC} and never saw the verdict.
+#   verdict for the SAME families said the settled record BACKED the claim.
+#   pr408 review C1+C2 #1 CRITICAL (2026-06-14): the licensing set ALSO had to
+#   include INSUFFICIENT_DATA — the K3 design is license-by-default on thin settled
+#   claim history (RULE 1), but the prior set {LICENSED, UNLICENSED} EXCLUDED it and so
+#   rejected every thin-settlement per-city cold cell at submit. The gate now reads the
+#   K3 admission predicates (settlement_coverage_allows_arm / _refutes_claim), so ANY
+#   real settled-record verdict admits and only None / UNEVALUATED rejects.
 """Relationship antibodies: settlement-coverage verdict licenses material-YES buy_no.
 
 CROSS-MODULE INVARIANTS pinned here:
   1. The licensing set has ONE home (live_admission.SETTLEMENT_COVERAGE_LICENSING_
      STATUSES); the adapter cert credential aliases it (registry entry #11).
-  2. A verdict the settled record evaluated (LICENSED, or UNLICENSED where the
-     shrink was the verdict's output) admits a material-YES buy_no whose q_lcb
-     source is FORECAST_BOOTSTRAP; INSUFFICIENT_DATA / None reject EXACTLY as
-     before, with the status in the reason (provenance law).
+  2. ANY real settled-record verdict admits a material-YES buy_no whose q_lcb source is
+     FORECAST_BOOTSTRAP: LICENSED (record backs the claim), INSUFFICIENT_DATA (thin →
+     license-by-default, pr408 #1), and UNLICENSED (record refuted → shrunk, the shrunk
+     q_lcb is what's admitted). Only None / UNEVALUATED (no verdict) reject, with the
+     status in the reason (provenance law).
   3. CATEGORY-INVERSION KILL: before reconciliation a record-BACKED bootstrap
      q_lcb was rejected while a record-REFUTED one (re-branded SETTLEMENT_ISOTONIC
      by the shrink) was accepted. The verdict, not the brand, is the evidence.
@@ -81,18 +84,17 @@ def test_material_yes_bootstrap_with_unlicensed_verdict_is_admitted() -> None:
     assert reason is None
 
 
-# --- (b) INSUFFICIENT_DATA / None reject exactly as today, status in reason --------------------
+# --- (b) INSUFFICIENT_DATA ADMITS (license-by-default, pr408 #1); None rejects -----------------
 
 
-def test_material_yes_bootstrap_with_insufficient_data_rejected_with_status() -> None:
+def test_material_yes_bootstrap_with_insufficient_data_is_admitted() -> None:
+    """pr408 #1 CRITICAL: INSUFFICIENT_DATA is license-by-default — a thin-settlement
+    per-city cold cell is ADMITTED, not rejected. RED-on-revert: restoring the old
+    {LICENSED, UNLICENSED}-only set re-rejects this with the status in the reason."""
     reason = live_buy_no_conservative_evidence_rejection_reason(
         **_ATLANTA, settlement_coverage_status="INSUFFICIENT_DATA"
     )
-    assert reason is not None
-    assert reason.startswith("ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:")
-    assert ":coverage_status=INSUFFICIENT_DATA" in reason, (
-        "the rejection must record WHICH verdict failed to license (provenance law)"
-    )
+    assert reason is None, f"thin-history INSUFFICIENT_DATA must be admitted-by-default: {reason}"
 
 
 def test_material_yes_bootstrap_with_no_verdict_rejected_with_missing_status() -> None:
@@ -105,9 +107,12 @@ def test_material_yes_bootstrap_with_no_verdict_rejected_with_missing_status() -
 
 
 def test_unknown_status_never_licenses() -> None:
-    """Fail-closed: only the two members of the ONE-home licensing set admit. An
-    unknown / future / corrupted status string rejects with the status recorded."""
-    assert SETTLEMENT_COVERAGE_LICENSING_STATUSES == frozenset({"LICENSED", "UNLICENSED"})
+    """Fail-closed: only a REAL settled-record verdict admits. An unknown / future /
+    corrupted / UNEVALUATED status string rejects with the status recorded — it is not
+    a verdict the settled record produced."""
+    assert SETTLEMENT_COVERAGE_LICENSING_STATUSES == frozenset(
+        {"LICENSED", "INSUFFICIENT_DATA", "UNLICENSED"}
+    )
     reason = live_buy_no_conservative_evidence_rejection_reason(
         **_ATLANTA, settlement_coverage_status="UNEVALUATED"
     )

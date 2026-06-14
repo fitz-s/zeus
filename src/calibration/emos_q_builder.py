@@ -1,5 +1,12 @@
 # Created: 2026-06-04
-# Lifecycle: created=2026-06-04; last_reviewed=2026-06-04; last_reused=2026-06-04
+# Lifecycle: created=2026-06-04; last_reviewed=2026-06-14; last_reused=2026-06-14
+# 2026-06-14 (pr408 review C1+C2 #3 HIGH): build_emos_q enforces the one-signed μ-offset contract at the
+#   seam — applies μ_corr = μ* − offset_c ONLY when offset_c<0 (a cold center is WARMED); a non-negative
+#   offset is never applied (defense-in-depth atop the loader's refusal). Prior:
+# 2026-06-14 (D4 emos_mu_bias_probe.md + law 8): build_emos_q applies the airport-settlement-honest
+#   EMOS μ-OFFSET correction (src.calibration.emos.emos_mu_offset) to the °C center BEFORE the σ-floor
+#   and F→C unit handling — μ_corr = μ* − offset_c for `activated` (cold + OOS-do-no-harm) cells only;
+#   absent/unactivated → uncorrected center (fail-closed). Reuse with scripts/fit_emos_mu_offset.py.
 # Purpose: The ONE q seam (#110 / ELEVATION S2). build_emos_q produces the traded bin-probability
 #   distribution from the single EMOS calibrator: q[bin] = N(mu, sigma) integrated over the
 #   settlement preimage, with the SAME (mu, sigma) feeding the point q AND the lcb sigma. This
@@ -17,6 +24,7 @@ import numpy as np
 
 from src.calibration.emos import (
     bin_probability_settlement,
+    emos_mu_offset,
     emos_predictive,
     emos_sigma_model,
     settlement_sigma_floor,
@@ -80,6 +88,25 @@ def build_emos_q(
     if pred is None:
         return None  # served=raw / missing -> honest raw fallback (caller decides)
     mu_c, sigma_c = pred
+
+    # AIRPORT-SETTLEMENT-HONEST μ CORRECTION (D4 emos_mu_bias_probe.md + law 8). The EMOS-served center
+    # μ* = a + b·x̄ lands COLD for per-city cold-biased cells (Tokyo|MAM median −1.89°C vs VERIFIED
+    # settlement); a cold center shifts q mass to cold bins and UNDER-PRICES warm-side winners. The
+    # discriminating probe (scripts/probe_emos_mu_correction_D4.py) proved the root is the per-cell EMOS
+    # INTERCEPT (the grid-cold de-bias is already absorbed at fit time — applying it again on x̄ OVER-warms
+    # by ~3°C and worsens CRPS), so the fix is a residual-grounded per-cell μ-OFFSET measured DIRECTLY on
+    # (μ*−settlement), walk-forward OOS-gated (scripts/fit_emos_mu_offset.py). μ_corr = μ* − offset_c: a
+    # measured-cold center (offset_c<0) is WARMED toward settlement. ONLY `activated` cells (materially
+    # cold AND OOS do-no-harm pass) carry a correction; an absent table / unactivated cell → None → the
+    # uncorrected center (today's behavior, fail-closed — never crashes a live size). σ is UNCHANGED (the
+    # σ-floor still governs dispersion); this shifts ONLY the center, in °C, BEFORE any F→C unit handling.
+    # ONE-SIGNED CONTRACT (pr408 review C1+C2 #3 HIGH, 2026-06-14): the offset must be
+    # strictly negative (μ_corr = μ* − offset_c WARMS a cold center). The loader already
+    # refuses an activated offset_c ≥ 0, but guard here too (defense-in-depth at the seam):
+    # a non-negative offset would COOL the center the wrong way, so apply NO correction.
+    _mu_off_c = emos_mu_offset(city, season, str(metric).lower(), required=False)
+    if _mu_off_c is not None and float(_mu_off_c) < 0.0:
+        mu_c = mu_c - float(_mu_off_c)
 
     # EMPIRICAL settlement σ-floor (loop-breaker, investigation 2026-06-05; iron rule 5). The EMOS
     # σ-model is systemically under-dispersed (median σ_emos/σ_settled = 0.49) → q pins near 1.0 on

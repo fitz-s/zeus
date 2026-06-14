@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-08
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Last reused/audited: 2026-06-13
+# Lifecycle: created=2026-06-06; last_reviewed=2026-06-13; last_reused=2026-06-13
 # Purpose: Protect replacement forecast reactor hook placement before final order intent.
 # Reuse: Run before wiring replacement shadow/veto logic into event_reactor_adapter.
 # Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
@@ -9,6 +9,12 @@
 #   capital-objective proofs) and the post-c41f13428c bin-topology + posterior-identity
 #   gate (bundle reader requires q_ucb/bin_topology_hash/identity hashes + key-matched
 #   q_lcb). Coverage preserved; assertions track the current contract.
+#   2026-06-13 task #62 (workflow A3 diagnosis): added bare-canonical-direction
+#   relationship tests (test_bare_canonical_direction_constructs,
+#   test_malformed_side_still_raises, test_bare_candidate_admits_and_direction_law
+#   _recheck_noops) pinning the producer/consumer contract after scoping the
+#   ReplacementForecastCandidateView :bin requirement. Pre-existing :bin fixtures
+#   retained unchanged (still valid, no coverage lost).
 """Replacement forecast reactor hook tests."""
 
 from __future__ import annotations
@@ -1376,3 +1382,146 @@ def test_reactor_hook_live_authority_admits_direction_law_consistent_candidate()
     assert result.status == "LIVE_AUTHORITY"
     assert "REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION" not in result.reason_codes
     assert result.effective_direction == "buy_no:cool"
+
+
+# ---------------------------------------------------------------------------
+# task #62 (2026-06-13): bare canonical direction is admissible.
+#
+# RELATIONSHIP TEST (producer/consumer contract): the canonical producer
+# (replacement_forecast_hook_factory._candidate_view_from_proof) stamps
+# baseline_direction VERBATIM from proof.direction, which is canonically BARE
+# (buy_no/buy_yes) system-wide, and stamps candidate_direction BARE whenever no
+# replacement_bundle has bound a bin (the first, no-bundle call site at the
+# storm source). The pre-2026-06-13 __post_init__ required BOTH legs to carry a
+# ``:bin`` suffix, so construction RAISED before the bundle-loaded path could
+# re-stamp the candidate -- sending real tradeable families to
+# UNKNOWN_REVIEW_REQUIRED (zero orders). These tests pin the cross-module
+# invariant: a bare canonical direction (as the real producer emits) MUST
+# construct, while a malformed side MUST still raise.
+#
+# NOTE on the pre-existing fixtures above: they all use the ``:bin`` form
+# (e.g. 'buy_no:warm') which the REAL producer never emits -- that is exactly
+# the bug they masked. They remain valid (``:bin`` is still admissible) and are
+# retained unchanged so no coverage is lost; the cases below add the bare-form
+# coverage the producer actually exercises.
+
+
+def test_bare_canonical_direction_constructs() -> None:
+    """A bare canonical direction (no ``:bin``), exactly as the real producer
+    ``_candidate_view_from_proof`` emits from a bare ``proof.direction``, MUST
+    construct successfully.
+
+    RED-on-revert: under the pre-2026-06-13 line-88 guard this raised
+    "must carry a bin id as side:bin".
+    """
+
+    view = ReplacementForecastCandidateView(
+        baseline_direction="buy_no",
+        baseline_q_posterior=0.70,
+        baseline_q_lcb=0.62,
+        baseline_kelly_fraction=0.04,
+        candidate_direction="buy_no",
+        candidate_q_posterior=0.75,
+        candidate_q_lcb=0.55,
+        candidate_kelly_fraction=0.02,
+        market_snapshot_id="snap-1",
+        condition_id="cond-1",
+        token_id="token-no",
+        decision_time="2026-06-06T04:00:00+00:00",
+    )
+
+    assert view.baseline_direction == "buy_no"
+    assert view.candidate_direction == "buy_no"
+
+    # buy_yes bare side is equally admissible.
+    yes_view = ReplacementForecastCandidateView(
+        baseline_direction="buy_yes",
+        baseline_q_posterior=0.70,
+        baseline_q_lcb=0.62,
+        baseline_kelly_fraction=0.04,
+        candidate_direction="buy_yes",
+        candidate_q_posterior=0.75,
+        candidate_q_lcb=0.55,
+        candidate_kelly_fraction=0.02,
+        market_snapshot_id="snap-1",
+        condition_id="cond-1",
+        token_id="token-yes",
+        decision_time="2026-06-06T04:00:00+00:00",
+    )
+    assert yes_view.baseline_direction == "buy_yes"
+    assert yes_view.candidate_direction == "buy_yes"
+
+
+def test_malformed_side_still_raises() -> None:
+    """The well-formedness gate survives the fix: a non-{buy_yes,buy_no} side
+    STILL raises, whether bare ('foo') or carrying a bin ('foo:bin'). Garbage
+    must remain unconstructable both before AND after the task #62 fix.
+    """
+
+    for bad_direction in ("foo", "foo:bin", "buy:warm", "sell_no"):
+        with pytest.raises(ValueError, match="side must be buy_yes or buy_no"):
+            ReplacementForecastCandidateView(
+                baseline_direction="buy_no",
+                baseline_q_posterior=0.70,
+                baseline_q_lcb=0.62,
+                baseline_kelly_fraction=0.04,
+                candidate_direction=bad_direction,
+                candidate_q_posterior=0.75,
+                candidate_q_lcb=0.55,
+                candidate_kelly_fraction=0.02,
+                market_snapshot_id="snap-1",
+                condition_id="cond-1",
+                token_id="token-no",
+                decision_time="2026-06-06T04:00:00+00:00",
+            )
+        # ...and on the baseline leg too.
+        with pytest.raises(ValueError, match="side must be buy_yes or buy_no"):
+            ReplacementForecastCandidateView(
+                baseline_direction=bad_direction,
+                baseline_q_posterior=0.70,
+                baseline_q_lcb=0.62,
+                baseline_kelly_fraction=0.04,
+                candidate_direction="buy_no",
+                candidate_q_posterior=0.75,
+                candidate_q_lcb=0.55,
+                candidate_kelly_fraction=0.02,
+                market_snapshot_id="snap-1",
+                condition_id="cond-1",
+                token_id="token-no",
+                decision_time="2026-06-06T04:00:00+00:00",
+            )
+
+
+def test_bare_candidate_admits_and_direction_law_recheck_noops() -> None:
+    """A BARE candidate_direction (no bin) is admitted through the live hook and
+    the posterior-derived DIRECTION-LAW recheck NO-OPS on it (no false
+    flip-veto): _lawful_direction_for_candidate returns None when the candidate
+    carries no bin id, so REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION never
+    fires. The trade still clears the honest gates (q_lcb, flip authority).
+
+    RED-on-revert: under the pre-2026-06-13 guard the bare candidate could not
+    even be CONSTRUCTED (raised at __post_init__), so this path was unreachable.
+    """
+
+    policy = resolve_replacement_forecast_runtime_policy(
+        _flags(shadow=True, veto=True, trade=True, kelly=True, flip=True),
+        promotion_evidence=_promotion_evidence(),
+        capital_objective_evidence=_capital_objective_evidence(),
+    )
+
+    # Bare baseline AND bare candidate, identical side: no flip-vs-baseline, and
+    # the posterior-law recheck no-ops because the candidate carries no bin id.
+    result = apply_replacement_forecast_reactor_hook(
+        policy=policy,
+        switch_decision=_switch_decision(policy, live_promotion=True),
+        candidate=_candidate(
+            baseline_direction="buy_no",
+            candidate_direction="buy_no",
+        ),
+        replacement_bundle=_bundle(),
+        readiness=_readiness(),
+    )
+
+    assert result.status == "LIVE_AUTHORITY"
+    assert "REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION" not in result.reason_codes
+    assert result.effective_direction == "buy_no"

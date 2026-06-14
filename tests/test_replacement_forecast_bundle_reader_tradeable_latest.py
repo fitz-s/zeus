@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-13
 # Authority basis: operator clobber-category directive 2026-06-10 (tradeable-latest read
 #   semantics). Third recurrence of the bounds-less clobber: a NEWER model cycle that has
 #   anchor manifests but no fusion instruments yet writes a bounds-less posterior
@@ -95,8 +95,14 @@ def _insert_posterior(
     computed_at: datetime,
     q_mode: str,
     with_bounds: bool,
+    with_ucb: bool | None = None,
     dependency_source_run_ids: dict[str, str] | None = None,
 ) -> int:
+    # ``with_ucb`` lets a row carry q_lcb_json but NOT q_ucb_json (the freshest-row
+    # twin-authority carrier defect: a 13:08Z row HAS q_ucb, its 13:09Z sibling MISSING it).
+    # Default: q_ucb tracks q_lcb (a real fused row materializes BOTH bounds together).
+    if with_ucb is None:
+        with_ucb = with_bounds
     deps = dependency_source_run_ids or {
         "baseline_b0": "b0-run",
         "aifs_sampled_2t": "aifs-run",
@@ -139,7 +145,7 @@ def _insert_posterior(
             f"pid-hash-{identity_suffix}",
             f"dep-hash-{identity_suffix}",
             f"cfg-hash-{identity_suffix}",
-            None,
+            json.dumps({"cold": 0.3, "warm": 0.9}) if with_ucb else None,
         ),
     )
     return int(conn.execute("SELECT MAX(posterior_id) FROM forecast_posteriors").fetchone()[0])
@@ -396,3 +402,59 @@ def test_afternoon_clobber_does_not_change_eligibility() -> None:
     assert after.ok is True, after.reason_code
     assert after.bundle.posterior_id == fused_id
     assert after.bundle.q_lcb == before.bundle.q_lcb
+
+
+# ---------------------------------------------------------------------------
+# Relationship 5 (q_ucb carrier defect, 2026-06-13): a NEWER row carrying q_lcb_json
+#   but NOT q_ucb_json must NOT clobber an OLDER row that has BOTH bounds. The live
+#   bounds gate (event_reactor_adapter, the _needs_bounds/_bounds_ok block) requires
+#   BOTH q_lcb AND q_ucb non-empty; and _replacement_no_lcb_for_bin fail-closes EVERY
+#   buy_no to q_lcb_no=0.0 when the served bundle's q_ucb is absent. Selecting the
+#   q_ucb-less freshest row (the freshest-row twin-authority defect, observed live on
+#   Wellington 06-14) therefore structurally extinguishes the entire buy_no leg for the
+#   family. The reader must serve the freshest row that carries BOTH bounds.
+#
+# RED-ON-REVERT: drop the `if not row_map.get("q_ucb_json"): return False` line from
+# _row_is_tradeable_grade and this test fails (the q_ucb-less newer row is served, and
+# its q_ucb is None).
+def test_newer_q_ucb_missing_does_not_clobber_older_both_bounds() -> None:
+    conn = _conn()
+    # Older row with BOTH bounds (00Z cycle, within staleness).
+    both_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        with_ucb=True,
+    )
+    # NEWER row: FUSED mode, q_lcb present, but q_ucb MISSING (the carrier defect).
+    lcb_only_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 6),
+        source_available_at=_dt(6, 11),
+        computed_at=_dt(6, 11, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        with_ucb=False,
+    )
+    assert lcb_only_id > both_id
+    # Scope readiness points at the newer (q_ucb-less) row, as in production.
+    readiness = _readiness(
+        posterior_id=lcb_only_id,
+        computed_at=_dt(6, 11, 30),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 11, 30),
+    )
+    result = _read(conn, readiness, decision_time=_dt(6, 12))
+    assert result.ok is True, result.reason_code
+    assert result.bundle is not None
+    # The served bundle MUST be the older row that carries BOTH bounds — so the buy_no leg
+    # (q_lcb_no = 1 - q_ucb_yes) has a real q_ucb to work from, never the silent 0.0.
+    assert result.bundle.posterior_id == both_id
+    assert result.bundle.q_ucb is not None and bool(result.bundle.q_ucb)
+    note = (result.bundle.provenance_json or {}).get("tradeable_latest_selection")
+    assert isinstance(note, dict)
+    assert note.get("newer_shadow_posterior_id") == lcb_only_id
+    assert note.get("served_posterior_id") == both_id

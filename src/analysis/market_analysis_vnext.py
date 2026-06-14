@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
-    from src.strategy.candidates import FamilyOrderBookSnapshot
 
 # T4_MERGE_DATE: placeholder. Production pass overwrites with the merge commit
 # ISO timestamp extracted from:
@@ -100,7 +99,7 @@ class MarketAnalysisVNext:
         polymarket_end_anchor_source: str = "",
         bin_grid_id: Optional[str] = None,
         bin_schema_id: Optional[str] = None,
-        family_book_snapshot: "Optional[FamilyOrderBookSnapshot]" = None,
+        family_book_snapshot: "Optional[Any]" = None,
     ) -> None:
         """
         Args:
@@ -112,9 +111,10 @@ class MarketAnalysisVNext:
             bin_grid_id: From ensemble_snapshots.bin_grid_id for this snapshot's
                      triggering cycle (F4 retrofit).
             bin_schema_id: Companion to bin_grid_id.
-            family_book_snapshot: Optional caller-injected neg-risk family order-book
-                     snapshot. When present, neg_risk_basket.evaluate() reads per-leg
-                     depth for exact sweep-cost / profit calculation (§11.5-11.8).
+            family_book_snapshot: Inert carrier (always None in live code). Its only
+                     consumer was the neg_risk_basket shadow candidate, removed with the
+                     shadow-candidate framework (2026-06-14). Retained as a None-default
+                     parameter to preserve __init__ arity.
         """
         self._snapshot = snapshot
         self._history = history
@@ -124,8 +124,8 @@ class MarketAnalysisVNext:
         self._family_book_snapshot = family_book_snapshot
 
     @property
-    def family_book_snapshot(self) -> "Optional[FamilyOrderBookSnapshot]":
-        """Caller-injected neg-risk family order-book snapshot (may be None)."""
+    def family_book_snapshot(self) -> "Optional[Any]":
+        """Inert carrier (always None in live code; neg_risk_basket consumer removed)."""
         return self._family_book_snapshot
 
     def compute(self) -> MicrostructureMetrics:

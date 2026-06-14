@@ -1,6 +1,7 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-06-13
 # Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §2 + §6.P2 (v3 per §0.1); docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P2-1.
+# 2026-06-13 add: family_venue_closed (warm-lane venue-close skip authority) — docs/operations/live_inventory_warm_skip_2026-06-13.md.
 """``MarketPhase`` axis — market-time lifecycle of a Polymarket weather market.
 
 Per PLAN_v3 §2 (axis A), ``MarketPhase`` is computed from
@@ -362,6 +363,61 @@ def market_open_at_decision(
     here. tz-aware: both sides are normalized to UTC before comparison.
     """
     return as_of_utc.astimezone(timezone.utc) < polymarket_end_utc.astimezone(timezone.utc)
+
+
+def family_venue_closed(
+    *,
+    city: str | None,
+    target_date: str | None,
+    now_utc: datetime,
+) -> bool:
+    """True iff city X's weather market for ``target_date`` is VENUE-CLOSED
+    (POST_TRADING / RESOLVED) at ``now`` — the warm-lane analogue of the
+    reactor's ``_venue_market_closed_horizon``.
+
+    The venue close is the F1 12:00-UTC anchor of ``target_date`` (uniform
+    across the 13 verified cities, ``_f1_fallback_end_utc``), which is EARLIER
+    than the target LOCAL-day end (``EventStore._strictly_past_in_tz``) for
+    every city whose local day extends past 12:00 UTC. In the window
+    ``[venue_close, local_day_end)`` the venue book is gone, so the family can
+    produce no fresh executable book — re-probing it (Gamma returns an empty
+    event list) is pure budget waste. ``_strictly_past_in_tz`` alone does NOT
+    skip such a family (its local day has not ended); the venue-close anchor is
+    the precise authority for "this market closed".
+
+    This reuses the SAME POST_TRADING boundary ``market_open_at_decision`` /
+    ``market_phase_for_decision`` apply (venue-closed is exactly the complement
+    of ``market_open_at_decision``), so the warm-lane skip, the reactor horizon
+    (``_venue_market_closed_horizon``), and the bind-time phase gate cannot
+    disagree on the venue-close instant — no new clock, no venue probe, no
+    snapshot read.
+
+    Fail-SOFT (uncertain ⇒ keep): a missing city/target_date or an unresolvable
+    timezone returns ``False`` (treat as NOT closed) so the caller keeps the
+    family. Mislabeling a live family ``True`` would silently drop a tradeable
+    candidate; every uncertain case must therefore return ``False``. This is the
+    OPPOSITE fail direction from the forecast_only admission gate
+    (``market_phase_admits`` fails CLOSED) — here a wrong ``True`` is the harm.
+    """
+    if not city or not target_date:
+        return False
+    from src.config import runtime_cities_by_name
+
+    city_config = runtime_cities_by_name().get(city)
+    tz = getattr(city_config, "timezone", None) if city_config is not None else None
+    if not tz:
+        return False
+    try:
+        target_local_date = date.fromisoformat(str(target_date))
+    except (ValueError, TypeError):
+        return False
+    polymarket_end_utc = _f1_fallback_end_utc(target_local_date)
+    # market_open_at_decision is the single POST_TRADING-boundary authority;
+    # venue-closed is exactly its complement.
+    return not market_open_at_decision(
+        polymarket_end_utc=polymarket_end_utc,
+        as_of_utc=now_utc,
+    )
 
 
 def is_forecast_only_admissible(

@@ -128,24 +128,40 @@ def enrich_settled_day0_receipts(
     *,
     settlement_table: str = "forecasts.settlement_outcomes",
     batch_limit: int = 5_000,
+    grade_all_candidate_bearing: bool = False,
 ) -> int:
-    """Write later_outcome + would_have_won for SETTLED candidate-bearing day0 receipts.
+    """Write later_outcome + would_have_won for SETTLED candidate-bearing rows.
 
-    Joins ``no_trade_regret_events`` (day0 shadow rows that already carry
-    direction + bin_label) to VERIFIED ``settlement_outcomes`` on
-    (city, target_date, metric), grades each through ``grade_receipt``, and writes
-    via ``NoTradeRegretLedger.enrich_after_settlement`` (which carries the
+    Joins ``no_trade_regret_events`` (rows that already carry direction +
+    bin_label) to VERIFIED ``settlement_outcomes`` on (city, target_date, metric),
+    grades each through ``grade_receipt``, and writes via
+    ``NoTradeRegretLedger.enrich_after_settlement`` (which carries the
     settlement_proof + hindsight guard). Idempotent: rows already carrying
     ``would_have_won`` are skipped, so a re-run writes nothing new.
 
+    ``grade_all_candidate_bearing`` (2026-06-14): the original writer graded ONLY
+    ``rejection_reason='DAY0_SCOPE_SHADOW_ONLY'`` rows, leaving the actual
+    edge-bearing REJECTIONS (TRADE_SCORE_NON_POSITIVE — the q_lcb-crushed buy_no)
+    ungraded, so the SHADOW-PROVE loop had no data and no fix could be
+    settlement-validated. With this True, EVERY candidate-bearing settled row is
+    graded — the system continuously measures whether its OWN rejections would
+    have won at settlement (pure counterfactual, never submits, never fabricates;
+    grade_receipt is the single truth function, VERIFIED-only). This is what
+    surfaced the +EV near-certain buy_no tail the system was wrongly rejecting.
+
     ``settlement_table`` is parametrised ONLY so the relationship test can point
-    at an in-memory stand-in; production passes the ATTACHed
-    ``forecasts.settlement_outcomes``. Returns the count of receipts enriched.
+    at an in-memory stand-in. Returns the count of rows enriched.
     """
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
     ledger = NoTradeRegretLedger(world_conn)
-    # Candidate-bearing, day0 shadow, UNGRADED rows joined to VERIFIED settlement.
+    # Default preserves byte-equal behaviour (shadow-only); the broadened path
+    # drops the scope filter so every candidate-bearing rejection is graded.
+    _reason_filter = (
+        "" if grade_all_candidate_bearing
+        else "AND r.rejection_reason = 'DAY0_SCOPE_SHADOW_ONLY'"
+    )
+    # Candidate-bearing, UNGRADED rows joined to VERIFIED settlement.
     rows = world_conn.execute(
         f"""
         SELECT r.event_id, r.rejection_stage, r.rejection_reason, r.direction, r.bin_label,
@@ -155,10 +171,10 @@ def enrich_settled_day0_receipts(
             ON s.city = r.city
            AND s.target_date = r.target_date
            AND s.temperature_metric = r.metric
-         WHERE r.rejection_reason = 'DAY0_SCOPE_SHADOW_ONLY'
-           AND r.direction IS NOT NULL
+         WHERE r.direction IS NOT NULL
            AND r.bin_label IS NOT NULL
            AND r.would_have_won IS NULL
+           {_reason_filter}
            AND s.authority = 'VERIFIED'
            AND s.settlement_value IS NOT NULL
            AND s.settlement_unit IS NOT NULL
@@ -227,8 +243,15 @@ def run_day0_shadow_enrichment_job(*, write: bool = True) -> dict:
         return {"status": "noop", "enriched": 0}
     try:
         with open_world_with_forecasts(write_class="bulk") as world_conn:
+            # 2026-06-14: grade ALL candidate-bearing rejections (not just the
+            # DAY0_SCOPE_SHADOW_ONLY scope) so the system continuously measures
+            # whether its q_lcb-crushed rejections would have won at settlement —
+            # the SHADOW-PROVE data the promotion loop was starved of.
             enriched = enrich_settled_day0_receipts(
-                world_conn, settlement_table="forecasts.settlement_outcomes"
+                world_conn,
+                settlement_table="forecasts.settlement_outcomes",
+                grade_all_candidate_bearing=True,
+                batch_limit=20_000,
             )
             world_conn.commit()
             return {"status": "ok", "enriched": enriched}

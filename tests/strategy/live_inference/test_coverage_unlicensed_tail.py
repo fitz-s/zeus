@@ -1,13 +1,19 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-14
 # Authority basis: FIX B antibody for incident 0b5c305e26524042 (Milan 24C first
-#   fill); docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md. Fail-closed
-#   dual of the K3 settlement coverage gate's INSUFFICIENT_DATA fail-open.
-"""Antibody: an unlicensed q_lcb may not overrule the market in a longshot.
+#   fill); docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md.
+#   pr408 review C1+C2 #2 CRITICAL (2026-06-14): the cheap-tail guard was a forbidden
+#   ONE-SIDED fail-CLOSED gate (operator law 3) that killed +edge cheap trades. The PURE
+#   PREDICATE (coverage_unlicensed_tail_rejection_reason) is retained as the single
+#   definition of the tail concern and is now used ONLY for shadow telemetry; it no longer
+#   zeros score / fails prefilter / sets a no-trade reason / alters size on the live path.
+"""Predicate + shadow-only wiring for the unlicensed cheap-tail disagreement signal.
 
-Category killed: market price < 0.05 while a FORECAST_BOOTSTRAP (settlement-
-unlicensed) q_lcb claims > 2x the market. Near-center trades (price >= 0.05) and
-licensed bands (EMOS_ANALYTIC / SETTLEMENT_ISOTONIC) are untouched.
+The PURE PREDICATE still classifies the category (market price < 0.05 while a
+FORECAST_BOOTSTRAP settlement-unlicensed q_lcb claims > 2x the market; near-center and
+licensed bands abstain). pr408 #2: the live proof seam records this ONLY as
+``would_fail_unlicensed_tail_shadow`` — it never score-zeros, never fails prefilter, never
+becomes a live reason. RED-on-revert: a candidate that would have been killed now trades.
 """
 from __future__ import annotations
 
@@ -112,8 +118,10 @@ def test_licensed_vocabulary_is_subset_of_carrier_vocabulary():
 
 
 # ---------------------------------------------------------------------------
-# Wiring antibody: the proof seam applies the guard where the direction law
-# passes (forecast-ADJACENT cheap bin with an unlicensed inflated q_lcb).
+# Wiring antibody (pr408 #2): the proof seam records the tail concern as SHADOW
+# telemetry where the direction law passes (forecast-ADJACENT cheap bin with an
+# unlicensed inflated q_lcb) — and does NOT kill the trade. The forbidden one-sided
+# fail-closed gate is removed; the +edge cheap candidate stays eligible.
 # ---------------------------------------------------------------------------
 import json  # noqa: E402
 import types  # noqa: E402
@@ -180,16 +188,25 @@ def _wired_proofs(*, calibration_source: str):
     return {p.direction: p for p in proofs}
 
 
-def test_proof_seam_rejects_unlicensed_adjacent_tail():
+def test_proof_seam_unlicensed_adjacent_tail_is_shadow_only_not_killed():
+    """pr408 #2 RED-on-revert: a cheap-tail unlicensed +edge candidate is FLAGGED in the
+    shadow but stays eligible — never score-zeroed, never a live reason, never prefilter-
+    failed by the tail concern. Reverting (re-adding the live gate) makes score==0."""
     p = _wired_proofs(calibration_source="FORECAST_BOOTSTRAP")["buy_yes"]
-    assert p.missing_reason is not None
-    assert p.missing_reason.startswith("COVERAGE_UNLICENSED_TAIL")
-    assert p.trade_score == 0.0
-    assert p.passed_prefilter is False
+    # the tail concern is recorded for settlement-graded study ...
+    assert p.would_fail_unlicensed_tail_shadow is True
+    # ... but it does NOT kill the trade: no COVERAGE_UNLICENSED_TAIL live reason, the
+    # score is not zeroed BY THE TAIL GUARD, and the candidate is not prefilter-failed by it.
+    assert p.missing_reason is None or not p.missing_reason.startswith(
+        "COVERAGE_UNLICENSED_TAIL"
+    )
+    assert p.trade_score > 0.0
+    assert p.passed_prefilter is True
 
 
-def test_proof_seam_admits_settlement_licensed_tail():
+def test_proof_seam_settlement_licensed_tail_has_no_shadow_flag():
     p = _wired_proofs(calibration_source="SETTLEMENT_ISOTONIC")["buy_yes"]
+    assert p.would_fail_unlicensed_tail_shadow is False
     assert p.missing_reason is None or not p.missing_reason.startswith(
         "COVERAGE_UNLICENSED_TAIL"
     )

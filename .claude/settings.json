@@ -10,13 +10,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py post_merge_cleanup",
-            "description": "[Phase 3 cutover] Soft cleanup checklist after gh pr merge (replaces post-merge-cleanup-reminder.sh)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py pr_open_monitor_arm",
-            "description": "[Phase 2 new] After successful gh pr create or gh pr ready, emit additionalContext to arm Monitor + MONITOR_ARM_REQUIRED sentinel (ATTACK 9)"
+            "command": "python3 .claude/hooks/dispatch.py --multi post_merge_cleanup pr_open_monitor_arm",
+            "description": "[consolidated 2026-06-13] PostToolUse/Bash checks in ONE process. post_merge_cleanup (post gh pr merge), pr_open_monitor_arm (arm Monitor after pr create/ready)."
           }
         ]
       },
@@ -26,7 +21,7 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py pr_monitor_arm_ack",
-            "description": "[2026-05-27 ack] Clear pending monitor-arm sentinel when Monitor tool fires with pr_monitor.py <N> or gh pr <view|checks> <N> — stops the 2nd-tier reminder loop"
+            "description": "Clear pending monitor-arm sentinel when Monitor fires with pr_monitor.py <N> or gh pr <view|checks> <N>"
           }
         ]
       }
@@ -37,23 +32,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py pre_edit_architecture",
-            "description": "[hook v2 ADVISORY] Warn on edits to architecture/** without ARCH_PLAN_EVIDENCE env (no deny path; PR #74 retired BLOCKING tier)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py pre_write_capability_gate",
-            "description": "[hook v2 ADVISORY] Warn on writes to capability-path kernels without ARCH_PLAN_EVIDENCE (no deny path; PR #74 retired BLOCKING tier; sunset 2026-08-04)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py maintenance_worker_dry_run_floor",
-            "description": "[hook v2 ADVISORY] Warn when maintenance worker targets governance files without dry-run verification (ADVISORY only)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py citation_grep_gate",
-            "description": "[hook v2 ADVISORY] Citation grep-gate \u2014 drift in file:line citations within Edit/Write args"
+            "command": "python3 .claude/hooks/dispatch.py --multi pre_edit_architecture pre_write_capability_gate citation_grep_gate",
+            "description": "[consolidated 2026-06-13] PreToolUse/Edit checks in ONE process (was 4 python spawns). maintenance_worker_dry_run_floor DELETED (advisory-only, false-fired on reads + the global non-Zeus ~/.claude/settings.json)."
           }
         ]
       },
@@ -62,63 +42,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py invariant_test",
-            "description": "[hook v2 ADVISORY] Warn before git commit when invariant pytest baseline regresses (no deny path; PR #74 retired BLOCKING tier)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py secrets_scan",
-            "description": "[hook v2 ADVISORY] Warn before git commit if gitleaks finds secret patterns in staged content (no deny path; PR #74 retired BLOCKING tier)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py pre_merge_contamination",
-            "description": "[hook v2 ADVISORY] Conflict-first guidance + MERGE_AUDIT_EVIDENCE warning on protected branches (no deny path; PR #74 retired BLOCKING tier)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py cotenant_staging_guard",
-            "description": "[hook v2 ADVISORY] Warn on broad git add in main worktree (co-tenant absorption risk; no deny path; PR #74 retired BLOCKING tier)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py maintree_git_state_guard",
-            "description": "[BLOCKING 2026-06-12] Block branch-mutating git (checkout/switch/branch -b/-B/-d/-D/-f/-m, reset --hard) when effective repo dir is the MAIN tree (live daemons). Worktrees exempt. Bypass: MAINTREE_GIT_BYPASS=1"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py pre_checkout_uncommitted_overlap",
-            "description": "[hook v2 ADVISORY] Warn on git checkout/switch when tracked modifications overlap target branch tree (silent revert prevention; no deny path; PR #74 retired BLOCKING tier)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py pr_create_loc_accumulation",
-            "description": "[A1 BLOCKING] Block gh pr create/ready when commits < 2 AND LOC < 300 since merge-base (both conditions required). Bypass: ZEUS_PR_ALLOW_TINY=1"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py pre_merge_comment_check",
-            "description": "[B2 BLOCKING] Block gh pr merge when PR age <600s, unresolved Codex P0/P1, or CHANGES_REQUESTED. Bypass: ZEUS_PR_MERGE_FORCE=1"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py pr_thread_reply_waste",
-            "description": "[hook v2 ADVISORY] Warn on gh pr comment / thread reply commands; fix-commit IS the response, not a reply paragraph (P2 backstop)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py maintenance_worker_dry_run_floor",
-            "description": "[hook v2 ADVISORY] Warn when maintenance worker targets governance files without dry-run verification (ADVISORY only)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py pre_branch_create_in_primary",
-            "description": "[hook v2 ADVISORY] Detect git branch creation in PRIMARY worktree (2026-05-17 antibody)"
-          },
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py monitor_arm_overdue_advisor",
-            "description": "[hook v2 ADVISORY] 2nd-tier MONITOR_ARM reminder if sentinel >120s old"
+            "command": "python3 .claude/hooks/dispatch.py --multi invariant_test secrets_scan pre_merge_contamination cotenant_staging_guard maintree_git_state_guard pre_checkout_uncommitted_overlap pr_create_loc_accumulation pre_merge_comment_check pr_thread_reply_waste pre_branch_create_in_primary monitor_arm_overdue_advisor",
+            "description": "[consolidated 2026-06-13] PreToolUse/Bash checks in ONE process — was 12 python spawns/Bash (~655ms), now 1 (~55ms). BLOCKING (exit 2): maintree_git_state_guard (branch-mutating git in main tree; bypass MAINTREE_GIT_BYPASS=1), cotenant_staging_guard (broad git add in main worktree; bypass COTENANT_GUARD_BYPASS=1), pr_create_loc_accumulation (tiny PR; bypass ZEUS_PR_ALLOW_TINY=1), pre_merge_comment_check (unsafe gh pr merge; bypass ZEUS_PR_MERGE_FORCE=1). maintenance_worker_dry_run_floor DELETED (advisory-only noise)."
           }
         ]
       }
@@ -130,7 +55,19 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py phase_close_commit_required",
-            "description": "[Phase 2 new] Advisory: when phase-class subagent returns with tracked uncommitted changes, emit commit reminder"
+            "description": "Advisory: phase-class subagent returns with tracked uncommitted changes -> commit reminder"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py no_edge_rule1_guard",
+            "description": "RULE 1 guard (operator 2026-06-14): block + redirect when the final message concludes 'no edge'/'market efficient' — no-edge is OUR defect; root-cause the suppression, find other approaches. Bypass ZEUS_NO_EDGE_GUARD_OFF=1."
           }
         ]
       }
@@ -141,8 +78,13 @@
         "hooks": [
           {
             "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py boot_self_test_only",
+            "description": "[2026-06-13] Hook-registry integrity self-test, once per session (moved off per-call module import for perf; B-fix)"
+          },
+          {
+            "type": "command",
             "command": "python3 .claude/hooks/dispatch.py session_start_visibility",
-            "description": "[hook v2 ADVISORY] On session start, emit cross-worktree visibility summary via worktree_doctor (ADVISORY only)"
+            "description": "Cross-worktree visibility summary via worktree_doctor (advisory)"
           }
         ]
       }
@@ -154,7 +96,7 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py worktree_create_advisor",
-            "description": "[hook v2 ADVISORY] After WorktreeCreate, emit naming policy + scope + sentinel write advisory (ADVISORY only)"
+            "description": "After WorktreeCreate, emit naming policy + scope + sentinel write advisory"
           }
         ]
       }
@@ -166,7 +108,7 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py worktree_remove_advisor",
-            "description": "[hook v2 ADVISORY] Before WorktreeRemove, emit pre-remove dirty/uncommitted check + branch closure suggestion (ADVISORY only)"
+            "description": "Before WorktreeRemove, emit pre-remove dirty/uncommitted check + branch closure suggestion"
           }
         ]
       }

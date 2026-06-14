@@ -1,14 +1,18 @@
 """Materialize replacement forecast shadow posterior rows into forecast DB.
 
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-06-13
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md (the probability chain
 #   §1d-§1e fused-N-direct + settlement sigma floor); FIX 1/FIX 2/FIX 5 (operator-reviewed
 #   2026-06-09): explicit replacement_q_mode authority, settlement-sigma-floor coherence in the
 #   fused-q path, and capture-status provenance. 2026-06-09 (q_lcb materialization): real per-bin
 #   q_lcb_json/q_ucb_json on the fused path via fused-center parameter-uncertainty bootstrap
 #   (root-cause /tmp/candidate_missing_rootcause.md — NULL bounds force the Wilson-over-AIFS-votes
-#   fallback that under-certifies below ask and discards every candidate).
+#   fallback that under-certifies below ask and discards every candidate). 2026-06-13 (q_ucb
+#   symmetry): the soft-anchor (CAPTURE_MISSING) fallback now emits a GENUINE Wilson UPPER bound
+#   alongside its lower twin (same inputs/z), so EVERY materialized posterior carries BOTH bounds
+#   and the tradeable-latest reader's both-bounds predicate has a uniform carrier shape; the
+#   distinct wilson_aifs_member_votes basis keeps the row non-live-eligible (no fabricated edge).
 """
 
 from __future__ import annotations
@@ -639,23 +643,32 @@ def _replacement_settlement_sigma_floor_lookup(
 _SIGMA_SCALE_FIT_PATH = "state/sigma_scale_fit.json"
 
 
-def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float]:
-    """C3 calibration surface 2026-06-12 — FITTED σ_pred scale (k) + uniform-mixture weight (w).
+def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float, float]:
+    """C3 calibration surface — FITTED σ_pred scale (k) + uniform-mixture weight (w) + σ-floor (floor_steps).
 
     OPERATOR LAW (2026-06-12) "没有一个人可以在没有数学支持下决定一个 hard coded value": the σ-scale
     factor must be FITTED by math, never operator-picked or hardcoded. This reads the fitted artifact
-    ``state/sigma_scale_fit.json`` (written ONLY by scripts/fit_sigma_scale.py — MLE over settled cells)
-    and returns ``(k, w)`` for the given settlement unit family ('C' / 'F'):
-      q_adjusted(bin) = (1 - w) · Normal(σ_pred · k) + w · uniform(1/n_bins).
+    ``state/sigma_scale_fit.json`` (written ONLY by the σ-scale fitter — MLE over settled cells)
+    and returns ``(k, w, floor_steps)`` for the given settlement unit family ('C' / 'F'):
+      σ_core = max(σ_impl · k, floor_steps · step)   [step = per-cell bin width in settlement units]
+      q_adjusted(bin) = (1 - w) · Normal(σ_core) + w · uniform(1/n_bins).
 
-    Returns ``(k, w)`` where:
-      - artifact present AND family entry has fitted=True with finite k≥1, 0≤w≤1 → (k, w).
-      - artifact missing, malformed, family absent, or family fitted=False (REFUSED, e.g. F today,
-        n<60) → (1.0, 0.0) INERT (byte-identical to pre-scale behavior).
+    ``floor_steps`` (σ-refit report 2026-06-13, task #69) is the GATE-2 fix: an ABSOLUTE σ-floor in
+    step units that replaces the multiplicative widen — the realized ring dispersion is ~constant in
+    absolute (step) terms (~1.8 steps in BOTH C and F families), so a floor widens over-sharp forecasts
+    UP TO the realized dispersion and leaves already-wide forecasts alone (regime-aware → holdout-stationary).
+
+    Returns ``(k, w, floor_steps)`` where:
+      - artifact present AND family entry has fitted=True → (k, w, floor_steps), each field clamped.
+      - ``floor_steps`` is ABSENT from the artifact (the current live state/sigma_scale_fit.json) → 0.0,
+        so ``max(σ_impl·k, 0.0·step) = σ_impl·k`` is BYTE-IDENTICAL to pre-floor behavior. The live q
+        does NOT change until the operator swaps the artifact for one carrying ``floor_steps``.
+      - artifact missing, malformed, family absent, or family fitted=False (REFUSED, e.g. F when
+        n<60) → (1.0, 0.0, 0.0) INERT (byte-identical to pre-scale behavior).
 
     Precedent: the settlement sigma floor artifact (#20) is read the same fail-soft way. The fit
     artifact's per-family ``fitted`` flag is the enable: a family is corrected ONLY when math licensed
-    it. FAIL-SOFT: any error → (1.0, 0.0). Never raises.
+    it. FAIL-SOFT: any error → (1.0, 0.0, 0.0). Never raises.
     """
     try:
         import os  # noqa: PLC0415
@@ -665,21 +678,26 @@ def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float]:
             repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             path = os.path.join(repo, _SIGMA_SCALE_FIT_PATH)
         if not os.path.exists(path):
-            return 1.0, 0.0
+            return 1.0, 0.0, 0.0
         with open(path, "r", encoding="utf-8") as fh:
             artifact = json.load(fh)
         fam = (artifact.get("families") or {}).get(str(unit).upper())
         if not isinstance(fam, dict) or not fam.get("fitted"):
-            return 1.0, 0.0
+            return 1.0, 0.0, 0.0
         k = float(fam.get("k", 1.0))
         w = float(fam.get("w", 0.0))
+        # floor_steps ABSENT ⇒ 0.0 (strict backward compatibility: the live artifact has no such key,
+        # so the floor term is inert and q is unchanged). A non-finite / negative value is also inert.
+        floor_steps = float(fam.get("floor_steps", 0.0))
         if not (math.isfinite(k) and k > 0.0):
             k = 1.0
         if not (math.isfinite(w) and 0.0 <= w <= 1.0):
             w = 0.0
-        return k, w
+        if not (math.isfinite(floor_steps) and floor_steps >= 0.0):
+            floor_steps = 0.0
+        return k, w, floor_steps
     except Exception:
-        return 1.0, 0.0
+        return 1.0, 0.0, 0.0
 
 
 def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequest") -> str:
@@ -1232,6 +1250,26 @@ def _wilson_lower_bound(successes: float, trials: float, *, z: float = _QLCB_WIL
     return max(0.0, min(1.0, (center - margin) / denom))
 
 
+def _wilson_upper_bound(successes: float, trials: float, *, z: float = _QLCB_WILSON_Z) -> float:
+    """One-sided Wilson UPPER bound for a binomial proportion (successes/trials).
+
+    The exact symmetric counterpart of ``_wilson_lower_bound``: identical Wilson centre/denom,
+    ``(center + margin) / denom`` instead of ``- margin``. z=1.645 -> ~95% one-sided (the SAME z
+    the LCB uses, so the two bounds are the same-confidence two-sided interval ends, not a mixed
+    pair). A genuine binomial bound on the AIFS support fraction — NOT a fabricated value and NOT a
+    copy of the point or the LCB. Returns 1.0 for trials<=0 (no evidence -> widest honest upper).
+    """
+    if trials <= 0.0:
+        return 1.0
+    successes = min(max(float(successes), 0.0), float(trials))
+    p_hat = successes / float(trials)
+    z2 = z * z
+    denom = 1.0 + z2 / float(trials)
+    center = p_hat + z2 / (2.0 * float(trials))
+    margin = z * ((p_hat - (p_hat * p_hat) + z2 / (4.0 * float(trials))) / float(trials)) ** 0.5
+    return max(0.0, min(1.0, (center + margin) / denom))
+
+
 def _build_soft_anchor_wilson_lcb(
     *,
     aifs_probabilities: Mapping[str, float],
@@ -1258,6 +1296,45 @@ def _build_soft_anchor_wilson_lcb(
             continue
         lb = _wilson_lower_bound(float(prob) * mc, mc)
         out[bin_id] = min(max(lb, 0.0), max(float(q_pt), 0.0))
+    return out
+
+
+def _build_soft_anchor_wilson_ucb(
+    *,
+    aifs_probabilities: Mapping[str, float],
+    member_count: float,
+    q_point: Mapping[str, float],
+) -> dict[str, float]:
+    """Per-bin Wilson-over-AIFS-member-votes q_ucb for the soft-anchor (no-fusion) path.
+
+    The genuine one-sided Wilson UPPER bound — the EXACT symmetric counterpart of
+    ``_build_soft_anchor_wilson_lcb`` from the IDENTICAL inputs (the AIFS member-vote support
+    fraction × member_count, same z). This is the honest upper band of the soft-anchor support, so
+    a CAPTURE_MISSING posterior (no fused inputs -> no fused-center bootstrap upper band) is still
+    born with BOTH bounds instead of a half-bound. It is NOT a fabrication: not q_ucb=q_point, not a
+    constant, not a copy of q_lcb. The carrier honesty is preserved upstream — the basis string
+    stays ``wilson_aifs_member_votes`` (distinct from the certified fused bootstrap marker) and the
+    q_mode is CAPTURE_MISSING, so this row remains structurally NON-live-eligible (the credential
+    reader's exact-basis gate AND the q-mode gate both reject it). The bound exists for shadow
+    accrual, coverage measurement, and so the tradeable-latest reader's both-bounds predicate is the
+    SAME shape on every row (a fused row never falls out of the reader window behind a run of
+    half-bounded CAPTURE_MISSING rows).
+
+    Clipped to [q_point[bin], 1.0] (an upper bound can never sit below the point mass). Bins absent
+    from the AIFS vote map get q_ucb clipped up from the no-evidence Wilson upper (successes=0), so
+    they are still >= q_point — an honest wide upper where there is no vote support.
+
+    Raises on a non-finite member_count (caller fail-softs to NULL — never WORSE than status quo).
+    """
+    mc = float(member_count)
+    if not (math.isfinite(mc) and mc > 0.0):
+        raise ValueError(f"member_count must be positive-finite, got {member_count}")
+    out: dict[str, float] = {}
+    for bin_id, q_pt in q_point.items():
+        prob = aifs_probabilities.get(bin_id)
+        successes = 0.0 if prob is None else float(prob) * mc
+        ub = _wilson_upper_bound(successes, mc)
+        out[bin_id] = max(min(ub, 1.0), min(max(float(q_pt), 0.0), 1.0))
     return out
 
 
@@ -1371,11 +1448,32 @@ def _insert_posterior(
     metric: str,
     anchor_id: int,
 ) -> int:
-    # Wave-2 item 7 (2026-06-12): the per-city EB bias-correction of the center is
+    # Wave-2 item 7 (2026-06-12): the per-city EB bias-correction of the center was
     # DELETED — settlement-refuted as a wrong-set over-correction (2026-06-09 wiring
-    # audit, commit ff7f33dd5b). The center is never shifted by this layer; the
-    # zero-prior veto and downstream q_lcb floor are unchanged.
-    bias_shift_c = None
+    # audit, commit ff7f33dd5b) because it was fit on the thin live single_runs anchor
+    # (~6 settled dates → n_prior 1–4/city → overfit, net-WORSE per percity_corrected_oos.md).
+    #
+    # law-8 foundation fix (2026-06-14, cold_bias_metadata_root.md): the ROOT is a per-city
+    # 9km grid-cell-vs-settlement-station REPRESENTATIVENESS offset (Tokyo −2.18°C … Karachi
+    # +2.48°C, two-sign, lead-stable, raw-anchor-resident). It is correctable ONLY by a per-city
+    # de-bias, and SAFE only when fit on the FULL previous_runs history (n=23..890/city) with an
+    # activation guard (n>=n_min) + EB shrink toward 0 by SE + a do-no-harm walk-forward gate.
+    # The fitted, auditable artifact state/anchor_representativeness_debias.json carries δ_city;
+    # the loader (src/calibration/anchor_representativeness_debias.py) returns δ_city ONLY for an
+    # activated, gate-passing HIGH cell, else None. ARTIFACT-GATED, not a shadow flag: when the
+    # artifact is absent (current live state — gitignored generated file) the loader returns None
+    # → bias_shift_c stays None → BYTE-IDENTICAL to today. It goes live the moment the operator
+    # places the fitted artifact in state/ and restarts (same posture as the σ-floor artifact).
+    # SIGN: δ_city = anchor − settlement; applied below as corrected = raw − δ_city, so a cold
+    # anchor (δ<0) warms and a hot anchor (δ>0) cools; the corrected center feeds the fusion prior
+    # → the de-bias propagates into the fused μ*. FAIL-SOFT: any error → None (family-level fallback).
+    bias_shift_c: float | None
+    try:
+        from src.calibration.anchor_representativeness_debias import get_city_debias_c  # noqa: PLC0415
+
+        bias_shift_c = get_city_debias_c(request.city, metric)
+    except Exception:
+        bias_shift_c = None
     # THE_PATH member-vote smoothing: flag-gated additive Laplace/Dirichlet alpha so the AIFS
     # member prior is strictly positive on every bin and the soft_anchor.py:197-198 zero-prior
     # -inf veto can never make a bin un-hittable. None when flag OFF -> byte-identical to today.
@@ -1435,6 +1533,11 @@ def _insert_posterior(
     # family unfitted / w=0.0); float applied w when the mixture fires. Both come from the SAME
     # state/sigma_scale_fit.json family entry (MLE-fitted, operator law 2026-06-12).
     uniform_mixture_w_applied: float | None = None
+    # FITTED absolute σ-floor (step units) provenance (σ-refit report 2026-06-13, task #69). None when
+    # the floor is inert (artifact has no floor_steps key — the current live state — or the floor did
+    # not bind because the forecast was already wider); the applied floor_steps (e.g. 1.80) when it
+    # widened σ to floor_steps·step. From the SAME state/sigma_scale_fit.json family entry as k/w.
+    sigma_floor_steps_applied: float | None = None
     # Catch-all (open-ended bin) sigma-floor exemption (2026-06-10, Paris >=26C incident). Records
     # which open-ended bins had their floored mass capped at the un-floored predictive-sigma mass
     # so the floor could not inflate the tail. Empty tuple when no cap bit (no floor / no open-ended
@@ -1487,13 +1590,32 @@ def _insert_posterior(
             # The C-only restriction is enforced by the artifact (F family unfitted → (1.0,0.0)); the
             # explicit unit gate is kept as defense-in-depth so k can never touch an F family.
             _city_unit = _city_settlement_unit_from_bins(request)
-            _k, _uniform_w = _replacement_sigma_scale_lookup(_city_unit)
+            _k, _uniform_w, _floor_steps = _replacement_sigma_scale_lookup(_city_unit)
             if _city_unit != "C":
                 _k, _uniform_w = 1.0, 0.0  # defense-in-depth: only C families are corrected today
             if _k > 1.0:
                 _sigma_pred = _sigma_pred * _k
                 _sigma_used = _sigma_pred
                 sigma_scale_k_applied = _k
+            # ABSOLUTE σ-FLOOR in step units (σ-refit report 2026-06-13, task #69, GATE-2 fix).
+            # σ_core = max(σ_impl·k, floor_steps·step) where step = request.settlement_step_c (the SAME
+            # per-cell bin width the integrator's _half_step = step/2 derives from — reused, not
+            # recomputed, so the floor is the SAME physical dispersion across C/F unit families). The
+            # realized ring dispersion is ~constant in absolute (step) terms; the floor widens an
+            # over-sharp forecast UP TO that dispersion and never narrows a forecast already wider
+            # (max() only widens). STRICT BACKWARD COMPATIBILITY: the live artifact has NO floor_steps
+            # key ⇒ _floor_steps == 0.0 ⇒ floor_value == 0.0 ⇒ max(σ_used, 0.0) == σ_used (UNCHANGED).
+            # Applied unconditionally (NOT gated on _k>1) because the floor must be able to bind even at
+            # k=1.0 (the refit's form is k=1.0 + absolute floor). m / the second-Normal is inert at w=0.
+            # The floor widens _sigma_used ONLY and leaves _sigma_pred (the honest un-floored σ) intact,
+            # exactly like the settlement σ-floor below — so the catch-all coherence cap (which caps
+            # open-ended bins at their honest, un-floored mass) still bars the floor from inflating a
+            # far catch-all (Paris >=26 incident invariant).
+            if _floor_steps > 0.0:
+                _floor_value = float(_floor_steps) * float(request.settlement_step_c)
+                if math.isfinite(_floor_value) and _floor_value > _sigma_used:
+                    _sigma_used = _floor_value
+                    sigma_floor_steps_applied = float(_floor_steps)
             _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
                 request, metric=metric
             )
@@ -1712,10 +1834,12 @@ def _insert_posterior(
             settlement_sigma_floor_c = None
             replacement_sigma_basis = None
             settlement_sigma_floor_catchall_capped = ()
-            # The fused-q (incl. any σ-scale / uniform-mixture) was discarded → soft-anchor q has
-            # neither applied. Reset both provenance fields so they cannot misreport on the fallback q.
+            # The fused-q (incl. any σ-scale / uniform-mixture / σ-floor) was discarded → soft-anchor q
+            # has none applied. Reset all three provenance fields so they cannot misreport on the
+            # fallback q.
             sigma_scale_k_applied = None
             uniform_mixture_w_applied = None
+            sigma_floor_steps_applied = None
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
@@ -1724,37 +1848,59 @@ def _insert_posterior(
                 )
             except Exception:
                 pass
-    # SOFT-ANCHOR Q_LCB FALLBACK (2026-06-12) — PROMOTE the Wilson-over-AIFS-votes bound into the
-    # materializer so NO posterior is born with a NULL q_lcb. Reached ONLY when the fused-center
-    # bootstrap did not produce a bound (q_lcb_map is None): flag-off, no BAYES_PRECISION_FUSION
-    # override (CAPTURE_MISSING — the persisted current capture was absent), predictive_sigma None,
-    # or a fused-q build failure. The bound is the SAME estimator the live decision path computed at
-    # read time (single-authority law) — built from the AIFS member-vote probabilities the soft-anchor
-    # posterior already carries — now computed ONCE here with its OWN basis. FAIL-SOFT: any error
-    # leaves q_lcb_map None (NULL written, status-quo Wilson read-time fallback) — never WORSE.
-    # The DISTINCT basis means the calibration credential reader does NOT treat this as the certified
-    # bootstrap basis, so a CAPTURE_MISSING / SOFT_ANCHOR row is STILL not live-eligible (correct:
-    # n=21<min_n=30 settled CAPTURE_MISSING cells → insufficient coverage to license).
+    # SOFT-ANCHOR Q_LCB/Q_UCB FALLBACK (2026-06-12; q_ucb added 2026-06-13) — PROMOTE the
+    # Wilson-over-AIFS-votes BOUNDS into the materializer so NO posterior is born with a NULL bound.
+    # Reached ONLY when the fused-center bootstrap did not produce a bound (q_lcb_map is None):
+    # flag-off, no BAYES_PRECISION_FUSION override (CAPTURE_MISSING — the persisted current capture
+    # was absent), predictive_sigma None, or a fused-q build failure. The bounds are the SAME
+    # estimator the live decision path computed at read time (single-authority law) — built from the
+    # AIFS member-vote probabilities the soft-anchor posterior already carries — now computed ONCE
+    # here with their OWN basis.
+    #
+    # Q_UCB ROOT FIX (2026-06-13): the soft-anchor path used to build ONLY the one-sided q_lcb and
+    # leave q_ucb NULL, so 100% of CAPTURE_MISSING rows (the entire q_ucb-less population on the
+    # 06-14 surface: 158/158, fingerprinted by replacement_q_mode=CAPTURE_MISSING +
+    # q_lcb_basis=wilson_aifs_member_votes) were born HALF-BOUNDED. A fused row never exists on this
+    # path (the fused inputs mu*/center_sigma are genuinely absent — no honest FUSED upper band can
+    # be built), so the operator's "input genuinely missing -> mark non-tradeable, do NOT serve a
+    # half-bound" rule governs: the row carries BOTH genuine Wilson bounds (the upper is the exact
+    # symmetric counterpart of the lower, same inputs/z) and STAYS non-tradeable by basis + q_mode.
+    # The bounds are built ATOMICALLY (both-or-neither): a half-bound is never written.
+    #
+    # FAIL-SOFT: any error leaves q_lcb_map AND q_ucb_map None (NULL written, status-quo Wilson
+    # read-time fallback) — never WORSE. The DISTINCT basis means the calibration credential reader
+    # does NOT treat this as the certified bootstrap basis, so a CAPTURE_MISSING / SOFT_ANCHOR row is
+    # STILL not live-eligible (correct: n=21<min_n=30 settled CAPTURE_MISSING cells → insufficient
+    # coverage to license).
     if q_lcb_map is None:
         try:
             _aifs_probs = dict(result.aifs_probabilities.probabilities)
             _member_count = float(len(result.aifs_probabilities.member_values_c)) or 51.0
-            q_lcb_map = _build_soft_anchor_wilson_lcb(
+            _soft_lcb = _build_soft_anchor_wilson_lcb(
                 aifs_probabilities=_aifs_probs,
                 member_count=_member_count,
                 q_point=q,
             )
+            _soft_ucb = _build_soft_anchor_wilson_ucb(
+                aifs_probabilities=_aifs_probs,
+                member_count=_member_count,
+                q_point=q,
+            )
+            # Atomic both-or-neither: only publish once BOTH bounds built (q_ucb is the genuine
+            # symmetric Wilson upper, never a half-bound). The bundle reader's both-bounds
+            # tradeable-grade predicate then sees a consistent carrier shape on every row.
+            q_lcb_map = _soft_lcb
+            q_ucb_map = _soft_ucb
             q_lcb_basis = _QLCB_SOFT_ANCHOR_BASIS
-            # No q_ucb on this path — the Wilson member-vote bound is one-sided (a lower bound only).
-            # q_ucb stays NULL; the bundle reader handles a present-lcb / absent-ucb posterior.
         except Exception as _wexc:
             q_lcb_map = None
+            q_ucb_map = None
             q_lcb_basis = None
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                    "replacement_0_1 soft-anchor Wilson q_lcb fallback skipped "
-                    "(fail-soft to NULL, read-time Wilson unchanged): %s",
+                    "replacement_0_1 soft-anchor Wilson q_lcb/q_ucb fallback skipped "
+                    "(fail-soft to NULL bounds, read-time Wilson unchanged): %s",
                     _wexc,
                 )
             except Exception:
@@ -1853,6 +1999,10 @@ def _insert_posterior(
         # Authority: docs/operations/c3_sigma_calibration_surface_2026-06-12.md
         "sigma_scale_k_applied": sigma_scale_k_applied,
         "uniform_mixture_w_applied": uniform_mixture_w_applied,
+        # FITTED absolute σ-floor (step units) provenance (σ-refit report 2026-06-13, task #69). None
+        # when inert (live artifact has no floor_steps key, or the floor did not bind); the applied
+        # floor_steps when σ_core was lifted to floor_steps·step. Same artifact family entry as k/w.
+        "sigma_floor_steps_applied": sigma_floor_steps_applied,
         # Catch-all exemption (2026-06-10): open-ended bins whose floored mass was capped at the
         # un-floored predictive-sigma mass (the floor may only flatten, never inflate a catch-all).
         "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),
@@ -1870,9 +2020,15 @@ def _insert_posterior(
             if q_lcb_basis == _QLCB_SOFT_ANCHOR_BASIS
             else "absent_no_calibrated_lcb_available"
         ),
+        # q_ucb role is BASIS-AWARE, symmetric with q_lcb_json_role: the soft-anchor Wilson upper
+        # bound (built alongside its lower twin when the fused-center bootstrap did not run) must
+        # NOT be mislabeled as the certified bootstrap ucb. q_ucb is published only when q_lcb was
+        # (atomic both-or-neither per path), so the basis fully determines the role.
         "q_ucb_json_role": (
             "fused_center_bootstrap_ucb"
-            if q_ucb_map is not None
+            if (q_ucb_map is not None and q_lcb_basis == _QLCB_BASIS)
+            else "wilson_aifs_member_votes_ucb"
+            if (q_ucb_map is not None and q_lcb_basis == _QLCB_SOFT_ANCHOR_BASIS)
             else "absent_no_calibrated_ucb_available"
         ),
         "q_lcb_basis": q_lcb_basis,

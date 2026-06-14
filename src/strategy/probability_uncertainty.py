@@ -209,6 +209,11 @@ class ProbabilityUncertainty:
     alpha: float = DEFAULT_ALPHA
     # Non-field metadata for downstream provenance; excluded from eq/hash key.
     n_samples: int = field(default=0, compare=False)
+    # N_eff shadow fields (C3): populated when n_eff_override is supplied to
+    # probability_uncertainty_from_samples. Never affect q_lcb unless the caller
+    # opts in to the corrected value. Both excluded from eq/hash.
+    q_lcb_neff_corrected: float | None = field(default=None, compare=False)
+    neff_correction_source: str | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         for name in ("q_point", "q_lcb", "q_ucb"):
@@ -253,6 +258,7 @@ def probability_uncertainty_from_samples(
     *,
     alpha: float = DEFAULT_ALPHA,
     penalties: UncertaintyPenalties | None = None,
+    n_eff_override: float | None = None,
 ) -> ProbabilityUncertainty:
     """Build a :class:`ProbabilityUncertainty` from ONE side's probability samples.
 
@@ -271,6 +277,24 @@ def probability_uncertainty_from_samples(
     q_lcb is a pure function of the probability samples and penalties ONLY. It
     never consumes cost/price samples — that is :func:`edge_lcb`'s job
     (Hidden #2). Do not derive q_lcb from edge_lcb.
+
+    N_eff width correction (C3, addendum A10):
+        When ``n_eff_override`` is provided, a corrected q_lcb is computed and
+        stored in ``result.q_lcb_neff_corrected`` for shadow logging. The main
+        ``q_lcb`` field is ALWAYS the raw (N=n_samples) value — callers that
+        opt in to the correction must read ``q_lcb_neff_corrected`` explicitly.
+        This guarantees flag-OFF is byte-identical to prior behavior.
+
+        Correction formula (half-width scaling)::
+
+            raw_half_width    = q_point - raw_lcb          (downward margin at alpha)
+            corrected_hw      = raw_half_width * sqrt(N / N_eff)
+            q_lcb_neff_raw    = q_point - corrected_hw
+            q_lcb_neff        = clip(q_lcb_neff_raw - Σ penalties, 0, 1)
+            q_lcb_neff        = min(q_lcb_neff, q_point)   (bound invariant)
+
+        Smaller N_eff → larger correction ratio → wider interval (lower q_lcb).
+        At N_eff = N the correction is identity (ratio = 1.0).
     """
     _validate_alpha(alpha)
     arr = _as_clean_samples(q_side_samples)
@@ -298,6 +322,29 @@ def probability_uncertainty_from_samples(
     # when the upper quantile degenerates below it.
     q_ucb = max(q_ucb, q_point)
 
+    # N_eff shadow correction (C3). Populate shadow fields; never alter q_lcb.
+    q_lcb_neff: float | None = None
+    neff_src: str | None = None
+    if n_eff_override is not None and n_eff_override > 0.0:
+        n_raw = float(arr.size)
+        raw_half_width = q_point - raw_lcb  # may be negative if raw_lcb > q_point (degenerate)
+        if raw_half_width > 0.0 and n_raw > 0.0:
+            correction_ratio = float(np.sqrt(n_raw / n_eff_override))
+            corrected_hw = raw_half_width * correction_ratio
+            q_lcb_neff_raw = q_point - corrected_hw
+            q_lcb_neff = float(np.clip(q_lcb_neff_raw - pen.total(), 0.0, 1.0))
+            q_lcb_neff = min(q_lcb_neff, q_point)
+            neff_src = (
+                f"neff_correction_n_raw={n_raw:.0f}_n_eff={n_eff_override:.3f}"
+                f"_ratio={correction_ratio:.4f}_q_lcb_raw={q_lcb:.4f}"
+                f"->q_lcb_neff={q_lcb_neff:.4f}"
+            )
+        else:
+            # Degenerate samples (raw_lcb >= q_point): correction is undefined;
+            # record the sentinel rather than producing a spurious corrected bound.
+            q_lcb_neff = q_lcb
+            neff_src = f"neff_correction_skipped_degenerate_n_eff={n_eff_override:.3f}"
+
     return ProbabilityUncertainty(
         q_point=q_point,
         q_samples_hash=_hash_samples(arr),
@@ -310,6 +357,8 @@ def probability_uncertainty_from_samples(
         multiple_comparison_penalty=float(pen.multiple_comparison_penalty),
         alpha=float(alpha),
         n_samples=int(arr.size),
+        q_lcb_neff_corrected=q_lcb_neff,
+        neff_correction_source=neff_src,
     )
 
 

@@ -49,20 +49,7 @@ if TYPE_CHECKING:
 from src.calibration.manager import edge_threshold_multiplier, get_calibrator
 from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
-# Zeus #64 FT-ship F1 (2026-05-26): full_transport_live entry-path wiring.
-# These imports enable the evaluator to call p_raw_vector_with_error_model and
-# reconstruct a PredictiveErrorModel from model_bias_ens — mirroring the
-# logic already present in monitor_refresh._resolve_ft_error_model.
-# Cannot import _resolve_ft_error_model directly: monitor_refresh imports evaluator
-# (circular). Logic is inlined below as _resolve_ft_error_model_for_entry().
-# Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
 from src.calibration.ens_bias_repo import read_bias_model as _read_bias_model_for_entry
-from src.calibration.ens_error_model import (
-    PredictiveErrorModel as _PredictiveErrorModel,
-    predictive_error_from_posterior as _predictive_error_from_posterior,
-    p_raw_vector_with_error_model as _p_raw_vector_with_error_model,
-)
-from src.calibration.ens_bias_model import PosteriorBias as _PosteriorBias
 from src.config import (
     CONFIG_DIR,
     City,
@@ -131,8 +118,6 @@ from src.state.portfolio import (
     cluster_exposure_result_for_bankroll,
     has_same_token_open,
     has_inflight_exit_for_token,
-    is_reentry_blocked,
-    is_token_on_cooldown,
     portfolio_heat_for_bankroll,
 )
 from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
@@ -3476,85 +3461,6 @@ def _resolve_unified_entry_bias_native(
         return None
 
 
-def _resolve_ft_error_model_for_entry(
-    conn,
-    city,
-    target_date: str,
-    metric_str: str,
-    lead_hours: float | None = None,
-) -> "_PredictiveErrorModel | None":
-    """Entry-path analogue of monitor_refresh._resolve_ft_error_model.
-
-    Zeus #64 FT-ship F1 (2026-05-26): resolves a PredictiveErrorModel from
-    model_bias_ens for the entry evaluator so the full_transport_live flag
-    drives BOTH the monitor refresh path AND the entry p_raw computation
-    symmetrically.
-
-    Cannot reuse monitor_refresh._resolve_ft_error_model directly: monitor_refresh
-    imports evaluator (circular).  The logic is byte-equivalent to the monitor
-    version; any future change to the resolution algorithm must be applied to both.
-
-    SEV-1 fix (2026-05-29): ``lead_hours`` param added. When provided (and flag ON),
-    the computed lead_bucket is passed to read_bias_model so the correct per-bucket
-    row is served (fail-closed: returns None if no row for that bucket). When absent
-    (legacy callers), no bucket filter is applied — behaviour is unchanged for
-    flag-OFF or callers that don't yet pass lead_hours.
-
-    Returns None on flag-OFF, missing config, or missing model row (fail-open —
-    caller falls back to plain p_raw_vector_from_maxes).  Logging mirrors the
-    monitor version so operators see the same WARNING on both paths.
-    Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
-    """
-    if not bool(settings["feature_flags"].get("full_transport_live_enabled", False)):
-        return None
-    try:
-        cfg = entry_forecast_config()
-        track = track_for_metric(cfg, metric_str)
-        live_data_version = data_version_for_track(track)
-    except Exception:
-        return None
-    # 2026-05-27 bugfix: target_date is already a string (MarketCandidate.target_date: str);
-    # prior call `target_date.isoformat()` raised AttributeError → outer except swallowed
-    # the trace → ALL opening_hunt candidates silently dropped (49→0 trades blocker).
-    season = season_from_date(str(target_date), lat=city.lat)
-    _FT_FAMILY = "full_transport_v1"
-    # SEV-1: compute lead_bucket from lead_hours when available (flag-gated: no-op when OFF).
-    _lb: str | None = None
-    if lead_hours is not None:
-        try:
-            from src.calibration.lead_bucket import lead_bucket as _lb_fn  # noqa: PLC0415
-            _lb = _lb_fn(float(lead_hours))
-        except Exception:
-            _lb = None
-    row = _read_bias_model_for_entry(
-        conn,
-        city=city.name,
-        season=season,
-        metric=metric_str,
-        live_data_version=live_data_version,
-        month=None,
-        error_model_family=_FT_FAMILY,
-        lead_bucket=_lb,
-    )
-    if row is None:
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
-            "full_transport_live entry: flag ON but no VERIFIED model_bias_ens row for "
-            "city=%r season=%r metric=%r live_data_version=%r family=%r — plain p_raw",
-            city.name, season, metric_str, live_data_version, _FT_FAMILY,
-        )
-        return None
-    posterior = _PosteriorBias(
-        bias=float(row["bias_c"]),
-        sd=float(row["bias_sd_c"]),
-        weight_live=0.0,
-        n_live=0,
-        disagreement_high=False,
-        heterogeneity_var=float(row["heterogeneity_var_c2"]),
-    )
-    return _predictive_error_from_posterior(posterior, float(row["residual_sd_c"]))
-
-
 def evaluate_candidate(
     candidate: MarketCandidate,
     conn,
@@ -4306,19 +4212,6 @@ def evaluate_candidate(
                     rejection_reason_enum=NoTradeReason.EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID,
                     rejection_reason_detail="EXECUTABLE_FORECAST_MEMBER_EXTREMA_INVALID",
                 )]
-            # Zeus #64 FT-ship F1 (2026-05-26): full_transport_live entry wiring.
-            # Attempt to resolve a VERIFIED PredictiveErrorModel; falls back to plain
-            # p_raw_vector_from_maxes when flag OFF, model absent, or conn unavailable.
-            # GFS crosscheck site (gfs_p = p_raw_vector_from_maxes below) is NOT wired:
-            # model_bias_ens is trained on TIGGE ENS members; applying it to GFS
-            # members would be a wrong-error-model regression.
-            # Authority: FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
-            # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row
-            # is resolved. lead_days is already computed above (line ~3867).
-            _ft_model = _resolve_ft_error_model_for_entry(
-                conn, city, target_date, temperature_metric.temperature_metric,
-                lead_hours=lead_days * 24.0,
-            )
             # D2 unify: bias-SHIFT only (no residual widening) when the new flag is ON;
             # takes precedence over the legacy ft model. Identity-Platt set downstream.
             _unified_bias_native = _resolve_unified_entry_bias_native(
@@ -4334,17 +4227,6 @@ def evaluate_candidate(
                     n_mc=ensemble_n_mc(),
                 )
                 _unified_bias_applied = True
-            elif _ft_model is not None:
-                p_raw = _p_raw_vector_with_error_model(
-                    member_extrema,
-                    _ft_model,
-                    city,
-                    settlement_semantics,
-                    bins,
-                    member_unit=ens_result.get("members_unit", city.settlement_unit or "F"),
-                    n_mc=ensemble_n_mc(),
-                    rng=None,
-                )
             else:
                 p_raw = p_raw_vector_from_maxes(
                     member_extrema,
@@ -4375,13 +4257,6 @@ def evaluate_candidate(
             )
         else:
             assert ens is not None
-            # Zeus #64 FT-ship F1 (2026-05-26): ens-signal branch FT wiring.
-            # Same error-model resolution as the period_extrema branch above.
-            # SEV-1 fix (2026-05-29): pass lead_hours for per-bucket row selection.
-            _ft_model_ens = _resolve_ft_error_model_for_entry(
-                conn, city, target_date, temperature_metric.temperature_metric,
-                lead_hours=lead_days * 24.0,
-            )
             # D2 unify: bias-SHIFT only (no residual widening) when the new flag is ON.
             _unified_bias_native = _resolve_unified_entry_bias_native(
                 conn, city, target_date, temperature_metric.temperature_metric,
@@ -4397,18 +4272,6 @@ def evaluate_candidate(
                 )
                 _unified_bias_applied = True
                 analysis_member_extrema = _shifted
-            elif _ft_model_ens is not None:
-                p_raw = _p_raw_vector_with_error_model(
-                    ens.member_extrema,
-                    _ft_model_ens,
-                    city,
-                    settlement_semantics,
-                    bins,
-                    member_unit=city.settlement_unit or "F",
-                    n_mc=ensemble_n_mc(),
-                    rng=None,
-                )
-                analysis_member_extrema = ens.member_extrema
             else:
                 p_raw = ens.p_raw_vector(bins, n_mc=ensemble_n_mc())
                 analysis_member_extrema = ens.member_extrema
@@ -5345,26 +5208,10 @@ def evaluate_candidate(
                 rejection_reason_enum=NoTradeReason.PROBABILITY_SANITY_GATE,
                 rejection_reason_detail=_san_reason,
             )]
-    elif temperature_metric.is_high():
-        # P0-D shadow telemetry: run validate_high_distribution for non-day0 HIGH
-        # strategies (center_buy, opening_inertia, imminent_open_capture) — log only,
-        # do NOT block.  Gated to is_high() because validate_high_distribution is a
-        # HIGH-metric validator; LOW candidates are excluded here.
-        # Promotes to hard gate after replay confirms threshold calibration.
-        _shadow_settled = settlement_semantics.round_values(analysis_member_extrema)
-        _shadow_ok, _shadow_reason = validate_high_distribution(
-            bins=bins,
-            p_raw=p_raw,
-            p_cal=p_cal,
-            member_samples=_shadow_settled,
-            market_prices=p_market,
-            strategy_key=f"shadow:{city.name}:{target_date}:{selected_method}",
-        )
-        if not _shadow_ok:
-            logger.warning(
-                "[PROBABILITY_SANITY_SHADOW] strategy=%s city=%s date=%s metric=high reason=%s",
-                selected_method, city.name, target_date, _shadow_reason,
-            )
+    # P0-D non-day0 HIGH validate_high_distribution SHADOW (log-only) DELETED 2026-06-14
+    # (gate-mass collapse: log-only shadow, no telemetry sink, no promotion path). Non-day0
+    # HIGH is already covered by the per-edge probability_edge_bin_sanity gate below. The
+    # day0 HIGH hard gate (above) is untouched.
 
     # LIVE-PROB-P0 (2026-05-23): symmetric cumulative tail-mass discrepancy gate.
     # Covers ALL temperature_metric (HIGH and LOW), ALL non-day0 strategies.
@@ -5829,9 +5676,9 @@ def evaluate_candidate(
                 rejection_reason_detail=source_quality_rejection,
             ))
             continue
-        source_quality_haircut = _source_quality_kelly_haircut(strategy_key, ens_result)
-        if source_quality_haircut != 1.0:
-            decision_validations.append(f"partial_source_kelly_haircut_{source_quality_haircut:g}x")
+        # D3 source-quality Kelly haircut DELETED 2026-06-14 (operator no-caps law:
+        # sizing = q_lcb + Kelly only, no continuous data-availability haircut). The
+        # BINARY _source_quality_policy_rejection gate above STAYS (no-data => no-trade).
         # LIVE-PROB-P0 per-edge phantom gate (operator binding spec §B, 2026-05-23):
         # probability_edge_bin_sanity fires only when edge bin is sub-floor, gap>=min_edge_gap,
         # ratio >= odds_ratio_threshold, AND settled_member_support < min_edge_bin_member_support.
@@ -5903,13 +5750,11 @@ def evaluate_candidate(
                     _eb_rej.near_tail_p_market = _eb_telemetry_dict.get("near_tail_p_market")
                     decisions.append(_eb_rej)
                     continue
-                else:  # shadow
-                    logger.warning(
-                        "[PROB_EDGE_BIN_SANITY_SHADOW] strategy=%s city=%s date=%s bin_idx=%s "
-                        "support=%.4f reason=%s",
-                        selected_method, city.name, target_date, bin_idx,
-                        _eb_telemetry_dict.get("edge_bin_member_support", 0.0), _eb_reason,
-                    )
+                # shadow mode = phantom detected but NON-blocking: the
+                # PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW reason is still stamped as
+                # probability_sanity_reason telemetry below (no EdgeDecision, no
+                # continue). Dead log-only else-branch removed 2026-06-14 (gate-mass
+                # collapse); the dead enum member rides the schema-enum wave.
             # Carry telemetry dict forward so loop-at-exit can stamp it on all decisions
             # (both rejection path above and pass-through path here reach this point
             # only on shadow mode or pass — bind to local _edge_bin_telemetry).
@@ -5990,40 +5835,12 @@ def evaluate_candidate(
             ))
             continue
 
-        # Anti-churn layers 5, 6, 7
-        if is_reentry_blocked(portfolio, city.name, edge.bin.label, target_date):
-            decisions.append(EdgeDecision(
-                False,
-                edge=edge,
-                decision_id=_decision_id(),
-                rejection_stage="ANTI_CHURN",
-                rejection_reasons=[NoTradeReason.REENTRY_BLOCKED.value],
-                selected_method=selected_method,
-                applied_validations=[*decision_validations, "anti_churn"],
-                decision_snapshot_id=snapshot_id,
-                edge_source=edge_source,
-                strategy_key=strategy_key,
-                rejection_reason_enum=NoTradeReason.REENTRY_BLOCKED,
-                rejection_reason_detail="REENTRY_BLOCKED",
-            ))
-            continue
+        # Anti-churn Layer 7 only. Layers 5 (is_reentry_blocked, 20-min reversal
+        # time-ban) + 6 (is_token_on_cooldown, 1-hr post-fail time-ban) DELETED
+        # 2026-06-14 (operator no-caps law: time-bans not derived from
+        # belief/quote/edge/Kelly/arm). REENTRY_BLOCKED / TOKEN_COOLDOWN enum members
+        # retained (schema CHECK-pin coupling); no emitter now.
         check_token = tokens["token_id"] if edge.direction == "buy_yes" else tokens["no_token_id"]
-        if is_token_on_cooldown(portfolio, check_token):
-            decisions.append(EdgeDecision(
-                False,
-                edge=edge,
-                decision_id=_decision_id(),
-                rejection_stage="ANTI_CHURN",
-                rejection_reasons=[NoTradeReason.TOKEN_COOLDOWN.value],
-                selected_method=selected_method,
-                applied_validations=[*decision_validations, "anti_churn"],
-                decision_snapshot_id=snapshot_id,
-                edge_source=edge_source,
-                strategy_key=strategy_key,
-                rejection_reason_enum=NoTradeReason.TOKEN_COOLDOWN,
-                rejection_reason_detail="TOKEN_COOLDOWN",
-            ))
-            continue
         # Layer 7 (v2): token-keyed dedup gate with decision-time DB read.
         # Probe-6 (2026-05-17): execution_facts absent → venue_commands join path
         # in has_inflight_exit_for_token (venue_trade_facts → venue_commands).
@@ -6071,7 +5888,6 @@ def evaluate_candidate(
         # operator can disable without redeploying code. Skipped entirely when
         # conn is None (legacy test paths exercise evaluate_candidate without
         # a DB; production always passes a live connection).
-        ddd_discount = 0.0
         if conn is not None and _strict_feature_flag("ddd_v2_enabled", default=True):
             metric_name = temperature_metric.temperature_metric
             if metric_name == "high":
@@ -6135,16 +5951,10 @@ def evaluate_candidate(
                 ))
                 continue
 
-            # Rail 2 DISCOUNT path — keep the discount value; applied to km below.
-            # Note: result.discount is already max(mismatch_rate, raw_discount)
-            # so it composes oracle penalty cleanly. We subtract the
-            # mismatch_rate component because oracle.penalty_multiplier already
-            # encodes that gate; only the *additional* DDD-derived shortfall
-            # discount layers on top of Kelly here.
-            raw_ddd = ddd_result.diagnostic.get("final_discount_pre_mismatch") or 0.0
-            ddd_discount = float(raw_ddd)
-            if ddd_discount > 0.0:
-                decision_validations.append(f"ddd_v2_discount_{ddd_discount:.4f}")
+            # D4: Rail-2 DISCOUNT Kelly-discount capture DELETED 2026-06-14 (no-caps
+            # law). Rail-1 HALT above is the only honest DDD gate retained; the
+            # DISCOUNT action no longer haircuts Kelly. evaluate_ddd_for_decision
+            # still runs to enforce HALT.
 
         # Kelly sizing
         decision_validations.extend(["kelly_sizing", "dynamic_multiplier"])
@@ -6225,9 +6035,10 @@ def evaluate_candidate(
         if current_variance_exp is not None and current_variance_exp > 0.10:  # Variance saturation
             risk_throttle *= 0.5
             decision_validations.append(f"regime_throttled_variance_50pct:{current_variance_exp:.3f}")
-        if current_heat > 0.25: # Global heat saturation
-            risk_throttle *= 0.5
-            decision_validations.append("global_heat_throttled_50pct")
+        # D5: global-heat risk_throttle *= 0.5 DELETED 2026-06-14 — redundant double-
+        # count of portfolio_heat, which dynamic_kelly_mult already attenuates via
+        # 1/(1+heat) (kelly.py). The gross_exp / variance_exp branches above are
+        # distinct cluster quantities (NOT ingested by Kelly) and STAY.
 
         try:
             # A6 (PLAN.md §A6): pass strategy_key=None so dynamic_kelly_mult
@@ -6348,26 +6159,11 @@ def evaluate_candidate(
             km = km / policy.threshold_multiplier
             decision_validations.append(f"strategy_policy_threshold_{policy.threshold_multiplier:g}x")
 
-        # Oracle penalty was previously applied here as a separate
-        # multiplication. Post-A6 the oracle factor is folded into
-        # phase_aware_kelly_multiplier (above), so this block intentionally
-        # has no live behavior — kept as a no-op shell that logs CAUTION
-        # cases for backward-compat with existing log consumers expecting
-        # the "strategy_policy_threshold_*" annotation. Removable in the
-        # follow-up cleanup PR.
-        if oracle.penalty_multiplier < 1.0:
-            decision_validations.append(
-                f"oracle_penalty_observed_{oracle.penalty_multiplier:g}x"
-            )
-
-        # DDD v2 Rail 2 discount: reduce Kelly by the remaining multiplier. Applied
-        # AFTER oracle penalty so the two compose multiplicatively. ddd_discount
-        # is 0.0 unless Rail 2 fired (Rail 1 already short-circuited with HALT).
-        if ddd_discount > 0.0:
-            # Remaining Kelly multiplier after the discount is (1 - ddd_discount);
-            # de-obfuscated from the value-identical (1/x - 1) * x (§0.2 / FIX-5a).
-            km *= max(0.0, one_minus(ddd_discount))
-        km *= source_quality_haircut
+        # D4 DDD Rail-2 continuous discount + D3 source-quality haircut DELETED
+        # 2026-06-14 (operator no-caps law: no continuous Kelly haircuts). DDD Rail-1
+        # HALT (binary no-trade on catastrophic coverage) is untouched above; the
+        # binary source-quality rejection gate is untouched above. Kelly size = q_lcb
+        # + fractional-Kelly only.
         
         # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.
         try:
