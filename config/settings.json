@@ -112,8 +112,6 @@
     "real_order_submit_enabled": true,
     "durable_submit_outbox_enabled": true,
     "edli_live_operator_authorized": true,
-    "edli_arm_gate_emit_enabled": false,
-    "edli_arm_gate_artifact_path": "state/edli_arm_gate_artifact.json",
     "edli_live_promotion_artifact_path": "state/edli_live_promotion_artifact.json",
     "edli_live_max_unresolved_unknowns": 0,
     "edli_live_min_realized_edge_bps": 0,
