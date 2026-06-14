@@ -4231,6 +4231,100 @@ def _market_discovery_cycle() -> None:
         _market_discovery_lock.release()
 
 
+@_scheduler_job("afternoon_snapshot_capture")
+def _afternoon_snapshot_capture_cycle() -> None:
+    """30-min dedicated capture for same-day SETTLEMENT_DAY markets (hours_to_resolution ≤12).
+
+    Afternoon-capture fix (2026-06-14): the universe-wide market_discovery runs every
+    5 min and the EDLI warm cycle runs every 20s — both target PENDING families and the
+    full weather universe.  Neither explicitly targets the sub-12h same-day window that
+    corresponds to the nowcast decision window (cities whose local-afternoon aligns with
+    the pre-12:00 UTC capture window).  This job fills that gap by:
+
+      1. Running a slug-pattern–only discovery scoped to TODAY (the slug fix above ensures
+         today is always in the target-date list after UTC noon).
+      2. Filtering to markets with hours_to_resolution in (0, 12] — the same-day
+         afternoon window.
+      3. Calling the standard rate-limited refresh_executable_market_substrate_snapshots
+         so orderbook top-bid/ask + depth are recorded at ≥30-min cadence through the
+         settlement window for every active same-day market.
+
+    SAFETY / THROTTLE: reuses the existing CLOB capture path (refresh_executable_market_
+    substrate_snapshots with a conservative 60s wall-clock budget).  max_outcomes=4 per
+    city (the standard cap).  max_instances=1/coalesce prevents stacked CLOB fan-out.
+    The job runs only when there are same-day markets open (hours_to_resolution > 0);
+    if today's markets are already closed (past 12:00 UTC) find_slug_pattern_weather_
+    markets returns [] and the job is a sub-100ms no-op.  NOT a trading or decision
+    path — capture only, no belief/flag/order change.
+    """
+    acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+    if not acquired:
+        logger.info("afternoon_snapshot_capture: skipped — substrate refresh already running")
+        return
+    try:
+        from src.data.market_scanner import (
+            find_slug_pattern_weather_markets,
+            refresh_executable_market_substrate_snapshots,
+        )
+        from src.data.polymarket_client import PolymarketClient
+        from src.state.db import get_trade_connection
+
+        # Slug-pattern–only fetch scoped to same-day markets with ≤12h to resolution.
+        # hours_to_resolution ≤12 catches the SETTLEMENT_DAY window; >0 excludes
+        # already-expired markets (end_at <= now) which Gamma returns empty for.
+        # find_slug_pattern_weather_markets always includes today (slug fix above).
+        now_utc = datetime.now(timezone.utc)
+        events = find_slug_pattern_weather_markets(min_hours_to_resolution=0.0)
+        same_day_events = [
+            e for e in events
+            if isinstance(e, dict)
+            and e.get("hours_to_resolution") is not None
+            and 0 < float(e["hours_to_resolution"]) <= 12.0
+        ]
+        if not same_day_events:
+            logger.debug("afternoon_snapshot_capture: no same-day markets open (hours_to_resolution ≤12), skipping")
+            return
+        conn = get_trade_connection(write_class="live")
+        try:
+            _clob_timeout = max(
+                1.0,
+                float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
+            )
+            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+                summary = refresh_executable_market_substrate_snapshots(
+                    conn,
+                    markets=same_day_events,
+                    clob=clob,
+                    captured_at=now_utc,
+                    scan_authority="VERIFIED",
+                    refresh_reason="afternoon_snapshot_capture",
+                    # Conservative 60s budget — same-day markets are a subset of the
+                    # universe, so this runs well within the interval (30 min).  The
+                    # standard per-city cap (ZEUS_MARKET_DISCOVERY_SNAPSHOT_MAX_OUTCOMES)
+                    # applies — no unbounded fan-out.
+                    budget_seconds=float(
+                        os.environ.get("ZEUS_AFTERNOON_CAPTURE_BUDGET_SECONDS", "60.0")
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        logger.info(
+            "afternoon_snapshot_capture: same_day_markets=%d executable_snapshots=%s",
+            len(same_day_events),
+            summary,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
+        logger.error(
+            "afternoon_snapshot_capture: capture raised (non-fatal): %r", exc
+        )
+    finally:
+        try:
+            _market_substrate_refresh_lock.release()
+        except RuntimeError:
+            pass
+
+
 @_scheduler_job("new_listing_scout")
 def _new_listing_scout_cycle() -> None:
     """Lightweight 60s new-listing scout: detect brand-new Polymarket weather markets.
@@ -9073,6 +9167,16 @@ def main():
             max_instances=1,
             coalesce=True,
         )
+        # AFTERNOON CAPTURE — legacy_cron mode (2026-06-14): see EDLI registration below.
+        scheduler.add_job(
+            _afternoon_snapshot_capture_cycle,
+            "interval",
+            minutes=30,
+            id="afternoon_snapshot_capture",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 120.0),
+            max_instances=1,
+            coalesce=True,
+        )
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("enabled"):
         scheduler.add_job(
             _edli_event_reactor_cycle,
@@ -9244,6 +9348,22 @@ def main():
             minutes=5,
             id="market_discovery",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 90.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # AFTERNOON CAPTURE (2026-06-14): dedicated 30-min capture for same-day
+        # SETTLEMENT_DAY markets (hours_to_resolution ≤12).  The universe-wide
+        # market_discovery and EDLI warm cycle target PENDING families; neither
+        # explicitly sweeps the sub-12h same-day window.  This job ensures
+        # orderbook snapshots are recorded at ≥30-min cadence through the local-
+        # afternoon / pre-close window for backtesting and microstructure analysis.
+        # Capture-only (no decision/order); fail-soft; max_instances=1/coalesce.
+        scheduler.add_job(
+            _afternoon_snapshot_capture_cycle,
+            "interval",
+            minutes=30,
+            id="afternoon_snapshot_capture",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 120.0),
             max_instances=1,
             coalesce=True,
         )
