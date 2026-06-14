@@ -62,9 +62,25 @@ _SIGMA_FLOOR_PATH = _state_path("settlement_sigma_floor.json")
 _sigma_floor_cache: dict | None = None
 _sigma_floor_lock = threading.Lock()
 
+# EMOS μ-OFFSET correction (airport-settlement-honest center, D4 emos_mu_bias_probe.md + law 8). The
+# EMOS-served μ* = a + b·x̄ lands COLD for per-city cold-biased cells (Tokyo|MAM median −1.89°C). The
+# discriminating probe proved the cold root is the per-cell EMOS INTERCEPT (already absorbed the
+# grid-cold offset at fit time), not an absent x̄-side de-bias — so the correction is a residual-grounded
+# per-(city,season,metric) μ-OFFSET measured DIRECTLY on (μ*−settlement), walk-forward OOS-gated, fit
+# offline by scripts/fit_emos_mu_offset.py. Applied at the q seam as μ_corr = μ* − offset_c (a cold
+# center, offset_c<0, is WARMED). Only `activated` cells (cold + OOS do-no-harm pass) carry a correction;
+# absent/unactivated → None → today's behavior (fail-closed). One-signed-honest: it never cools a warm cell.
+_MU_OFFSET_PATH = _state_path("emos_mu_offset.json")
+_mu_offset_cache: dict | None = None
+_mu_offset_lock = threading.Lock()
+
 
 class SettlementSigmaFloorError(RuntimeError):
     """Raised when the settlement sigma floor is required but cannot be proven valid."""
+
+
+class EmosMuOffsetError(RuntimeError):
+    """Raised when the EMOS μ-offset correction is required but cannot be proven valid."""
 
 
 def load_emos_table() -> dict:
@@ -230,6 +246,121 @@ def settlement_sigma_floor(
                 f"SETTLEMENT_SIGMA_FLOOR_MALFORMED_ARTIFACT:{type(exc).__name__}: {exc}"
             ) from exc
         logger.warning("settlement_sigma_floor(%r, %r, %r) error: %s", city, season, metric, exc)
+        return None
+
+
+def load_mu_offset_table(*, required: bool = False) -> dict:
+    """Return the cached EMOS μ-offset correction table dict.
+
+    Loaded once per process from state/emos_mu_offset.json (cached + thread-safe, mirroring
+    load_sigma_floor_table). Structure:
+        {"_meta": {"created":..., "method":..., "authority": "emos_mu_offset_v1_residual"},
+         "cells": {"City|SEASON|metric": {"offset_c": float, "activated": bool, "n": int,
+                   "mean_residual_c": float, "oos": {...}}}}
+    All values °C. Legacy callers use ``required=False`` → empty dict if the file is missing/malformed
+    (fail-soft: emos_mu_offset returns None, the EMOS μ* is served UNCORRECTED — today's behavior).
+    EDLI flag-on callers may use ``required=True``: a missing/malformed artifact raises EmosMuOffsetError
+    so a candidate that should be corrected cannot silently serve the cold center.
+    """
+    global _mu_offset_cache
+    if _mu_offset_cache is not None and (not required or _mu_offset_cache):
+        return _mu_offset_cache
+    with _mu_offset_lock:
+        if _mu_offset_cache is not None and (not required or _mu_offset_cache):
+            return _mu_offset_cache
+        try:
+            raw = _MU_OFFSET_PATH.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                if required:
+                    raise EmosMuOffsetError("EMOS_MU_OFFSET_MALFORMED_ARTIFACT:not_dict")
+                logger.warning("emos_mu_offset.json is not a dict — treating as empty")
+                data = {}
+            _mu_offset_cache = data
+        except FileNotFoundError:
+            if required:
+                raise EmosMuOffsetError(f"EMOS_MU_OFFSET_MISSING_ARTIFACT:{_MU_OFFSET_PATH}")
+            # FAIL-SOFT but VISIBLE: an absent table means NO cell is corrected (the EMOS μ* serves
+            # uncorrected = today's behavior). That is the intended fail-closed default, so this is a
+            # debug, not a warning (unlike the σ-floor, whose absence silently disables a SAFETY widen).
+            logger.debug(
+                "emos_mu_offset.json not found at %s; EMOS μ-offset correction DISABLED "
+                "(every cell serves the uncorrected EMOS center).",
+                _MU_OFFSET_PATH,
+            )
+            _mu_offset_cache = {}
+        except EmosMuOffsetError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — fail-soft unless required
+            if required:
+                raise EmosMuOffsetError(
+                    f"EMOS_MU_OFFSET_MALFORMED_ARTIFACT:{type(exc).__name__}: {exc}"
+                ) from exc
+            logger.warning("Failed to load emos_mu_offset.json: %s", exc)
+            _mu_offset_cache = {}
+    return _mu_offset_cache
+
+
+def emos_mu_offset(
+    city: str,
+    season: str,
+    metric: str,
+    *,
+    required: bool = False,
+) -> Optional[float]:
+    """The EMOS μ-offset correction (°C) for an ACTIVATED (city, season, metric) cell, or None.
+
+    Returns ``offset_c`` (the residual-grounded per-cell median of ``μ*_EMOS − settlement``) ONLY when
+    the cell is present AND ``activated`` (it is materially cold AND its correction passed the offline
+    walk-forward do-no-harm OOS gate). The caller applies ``μ_corr = μ* − offset_c`` — a measured-cold
+    center (offset_c < 0) is WARMED toward settlement; the correction is one-signed-honest (the fitter
+    never activates a warm cell, so this never cools one). Metric is lowercased to match the cell key.
+
+    FAIL-CLOSED: an absent/malformed table, a missing cell, an unactivated cell, a non-finite offset, or
+    (when ``required``) any defect → no correction (None) / EmosMuOffsetError. An unactivated cell is the
+    common case (most cells are EMOS-absorbed or warm) and returns None WITHOUT raising even under
+    ``required`` — "no honest correction for this cell" is a valid, expected state, NOT an artifact defect.
+    Cached + thread-safe like the EMOS table.
+    """
+    try:
+        table = load_mu_offset_table(required=required)
+        cells = table.get("cells", {})
+        if not isinstance(cells, dict):
+            if required:
+                raise EmosMuOffsetError("EMOS_MU_OFFSET_MALFORMED_ARTIFACT:cells")
+            return None
+        key = emos_cell_key(city, season, metric)
+        cell = cells.get(key)
+        if cell is None or not isinstance(cell, dict):
+            # No cell for this (city,season,metric): the cell is EMOS-absorbed/warm/thin and was never
+            # fit — a valid "leave alone" state, NOT a defect. No correction even under required.
+            return None
+        if not bool(cell.get("activated")):
+            return None  # cold but did not earn the OOS gate → serve uncorrected (fail-closed)
+        off = cell.get("offset_c")
+        if off is None:
+            if required:
+                raise EmosMuOffsetError(f"EMOS_MU_OFFSET_MALFORMED_CELL:missing_offset_c:{key}")
+            return None
+        try:
+            off = float(off)
+        except Exception as exc:  # noqa: BLE001 — malformed scalar
+            if required:
+                raise EmosMuOffsetError(f"EMOS_MU_OFFSET_MALFORMED_CELL:{key}: {exc}") from exc
+            return None
+        if not math.isfinite(off):
+            if required:
+                raise EmosMuOffsetError(f"EMOS_MU_OFFSET_NON_FINITE:{key}:offset_c={off}")
+            return None
+        return off
+    except EmosMuOffsetError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — fail-soft: no correction rather than crash the q seam
+        if required:
+            raise EmosMuOffsetError(
+                f"EMOS_MU_OFFSET_MALFORMED_ARTIFACT:{type(exc).__name__}: {exc}"
+            ) from exc
+        logger.warning("emos_mu_offset(%r, %r, %r) error: %s", city, season, metric, exc)
         return None
 
 
