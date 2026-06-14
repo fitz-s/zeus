@@ -2045,28 +2045,16 @@ def _forecast_only_phase_admits(evidence: "_market_phase_evidence.MarketPhaseEvi
     return evidence.phase in _FORECAST_ONLY_ADMIT_PHASES
 
 
-def _selection_eb_shrinkage_enabled() -> bool:
-    """C2 (task #60): replacement EB-shrinkage selection gate flag.
-
-    DEFAULT FALSE. When OFF the live trading-path gate is the CURRENT BH/FDR
-    behavior (which consumes degenerate {0,1} p-values — a no-op multiplicity
-    correction); the EB-shrinkage quantities are still COMPUTED and stamped on
-    receipts as shadow logging. When ON, the posterior expected-log-utility
-    license (authority statistical_calibration_addendum_2026-06-13 A2/D3)
-    REPLACES the BH decision: trade iff the shrunk posterior edge clears e_min
-    with P(e>e_min|D) >= pi_min AND posterior expected log growth > 0.
-
-    Honest math, not a throttle (NO-CAPS law): the license never adds an
-    artificial cap — a confident, growth-positive edge is always admitted.
-    """
-    try:
-        return bool(settings["edli"].get("replacement_selection_eb_shrinkage_enabled", False))
-    except Exception:
-        return False
-
-
 def _selection_pi_min() -> float:
-    """Posterior probability threshold P(e>e_min|D) for the EB license (A2: 0.90)."""
+    """Posterior probability threshold P(e>e_min|D) for the EB-shrinkage SHADOW
+    license computation (A2: 0.90).
+
+    The EB-shrinkage decision-replacement flag was REMOVED 2026-06-13 in the
+    q-shadow gate-mass collapse: the live selection gate is the BH/FDR pass
+    UNCONDITIONALLY. This threshold now parameterizes only the shadow telemetry
+    (lfsr / edge_shrunk / edge_shrunk_posterior_sd / selection_authority stamped
+    on edli_no_submit_receipts for the winner's-curse slope diagnostic); it never
+    influences the live decision."""
     try:
         return float(settings["edli"].get("replacement_selection_pi_min", 0.90))
     except Exception:
@@ -2809,18 +2797,18 @@ def _build_event_bound_no_submit_receipt_core(
         )
     hypothesis_id = f"{family.family_id}:{selected_token_id}"
     # C2 (task #60): compute the posterior lfsr + EB-shrunk selected edge over the
-    # family's executable bins. Shadow-only when the flag is OFF (BH still gates);
-    # the EB expected-log-utility license REPLACES the BH decision when ON. The
-    # vacuous {0,1}-p-value BH gate below (evaluate_fdr_full_family) consumes the
-    # degenerate edge-positivity p-values set at lines ~9854/9876 — a no-op
-    # multiplicity correction the addendum (A2) condemns as a BLOCKER.
-    _eb_authority_on = _selection_eb_shrinkage_enabled()
+    # family's executable bins. SHADOW-ONLY: the BH/FDR pass is the unconditional
+    # live selection gate. The EB-shrinkage decision-replacement flag was REMOVED
+    # 2026-06-13 in the q-shadow gate-mass collapse; ``authority_on=False`` pins the
+    # shadow stamp to selection_authority="BH_FDR" (byte-identical to the prior
+    # flag-OFF live path) while the lfsr / edge_shrunk quantities are still computed
+    # and stamped on edli_no_submit_receipts for the winner's-curse slope diagnostic.
     _shrink = _compute_selection_shrinkage(
         proofs=proofs,
         selected_token_id=selected_token_id,
         selected_q_posterior=proof.q_posterior,
         selected_price=execution_price.value,
-        authority_on=_eb_authority_on,
+        authority_on=False,
     )
 
     def _with_shrink(receipt: EventSubmissionReceipt) -> EventSubmissionReceipt:
@@ -2875,17 +2863,11 @@ def _build_event_bound_no_submit_receipt_core(
             source_status="MATCH",
             family_complete=False,
         ))
-    # GATE DECISION (C2): the EB expected-log-utility license is the DECISION
-    # authority when the flag is ON; otherwise the current BH/FDR pass is. When
-    # ON but the EB universe was not computable (eb_licensed is None), fail-soft
-    # back to the BH verdict so a missing executable universe is never a silent
-    # admit. Shadow quantities are stamped on the receipt either way.
-    if _eb_authority_on and _shrink.eb_licensed is not None:
-        _gate_passed = _shrink.eb_licensed
-        _gate_reject_reason = "SELECTION_EB_UNLICENSED"
-    else:
-        _gate_passed = fdr.passed
-        _gate_reject_reason = "FDR_REJECTED"
+    # GATE DECISION: the BH/FDR pass is the unconditional live selection authority
+    # (the EB-shrinkage decision-replacement flag was REMOVED 2026-06-13). Shadow
+    # quantities are stamped on the receipt regardless.
+    _gate_passed = fdr.passed
+    _gate_reject_reason = "FDR_REJECTED"
     if not _gate_passed:
         return EventSubmissionReceipt(
             False,
@@ -7247,15 +7229,6 @@ def _opportunity_book_from_proofs(
             locked_opportunity_conn=locked_opportunity_conn,
         )
     )
-    # Horse-race Kelly SHADOW compute (task #63 / authority §P1). The full family
-    # {(p_k, q_k)} vector is in scope HERE (the evaluations tuple) — the single point
-    # where mutually-exclusive bin competition can be solved jointly. SHADOW-ONLY this
-    # pass: compute the closed-form portfolio-correct allocation and log it beside the
-    # live per-candidate sizing; the live decision below is UNTOUCHED, byte-identical.
-    # The flag (_replacement_horse_race_kelly_enabled) governs only a FUTURE live
-    # replacement; while it is OFF the shadow log is observe-only. Fail-silent.
-    _shadow_log_horse_race_allocation(family_id=family_id, evaluations=evaluations)
-
     # The live decision is the ΔU ranker's pick (selected_proof). The book RECORDS
     # it as the single selected_candidate_id (operator directive 2026-06-08;
     # spec §14 item 7/8) rather than re-deciding via legacy scalar-Kelly. The
@@ -7363,18 +7336,6 @@ def _generate_candidate_proofs(
             pass
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
-
-    # JAMES-STEIN BLEND (C3, addendum A10, flag default OFF).
-    # Operates on the full YES-probability vector over the family's bins.
-    # Applied AFTER calibrated q (q_by_condition), BEFORE q_lcb is derived.
-    # When flag OFF: shadow-logs q_js + lambda_js on zeus.replacement_qlcb_shadow.
-    # When flag ON:  q_by_condition is replaced with the JS-blended values.
-    # Symmetric estimator — NOT a one-sided cap. The market_anchor cap is separate.
-    q_by_condition = _apply_james_stein_blend_family(
-        family=family,
-        q_by_condition=q_by_condition,
-        rows_by_direction=rows_by_direction,
-    )
 
     # FIX A (direction law; incident 0b5c305e26524042, 2026-06-10 Milan-24C;
     # docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md): resolve the
@@ -8057,105 +8018,6 @@ def _direction_law_reason_for_candidate(
         mu_settled=mu_settled,
         settle_value=settle_value,
     )
-
-
-def _apply_james_stein_blend_family(
-    *,
-    family,
-    q_by_condition: dict[str, float],
-    rows_by_direction: dict,
-) -> dict[str, float]:
-    """Apply (or shadow-log) the James-Stein blend over the full family q vector.
-
-    Returns a (possibly modified) copy of ``q_by_condition``.
-    When ``replacement_q_james_stein_enabled`` is False: shadow-logs q_js + lambda_js
-    and returns the original dict unchanged (byte-identical to prior behavior).
-    When True: returns a new dict with JS-blended YES probabilities.
-
-    Requires K >= 3 bins (JS inadmissibility guard). Falls through silently when:
-      * fewer than 3 bins have both a model q and a market price,
-      * the artifact is missing / stale (N_eff falls back to N=51 from load_member_correlation),
-      * any exception in the blend (fail-open: original q returned).
-    """
-    import logging as _logging
-
-    import numpy as _np
-
-    from src.strategy.james_stein_blend import james_stein_toward_market, load_member_correlation
-
-    _js_enabled = _replacement_q_james_stein_enabled()
-    _logger = _logging.getLogger("zeus.replacement_qlcb_shadow")
-
-    try:
-        candidates = list(family.candidates)
-        # Build aligned vectors: condition_ids, q_model (YES), q_market (YES ask price).
-        # YES all-in execution price = market's YES probability (mirrors market_anchor logic).
-        cond_ids: list[str] = []
-        q_model_vals: list[float] = []
-        q_mkt_vals: list[float] = []
-        for cand in candidates:
-            cid = str(cand.condition_id or "")
-            q_model_yes = q_by_condition.get(cid)
-            if q_model_yes is None:
-                continue
-            # YES all-in price from snapshot: best ask on the YES token row
-            yes_row = rows_by_direction.get((cid, "buy_yes"))
-            if yes_row is None:
-                continue
-            yes_ask = _optional_float(yes_row.get("orderbook_top_ask"))
-            if yes_ask is None or not (0.0 < yes_ask < 1.0):
-                continue
-            cond_ids.append(cid)
-            q_model_vals.append(float(q_model_yes))
-            q_mkt_vals.append(float(yes_ask))
-
-        K = len(cond_ids)
-        if K < 3:
-            # Not enough bins with market prices — JS inadmissible or insufficient data.
-            return q_by_condition
-
-        q_model_arr = _np.array(q_model_vals, dtype=float)
-        q_mkt_arr = _np.array(q_mkt_vals, dtype=float)
-
-        # Normalize model vector (should already sum to ~1 over family; guard float drift)
-        model_total = float(_np.sum(q_model_arr))
-        if model_total > 1e-9:
-            q_model_arr = q_model_arr / model_total
-
-        # Normalize market prices to a proper probability simplex
-        mkt_total = float(_np.sum(q_mkt_arr))
-        if mkt_total > 1e-9:
-            q_mkt_arr = q_mkt_arr / mkt_total
-        else:
-            return q_by_condition
-
-        _n_eff, _neff_src = load_member_correlation()
-        q_js, lambda_js, blend_src = james_stein_toward_market(
-            q_model_arr, q_mkt_arr, _n_eff
-        )
-
-        _logger.info(
-            "js_blend family=%s K=%d n_eff=%.3f lambda=%.4f src=%s neff_src=%s",
-            getattr(family, "family_id", "?"),
-            K,
-            _n_eff,
-            lambda_js,
-            blend_src,
-            _neff_src,
-        )
-
-        if not _js_enabled:
-            # Flag OFF: shadow only, return original dict unchanged.
-            return q_by_condition
-
-        # Flag ON: build updated q_by_condition with JS-blended YES probabilities.
-        updated = dict(q_by_condition)
-        for i, cid in enumerate(cond_ids):
-            updated[cid] = float(q_js[i])
-        return updated
-
-    except Exception:  # noqa: BLE001 — JS blend is non-critical; never break decisions
-        return q_by_condition
 
 
 def _market_anchor_no_lcb_for_candidate(
@@ -9776,125 +9638,6 @@ def _replacement_q_market_anchor_enabled() -> bool:
         return False
 
 
-def _replacement_neff_width_correction_enabled() -> bool:
-    """N_eff width correction flag (C3, addendum A10, default FALSE).
-
-    When OFF: q_lcb math is byte-identical to prior behavior (N=51 raw member count).
-    A corrected width is SHADOW-LOGGED on the zeus.replacement_qlcb_shadow logger for
-    observation, but the live q_lcb value is unchanged.
-    When ON: the N_eff-corrected q_lcb (wider interval, lower bound) replaces the raw
-    q_lcb in the decision path. Flip only on operator word after artifact validation."""
-    try:
-        return bool(settings["edli"].get("replacement_neff_width_correction_enabled", False))
-    except Exception:
-        return False
-
-
-def _replacement_q_james_stein_enabled() -> bool:
-    """James-Stein blend flag (C3, addendum A10, default FALSE).
-
-    When OFF: JS blend is computed and SHADOW-LOGGED on zeus.replacement_qlcb_shadow
-    (q_js and lambda_js per family) wherever a market snapshot is available, but the
-    live q values are byte-identical to prior behavior.
-    When ON: the JS-blended q replaces the calibrated q BEFORE q_lcb is derived.
-    JS is a symmetric estimator — NOT a one-sided cap. The market_anchor cap stays
-    as a separate untouched authority. Flip only on operator word."""
-    try:
-        return bool(settings["edli"].get("replacement_q_james_stein_enabled", False))
-    except Exception:
-        return False
-
-
-def _replacement_horse_race_kelly_enabled() -> bool:
-    """Horse-race Kelly flag (consult-3 Q2/P1, task #63, default FALSE).
-
-    When OFF (default): the family's closed-form horse-race allocation is COMPUTED
-    and SHADOW-LOGGED on zeus.replacement_qlcb_shadow (per-bin f_k* + s_cash) next to
-    the live per-candidate sizing, but the LIVE sizing is byte-identical to prior
-    behavior — no live size, selection, or receipt value changes.
-    When ON: (future pass) the horse-race allocation replaces the per-candidate
-    edge>threshold sizing at the family-decision point. This pass is SHADOW-ONLY.
-
-    Authority: docs/authority/exit_portfolio_execution_authority_2026-06-13.md §P1.
-    The endogenous cash threshold s* is the structural cap (NO artificial max-exposure
-    cap is layered on top — NO-caps law). Flip only on operator word after the shadow
-    artifact licenses the allocation forward."""
-    try:
-        return bool(settings["edli"].get("replacement_horse_race_kelly_enabled", False))
-    except Exception:
-        return False
-
-
-def _shadow_log_horse_race_allocation(
-    *,
-    family_id: str,
-    evaluations: tuple["CandidateEvaluation", ...],
-) -> None:
-    """Compute the family's closed-form horse-race Kelly allocation and SHADOW-LOG it.
-
-    SHADOW-ONLY (task #63 / authority §P1). Mirrors ``_apply_james_stein_blend_family``:
-    builds the aligned ``{(p_k, q_k)}`` vector from the family's executable buy_yes
-    evaluations (p_k = effective YES execution price, q_k = conservative q_lcb_5pct),
-    runs ``horse_race_allocation``, and logs the per-bin f_k* + s_cash on the
-    ``zeus.replacement_qlcb_shadow`` logger. Returns None; NEVER mutates the live
-    evaluations / sizing / selection. Fail-silent — a shadow logger must never break a
-    live decision.
-
-    Scope: YES-side bins only (the horse-race is the mutually-exclusive YES-bin
-    water-filling). The vector is the partition over the family's settlement bins, so
-    YES legs are the natural axis; NO legs are unions and are handled by the dominance
-    LP / QP in a later pass.
-    """
-    import logging as _logging
-
-    from src.strategy.horse_race_kelly import horse_race_allocation as _horse_race_allocation
-
-    _logger = _logging.getLogger("zeus.replacement_qlcb_shadow")
-    try:
-        cond_ids: list[str] = []
-        bin_labels: list[str] = []
-        p_vals: list[float] = []
-        q_vals: list[float] = []
-        for ev in evaluations:
-            # YES-side, priced, with a usable conservative posterior.
-            if str(ev.direction or "") != "buy_yes":
-                continue
-            price = ev.execution_price
-            if price is None or not (0.0 < float(price) < 1.0):
-                continue
-            q_lcb = float(ev.q_lcb_5pct)
-            if not (0.0 <= q_lcb <= 1.0):
-                continue
-            cond_ids.append(str(ev.condition_id or ""))
-            bin_labels.append(str(ev.bin_label or "?"))
-            p_vals.append(float(price))
-            q_vals.append(q_lcb)
-
-        K = len(p_vals)
-        if K < 2:
-            # Single-bin families have no cross-bin competition to shadow.
-            return
-
-        alloc = _horse_race_allocation(p=p_vals, q=q_vals)
-        per_bin = ";".join(
-            f"{bin_labels[i]}:p={p_vals[i]:.4f},q={q_vals[i]:.4f},f={alloc.f[i]:.4f}"
-            for i in range(K)
-        )
-        _logger.info(
-            "horse_race_shadow family=%s K=%d regime=%s active=%d s_cash=%.4f "
-            "elg=%.5f bins=[%s]",
-            family_id,
-            K,
-            alloc.regime,
-            alloc.active_count,
-            alloc.s_cash,
-            alloc.expected_log_growth,
-            per_bin,
-        )
-    except Exception:  # noqa: BLE001 — shadow compute is non-critical; never break decisions
-        return
-
-
 def _market_anchor_alpha() -> float:
     """Conservative per-decision α for the market-anchor cap, from the SINGLE legacy
     registry (config edge.base_alpha). The calibration level is not threaded to this
@@ -10428,57 +10171,22 @@ def _side_q_lcb_from_yes_samples(
     probability lower bound that exceeds its own point — the edge_ci_lower-as-q_lcb
     signature (Hidden #2) — unconstructable on BOTH sides.
     """
-    import logging as _logging
-
-    from src.strategy.james_stein_blend import load_member_correlation
     from src.strategy.probability_uncertainty import (
         lower_quantile,
         no_side_samples,
         probability_uncertainty_from_samples,
     )
 
-    # N_eff width correction (C3): load N_eff once; always compute for shadow logging.
-    # Flag ON  → corrected q_lcb replaces raw q_lcb on the live decision path.
-    # Flag OFF → corrected value is shadow-logged only; q_lcb is byte-identical to prior.
-    _neff_enabled = _replacement_neff_width_correction_enabled()
-    _n_eff, _neff_src = load_member_correlation()
-
     # YES authority: q_lcb is a pure function of the probability samples (never cost).
-    # Pass n_eff_override always so the corrected value is computed for shadow logging.
-    pu_yes = probability_uncertainty_from_samples(yes_samples, n_eff_override=_n_eff)
+    pu_yes = probability_uncertainty_from_samples(yes_samples)
     q_point_yes = float(min(max(q_yes_point, 0.0), 1.0))
     q_lcb_yes = float(min(pu_yes.q_lcb, q_point_yes))
 
-    # Shadow-log and optionally promote the N_eff corrected YES bound.
-    if pu_yes.q_lcb_neff_corrected is not None and pu_yes.neff_correction_source is not None:
-        _logging.getLogger("zeus.replacement_qlcb_shadow").debug(
-            "neff_width_correction YES: q_lcb=%.4f q_lcb_neff=%.4f src=%s neff_src=%s",
-            q_lcb_yes,
-            pu_yes.q_lcb_neff_corrected,
-            pu_yes.neff_correction_source,
-            _neff_src,
-        )
-        if _neff_enabled:
-            q_lcb_yes = float(min(pu_yes.q_lcb_neff_corrected, q_point_yes))
-
     # NO authority (Hidden #3): lower tail of (1 - q_yes_samples) == 1 - q_ucb_yes.
-    # Compute NO samples once; reuse for both raw q_lcb and N_eff correction.
     _no_arr = no_side_samples(yes_samples)
     q_lcb_no_raw = lower_quantile(_no_arr)
     q_point_no = float(min(max(1.0 - q_yes_point, 0.0), 1.0))
     q_lcb_no = float(min(max(q_lcb_no_raw, 0.0), q_point_no))
-
-    # N_eff correction on NO side (same correlation structure as YES side).
-    pu_no_shadow = probability_uncertainty_from_samples(_no_arr, n_eff_override=_n_eff)
-    if pu_no_shadow.q_lcb_neff_corrected is not None and pu_no_shadow.neff_correction_source is not None:
-        _logging.getLogger("zeus.replacement_qlcb_shadow").debug(
-            "neff_width_correction NO: q_lcb=%.4f q_lcb_neff=%.4f neff_src=%s",
-            q_lcb_no,
-            pu_no_shadow.q_lcb_neff_corrected,
-            _neff_src,
-        )
-        if _neff_enabled:
-            q_lcb_no = float(min(max(pu_no_shadow.q_lcb_neff_corrected, 0.0), q_point_no))
 
     return q_lcb_yes, q_lcb_no
 

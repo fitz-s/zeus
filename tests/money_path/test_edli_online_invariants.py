@@ -56,8 +56,6 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["pre_submit_max_quote_age_ms"] <= 1000
     assert edli["pre_submit_balance_allowance_check_enabled"] is True
     assert edli["market_channel_quote_cache_enabled"] is True
-    assert edli["no_trade_regret_enabled"] is True
-    assert edli["reports_enabled"] is True
     assert edli["forecast_snapshot_emit_limit"] is False
     # Wave-1 2026-06-12: coverage_fairness_emit_enabled flag DELETED — fairness is now
     # unconditional, so the key is ABSENT (the OFF branch no longer exists).

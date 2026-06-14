@@ -3667,54 +3667,6 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             should_exit = exit_decision.should_exit
             exit_reason = exit_decision.reason
 
-            # Exit capability shadow (consult-3 Q1, task #52): compute the
-            # principled exit quantities (market-blended q_exit E5a, partial-exit
-            # FOC fraction E6, sell-all dominance gap E2, anytime-valid e-process
-            # E_n E5b) next to the live decision. The replacement_exit_* flags
-            # DEFAULT OFF ⇒ this is pure shadow telemetry and NEVER changes
-            # should_exit (live behavior byte-identical). Cost basis is NOT among
-            # the inputs by construction (E1). Failures are swallowed: a shadow
-            # computation must never break the live exit path.
-            try:
-                from src.config import settings as _settings_for_exit_shadow
-                from src.strategy.exit_policy_shadow import (
-                    evaluate_exit_policy_shadow as _eval_exit_shadow,
-                )
-
-                _shadow = _eval_exit_shadow(
-                    settings=_settings_for_exit_shadow,
-                    q_agent=exit_context.fresh_prob,
-                    q_market=exit_context.current_market_price,
-                    best_bid=exit_context.best_bid,
-                    position_units=getattr(pos, "effective_shares", None),
-                    wealth_ex_position=exit_context.bankroll,
-                    t_remaining_days=(
-                        float(exit_context.hours_to_settlement) / 24.0
-                        if exit_context.hours_to_settlement is not None
-                        else None
-                    ),
-                    q_sd=float(getattr(pos, "entry_ci_width", 0.0) or 0.0),
-                )
-                summary.setdefault("exit_policy_shadow", []).append(
-                    {"position_id": pos.trade_id, **_shadow}
-                )
-                if _shadow.get("exit_policy_suspended"):
-                    summary["exit_policy_shadow_suspensions"] = (
-                        summary.get("exit_policy_shadow_suspensions", 0) + 1
-                    )
-                deps.logger.info(
-                    "EXIT_POLICY_SHADOW position=%s live_should_exit=%s %s",
-                    pos.trade_id,
-                    should_exit,
-                    _shadow.get("exit_policy_source", ""),
-                )
-            except Exception as _exit_shadow_exc:  # never break the live path
-                deps.logger.debug(
-                    "exit_policy_shadow_skipped position=%s err=%s",
-                    getattr(pos, "trade_id", "?"),
-                    _exit_shadow_exc,
-                )
-
             if should_exit:
                 exit_trigger = exit_decision.trigger or exit_reason
                 gate_allowed, gate_reason = _exit_evidence_gate_allows_statistical_exit(

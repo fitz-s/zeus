@@ -135,12 +135,6 @@ def test_no_executable_universe_falls_back_to_bh():
     assert v.eb_licensed is None
 
 
-def test_flag_default_is_false():
-    """The replacement flag MUST default to False (current behavior preserved)."""
-    # Read the live settings value; default-False contract.
-    assert era._selection_eb_shrinkage_enabled() is False
-
-
 def test_pi_min_default_is_090():
     assert era._selection_pi_min() == pytest.approx(0.90)
 
