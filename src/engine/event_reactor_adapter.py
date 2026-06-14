@@ -12127,6 +12127,96 @@ def _maybe_override_lcb_with_emos_ci(
                 pass
 
 
+def _coverage_band_template(label: str | None) -> str | None:
+    """Date-stripped band identity for a market question label.
+
+    A market question carries the band AND the target date:
+      "Will the highest temperature in Singapore be 31°C on May 31?"
+    The BAND (the calibration cohort that pools across days) is everything BEFORE the
+    trailing "on <Month Day>?". Stripping the date yields a stable per-band key that is
+    identical across the days the same band traded:
+      "Will the highest temperature in Singapore be 31°C"
+    Returns None when the label is empty (→ no per-day claim history → INSUFFICIENT_DATA).
+    """
+    if not label:
+        return None
+    import re as _re
+
+    stripped = _re.sub(r"\s+on\s+[A-Za-z]+\s+\d{1,2}\??\s*$", "", str(label)).strip()
+    return stripped or None
+
+
+def _per_day_claimed_qlcb_by_date(
+    *,
+    city: str,
+    metric: str,
+    direction: str,
+    band_template: str | None,
+):
+    """Per-day ACTUAL claimed q_lcb history for ONE (city, metric, direction, band).
+
+    Reads ``edli_no_submit_receipts`` (zeus-world.db, READ-ONLY) — the per-decision
+    no-submit receipt stream stamps the q_lcb the model CLAIMED that day
+    (``q_lcb_5pct``) alongside the band question (``bin_label``), city, metric,
+    direction, and target_date inside ``receipt_json``. Returns a dict
+    ``{target_date: claimed_q_lcb}`` keyed on the SETTLEMENT target_date — the per-day
+    claim history the calibration check needs (each day a DISTINCT claimed band, NOT one
+    constant). When a (city, metric, direction, band) traded multiple receipts on one
+    target_date, the LAST-written receipt's claim is kept (the decision that stood).
+
+    INV-37: a single-DB READ on world.db via a short read-only connection (no cross-DB
+    WRITE transaction; the ATTACH+SAVEPOINT discipline governs cross-DB writes, not reads).
+    FAIL-OPEN: any error / unavailable history yields an EMPTY dict (→ the caller produces
+    an empty stream → INSUFFICIENT_DATA → q_lcb unchanged, no shrink, no ARM block). This
+    is the RULE-1 inert default: absence of claim history is never a reason to suppress.
+    """
+    import json as _json
+
+    if not band_template:
+        return {}
+    out: dict[str, float] = {}
+    try:
+        from src.state.db import get_world_connection_read_only
+
+        conn = get_world_connection_read_only()
+    except Exception:
+        return {}
+    try:
+        rows = conn.execute(
+            "SELECT receipt_json, q_lcb_5pct, created_at FROM edli_no_submit_receipts "
+            "WHERE direction = ? AND q_lcb_5pct IS NOT NULL ORDER BY created_at ASC",
+            (str(direction),),
+        ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    want_city = str(city)
+    want_metric = str(metric).lower()
+    for receipt_json, qlcb, _created_at in rows:
+        try:
+            doc = _json.loads(receipt_json)
+        except Exception:
+            continue
+        if str(doc.get("city") or "") != want_city:
+            continue
+        if str(doc.get("metric") or "").lower() != want_metric:
+            continue
+        if _coverage_band_template(doc.get("bin_label")) != band_template:
+            continue
+        target_date = doc.get("target_date")
+        if not target_date:
+            continue
+        try:
+            out[str(target_date)] = float(qlcb)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _settlement_coverage_observations(
     *,
     forecast_conn: sqlite3.Connection,
@@ -12136,13 +12226,30 @@ def _settlement_coverage_observations(
     direction: str,
     claimed_q_lcb: float,
 ):
-    """Build the (claimed_q_lcb, won) coverage stream for ONE (bin, direction).
+    """Build the (PER-DAY claimed_q_lcb, won) CALIBRATION stream for ONE (bin, direction).
 
-    Backward coverage: for every SETTLED outcome of this (city, metric), grade
-    "had I traded THIS bin in THIS direction, would the settled value have won?"
-    via the spine grade_receipt — the Direction Law + BinKind + unit antibodies are
-    inherited, not re-rolled. Returns a list[CoverageObservation]. FAIL-OPEN: any
-    error / unit mismatch yields an empty stream (→ INSUFFICIENT_DATA → no shrink).
+    2026-06-14 REBUILD (qlcb_suppression.md + RULE 1). The prior implementation stamped
+    ONE CONSTANT ``claimed_q_lcb`` on every settled day and graded a FIXED bin against the
+    whole pooled (city, metric) history, so the downstream isotonic degenerated to
+    ``np.mean(ys)`` = the UNCONDITIONAL bin base rate (CLIMATOLOGY). It then shrank any
+    forecast concentrating above that base rate to base_rate-0.01 — destroying forecast
+    skill (Singapore high 31°C: +0.060 ev/$ -> -0.730 ev/$).
+
+    This rebuild measures CALIBRATION: it pairs, per SETTLED day, the q_lcb the model
+    ACTUALLY CLAIMED that day (read from edli_no_submit_receipts) with whether the band
+    realized (graded via the spine grade_receipt — Direction Law + BinKind + unit
+    antibodies inherited, not re-rolled). The claimed band now VARIES day to day, so the
+    isotonic reads a genuine claimed->realized calibration curve, not a single pooled mean.
+
+    The per-day claim history is matched on (city, metric, direction, BAND) where BAND is
+    the date-stripped market question (``_coverage_band_template``). A settled day enters
+    the stream ONLY when BOTH a VERIFIED settlement AND a per-day claimed q_lcb exist for
+    that (band, day) — so n counts INDEPENDENT settled CLAIM-days, exactly what min_n
+    should gate on.
+
+    Returns a list[CoverageObservation]. FAIL-OPEN: any error / unit mismatch / absent
+    claim history yields an EMPTY stream (→ INSUFFICIENT_DATA → q_lcb unchanged, no shrink,
+    no ARM block). RULE 1: absence of claim history is never a reason to suppress.
     """
     from types import SimpleNamespace
 
@@ -12151,20 +12258,34 @@ def _settlement_coverage_observations(
     from src.types.temperature import UnitMismatchError
 
     obs: list = []
+    band_template = _coverage_band_template(getattr(bin, "label", None))
+    # Per-day ACTUAL claimed q_lcb history for THIS band (empty → INSUFFICIENT_DATA inert).
+    claimed_by_date = _per_day_claimed_qlcb_by_date(
+        city=city, metric=metric, direction=direction, band_template=band_template
+    )
+    if not claimed_by_date:
+        return obs
     try:
         rows = forecast_conn.execute(
-            "SELECT settlement_value, settlement_unit FROM settlement_outcomes "
+            "SELECT target_date, settlement_value, settlement_unit FROM settlement_outcomes "
             "WHERE city = ? AND temperature_metric = ? "
-            "AND settlement_value IS NOT NULL AND settlement_unit IS NOT NULL",
+            "AND settlement_value IS NOT NULL AND settlement_unit IS NOT NULL "
+            "AND authority = 'VERIFIED'",
             (str(city), str(metric).lower()),
         ).fetchall()
     except Exception:
         return obs
     for row in rows:
         try:
-            settled_value = float(row[0])
-            settled_unit = str(row[1])
-        except (TypeError, ValueError):
+            target_date = str(row[0])
+            settled_value = float(row[1])
+            settled_unit = str(row[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        # Only settled days for which the model ACTUALLY claimed a q_lcb on THIS band
+        # enter the calibration stream — the per-day pairing is the whole rebuild.
+        day_claim = claimed_by_date.get(target_date)
+        if day_claim is None:
             continue
         # settlement_outcomes.settlement_value is WMO-rounded at write time, so no
         # semantics object is needed (grade_receipt grades the stored value as-is).
@@ -12178,7 +12299,7 @@ def _settlement_coverage_observations(
             continue
         except Exception:
             continue
-        obs.append(CoverageObservation(q_lcb=float(claimed_q_lcb), won=bool(graded.won)))
+        obs.append(CoverageObservation(q_lcb=float(day_claim), won=bool(graded.won)))
     return obs
 
 

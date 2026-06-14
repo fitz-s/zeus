@@ -1,22 +1,23 @@
 # Created: 2026-06-03
-# Last reused or audited: 2026-06-03
-# Authority basis: Phase-2 K3 SHADOW FLAG (edli.q_lcb_settlement_coverage_gate_enabled,
-#   default FALSE) + ARM-gate coverage predicate. Rule-6 (overconfidence=ruin) made
-#   structural: the settlement-coverage SHRINK is HIGH risk, so it is gated OFF by
-#   default and the coverage table is computed-but-not-applied. With the flag OFF the
-#   live q_lcb is byte-identical to today. The ARM gate, however, reads the coverage
-#   verdict UNCONDITIONALLY (an arm decision must never be made on an UNLICENSED LCB).
+# Last reused or audited: 2026-06-14
+# Authority basis: Phase-2 K3 SHADOW FLAG (edli.q_lcb_settlement_coverage_gate_enabled)
+#   + ARM-gate coverage predicate. 2026-06-14 REBUILD (qlcb_suppression.md + RULE 1):
+#   the ARM gate is now a PROVEN-OVERCONFIDENCE catch, not a default-deny. It blocks ONLY
+#   on UNLICENSED (n>=min_n AND realized materially below claimed); it does NOT block on
+#   INSUFFICIENT_DATA (thin/absent claim history) nor on coverage_ratio>1 (conservative /
+#   calibrated-above bands). The two tests that previously asserted those blocks are
+#   updated to the rebuilt semantics below (their old assertions were the suppression bug).
 """Flag-gating + ARM-gate relationship tests for K3 settlement-coverage.
 
 Two relationships:
   1. SHADOW SAFETY: flag OFF -> the coverage shrink is NOT applied; the q_lcb the
      consumer reads equals the pre-coverage (legacy) q_lcb, source unchanged. This
-     is the "byte-identical to today" contract for the live decision.
-  2. ARM SAFETY: the ARM gate blocks when ANY traded cohort's coverage verdict is
-     UNLICENSED, or when coverage_ratio is None / |ratio-1| >= 0.10 — independent
-     of the shrink flag. Arming on an LCB the settled record refuses is forbidden.
-
-Written RED-first.
+     is the "byte-identical to today" contract for the live decision. (Unchanged by
+     the rebuild — the flag gating is orthogonal to the verdict computation.)
+  2. ARM SAFETY (REBUILT): the ARM gate blocks ONLY when a traded cohort's coverage
+     verdict is UNLICENSED (PROVEN overconfident). INSUFFICIENT_DATA and conservative
+     (ratio>1) verdicts do NOT block — lack of per-day claim history is not proof of
+     overconfidence, and a band the settled record OVER-backs is exactly what we arm on.
 """
 from __future__ import annotations
 
@@ -134,9 +135,12 @@ def test_arm_gate_blocks_on_unlicensed():
     assert "UNLICENSED" in reason
 
 
-def test_arm_gate_blocks_on_coverage_ratio_none():
-    """coverage_ratio None (no settled backing) blocks the ARM gate — the gate
-    requires coverage_ratio is not None and |ratio-1| < 0.10."""
+def test_arm_gate_does_not_block_on_insufficient_data():
+    """REBUILD (RULE 1): INSUFFICIENT_DATA (coverage_ratio None — no per-day claim
+    history) does NOT block the ARM gate. Lack of settled-claim history is not proof
+    of overconfidence; blocking on it is the default-deny suppression RULE 1 forbids.
+
+    (Pre-rebuild this asserted blocked is True — that was the bug.)"""
     from src.calibration.settlement_backward_coverage import (
         CoverageVerdict,
         arm_gate_coverage_blocks,
@@ -149,13 +153,17 @@ def test_arm_gate_blocks_on_coverage_ratio_none():
         realized_win_rate=None, calibration_source="SETTLEMENT_ISOTONIC",
     )
     blocked, reason = arm_gate_coverage_blocks(verdict)
-    assert blocked is True
-    assert "coverage_ratio" in reason
+    assert blocked is False
+    assert reason == ""
 
 
-def test_arm_gate_blocks_on_coverage_ratio_far_from_one():
-    """coverage_ratio with |ratio-1| >= 0.10 blocks the ARM gate even if LICENSED-
-    shaped — the band is mis-calibrated by more than the 10% tolerance."""
+def test_arm_gate_does_not_block_on_conservative_ratio_above_one():
+    """REBUILD: a LICENSED verdict with coverage_ratio > 1 (realized ABOVE claimed —
+    the model under-claimed; conservative / calibrated-above) does NOT block the ARM
+    gate. A one-sided lower bound is HONEST precisely when realized >= claimed.
+
+    (Pre-rebuild the |ratio-1| >= 0.10 rule blocked this conservative band too — it
+    refused a band the settled record OVER-backs, the opposite of overconfident.)"""
     from src.calibration.settlement_backward_coverage import (
         CoverageVerdict,
         arm_gate_coverage_blocks,
@@ -164,12 +172,12 @@ def test_arm_gate_blocks_on_coverage_ratio_far_from_one():
     verdict = CoverageVerdict(
         status="LICENSED",
         q_lcb_in=0.70, q_lcb_out=0.70,
-        n_settlement_observations=40, coverage_ratio=1.25,  # |1.25-1|=0.25 > 0.10
+        n_settlement_observations=40, coverage_ratio=1.25,  # realized well ABOVE claimed
         realized_win_rate=0.875, calibration_source="SETTLEMENT_ISOTONIC",
     )
     blocked, reason = arm_gate_coverage_blocks(verdict)
-    assert blocked is True
-    assert "coverage_ratio" in reason
+    assert blocked is False
+    assert reason == ""
 
 
 def test_arm_gate_passes_on_licensed_in_tolerance():

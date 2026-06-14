@@ -1,14 +1,31 @@
 # Created: 2026-06-03
-# Last reused or audited: 2026-06-03
-# Authority basis: Phase-2 K3 (q_lcb settlement-backward-coverage). K3 root: q_lcb
-#   was never settlement-grounded (identity-Platt = 0 calibration rows) -> the live
-#   LCB ran ~26pt overconfident. This module reads the REALIZED settlement win-rate
-#   in the band a q_lcb claims, isotonic-calibrates it, and REFUSES to license an LCB
-#   the settled record does not back. Truth comes ONLY from GradedReceipt verdicts
+# Last reused or audited: 2026-06-14
+# Authority basis: docs/evidence/deadloop_2026-06-14/qlcb_suppression.md + operator
+#   RULE 1 (every q_lcb<price rejection is OUR DEFECT until settlement proves otherwise).
+#   2026-06-14 REBUILD: the prior check measured CLIMATOLOGY, not CALIBRATION. The live
+#   observation stream stamped ONE constant claimed_q_lcb on every settled day and graded
+#   a FIXED bin against the whole pooled history, so `_isotonic_realized_rate` degenerated
+#   to `np.mean(ys)` = the UNCONDITIONAL base rate of the bin. It then declared any forecast
+#   that CONCENTRATED above that base rate "UNLICENSED" and shrank it to base_rate-0.01 —
+#   punishing forecast concentration itself, shrinking a PERFECTLY-calibrated forecast
+#   identically (qlcb_suppression.md: Singapore high 31C, +0.060 ev/$ -> -0.730 ev/$).
+#   This module now measures CALIBRATION: it consumes (per-day ACTUAL claimed q_lcb,
+#   realized 0/1) pairs and asks "when the model claimed q_lcb~=X for THIS band, did the
+#   outcome realize at >=X?". The honest direction-shrink is PRESERVED (one-sided, only
+#   ever LOWERS — P3_architecture.md KEEP-list: "shrink-only coverage direction"). The
+#   defect removed is the CLIMATOLOGY MEASUREMENT, not the shrink direction; no UP arm is
+#   added (P3 KILL: N7 bidirectional rewrite). Truth comes ONLY from GradedReceipt verdicts
 #   (src.contracts.graded_receipt) — never a fresh value-equality / startswith join
 #   (which the D1 keystone proved structurally mis-grades temperature labels).
 #   Direction Law lives inside grade_receipt: buy_yes WIN iff settled_bin==traded_bin;
 #   buy_no WIN iff !=. The win/loss STREAM this module consumes is produced there.
+#
+#   RULE-1 INERT-DEFAULT: INSUFFICIENT_DATA (too few independent settled CLAIM days, OR
+#   the per-day claimed-q_lcb history is unavailable) is now LICENSED-BY-DEFAULT: q_lcb
+#   UNCHANGED and the ARM gate does NOT block. The EMOS/MC q_lcb already carries a
+#   conservative LCB floor + N_eff width correction + sigma-shape; this gate is a
+#   PROVEN-OVERCONFIDENCE catch, NOT a default-deny. A gate that blocks for LACK of data
+#   is the suppression RULE 1 forbids.
 #
 #   K<<N FOLD: the coverage verdict is the EMOS k_cov INPUT (see emos_ci_license),
 #   NOT a 7th coverage flag bolted atop the calibration layers.
@@ -21,25 +38,42 @@
 #   NOT because it re-fits the corrected-domain Platt. Promoting this to a full
 #   re-calibration of p_raw requires resolving that lockstep first — it is out of
 #   scope for K3 and must not be done implicitly.
-"""settlement_backward_coverage — license a q_lcb against the settled record.
+"""settlement_backward_coverage — CALIBRATION-license a q_lcb against the settled record.
 
-For a (city, metric, season) cohort and a claimed ``q_lcb``, read the realized
-settlement win-rate in that band (graded through ``grade_receipt``), isotonic-
-calibrate it, and return one of:
+For a (city, metric, season) cohort and a claimed ``q_lcb``, read the settlement
+CALIBRATION CURVE — pairs of (per-day ACTUAL claimed q_lcb, realized 0/1) graded
+through ``grade_receipt`` — isotonic-fit the monotone claimed->realized map, read it
+at the claimed band, and return one of:
 
-  LICENSED          — realized >= claimed within tolerance: q_lcb unchanged.
-  UNLICENSED        — realized < claimed beyond tolerance: shrink q_lcb to the
-                      realized rate minus a 1pp honesty margin; source becomes
-                      SETTLEMENT_ISOTONIC.
-  INSUFFICIENT_DATA — fewer than ``min_n`` settled observations: q_lcb unchanged
-                      + a WARN (we never shrink, nor license, on thin data).
+  LICENSED          — realized >= claimed - tolerance: the band is calibrated or
+                      conservative (under-claimed). q_lcb unchanged.
+  UNLICENSED        — PROVEN overconfident: n >= min_n independent settled CLAIM days
+                      AND realized < claimed - tolerance. Shrink q_lcb to the realized
+                      rate minus a 1pp honesty margin; source becomes SETTLEMENT_ISOTONIC.
+  INSUFFICIENT_DATA — fewer than ``min_n`` independent settled CLAIM days (or the
+                      per-day claimed-q_lcb history is unavailable): q_lcb UNCHANGED
+                      + a WARN. LICENSED-BY-DEFAULT: we never shrink AND never block
+                      arming on thin data — that would be the default-deny suppression
+                      RULE 1 forbids.
+
+WHAT CHANGED (2026-06-14): the observation stream now carries the per-day ACTUAL
+claimed q_lcb (varying day to day), NOT one constant stamped on every day. With a
+single constant claimed band the isotonic degenerated to ``np.mean(ys)`` = the
+UNCONDITIONAL bin base rate (climatology), which shrank every concentrated forecast
+to its bin's all-history frequency. Measuring the per-day claimed->realized curve is
+a CALIBRATION test (P(realize | claimed X)), not a climatology test (P(bin | any day)).
 
 The SHRINK is HIGH risk (it moves the live decision). It is applied to the live
 LCB ONLY through ``apply_settlement_coverage(..., enabled=<flag>)`` with the flag
-``edli.q_lcb_settlement_coverage_gate_enabled`` (default FALSE). With the flag
-OFF the verdict is computed but the LCB is byte-identical to today. The ARM gate
-(``arm_gate_coverage_blocks``) reads the verdict UNCONDITIONALLY — you cannot arm
-on an LCB the settled record refuses, even while the live shrink is shadowed OFF.
+``edli.q_lcb_settlement_coverage_gate_enabled``. With the flag OFF the verdict is
+computed but the LCB is byte-identical to today. The shrink is SHRINK-ONLY (one-sided,
+only ever LOWERS): there is NO UP arm (P3_architecture.md KILL: N7 bidirectional rewrite).
+
+The ARM gate (``arm_gate_coverage_blocks``) reads the verdict UNCONDITIONALLY — you
+cannot arm on an LCB the settled record PROVES overconfident (UNLICENSED). But
+INSUFFICIENT_DATA does NOT block arming: lack of per-day claim history is not proof of
+overconfidence, and blocking on it suppresses every real concentrated edge before any
+claim history can accumulate.
 """
 from __future__ import annotations
 
@@ -134,27 +168,35 @@ def settlement_backward_coverage_check(
     observations: Iterable[CoverageObservation],
     min_n: int = 30,
 ) -> CoverageVerdict:
-    """License ``q_lcb`` for (city, metric, season) against the settled record.
+    """CALIBRATION-license ``q_lcb`` for (city, metric, season) against the settled record.
 
     Args:
         city, metric, season: cohort keys (for the WARN message + downstream keying).
         q_lcb: the claimed LCB band to license.
-        observations: settled (claimed-LCB, won) pairs, ``won`` graded through
-            grade_receipt. Build this stream via the spine truth fn — passing a
-            hand-set ``won`` defeats the Direction-Law / BinKind / unit antibodies.
-        min_n: minimum settled observations to act on (default 30).
+        observations: settled (per-day ACTUAL claimed-LCB, won) pairs, ``won`` graded
+            through grade_receipt. Build this stream via the spine truth fn — passing a
+            hand-set ``won`` defeats the Direction-Law / BinKind / unit antibodies. Each
+            observation MUST carry the q_lcb the model CLAIMED that day (varying day to
+            day), NOT one constant — a constant claimed band collapses the isotonic to the
+            unconditional bin base rate (climatology), the 2026-06-14 defect this rebuild
+            removes.
+        min_n: minimum INDEPENDENT settled claim-day observations to act on (default 30).
 
     Returns:
-        A ``CoverageVerdict``. INSUFFICIENT_DATA when n < min_n (q_lcb unchanged +
-        WARN). UNLICENSED when realized < claimed - tol (shrink to realized-1pp).
-        LICENSED otherwise (q_lcb unchanged).
+        A ``CoverageVerdict``. INSUFFICIENT_DATA when n < min_n (q_lcb unchanged + WARN,
+        LICENSED-by-default: never shrink, never block arming — proven-overconfidence is
+        the only thing this gate refuses, and thin data is not proof). UNLICENSED ONLY on
+        PROVEN overconfidence (n >= min_n AND realized < claimed - tol -> shrink to
+        realized-1pp). LICENSED when realized >= claimed - tol (calibrated or conservative;
+        q_lcb unchanged).
     """
     obs = list(observations)
     n = len(obs)
     if n < min_n:
         logger.warning(
-            "settlement coverage INSUFFICIENT_DATA city=%s metric=%s season=%s "
-            "q_lcb=%.4f: n=%d < min_n=%d — q_lcb unchanged (MC LCB stands)",
+            "settlement coverage INSUFFICIENT_DATA (LICENSED-by-default; q_lcb unchanged, "
+            "ARM not blocked) city=%s metric=%s season=%s q_lcb=%.4f: n=%d < min_n=%d — "
+            "MC LCB stands; this gate is a proven-overconfidence catch, not a default-deny",
             city, metric, season, float(q_lcb), n, min_n,
         )
         return CoverageVerdict(
@@ -228,30 +270,37 @@ def apply_settlement_coverage(
 def arm_gate_coverage_blocks(verdict: CoverageVerdict) -> tuple[bool, str]:
     """ARM-gate coverage predicate — read UNCONDITIONALLY (flag-independent).
 
-    You cannot arm on an LCB the settled record refuses. The gate BLOCKS when:
-      * status is UNLICENSED (the band is overconfident vs settled truth), or
-      * coverage_ratio is None (no settled backing — INSUFFICIENT_DATA), or
-      * |coverage_ratio - 1| >= 0.10 (band mis-calibrated beyond tolerance).
+    REBUILD (2026-06-14, RULE 1): this gate is a PROVEN-OVERCONFIDENCE catch, not a
+    default-deny. It BLOCKS arming ONLY on a verdict the settled record PROVES is
+    overconfident:
+      * status is UNLICENSED — n >= min_n independent settled claim-days AND the
+        realized calibration rate fell materially BELOW the claimed band.
+
+    It does NOT block on:
+      * INSUFFICIENT_DATA / coverage_ratio is None — lack of per-day claim history is
+        NOT proof of overconfidence. Blocking here is the default-deny suppression
+        RULE 1 forbids (and it would perversely require corroboration we cannot yet
+        compute, freezing every concentrated edge before any claim history accrues).
+        The EMOS/MC q_lcb already carries its own conservative LCB floor + N_eff width
+        correction + sigma-shape; this gate adds a check only WHEN the settled record
+        can prove overconfidence.
+      * coverage_ratio > 1 (realized ABOVE claimed) — that is a CONSERVATIVE / calibrated
+        band (the model under-claimed), which is exactly what we WANT to arm on, never a
+        reason to block. The prior ``|ratio-1| >= 0.10`` rule wrongly blocked conservative
+        bands too; a one-sided lower bound is honest precisely when realized >= claimed.
+
+    Note: when status is UNLICENSED the realized rate is materially below the claim, so a
+    redundant ratio test is unnecessary — the status leg is the single source of truth.
 
     Returns (blocked, reason). blocked=False + reason="" means the gate passes.
     """
     if verdict.status == "UNLICENSED":
         return (
             True,
-            f"coverage UNLICENSED: realized={verdict.realized_win_rate} < "
-            f"claimed={verdict.q_lcb_in} (n={verdict.n_settlement_observations})",
+            f"coverage UNLICENSED (proven overconfident): realized="
+            f"{verdict.realized_win_rate} < claimed={verdict.q_lcb_in} "
+            f"(n={verdict.n_settlement_observations})",
         )
-    ratio = verdict.coverage_ratio
-    if ratio is None:
-        return (
-            True,
-            f"coverage_ratio is None (status={verdict.status}, "
-            f"n={verdict.n_settlement_observations}) — no settled backing to arm on",
-        )
-    if abs(float(ratio) - 1.0) >= _ARM_RATIO_TOL:
-        return (
-            True,
-            f"coverage_ratio={float(ratio):.4f} is more than {_ARM_RATIO_TOL:.2f} "
-            f"from 1.0 — band mis-calibrated for arming",
-        )
+    # LICENSED (calibrated / conservative) and INSUFFICIENT_DATA (thin / absent history)
+    # are BOTH non-blocking: only PROVEN overconfidence refuses an arm.
     return (False, "")
