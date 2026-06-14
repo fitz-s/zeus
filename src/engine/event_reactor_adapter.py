@@ -2301,11 +2301,23 @@ def _build_event_bound_no_submit_receipt_core(
             # pre-refresh rows (snapshot_token_maps + topology feed the decision engine;
             # family_rows feeds _generate_candidate_proofs). Verify consistency before
             # re-running the staleness gate.
+            # POST-REFRESH RE-ELECT — fresh_at=None (NOT decision_time). The targeted
+            # refresher above just did a live NET CLOB fetch and inserted rows with
+            # captured_at ≈ now() > decision_time. Passing fresh_at=decision_time would
+            # apply the `captured_at <= decision_time` ceiling (_latest_snapshot_rows_
+            # for_event_family L12921) and EXCLUDE the very rows we just fetched, re-electing
+            # the stale pre-refresh row → _snapshot_price_stale_reason fires again → permanent
+            # STALE requeue loop (dead-decision-loop root cause, 2026-06-14: 0 receipts since
+            # 06-12 while the refresher kept landing fresher books the re-elect could not see).
+            # The captured_at ceiling guards NO-LOOK-AHEAD for replay/identity callers; here the
+            # refresh deliberately advances the book past decision_time, so the latest row IS the
+            # honest one. No-look-ahead is still enforced: the stale recheck below grades the
+            # re-elected row's freshness_deadline against the unchanged decision_time.
             refreshed_family_rows = _latest_snapshot_rows_for_event_family(
                 trade_conn,
                 event,
                 condition_ids=family_condition_ids,
-                fresh_at=decision_time,
+                fresh_at=None,
                 require_fresh=False,
             )
             if refreshed_family_rows:
