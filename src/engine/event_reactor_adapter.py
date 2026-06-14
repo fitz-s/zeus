@@ -7914,7 +7914,12 @@ def _mode_consistent_ev_for_proof(
     execution_price: ExecutionPrice | None,
     c_cost_95pct: float | None,
     p_fill_lcb: float,
-    penalty: float = 0.01,
+    # penalty removed 2026-06-14 (RULE 1, trade_score_suppression.md): the flat 0.01
+    # was a phantom 2-prob-cent edge floor with NO cost basis — the real fee is already
+    # in c_cost_95pct (fee_deducted) and the real tick is enforced separately. It was the
+    # dominant live suppressor (Karachi 40C +edge → score −0.00076), harshest exactly
+    # where the model disagrees with a cheap market. Honest cost (fee + tick) is preserved.
+    penalty: float = 0.0,
     minutes_to_event_end: float | None = None,
     unexpired_family_rest: bool = False,
     escalated_after_rest: bool = False,
@@ -14049,8 +14054,10 @@ def _robust_trade_score_from_generated_inputs(
         c_95pct=ExecutionPrice(c_cost_95pct, "ask", fee_deducted=True, currency="probability_units"),
         c_stress=ExecutionPrice(c_cost_95pct, "ask", fee_deducted=True, currency="probability_units"),
         p_fill_lcb=p_fill_lcb,
-        penalty=0.01,
-        stress_penalty=0.01,
+        # phantom 0.01 penalty removed 2026-06-14 (RULE 1) — see trade_score_suppression.md.
+        # Honest cost (real fee in c_95pct fee_deducted + real tick) is preserved.
+        penalty=0.0,
+        stress_penalty=0.0,
     )
     return float(receipt.score)
 
