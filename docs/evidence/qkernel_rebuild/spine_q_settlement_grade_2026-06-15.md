@@ -237,3 +237,113 @@ unproven** — same limitation #121 hit.
    per-city/per-season σ differentiation in the live floor table, so the spine cannot
    widen for genuinely high-variance cells. Re-fitting the floor (lever §D-1) should
    also restore city×metric cohorts where n permits.
+
+---
+
+## RE-GRADE at k_default = 1.30 (operator's σ fix applied)
+
+- Appended 2026-06-15. The operator raised `state/settlement_sigma_floor.json`
+  `_meta.k_default` from 1.0 → 1.30 (consumed as `σ_eff = k · sigma_floor_c` via
+  `src/calibration/emos.settlement_sigma_floor` → `src/forecast/sigma_authority.realized_sigma_floor`).
+  Confirmed live in a fresh process: the served σ scaled by **exactly 1.30× on all
+  10,978 bin-obs** (1.334 → 1.735 °C; absolute-floor cells 1.0 → 1.30 °C). Same
+  sample as the prior verdict (360 families, 998 cell×lead, 10,978 bin-obs), so the
+  ONLY thing that changed is the width. READ-ONLY re-grade through the real
+  `build_joint_q`. **This does NOT supersede the prior verdict; it validates the fix.**
+
+### 1. PIT moved from clearly under-dispersed toward calibrated
+
+| source | std(z) k=1.0 | **std(z) k=1.30** | \|z\|>2 k=1.0 → k=1.30 | \|z\|>3 k=1.0 → k=1.30 | mean(z) k=1.30 |
+|---|---|---|---|---|---|
+| **WU (canonical)**, n=998 | 1.380 | **1.062** | 0.147 → 0.075 | 0.044 → 0.012 | +0.304 |
+| OpenMeteo (robustness, C), n=793 | 1.175 | **0.904** | 0.092 → 0.037 | 0.015 → 0.004 | +0.059 |
+
+Normal targets: |z|>2 = 0.046, |z|>3 = 0.003. **k=1.30 lands WU almost exactly on
+calibration (std(z) 1.06, |z|>2 0.075) and OM just past it (0.90, slightly
+over-corrected).** The fat tails collapse: WU |z|>3 from 4.4 % → 1.2 %.
+
+### 2. Ring-distance ratios collapsed toward 1.0 (realized is fixed; only mean_q widened)
+
+| ring | n | ratio k=1.0 | **ratio k=1.30** |
+|---|---|---|---|
+| 0 (modal) | 899 | 0.754 | **0.953** |
+| 1 | 1897 | 0.858 | **0.995** |
+| 2 | 1820 | 1.364 | **1.121** |
+| 3 | 1690 | 2.072 | **1.016** |
+| ≥4 | 2676 | 11.03 | **2.689** |
+| tail (open shoulders) | 1996 | 0.337 | **0.265** |
+
+Rings 0–3 are now essentially calibrated (0.95–1.12). Ring ≥4 improved 11× → 2.7×
+but is **still under-dispersed** — the extreme far tail is fatter than any single
+Normal width captures (a Normal of *any* k can't simultaneously fit rings 1–3 and the
+≥4 fat tail; this residual is a shape, not a width, defect). The open-shoulder `tail`
+got slightly *worse* (0.34 → 0.27): widening pushes more mass onto the catch-all
+shoulders, which almost never settle — a known integrator artifact, not a σ problem.
+
+### 3. PIT-optimal k — 1.30 is a justified midpoint; the real fix is lead-dependent
+
+| | WU | OpenMeteo |
+|---|---|---|
+| **global PIT-optimal k (std(z)→1.0)** | **1.380** | **1.175** |
+| per-lead optimal k — 24h | 1.258 | 0.973 |
+| per-lead optimal k — 72h | 1.331 | 1.098 |
+| per-lead optimal k — 96h+ | **1.527** | 1.393 |
+
+**k=1.30 slightly UNDER-corrects on WU (residual std(z) 1.06 > 1.0) and slightly
+OVER-corrects on OM (0.90 < 1.0).** It sits inside the honest [1.18, 1.38] band and is
+a defensible single-number choice. BUT a single global k is structurally wrong: the
+under-dispersion **grows with lead** (optimal k 1.26 → 1.33 → 1.53 on WU). At k=1.30,
+24h is mildly over-dispersed (std(z) 0.97) while 96h+ stays under-dispersed (std(z)
+1.18). The precise fix is a **per-lead floor multiplier**: ~1.25 (24h) / ~1.33 (72h) /
+~1.50 (96h+). `global_lead_bucket_floor` already widens +0.10 °C/lead-day
+(`src/forecast/sigma_authority.py:118`) but is dominated by the flat realized floor;
+the per-lead k belongs in the floor *table* or as a lead-scaled `k_default`.
+
+### 4. Non-modal YES [0.05,0.35] stays NEGATIVE — direction law holds
+
+| | n | mean_q | realized | ratio q/real | buy_YES EV (q-proxy) |
+|---|---|---|---|---|---|
+| class k=1.0 | 3790 | 0.1638 | 0.1609 | 1.018× | −0.0229 (NEG) |
+| **class k=1.30** | 4719 | 0.1412 | 0.1435 | 0.984× | **−0.0178 (NEG)** |
+
+Widening did the right thing to the sub-classes: the over-confident ring-1 losers
+moved to fair (q/real 1.17× → **1.01×**, EV −0.053 → −0.022) and the previously
+under-confident ring-2/3 "winners" were pulled back to neutral/negative (ring-2 EV
++0.016 → −0.007; ring-3 +0.000 → −0.014). **No sub-class flips to a tradeable YES**
+except a tiny ring-≥4 pocket (n=37, EV +0.043 — far-tail, not in the class the law
+targets, and below any sane min-n). **The direction law stays.** The aggregate is now
+*slightly under*-confident (0.98×), consistent with k=1.30 being a hair wide on the
+near rings. (The executable-price caveat from §C is unchanged: at a real ask ≳0.04
+below q the class would still be +EV, but that leg remains undemonstrable here.)
+
+### 5. Favorite-NO refusal — INTACT and strengthened (the critical safety check)
+
+Running the live NO-admit gate (`(1−q) − z·se > price_no + cost`, `price_no =
+1 − realized_freq(ring)` — the harshest calibrated-market proxy, mirroring
+`scripts/sigma_kernel_holdout_replay._no_gate_replay`):
+
+| | modal/favorite-NO admits | near-ring NO admits (winrate) | far-NO admits (winrate) |
+|---|---|---|---|
+| k=1.0 | **0** | 1178 (0.893) | 3142 (0.974) |
+| **k=1.30** | **0** | 830 (0.892) | 1465 (0.985) |
+
+**Modal/favorite-NO admits = 0 at BOTH k.** Widening σ does NOT manufacture a
+favorite-NO trade — the spine never admits a NO on its own modal (favorite) bin, and
+the highest-q bin (q=1.0, won) carries buy-NO@0.999 EV = −1.02 (correctly refused).
+Widening made the spine *more* conservative on near-ring NO (admits 1178 → 830,
+winrate held 0.89) and *preserved* the legitimate far-NO harvest (winrate 0.974 →
+**0.985**), dropping only the spurious far-NO admits that were riding on the previously
+under-dispersed q. The cost-0.999 favorite-NO refusal is structurally intact.
+
+### RE-GRADE VERDICT
+
+**k_default = 1.30 is a correct, safe improvement that should ship.** It moves the
+spine PIT from clearly under-dispersed (WU std(z) 1.38) to essentially calibrated
+(1.06), collapses the ring-0–3 ratios to 0.95–1.12, keeps the non-modal YES class
+net-negative (direction law holds), and does NOT manufacture a favorite-NO trade
+(modal-NO admits stay 0; far-NO harvest preserved at 0.985 winrate). Residual gaps,
+both minor and both *shape* not *width*: (a) the ring-≥4 extreme tail is still fatter
+than a Normal (2.7×) — no global k fixes this; it needs a heavier-tailed kernel or an
+explicit far-shoulder mass floor; (b) the under-dispersion is lead-dependent, so the
+ideal is a per-lead k (~1.25/1.33/1.50 for 24h/72h/96h+) rather than the flat 1.30,
+which leaves 96h+ mildly under-dispersed (std(z) 1.18) and 24h mildly over (0.97).
