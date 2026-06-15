@@ -2,15 +2,19 @@ schema_version: 1
 metadata:
   created: "2026-05-22"
   owner_packet: "docs-convergence-20260522 PR-T0 advisory file-arrangement kernel"
-  enforcement: advisory
+  enforcement: data_only   # workspace-routing-redesign S7 (PLAN §5): was "advisory"
   not_authority_over:
     - runtime code
     - canonical DB truth
     - live state
   note: >
-    This manifest tells agents WHERE a file belongs and WHAT to read.
-    It never blocks. Every rule has severity warn and blocking false.
-    Enforcement is by critic-agent review only.
+    PURE DATA TABLE. This manifest declares WHERE each file kind belongs; it does
+    not itself enforce. The write-router route_write (.claude/hooks/route_write.py)
+    consumes these canonical_path / legacy_paths at the write boundary (silent-route
+    / nudge). The prior "enforcement is by critic-agent review only" concept is
+    RETIRED 2026-06-14 — placement is structural now, not a review checklist. The
+    topology H5-H8 docs-checks remain only as a once-per-PR/CI backstop for residue
+    route_write cannot see (raw mkdir / shell > redirect outside the Write tool).
 
 active_operations_package:
   pointer_file: docs/operations/current_state.md

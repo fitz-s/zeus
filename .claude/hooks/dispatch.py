@@ -1215,69 +1215,10 @@ def _run_advisory_check_post_merge_cleanup(
     )
 
 
-def _run_advisory_check_pre_edit_architecture(
-    payload: dict[str, Any],
-) -> str | None:
-    """Advisory on edits to architecture/** without ARCH_PLAN_EVIDENCE."""
-    file_path = _file_path_from_payload(payload)
-    if not file_path:
-        tool_input = payload.get("tool_input", {})
-        file_path = tool_input.get("notebook_path", "") if isinstance(tool_input, dict) else ""
-    if not file_path:
-        return None
-
-    try:
-        fpath = Path(file_path)
-        if fpath.is_absolute():
-            try:
-                fpath = fpath.relative_to(REPO_ROOT)
-            except ValueError:
-                return None
-        if not fpath.as_posix().startswith("architecture/"):
-            return None
-    except Exception:
-        return None
-
-    evidence = os.environ.get("ARCH_PLAN_EVIDENCE", "").strip()
-    if evidence:
-        ep = Path(evidence) if Path(evidence).is_absolute() else REPO_ROOT / evidence
-        if ep.exists():
-            return None
-
-    return (
-        "ADVISORY: editing architecture/** without ARCH_PLAN_EVIDENCE. "
-        "Ensure an architecture plan exists before modifying capability definitions."
-    )
-
-
-def _run_advisory_check_pre_write_capability_gate(
-    payload: dict[str, Any],
-) -> str | None:
-    """Advisory on writes to blocking-class capability paths."""
-    if os.environ.get("ZEUS_ROUTE_GATE_EDIT", "").lower() == "off":
-        return None
-
-    file_path = _file_path_from_payload(payload)
-    if not file_path:
-        tool_input = payload.get("tool_input", {})
-        file_path = tool_input.get("notebook_path", "") if isinstance(tool_input, dict) else ""
-    if not file_path:
-        return None
-
-    try:
-        import sys as _sys
-        _repo_str = str(REPO_ROOT)
-        if _repo_str not in _sys.path:
-            _sys.path.insert(0, _repo_str)
-        from src.architecture.gate_edit_time import evaluate  # type: ignore[import]
-        allowed, msg = evaluate([file_path])
-        if not allowed:
-            return f"ADVISORY: capability gate would block this write: {msg}"
-        return None
-    except Exception:
-        pass
-
-    return None
+# pre_edit_architecture + pre_write_capability_gate handlers DELETED 2026-06-14
+# (workspace-routing-redesign S3 collapse, PLAN §5). Both were ADVISORY-only
+# placement/capability checks on the Edit/Write line; placement is now owned
+# structurally by route_write. Deregistered from registry.yaml + settings.json.
 
 
 _WORKTREE_DOCTOR = REPO_ROOT / "scripts" / "worktree_doctor.py"
@@ -1946,8 +1887,6 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "phase_close_commit_required": _run_advisory_check_phase_close_commit_required,
     "pre_merge_contamination": _run_advisory_check_pre_merge_contamination,
     "post_merge_cleanup": _run_advisory_check_post_merge_cleanup,
-    "pre_edit_architecture": _run_advisory_check_pre_edit_architecture,
-    "pre_write_capability_gate": _run_advisory_check_pre_write_capability_gate,
     "session_start_visibility": _run_advisory_check_session_start_visibility,
     "worktree_create_advisor": _run_advisory_check_worktree_create_advisor,
     "worktree_remove_advisor": _run_advisory_check_worktree_remove_advisor,

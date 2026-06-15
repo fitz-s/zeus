@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 23
+  catalog_size: 21
   sunset_default: 90d
 
 hooks:
@@ -197,29 +197,13 @@ hooks:
     telemetry:
       ritual_signal_emitted: true
 
-  - id: pre_edit_architecture
-    event: PreToolUse
-    matcher: "Edit|Write|MultiEdit|NotebookEdit"
-    intent: >
-      Advisory on edits to architecture/** without ARCH_PLAN_EVIDENCE.
-      ADVISORY: emits context; never blocks.
-    blocked_when: []
-    severity: ADVISORY
-    sunset_date: 2026-08-06
-    telemetry:
-      ritual_signal_emitted: true
-
-  - id: pre_write_capability_gate
-    event: PreToolUse
-    matcher: "Edit|Write|MultiEdit|NotebookEdit"
-    intent: >
-      Topology Gate 1 advisory -- writes to blocking-class capability paths.
-      ADVISORY: emits context; never blocks.
-    blocked_when: []
-    severity: ADVISORY
-    sunset_date: 2026-08-04
-    telemetry:
-      ritual_signal_emitted: true
+  # pre_edit_architecture + pre_write_capability_gate DELETED 2026-06-14
+  # (workspace-routing-redesign S3 collapse, PLAN §5). Both were ADVISORY-only
+  # (never blocked = zero enforcement value) placement/capability checks on the
+  # Edit/Write line. Placement is now owned structurally by route_write
+  # (silent-route + nudge + cross-tenant HARD-STOP). Per operator gate-mass law:
+  # collapse decayed advisories, do not re-implement them. Edit-line keeps only
+  # citation_grep_gate.
 
   - id: session_start_visibility
     event: SessionStart

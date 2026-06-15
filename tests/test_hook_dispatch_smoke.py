@@ -474,100 +474,10 @@ def test_pre_merge_contamination_operator_override_allows() -> None:
     assert _parse_decision(result) != "deny"
 
 
-# ---------------------------------------------------------------------------
-# pre_edit_architecture realistic payloads
-# ---------------------------------------------------------------------------
-
-
-def test_pre_edit_architecture_non_arch_path_allows() -> None:
-    """Edits outside architecture/ pass through."""
-    payload = _make_edit_payload("src/engine/evaluator.py")
-    result = _run_dispatch("pre_edit_architecture", payload)
-    assert result.returncode == 0
-    assert _parse_decision(result) != "deny"
-
-
-def test_pre_edit_architecture_without_evidence_emits_advisory() -> None:
-    """Edit on architecture/** without ARCH_PLAN_EVIDENCE emits advisory context (not deny)."""
-    payload = _make_edit_payload("architecture/topology.yaml")
-    result = _run_dispatch_env(
-        "pre_edit_architecture",
-        payload,
-        {"ARCH_PLAN_EVIDENCE": ""},
-    )
-    assert result.returncode == 0, (
-        f"advisory hook must exit 0; rc={result.returncode} stderr={result.stderr!r}"
-    )
-    assert _parse_decision(result) != "deny", "advisory hook must not emit deny"
-    try:
-        parsed = json.loads(result.stdout)
-        ctx = parsed.get("hookSpecificOutput", {}).get("additionalContext", "")
-    except Exception:
-        ctx = ""
-    assert ctx, (
-        f"arch edit without evidence must emit additionalContext advisory; "
-        f"stdout={result.stdout!r}"
-    )
-
-
-def test_pre_edit_architecture_with_valid_evidence_allows() -> None:
-    """Edit on architecture/** with valid ARCH_PLAN_EVIDENCE file allows."""
-    import tempfile, pathlib
-    with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
-        f.write("plan evidence for this test\n")
-        evidence_path = f.name
-    try:
-        payload = _make_edit_payload("architecture/topology.yaml")
-        result = _run_dispatch_env(
-            "pre_edit_architecture",
-            payload,
-            {"ARCH_PLAN_EVIDENCE": evidence_path},
-        )
-        assert result.returncode == 0
-        assert _parse_decision(result) != "deny"
-    finally:
-        pathlib.Path(evidence_path).unlink(missing_ok=True)
-
-
-
-# ---------------------------------------------------------------------------
-# pre_write_capability_gate realistic payloads
-# ---------------------------------------------------------------------------
-
-
-def test_pre_write_capability_gate_non_kernel_path_allows() -> None:
-    """Edits to non-kernel paths pass through."""
-    payload = _make_edit_payload("tests/test_foo.py")
-    result = _run_dispatch("pre_write_capability_gate", payload)
-    assert result.returncode == 0
-    assert _parse_decision(result) != "deny"
-
-
-def test_pre_write_capability_gate_feature_flag_off_allows() -> None:
-    """ZEUS_ROUTE_GATE_EDIT=off disables the gate entirely."""
-    payload = _make_edit_payload("src/state/ledger.py")
-    result = _run_dispatch_env(
-        "pre_write_capability_gate",
-        payload,
-        {"ZEUS_ROUTE_GATE_EDIT": "off"},
-    )
-    assert result.returncode == 0
-    assert _parse_decision(result) != "deny"
-
-
-def test_pre_write_capability_gate_kernel_path_without_evidence_denies() -> None:
-    """Write to a hard_kernel_path without evidence must deny."""
-    payload = _make_edit_payload("src/state/ledger.py")
-    result = _run_dispatch_env(
-        "pre_write_capability_gate",
-        payload,
-        {"ARCH_PLAN_EVIDENCE": "", "ZEUS_ROUTE_GATE_EDIT": "on"},
-    )
-    # Either deny (evidence missing) or allow (gate_edit_time not importable → fallback)
-    assert result.returncode in (0, 2), f"unexpected rc={result.returncode}"
-    decision = _parse_decision(result)
-    if decision is not None:
-        assert decision in ("deny", "allow")
+# pre_edit_architecture + pre_write_capability_gate smoke tests DELETED
+# 2026-06-14 (workspace-routing-redesign S3 collapse). Both hooks were removed
+# (advisory-only; placement now owned structurally by route_write — see
+# tests/test_route_write.py). Nothing to smoke-test for deregistered hooks.
 
 
 # ---------------------------------------------------------------------------

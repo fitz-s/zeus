@@ -32,8 +32,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py --multi pre_edit_architecture pre_write_capability_gate citation_grep_gate",
-            "description": "[consolidated 2026-06-13] PreToolUse/Edit checks in ONE process (was 4 python spawns). maintenance_worker_dry_run_floor DELETED (advisory-only, false-fired on reads + the global non-Zeus ~/.claude/settings.json)."
+            "command": "python3 .claude/hooks/dispatch.py --multi citation_grep_gate",
+            "description": "[workspace-routing S3] Edit/Write checks. pre_edit_architecture + pre_write_capability_gate DELETED (advisory-only, placement now owned by route_write). citation_grep_gate remains."
           }
         ]
       },
