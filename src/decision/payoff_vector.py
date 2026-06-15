@@ -1,5 +1,8 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-06-15 (vectorized robust-ΔU stake sweep: precompute the
+#   stake-independent effective-π matrix once + single matmul reduction over band draws;
+#   numerically identical to the per-draw _delta_u_at_stake sum, ~1400x faster — fixes the
+#   live reactor cycle hang that blew the 45s budget to ~660s and starved snapshot freshness)
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/payoff_vector.py" block lines 734-802: CandidateRoute
 #   738-746 [candidate_id, instrument, route_cost, payoff_vector, side, bin_id];
@@ -127,6 +130,7 @@ DRIFT RESOLVED (recorded per operator law; see docs/rebuild/impl_w4_payoff_vecto
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal, Mapping, Sequence
@@ -375,6 +379,97 @@ def _draw_to_pi(
     return pi
 
 
+class _PreparedSizing:
+    """Stake-INDEPENDENT precompute for the robust-ΔU stake sweep (performance only).
+
+    ``robust_delta_u(s)`` is ``quantile_alpha( [ Σ_y π_y^(k) · g_y(s) for draw k ] )`` where
+
+      * the per-draw side-conservative effective π (``effective_outcome_pi``) is INDEPENDENT
+        of the stake ``s`` (it depends only on the draw and the candidate side), and
+      * the per-outcome log-growth ``g_y(s) = log(A_y + R_y(s)) - log(A_y)`` is INDEPENDENT
+        of the draw (it depends only on the stake, the candidate and the outcome).
+
+    The naive nested ``optimize_vector_stake`` rebuilt the entire (n_draws) effective-π set
+    at EVERY stake grid point and summed the draws in pure Python — ``O(grid · n_draws ·
+    n_outcomes)`` Python work. With grid≈396 and n_draws=4000 that is ~1.6M
+    ``_delta_u_at_stake`` calls PER candidate, which blew the live reactor cycle budget
+    (a 22-family cycle ran ~660s at 100% CPU, starving snapshot freshness so every priced
+    family expired before it could fill).
+
+    This precomputes, ONCE per candidate, the (n_draws × n_outcomes) effective-π matrix
+    ``Pi`` and the per-outcome existing wealth ``A``. Each stake evaluation then costs one
+    per-outcome growth vector ``g(s)`` (``n_outcomes`` ``matrix.payoff`` walks) plus a
+    single ``Pi @ g`` matmul and one quantile — the draw loop is gone. Because ΔU is LINEAR
+    in π, the matmul is numerically identical to the per-draw ``_delta_u_at_stake`` sum: the
+    SAME effective_outcome_pi, the SAME Decimal-wealth ruin rule, the SAME alpha-quantile.
+    It is a pure speedup, NOT a cap/haircut/behavior change.
+    """
+
+    __slots__ = ("candidate", "matrix", "alpha", "outcomes", "_A", "_Pi")
+
+    def __init__(
+        self,
+        candidate: NativeSideCandidate,
+        *,
+        band: JointQBand,
+        omega: OutcomeSpace,
+        matrix: FamilyPayoffMatrix,
+        exposure: PortfolioExposureVector,
+        alpha: float,
+    ) -> None:
+        self.candidate = candidate
+        self.matrix = matrix
+        self.alpha = alpha
+        outcomes = list(matrix.outcomes)
+        self.outcomes = outcomes
+        # Existing wealth A_y per outcome (Decimal — the ruin check and the log are taken
+        # exactly as utility_ranker._delta_u_at_stake does, on Decimal wealth).
+        self._A = [exposure.a(y) for y in outcomes]
+        # Stake-INDEPENDENT effective-π matrix: Pi[k, j] = effective_outcome_pi(draw_k)[j].
+        samples = np.asarray(band.samples, dtype=float)
+        n_draws = samples.shape[0]
+        n_out = len(outcomes)
+        Pi = np.zeros((n_draws, n_out), dtype=float)
+        for k in range(n_draws):
+            pi = _draw_to_pi(samples[k, :], omega, matrix)
+            eff_pi = effective_outcome_pi(candidate, matrix, pi)
+            for j, y in enumerate(outcomes):
+                Pi[k, j] = float(eff_pi.get(y, 0.0))
+        self._Pi = Pi
+
+    def robust_at(self, stake_usd: Decimal) -> float:
+        """The alpha-quantile of ΔU across all band draws at ``stake_usd`` (vectorized)."""
+        outcomes = self.outcomes
+        A = self._A
+        g = np.zeros(len(outcomes), dtype=float)
+        ruin = np.zeros(len(outcomes), dtype=bool)
+        for j, y in enumerate(outcomes):
+            a = A[j]
+            try:
+                r = self.matrix.payoff(self.candidate, y, stake_usd)
+            except (ValueError, ArithmeticError):
+                # Infeasible stake at this outcome (depth / min order / off-grid): any draw
+                # placing mass here is -inf — exactly _delta_u_at_stake's except branch.
+                ruin[j] = True
+                continue
+            new_wealth = a + r
+            if new_wealth <= Decimal("0"):
+                # Ruin on this outcome -> log undefined -> -inf for any draw with mass here.
+                ruin[j] = True
+                continue
+            g[j] = math.log(float(new_wealth)) - math.log(float(a))
+        # ΔU per draw = Σ_y π_y · g_y  (LINEAR in π -> one matmul over ALL draws at once).
+        du = self._Pi @ g
+        if ruin.any():
+            # A draw with POSITIVE mass on ANY ruin outcome is -inf. This matches the
+            # per-draw `if p <= 0: continue` skip: an outcome with zero draw-mass never
+            # triggers the ruin -inf for that draw.
+            bad = (self._Pi[:, ruin] > 0.0).any(axis=1)
+            if bad.any():
+                du = np.where(bad, -np.inf, du)
+        return float(np.quantile(du, self.alpha))
+
+
 def robust_delta_u(
     candidate: NativeSideCandidate,
     stake_usd: Decimal,
@@ -412,19 +507,15 @@ def robust_delta_u(
     if not (0.0 < a < 1.0):
         raise PayoffVectorError(f"DEGENERATE_ALPHA: alpha={a!r} (need 0 < alpha < 1)")
 
-    values: list[float] = []
-    samples = np.asarray(band.samples, dtype=float)
-    for k in range(samples.shape[0]):
-        pi = _draw_to_pi(samples[k, :], omega, matrix)
-        # Side-conservative reweighting per draw (the NO side gets its own bound; YES is
-        # returned unchanged) — the SAME effective_outcome_pi the family ranker applies.
-        eff_pi = effective_outcome_pi(candidate, matrix, pi)
-        u = _delta_u_at_stake(candidate, matrix, eff_pi, exposure, stake_usd)
-        values.append(u)
-    # A draw that drives an outcome's wealth to ruin returns -inf; the quantile must still
-    # be a real number for the optimizer. If EVERY draw is -inf the stake is infeasible
-    # (the quantile is -inf), which the argmax correctly avoids.
-    return float(np.quantile(np.asarray(values, dtype=float), a))
+    # Vectorized: build the stake-INDEPENDENT effective-π matrix once, then reduce the draws
+    # with a single matmul (ΔU is linear in π). Numerically identical to the per-draw
+    # `_delta_u_at_stake` sum — same effective_outcome_pi, same Decimal-wealth ruin rule,
+    # same alpha-quantile (see :class:`_PreparedSizing`). `_delta_u_at_stake` is retained as
+    # the single-π reference the equivalence test pins this against.
+    prepared = _PreparedSizing(
+        candidate, band=band, omega=omega, matrix=matrix, exposure=exposure, alpha=a
+    )
+    return prepared.robust_at(stake_usd)
 
 
 def _feasible_stake_bounds(
@@ -491,16 +582,24 @@ def optimize_vector_stake(
     if lo is None or hi is None or hi <= lo:
         return Decimal("0"), 0.0, float("-inf")
 
+    # Untradeable candidates have no robust ΔU (robust_delta_u returns -inf for them and
+    # effective_outcome_pi refuses them); guard BEFORE the precompute so the prepared matrix
+    # is never built for a no-trade candidate. Matches the old per-call robust_delta_u guard.
+    if not candidate.is_tradeable or candidate.executable_cost_curve is None:
+        return Decimal("0"), 0.0, float("-inf")
+    a = band.alpha if alpha is None else float(alpha)
+    if not (0.0 < a < 1.0):
+        raise PayoffVectorError(f"DEGENERATE_ALPHA: alpha={a!r} (need 0 < alpha < 1)")
+
+    # Build the stake-INDEPENDENT effective-π matrix ONCE; every grid point reuses it (the
+    # whole reason the sweep is now cheap — see :class:`_PreparedSizing`). Identical numbers
+    # to calling robust_delta_u per stake, ~grid× less work.
+    prepared = _PreparedSizing(
+        candidate, band=band, omega=omega, matrix=matrix, exposure=exposure, alpha=a
+    )
+
     def _ru(stake: Decimal) -> float:
-        return robust_delta_u(
-            candidate,
-            stake,
-            band=band,
-            omega=omega,
-            matrix=matrix,
-            exposure=exposure,
-            alpha=alpha,
-        )
+        return prepared.robust_at(stake)
 
     delta_u_at_min = _ru(lo)
 
