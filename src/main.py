@@ -91,6 +91,15 @@ _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
 # consecutive cycles cover disjoint families and the whole live set is swept
 # within a bounded number of cycles. See _refresh_pending_family_snapshots.
 _SUBSTRATE_REFRESH_CURSOR = 0
+# FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): family_key -> monotonic
+# deadline until which a NO-topology family whose Gamma slug lookup returned an
+# EMPTY event list (no Polymarket market listed yet for a future target_date) is
+# NOT re-probed. Stops not-yet-listed future families (measured 200/200 such were
+# next-day lows/highs probed the day before listing) from clogging the bounded
+# Gamma time-box every ~20s warm cycle and starving CLOB capture of families that
+# DO have topology — the fresh_executable_city_count 0-oscillation. Module-global
+# (mirrors _SUBSTRATE_REFRESH_CURSOR); resets on restart (cold re-warm is fine).
+_GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 # New-listing scout (FIX 3c): condition_ids discovered by the 60s scout that have
 # not yet been seen at the head of the substrate-warmer rotation.  The warmer
 # reads + clears this set and prepends matching families so new markets are warmed
@@ -3427,7 +3436,7 @@ def _refresh_pending_family_snapshots(
     # of the rotation so they are warmed in the NEXT cycle rather than waiting at
     # the tail of the round-robin.  Translate condition_ids → (city, date, metric)
     # tuples via the topology DB, then prepend to families before cursor rotation.
-    global _SUBSTRATE_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS
+    global _SUBSTRATE_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS, _GAMMA_EMPTY_BACKOFF_UNTIL
     new_priority_families: list[tuple[str, str, str]] = []
     if _NEW_FAMILY_CONDITION_IDS:
         try:
@@ -3478,6 +3487,12 @@ def _refresh_pending_family_snapshots(
         max(1.0, float(os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0"))),
         max(0.1, refresh_budget_s - 0.1),
     )
+    # FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): cooldown (seconds) a
+    # no-topology, Gamma-empty family is parked before re-probing. 0 disables.
+    _gamma_empty_backoff_s = max(
+        0.0,
+        float(os.environ.get("ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS", "300.0")),
+    )
     topology_deadline = _topology_lookup_deadline_for_snapshot_refresh(
         refresh_deadline=refresh_deadline,
         refresh_budget_s=refresh_budget_s,
@@ -3504,6 +3519,7 @@ def _refresh_pending_family_snapshots(
     #         Families with ANY stale/missing bin still proceed to Gamma fetch.
     fresh_skipped = 0
     no_topology = 0
+    no_topology_backed_off = 0
     venue_closed_skipped = 0
     gamma_refresh_families: list[tuple[str, str, str]] = []
     cached_topology_markets: list[dict] = []
@@ -3569,6 +3585,27 @@ def _refresh_pending_family_snapshots(
             topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
             if not topology_rows:
                 no_topology += 1
+                # FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): if this
+                # no-topology family's last Gamma slug lookup returned an EMPTY
+                # event list (no Polymarket market listed yet for this future
+                # target_date) and we are still inside its cooldown, do NOT re-add
+                # it to the Gamma probe set this cycle. Re-probing not-yet-listed
+                # future families every ~20s warm tick returns empty every time,
+                # exhausts the bounded Gamma time-box, and starves CLOB capture of
+                # families that DO have topology (the fresh_executable_city_count
+                # 0-oscillation, measured 200/200 backed-off were next-day
+                # lows/highs). The family stays a pending event and is re-probed
+                # the moment the cooldown expires — captured as soon as the market
+                # lists. Symmetric twin of the _family_venue_closed past-skip: a
+                # focus/efficiency skip, never a terminal drop. Env
+                # ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS=0 disables.
+                nb_key = _refresh_family_key(city, target_date, metric)
+                if (
+                    _gamma_empty_backoff_s > 0.0
+                    and _GAMMA_EMPTY_BACKOFF_UNTIL.get(nb_key, 0.0) > time.monotonic()
+                ):
+                    no_topology_backed_off += 1
+                    continue
                 logger.debug(
                     "refresh_pending_family_snapshots: no market topology for %s/%s/%s "
                     "(no Polymarket market for this family — event will be rejected at gate)",
@@ -3902,6 +3939,17 @@ def _refresh_pending_family_snapshots(
 
             gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
 
+            # FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): families whose
+            # Gamma slug lookup returned an EMPTY event list this cycle have no
+            # market listed yet; park them for the cooldown so they stop clogging
+            # the Gamma time-box every warm tick. Only genuinely-probed-empty
+            # families are parked — timebox_unattempted (never probed) families
+            # stay immediately retryable next cycle.
+            if _gamma_empty_backoff_s > 0.0 and gamma_empty_family_keys:
+                _eb_deadline = time.monotonic() + _gamma_empty_backoff_s
+                for _eb_key in gamma_empty_family_keys:
+                    _GAMMA_EMPTY_BACKOFF_UNTIL[_eb_key] = _eb_deadline
+
             # 2026-06-06 throughput repair: keep this refresh truly scoped to pending
             # families. The old fallback called the global weather discovery scanner,
             # which performs a tag/slug sweep and routinely exhausts its
@@ -4067,6 +4115,7 @@ def _refresh_pending_family_snapshots(
         "cached_topology_families": cached_topology_families,
         "cached_topology_incomplete": cached_topology_incomplete,
         "no_topology": no_topology,
+        "no_topology_backed_off": no_topology_backed_off,
         "fresh_skipped": fresh_skipped,
         "venue_closed_skipped": venue_closed_skipped,
         "topology_budget_exhausted": int(topology_budget_exhausted),
