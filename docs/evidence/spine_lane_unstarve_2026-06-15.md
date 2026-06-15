@@ -94,6 +94,33 @@ B. **Speed the decision** (latency): parallelize the per-candidate book fetches 
    budget covers many more families and reaches FSR naturally — helps BOTH lanes, no priority
    change, but touches the network/txn discipline and must preserve the K=1 fresh-book law.
 
+## L5 — RESOLVED: fair cross-lane interleave → THE SPINE RUNS (commit reactor interleave)
+`_fair_lane_interleave` (reactor.py) round-robins the forecast-decision lane against day0 1:1
+within the per-cycle budget. Deployed + restarted → **fsr_claimed=2, fsr_processed=2** (0 all
+week), and the rebuilt spine returned real reasons (`QKERNEL_SPINE_NO_TRADE:...`). The 4-layer
+queue/claim starvation (L1–L4) is fully cleared; the rebuilt q-kernel spine is on the live
+decision path for the first time.
+
+## L6 — current frontier: spine runs but gets SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED
+Sub-typed the reason (commit) → **universal `MU_SIGMA_NOT_STASHED`** (7/7 spine decisions over
+12 min; zero real price decisions). Traced:
+- The Stage-0 producer (`_market_analysis_from_event_snapshot`, event_reactor_adapter.py:11190)
+  stashes `_edli_spine_mu/sigma_native` onto the SAME threaded payload the seam reads (verified
+  caller @10687); no early return bypasses it.
+- `ensemble_snapshots` (zeus-forecasts.db) HAS members for every current target (06-15:
+  1372/1372, 06-16: 1156/1156) — so this is NOT a raw-supply gap.
+- Therefore: `_spine_mu_native` is None (the EMOS @11307 / honest-raw @11355 belief branch did
+  NOT run for these families) AND the corrected member array `members` is empty at the producer
+  (the empirical fallback @11547 can't fire). The served predictive center is never computed.
+- Tied to the live `REPLACEMENT_FORECAST_LIVE_DIRECTION_PROOF_MISSING` cycle reason: the
+  replacement/EMOS belief isn't producing mu/sigma for the FSR families reaching the spine.
+
+NEXT (task #119): the forecast BELIEF computation — why EMOS/replacement does not produce
+mu/sigma and why the corrected `members` array is empty for live FSR families despite raw
+ensemble members existing. This is the forecast-belief-computation layer (tasks #97/#98/#70),
+now the live frontier because the spine finally runs and reaches it. The fix lets the spine
+price → the path to a real settlement-graded fill.
+
 ## Policy lever flagged for the operator
 day0 (Tier-0) genuinely has ~92 families (46 cities × {high,low}). With claim `limit=100`,
 day0 nearly fills the claim every cycle, leaving FSR only the residual (~8–9/cycle). The L3
