@@ -688,8 +688,11 @@ def test_capture_executable_snapshot_timestamps_actual_clob_read_completion(conn
     assert loaded is not None
     assert loaded.captured_at >= before_capture
     assert loaded.captured_at <= after_capture
-    assert loaded.freshness_deadline == loaded.captured_at + timedelta(seconds=30)
+    # Selection freshness window widened 30s -> 180s (2026-06-15, #122 oscillation fix;
+    # submission stays tight via the separate presubmit window + revalidation).
+    assert loaded.freshness_deadline == loaded.captured_at + timedelta(seconds=180)
     assert is_fresh(loaded, loaded.captured_at + timedelta(seconds=1))
+    assert is_fresh(loaded, loaded.captured_at + timedelta(seconds=120))
 
 
 def test_fee_details_canonicalize_base_fee_bps_to_fraction():
