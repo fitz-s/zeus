@@ -11557,7 +11557,8 @@ def _market_analysis_from_event_snapshot(
             # exactly why the served center is absent — EMOS/honest-raw not run vs an empty
             # corrected-member array — so the threading/computation defect is named, not guessed.
             try:
-                logger.warning(
+                import logging as _spine_diag_logging
+                _spine_diag_logging.getLogger("zeus.spine_stash").warning(
                     "SPINE_STASH_DIAG family=%s mu_native=%r sigma_native=%r mu=%r sigma=%r "
                     "deb_list_n=%s raw_list_n=%s members_n=%s raw_members_n=%s",
                     getattr(family, "family_id", "?"),
@@ -11595,7 +11596,8 @@ def _market_analysis_from_event_snapshot(
             payload["_edli_spine_source_cycle_time_utc"] = str(_spine_source_cycle)
     except Exception as _spine_stash_exc:  # noqa: BLE001 — Stage-0 spine is observability-only; never alter a decision
         try:
-            logger.warning(
+            import logging as _spine_diag_logging
+            _spine_diag_logging.getLogger("zeus.spine_stash").warning(
                 "SPINE_STASH_DIAG family=%s EXCEPTION %s: %s",
                 getattr(family, "family_id", "?"), type(_spine_stash_exc).__name__, _spine_stash_exc,
             )
