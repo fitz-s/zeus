@@ -577,7 +577,7 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         )
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
-            lambda *, position, city, now=None: hard_fact_verdict,
+            lambda *, position, city, now=None, world_conn=None: hard_fact_verdict,
         )
 
         results = []
@@ -708,7 +708,7 @@ class TestStructuralWinTerminalHold:
         )
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
-            lambda *, position, city, now=None: hold_verdict,
+            lambda *, position, city, now=None, world_conn=None: hold_verdict,
         )
         # Stub evaluate_exit to return the requested should_exit value
         monkeypatch.setattr(
@@ -842,7 +842,7 @@ class TestStructuralWinTerminalHold:
         )
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
-            lambda *, position, city, now=None: exit_verdict,
+            lambda *, position, city, now=None, world_conn=None: exit_verdict,
         )
 
         results = []

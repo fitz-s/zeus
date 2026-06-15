@@ -481,52 +481,85 @@ class TestRBG_DT6GracefulDegradation:
         assert result.authority != "canonical_db"
 
     def test_riskguard_trailing_loss_stale_does_not_halt(self):
-        """B055: stale trailing-loss reference must degrade to DATA_DEGRADED, not raise RuntimeError."""
+        """B055: a stale trailing-loss reference must NOT raise RuntimeError and
+        must NOT halt the cycle on its own — it resolves by current law:
+
+          - stale reference + NO demonstrable loss -> GREEN bootstrap
+            (`bootstrap_stale_reference`), NOT DATA_DEGRADED. Operator directive
+            2026-05-01 + cold-start follow-up: a reference older than the lookback
+            window (e.g. after a long unload) must not deadlock every restart by
+            flagging DATA_DEGRADED when no loss has actually occurred against it.
+          - stale reference + a real loss past threshold -> RED/degraded (the
+            loss signal still gates).
+
+        Test updated 2026-06-15: the original asserted "stale -> DATA_DEGRADED"
+        unconditionally, which the riskguard staleness handling legitimately
+        changed (see riskguard.py _trailing_loss_snapshot stale_reference branch).
+        The original fixture row was also (a) only 4h old — INSIDE the 24h lookback
+        cutoff, so `checked_at <= cutoff` excluded it and it never reached the
+        stale branch at all, and (b) missing bankroll_truth_source='polymarket_wallet',
+        which the SF7 SQL pre-filter (2026-05-04) now requires of a candidate row.
+        Both are corrected here so the test actually exercises the stale path.
+        """
+        import json
         import sqlite3
         from datetime import timedelta, datetime, timezone
         from src.riskguard.riskguard import _trailing_loss_snapshot, RiskLevel
 
-        # Create an in-memory DB with only stale rows (> 2h old)
-        conn = sqlite3.connect(":memory:")
-        conn.execute("""
-            CREATE TABLE risk_state (
-                id INTEGER PRIMARY KEY,
-                checked_at TEXT,
-                level TEXT,
-                brier REAL,
-                accuracy REAL,
-                win_rate REAL,
-                details_json TEXT,
-                force_exit_review INTEGER DEFAULT 0
+        def _snapshot(current_equity: float) -> dict:
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            conn.execute("""
+                CREATE TABLE risk_state (
+                    id INTEGER PRIMARY KEY,
+                    checked_at TEXT,
+                    level TEXT,
+                    brier REAL,
+                    accuracy REAL,
+                    win_rate REAL,
+                    details_json TEXT,
+                    force_exit_review INTEGER DEFAULT 0
+                )
+            """)
+            # 27h old: older than the 24h lookback cutoff AND beyond the 2h
+            # staleness tolerance -> the reference is genuinely `stale_reference`.
+            # bankroll_truth_source='polymarket_wallet' so it survives the SF7
+            # SQL pre-filter and reaches the trustworthiness path.
+            stale_time = (datetime.now(timezone.utc) - timedelta(hours=27)).isoformat()
+            details = json.dumps({
+                "effective_bankroll": 1000.0,
+                "initial_bankroll": 1000.0,
+                "bankroll_truth_source": "polymarket_wallet",
+            })
+            conn.execute(
+                "INSERT INTO risk_state (checked_at, level, brier, accuracy, win_rate, details_json) "
+                "VALUES (?, 'GREEN', 0.25, 0.6, 0.6, ?)",
+                (stale_time, details),
             )
-        """)
-        # Insert a row that is 3+ hours old (stale beyond TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE)
-        stale_time = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
-        details = '{"effective_bankroll": 1000.0}'
-        conn.execute(
-            "INSERT INTO risk_state (checked_at, level, brier, accuracy, win_rate, details_json) VALUES (?, 'GREEN', 0.25, 0.6, 0.6, ?)",
-            (stale_time, details),
-        )
-        conn.commit()
+            conn.commit()
+            now = datetime.now(timezone.utc).isoformat()
+            # Must not raise — graceful degradation is the B055 core invariant.
+            result = _trailing_loss_snapshot(
+                conn,
+                now=now,
+                lookback=timedelta(hours=24),
+                current_equity=current_equity,
+                initial_bankroll=1000.0,
+                threshold_pct=0.05,
+            )
+            conn.close()
+            return result
 
-        now = datetime.now(timezone.utc).isoformat()
-        # Must not raise — must return degraded snapshot
-        result = _trailing_loss_snapshot(
-            conn,
-            now=now,
-            lookback=timedelta(hours=24),
-            current_equity=1000.0,
-            initial_bankroll=1000.0,
-            threshold_pct=0.05,
-        )
-        conn.close()
+        # Stale reference, NO loss -> bootstrap GREEN, not degraded (no deadlock).
+        no_loss = _snapshot(current_equity=1000.0)
+        assert no_loss["degraded"] is False, no_loss
+        assert no_loss["level"] == RiskLevel.GREEN, no_loss
+        assert no_loss["status"] == "bootstrap_stale_reference", no_loss
 
-        assert result["degraded"] is True or result["level"] == RiskLevel.DATA_DEGRADED, (
-            f"Stale reference must produce degraded result, got: {result}"
-        )
-        assert "RuntimeError" not in str(type(result.get("level", ""))), (
-            "Must not raise RuntimeError on stale reference"
-        )
+        # Stale reference WITH a real loss past threshold -> RED/degraded (gates).
+        with_loss = _snapshot(current_equity=800.0)
+        assert with_loss["degraded"] is True, with_loss
+        assert with_loss["level"] == RiskLevel.RED, with_loss
 
     def test_riskguard_portfolio_authority_degraded_does_not_halt_cycle(self):
         """DT#6: riskguard cycle entry must handle degraded portfolio without RuntimeError.

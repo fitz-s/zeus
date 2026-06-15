@@ -57,6 +57,25 @@ def trade_conn(monkeypatch):
     conn.close()
 
 
+def _tokyo_city():
+    """City-like object for the day0 classifier.
+
+    The day0 truth classifier (evaluator.day0_high_truth_classification_for_edge)
+    calls SettlementSemantics.for_city(candidate.city), which requires a City
+    OBJECT exposing settlement_source_type / settlement_unit / wu_station — not a
+    bare city-name string. MarketCandidate.city is typed `City` in production;
+    earlier fixtures passed the string "Tokyo", so the classifier fell through to
+    its defensive `settlement_semantics_unavailable` fallback and never produced
+    the real classification. Mirrors Tokyo's runtime config (wu_icao / °C / RJTT).
+    """
+    return SimpleNamespace(
+        name="Tokyo",
+        settlement_source_type="wu_icao",
+        settlement_unit="C",
+        wu_station="RJTT",
+    )
+
+
 # ---------------------------------------------------------------------------
 # FIX-1 — runtime observation authority persisted before day0 evaluation,
 # and the resulting EdgeDecision references the authority id.
@@ -222,7 +241,7 @@ def test_day0_truth_classification_persisted(trade_conn):
         ci_upper=0.5,
     )
     candidate = SimpleNamespace(
-        city="Tokyo",
+        city=_tokyo_city(),
         target_date="2026-05-23",
         temperature_metric="high",
         observation=observation,
@@ -296,7 +315,7 @@ def test_day0_truth_classification_observation_locked_is_eligible(trade_conn):
         edge=0.2, ci_lower=0.3, ci_upper=0.6,
     )
     candidate = SimpleNamespace(
-        city="Tokyo", target_date="2026-05-23", temperature_metric="high",
+        city=_tokyo_city(), target_date="2026-05-23", temperature_metric="high",
         observation=observation, discovery_mode="day0_capture",
         hours_to_resolution=4.0, name="Tokyo",
     )
