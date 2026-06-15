@@ -756,12 +756,20 @@ def decide_family_via_spine(
         case = build_forecast_case(
             family, source_cycle_time_utc=served["source_cycle_time_utc"]
         )
-        # v1 lead-bucket restriction: only the 24h bucket has its own settlement-EV
-        # replay. A case outside the replayed bucket is a typed no-trade (round-2 §3).
-        from src.forecast.forecast_case_factory import REPLAYED_LEAD_BUCKET
+        # LEAD-BUCKET ADMISSION (2026-06-15). The prior "only 24h" restriction was tied to
+        # the settlement-EV REPLAY (round-2 §3) — which the operator DELETED (price replay is
+        # not the validation; settlement-σ coverage is). Every FORECAST lead bucket
+        # (24h/72h/96h_plus) carries a conservative per-lead σ-floor: build_sigma serves
+        # max(global_lead_bucket_floor, realized_floor), and global_lead_bucket_floor widens
+        # +0.10°C/lead-day, so a longer lead is honestly WIDER => q_lcb is strictly LOWER =>
+        # the spine's own edge_lcb>0 filter sets a strictly HIGHER edge bar at long lead. The
+        # q is therefore calibration-honest at every forecast lead, and edge_lcb>0 (not a
+        # bucket whitelist) is the EV gate — the spine self-restricts to genuine positive
+        # edge. day0 (lead<24h) is still excluded: it has no Day0Reader in the spine and
+        # routes to the legacy lane.
         from src.forecast.sigma_authority import lead_bucket_for
 
-        if lead_bucket_for(case) != REPLAYED_LEAD_BUCKET:
+        if lead_bucket_for(case) == "day0":
             return SpineDecisionResult(
                 selected_proof=None,
                 no_trade_reason=NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED,

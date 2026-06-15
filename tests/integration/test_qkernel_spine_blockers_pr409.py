@@ -308,26 +308,31 @@ def test_spine_inputs_unavailable_when_source_cycle_absent():
     assert result.no_trade_reason.startswith(bridge.NO_TRADE_SPINE_INPUTS_UNAVAILABLE)
 
 
-def test_lead_bucket_outside_24h_is_typed_no_trade():
-    """A case outside the replay-validated 24h lead bucket is a typed no-trade
-    (QKERNEL_LEAD_BUCKET_NOT_REPLAYED). A source cycle 5 days before target lands in the
-    96h_plus bucket.
+def test_forecast_lead_buckets_beyond_24h_are_admitted():
+    """Forecast lead buckets beyond 24h (72h / 96h_plus) are now ADMITTED to the spine, NOT
+    a typed lead-bucket no-trade. Each forecast lead carries a conservative per-lead σ-floor
+    (build_sigma serves max(global_lead_bucket_floor, realized_floor); global_lead_bucket_floor
+    widens +0.10°C/lead-day, so a longer lead is honestly WIDER ⇒ q_lcb strictly LOWER ⇒ the
+    spine's own edge_lcb>0 gate is a strictly HIGHER edge bar). The prior 24h-only restriction
+    was tied to the settlement-EV replay the operator DELETED; calibration is validated by the
+    settlement-σ coverage + edge_lcb>0, not a bucket whitelist. day0 (lead<24h) stays excluded
+    (no Day0Reader; routes to legacy) — covered by the day0→legacy seam test.
 
-    RED-on-revert: removing the 24h-bucket restriction lets a non-replayed bucket trade.
+    RED-on-revert: re-adding the `!= REPLAYED_LEAD_BUCKET` restriction makes a 96h_plus case a
+    lead-bucket no-trade again, failing the assertion below.
     """
     family, _bins = _three_bin_family()
     proofs = _proofs_for(
         family, yes_asks=[0.05, 0.20, 0.20, 0.05], no_asks=[0.92, 0.75, 0.75, 0.92],
         q_by_bin=[0.05, 0.45, 0.40, 0.10], q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
     )
-    # Source cycle 5 days before target -> ~130h -> "96h_plus" bucket.
+    # Source cycle 5 days before target -> ~130h -> "96h_plus" bucket -> ADMITTED.
     payload = _payload(
         mu=20.4, sigma=1.2, members=[19.8, 20.1, 20.5, 21.0, 20.7],
         source_cycle="2026-06-09T00:00:00Z",
     )
     result = _drive(family, proofs, payload)
-    assert result.selected_proof is None
-    assert result.no_trade_reason == bridge.NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED
+    assert result.no_trade_reason != bridge.NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED
 
 
 # ===========================================================================
