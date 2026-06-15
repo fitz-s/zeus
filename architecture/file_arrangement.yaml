@@ -18,54 +18,83 @@ active_operations_package:
   new_top_level_operations_task_default: disallow_advisory
   human_override_allowed: true
 
+# ORGANIZING PRINCIPLE (workspace-routing-redesign, operator-decided 2026-06-14):
+# BY-WORK, not by-kind. Every mission lives in ONE self-contained folder
+# `docs/operations/current/<work>/` holding ALL its artifacts together
+# (PLAN.md, scope.yaml, evidence/, report.md, closeout.md, agent_runtime/).
+# `current/` means ONLY active missions; finished work leaves current/ via the
+# 2-stage lifecycle (current/<work>/ -> docs/archive/<work>/, operator-gated
+# `zpkt close`, reference-checked — never auto-bulldoze). Authority basis +
+# work-name resolution: docs/operations/current/workspace-routing-redesign/PLAN.md
+# §3/§4. legacy_paths retain the prior BY-KIND layout (current/plans/<slug>.md,
+# current/evidence/<slug>/, ...) so existing files + zpkt's current scheme stay
+# recognized until the S6 migration regroups them into by-work folders.
 artifact_kinds:
   - id: operation_plan
-    canonical_path: "docs/operations/current/plans/<slug>/PLAN.md"
+    canonical_path: "docs/operations/current/<work>/PLAN.md"
     authority: true
     legacy_paths:
+      - "docs/operations/current/plans/<slug>/PLAN.md"
+      - "docs/operations/current/plans/<slug>.md"
       - "docs/operations/task_*_*/PLAN.md"
       - "docs/operations/task_*_*/*.md"
 
   - id: operation_scope
-    canonical_path: "docs/operations/current/plans/<slug>/scope.yaml"
+    canonical_path: "docs/operations/current/<work>/scope.yaml"
     authority: true
-    note: sibling scope.yaml next to PLAN.md
+    note: sibling scope.yaml next to PLAN.md in the work folder
     legacy_paths:
+      - "docs/operations/current/plans/<slug>/scope.yaml"
       - "docs/operations/task_*_*/scope.yaml"
 
   - id: operation_evidence
-    canonical_path: "docs/operations/current/evidence/<slug>/<file>"
+    canonical_path: "docs/operations/current/<work>/evidence/<file>"
     authority: false
     legacy_paths:
+      - "docs/operations/current/evidence/<slug>/**"
       - "docs/operations/task_*_*/evidence/**"
       - "docs/operations/task_*_*/*_EVIDENCE*"
 
   - id: operation_report
-    canonical_path: "docs/operations/current/reports/<slug>.md"
+    canonical_path: "docs/operations/current/<work>/report.md"
     authority: false
     note: generated report; must declare non-authority at top
     legacy_paths:
+      - "docs/operations/current/reports/<slug>.md"
       - "docs/operations/task_*_*/*_REPORT*"
       - "docs/operations/task_*_*/reports/*.md"
 
   - id: operation_closeout
-    canonical_path: "docs/operations/current/closeouts/<slug>_<date>.md"
+    canonical_path: "docs/operations/current/<work>/closeout.md"
     authority: false
+    note: writing closeout.md triggers the 2-stage lifecycle (zpkt close)
     legacy_paths:
+      - "docs/operations/current/closeouts/<slug>_<date>.md"
       - "docs/operations/task_*_*/closeout*.md"
 
   - id: agent_runtime_capsule
-    canonical_path: "docs/operations/current/agent_runtime/capsules/<ts>_<slug>.md"
+    canonical_path: "docs/operations/current/<work>/agent_runtime/<ts>_<slug>.md"
     authority: false
     legacy_paths:
+      - "docs/operations/current/agent_runtime/capsules/<ts>_<slug>.md"
       - "docs/operations/task_*_*/capsules/*.md"
       - ".omx/context/**/*.md"
 
   - id: active_task_ledger
+    # Package-level ledger stays at current/task.md (referenced by current_state.md
+    # + topology); a work folder MAY also carry its own current/<work>/task.md.
     canonical_path: "docs/operations/current/task.md"
     authority: false
     legacy_paths:
+      - "docs/operations/current/<work>/task.md"
       - "docs/operations/task_*_*/task.md"
+
+  - id: operation_archived_work
+    canonical_path: "docs/archive/<work>/"
+    authority: false
+    note: >
+      Terminal home of a finished work folder (2-stage lifecycle stage 2).
+      A whole current/<work>/ tree is git-mv'd here, intact, by `zpkt close`.
 
   - id: current_pointer
     canonical_path: "docs/operations/current_state.md"
@@ -100,7 +129,7 @@ rules:
     blocking: false
     description: >
       New docs/operations/task_<date>_<slug>/ top-level dirs are advisory-discouraged.
-      Use docs/operations/current/plans/<slug>/ instead.
+      Use the by-work folder docs/operations/current/<work>/ instead.
       Human override is allowed; this is an advisory only.
 
   - id: current_state_must_point_to_active_package
@@ -138,6 +167,7 @@ rules:
     severity: warn
     blocking: false
     description: >
-      Evidence files should live under docs/operations/current/evidence/<slug>/
-      or docs/archive/. Legacy paths under docs/operations/task_*_*/evidence/
-      are recognized and not double-warned.
+      Evidence files should live under the work folder
+      docs/operations/current/<work>/evidence/ or docs/archive/<work>/evidence/.
+      Legacy by-kind (current/evidence/<slug>/) and task_*_*/evidence/ paths are
+      recognized and not double-warned (S6 migration regroups them by-work).
