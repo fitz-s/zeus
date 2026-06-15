@@ -2462,11 +2462,54 @@ def _build_event_bound_no_submit_receipt_core(
     # leg with the family payoff matrix + existing exposure). The opportunity_book
     # per-candidate kelly_size_usd is a display field only; it is no longer fed by a
     # parallel scalar-Kelly pass (one sizing surface, no shadow).
-    proof = _selected_candidate_proof(
-        payload,
-        proofs,
-        locked_opportunity_conn=locked_opportunity_conn,
+    #
+    # === Q-KERNEL REBUILD WAVE 5B — single cutover branch (2026-06-14) ============
+    # ONE flag decides which authority computes the per-family DECISION (q +
+    # candidate selection + sizing). When qkernel_spine_enabled is OFF (default), the
+    # legacy path below runs byte-for-byte unchanged. When ON, the decision is
+    # computed by the rebuilt q-kernel spine (src/decision/family_decision_engine via
+    # src/engine/qkernel_spine_bridge): predictive_distribution -> joint_q ->
+    # joint_q_band -> family_book -> market_coherence -> negrisk_routes ->
+    # payoff_vector -> filter[direction, coherence, edge_lcb>0 & delta_u>0] -> argmax
+    # optimal_delta_u, and FamilyDecision.selected is mapped back onto the SAME
+    # _CandidateProof shape this submission pipeline already consumes (so RiskGuard,
+    # freshness, MECE fail-closed, venue submission, receipts, and the Stage-0
+    # decision_receipt_spine all still run on the spine's selected candidate,
+    # unchanged). The legacy authorities (EDLI bias correction, scalar trade_score
+    # selector, binary Kelly, 1-q_ucb_yes NO LCB, market_anchor) stay INERT for
+    # rollback; Stage 11 removes them. The proofs tuple is generated the SAME way on
+    # both paths (it is the submission substrate — rows / execution_price / native
+    # costs); only the SELECTION authority differs.
+    _spine_no_trade_reason: str | None = None
+    from src.engine.qkernel_spine_bridge import (
+        decide_family_via_spine,
+        qkernel_spine_enabled,
     )
+
+    if qkernel_spine_enabled():
+        _spine_result = decide_family_via_spine(
+            family=family,
+            payload=payload,
+            proofs=proofs,
+            decision_time=decision_time,
+            native_side_candidate_from_proof=_native_side_candidate_from_proof,
+            candidate_bin_id=_candidate_bin_id,
+            payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
+            exposure_builder=_robust_marginal_utility_exposure,
+            baseline_usd_provider=_robust_marginal_utility_baseline_usd,
+            per_bin_yes_q_lcb=_per_bin_yes_q_lcb(proofs),
+            # Flat baseline for SELECTION (the legacy selector also selects on the flat
+            # baseline; existing exposure only re-sizes the chosen leg afterward).
+            extra_exposure_by_bin_id=None,
+        )
+        proof = _spine_result.selected_proof
+        _spine_no_trade_reason = _spine_result.no_trade_reason
+    else:
+        proof = _selected_candidate_proof(
+            payload,
+            proofs,
+            locked_opportunity_conn=locked_opportunity_conn,
+        )
     opportunity_book = _opportunity_book_from_proofs(
         event_id=event.event_id,
         family_id=family.family_id,
@@ -2508,7 +2551,15 @@ def _build_event_bound_no_submit_receipt_core(
         #       structural precondition (Ankara repro: family_candidates / proofs /
         #       priced counts) so a queried receipt says WHICH precondition emptied it.
         _all_rejected_reason = _family_all_candidates_rejected_reason(opportunity_book)
-        if _all_rejected_reason is not None:
+        if _spine_no_trade_reason is not None:
+            # Q-KERNEL REBUILD WAVE 5B: the spine computed the decision and it was a
+            # no-trade (or a typed reconstruction-gap / wiring fault). Surface the
+            # spine's own typed reason so the receipt names the spine gate that emptied
+            # the survivor set (PREDICTIVE_DISTRIBUTION_NOT_LIVE_ELIGIBLE /
+            # MARKET_INCOHERENT_BLOCK_LIVE / NO_DIRECTION_LAW_CANDIDATE /
+            # NO_POSITIVE_EDGE_CANDIDATE / SPINE_INPUTS_UNAVAILABLE / ...).
+            _selected_missing_reason = f"QKERNEL_SPINE_NO_TRADE:{_spine_no_trade_reason}"
+        elif _all_rejected_reason is not None:
             _selected_missing_reason = _all_rejected_reason
         else:
             _priced_proofs = sum(1 for p in proofs if p.execution_price is not None)
