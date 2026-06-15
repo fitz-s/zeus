@@ -281,6 +281,12 @@ _FORECAST_DECISION_EVENT_TYPES: frozenset[str] = frozenset(
     {"FORECAST_SNAPSHOT_READY", _EDLI_REDECISION_EVENT_TYPE}
 )
 
+# The day0/same-day event lane (a DAY0_EXTREME_UPDATED prices against an observed
+# running extreme). Module-level so the qkernel seam can hard-block the spine on it
+# (the spine reads no day0 observation; consult_review_pr409_round2.md §3). The day0
+# boundary guard inside the live adapter references this same constant.
+_DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
+
 
 # Decision-triggered targeted snapshot refresh (zero-order wall fix 2026-06-11).
 #
@@ -1485,7 +1491,7 @@ def event_bound_live_adapter_from_trade_conn(
     # proofs/gates/arm downstream). The unknown-event-type fail-closed posture is
     # preserved under both shadow-style scopes — an event type that is neither
     # the known forecast lane nor the known day0 lane is rejected.
-    _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
+    # (The set is the module-level _DAY0_LANE_EVENT_TYPES, shared with the qkernel seam.)
 
     # FIX-4 (P2): per-cycle live submit call counter. Incremented ONLY when
     # executor_submit() is actually called (i.e., real_order_submit_enabled and
@@ -2462,11 +2468,83 @@ def _build_event_bound_no_submit_receipt_core(
     # leg with the family payoff matrix + existing exposure). The opportunity_book
     # per-candidate kelly_size_usd is a display field only; it is no longer fed by a
     # parallel scalar-Kelly pass (one sizing surface, no shadow).
-    proof = _selected_candidate_proof(
-        payload,
-        proofs,
-        locked_opportunity_conn=locked_opportunity_conn,
+    #
+    # === Q-KERNEL REBUILD WAVE 5B — single cutover branch (2026-06-14) ============
+    # ONE flag decides which authority computes the per-family DECISION (q +
+    # candidate selection + sizing). When qkernel_spine_enabled is OFF (default), the
+    # legacy path below runs byte-for-byte unchanged. When ON, the decision is
+    # computed by the rebuilt q-kernel spine (src/decision/family_decision_engine via
+    # src/engine/qkernel_spine_bridge): predictive_distribution -> joint_q ->
+    # joint_q_band -> family_book -> market_coherence -> negrisk_routes ->
+    # payoff_vector -> filter[direction, coherence, edge_lcb>0 & delta_u>0] -> argmax
+    # optimal_delta_u, and FamilyDecision.selected is mapped back onto the SAME
+    # _CandidateProof shape this submission pipeline already consumes (so RiskGuard,
+    # freshness, MECE fail-closed, venue submission, receipts, and the Stage-0
+    # decision_receipt_spine all still run on the spine's selected candidate,
+    # unchanged). The legacy authorities (EDLI bias correction, scalar trade_score
+    # selector, binary Kelly, 1-q_ucb_yes NO LCB, market_anchor) stay INERT for
+    # rollback; Stage 11 removes them. The proofs tuple is generated the SAME way on
+    # both paths (it is the submission substrate — rows / execution_price / native
+    # costs); only the SELECTION authority differs.
+    _spine_no_trade_reason: str | None = None
+    from src.engine.qkernel_spine_bridge import (
+        NO_TRADE_QKERNEL_DAY0_NOT_WIRED,
+        decide_family_via_spine,
+        qkernel_spine_enabled,
     )
+
+    # DAY0 HARD-FACT GAP (consult_review_pr409_round2.md §3 BLOCKER "qkernel DAY0 hard
+    # block"): the spine bridge reads no day0 observation (_NoDay0Reader), so a day0
+    # event family routed through the spine could price physically impossible bins
+    # (below the observed running high / above the observed running low). Until a real
+    # Day0Reader is wired, the qkernel branch hard-blocks the day0 lane:
+    #   * flag ON + day0 event type  -> typed QKERNEL_DAY0_NOT_WIRED no-trade (the spine
+    #     REFUSES; it is not silently routed through a no-observation conditioner, and it
+    #     does NOT fall back to a forecast-blind legacy decision on a same-day market).
+    #   * flag ON + forecast event type -> route through the spine.
+    #   * flag ON + any other type / flag OFF -> legacy decision path unchanged.
+    _spine_flag_on = qkernel_spine_enabled()
+    _is_day0_event = event.event_type in _DAY0_LANE_EVENT_TYPES
+    _spine_eligible_event = event.event_type in _FORECAST_DECISION_EVENT_TYPES
+    if _spine_flag_on and _is_day0_event:
+        # Hard-block: qkernel has no day0 observation. Typed no-trade BEFORE the spine.
+        proof = None
+        _spine_no_trade_reason = NO_TRADE_QKERNEL_DAY0_NOT_WIRED
+    elif _spine_flag_on and _spine_eligible_event:
+        # Fix #4 (consult_review_pr409.md §5/§6 "current exposure not in route
+        # selection"): pass the REAL current per-bin family exposure into the spine's
+        # ΔU SELECTION. The spine picks the new leg by argmax ΔU over the whole family,
+        # so a flat/empty baseline lets it choose a leg the account is already heavy in
+        # — and re-sizing the chosen leg afterward cannot repair a wrong INSTRUMENT
+        # choice. The per-bin exposure attributes each open committed position to its own
+        # family bin by condition_id (NOT collapsed onto one bin), so the concave ΔU
+        # objective shrinks the legs the book already holds before the argmax.
+        _spine_selection_exposure = _family_existing_exposure_for_selection_by_bin_id(
+            proofs=proofs,
+            portfolio_state_provider=portfolio_state_provider,
+            family=family,
+        )
+        _spine_result = decide_family_via_spine(
+            family=family,
+            payload=payload,
+            proofs=proofs,
+            decision_time=decision_time,
+            native_side_candidate_from_proof=_native_side_candidate_from_proof,
+            candidate_bin_id=_candidate_bin_id,
+            payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
+            exposure_builder=_robust_marginal_utility_exposure,
+            baseline_usd_provider=_robust_marginal_utility_baseline_usd,
+            per_bin_yes_q_lcb=_per_bin_yes_q_lcb(proofs),
+            extra_exposure_by_bin_id=(_spine_selection_exposure or None),
+        )
+        proof = _spine_result.selected_proof
+        _spine_no_trade_reason = _spine_result.no_trade_reason
+    else:
+        proof = _selected_candidate_proof(
+            payload,
+            proofs,
+            locked_opportunity_conn=locked_opportunity_conn,
+        )
     opportunity_book = _opportunity_book_from_proofs(
         event_id=event.event_id,
         family_id=family.family_id,
@@ -2508,7 +2586,15 @@ def _build_event_bound_no_submit_receipt_core(
         #       structural precondition (Ankara repro: family_candidates / proofs /
         #       priced counts) so a queried receipt says WHICH precondition emptied it.
         _all_rejected_reason = _family_all_candidates_rejected_reason(opportunity_book)
-        if _all_rejected_reason is not None:
+        if _spine_no_trade_reason is not None:
+            # Q-KERNEL REBUILD WAVE 5B: the spine computed the decision and it was a
+            # no-trade (or a typed reconstruction-gap / wiring fault). Surface the
+            # spine's own typed reason so the receipt names the spine gate that emptied
+            # the survivor set (PREDICTIVE_DISTRIBUTION_NOT_LIVE_ELIGIBLE /
+            # MARKET_INCOHERENT_BLOCK_LIVE / NO_DIRECTION_LAW_CANDIDATE /
+            # NO_POSITIVE_EDGE_CANDIDATE / SPINE_INPUTS_UNAVAILABLE / ...).
+            _selected_missing_reason = f"QKERNEL_SPINE_NO_TRADE:{_spine_no_trade_reason}"
+        elif _all_rejected_reason is not None:
             _selected_missing_reason = _all_rejected_reason
         else:
             _priced_proofs = sum(1 for p in proofs if p.execution_price is not None)
@@ -3515,6 +3601,105 @@ def _candidate_book_for_envelope(opportunity_book_dict: Any) -> list[dict[str, A
     return out or None
 
 
+def _build_decision_receipt_spine(
+    spine_inputs: dict[str, Any] | None,
+    receipt: EventSubmissionReceipt,
+) -> "DecisionReceipt | None":
+    """Assemble the Stage-0 decision-receipt spine from already-computed live values.
+
+    READ-ONLY / observability-only (q-kernel rebuild Stage 0, consult_build_spec.md:994-1033).
+    ``spine_inputs`` is the dict lifted from the THREADED payload onto provenance_capture
+    inside ``_generate_candidate_proofs`` (key ``decision_receipt_spine_inputs``). Every input
+    is a value the CURRENT live path already produced:
+      - mu_native / sigma_native / member arrays / q vector: from the q-build's payload stash.
+      - q_source: the receipt's #120 calibrator-provenance field.
+      - rounding_rule: the city's settlement-semantics rounding (WMO half-up vs HK truncate)
+        — the SAME authority the q integrator uses; read here only to record it.
+      - sizing_authority: the receipt's selection_authority (which gate sized the stake).
+
+    The DecisionReceipt builder DERIVES the coherence fields (envelope min/max, q_sum) from
+    these arrays, so a spine that misrepresents its own forecast/q is unconstructable — the
+    corrected transformation, not a post-hoc detector. Returns None when no q-build spine was
+    stashed (gate-reject receipts that never reached q integration); never raises into the
+    caller (the caller is already wrapped fail-soft).
+    """
+    from src.decision.decision_receipt import DecisionReceipt  # lazy: no import cycle
+
+    if not spine_inputs:
+        return None
+    # The q-build stashes these only when it ran; their absence means this receipt never
+    # reached q integration (early gate reject) and there is no forecast spine to emit.
+    if (
+        "_edli_spine_q_vector" not in spine_inputs
+        and "_edli_spine_mu_native" not in spine_inputs
+    ):
+        return None
+
+    raw_members = spine_inputs.get("_edli_spine_raw_members_native")
+    debiased_members = spine_inputs.get("_edli_spine_debiased_members_native")
+    q_vector = spine_inputs.get("_edli_spine_q_vector")
+
+    # applied_debias_native: the native-unit mean shift the live correction applied, when it
+    # ran. Derived from the raw vs debiased member means (the correction shifts the mean by a
+    # constant), so it is consistent with the debiased envelope the receipt also carries.
+    applied_debias_native = None
+    try:
+        if (
+            isinstance(raw_members, (list, tuple))
+            and isinstance(debiased_members, (list, tuple))
+            and raw_members
+            and debiased_members
+        ):
+            _raw_mean = sum(float(m) for m in raw_members) / len(raw_members)
+            _deb_mean = sum(float(m) for m in debiased_members) / len(debiased_members)
+            applied_debias_native = float(_deb_mean - _raw_mean)
+    except Exception:  # noqa: BLE001 — observation only
+        applied_debias_native = None
+
+    # q_source: prefer the receipt's #120 field; fall back to the q-build stash (covers
+    # receipt paths that have not yet lifted q_source onto the receipt object).
+    q_source = receipt.q_source if receipt.q_source is not None else spine_inputs.get("_edli_q_source")
+
+    # rounding_rule: the city's settlement-semantics rounding. Read-only; the q integrator is
+    # the authority that USES it, here we only record which rule that family settles under.
+    rounding_rule = None
+    day0_observed_extreme_native = None
+    try:
+        city_obj = runtime_cities_by_name().get(str(spine_inputs.get("city") or "")) or None
+        if city_obj is not None:
+            from src.contracts.settlement_semantics import SettlementSemantics
+            rounding_rule = SettlementSemantics.for_city(city_obj).rounding_rule
+    except Exception:  # noqa: BLE001 — observation only
+        rounding_rule = None
+    # day0 observed running extreme, when the live day0 lane recorded one on the payload.
+    for _k in (
+        "_edli_spine_day0_observed_extreme_native",
+        "_edli_day0_observed_extreme_native",
+    ):
+        _v = spine_inputs.get(_k)
+        if _v is not None:
+            try:
+                day0_observed_extreme_native = float(_v)
+            except (TypeError, ValueError):
+                day0_observed_extreme_native = None
+            break
+
+    return DecisionReceipt.from_q_build(
+        q_source=q_source,
+        q_vector=q_vector if isinstance(q_vector, (list, tuple)) else None,
+        mu_native=spine_inputs.get("_edli_spine_mu_native"),
+        sigma_native=spine_inputs.get("_edli_spine_sigma_native"),
+        raw_members_native=raw_members if isinstance(raw_members, (list, tuple)) else None,
+        debiased_members_native=(
+            debiased_members if isinstance(debiased_members, (list, tuple)) else None
+        ),
+        applied_debias_native=applied_debias_native,
+        day0_observed_extreme_native=day0_observed_extreme_native,
+        rounding_rule=rounding_rule,
+        sizing_authority=getattr(receipt, "selection_authority", None),
+    )
+
+
 def build_event_bound_no_submit_receipt(
     event: OpportunityEvent,
     *,
@@ -3576,6 +3761,22 @@ def build_event_bound_no_submit_receipt(
     _belief = provenance_capture.get("edli_belief")
     if _belief is not None and receipt.belief_payload is None:
         receipt = dataclass_replace(receipt, belief_payload=_belief)
+    # === Q-KERNEL REBUILD STAGE 0 — emit the decision-receipt spine (2026-06-14) =========
+    # READ-ONLY, observability-only: assemble the DecisionReceipt spine from the inputs the
+    # live q-build already lifted onto provenance_capture (decision_receipt_spine_inputs) plus
+    # the receipt's own q_source / sizing provenance, and attach the flattened 19-column row
+    # to provenance_capture so the spine is reconstructable forecast -> q -> route -> size
+    # (consult_build_spec.md:994-1033). This NEVER mutates the receipt that drives the
+    # decision/size/submit. Fail-soft: any error leaves the decision untouched (mirrors the
+    # envelope wrapper's contract).
+    try:
+        _spine = _build_decision_receipt_spine(
+            provenance_capture.get("decision_receipt_spine_inputs"), receipt
+        )
+        if _spine is not None:
+            provenance_capture["decision_receipt_spine"] = _spine.to_row()
+    except Exception:  # noqa: BLE001 — observability must never alter or fail a decision
+        pass
     if receipt.envelope_json is not None:
         return receipt
     try:
@@ -7393,6 +7594,33 @@ def _generate_candidate_proofs(
                 }
         except Exception:  # noqa: BLE001 — belief capture is non-critical; never break the decision
             pass
+    # === Q-KERNEL REBUILD STAGE 0 — lift the receipt-spine inputs (2026-06-14) ===========
+    # READ-ONLY: the q-build (_market_analysis_from_event_snapshot) already stashed the
+    # forecast/q spine onto the THREADED payload under payload["_edli_spine_*"]. Lift those
+    # values onto provenance_capture here (the same site that captures the belief) so the
+    # receipt wrapper can assemble the DecisionReceipt — the threaded payload is the only
+    # object that carries them (the wrapper's _payload(event) re-parse does NOT). This copies
+    # already-computed values and feeds NOTHING back into the decision. (spec:994-1033.)
+    if provenance_capture is not None:
+        try:
+            _spine_inputs = {
+                k: payload.get(k)
+                for k in (
+                    "_edli_spine_mu_native",
+                    "_edli_spine_sigma_native",
+                    "_edli_spine_raw_members_native",
+                    "_edli_spine_debiased_members_native",
+                    "_edli_spine_q_vector",
+                    "_edli_spine_source_cycle_time_utc",
+                    "_edli_q_source",
+                )
+                if k in payload
+            }
+            if _spine_inputs:
+                _spine_inputs["city"] = str(family.city)
+                provenance_capture["decision_receipt_spine_inputs"] = _spine_inputs
+        except Exception:  # noqa: BLE001 — observability only; never break the decision
+            pass
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
 
@@ -9132,6 +9360,67 @@ def _family_existing_exposure_by_bin_id(
     if exposure_usd <= 0.0:
         return {}
     return {selected_bin_id: exposure_usd}
+
+
+def _family_existing_exposure_for_selection_by_bin_id(
+    *,
+    proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
+    portfolio_state_provider: "Callable[[], Any] | None",
+    family,
+) -> dict[str, float]:
+    """PRE-SELECTION per-bin family exposure for the spine's ΔU SELECTION (Fix #4).
+
+    The spine selects the new leg by ``argmax ΔU`` over the WHOLE family, so the
+    exposure baseline must be per-bin BEFORE a leg is chosen — a flat/empty baseline
+    lets the argmax pick a leg the account is already heavy in (re-sizing after
+    selection cannot repair a wrong INSTRUMENT choice; consult_review_pr409.md §5/§6
+    "current exposure not in route selection"). Unlike
+    :func:`_family_existing_exposure_by_bin_id` (which collapses same-city exposure
+    onto the ALREADY-selected bin — a post-selection sizing input), this attributes
+    each open committed position to its OWN family bin by matching the position's
+    ``condition_id`` to the family candidate's ``condition_id``, keyed by
+    ``_candidate_bin_id`` so it lines up with the candidates' bins.
+
+    Scope (what is honestly attributable per-bin at selection): COMMITTED open
+    positions carry a ``condition_id`` that maps to exactly one family bin, so their
+    ``effective_cost_basis_usd`` is the per-bin exposure ``A_y`` the concave ΔU
+    objective shrinks against. Same-cycle reservations are city-keyed with NO bin
+    identity, so they are NOT fabricated onto a bin here — the post-selection
+    recapture already nets them by city. Returns ``{}`` (flat baseline, prior
+    behavior byte-for-byte) when no provider is wired or no open position matches a
+    family bin's condition_id.
+    """
+    if portfolio_state_provider is None:
+        return {}
+    # condition_id -> bin_id for THIS family (a bin's YES and NO proofs share both).
+    bin_id_by_condition: dict[str, str] = {}
+    for proof in proofs:
+        cond = str(getattr(getattr(proof, "candidate", None), "condition_id", "") or "")
+        if cond:
+            bin_id_by_condition.setdefault(cond, _candidate_bin_id(proof))
+    if not bin_id_by_condition:
+        return {}
+    try:
+        from src.state.portfolio import (
+            _runtime_open_exposure_usd,
+            get_open_positions,
+        )
+
+        state = portfolio_state_provider()
+        if state is None:
+            return {}
+        exposure_by_bin: dict[str, float] = {}
+        for pos in get_open_positions(state):
+            cond = str(getattr(pos, "condition_id", "") or "")
+            bin_id = bin_id_by_condition.get(cond)
+            if bin_id is None:
+                continue
+            committed = float(_runtime_open_exposure_usd(pos))
+            if committed > 0.0:
+                exposure_by_bin[bin_id] = exposure_by_bin.get(bin_id, 0.0) + committed
+        return exposure_by_bin
+    except (TypeError, ValueError, ImportError):
+        return {}
 
 
 def _selected_candidate_proof(
@@ -10916,6 +11205,17 @@ def _market_analysis_from_event_snapshot(
 
     bins = list(family.bins)
     raw_members = _snapshot_members(snapshot)
+    # === Q-KERNEL REBUILD STAGE 0 — receipt-spine producer (2026-06-14) =====================
+    # READ-ONLY observability: capture the predictive center/dispersion the calibrated branch
+    # already computed so the stash below (just before `return MarketAnalysis`) can write them
+    # onto the THREADED payload under `_edli_spine_*` — the keys the read seam at
+    # _generate_candidate_proofs already lifts (consult_build_spec.md:994-1033). These two locals
+    # hold the EMOS / honest-raw predictive N(mu, sigma); branches that compute no explicit
+    # predictive center (Platt / day0) leave them None and the stash derives the empirical
+    # mean/std of the SAME member array the live bootstrap already draws from. This NEVER feeds
+    # back into q, sizing, or submit — it only records already-computed values.
+    _spine_mu_native: float | None = None
+    _spine_sigma_native: float | None = None
     # §4.1 (CI_HONESTY_AND_SCORE_GATE_RULING_2026-06-01): hoist bias correction so
     # both the p_raw path AND the bootstrap (member_maxes) consume the SAME corrected
     # surface.  Pre-fix: correction was applied inside _snapshot_p_raw (local rebind)
@@ -11007,6 +11307,9 @@ def _market_analysis_from_event_snapshot(
         representativeness_sigma = 0.0  # the EMOS sampler carries the predictive sigma
         payload["_edli_q_source"] = "emos"
         _emos_sampler = _make_emos_bootstrap_sampler(_emos_mu_native, _emos_sigma_native)
+        # Stage-0 spine: EMOS IS the predictive N(mu, sigma); record its native center/dispersion.
+        _spine_mu_native = _emos_mu_native
+        _spine_sigma_native = _emos_sigma_native
     elif _emos_regime:
         # HONEST RAW (universal, #110 / operator 2026-06-05) with a CALIBRATED σ-FLOOR (residual
         # under-dispersion fix, counterfactual 2026-06-05). EMOS did not serve this non-day0 cell —
@@ -11052,6 +11355,9 @@ def _market_analysis_from_event_snapshot(
             p_raw = np.asarray(_hrq, dtype=float)
             p_cal = np.asarray(_hrq, dtype=float)
             _emos_sampler = _make_emos_bootstrap_sampler(_hr_mu, _hr_sigma)
+            # Stage-0 spine: honest-raw IS the predictive N(xbar, floored sigma).
+            _spine_mu_native = _hr_mu
+            _spine_sigma_native = _hr_sigma
         else:
             p_raw = _snapshot_p_raw(
                 snapshot, family=family, bins=bins, members=members, payload=payload,
@@ -11191,6 +11497,90 @@ def _market_analysis_from_event_snapshot(
         snapshot=snapshot, family=family, payload=payload, unit=unit, bins=bins,
         day0_exempt=is_day0,
     )
+    # === Q-KERNEL REBUILD STAGE 0 — receipt-spine producer stash (2026-06-14) ===============
+    # READ-ONLY observability: at the single point where the predictive center/dispersion, the
+    # raw member array, the debiased member array, and the final calibrated q vector are ALL in
+    # scope, write them onto the THREADED payload under the `_edli_spine_*` keys the read seam at
+    # _generate_candidate_proofs already lifts onto provenance_capture (which feeds
+    # _build_decision_receipt_spine -> DecisionReceipt.from_q_build). This is the producer half of
+    # the Stage-0 receipt spine (consult_build_spec.md:994-1033). Behavior contract: every value
+    # written here is ALREADY-COMPUTED by the live decision above; nothing is fed back into q,
+    # sizing, or submit — the MarketAnalysis returned below is unchanged byte-for-byte. Fail-soft:
+    # any error stashes nothing and never disturbs the decision.
+    #
+    # Drift resolved (spec_vs_live_drift_ledger module note): "stash already-computed values
+    # only". mu/sigma come from the calibrated predictive N(mu, sigma) when the EMOS / honest-raw
+    # branch computed it; the Platt / day0 branches compute no explicit predictive center, so the
+    # spine records the empirical mean/std of the SAME member array the live bootstrap and the
+    # direction-law family center already derive from (_direction_law_family_center /
+    # _make_*_bootstrap_sampler) — not an invented number, the already-implied center of the
+    # member envelope the q-build integrated. Branches with no q vector or no member array write
+    # only the keys they DO have (the consumer guard tolerates partial).
+    try:
+        _spine_q_list: list[float] | None = None
+        try:
+            _spine_q_arr = np.asarray(p_cal, dtype=float).ravel()
+            if _spine_q_arr.size and np.isfinite(_spine_q_arr).all():
+                _spine_q_list = [float(x) for x in _spine_q_arr.tolist()]
+        except Exception:  # noqa: BLE001 — observation only
+            _spine_q_list = None
+
+        _spine_raw_list: list[float] | None = None
+        try:
+            _spine_raw_arr = np.asarray(raw_members, dtype=float).ravel()
+            if _spine_raw_arr.size and np.isfinite(_spine_raw_arr).all():
+                _spine_raw_list = [float(x) for x in _spine_raw_arr.tolist()]
+        except Exception:  # noqa: BLE001 — observation only
+            _spine_raw_list = None
+
+        # `members` is the array actually fed to MarketAnalysis (member_maxes): the DEBIASED /
+        # corrected array on the Platt path, the raw array on EMOS / honest-raw / day0. It is the
+        # debiased member envelope the receipt records.
+        _spine_debiased_list: list[float] | None = None
+        try:
+            _spine_deb_arr = np.asarray(members, dtype=float).ravel()
+            if _spine_deb_arr.size and np.isfinite(_spine_deb_arr).all():
+                _spine_debiased_list = [float(x) for x in _spine_deb_arr.tolist()]
+        except Exception:  # noqa: BLE001 — observation only
+            _spine_debiased_list = None
+
+        # mu/sigma: predictive N(mu, sigma) when the calibrated branch produced it; else the
+        # empirical center/dispersion of the integrated member array (already-implied, not new).
+        _spine_mu = _spine_mu_native
+        _spine_sigma = _spine_sigma_native
+        if _spine_mu is None and _spine_debiased_list:
+            _spine_mu = float(sum(_spine_debiased_list) / len(_spine_debiased_list))
+        if _spine_sigma is None and _spine_debiased_list and len(_spine_debiased_list) >= 2:
+            _m = float(sum(_spine_debiased_list) / len(_spine_debiased_list))
+            _var = sum((v - _m) ** 2 for v in _spine_debiased_list) / (len(_spine_debiased_list) - 1)
+            _spine_sigma = float(_var ** 0.5)
+
+        if _spine_mu is not None:
+            payload["_edli_spine_mu_native"] = float(_spine_mu)
+        if _spine_sigma is not None:
+            payload["_edli_spine_sigma_native"] = float(_spine_sigma)
+        if _spine_raw_list is not None:
+            payload["_edli_spine_raw_members_native"] = _spine_raw_list
+        if _spine_debiased_list is not None:
+            payload["_edli_spine_debiased_members_native"] = _spine_debiased_list
+        if _spine_q_list is not None:
+            payload["_edli_spine_q_vector"] = _spine_q_list
+        # Stage-0: stash the FORECAST SOURCE CYCLE that produced these members so the
+        # qkernel ForecastCaseFactory builds issue_time_utc / source_cycle_time_utc /
+        # lead_hours from the real forecast cycle (NOT decision_time) — the live σ-floor
+        # lead bucket then matches the replay-validated cell (consult_review_pr409_round2
+        # §3). The same canonical accessor the calibration path uses
+        # (snapshot.source_cycle_time / issue_time / payload.cycle). Absent ⇒ the bridge
+        # fails closed to a typed SPINE_INPUTS_UNAVAILABLE no-trade (never decision_time).
+        _spine_source_cycle = (
+            snapshot.get("source_cycle_time")
+            or snapshot.get("issue_time")
+            or payload.get("cycle")
+        )
+        if _spine_source_cycle:
+            payload["_edli_spine_source_cycle_time_utc"] = str(_spine_source_cycle)
+    except Exception:  # noqa: BLE001 — Stage-0 spine is observability-only; never alter a decision
+        pass
     return MarketAnalysis(
         p_raw=np.asarray(p_raw, dtype=float),
         p_cal=np.asarray(p_cal, dtype=float),
