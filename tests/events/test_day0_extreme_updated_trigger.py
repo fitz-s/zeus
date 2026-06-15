@@ -451,6 +451,77 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
     assert all('"source_authorized_status":"AUTHORIZED"' in payload for payload in payloads)
 
 
+def _insert_observation_instant(conn, *, running_max, running_min, imported_at, station_id="LFPB", city="Paris", target_date="2026-06-06", source="wu_icao_history"):
+    conn.execute(
+        """
+        INSERT INTO observation_instants (
+            city, target_date, source, timezone_name, local_hour, local_timestamp,
+            utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
+            is_missing_local_hour, time_basis, temp_current, running_max, running_min,
+            temp_unit, station_id, observation_count, imported_at, authority,
+            data_version, provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            city, target_date, source, "Europe/Paris", 6.0, "2026-06-06T06:00:00+02:00",
+            imported_at.replace("T04:15", "T04:00").replace("T05:15", "T05:00").replace("T06:15", "T06:00"),
+            120, 1, 0, 0, "observed", running_max, running_max, running_min,
+            "C", station_id, 1, imported_at, "VERIFIED", "v1.wu-native",
+            '{"source_url":"redacted","station_id":"LFPB"}', 1, "OK", "historical_hourly",
+        ),
+    )
+
+
+def test_scan_observation_instants_change_gate_suppresses_unchanged_extreme():
+    """FIREHOSE ANTIBODY (2026-06-15): a re-scan whose running extreme is UNCHANGED emits
+    NOTHING, even though MAX(imported_at) advanced (which would otherwise mint a new event
+    via the available_at-keyed idempotency). The unchanged-extreme firehose that starved
+    the FORECAST_SNAPSHOT_READY/spine lane at Tier-0 is suppressed."""
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    trigger = Day0ExtremeUpdatedTrigger(EventWriter(conn))
+
+    _insert_observation_instant(conn, running_max=14.0, running_min=11.0, imported_at="2026-06-06T04:15:00+00:00")
+    first = trigger.scan_observation_instants_rows(
+        observation_conn=conn, settlement_semantics=FakeSettlementSemantics(14),
+        decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc), received_at="2026-06-06T05:20:00+00:00",
+    )
+    assert len(first) == 2  # first-ever high+low
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 2
+
+    # Later import, SAME running extreme → available_at advances but the extreme did not.
+    _insert_observation_instant(conn, running_max=14.0, running_min=11.0, imported_at="2026-06-06T05:15:00+00:00")
+    second = trigger.scan_observation_instants_rows(
+        observation_conn=conn, settlement_semantics=FakeSettlementSemantics(14),
+        decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc), received_at="2026-06-06T05:20:00+00:00",
+    )
+    assert second == [], "unchanged extreme must not re-emit (firehose suppressed)"
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 2
+
+
+def test_scan_observation_instants_change_gate_emits_on_extreme_advance():
+    """The gate still emits when the running extreme ADVANCES: a higher running_max emits a
+    new 'high' event; the unchanged low is suppressed."""
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    trigger = Day0ExtremeUpdatedTrigger(EventWriter(conn))
+
+    _insert_observation_instant(conn, running_max=14.0, running_min=11.0, imported_at="2026-06-06T04:15:00+00:00")
+    trigger.scan_observation_instants_rows(
+        observation_conn=conn, settlement_semantics=FakeSettlementSemantics(14),
+        decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc), received_at="2026-06-06T05:20:00+00:00",
+    )
+    # New high (16 > 14); low unchanged (11).
+    _insert_observation_instant(conn, running_max=16.0, running_min=11.0, imported_at="2026-06-06T05:15:00+00:00")
+    second = trigger.scan_observation_instants_rows(
+        observation_conn=conn, settlement_semantics=FakeSettlementSemantics(16),
+        decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc), received_at="2026-06-06T05:20:00+00:00",
+    )
+    assert len(second) == 1, "only the advanced high re-emits; the unchanged low is suppressed"
+    payloads = [r[0] for r in conn.execute("SELECT payload_json FROM opportunity_events").fetchall()]
+    assert sum('"high_so_far":16.0' in p for p in payloads) == 1
+
+
 def test_scan_observation_instants_rows_skips_fallback_evidence_rows():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
