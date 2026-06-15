@@ -2268,6 +2268,24 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # Receipt missing or not bound to this event (submit returned True / a
     # non-matching receipt): a structural expressibility failure, not a race.
     "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND",
+    # --- q-kernel single-spine no-trade (src/engine/qkernel_spine_bridge.py +
+    #     src/engine/event_reactor_adapter.py decision seam) ---
+    # The spine emits one wrapped reason base, "QKERNEL_SPINE_NO_TRADE:<inner>",
+    # for every no-trade it returns (inner ∈ the bridge/engine vocabulary:
+    # SPINE_INPUTS_UNAVAILABLE, SPINE_NO_SELECTION, NO_POSITIVE_EDGE_CANDIDATE,
+    # NO_EXECUTABLE_ROUTE_CANDIDATE, MARKET_INCOHERENT_BLOCK_LIVE,
+    # PREDICTIVE_DISTRIBUTION_NOT_LIVE_ELIGIBLE, NO_DIRECTION_LAW_CANDIDATE,
+    # NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE, QKERNEL_LEAD_BUCKET_NOT_REPLAYED,
+    # QKERNEL_DAY0_NOT_WIRED, SPINE_WIRING_FAULT). EVERY such no-trade is TERMINAL
+    # for THIS event, exactly like the legacy honest-no-edge declines (FDR_REJECTED,
+    # TRADE_SCORE_NON_POSITIVE): the spine re-prices the whole family from a FRESH
+    # book on the NEXT forecast snapshot, which arrives as a NEW event — so the
+    # recovery path is a fresh event, NOT a requeue of this one. Requeueing instead
+    # would double-churn the same event every cycle against an unchanged decision
+    # substrate (the live QKERNEL_DAY0_NOT_WIRED requeue storm, monitor b9w56vec6).
+    # Genuine intra-cycle execution races (PRICE_MOVED / MODE_FLIPPED) are classified
+    # later at the SUBMIT stage under their own transient bases and are unaffected.
+    "QKERNEL_SPINE_NO_TRADE",
 })
 
 

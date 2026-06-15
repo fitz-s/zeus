@@ -2488,29 +2488,25 @@ def _build_event_bound_no_submit_receipt_core(
     # costs); only the SELECTION authority differs.
     _spine_no_trade_reason: str | None = None
     from src.engine.qkernel_spine_bridge import (
-        NO_TRADE_QKERNEL_DAY0_NOT_WIRED,
         decide_family_via_spine,
         qkernel_spine_enabled,
     )
 
-    # DAY0 HARD-FACT GAP (consult_review_pr409_round2.md §3 BLOCKER "qkernel DAY0 hard
-    # block"): the spine bridge reads no day0 observation (_NoDay0Reader), so a day0
-    # event family routed through the spine could price physically impossible bins
-    # (below the observed running high / above the observed running low). Until a real
-    # Day0Reader is wired, the qkernel branch hard-blocks the day0 lane:
-    #   * flag ON + day0 event type  -> typed QKERNEL_DAY0_NOT_WIRED no-trade (the spine
-    #     REFUSES; it is not silently routed through a no-observation conditioner, and it
-    #     does NOT fall back to a forecast-blind legacy decision on a same-day market).
-    #   * flag ON + forecast event type -> route through the spine.
-    #   * flag ON + any other type / flag OFF -> legacy decision path unchanged.
+    # DAY0 -> LEGACY (consult_review_pr409_round2.md §3): the spine bridge reads no day0
+    # observation (_NoDay0Reader), so a day0 family must NOT be decided by the spine (it
+    # could price physically impossible bins below the observed running high / above the
+    # observed running low). day0 events are NOT in _FORECAST_DECISION_EVENT_TYPES, so
+    # they fall through to the LEGACY decision path — the existing, tested day0 lane —
+    # which keeps day0 TRADING (no revenue-lane regression). An earlier version
+    # hard-blocked day0 to a typed QKERNEL_DAY0_NOT_WIRED no-trade, which both killed the
+    # day0 lane and churned the money-path requeue every cycle. Routing day0 to legacy
+    # keeps the spine away from day0 AND keeps day0 trading; wiring day0 INTO the spine
+    # (a real Day0Reader) is the follow-up arc. Flag OFF / any non-forecast type ->
+    # legacy decision path unchanged.
     _spine_flag_on = qkernel_spine_enabled()
     _is_day0_event = event.event_type in _DAY0_LANE_EVENT_TYPES
     _spine_eligible_event = event.event_type in _FORECAST_DECISION_EVENT_TYPES
-    if _spine_flag_on and _is_day0_event:
-        # Hard-block: qkernel has no day0 observation. Typed no-trade BEFORE the spine.
-        proof = None
-        _spine_no_trade_reason = NO_TRADE_QKERNEL_DAY0_NOT_WIRED
-    elif _spine_flag_on and _spine_eligible_event:
+    if _spine_flag_on and _spine_eligible_event and not _is_day0_event:
         # Fix #4 (consult_review_pr409.md §5/§6 "current exposure not in route
         # selection"): pass the REAL current per-bin family exposure into the spine's
         # ΔU SELECTION. The spine picks the new leg by argmax ΔU over the whole family,
