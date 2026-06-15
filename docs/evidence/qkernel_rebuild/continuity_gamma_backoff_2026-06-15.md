@@ -71,6 +71,27 @@ the moment the market lists (≤cooldown latency). Symmetric twin of the existin
   the 2026-06-09 FUNNEL-STARVATION FIX) and 3 fixture-dependent gamma-parse tests. None
   touched by this change. (Separate cleanup, not part of #122.)
 
+## POST-DEPLOY VERIFICATION (18:08 restart, PID 69668)
+- Backoff ACTIVE + working: `no_topology_backed_off` 6→17→15/cycle; `gamma_slug_timebox_unattempted`
+  collapsed 18→**2** (the gamma-discovery clog this fix targeted IS relieved). Daemon boot clean,
+  no traceback. The #122 gamma-clog root cause is resolved.
+- BUT `fresh_executable_city_count` is still 0 in most current cycles — and the reason is now
+  DIFFERENT (not gamma clog): the entire current pending forecast inventory is `2026-06-16`
+  (1526 low + 293 high log-hits; NO 06-15/06-17). 06-17 was traded this morning (3 buy_no orders:
+  08:49 @0.70, 09:30 @0.74 FILLED, 11:30 @0.76); 06-15 is venue-closed; 06-16 markets are listed
+  with topology (62–75 `cached_topology_families`/cycle) but NOT YET OPEN/LIQUID for trading —
+  capture SKIPS them (`inserted:0 skipped:1362–1649 failed:1–2`), correctly non-executable. So the
+  residual 0-coverage is **no tradeable inventory**, not a bug.
+- Net: #122 (gamma clog) FIXED. The harvest is currently idle because there is no open/liquid
+  forecast market to harvest — externally gated by Polymarket's 06-16 open cadence. When 06-16
+  opens, #122 ensures prompt capture and the validated NO-on-modal harvest resumes.
+
+## Next systematic lever (characterized, NOT yet deployed — needs live inventory to validate)
+Forecast-lane reach: when forecast inventory IS available, the reactor's rotating cursor competes
+with ~1387 DAY0 families (legacy lane, no edge). Prioritizing FORECAST (spine/edge) families over
+DAY0 in the rotation would maximize harvest per tradeable window. Validate on the next 06-16 open
+window before deploying (do not stack an unvalidated reactor change on the #122 deploy).
+
 ## Success bar (unchanged)
 This fix removes a CONTINUITY limiter; it does not by itself prove alpha. DONE remains:
 continuous settlement-graded POSITIVE-after-cost fills, the 06-17 settlement of the
