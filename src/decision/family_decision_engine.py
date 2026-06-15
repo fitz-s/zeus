@@ -278,6 +278,28 @@ class FamilyBookBuilder(Protocol):
     ) -> FamilyBook: ...
 
 
+class RouteSetBuilder(Protocol):
+    """Builds the family route set (spec ``route_builder.build``).
+
+    The default implementation is ``build_negrisk_route_set`` (the live engine that
+    walks the family book's native ask ladders, size-aware). The reactor may inject a
+    different source — e.g. a PROOF-NATIVE direct-route builder that prices each direct
+    YES/NO route at the reactor ``_CandidateProof``'s own ``execution_price`` (the exact
+    maker/taker cost the submit path will use), so a maker buy_no into an empty NO ask
+    is priced as the resting bid, NOT discarded by the ask-ladder taker cost. When a
+    proof-native builder is injected the engine's ``enable_negrisk_routes`` is irrelevant
+    (the builder owns the route surface).
+    """
+
+    def __call__(
+        self,
+        family_book: FamilyBook,
+        *,
+        shares,
+        enable_negrisk_routes: bool,
+    ) -> NegRiskRouteSet: ...
+
+
 # ===========================================================================
 # CandidateDecision — one enumerated candidate's full economics + provenance.
 # (Internal carrier; the FamilyDecision.candidates tuple is CandidateEconomics
@@ -447,6 +469,7 @@ class FamilyDecisionEngine:
         day0_reader: Day0Reader,
         predictive_builder: PredictiveBuilder,
         family_book_builder: Optional[FamilyBookBuilder] = None,
+        route_set_builder: Optional[RouteSetBuilder] = None,
         n_band_draws: int = 4000,
         band_alpha: float = 0.05,
         enable_negrisk_routes: bool = True,
@@ -463,6 +486,12 @@ class FamilyDecisionEngine:
             family_book_builder
             if family_book_builder is not None
             else family_book_from_snapshots
+        )
+        # Default the route-set builder to the live neg-risk engine; the reactor injects a
+        # PROOF-NATIVE direct-route builder (maker/taker cost from each proof's
+        # execution_price) so the v1 direct-native policy is not priced off the ask ladder.
+        self._route_set_builder: RouteSetBuilder = (
+            route_set_builder if route_set_builder is not None else build_negrisk_route_set
         )
         self._n_band_draws = int(n_band_draws)
         self._band_alpha = float(band_alpha)
@@ -562,7 +591,12 @@ class FamilyDecisionEngine:
         )
 
         # --- (5) the family route set (the executable surface per bin/side) ------
-        route_set = build_negrisk_route_set(
+        # The injected route_set_builder owns the route surface. Default = the live
+        # neg-risk engine (ask-ladder, size-aware). The reactor injects a PROOF-NATIVE
+        # direct-route builder so each direct YES/NO route's cost is the proof's own
+        # maker/taker execution_price, not the ask-ladder taker cost (a maker buy_no into
+        # an empty NO ask keeps its resting-bid cost instead of being discarded).
+        route_set = self._route_set_builder(
             family_book,
             shares=shares_for_routing,
             enable_negrisk_routes=self._enable_negrisk_routes,

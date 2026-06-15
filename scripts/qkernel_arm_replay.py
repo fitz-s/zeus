@@ -83,17 +83,16 @@ BAND_ALPHA = 0.05  # q_lcb = 5th percentile (conservative lower band)
 
 
 # ---------------------------------------------------------------------------
-# Season helper (matches emos_season convention used by the sigma floor table).
+# Season + lead/regime helpers — the SINGLE ForecastCaseFactory derivation, shared
+# with the live reactor bridge (src/engine/qkernel_spine_bridge.build_forecast_case)
+# so live and replay ForecastCase season/lead/regime cannot drift
+# (consult_review_pr409.md §5/§6 "replay/live identical forecast case").
 # ---------------------------------------------------------------------------
-def season_for(d: date) -> str:
-    m = d.month
-    if m in (12, 1, 2):
-        return "DJF"
-    if m in (3, 4, 5):
-        return "MAM"
-    if m in (6, 7, 8):
-        return "JJA"
-    return "SON"
+from src.calibration.emos import emos_season as season_for  # noqa: E402  (the SAME helper the σ-floor lookup keys on)
+from src.forecast.forecast_case_factory import (  # noqa: E402
+    DEFAULT_REGIME_KEY,
+    REPLAY_LEAD_HOURS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -309,9 +308,9 @@ def replay_family(
         target_local_date=td,
         metric=metric,
         issue_time_utc=issue,
-        lead_hours=24.0,
+        lead_hours=REPLAY_LEAD_HOURS,
         season=season_for(td),
-        regime_key="default",
+        regime_key=DEFAULT_REGIME_KEY,
         unit=unit,
         resolution=resolution,
         family_id=f"{city}|{target_date}|{metric}",

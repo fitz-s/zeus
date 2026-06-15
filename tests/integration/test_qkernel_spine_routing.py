@@ -214,6 +214,12 @@ def _proofs_for(family, *, yes_asks, no_asks, q_by_bin, q_lcb_by_bin):
     return proofs
 
 
+# Forecast source cycle that lands the (Paris, 2026-06-14, high) case in the 24h lead
+# bucket (the replay-validated bucket): cycle 2026-06-13T00:00Z -> finalization
+# 2026-06-14T10:00Z (Paris noon local) = 34h -> "24h" bucket.
+SOURCE_CYCLE_TIME_UTC = "2026-06-13T00:00:00Z"
+
+
 def _payload_with_spine_inputs(*, mu, sigma, members):
     return {
         "family_id": "edli_family_smoke_w5b",
@@ -222,6 +228,7 @@ def _payload_with_spine_inputs(*, mu, sigma, members):
         "_edli_spine_sigma_native": float(sigma),
         "_edli_spine_debiased_members_native": [float(x) for x in members],
         "_edli_spine_raw_members_native": [float(x) for x in members],
+        "_edli_spine_source_cycle_time_utc": SOURCE_CYCLE_TIME_UTC,
     }
 
 

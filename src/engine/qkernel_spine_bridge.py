@@ -105,6 +105,7 @@ from src.decision.family_decision_engine import (
 )
 from src.forecast.day0_conditioner import Day0ObservationState
 from src.forecast.debias_authority import AppliedDebias
+from src.forecast.forecast_case_factory import forecast_case_metadata
 from src.forecast.predictive_distribution_builder import (
     PredictiveDistribution,
     PredictiveDistributionBuilder,
@@ -128,6 +129,25 @@ from src.strategy import utility_ranker
 NO_TRADE_SPINE_INPUTS_UNAVAILABLE = "SPINE_INPUTS_UNAVAILABLE"
 NO_TRADE_SPINE_WIRING_FAULT = "SPINE_WIRING_FAULT"
 NO_TRADE_SPINE_NO_SELECTION = "SPINE_NO_SELECTION"
+# Route identity (consult_review_pr409.md §5 BLOCKER "integration-route identity"):
+# the unchanged submit path executes ONE native leg, so the bridge may only carry a
+# DIRECT native route (DIRECT_YES / DIRECT_NO) back to a single _CandidateProof. A
+# synthetic / arb / conversion route is multi-leg and the submit path cannot execute
+# it — the minimum-safe realization restricts the engine to direct routes and REFUSES
+# (never silently single-leg-maps) any non-direct selection as this typed no-trade.
+NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE = "NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE"
+# v1 lead-bucket restriction (consult_review_pr409_round2.md §3): only the 24h lead
+# bucket has its own settlement-EV replay, so live qkernel is restricted to it. A case
+# outside the replayed bucket is a typed no-trade until that bucket is EV-replayed.
+NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED = "QKERNEL_LEAD_BUCKET_NOT_REPLAYED"
+# v1 day0 hard-block (consult_review_pr409_round2.md §3): qkernel reads no day0
+# observation, so a day0 event type is refused BEFORE the spine is driven.
+NO_TRADE_QKERNEL_DAY0_NOT_WIRED = "QKERNEL_DAY0_NOT_WIRED"
+
+# The route_id prefixes a DIRECT native route carries (negrisk_routes._direct_*_route:
+# route_id = f"{route_type}:{bin_id}@{shares}"). These are the ONLY route types one
+# native _CandidateProof can execute via the unchanged single-leg submit path.
+_DIRECT_ROUTE_ID_PREFIXES = ("DIRECT_YES:", "DIRECT_NO:")
 
 # The joint-q band draw count the engine uses for the coherent ΔU band. The engine's
 # own default is 4000 (the validated production width). ``None`` means "use the engine
@@ -256,14 +276,22 @@ def _candidate_bin_id_for(candidate: Any) -> str:
 def build_forecast_case(
     family: Any,
     *,
-    decision_time: datetime,
+    source_cycle_time_utc: datetime,
 ) -> ForecastCase:
-    """Build the spine ``ForecastCase`` from the reactor family + decision time.
+    """Build the spine ``ForecastCase`` from the reactor family + forecast source cycle.
 
     Resolves the versioned ``EventResolution`` via the live
     ``event_resolution_for_city`` (the SAME per-city settlement identity the q layer
-    threads). Raises ``ResolutionError`` (fail-closed) if the city cannot be
-    resolved to a settlement station — the caller turns that into a typed no-trade.
+    threads). Raises ``ResolutionError`` (fail-closed) if the city cannot be resolved
+    to a settlement station — the caller turns that into a typed no-trade.
+
+    The case ``issue_time_utc`` / ``source_cycle_time_utc`` are the FORECAST SOURCE
+    CYCLE that produced the served members (NOT decision_time), and season / lead /
+    regime are derived by the SINGLE ``forecast_case_metadata`` factory the ARM replay
+    also uses, so the settlement sigma-floor cell identity is the replay-validated one
+    (consult_review_pr409_round2.md §3). ``season = emos_season(target)`` (the floor
+    table's own key — never blank); ``regime_key = "default"`` (the replay's);
+    ``lead_hours`` is the real lead from the source cycle to the target finalization.
     """
     city = _city_resolver(family)
     if city is None:
@@ -276,7 +304,17 @@ def build_forecast_case(
     target_local_date = _coerce_target_date(getattr(family, "target_date", None))
     resolution = event_resolution_for_city(city, target_local_date, metric)  # type: ignore[arg-type]
 
-    issue = decision_time if decision_time.tzinfo else decision_time.replace(tzinfo=timezone.utc)
+    cycle = (
+        source_cycle_time_utc
+        if source_cycle_time_utc.tzinfo
+        else source_cycle_time_utc.replace(tzinfo=timezone.utc)
+    )
+    meta = forecast_case_metadata(
+        target_local_date=target_local_date,
+        source_cycle_time_utc=cycle,
+        finalization_local_time=resolution.finalization_local_time,
+        settlement_timezone=resolution.settlement_timezone,
+    )
     return ForecastCase(
         city=resolution.city,
         city_id=str(getattr(city, "name", resolution.city)),
@@ -284,14 +322,14 @@ def build_forecast_case(
         settlement_source_type=resolution.settlement_source_type,
         target_local_date=target_local_date,
         metric=metric,  # type: ignore[arg-type]
-        issue_time_utc=issue,
-        lead_hours=0.0,
-        season="",
-        regime_key="",
+        issue_time_utc=cycle,
+        lead_hours=meta.lead_hours,
+        season=meta.season,
+        regime_key=meta.regime_key,
         unit=resolution.measurement_unit,
         resolution=resolution,
         family_id=str(getattr(family, "family_id", "")),
-        source_cycle_time_utc=issue,
+        source_cycle_time_utc=cycle,
     )
 
 
@@ -384,12 +422,43 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
     # latent legacy-mu seam.
     if members is None and raw_members is None:
         return None
+    # The FORECAST SOURCE CYCLE that produced these members (the Stage-0 producer
+    # stashes it under _edli_spine_source_cycle_time_utc). The ForecastCase issue /
+    # source_cycle / lead MUST derive from this cycle, NOT decision_time, so the live
+    # σ-floor lead bucket matches the replay-validated cell (round-2 §3). FAIL CLOSED
+    # (return None ⇒ typed SPINE_INPUTS_UNAVAILABLE) when absent — never silently fall
+    # back to decision_time, which would mis-bucket the lead and serve the wrong floor.
+    source_cycle = _parse_source_cycle_time(payload.get("_edli_spine_source_cycle_time_utc"))
+    if source_cycle is None:
+        return None
     return {
         "mu_native": mu_f,
         "sigma_native": sigma_f,
         "debiased_members_native": members,
         "raw_members_native": raw_members,
+        "source_cycle_time_utc": source_cycle,
     }
+
+
+def _parse_source_cycle_time(value: Any) -> Optional[datetime]:
+    """Parse the threaded forecast source-cycle timestamp into a tz-aware UTC datetime.
+
+    The producer stashes a string (the snapshot ``source_cycle_time`` / ``issue_time``).
+    Returns ``None`` (⇒ the caller fails closed to SPINE_INPUTS_UNAVAILABLE) when the
+    value is absent or unparseable — the source cycle is REQUIRED for the lead bucket.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
 
 
 def build_fresh_model_set(
@@ -580,6 +649,27 @@ def _parse_candidate_id(candidate_id: str) -> Optional[tuple[str, str]]:
     return bin_id, side
 
 
+def _selected_route_is_direct(selected: Any) -> bool:
+    """Whether the spine's selected candidate is a DIRECT native route.
+
+    The submit path executes ONE native leg, so only ``DIRECT_YES`` / ``DIRECT_NO``
+    routes map to a single ``_CandidateProof``. The engine stamps
+    ``CandidateEconomics.route_id`` (and the candidate_id ``SIDE:bin_id:route_id``)
+    from ``RouteCost.route_id`` = ``f"{route_type}:{bin_id}@{shares}"``. A direct route
+    therefore begins with ``DIRECT_YES:`` / ``DIRECT_NO:``; a synthetic / arb /
+    conversion route begins with ``SYNTHETIC_NOT_I_YES_BASKET:`` / ``PAIR_ARB:`` /
+    ``FULL_YES_BASKET_ARB`` / ``CONVERSION_SELL_BASKET:`` and is NOT directly
+    executable. Reads ``route_id`` (authoritative) and falls back to parsing the
+    candidate_id's route segment.
+    """
+    route_id = str(getattr(selected, "route_id", "") or "")
+    if not route_id:
+        candidate_id = str(getattr(selected, "candidate_id", "") or "")
+        parts = candidate_id.split(":", 2)
+        route_id = parts[2] if len(parts) >= 3 else ""
+    return route_id.startswith(_DIRECT_ROUTE_ID_PREFIXES)
+
+
 # ===========================================================================
 # The bridge entry point.
 # ===========================================================================
@@ -636,7 +726,24 @@ def decide_family_via_spine(
         )
 
     try:
-        case = build_forecast_case(family, decision_time=decision_time)
+        # The ForecastCase issue / source_cycle / lead derive from the FORECAST SOURCE
+        # CYCLE that produced the served members (threaded under
+        # _edli_spine_source_cycle_time_utc; _served_predictive_inputs already failed
+        # closed to SPINE_INPUTS_UNAVAILABLE if it was absent), NOT decision_time.
+        case = build_forecast_case(
+            family, source_cycle_time_utc=served["source_cycle_time_utc"]
+        )
+        # v1 lead-bucket restriction: only the 24h bucket has its own settlement-EV
+        # replay. A case outside the replayed bucket is a typed no-trade (round-2 §3).
+        from src.forecast.forecast_case_factory import REPLAYED_LEAD_BUCKET
+        from src.forecast.sigma_authority import lead_bucket_for
+
+        if lead_bucket_for(case) != REPLAYED_LEAD_BUCKET:
+            return SpineDecisionResult(
+                selected_proof=None,
+                no_trade_reason=NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED,
+                decision=None,
+            )
         omega = build_outcome_space(family, case)
         models = build_fresh_model_set(case, served)
         sizing_candidates = _sizing_candidates_from_proofs(
@@ -666,10 +773,26 @@ def decide_family_via_spine(
             # the ARM-replay-validated center+σ, NOT the reactor's legacy served mu/σ.
             # De-bias is a no-op here (already applied upstream; see _NoOpDebiasAuthority).
             predictive_builder=PredictiveDistributionBuilder(_NoOpDebiasAuthority()),
+            # ROUTE IDENTITY (consult_review_pr409.md §5 BLOCKER): DIRECT native routes
+            # ONLY. The unchanged submit path executes ONE native leg, so the decision
+            # may only choose a route a single _CandidateProof can execute. Disabling the
+            # neg-risk routes makes build_negrisk_route_set produce direct-only routes
+            # (synthetic_not_i / pair_arbs / full_basket_arbs / conversion_routes are all
+            # empty) and best_no_route returns the DIRECT NO — so the engine cannot select
+            # a multi-leg synthetic/arb route the bridge would have to silently single-leg
+            # map. The full multi-leg route-intent submit is a later arc; until it exists
+            # this is the minimum-safe restriction. A non-direct selection (defensive,
+            # unreachable while this flag is False) is REFUSED below as a typed no-trade.
+            enable_negrisk_routes=False,
             # Inject a family_book_builder that assembles the FamilyBook DIRECTLY from
             # the reactor proofs' native ladders (the SAME books the reactor priced
             # each proof against) — bypassing ExecutableMarketSnapshot reconstruction.
             family_book_builder=_family_book_builder_from_proofs(proofs, candidate_bin_id),
+            # PROOF-NATIVE direct routes (consult_review_pr409_round2.md §1): each direct
+            # YES/NO route is priced at the proof's OWN maker/taker execution_price, not
+            # the negrisk ask-ladder. This preserves the maker buy_no edge class (resting
+            # bid into an empty NO ask) the ask-ladder taker cost would discard.
+            route_set_builder=_proof_native_direct_route_set_builder(proofs, candidate_bin_id),
             **_engine_kwargs,
         )
         captured_at_utc = decision_time if decision_time.tzinfo else decision_time.replace(tzinfo=timezone.utc)
@@ -712,6 +835,22 @@ def decide_family_via_spine(
         return SpineDecisionResult(
             selected_proof=None,
             no_trade_reason=decision.no_trade_reason or NO_TRADE_SPINE_NO_SELECTION,
+            decision=decision,
+        )
+
+    # ROUTE IDENTITY GUARD (consult_review_pr409.md §5 BLOCKER). The unchanged submit
+    # path executes ONE native leg, so only a DIRECT native route maps to a single
+    # _CandidateProof. The engine is driven direct-only (enable_negrisk_routes=False),
+    # so a non-direct selection is unreachable on the live lane — but if a route other
+    # than DIRECT_YES/DIRECT_NO is ever selected, REFUSE it as a typed no-trade rather
+    # than silently single-leg-mapping a multi-leg synthetic/arb route the submit path
+    # cannot execute. (This is the second, defensive half of the minimum-safe fix: the
+    # engine flag prevents it; this guard makes a regression that re-enabled neg-risk
+    # routes fail closed instead of mis-executing.)
+    if not _selected_route_is_direct(decision.selected):
+        return SpineDecisionResult(
+            selected_proof=None,
+            no_trade_reason=NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE,
             decision=decision,
         )
 
@@ -842,6 +981,90 @@ def _family_book_builder_from_proofs(
             markets[bin_id] = market
         return build_family_book(
             omega=omega, markets=markets, captured_at_utc=captured_at_utc
+        )
+
+    return _build
+
+
+def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_id):
+    """Return a ``RouteSetBuilder`` that prices DIRECT routes at each proof's own cost.
+
+    PROOF-NATIVE single-leg routing (consult_review_pr409_round2.md §1/§5 BLOCKER
+    "direct-native route realization"). The v1 live edge class is a maker buy_no into an
+    empty NO ask, priced as the resting bid behind the complementary book — the reactor
+    already submits this. ``negrisk_routes`` direct-NO walks the NO ASK (taker), which
+    DISCARDS that maker edge. So in v1 the route surface is NOT built off the ask ladder:
+    each reactor ``_CandidateProof`` IS one direct-native route, and its cost is the
+    proof's own ``execution_price`` (the exact maker/taker all-in cost, fee-applied, in
+    probability units, that the unchanged submit path will carry). This builder produces a
+    ``NegRiskRouteSet`` whose ``direct_yes`` / ``direct_no`` per bin are priced at those
+    proof execution prices, with EVERY neg-risk surface empty (synthetic / pair / basket /
+    conversion) — synthetic/arb/conversion stay disabled until a real multi-leg
+    route-intent submit exists. Each route is exactly ONE leg whose token/condition is the
+    proof's, so the selected route maps back to that proof unambiguously.
+
+    The returned callable matches the engine's ``RouteSetBuilder`` protocol
+    ``(family_book, *, shares, enable_negrisk_routes) -> NegRiskRouteSet``; the family_book
+    / shares / flag args are accepted for signature parity but the routes come from the
+    proofs (the proof-native cost is the authority, not the book ladder).
+    """
+    from src.execution.negrisk_routes import NegRiskRouteSet, RouteCost, RouteLeg
+    from src.probability.instruments import Instrument
+
+    direct_yes: dict[str, RouteCost] = {}
+    direct_no: dict[str, RouteCost] = {}
+    for proof in proofs:
+        direction = str(getattr(proof, "direction", "") or "")
+        side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
+        if side is None:
+            continue
+        execution_price = getattr(proof, "execution_price", None)
+        if execution_price is None or getattr(execution_price, "currency", None) != "probability_units":
+            # An unpriced / wrong-unit proof is not a routable direct candidate; the
+            # engine simply has no route for that (bin, side) and never sizes it.
+            continue
+        bin_id = candidate_bin_id(proof)
+        candidate = getattr(proof, "candidate", None)
+        token_id = str(getattr(proof, "token_id", "") or "")
+        condition_id = str(getattr(candidate, "condition_id", "") or "")
+        route_type = "DIRECT_YES" if side == "YES" else "DIRECT_NO"
+        instrument = Instrument(
+            instrument_id=f"{side}:{bin_id}",
+            bin_id=bin_id,
+            side=side,
+            direct_token_id=token_id or None,
+        )
+        leg = RouteLeg(
+            condition_id=condition_id,
+            bin_id=bin_id,
+            token_id=token_id,
+            direction=direction,  # type: ignore[arg-type]
+            shares=Decimal("1"),
+            leg_cost=execution_price,
+        )
+        route = RouteCost(
+            route_id=f"{route_type}:{bin_id}@proof",
+            route_type=route_type,  # type: ignore[arg-type]
+            instrument=instrument,
+            shares=Decimal("1"),
+            avg_cost=execution_price,
+            max_shares=Decimal("1000000"),
+            legs=(leg,),
+            executable=True,
+            reason=None,
+        )
+        target = direct_yes if side == "YES" else direct_no
+        # First proof for a (bin, side) wins (YES and NO proofs are distinct sides).
+        target.setdefault(bin_id, route)
+
+    def _build(family_book, *, shares=Decimal("1"), enable_negrisk_routes=False):  # noqa: ARG001
+        return NegRiskRouteSet(
+            direct_yes=dict(direct_yes),
+            direct_no=dict(direct_no),
+            synthetic_not_i={},
+            pair_arbs=(),
+            full_basket_arbs=(),
+            conversion_routes=(),
         )
 
     return _build

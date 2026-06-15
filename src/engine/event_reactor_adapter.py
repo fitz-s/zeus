@@ -281,6 +281,12 @@ _FORECAST_DECISION_EVENT_TYPES: frozenset[str] = frozenset(
     {"FORECAST_SNAPSHOT_READY", _EDLI_REDECISION_EVENT_TYPE}
 )
 
+# The day0/same-day event lane (a DAY0_EXTREME_UPDATED prices against an observed
+# running extreme). Module-level so the qkernel seam can hard-block the spine on it
+# (the spine reads no day0 observation; consult_review_pr409_round2.md §3). The day0
+# boundary guard inside the live adapter references this same constant.
+_DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
+
 
 # Decision-triggered targeted snapshot refresh (zero-order wall fix 2026-06-11).
 #
@@ -1485,7 +1491,7 @@ def event_bound_live_adapter_from_trade_conn(
     # proofs/gates/arm downstream). The unknown-event-type fail-closed posture is
     # preserved under both shadow-style scopes — an event type that is neither
     # the known forecast lane nor the known day0 lane is rejected.
-    _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
+    # (The set is the module-level _DAY0_LANE_EVENT_TYPES, shared with the qkernel seam.)
 
     # FIX-4 (P2): per-cycle live submit call counter. Incremented ONLY when
     # executor_submit() is actually called (i.e., real_order_submit_enabled and
@@ -2482,11 +2488,42 @@ def _build_event_bound_no_submit_receipt_core(
     # costs); only the SELECTION authority differs.
     _spine_no_trade_reason: str | None = None
     from src.engine.qkernel_spine_bridge import (
+        NO_TRADE_QKERNEL_DAY0_NOT_WIRED,
         decide_family_via_spine,
         qkernel_spine_enabled,
     )
 
-    if qkernel_spine_enabled():
+    # DAY0 HARD-FACT GAP (consult_review_pr409_round2.md §3 BLOCKER "qkernel DAY0 hard
+    # block"): the spine bridge reads no day0 observation (_NoDay0Reader), so a day0
+    # event family routed through the spine could price physically impossible bins
+    # (below the observed running high / above the observed running low). Until a real
+    # Day0Reader is wired, the qkernel branch hard-blocks the day0 lane:
+    #   * flag ON + day0 event type  -> typed QKERNEL_DAY0_NOT_WIRED no-trade (the spine
+    #     REFUSES; it is not silently routed through a no-observation conditioner, and it
+    #     does NOT fall back to a forecast-blind legacy decision on a same-day market).
+    #   * flag ON + forecast event type -> route through the spine.
+    #   * flag ON + any other type / flag OFF -> legacy decision path unchanged.
+    _spine_flag_on = qkernel_spine_enabled()
+    _is_day0_event = event.event_type in _DAY0_LANE_EVENT_TYPES
+    _spine_eligible_event = event.event_type in _FORECAST_DECISION_EVENT_TYPES
+    if _spine_flag_on and _is_day0_event:
+        # Hard-block: qkernel has no day0 observation. Typed no-trade BEFORE the spine.
+        proof = None
+        _spine_no_trade_reason = NO_TRADE_QKERNEL_DAY0_NOT_WIRED
+    elif _spine_flag_on and _spine_eligible_event:
+        # Fix #4 (consult_review_pr409.md §5/§6 "current exposure not in route
+        # selection"): pass the REAL current per-bin family exposure into the spine's
+        # ΔU SELECTION. The spine picks the new leg by argmax ΔU over the whole family,
+        # so a flat/empty baseline lets it choose a leg the account is already heavy in
+        # — and re-sizing the chosen leg afterward cannot repair a wrong INSTRUMENT
+        # choice. The per-bin exposure attributes each open committed position to its own
+        # family bin by condition_id (NOT collapsed onto one bin), so the concave ΔU
+        # objective shrinks the legs the book already holds before the argmax.
+        _spine_selection_exposure = _family_existing_exposure_for_selection_by_bin_id(
+            proofs=proofs,
+            portfolio_state_provider=portfolio_state_provider,
+            family=family,
+        )
         _spine_result = decide_family_via_spine(
             family=family,
             payload=payload,
@@ -2498,9 +2535,7 @@ def _build_event_bound_no_submit_receipt_core(
             exposure_builder=_robust_marginal_utility_exposure,
             baseline_usd_provider=_robust_marginal_utility_baseline_usd,
             per_bin_yes_q_lcb=_per_bin_yes_q_lcb(proofs),
-            # Flat baseline for SELECTION (the legacy selector also selects on the flat
-            # baseline; existing exposure only re-sizes the chosen leg afterward).
-            extra_exposure_by_bin_id=None,
+            extra_exposure_by_bin_id=(_spine_selection_exposure or None),
         )
         proof = _spine_result.selected_proof
         _spine_no_trade_reason = _spine_result.no_trade_reason
@@ -7576,6 +7611,7 @@ def _generate_candidate_proofs(
                     "_edli_spine_raw_members_native",
                     "_edli_spine_debiased_members_native",
                     "_edli_spine_q_vector",
+                    "_edli_spine_source_cycle_time_utc",
                     "_edli_q_source",
                 )
                 if k in payload
@@ -9324,6 +9360,67 @@ def _family_existing_exposure_by_bin_id(
     if exposure_usd <= 0.0:
         return {}
     return {selected_bin_id: exposure_usd}
+
+
+def _family_existing_exposure_for_selection_by_bin_id(
+    *,
+    proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
+    portfolio_state_provider: "Callable[[], Any] | None",
+    family,
+) -> dict[str, float]:
+    """PRE-SELECTION per-bin family exposure for the spine's ΔU SELECTION (Fix #4).
+
+    The spine selects the new leg by ``argmax ΔU`` over the WHOLE family, so the
+    exposure baseline must be per-bin BEFORE a leg is chosen — a flat/empty baseline
+    lets the argmax pick a leg the account is already heavy in (re-sizing after
+    selection cannot repair a wrong INSTRUMENT choice; consult_review_pr409.md §5/§6
+    "current exposure not in route selection"). Unlike
+    :func:`_family_existing_exposure_by_bin_id` (which collapses same-city exposure
+    onto the ALREADY-selected bin — a post-selection sizing input), this attributes
+    each open committed position to its OWN family bin by matching the position's
+    ``condition_id`` to the family candidate's ``condition_id``, keyed by
+    ``_candidate_bin_id`` so it lines up with the candidates' bins.
+
+    Scope (what is honestly attributable per-bin at selection): COMMITTED open
+    positions carry a ``condition_id`` that maps to exactly one family bin, so their
+    ``effective_cost_basis_usd`` is the per-bin exposure ``A_y`` the concave ΔU
+    objective shrinks against. Same-cycle reservations are city-keyed with NO bin
+    identity, so they are NOT fabricated onto a bin here — the post-selection
+    recapture already nets them by city. Returns ``{}`` (flat baseline, prior
+    behavior byte-for-byte) when no provider is wired or no open position matches a
+    family bin's condition_id.
+    """
+    if portfolio_state_provider is None:
+        return {}
+    # condition_id -> bin_id for THIS family (a bin's YES and NO proofs share both).
+    bin_id_by_condition: dict[str, str] = {}
+    for proof in proofs:
+        cond = str(getattr(getattr(proof, "candidate", None), "condition_id", "") or "")
+        if cond:
+            bin_id_by_condition.setdefault(cond, _candidate_bin_id(proof))
+    if not bin_id_by_condition:
+        return {}
+    try:
+        from src.state.portfolio import (
+            _runtime_open_exposure_usd,
+            get_open_positions,
+        )
+
+        state = portfolio_state_provider()
+        if state is None:
+            return {}
+        exposure_by_bin: dict[str, float] = {}
+        for pos in get_open_positions(state):
+            cond = str(getattr(pos, "condition_id", "") or "")
+            bin_id = bin_id_by_condition.get(cond)
+            if bin_id is None:
+                continue
+            committed = float(_runtime_open_exposure_usd(pos))
+            if committed > 0.0:
+                exposure_by_bin[bin_id] = exposure_by_bin.get(bin_id, 0.0) + committed
+        return exposure_by_bin
+    except (TypeError, ValueError, ImportError):
+        return {}
 
 
 def _selected_candidate_proof(
@@ -11468,6 +11565,20 @@ def _market_analysis_from_event_snapshot(
             payload["_edli_spine_debiased_members_native"] = _spine_debiased_list
         if _spine_q_list is not None:
             payload["_edli_spine_q_vector"] = _spine_q_list
+        # Stage-0: stash the FORECAST SOURCE CYCLE that produced these members so the
+        # qkernel ForecastCaseFactory builds issue_time_utc / source_cycle_time_utc /
+        # lead_hours from the real forecast cycle (NOT decision_time) — the live σ-floor
+        # lead bucket then matches the replay-validated cell (consult_review_pr409_round2
+        # §3). The same canonical accessor the calibration path uses
+        # (snapshot.source_cycle_time / issue_time / payload.cycle). Absent ⇒ the bridge
+        # fails closed to a typed SPINE_INPUTS_UNAVAILABLE no-trade (never decision_time).
+        _spine_source_cycle = (
+            snapshot.get("source_cycle_time")
+            or snapshot.get("issue_time")
+            or payload.get("cycle")
+        )
+        if _spine_source_cycle:
+            payload["_edli_spine_source_cycle_time_utc"] = str(_spine_source_cycle)
     except Exception:  # noqa: BLE001 — Stage-0 spine is observability-only; never alter a decision
         pass
     return MarketAnalysis(
