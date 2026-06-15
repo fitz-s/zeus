@@ -7608,11 +7608,19 @@ def _generate_candidate_proofs(
         and "_edli_spine_mu_native" not in payload
     ):
         try:
+            # allow_latest=True: bind the spine belief to the FRESHEST available forecast
+            # cycle for this family (K=1 freshest-is-the-decision-authority law), NOT the
+            # event's stale causal cycle. Live FSR events bind to an OLD cycle (e.g. a
+            # 06-16 target on the 06-14 cycle = ~48h lead = the spine's unvalidated 72h
+            # bucket => LEAD_BUCKET_NOT_REPLAYED). The fresh cycle (06-15, materialized)
+            # puts the same family at ~24h lead = the spine's ARM-VALIDATED tradeable
+            # bucket. This only sources the spine's input belief (on a payload copy); the
+            # live decision's causal binding is untouched.
             _spine_snap = _forecast_snapshot_row_for_event(
                 forecast_conn,
                 event=event,
                 family=family,
-                allow_latest=False,
+                allow_latest=True,
                 decision_time=decision_time,
             )
             if _spine_snap is not None:
