@@ -7590,6 +7590,53 @@ def _generate_candidate_proofs(
                 }
         except Exception:  # noqa: BLE001 — belief capture is non-critical; never break the decision
             pass
+    # === Q-KERNEL SPINE INPUTS — populate from the canonical member-envelope belief (2026-06-15) ===
+    # The LIVE q above is the replacement provider-fused chain (_live_yes_probabilities), which
+    # carries an anchor-fused posterior with NO debiased ensemble member envelope. The rebuilt
+    # qkernel spine REQUIRES that envelope (build_center). Wave-5B wired the spine producer ONLY
+    # into the canonical path (_market_analysis_from_event_snapshot), which is NOT on the live
+    # replacement lane — so the spine got SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED universally
+    # (SPINE_STASH_DIAG=0 confirmed the producer never ran live). Fix: for spine-eligible families,
+    # run that SAME validated producer here (read-only) on a payload COPY and lift ONLY the
+    # _edli_spine_* keys onto the real payload — the live decision provenance (_edli_q_source etc.)
+    # is untouched, and the spine bridge gets the exact debiased belief the ARM replay validated.
+    # Bias-safe: the producer applies whatever de-bias is live (currently off => raw envelope, the
+    # ARM-validated center) — NOT a new/contaminated correction. Fail-soft: any error stashes
+    # nothing and never disturbs the decision.
+    if (
+        getattr(event, "event_type", None) in _FORECAST_DECISION_EVENT_TYPES
+        and "_edli_spine_mu_native" not in payload
+    ):
+        try:
+            _spine_snap = _forecast_snapshot_row_for_event(
+                forecast_conn,
+                event=event,
+                family=family,
+                allow_latest=False,
+                decision_time=decision_time,
+            )
+            if _spine_snap is not None:
+                _spine_payload_copy = dict(payload)
+                _market_analysis_from_event_snapshot(
+                    calibration_conn=calibration_conn,
+                    snapshot=_spine_snap,
+                    family=family,
+                    native_costs=native_costs,
+                    payload=_spine_payload_copy,
+                    decision_time=decision_time,
+                )
+                for _sk in (
+                    "_edli_spine_mu_native",
+                    "_edli_spine_sigma_native",
+                    "_edli_spine_raw_members_native",
+                    "_edli_spine_debiased_members_native",
+                    "_edli_spine_q_vector",
+                    "_edli_spine_source_cycle_time_utc",
+                ):
+                    if _sk in _spine_payload_copy:
+                        payload[_sk] = _spine_payload_copy[_sk]
+        except Exception:  # noqa: BLE001 — spine-input population is observability-only; never break the decision
+            pass
     # === Q-KERNEL REBUILD STAGE 0 — lift the receipt-spine inputs (2026-06-14) ===========
     # READ-ONLY: the q-build (_market_analysis_from_event_snapshot) already stashed the
     # forecast/q spine onto the THREADED payload under payload["_edli_spine_*"]. Lift those
