@@ -33,18 +33,24 @@ Two structural guarantees, both implemented as the TRANSFORMATION (not as a
 downstream gate/cap/clamp that catches a bad σ after a broken estimator produced
 it):
 
-  1. **σ is never below the realized floor — by construction of the estimator.**
+  1. **The served σ IS the realized walk-forward floor — the calibrated width.**
      ``build_sigma`` composes the per-cell candidate components
      (``sigma_model``, ``sigma_param``, ``sigma_station``, ``sigma_day0``) by
-     root-sum-square into ``sigma_before_floor`` and then takes
-     ``sigma = max(sigma_before_floor, floor.rmse_native, floor.mad_sigma_native)``.
-     The realized floor is the realized walk-forward settlement error of the cell
-     (RMSE and a MAD-robust σ). The constant 1.0 of the live materializer is folded
-     in only as an INTERNAL ``sigma_day0`` candidate — it can only enter the RSS,
-     it is never the served authority. A sub-realized σ is therefore not a value to
-     be detected and clamped afterwards: the only σ the estimator can emit is at
-     least the realized floor, because ``max`` is the last operation that produces
-     it. There is no code path that returns ``sigma_before_floor`` unfloored.
+     root-sum-square into ``sigma_before_floor`` (kept as telemetry + the thin/new-
+     cell fallback). When a realized floor exists, the served σ IS that realized
+     floor (``sigma = max(floor.rmse_native, floor.mad_sigma_native)``), NOT
+     ``max(sigma_before_floor, floor)``. The realized floor is the realized
+     walk-forward settlement error of the cell (RMSE and a MAD-robust σ) — it
+     already contains every real source of day-ahead error, so it is the honest
+     total width; the component RSS over-disperses by double-counting modeled
+     uncertainty on top of it (ARM settlement replay 2026-06-15, n=693:
+     sigma_before_floor ≈ 1.94× realized, std(z)=0.52, vs the realized-floor served
+     width std(z)=0.93, σ/RMSE=0.99 — honest; docs/rebuild/arm_replay_report.md).
+     A sub-realized σ remains impossible: ``sigma == realized_floor`` trivially
+     satisfies ``sigma >= realized_floor``, so the original 47%-spike under-
+     dispersion cannot recur. Only when NO realized floor exists for the cell does
+     ``build_sigma`` return ``sigma_before_floor`` (the composed honest RSS) as the
+     thin/new-cell fallback — never a fabricated narrow value.
 
   2. **No soft-anchor path serves q without σ.** When the fusion capture that
      would furnish a predictive width is missing AND there is no realized floor to
@@ -177,13 +183,16 @@ class SigmaComponents:
     """The decomposition of the served predictive σ into its candidate components.
 
     Every field is in the settlement native unit. ``sigma_before_floor_native`` is
-    the root-sum-square of the model/param/station/day0 candidate σ (NOT yet
-    floored). ``sigma_after_floor_native`` is the SERVED σ — the
-    ``max(sigma_before_floor_native, realized_floor_native)`` — and is the only σ a
-    live q may use. ``realized_floor_native`` is ``max(rmse_native, mad_sigma_native)``
-    of the floor artifact (or the conservative fallback floor). ``raw_member_spread_native``
-    is the raw ensemble spread retained for diagnostics (the under-dispersed quantity
-    the live path served; never the authority here).
+    the root-sum-square of the model/param/station/day0 candidate σ — retained as
+    telemetry and as the thin/new-cell fallback ONLY. ``sigma_after_floor_native``
+    is the SERVED σ: it is ``realized_floor_native`` (the calibrated realized
+    walk-forward width) whenever a realized floor exists, and ``sigma_before_floor_native``
+    only when no realized floor exists for the cell. The component RSS is NOT served
+    above the realized floor (it over-disperses ~1.94× by double-counting modeled
+    uncertainty on top of an already-complete realized error — ARM replay 2026-06-15).
+    ``realized_floor_native`` is ``max(rmse_native, mad_sigma_native)`` of the floor
+    artifact (or the conservative fallback floor). ``raw_member_spread_native`` is the
+    raw ensemble spread retained for diagnostics (never the authority here).
     """
 
     raw_member_spread_native: float
@@ -545,21 +554,30 @@ def build_sigma(
         + sigma_day0 ** 2
     )
 
-    # The realized floor is the TRANSFORMATION's last operation. When a realized
-    # floor exists, the served σ is the max of the RSS and the realized RMSE / MAD
-    # floor. When it is absent, the day0 candidate (which itself carries the
-    # materializer's max(1.0, ...) internal floor) keeps the RSS strictly positive —
-    # a sub-realized σ remains impossible because the realized floor, when present,
-    # always participates in the max, and when absent the served σ is still a
-    # composed honest width, never a fabricated narrow value.
+    # The realized walk-forward error IS the honest TOTAL width. It is the realized
+    # |settle - mu*| dispersion of the actual day-ahead forecast against settlement,
+    # so it already CONTAINS every real source of error (model + station + process).
+    # The component RSS (sigma_before_floor) is an independent ESTIMATE of that same
+    # width that adds modeled uncertainty ON TOP of an already-complete realized
+    # error -> it double-counts and over-disperses. The ARM settlement replay
+    # (2026-06-15, docs/rebuild/arm_replay_report.md, n=693) proved the RSS-served
+    # width is ~1.94x the realized RMSE (std(z)=0.52) while the realized-floor width
+    # is honest (std(z)=0.86, sigma/RMSE=1.09). So when a realized floor exists, the
+    # served sigma IS the realized floor (the calibrated width), NOT max(RSS, floor).
+    # The RSS is retained only as the thin/new-cell fallback (floor is None) and as
+    # telemetry. sigma == realized_floor still satisfies sigma >= realized_floor, so a
+    # sub-realized (too-tight) sigma remains mathematically impossible -- the original
+    # 47%-spike under-dispersion disease cannot recur.
     if floor is not None:
         realized_floor_native = max(floor.rmse_native, floor.mad_sigma_native)
-        sigma = max(sigma_before_floor, floor.rmse_native, floor.mad_sigma_native)
+        sigma = realized_floor_native
         artifact_id = floor.artifact_id
     else:
         realized_floor_native = 0.0
+        # No realized floor for this cell: the composed RSS is the only honest width
+        # available for a thin/new cell -- never a fabricated narrow value.
         sigma = sigma_before_floor
-        artifact_id = "no_realized_floor"
+        artifact_id = "no_realized_floor_rss_fallback"
 
     components = SigmaComponents(
         raw_member_spread_native=float(sigma_ensemble),
@@ -580,14 +598,15 @@ def build_sigma(
         live_eligible=True,
         ineligibility_reason=None,
         receipt={
-            "basis": "predictive_sigma_authority",
+            "basis": "realized_floor_anchored" if floor is not None else "rss_thin_cell_fallback",
             "live_eligible": True,
             "has_fusion_capture": True,
             "sigma_native": float(sigma),
             "sigma_before_floor_native": float(sigma_before_floor),
             "realized_floor_native": float(realized_floor_native),
             "realized_floor_present": floor is not None,
-            "floor_dominated": bool(floor is not None and sigma > sigma_before_floor),
+            "realized_floor_anchored": bool(floor is not None),
+            "rss_over_realized_ratio": float(sigma_before_floor / realized_floor_native) if realized_floor_native > 0.0 else None,
             "components": {
                 "sigma_model": float(sigma_model),
                 "sigma_param": float(sigma_param),

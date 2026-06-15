@@ -1,10 +1,14 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-06-15 (ARM-replay width recalibration)
 # Authority basis: docs/rebuild/consult_build_spec.md Stage 5 (lines 1109-1125
 #   RED-on-revert names + live signal) + sigma_authority Create block (lines
-#   369-430: the realized-floor transformation sigma = max(sigma_before_floor,
-#   floor.rmse_native, floor.mad_sigma_native) and the soft-anchor-without-sigma
-#   live_eligible=False / PREDICTIVE_SIGMA_AUTHORITY_MISSING fallback).
+#   369-430) + docs/rebuild/arm_replay_report.md (2026-06-15, n=693): the served σ
+#   is ANCHORED to the realized walk-forward floor (the honest settlement-validated
+#   width), NOT max(sigma_before_floor, floor) — the RSS over-disperses ~1.94x by
+#   double-counting modeled uncertainty on top of an already-complete realized
+#   error. The RSS is retained as the thin/new-cell fallback (floor None) only, and
+#   the soft-anchor-without-sigma live_eligible=False / PREDICTIVE_SIGMA_AUTHORITY_MISSING
+#   fallback is unchanged.
 #   Reconciled against docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md
 #   (GREENFIELD ONLY; the constant-1.0 floor and member-vote-q-without-sigma are the
 #   broken behaviors these tests forbid).
@@ -181,7 +185,7 @@ def test_sigma_never_below_realized_floor_on_emos_raw_replacement_day0(monkeypat
     # 1.0 and NOT the under-dispersed sigma_before_floor.
     assert decision.components.sigma_before_floor_native < realized_floor_native
     assert decision.sigma_native == pytest.approx(realized_floor_native)
-    assert decision.receipt["floor_dominated"] is True
+    assert decision.receipt["realized_floor_anchored"] is True
 
     # A constant 1.0 is NEVER the final authority (spec line 423): the served σ here
     # is 2.4, not 1.0, and the served σ is strictly greater than the materializer's
@@ -201,6 +205,48 @@ def test_sigma_never_below_realized_floor_on_emos_raw_replacement_day0(monkeypat
     # so reverting to "sigma = sigma_before_floor" (drop the realized-floor max)
     # makes sigma_native == sigma_before_floor < realized_floor and this fails.
     assert decision.sigma_native > decision.components.sigma_before_floor_native
+
+
+# ---------------------------------------------------------------------------
+# Test 1b — the ARM-replay width recalibration (2026-06-15): when the component
+# RSS is WIDER than the realized walk-forward floor, the served σ is the realized
+# floor (the honest settlement-validated width), NOT the over-dispersed RSS.
+# ---------------------------------------------------------------------------
+
+def test_served_sigma_anchors_to_realized_floor_not_inflated_rss(monkeypatch):
+    """RED-on-revert for the ARM-replay fix. The offline settlement replay
+    (docs/rebuild/arm_replay_report.md, n=693) proved the served predictive-RSS σ
+    over-disperses ~1.94x (σ/realized-RMSE=1.94, std(z)=0.52) while the realized
+    floor is honest (std(z)=0.86). The corrected transform serves the realized
+    floor when present. Reverting to ``sigma = max(sigma_before_floor, floor...)``
+    serves the inflated RSS (> floor) and these assertions fail."""
+    case = _case()
+    # A WIDE member set + a wide EMOS σ-model so the composed RSS is large — the
+    # over-dispersed width the ARM replay measured.
+    models = _model_set([26.0, 30.0, 34.0])
+    monkeypatch.setattr(sa, "emos_sigma_model", lambda *a, **k: 3.0)
+    # The realized walk-forward settlement floor for this cell is the HONEST width,
+    # NARROWER than the inflated RSS.
+    REALIZED_FLOOR_C = 1.6
+    monkeypatch.setattr(sa, "settlement_sigma_floor", lambda *a, **k: REALIZED_FLOOR_C)
+
+    floor = realized_sigma_floor(case)
+    assert floor is not None
+    realized_floor_native = max(floor.rmse_native, floor.mad_sigma_native)
+
+    decision: SigmaDecision = build_sigma(case, models, has_fusion_capture=True)
+
+    # The composed RSS is strictly WIDER than the realized floor (the over-dispersion).
+    assert decision.components.sigma_before_floor_native > realized_floor_native
+    # THE FIX: the served σ is the realized floor, NOT the inflated RSS.
+    assert decision.sigma_native == pytest.approx(realized_floor_native)
+    assert decision.sigma_native < decision.components.sigma_before_floor_native
+    # Still >= realized floor (no under-dispersion): equality holds, never below.
+    assert decision.sigma_native >= realized_floor_native - 1e-9
+    assert decision.live_eligible is True
+    assert decision.receipt["basis"] == "realized_floor_anchored"
+    assert decision.receipt["realized_floor_anchored"] is True
+    assert decision.receipt["rss_over_realized_ratio"] > 1.0
 
 
 # ---------------------------------------------------------------------------
