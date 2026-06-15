@@ -461,6 +461,29 @@ def _parse_source_cycle_time(value: Any) -> Optional[datetime]:
         return None
 
 
+def _spine_inputs_missing_reason(payload: Mapping[str, Any]) -> str:
+    """Sub-type WHY ``_served_predictive_inputs`` failed, so a live SPINE_INPUTS_UNAVAILABLE
+    names the exact gap (the Stage-0 producer threads these onto the payload; a missing key
+    means the producer did not run for this family, mutated a different payload object, or
+    that branch computed no value). Diagnostic only — never alters a decision."""
+    mu = payload.get("_edli_spine_mu_native")
+    sigma = payload.get("_edli_spine_sigma_native")
+    if mu is None or sigma is None:
+        return "MU_SIGMA_NOT_STASHED"
+    try:
+        if not (np.isfinite(float(mu)) and np.isfinite(float(sigma)) and float(sigma) > 0.0):
+            return "MU_SIGMA_NONFINITE"
+    except (TypeError, ValueError):
+        return "MU_SIGMA_UNPARSEABLE"
+    if payload.get("_edli_spine_debiased_members_native") is None and (
+        payload.get("_edli_spine_raw_members_native") is None
+    ):
+        return "MEMBERS_NOT_STASHED"
+    if _parse_source_cycle_time(payload.get("_edli_spine_source_cycle_time_utc")) is None:
+        return "SOURCE_CYCLE_NOT_STASHED"
+    return "UNKNOWN"
+
+
 def build_fresh_model_set(
     case: ForecastCase, served: Mapping[str, Any]
 ) -> FreshModelSet:
@@ -721,7 +744,7 @@ def decide_family_via_spine(
     if served is None:
         return SpineDecisionResult(
             selected_proof=None,
-            no_trade_reason=NO_TRADE_SPINE_INPUTS_UNAVAILABLE,
+            no_trade_reason=f"{NO_TRADE_SPINE_INPUTS_UNAVAILABLE}:{_spine_inputs_missing_reason(payload)}",
             decision=None,
         )
 

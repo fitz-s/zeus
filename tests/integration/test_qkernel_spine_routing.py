@@ -372,7 +372,7 @@ def test_no_trade_typed_reason_when_spine_inputs_unavailable():
     result = _drive(family, proofs, payload)
 
     assert result.selected_proof is None
-    assert result.no_trade_reason == bridge.NO_TRADE_SPINE_INPUTS_UNAVAILABLE
+    assert result.no_trade_reason.startswith(bridge.NO_TRADE_SPINE_INPUTS_UNAVAILABLE)
 
 
 def test_no_trade_when_served_mu_present_but_members_absent():
@@ -398,7 +398,7 @@ def test_no_trade_when_served_mu_present_but_members_absent():
     result = _drive(family, proofs, payload)
 
     assert result.selected_proof is None
-    assert result.no_trade_reason == bridge.NO_TRADE_SPINE_INPUTS_UNAVAILABLE
+    assert result.no_trade_reason.startswith(bridge.NO_TRADE_SPINE_INPUTS_UNAVAILABLE)
 
 
 # ===========================================================================

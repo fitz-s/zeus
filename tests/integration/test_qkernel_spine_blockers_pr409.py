@@ -305,7 +305,7 @@ def test_spine_inputs_unavailable_when_source_cycle_absent():
     payload = _payload(mu=20.4, sigma=1.2, members=[19.8, 20.1, 20.5, 21.0, 20.7], source_cycle=None)
     result = _drive(family, proofs, payload)
     assert result.selected_proof is None
-    assert result.no_trade_reason == bridge.NO_TRADE_SPINE_INPUTS_UNAVAILABLE
+    assert result.no_trade_reason.startswith(bridge.NO_TRADE_SPINE_INPUTS_UNAVAILABLE)
 
 
 def test_lead_bucket_outside_24h_is_typed_no_trade():
