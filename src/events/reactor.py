@@ -123,6 +123,37 @@ EDLI_PROCESSING_REACTOR_MODES = frozenset({"live", "live_no_submit", "submit_dis
 # source-truth dead-letter treatment as a forecast snapshot event.
 _FORECAST_DECISION_EVENT_TYPES = frozenset({"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"})
 
+
+def _fair_lane_interleave(events: list) -> list:
+    """Round-robin the forecast-decision lane against the rest (day0) 1:1.
+
+    fetch_pending returns all Tier-0 DAY0_EXTREME_UPDATED before any Tier-1
+    FORECAST_SNAPSHOT_READY; under a bounded per-cycle decision budget (~3-4 slow
+    decisions) the day0 lane consumes the whole budget and the forecast/spine lane is
+    never processed. This interleaves the two DECISION lanes so each gets a fair half of
+    the budget. The forecast lane and the rest each keep their incoming (per-city-fair)
+    order; only the cross-lane alternation is added. The 'rest' (day0) takes the first
+    slot — preserving its realized-observation freshness bias — without starving the
+    spine. Order-only: each family is decided on its own fresh inputs, so processing
+    order does not affect decision correctness.
+    """
+    forecast = [e for e in events if getattr(e, "event_type", None) in _FORECAST_DECISION_EVENT_TYPES]
+    if not forecast:
+        return events  # nothing to protect — keep the cheap fast path unchanged
+    rest = [e for e in events if getattr(e, "event_type", None) not in _FORECAST_DECISION_EVENT_TYPES]
+    if not rest:
+        return events
+    out: list = []
+    i = j = 0
+    while i < len(rest) or j < len(forecast):
+        if i < len(rest):
+            out.append(rest[i])
+            i += 1
+        if j < len(forecast):
+            out.append(forecast[j])
+            j += 1
+    return out
+
 # VENUE-CLOSE HORIZON eligibility (freshness-throughput starvation fix 2026-06-14,
 # #92 / docs/evidence/deadloop_2026-06-14/binding_wall.md). The geometric
 # venue-close terminal (horizon b) applies to EVERY family-keyed event that binds a
@@ -626,6 +657,20 @@ class OpportunityEventReactor:
             )
             if not events:
                 break
+            # FAIR LANE INTERLEAVE (2026-06-15). The per-cycle wall-clock budget completes
+            # only ~3-4 family decisions (p99=59s each), and fetch_pending returns ALL
+            # Tier-0 DAY0_EXTREME_UPDATED before ANY Tier-1 FORECAST_SNAPSHOT_READY — so the
+            # whole budget is consumed by the day0 lane and the forecast/spine lane is
+            # STARVED of processing budget every cycle (measured 2026-06-15: 0 FSR ever
+            # claimed while day0 monopolized the budget). This is the cross-lane gap in the
+            # event_priority anti-starvation design (which fairly round-robins WITHIN a tier
+            # but lets Tier-0 fully precede Tier-1). Interleave the two DECISION lanes 1:1 so
+            # each gets a fair half of the bounded budget — day0 keeps the first slot (its
+            # realized-observation freshness bias) but no longer starves the spine. Order-only
+            # (each family is decided on its own fresh inputs; processing order is immaterial
+            # to correctness); within-lane fetch order — and thus the per-city fairness — is
+            # preserved. Channel events are already excluded by fetch_pending.
+            events = _fair_lane_interleave(events)
             for event in events:
                 # PRE-EVENT budget check (2026-06-11 cadence guard): if the budget
                 # is ALREADY spent, stop BEFORE claiming another event. The
