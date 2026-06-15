@@ -460,3 +460,137 @@ touch `emos_predictive` / the EMOS sole-calibrator path (EMOS stays the width/sh
 calibrator; the residual-mean is a separate, additive center term) — so it cannot
 re-introduce the legacy bias maze. **But per the verdict above, this is a
 calibration-quality fix, not a trade-unblock; do not deploy it expecting new fills.**
+
+---
+
+## DECISIVE: edge-gated NO-on-modal grade (the candidate alpha)
+
+- Appended 2026-06-15. k_default=1.30 live. This grades the ONE class the live spine
+  surfaces as positive-edge but the direction law kills: **NO on the spine's own modal
+  bin**, admitted only when the live gate fires (q_no_lcb > market_NO_cost, i.e.
+  edge_lcb>0). q_no_lcb is built from the REAL #91 coherent band
+  (`build_joint_q_band`, 600 draws, alpha=0.05; q_no_lcb_modal = 1 − q_yes_ucb(modal)).
+  Same 360-family / 998-cell sample. Settlement = `settlement_outcomes` VERIFIED;
+  NO wins iff the modal bin did NOT contain the settled value. READ-ONLY.
+
+### The class exists and is continuous (deliverable 5)
+
+998 modal-NO candidates over 360 families. At the operator's cited live NO cost band
+(0.62–0.69), the gate (q_no_lcb > cost) fires on **884–919 of 998** candidates =
+**~130 admits/day**, every one of the 7 settled days (154/157, 94/105, 143/158,
+135/144, 147/164, 133/157, 104/113). This is a **continuous harvest**, not a handful.
+
+### After-cost EV — POSITIVE on REAL prices and across the realistic cost band (deliverables 1–2)
+
+| price source | n | NO win-rate | mean NO cost | after-cost EV/$1 | verdict |
+|---|---|---|---|---|---|
+| **REAL token_price_log** (NO = 1 − YES_bid) | 11 | 0.818 | 0.432 | **+0.386** | POSITIVE |
+| **REAL edli c_fee_adjusted** (live fee-adj NO cost) | 17 | 0.882 | 0.728 | **+0.154** | POSITIVE |
+| fixed 0.62 (operator band lo) — large-n proxy | 919 | 0.780 | 0.620 | **+0.160** | POSITIVE |
+| fixed 0.65 (operator band mid) | 910 | 0.778 | 0.650 | **+0.128** | POSITIVE |
+| fixed 0.69 (operator band hi) | 884 | 0.777 | 0.690 | **+0.087** | POSITIVE |
+| fixed 0.78 (above q_no_lcb max) | 2 | 0.000 | 0.780 | −0.780 | (gate barely fires; n→0) |
+
+**Real-price n is small (11 + 17 = 28 distinct real quotes)** — the verdict's
+confidence rests on these PLUS the large-n fixed-cost counterfactual at the operator's
+own cited live book level. Both agree: POSITIVE. The q-proxy (price = 1 − q_yes_modal)
+correctly admits **0** — it can only fire when the market prices the modal NO BELOW the
+spine's own NO point, which is exactly the over-priced-favorite condition; that the real
+gate fires on ~910 cells means the real market IS systematically below the spine's
+conservative NO bound on the favorite.
+
+The 11 real token_price_log cases are genuine (Istanbul/Warsaw/London/Wellington/Denver/
+Beijing, modal bins, NO asks 0.27–0.67) — 2 were modal-winners (NO lost) but the cheap
+mid-window asks (mean 0.43) net strongly positive. The Denver 92°F case (settle=92, modal
+90-91 bin did NOT win, NO ask 0.47) is the operator's own example, and NO won.
+
+### Robust across leads AND both settlement sources (deliverable 3)
+
+At fixed cost 0.65, edge-gated:
+
+| | n | NO win-rate | EV/$1 |
+|---|---|---|---|
+| 24h | 277 | 0.765 | +0.115 |
+| 72h | 322 | 0.758 | +0.108 |
+| 96h+ | 311 | 0.810 | +0.160 |
+| **WU** (canonical, C) | 715 | 0.775 [0.743,0.804] | **+0.125** |
+| **OpenMeteo** (robustness, C) | 715 | 0.706 [0.672,0.739] | **+0.056** |
+
+Positive at every lead and on BOTH settlement sources. OM is thinner (+0.056) but still
+positive — the edge survives the 67%-winning-bin source disagreement that kills
+per-family claims. Not a single-lead, single-source artifact.
+
+### THE HISTORICAL-LOSS RECONCILIATION — why the edge gate excludes the losers (deliverable 4)
+
+The historical favorite-NO loss the operator + tasks #74/#69 closed has TWO mechanisms;
+the edge gate filters BOTH:
+
+1. **Sold NO at a NO-EDGE price (NO cost ≈ true NO prob).** Reconstructed from the live
+   `edli_no_submit_receipts` (n=60,219 NO decisions graded vs settlement), stratified by
+   NO cost: the **deep far-NO class (cost ≥ 0.90)** is the loss class — NO win-rate 0.913
+   but after-cost **EV = −0.042** (paying 0.95 to win 0.91 of the time = ruin on the rare
+   YES). **The edge gate STRUCTURALLY EXCLUDES this class**: q_no_lcb_modal caps at
+   **0.781** (max over all 998 cells), so the gate `q_no_lcb > cost` can NEVER fire when
+   the NO cost ≥ 0.79. The historically-losing deep-far-NO is unreachable by this gate
+   *by construction*. (The favorite-NO band cost 0.55–0.75 was actually +0.034 historically;
+   the deep-far-NO ≥0.90 was the −0.042 loss.)
+
+2. **Cold/miscalibrated q mis-identified the modal bin** (sold NO on the actual winner).
+   At k=1.30 this is fixed: the spine PREDICTS modal wins **26.5%**, realized modal_won =
+   **21.6%** — the modal call is calibrated (ratio 1.22×, if anything the spine slightly
+   *over*-states the favorite, which makes NO-on-modal win MORE than the spine's own q
+   implies). The NO-on-modal win-rate (0.784) is REAL, not a mislabel artifact.
+
+**The gate's economic logic:** the modal bin settles only **21.6%** of the time, but the
+market prices it at ~35% (NO cost ~0.65). The gate fires precisely on that mispricing
+gap. Gate-fired NO win-rate 0.778, 95% CI **[0.750, 0.804]**, which **clears the
+breakeven (cost 0.65) by +0.13** — the CI does not touch breakeven at cost 0.62/0.65/0.69.
+
+### q_no_lcb integrity — NOT crushed by a cap (deliverable 6)
+
+The modal-YES band half-width (q_ucb − q_point) is **tiny** (mean 0.0068, median 0.0020):
+the #91 coherent band is TIGHT on the high-belief modal bin (the per-bin-percentile
+collapse the #91 fix removed would have hollowed it). q_no_lcb_modal = 1 − q_yes_ucb has
+mean **0.728**, median **0.773** — NOT piled near 0, so no market-anchor / settlement-
+coverage cap is suppressing the edge. The gate can fire on genuinely over-priced
+favorites. (`_replacement_q_market_anchor_enabled` is OFF per the favorite-capture audit;
+the band reads only model parameter-posterior draws, no market cap.)
+
+### DECISIVE VERDICT
+
+**Edge-gated NO-on-modal is robustly after-cost POSITIVE — RELAX the direction law to
+admit it (this is the validated alpha).** It is positive on real recoverable prices
+(token_price_log +0.386 n=11; edli c_fee +0.154 n=17), positive at the operator's cited
+live cost band on large-n (+0.087 to +0.160, n≈900), positive at every lead
+(+0.108 to +0.160), positive on BOTH settlement sources (WU +0.125, OM +0.056), and
+continuous (~130 admits/day). The edge gate cleanly excludes the historical loss class:
+the deep-far-NO (cost ≥0.90) that lost −0.042 is structurally unreachable
+(q_no_lcb caps at 0.78), and the modal call is now calibrated (predicts 26.5%, realizes
+21.6%) so the old cold-q mislabel is gone. The alpha source is a genuine, persistent
+market OVER-pricing of the temperature favorite: the modal bin settles 21.6% but is
+priced ~35%.
+
+**The exact relaxation lever:** `src/strategy/live_inference/direction_law.py`,
+`direction_law_rejection_reason` — the buy_no ban fires when `settled_distance == 0.0`
+(the forecast/modal bin) plus the boundary-zone double-ban (`BOUNDARY_ZONE_STEP_FRACTION`).
+Make that forecast-bin ban **conditional on the edge gate**: admit buy_no on the modal bin
+when `q_no_lcb > market_NO_cost` (edge_lcb > 0) — i.e. only when the market materially
+over-prices the favorite vs the spine's CONSERVATIVE lower bound. This preserves the
+refusal everywhere the market prices the favorite fairly or cheap (no edge → still
+banned), so it does NOT reopen the no-edge / deep-far-NO loss class.
+
+**MANDATORY pre-deployment guards (the rigor the reversal demands):**
+1. **Real-price n is thin (28 quotes).** Before live capital, gate the rollout on a
+   forward paper-trade capturing real modal-NO asks at decision time for ≥1 week (the
+   fixed-cost counterfactual assumes the operator's 0.62–0.69 band holds; confirm it on
+   live books, since mid-window asks ran cheaper 0.27–0.67 in token_price_log).
+2. **Correlated risk:** the ~130 admits/day are NOT independent — they share daily
+   weather-regime risk. Size by family-correlated Kelly, not 130 independent bets; a
+   single hot/cold regime day flips many modal bins together.
+3. **The 1.22× modal over-confidence** (spine q 0.265 vs realized 0.216) is load-bearing
+   for the edge — re-confirm it does not regress if the σ floor or center is later
+   re-tuned (a warmer/tighter spine that raised realized modal_won toward 0.265 would
+   shrink this edge). Re-grade after any σ/center change.
+4. **OM EV (+0.056) is materially thinner than WU (+0.125).** Since we settle on WU this
+   is acceptable, but it means the edge is partly a WU-vs-OM winning-bin disagreement;
+   the true atmospheric edge is the conservative +0.056. Treat +0.056 as the floor.
