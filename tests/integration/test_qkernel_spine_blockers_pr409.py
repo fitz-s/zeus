@@ -444,38 +444,50 @@ def test_non_direct_selection_is_refused_as_typed_no_trade():
 
 
 # ===========================================================================
-# BLOCKER 3 — day0 hard-block (QKERNEL_DAY0_NOT_WIRED).
+# BLOCKER 3 — day0 routes to LEGACY, never to the spine (no day0 revenue-lane
+# regression). The spine bridge reads no day0 observation (_NoDay0Reader), so a
+# day0 family must NOT be decided by the spine — but it MUST still trade via the
+# existing, tested legacy day0 lane. The earlier hard-block (a typed
+# QKERNEL_DAY0_NOT_WIRED no-trade) both killed the day0 lane and churned the
+# money-path requeue every cycle (live monitor: QKERNEL_DAY0_NOT_WIRED storm),
+# so it is replaced by day0 -> legacy fall-through.
 # ===========================================================================
 def test_day0_event_type_is_in_day0_lane_and_excluded_from_forecast_lane():
     """The reactor's module-level lanes: DAY0_EXTREME_UPDATED is the day0 lane and is NOT
-    a forecast decision type. The seam hard-blocks the spine on the day0 lane.
+    a forecast decision type. The seam routes the day0 lane to LEGACY (not the spine).
     """
     assert "DAY0_EXTREME_UPDATED" in era._DAY0_LANE_EVENT_TYPES
     assert "DAY0_EXTREME_UPDATED" not in era._FORECAST_DECISION_EVENT_TYPES
     assert "FORECAST_SNAPSHOT_READY" in era._FORECAST_DECISION_EVENT_TYPES
 
 
-def test_reactor_seam_hard_blocks_day0_before_spine():
-    """Structural RED-on-revert: the reactor seam emits QKERNEL_DAY0_NOT_WIRED for a day0
-    event type BEFORE the spine call (flag ON). Asserts the adapter source contains the
-    day0 hard-block branch.
+def test_reactor_seam_routes_day0_to_legacy_not_spine():
+    """Structural RED-on-revert: the reactor seam EXCLUDES the day0 lane from the spine
+    (so day0 falls through to the legacy ``_selected_candidate_proof`` decision path) and
+    no longer emits the QKERNEL_DAY0_NOT_WIRED hard-block. If the hard-block is
+    re-introduced — or the ``not _is_day0_event`` exclusion is dropped — this fails.
     """
     import inspect
 
     src = inspect.getsource(era)
+    # The day0 lane gate is still computed at the seam.
     assert "_is_day0_event = event.event_type in _DAY0_LANE_EVENT_TYPES" in src, (
-        "the day0 lane gate is missing from the reactor seam (Fix #3 reverted)"
+        "the day0 lane gate is missing from the reactor seam"
     )
-    assert "_spine_flag_on and _is_day0_event" in src, (
-        "the spine is no longer hard-blocked on the day0 lane (Fix #3 reverted)"
+    # The spine runs ONLY on a forecast-eligible, NON-day0 event — day0 is excluded
+    # and falls through to the legacy decision path.
+    assert "_spine_flag_on and _spine_eligible_event and not _is_day0_event" in src, (
+        "the day0 exclusion from the spine call is missing (day0 would regress to the spine)"
     )
-    assert "NO_TRADE_QKERNEL_DAY0_NOT_WIRED" in src, (
-        "the QKERNEL_DAY0_NOT_WIRED no-trade is not emitted at the seam (Fix #3 reverted)"
+    # The QKERNEL_DAY0_NOT_WIRED hard-block no-trade must NOT be emitted at the seam.
+    assert "NO_TRADE_QKERNEL_DAY0_NOT_WIRED" not in src, (
+        "the QKERNEL_DAY0_NOT_WIRED hard-block was re-introduced — day0 must route to legacy, "
+        "not to a typed no-trade (that killed the day0 lane and churned the money-path requeue)"
     )
-    # The day0 hard-block precedes the forecast-lane spine call in the source.
-    i_day0 = src.index("_spine_flag_on and _is_day0_event")
-    i_spine = src.index("_spine_flag_on and _spine_eligible_event")
-    assert i_day0 < i_spine, "day0 hard-block must come BEFORE the spine call"
+    # The legacy selector is the fall-through decision authority (day0 + flag-off both use it).
+    assert "_selected_candidate_proof(" in src, (
+        "the legacy decision path day0 falls through to is missing from the seam"
+    )
 
 
 # ===========================================================================
