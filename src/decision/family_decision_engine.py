@@ -111,13 +111,19 @@ selects a trade carries the selected candidate; a decision that selects nothing 
 ``candidates`` tuple so the no-trade is auditable. The ``receipt_hash`` anchors the exact
 (predictive, omega, q, band, family_book, coherence, candidates, selected) tuple.
 
-DIRECTION LAW (spec lines 947-951): ``YES_i`` is legal only when buying the forecast bin;
-``NO_i`` is legal only when the payoff vector is "not forecast bin". The forecast bin is
-the modal bin of the joint q (the bin the predictive distribution most favors). A YES
-candidate is direction-law-legal iff its bin IS the forecast bin; a NO candidate is legal
-iff its bin is NOT the forecast bin (its payoff vector ``1 - e_i`` wins on the forecast
-bin). This is a structural proof read off the joint q + the candidate's side/bin — the
-filter cannot pass a YES on a non-modal bin or a NO on the modal bin.
+DIRECTION LAW (spec lines 947-951; relaxed 2026-06-15, settlement-justified): ``YES_i`` is
+legal when buying the forecast bin OR when the candidate's point-q is inside the
+settlement-validated calibrated domain (``point_q >= CALIBRATED_NONMODAL_Q_FLOOR``); ``NO_i``
+is legal only when its bin is NOT the forecast bin. The forecast bin is the modal bin of the
+joint q. The original modal-only YES rule was settlement-INVERTED: 6,450 settled non-modal
+bin-obs grade the non-modal tail in (0.05,0.35] at pred/real 1.05× (CALIBRATED) while the
+modal bin the rule TRUSTS grades 1.28× (1.82× at 72h, OVER-dispersed) — it suppressed the
+calibrated side and admitted the over-dispersed side (docs/evidence/qkernel_rebuild/
+nonmodal_bin_calibration_2026-06-15.md F1/F2). YES is now admitted on any bin whose point-q
+reaches the calibrated floor, with the conservative ``edge_lcb > 0`` gate as the trade
+authority; below the floor (the ≥3-4σ far tail, no settlement coverage, where edge_lcb
+amplifies the over-dispersed served σ) YES stays modal-only. A NO on the modal bin remains
+unconstructable.
 
 GREENFIELD / WAVE-5 WIRING. The spec ``decide(case, family, snapshots, portfolio)``
 references ``fresh_model_reader``, ``day0_reader``, ``predictive_builder``,
@@ -402,20 +408,50 @@ def forecast_bin_id(joint_q: JointQ) -> str:
     return joint_q.omega.bins[i].bin_id
 
 
-def direction_law_ok(route: CandidateRoute, *, forecast_bin: str) -> bool:
+# Settlement-validated lower edge of the calibrated non-modal q domain.
+#
+# This is NOT an arbitrary cap / throttle / q-haircut (operator law: no caps). It is the
+# empirically-measured lower boundary of the q region where the non-modal forecast q is
+# settlement-CALIBRATED. 6,450 settled non-modal bin-observations (313 families, WU UMA
+# settlement source, 2026-06-08..06-14) grade the non-modal tail in (0.05,0.35] at
+# pred/real ≈ 1.05× — calibrated to sampling noise (docs/evidence/qkernel_rebuild/
+# nonmodal_bin_calibration_2026-06-15.md F1 / STAT:effect_size). BELOW this floor the bins
+# are the ≥3-4σ far tail where (a) the live served σ is graded over-dispersed/honest, never
+# over-tight (docs/rebuild/arm_replay_report.md §4: predictive_rss std(z)=0.92, σ/RMSE=1.00),
+# so a wide σ + the conservative edge_lcb quantile AMPLIFY rather than shield far-tail q
+# inflation, and (b) settlement coverage is absent (the q_lcb>price executable test was not
+# runnable on the far tail). YES is admitted ONLY inside the proven-calibrated domain; the
+# far tail stays modal-only until an executable settlement test extends the validated region.
+CALIBRATED_NONMODAL_Q_FLOOR: float = 0.05
+
+
+def direction_law_ok(
+    route: CandidateRoute, *, forecast_bin: str, point_q: float
+) -> bool:
     """Whether ``route`` is direction-law-legal against the forecast bin (spec 947-951).
 
-    * ``YES_i`` is legal ONLY when ``i`` IS the forecast bin (buying the forecast bin).
+    * ``YES_i`` is legal when ``i`` IS the forecast bin (buying the forecast bin) OR when the
+      candidate's point-q ``point_q`` is at or above the settlement-validated calibration
+      floor :data:`CALIBRATED_NONMODAL_Q_FLOOR` — the region where settlement grading proves
+      the non-modal q is calibrated, so the bin is a tradeable Arrow-Debreu claim whose
+      direction is a structural proof (#97), not a market view. The conservative edge gate
+      (``edge_lcb > 0``) downstream remains the trade authority within this domain.
     * ``NO_i`` is legal ONLY when ``i`` is NOT the forecast bin (its payoff vector
-      ``1 - e_i`` wins on the forecast bin — "not forecast bin").
+      ``1 - e_i`` wins on the forecast bin — "not forecast bin"). NO direction is unchanged.
 
-    This is a structural proof read off the candidate's (side, bin) and the modal bin. A
-    YES on a non-modal bin (betting a bin you do not forecast wins) and a NO on the modal
-    bin (betting against your own forecast) are both refused — the bad direction is
-    unconstructable past this filter, not flagged after a trade is sized.
+    The pre-2026-06-15 modal-only YES rule suppressed the settlement-CALIBRATED non-modal
+    side (pred/real 1.05×) while admitting the OVER-dispersed modal bin (pred/real 1.28×,
+    1.82× at 72h) — the law's premise was inverted (report F1/F2). Relaxing it inside the
+    validated q domain restores the suppressed-but-real edge (RULE 1: a no-edge verdict is
+    presumed our defect until settlement proves otherwise; here settlement proves the edge).
+    The far-tail floor is the only retained structural constraint: below it the calibration
+    evidence does not reach and edge_lcb amplifies σ-spread, so YES stays modal-only there.
     """
     if route.side == "YES":
-        return route.bin_id == forecast_bin
+        return (
+            route.bin_id == forecast_bin
+            or point_q >= CALIBRATED_NONMODAL_Q_FLOOR
+        )
     # NO_i is legal exactly when its bin is NOT the forecast bin.
     return route.bin_id != forecast_bin
 
@@ -640,7 +676,11 @@ class FamilyDecisionEngine:
             CandidateDecision(
                 route=d.route,
                 economics=d.economics,
-                direction_law_ok=direction_law_ok(d.route, forecast_bin=forecast_bin),
+                direction_law_ok=direction_law_ok(
+                    d.route,
+                    forecast_bin=forecast_bin,
+                    point_q=float(joint_q.q_by_bin_id.get(d.route.bin_id, 0.0)),
+                ),
                 coherence_allows=coherence_allows(d.route, coherence),
                 robust_trade_score=d.robust_trade_score,
             )
