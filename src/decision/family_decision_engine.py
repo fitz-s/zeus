@@ -873,7 +873,32 @@ class FamilyDecisionEngine:
         if not after_executable:
             return None, NO_TRADE_NO_EXECUTABLE_ROUTE
 
-        after_direction = [d for d in after_executable if d.direction_law_ok]
+        # FAVORITE-LONGSHOT HARVEST (2026-06-15, settlement-validated by TWO independent
+        # methods: spine settlement grade docs/evidence/qkernel_rebuild/
+        # spine_q_settlement_grade_2026-06-15.md + ChatGPT edge consult
+        # chatgpt_edge_consult_2026-06-15.md rank 1). The market systematically
+        # OVER-PRICES the point-forecast (modal) bin: it realizes ~22% but is priced
+        # ~35%. The direction law's blanket buy_no-on-the-forecast-bin ban structurally
+        # zeroed this harvest. We relax ONLY that one case, and ONLY when the candidate's
+        # CONSERVATIVE edge clears: for a NO route edge_lcb = q_no_lcb - cost, so
+        # edge_lcb > 0 == q_no_lcb > the NO ask == the market over-prices the favorite
+        # beyond our conservative lower bound (the agent grade's recommended condition).
+        # This swaps the blanket geometry ban for a conservative-belief gate; the
+        # downstream edge_lcb>0 & ΔU>0, coherence, and live-pass gates still apply.
+        # Settlement evidence: gate-fired NO win 0.778 (CI [0.750,0.804]) vs breakeven
+        # 0.65; after-cost +0.125 (WU) / +0.056 (OM); the gate structurally EXCLUDES the
+        # historical loss class (deep-far-NO cost>=0.79, where q_no_lcb caps ~0.781 so
+        # q_no_lcb>cost is unreachable) AND the operator's hated cost-0.78 favorite-NO
+        # (edge_lcb~0 there). buy_yes on a NON-modal bin (the OTHER direction_law_ok=False
+        # case) STAYS banned — it graded after-cost NEGATIVE. NOTE: the 1.22x modal
+        # over-confidence is load-bearing for this gate; RE-GRADE before any sigma/center
+        # change (current sigma artifact k_default=1.30).
+        after_direction = [
+            d
+            for d in after_executable
+            if d.direction_law_ok
+            or (d.route.side == "NO" and d.economics.edge_lcb > 0.0)
+        ]
         if not after_direction:
             return None, NO_TRADE_NO_DIRECTION_LAW
 
