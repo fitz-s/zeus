@@ -11551,6 +11551,24 @@ def _market_analysis_from_event_snapshot(
             _var = sum((v - _m) ** 2 for v in _spine_debiased_list) / (len(_spine_debiased_list) - 1)
             _spine_sigma = float(_var ** 0.5)
 
+        if _spine_mu is None or _spine_sigma is None:
+            # DIAGNOSTIC (2026-06-15 MU_SIGMA_NOT_STASHED frontier): the spine gets
+            # SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED universally on live FSR. Capture
+            # exactly why the served center is absent — EMOS/honest-raw not run vs an empty
+            # corrected-member array — so the threading/computation defect is named, not guessed.
+            try:
+                logger.warning(
+                    "SPINE_STASH_DIAG family=%s mu_native=%r sigma_native=%r mu=%r sigma=%r "
+                    "deb_list_n=%s raw_list_n=%s members_n=%s raw_members_n=%s",
+                    getattr(family, "family_id", "?"),
+                    _spine_mu_native, _spine_sigma_native, _spine_mu, _spine_sigma,
+                    (len(_spine_debiased_list) if _spine_debiased_list else _spine_debiased_list),
+                    (len(_spine_raw_list) if _spine_raw_list else _spine_raw_list),
+                    (int(np.asarray(members).size) if members is not None else None),
+                    (int(np.asarray(raw_members).size) if raw_members is not None else None),
+                )
+            except Exception:  # noqa: BLE001
+                pass
         if _spine_mu is not None:
             payload["_edli_spine_mu_native"] = float(_spine_mu)
         if _spine_sigma is not None:
@@ -11575,8 +11593,14 @@ def _market_analysis_from_event_snapshot(
         )
         if _spine_source_cycle:
             payload["_edli_spine_source_cycle_time_utc"] = str(_spine_source_cycle)
-    except Exception:  # noqa: BLE001 — Stage-0 spine is observability-only; never alter a decision
-        pass
+    except Exception as _spine_stash_exc:  # noqa: BLE001 — Stage-0 spine is observability-only; never alter a decision
+        try:
+            logger.warning(
+                "SPINE_STASH_DIAG family=%s EXCEPTION %s: %s",
+                getattr(family, "family_id", "?"), type(_spine_stash_exc).__name__, _spine_stash_exc,
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return MarketAnalysis(
         p_raw=np.asarray(p_raw, dtype=float),
         p_cal=np.asarray(p_cal, dtype=float),
