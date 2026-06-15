@@ -100,6 +100,30 @@ def test_nonwork_md_at_loose_location_not_nudged():
     assert _check("Write", "docs/operations/notes.md") is None
 
 
+# --- S2-full: slug-match silent-route into an EXISTING by-work folder ---------
+# Uses the real committed folder docs/operations/current/workspace-routing-redesign/
+# (has PLAN.md + scope.yaml, no report.md) as the resolution target.
+
+_WORK = "workspace-routing-redesign"
+
+
+def test_loose_report_slugmatch_silent_routes_to_existing_work():
+    res = _check("Write", f"docs/operations/{_WORK}_REPORT.md")
+    assert isinstance(res, dict), "should silent-route into the matching work folder"
+    assert res["updatedInput"]["file_path"] == f"docs/operations/current/{_WORK}/report.md"
+
+
+def test_loose_plan_slugmatch_clobber_nudges_not_overwrites():
+    # PLAN.md already exists in the work folder -> never clobber -> NUDGE (str).
+    res = _check("Write", f"docs/operations/{_WORK}_PLAN.md")
+    assert isinstance(res, str) and "by-work" in res
+
+
+def test_loose_workartifact_no_matching_work_nudges():
+    res = _check("Write", "docs/operations/nonexistent-xyz_PLAN.md")
+    assert isinstance(res, str) and "nudge" in res.lower()
+
+
 def test_crash_fails_open():
     # A malformed payload must never raise / never block.
     assert route_write._run_advisory_check_route_write({"tool_input": None}) is None

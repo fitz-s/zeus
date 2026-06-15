@@ -93,6 +93,53 @@ _LOOSE_WORK_DIRS = frozenset({
     "docs/operations/current",
 })
 
+# Legacy by-kind subdirs under current/ — recognized, left alone (migration
+# regroups them); a write here is NOT "loose" and NOT a placed by-work folder.
+_BYKIND_LEGACY = frozenset({"plans", "evidence", "reports", "closeouts", "agent_runtime"})
+_CURRENT_PREFIX = "docs/operations/current/"
+
+
+def _work_kind_and_slug(basename: str):
+    """Classify a work-artifact basename -> (kind, slug). slug is None when it
+    can't be inferred from the filename (bare PLAN.md/report.md/scope.yaml).
+    Returns (None, None) if not a work-artifact."""
+    low = basename.lower()
+    if low == "scope.yaml":
+        return ("scope", None)
+    if low == "plan.md":
+        return ("plan", None)
+    if low == "report.md":
+        return ("report", None)
+    m = re.match(r"(?i)^(.+?)[_-]plan\.md$", basename)
+    if m:
+        return ("plan", m.group(1))
+    m = re.match(r"(?i)^(.+?)[_-]report.*\.md$", basename)
+    if m:
+        return ("report", m.group(1))
+    m = re.match(r"(?i)^(.+?)[_-]evidence.*$", basename)
+    if m:
+        return ("evidence", m.group(1))
+    m = re.match(r"(?i)^closeout[_-]?(.+?)(?:\.md)?$", basename)
+    if m:
+        return ("closeout", m.group(1))
+    return (None, None)
+
+
+def _work_target(kind: str, slug: str, basename: str) -> str:
+    """Canonical slot for a kind inside the by-work folder current/<slug>/."""
+    base = f"{_CURRENT_PREFIX}{slug}"
+    if kind == "plan":
+        return f"{base}/PLAN.md"
+    if kind == "scope":
+        return f"{base}/scope.yaml"
+    if kind == "report":
+        return f"{base}/report.md"
+    if kind == "closeout":
+        return f"{base}/closeout.md"
+    if kind == "evidence":
+        return f"{base}/evidence/{basename}"
+    return f"{base}/{basename}"
+
 
 def _rel(file_path: str) -> str | None:
     """Repo-relative POSIX path, or None if outside the repo / unparseable."""
@@ -190,22 +237,51 @@ def _run_advisory_check_route_write(payload: dict[str, Any]) -> Any:
                 ),
             }
 
-        # --- work-artifact dropped in a LOOSE location -> NUDGE ---------------
-        # (S2 increment) Never silent-route work kinds yet (no reliable work-name
-        # resolver); just surface the canonical by-work home so the agent stops
-        # dropping plans/reports/evidence loose. The write still lands as-asked.
+        # --- work-artifact handling (S2-full) ---------------------------------
         parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
-        if parent in _LOOSE_WORK_DIRS and _WORK_ARTIFACT_RE.match(basename):
-            return (
-                f"route_write: '{basename}' looks like a work-artifact "
-                f"(plan/report/evidence/closeout/scope) but is being written to a "
-                f"loose location ({parent or 'repo root'}). Its home is a by-work "
-                f"folder: docs/operations/current/<work>/ (one folder per mission, "
-                f"holding PLAN.md + scope.yaml + evidence/ + report.md together). "
-                f"Write it under docs/operations/current/<work>/ or run "
-                f"`zpkt start <work>`. (Left where you asked — this is a nudge, not "
-                f"a block.)"
-            )
+        if _WORK_ARTIFACT_RE.match(basename):
+            # Already placed in a by-work folder current/<work>/ (a single segment
+            # after current/ that is NOT a by-kind legacy name) -> correct, no-op.
+            if parent.startswith(_CURRENT_PREFIX):
+                seg = parent[len(_CURRENT_PREFIX):].split("/", 1)[0]
+                if seg and seg not in _BYKIND_LEGACY:
+                    return None
+            # Loose location -> try SILENT-ROUTE into an EXISTING matching work
+            # folder (work-name resolved by slug from the filename); else NUDGE.
+            if parent in _LOOSE_WORK_DIRS:
+                kind, slug = _work_kind_and_slug(basename)
+                if kind and slug:
+                    work_dir = REPO_ROOT / _CURRENT_PREFIX / slug
+                    target = _work_target(kind, slug, basename)
+                    # Silent-route ONLY when the work folder already exists AND the
+                    # target slot is empty (never clobber, never create a phantom
+                    # work — anti-misroute / anti-data-loss).
+                    try:
+                        folder_ok = work_dir.is_dir()
+                        slot_free = not (REPO_ROOT / target).exists()
+                    except Exception:
+                        folder_ok = slot_free = False
+                    if folder_ok and slot_free and target != rel:
+                        new_input = dict(tool_input)
+                        new_input["file_path"] = target
+                        return {
+                            "updatedInput": new_input,
+                            "additionalContext": (
+                                f"route_write: {kind} routed -> {target} (its by-work "
+                                f"home; matched existing work '{slug}'). The tool "
+                                f"result shows where it landed."
+                            ),
+                        }
+                # No resolvable existing work -> NUDGE (never silent-misroute).
+                return (
+                    f"route_write: '{basename}' looks like a work-artifact "
+                    f"(plan/report/evidence/closeout/scope) at a loose location "
+                    f"({parent or 'repo root'}). Its home is a by-work folder "
+                    f"docs/operations/current/<work>/ (one folder per mission, "
+                    f"holding PLAN.md + scope.yaml + evidence/ + report.md together). "
+                    f"Write it under docs/operations/current/<work>/ or run "
+                    f"`zpkt start <work>`. (Left where you asked — nudge, not block.)"
+                )
 
         # --- everything else: leave the write exactly where asked -------------
         # Anti-data-loss (R16): ambiguous / unknown kinds are never silent-routed
