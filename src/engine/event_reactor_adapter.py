@@ -7623,25 +7623,30 @@ def _generate_candidate_proofs(
                 decision_time=decision_time,
             )
             if _spine_snap is not None:
-                _spine_payload_copy = dict(payload)
-                _market_analysis_from_event_snapshot(
-                    calibration_conn=calibration_conn,
-                    snapshot=_spine_snap,
-                    family=family,
-                    native_costs=native_costs,
-                    payload=_spine_payload_copy,
-                    decision_time=decision_time,
-                )
-                for _sk in (
-                    "_edli_spine_mu_native",
-                    "_edli_spine_sigma_native",
-                    "_edli_spine_raw_members_native",
-                    "_edli_spine_debiased_members_native",
-                    "_edli_spine_q_vector",
-                    "_edli_spine_source_cycle_time_utc",
-                ):
-                    if _sk in _spine_payload_copy:
-                        payload[_sk] = _spine_payload_copy[_sk]
+                # CHEAP belief stash — read the member envelope directly, NO full q-build.
+                # Calling _market_analysis_from_event_snapshot here (with its ~22 sequential
+                # CLOB /book fetches) per spine family DOUBLED the q-build and HUNG the reactor
+                # (a single cycle ran >12 min, pegging CPU, apscheduler skipping every cycle).
+                # De-bias is OFF live (edli_bias_correction_enabled=False + emos_sole_calibrator),
+                # so the RAW ensemble member envelope IS the debiased envelope the ARM replay
+                # validated; the spine's build_center (NoOpDebiasAuthority) locks to it. mu/sigma
+                # are the empirical mean/std of that envelope (the already-implied center/width,
+                # the producer's own fallback). _snapshot_members raises if members are absent =>
+                # caught => MU_SIGMA (honest: no envelope). No network, no per-candidate work.
+                _spine_raw = _snapshot_members(_spine_snap)
+                _spine_arr = np.asarray(_spine_raw, dtype=float).ravel()
+                if _spine_arr.size:
+                    _spine_lst = [float(_x) for _x in _spine_arr.tolist()]
+                    payload["_edli_spine_raw_members_native"] = _spine_lst
+                    payload["_edli_spine_debiased_members_native"] = _spine_lst
+                    _spine_mean = sum(_spine_lst) / len(_spine_lst)
+                    payload["_edli_spine_mu_native"] = float(_spine_mean)
+                    if len(_spine_lst) >= 2:
+                        _spine_var = sum((_v - _spine_mean) ** 2 for _v in _spine_lst) / (len(_spine_lst) - 1)
+                        payload["_edli_spine_sigma_native"] = float(_spine_var ** 0.5)
+                    _spine_sc = _spine_snap.get("source_cycle_time") or _spine_snap.get("issue_time")
+                    if _spine_sc:
+                        payload["_edli_spine_source_cycle_time_utc"] = str(_spine_sc)
         except Exception:  # noqa: BLE001 — spine-input population is observability-only; never break the decision
             pass
     # === Q-KERNEL REBUILD STAGE 0 — lift the receipt-spine inputs (2026-06-14) ===========
