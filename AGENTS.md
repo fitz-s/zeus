@@ -170,7 +170,6 @@ and performance slicing.
 - High and low rows must not mix in calibration, Platt fitting, replay bin
   lookup, or settlement rebuild identity.
 - DB commits must precede derived JSON export writes.
-- `RED` risk must cancel pending orders and sweep active positions.
 - Authority-loss must degrade monitor/exit lanes to read-only, not kill
   the cycle.
 
@@ -234,7 +233,7 @@ Commits: `type(scope): subject` — body only when why is non-obvious. Use `[ski
 
 Worktree isolation: `git add -A`/`--all`/`.` is hook-blocked in the main worktree; allowed in any linked worktree (isolated index). Bypass: `COTENANT_GUARD_BYPASS=1`. Verify `git log -1` after heredoc commits.
 
-PRs: only milestone-level changes open a PR against main. Everything else stays in the worktree and is validated there. A milestone is a complete feature, a new invariant + antibody tests, a security gate, or a schema migration with full test coverage. Incremental work, partial implementations, doc-only changes, and single-function fixes do NOT qualify — commit to the worktree branch and keep iterating. Every PR open triggers paid automated review (Copilot + Codex) that fires exactly once and cannot be retriggered; wasting it on non-milestone work is a protocol violation. Batch all related work before opening. Resolve all review comments before merging. Template: `.github/pull_request_template.md`.
+PRs: only milestone-level changes open a PR against main. Everything else stays in the worktree and is validated there. A milestone is a complete feature, a new invariant + antibody tests, a security gate, or a schema migration with full test coverage. Incremental work, partial implementations, doc-only changes, and single-function fixes do NOT qualify — commit to the worktree branch and keep iterating. Every PR open triggers paid automated review (Copilot + Codex) that fires exactly once and cannot be retriggered; wasting it on non-milestone work is a protocol violation. Batch all related work before opening. Template: `.github/pull_request_template.md`.
 
 **Post-merge cleanup** (soft, agent decides; hook prints checklist on `gh pr merge`):
 - worktree → `git worktree remove <path> && git worktree prune` when task done.
@@ -273,8 +272,7 @@ light: cite routed files, make focused edits, and run focused checks. Escalate
 only when risk or claims demand it: T2 source behavior needs scoped AGENTS and
 relationship tests; T3 governance/runtime tooling needs planning-lock for
 governed files, with receipts/critics only for packet closeout, explicit
-completion claims, or semantic ambiguity; T4 live/prod/data side effects stop
-until explicit operator-go, dry-run evidence, and rollback path exist.
+completion claims, or semantic ambiguity.
 
 `evidence.md`, `findings.md`, work logs, receipts, and critic/verifier records
 are conditional artifacts. Create/update them only when an active packet,
