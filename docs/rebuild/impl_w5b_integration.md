@@ -1,5 +1,24 @@
 # Wave 5B — Live-Reactor Integration of the Rebuilt Q-Kernel Spine
 
+> **2026-06-15 LOOP-BACK CORRECTION — supersedes the "served-mu" design described below.**
+> The first integration built the spine's `PredictiveDistribution` by WRAPPING the reactor's
+> LEGACY served `mu*`/`sigma` (`_edli_spine_*`) in a shell — so flag-ON routed the new
+> q-mechanics on the OLD center+σ, bypassing the ARM-validated belief. **That is fixed
+> (commit `fae75e7c8e`).** The bridge now injects the REAL
+> `PredictiveDistributionBuilder(_NoOpDebiasAuthority())`, so `build_center` (envelope-lock)
+> and `build_sigma` (realized-floor) RUN on the reactor's chain-of-record-debiased members —
+> the ARM-replay-validated center+σ. The legacy served `mu*`/`sigma` are NO LONGER used for
+> belief (presence gate only). De-bias is a no-op AT THE SEAM (the single correct
+> chain-of-record de-bias already ran upstream; the contaminating EDLI lane is OFF; the
+> reactor does not thread the provenance the real `DebiasAuthority` would need here — wiring
+> it on RAW members is a follow-up). `live_eligible` is owned by `build_sigma`. The FreshModelSet
+> is debiased-members-first (raw fallback). When NO member array is threaded the bridge returns
+> `SPINE_INPUTS_UNAVAILABLE` (no 1-point envelope from the legacy mu). Proven by
+> `tests/integration/test_qkernel_spine_routing.py::test_spine_belief_uses_validated_center_not_legacy_served_mu`
+> (warm served mu=26 ignored; spine center stays in the cold envelope [20,23]).
+> **Treat the §"Input mapping" predictive/FreshModelSet rows and §"Reconstruction/drift" item 1
+> below as HISTORICAL (the abandoned design), not the current authority.**
+
 Created: 2026-06-14
 Authority basis: docs/rebuild/consult_build_spec.md (Wave 5 reactor wiring) +
 docs/rebuild/impl_w4_family_decision_engine.md (the engine contract) +

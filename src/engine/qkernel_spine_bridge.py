@@ -374,6 +374,16 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
                 raw_members = tuple(float(x) for x in rarr.tolist())
         except (TypeError, ValueError):
             raw_members = None
+    # Belief requires fresh members: the VALIDATED build_center runs on the member
+    # envelope, NOT on the served mu. If NEITHER a debiased nor a raw member array was
+    # threaded, the seam has no fresh consensus to lock the center to — return None so
+    # the caller emits a typed SPINE_INPUTS_UNAVAILABLE no-trade rather than letting
+    # build_fresh_model_set synthesize a 1-point envelope from the legacy served mu
+    # (which would put the legacy mu back on the live path). The Stage-0 producer threads
+    # members alongside mu, so this is unreachable on the live lane; it closes the one
+    # latent legacy-mu seam.
+    if members is None and raw_members is None:
+        return None
     return {
         "mu_native": mu_f,
         "sigma_native": sigma_f,

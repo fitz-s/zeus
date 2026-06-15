@@ -368,6 +368,32 @@ def test_no_trade_typed_reason_when_spine_inputs_unavailable():
     assert result.no_trade_reason == bridge.NO_TRADE_SPINE_INPUTS_UNAVAILABLE
 
 
+def test_no_trade_when_served_mu_present_but_members_absent():
+    """Belief requires fresh members (the validated center locks to the member
+    envelope). If the reactor served mu/sigma but NO member array, the bridge returns
+    the typed SPINE_INPUTS_UNAVAILABLE no-trade rather than synthesizing a 1-point
+    envelope from the legacy served mu (the one latent legacy-mu seam, now closed)."""
+    family, bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.05, 0.20, 0.20, 0.05],
+        no_asks=[0.92, 0.75, 0.75, 0.92],
+        q_by_bin=[0.05, 0.45, 0.40, 0.10],
+        q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
+    )
+    # mu/sigma threaded, but NO _edli_spine_*_members_native arrays.
+    payload = {
+        "family_id": "edli_family_smoke_w5b",
+        "_edli_spine_mu_native": 26.0,
+        "_edli_spine_sigma_native": 3.0,
+    }
+
+    result = _drive(family, proofs, payload)
+
+    assert result.selected_proof is None
+    assert result.no_trade_reason == bridge.NO_TRADE_SPINE_INPUTS_UNAVAILABLE
+
+
 # ===========================================================================
 # (c) the submission-pipeline-facing candidate shape is well-formed.
 # ===========================================================================
