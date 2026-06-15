@@ -269,6 +269,7 @@ def persist_day0_hourly_vectors(
     request_hash: str,
     endpoint: str = OPENMETEO_FORECAST_URL,
     retention_days: float = DAY0_VECTOR_RETENTION_DAYS,
+    now: Optional[datetime] = None,
 ) -> int:
     """Persist vectors (idempotent on (model,city,date,captured_at)) + prune.
 
@@ -279,6 +280,12 @@ def persist_day0_hourly_vectors(
     request_hash is REQUIRED non-empty (PR#404 P1: rows feeding the
     remaining-day q must carry a replayable provenance identity; the table
     CHECK enforces the same on fresh DBs).
+
+    ``now`` pins the retention-prune reference clock (the cutoff is
+    ``now - retention_days``). Defaults to live wall-clock ``datetime.now(UTC)``
+    so production behaviour is unchanged; tests inject it so a fixture with
+    fixed captured_at timestamps is not pruned non-deterministically as real
+    time advances past the retention window.
     """
     if not vectors:
         return 0
@@ -321,7 +328,8 @@ def persist_day0_hourly_vectors(
                     ),
                 )
                 written += int(cur.rowcount or 0)
-            cutoff = datetime.now(UTC).timestamp() - retention_days * 86400.0
+            prune_reference = (now or datetime.now(UTC)).astimezone(UTC)
+            cutoff = prune_reference.timestamp() - retention_days * 86400.0
             cutoff_iso = datetime.fromtimestamp(cutoff, tz=UTC).isoformat()
             conn.execute(
                 "DELETE FROM day0_hourly_vectors WHERE captured_at < ?",
