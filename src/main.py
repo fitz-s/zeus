@@ -6971,6 +6971,29 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "(non-fatal): %r",
             _ch_sweep_exc,
         )
+
+    # DAY0 supersession (2026-06-15): keep only the latest DAY0_EXTREME_UPDATED per
+    # (city, target_date, metric). Day0 was in NEITHER drain sweep, so stale duplicates
+    # (measured 1972 pending rows / 152 families) piled up at Tier-0 claim priority and
+    # starved the tradeable FORECAST_SNAPSHOT_READY (spine) lane to zero decisions.
+    # Past-local-day day0 is handled by archive_expired_candidates (now day0-aware).
+    try:
+        _d0_archived = store.archive_superseded_day0_events(batch_limit=batch_limit)
+        if _d0_archived:
+            logger.info(
+                "EDLI reactor: archived %d superseded DAY0_EXTREME_UPDATED events "
+                "(keep-latest per city/target_date/metric) → 'expired'; Tier-0 day0 "
+                "claim backlog drained so tradeable FSR is no longer starved "
+                "(batch_limit=%d)",
+                _d0_archived,
+                batch_limit,
+            )
+    except Exception as _d0_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_superseded_day0_events sweep failed (non-fatal): %r",
+            _d0_sweep_exc,
+        )
+
     try:
         _ch_ignored = store.ignore_channel_cache_events(batch_limit=batch_limit)
         if _ch_ignored:

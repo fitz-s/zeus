@@ -324,10 +324,20 @@ class EventStore:
         round-trip, and only run the expensive per-city check on the frontier band.
         This bounds the expensive work to the handful of recent target_dates.
 
-        FAIL-CLOSED: an FSR whose city/target_date is missing or whose timezone is
+        SCOPE (2026-06-15): sweeps BOTH FORECAST_SNAPSHOT_READY and
+        DAY0_EXTREME_UPDATED — day0 events DO carry per-city ``$.city`` + ``$.target_date``
+        (verified live), so the identical per-city-tz strictly-past predicate applies.
+        Day0 was previously excluded by a wrong assumption ("day0 carries no per-city
+        target"); that left ~900 past-local-day day0 rows (06-13/06-14) sitting at the
+        Tier-0 claim priority on SETTLED markets, claimed ahead of every tradeable
+        FORECAST_SNAPSHOT_READY (spine) family and starving the spine lane to zero
+        decisions. Market-channel events (BEST_BID_ASK_CHANGED/BOOK_SNAPSHOT/
+        NEW_MARKET_DISCOVERED) are token-keyed, carry no per-city forecast target, and
+        remain out of scope here (their supersession/ignore sweeps own them).
+
+        FAIL-CLOSED: a row whose city/target_date is missing or whose timezone is
         unresolvable is KEPT ACTIVE (never archived) — archiving an active row would
-        silently drop a real candidate. Non-FSR (market-channel/day0) events carry no
-        per-city forecast target and are out of scope for this per-city sweep.
+        silently drop a real candidate.
 
         IDEMPOTENT + budget-safe: only ``pending``/``processing`` rows are touched and
         only those proven strictly-past; a re-run at the same decision time is a no-op.
@@ -354,7 +364,7 @@ class EventStore:
             JOIN opportunity_event_processing p
               ON p.event_id = e.event_id
              AND p.consumer_name = ?
-            WHERE e.event_type = 'FORECAST_SNAPSHOT_READY'
+            WHERE e.event_type IN ('FORECAST_SNAPSHOT_READY', 'DAY0_EXTREME_UPDATED')
               AND p.processing_status IN ('pending', 'processing')
               AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
               AND json_extract(e.payload_json, '$.target_date') < ?
@@ -537,6 +547,136 @@ class EventStore:
         # below SQLite's SQLITE_MAX_VARIABLE_NUMBER (999 default) while reducing
         # round-trips by ~200×.  Semantics are identical: only pending/processing
         # rows transition to expired.
+        now = _utc_now()
+        _CHUNK = 500
+        for chunk_start in range(0, len(superseded_ids), _CHUNK):
+            chunk = superseded_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id IN ({placeholders})
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, self.consumer_name, *chunk),
+            )
+        return len(superseded_ids)
+
+    def archive_superseded_day0_events(self, *, batch_limit: int = 5_000) -> int:
+        """Sweep superseded per-family DAY0_EXTREME_UPDATED events to terminal ``'expired'``.
+
+        Day0 companion to ``archive_superseded_channel_events`` (2026-06-15). A
+        ``DAY0_EXTREME_UPDATED`` event is a realized-extreme observation update for a
+        forecast family ``(city, target_date, metric)``. Each newer reading supersedes
+        the older ones for that family (the running max/min only advances; only the
+        latest observation is actionable) — but day0 events were in NEITHER the expiry
+        nor the channel-supersession sweep, so stale duplicates piled up (measured
+        2026-06-15: 1972 pending day0 rows across only 152 families, ~13/family). Under
+        scope ``forecast_plus_day0`` day0 claims at Tier 0, so this stale pileup is
+        claimed ahead of — and starves — the tradeable FORECAST_SNAPSHOT_READY (spine)
+        lane every cycle.
+
+        INVARIANT (superseded-keep-latest): for each ``(city, target_date, metric)``
+        family in the active working set (``pending``/``processing`` only), keep the
+        row(s) with ``MAX(available_at)`` and mark every older row ``'expired'``. Day0
+        carries NO ``token_id``, so the family tuple is the supersession key (the
+        token-keyed channel sweep does not apply). Ties at MAX(available_at) are all
+        kept (never archive on a duplicate-timestamp ambiguity).
+
+        Past-LOCAL-DAY day0 events are removed separately by
+        ``archive_expired_candidates`` (which now covers day0); this sweep dedups the
+        still-active families so only ONE latest day0 per family remains claimable.
+
+        FAIL-CLOSED: a row whose city/target_date/metric is missing is KEPT ACTIVE.
+        APPEND-ONLY PROVENANCE: only ``opportunity_event_processing.processing_status``
+        is mutated; the immutable ``opportunity_events`` row is never deleted.
+        IDEMPOTENT + batch-bounded (mirrors the channel sweep exactly).
+
+        Returns the number of processing rows transitioned to ``'expired'``.
+        """
+
+        self._require_world_event_tables()
+
+        # Step 1: oldest active day0 rows with a parseable (city, target_date, metric)
+        # family key — the only unscoped scan, batch-limited.
+        candidate_rows = self.conn.execute(
+            """
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city')        AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date,
+                   json_extract(e.payload_json, '$.metric')      AS metric
+            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            JOIN opportunity_events e
+              ON e.event_id = p.event_id
+            WHERE p.consumer_name = ?
+              AND p.processing_status IN ('pending', 'processing')
+              AND e.event_type = 'DAY0_EXTREME_UPDATED'
+              AND json_extract(e.payload_json, '$.city') IS NOT NULL
+              AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
+              AND json_extract(e.payload_json, '$.metric') IS NOT NULL
+            ORDER BY e.available_at ASC
+            LIMIT ?
+            """,
+            (self.consumer_name, batch_limit),
+        ).fetchall()
+
+        if not candidate_rows:
+            return 0
+
+        # Step 2: per family key in the candidate batch, find the keeper(s). The keeper
+        # may be outside the batch; preserving it is what makes a small batch safe.
+        candidate_keys = {
+            (str(row[1]), str(row[2]), str(row[3]))
+            for row in candidate_rows
+            if row[1] is not None and row[2] is not None and row[3] is not None
+        }
+        keeper_ids: set[str] = set()
+        for city, target_date, metric in candidate_keys:
+            max_row = self.conn.execute(
+                """
+                SELECT MAX(e.available_at)
+                  FROM opportunity_events e INDEXED BY idx_opportunity_events_fsr_target_date
+                  JOIN opportunity_event_processing p
+                    ON p.event_id = e.event_id
+                   AND p.consumer_name = ?
+                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+                   AND json_extract(e.payload_json, '$.target_date') = ?
+                   AND json_extract(e.payload_json, '$.city') = ?
+                   AND json_extract(e.payload_json, '$.metric') = ?
+                   AND p.processing_status IN ('pending', 'processing')
+                """,
+                (self.consumer_name, target_date, city, metric),
+            ).fetchone()
+            if max_row is None or max_row[0] is None:
+                continue
+            max_available_at = str(max_row[0])
+            keeper_rows = self.conn.execute(
+                """
+                SELECT e.event_id
+                  FROM opportunity_events e INDEXED BY idx_opportunity_events_fsr_target_date
+                  JOIN opportunity_event_processing p
+                    ON p.event_id = e.event_id
+                   AND p.consumer_name = ?
+                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
+                   AND json_extract(e.payload_json, '$.target_date') = ?
+                   AND json_extract(e.payload_json, '$.city') = ?
+                   AND json_extract(e.payload_json, '$.metric') = ?
+                   AND e.available_at = ?
+                   AND p.processing_status IN ('pending', 'processing')
+                """,
+                (self.consumer_name, target_date, city, metric, max_available_at),
+            ).fetchall()
+            keeper_ids.update(str(row[0]) for row in keeper_rows)
+
+        superseded_ids = [str(row[0]) for row in candidate_rows if str(row[0]) not in keeper_ids]
+
+        if not superseded_ids:
+            return 0
+
         now = _utc_now()
         _CHUNK = 500
         for chunk_start in range(0, len(superseded_ids), _CHUNK):
