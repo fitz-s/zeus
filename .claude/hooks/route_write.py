@@ -65,6 +65,34 @@ _ALREADY_HOME_PREFIXES = (
     "state/",
 )
 
+# --- work-artifact detection (S2 increment: NUDGE loose drops) -----------------
+# A work-artifact written to a LOOSE location (repo root / docs root /
+# docs/operations root / current/ root) is misplaced — its home is a by-work
+# folder docs/operations/current/<work>/ (file_arrangement.yaml by-work canonical).
+# We NUDGE (never silent-route): work-name resolution is not yet reliable (no
+# clean active-work pointer; current/ is a by-kind/by-work hybrid), so silently
+# guessing the wrong work is worse than one visible nudge. Silent-route for work
+# kinds lands with the full resolver + zpkt by-work creation. Anti-data-loss: a
+# work-artifact is NEVER buried — it lands exactly where asked, plus a nudge.
+_WORK_ARTIFACT_RE = re.compile(
+    r"""(?ix)^(
+        (?:.*[_-])?plan\.md            # PLAN.md / <slug>_PLAN.md
+      | .*_report.*\.md | report\.md   # *_REPORT*.md / report.md
+      | .*_evidence.*                  # *_EVIDENCE*
+      | closeout.*                     # closeout*.md
+      | scope\.yaml                    # scope.yaml
+    )$""",
+)
+# Loose dirs where a work-artifact does NOT belong. A deeper subfolder (a by-kind
+# legacy dir like current/plans/, or an actual by-work current/<work>/) is left
+# alone — legacy is recognized (migration regroups it); by-work is already correct.
+_LOOSE_WORK_DIRS = frozenset({
+    "",                          # repo root
+    "docs",
+    "docs/operations",
+    "docs/operations/current",
+})
+
 
 def _rel(file_path: str) -> str | None:
     """Repo-relative POSIX path, or None if outside the repo / unparseable."""
@@ -162,9 +190,26 @@ def _run_advisory_check_route_write(payload: dict[str, Any]) -> Any:
                 ),
             }
 
-        # --- everything else: INERT in S1 (anti-data-loss: never bury) --------
-        # Work-artifact by-work routing arrives in S0+S2. Until then, leave the
-        # write exactly where asked.
+        # --- work-artifact dropped in a LOOSE location -> NUDGE ---------------
+        # (S2 increment) Never silent-route work kinds yet (no reliable work-name
+        # resolver); just surface the canonical by-work home so the agent stops
+        # dropping plans/reports/evidence loose. The write still lands as-asked.
+        parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        if parent in _LOOSE_WORK_DIRS and _WORK_ARTIFACT_RE.match(basename):
+            return (
+                f"route_write: '{basename}' looks like a work-artifact "
+                f"(plan/report/evidence/closeout/scope) but is being written to a "
+                f"loose location ({parent or 'repo root'}). Its home is a by-work "
+                f"folder: docs/operations/current/<work>/ (one folder per mission, "
+                f"holding PLAN.md + scope.yaml + evidence/ + report.md together). "
+                f"Write it under docs/operations/current/<work>/ or run "
+                f"`zpkt start <work>`. (Left where you asked — this is a nudge, not "
+                f"a block.)"
+            )
+
+        # --- everything else: leave the write exactly where asked -------------
+        # Anti-data-loss (R16): ambiguous / unknown kinds are never silent-routed
+        # and never buried.
         return None
     except Exception:
         # Charter: a crash never blocks or alters a write.

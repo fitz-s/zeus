@@ -74,6 +74,32 @@ def test_cross_tenant_worktree_write_blocks():
     assert res == route_write._BLOCK_SENTINEL
 
 
+def test_loose_plan_nudged():
+    # A work-artifact dropped at a loose location -> NUDGE (str), never silent.
+    res = _check("Write", "docs/operations/some_PLAN.md")
+    assert isinstance(res, str) and "by-work" in res
+
+
+def test_loose_report_at_repo_root_nudged():
+    res = _check("Write", "report.md")
+    assert isinstance(res, str) and "work-artifact" in res
+
+
+def test_workartifact_in_workfolder_not_nudged():
+    # Already under a by-work subfolder -> correct -> no-op.
+    assert _check("Write", "docs/operations/current/my-work/PLAN.md") is None
+
+
+def test_workartifact_in_legacy_bykind_left_alone():
+    # Legacy by-kind dir is recognized (migration regroups it) -> no nudge churn.
+    assert _check("Write", "docs/operations/current/plans/foo.md") is None
+
+
+def test_nonwork_md_at_loose_location_not_nudged():
+    # A normal doc that isn't a work-artifact shape is left alone (no false nudge).
+    assert _check("Write", "docs/operations/notes.md") is None
+
+
 def test_crash_fails_open():
     # A malformed payload must never raise / never block.
     assert route_write._run_advisory_check_route_write({"tool_input": None}) is None
