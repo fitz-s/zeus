@@ -863,6 +863,32 @@ def decide_family_via_spine(
 
     # --- map the spine's selection back onto the reactor proof -----------------
     if decision.selected is None:
+        # DIAGNOSTIC (2026-06-15): on no-trade, log the top candidates by edge_lcb so we can
+        # tell HONEST no-edge (edge_lcb clearly < 0) from a near-miss (edge_lcb ~ 0 but
+        # optimal_delta_u <= 0). Read-only; fail-safe — never raise into the hot path.
+        try:
+            import logging as _spine_diag_logging
+
+            _cands = sorted(
+                getattr(decision, "candidates", ()) or (),
+                key=lambda e: (e.edge_lcb if e.edge_lcb is not None else float("-inf")),
+                reverse=True,
+            )[:3]
+            if _cands:
+                _top = "; ".join(
+                    f"{c.candidate_id} edge_lcb={c.edge_lcb:+.5f} dU={c.optimal_delta_u:+.6f} "
+                    f"dU_min={c.delta_u_at_min:+.6f} pt_ev={c.point_ev:+.5f} "
+                    f"cost={float(c.cost.value):.4f} stake={c.optimal_stake_usd}"
+                    for c in _cands
+                )
+                _spine_diag_logging.getLogger("zeus.spine_edge").info(
+                    "SPINE_NOTRADE_EDGE_DIAG family=%s reason=%s top=[%s]",
+                    getattr(case, "family_id", "?"),
+                    decision.no_trade_reason,
+                    _top,
+                )
+        except Exception:
+            pass
         return SpineDecisionResult(
             selected_proof=None,
             no_trade_reason=decision.no_trade_reason or NO_TRADE_SPINE_NO_SELECTION,
