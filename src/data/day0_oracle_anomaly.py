@@ -557,6 +557,20 @@ def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> Non
         _WU_CHECK_FAILURE_MEMO.pop(city_name, None)
     if verdict.diverged:
         flag_day0_oracle_anomaly(city_name, target_date, detail=verdict.detail)
+    else:
+        # CLEAN-VERDICT CLEARS A STALE FLAG (false-pause TTL fix 2026-06-15). The
+        # detector previously only ADDED flags and relied on the 24h TTL to expire,
+        # so a morning IN-PROGRESS-high cadence flag (high_delta from two feeds
+        # catching different provisional maxima before the daily high is reached)
+        # blocked the WHOLE day — including the afternoon, when the high is
+        # established and the same comparison comes back CLEAN. A compared & NOT
+        # diverged verdict is positive same-window evidence the two settlement feeds
+        # AGREE now; clear any stale flag so the afternoon sharp-edge day0 lane
+        # reopens instead of waiting out the TTL. Tamper detection is fully
+        # preserved: a genuine persistent sensor divergence diverges on EVERY check
+        # and never reaches this branch; only a self-resolving (cadence/coverage)
+        # divergence — the false-pause class — is cleared by a later clean read.
+        clear_day0_oracle_anomaly(city_name, target_date)
 
 
 def check_wu_metar_divergence(
