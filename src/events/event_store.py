@@ -354,6 +354,20 @@ class EventStore:
         # at decision_time, minus one day of margin. Any target_date strictly before
         # this is past in EVERY timezone and needs no per-city check.
         frontier_floor = _oceania_frontier_target_floor(decision_time_utc)
+        # DAY0 uses a TODAY-INCLUSIVE frontier (2026-06-15). The -1 day margin exists for
+        # FSR, whose target can be a future TRADING day still ambiguous across timezones.
+        # A DAY0_EXTREME_UPDATED is a SAME-DAY realized-observation signal — it never refers
+        # to a future trading day, so the margin only strands settled past-local-day day0
+        # (e.g. yesterday's) in the FRONTIER BAND, where they pile up at the Tier-0 claim
+        # priority and starve tradeable FORECAST_SNAPSHOT_READY off the bounded per-cycle
+        # claim. Widen the day0 candidate band to ``< frontier_floor + 2`` (= the Oceania
+        # local date + 1, i.e. today and everything before); the exact per-city
+        # _strictly_past_in_tz check below still KEEPS any day0 whose local day is still
+        # open, so today's live day0 is never archived — only genuinely-settled ones go.
+        try:
+            day0_floor = (date.fromisoformat(frontier_floor) + timedelta(days=2)).isoformat()
+        except ValueError:
+            day0_floor = frontier_floor
 
         candidate_rows = self.conn.execute(
             """
@@ -367,11 +381,16 @@ class EventStore:
             WHERE e.event_type IN ('FORECAST_SNAPSHOT_READY', 'DAY0_EXTREME_UPDATED')
               AND p.processing_status IN ('pending', 'processing')
               AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
-              AND json_extract(e.payload_json, '$.target_date') < ?
+              AND (
+                    (e.event_type = 'FORECAST_SNAPSHOT_READY'
+                       AND json_extract(e.payload_json, '$.target_date') < ?)
+                 OR (e.event_type = 'DAY0_EXTREME_UPDATED'
+                       AND json_extract(e.payload_json, '$.target_date') < ?)
+              )
             ORDER BY json_extract(e.payload_json, '$.target_date') ASC
             LIMIT ?
             """,
-            (self.consumer_name, frontier_floor, batch_limit),
+            (self.consumer_name, frontier_floor, day0_floor, batch_limit),
         ).fetchall()
 
         expired_ids: list[str] = []

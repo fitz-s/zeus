@@ -208,6 +208,32 @@ def test_fsr_expiry_unbroken_by_day0_generalization():
     assert _status_of(conn, fsr_active.event_id) == "pending"
 
 
+def test_day0_frontier_band_settled_is_swept_fsr_margin_preserved():
+    """The FRONTIER-BAND gap: a day0 whose target local day has ENDED but sits in the
+    Oceania -1-day margin (e.g. yesterday) was previously SPARED — it then piled up at
+    the Tier-0 claim priority and starved tradeable FSR. day0's today-inclusive frontier
+    now sweeps it, while FSR keeps the conservative margin (a same-frontier-band FSR is
+    NOT swept)."""
+    conn = _world_conn()
+    store = EventStore(conn)
+    # decision 2026-06-05T12:30Z → Auckland (UTC+12) local 2026-06-06 00:30, so its
+    # 2026-06-05 local day has just ENDED; frontier_floor=2026-06-05 (margin band).
+    decision = "2026-06-05T12:30:00+00:00"
+    settled_day0 = _day0_event("Auckland", "2026-06-05", "high", available_at="2026-06-05T11:00:00+00:00")
+    band_fsr = _fsr_event("Auckland", "2026-06-05", "snap-band", available_at="2026-06-05T11:00:00+00:00")
+    store.insert_or_ignore(settled_day0)
+    store.insert_or_ignore(band_fsr)
+
+    store.archive_expired_candidates(decision_time=decision)
+
+    assert _status_of(conn, settled_day0.event_id) == "expired", (
+        "a settled past-local-day day0 in the frontier band must now be swept off Tier-0"
+    )
+    assert _status_of(conn, band_fsr.event_id) == "pending", (
+        "FSR keeps its conservative -1-day margin (frontier-band FSR not swept)"
+    )
+
+
 def test_both_types_swept_in_one_pass():
     """A mixed batch of past-local-day FSR + day0 is fully drained in one sweep."""
     conn = _world_conn()
