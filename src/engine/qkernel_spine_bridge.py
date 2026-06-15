@@ -47,21 +47,22 @@ selected proof still flows through the reactor's downstream submit-time re-proof
 
 DRIFT RESOLVED (recorded per operator law — see impl_w5b_integration.md §"Input mapping"):
 
-  * The spine's ``PredictiveBuilder`` protocol expects to build the ONE predictive
-    distribution from a ``FreshModelSet`` via ``DebiasAuthority`` + ``build_center``
-    + ``build_sigma`` (calibration-artifact reads). At the LIVE reactor seam the
-    reactor has ALREADY produced and ARM-validated the served center (mu*),
-    dispersion (sigma), and the debiased member envelope — they are threaded on the
-    payload under ``_edli_spine_*`` by the Stage-0 producer. Re-running the σ/center
-    authorities here would be a SECOND authority read that could diverge from the q
-    the reactor's validated build produced. Resolution (toward the reactor's served
-    truth, zero drift): the injected ``PredictiveBuilder`` constructs the
-    ``PredictiveDistribution`` DIRECTLY from the reactor's served mu*/sigma/debiased
-    members (the "stash already-computed values" principle the Stage-0 receipt spine
-    established, applied forward). The spine then performs its OWN joint_q
-    integration, band, family book, coherence, routes, and payoff/ΔU selection — the
-    parts that ARE the rebuilt-spine decision logic — over the SAME N(mu*, sigma) the
-    reactor already validated. If the reactor served no predictive center/sigma (the
+  * The VALIDATED belief authority runs at the seam. The spine builds the ONE
+    predictive distribution via the REAL ``PredictiveDistributionBuilder`` —
+    ``build_center`` (envelope-locked) + ``build_sigma`` (realized-floor) — over the
+    reactor's chain-of-record-DEBIASED members (threaded under
+    ``_edli_spine_debiased_members_native`` by the Stage-0 producer). This is the
+    ARM-replay-validated center+σ (center PROVEN, σ honest std(z)=0.93; see
+    docs/rebuild/arm_replay_report.md), NOT the reactor's legacy served mu*/σ. The
+    reactor's served mu*/σ are the LEGACY EMOS/replacement values being replaced — they
+    are no longer used for belief. De-bias is a no-op at the seam (``_NoOpDebiasAuthority``):
+    the chain-of-record per-model de-bias already ran upstream (the single correct
+    de-bias; the contaminating EDLI lane is OFF), and the reactor does not thread the
+    member provenance the real ``DebiasAuthority`` would need to safely re-run here —
+    so the seam applies NO further shift (no double-de-bias). Wiring the full
+    ``DebiasAuthority`` on RAW members with provenance is a follow-up that only changes
+    behavior where a per-city artifact would diverge from the already-validated
+    chain-of-record debias. If the reactor served no debiased members at all (the
     threaded inputs are absent — a genuine reconstruction gap), the bridge returns a
     TYPED no-trade (``SPINE_INPUTS_UNAVAILABLE``) rather than fabricating a center.
 
@@ -102,11 +103,12 @@ from src.decision.family_decision_engine import (
     FamilyDecisionEngine,
     FamilyDecisionError,
 )
-from src.forecast.day0_conditioner import Day0Conditioning, Day0ObservationState
+from src.forecast.day0_conditioner import Day0ObservationState
 from src.forecast.debias_authority import AppliedDebias
-from src.forecast.center import CenterEstimate
-from src.forecast.predictive_distribution_builder import PredictiveDistribution
-from src.forecast.sigma_authority import SigmaComponents
+from src.forecast.predictive_distribution_builder import (
+    PredictiveDistribution,
+    PredictiveDistributionBuilder,
+)
 from src.forecast.types import ForecastCase, FreshModelSet, RawModelMember
 from src.probability.event_resolution import (
     ResolutionError,
@@ -383,16 +385,18 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
 def build_fresh_model_set(
     case: ForecastCase, served: Mapping[str, Any]
 ) -> FreshModelSet:
-    """Build a ``FreshModelSet`` from the reactor's served (raw) member array.
+    """Build a ``FreshModelSet`` from the reactor's CHAIN-OF-RECORD-DEBIASED members.
 
-    The members carry the case provenance; the values are the reactor's served raw
-    member array (falls back to the debiased array when no raw array was threaded —
-    the envelope bounds are identical for the center invariant). This set exists so
-    the injected predictive builder has a structurally-complete ``FreshModelSet`` on
-    the ``PredictiveDistribution.case`` contract; the served mu*/sigma are taken
-    directly from the reactor (see ``_ReactorServedPredictiveBuilder``).
+    The values are the reactor's served ``debiased_members_native`` — the members AFTER
+    the reactor's chain-of-record per-model de-bias (the single correct de-bias;
+    diagnosis: the +1.2 chain-debias is correct, and the contaminating EDLI per-city
+    lane is OFF upstream). The VALIDATED ``build_center`` (envelope-lock) and
+    ``build_sigma`` (realized-floor) authorities then run on THESE debiased members —
+    identical to the ARM-replay-validated path — with a no-op de-bias at the seam (see
+    ``_NoOpDebiasAuthority``: no double-de-bias, no missing de-bias). Falls back to the
+    raw array, then to ``mu_native``, only if no debiased array was threaded.
     """
-    values = served.get("raw_members_native") or served.get("debiased_members_native") or ()
+    values = served.get("debiased_members_native") or served.get("raw_members_native") or ()
     arr = np.asarray(values, dtype=float)
     if arr.size == 0:
         arr = np.asarray([float(served["mu_native"])], dtype=float)
@@ -424,94 +428,36 @@ def build_fresh_model_set(
     )
 
 
-def _reactor_served_predictive(
-    case: ForecastCase, served: Mapping[str, Any], models: FreshModelSet
-) -> PredictiveDistribution:
-    """Construct the ``PredictiveDistribution`` from the reactor's served mu*/sigma.
+class _NoOpDebiasAuthority:
+    """De-bias is a NO-OP at this live seam — the SINGLE correct de-bias already ran.
 
-    This is the resolved drift (see module docstring): rather than re-running the
-    σ/center authorities (a second authority read that could diverge from the q the
-    reactor's validated build produced), the predictive distribution is built
-    DIRECTLY from the reactor's served center/width/envelope. The structural
-    sub-objects (center / debias / day0 / sigma_components) are populated with the
-    served values so the receipt contract is complete and the joint-q integrator
-    reads a coherent N(mu*, sigma). ``live_eligible`` is True iff the reactor served a
-    positive finite sigma (the same eligibility the σ authority enforces).
+    The reactor's chain-of-record per-model de-bias is the one correct de-bias
+    (diagnosis: the +1.2 chain-debias is correct; the contaminating EDLI per-city lane
+    is OFF upstream). The members threaded here (``debiased_members_native``) are ALREADY
+    that debiased set, so the seam applies NO further shift. Re-running the real
+    ``DebiasAuthority`` here would need member provenance the reactor does not thread to
+    the seam (it would either no-op on synthetic provenance or, worse, double-de-bias on
+    a city/metric artifact match). The VALIDATED ``build_center`` (envelope-lock) and
+    ``build_sigma`` (realized-floor) authorities STILL run on these debiased members —
+    identical to the ARM-replay-validated belief — they just do not re-de-bias. (Wiring
+    the full ``DebiasAuthority`` on RAW members with real provenance is a follow-up that
+    only changes behavior where a per-city artifact would diverge from the chain-of-record
+    debias the diagnosis already validated as correct.)
     """
-    mu = float(served["mu_native"])
-    sigma = float(served["sigma_native"])
-    debiased = served.get("debiased_members_native")
-    if debiased:
-        deb_arr = np.asarray(debiased, dtype=float)
-    else:
-        deb_arr = np.asarray(models.member_values_native, dtype=float)
-    debiased_members = tuple(float(x) for x in deb_arr.tolist())
-    member_min = float(np.min(deb_arr)) if deb_arr.size else mu
-    member_max = float(np.max(deb_arr)) if deb_arr.size else mu
-    raw_consensus = float(np.mean(models.member_values_native)) if models.member_values_native.size else mu
 
-    center = CenterEstimate(
-        mu_native=mu,
-        raw_consensus_native=raw_consensus,
-        debiased_consensus_native=mu,
-        debiased_member_min_native=member_min,
-        debiased_member_max_native=member_max,
-        center_method="WEIGHTED_HUBER_CONSENSUS",
-        center_status="OK",
-        weights_by_model={},
-        reason="reactor_served_center",
-    )
-    n = len(debiased_members)
-    debias = AppliedDebias(
-        artifact_ids=(),
-        per_member_shift_native=tuple(0.0 for _ in range(n)),
-        aggregate_shift_native=0.0,
-        trailing_residual_mean_native=0.0,
-        trailing_residual_std_native=0.0,
-        activation_status="NO_ARTIFACT",
-        reason="reactor_served_debiased_members",
-    )
-    day0 = Day0Conditioning(
-        active=False,
-        observed_extreme_native=None,
-        support_lower_native=None,
-        support_upper_native=None,
-        center_before_native=mu,
-        center_after_native=mu,
-        status="NO_DAY0",
-    )
-    sigma_components = SigmaComponents(
-        raw_member_spread_native=float(np.std(models.member_values_native)) if models.member_values_native.size > 1 else 0.0,
-        model_dispersion_native=0.0,
-        center_parameter_se_native=0.0,
-        station_representativeness_sigma_native=0.0,
-        day0_remaining_process_sigma_native=0.0,
-        realized_floor_native=sigma,
-        sigma_before_floor_native=sigma,
-        sigma_after_floor_native=sigma,
-        artifact_id="reactor_served_sigma",
-    )
-    h = hashlib.sha256()
-    h.update(f"reactor_served|{case.family_id}|{mu!r}|{sigma!r}".encode("utf-8"))
-    for v in debiased_members:
-        h.update(f"|{v!r}".encode("utf-8"))
-    identity_hash = h.hexdigest()
-    return PredictiveDistribution(
-        case=case,
-        mu_native=mu,
-        sigma_native=sigma,
-        debiased_members_native=debiased_members,
-        member_min_native=member_min,
-        member_max_native=member_max,
-        center=center,
-        debias=debias,
-        day0=day0,
-        sigma_components=sigma_components,
-        distribution_family="NORMAL",
-        live_eligible=True,
-        ineligibility_reason=None,
-        identity_hash=identity_hash,
-    )
+    def apply(self, case: ForecastCase, models: FreshModelSet):
+        vals = np.asarray(models.member_values_native, dtype=float)
+        n = int(vals.size)
+        applied = AppliedDebias(
+            artifact_ids=(),
+            per_member_shift_native=tuple(0.0 for _ in range(n)),
+            aggregate_shift_native=0.0,
+            trailing_residual_mean_native=0.0,
+            trailing_residual_std_native=0.0,
+            activation_status="NO_ARTIFACT",
+            reason="reactor_chain_of_record_debias_upstream_no_seam_reshift",
+        )
+        return vals, applied
 
 
 class _ReactorServedFreshModelReader:
@@ -534,20 +480,6 @@ class _NoDay0Reader:
 
     def read(self, case: ForecastCase) -> Optional[Day0ObservationState]:  # noqa: ARG002
         return None
-
-
-class _ReactorServedPredictiveBuilder:
-    """A ``PredictiveBuilder`` that returns the reactor's served predictive distribution.
-
-    This injects the resolved-drift predictive distribution (built from the reactor's
-    ARM-validated mu*/sigma/members) into the spine engine WITHOUT editing the engine.
-    """
-
-    def __init__(self, served: Mapping[str, Any]) -> None:
-        self._served = served
-
-    def build(self, case, models, obs=None, **_kwargs):  # noqa: ANN001, ARG002
-        return _reactor_served_predictive(case, dict(self._served), models)
 
 
 # ---------------------------------------------------------------------------
@@ -719,7 +651,11 @@ def decide_family_via_spine(
         engine = FamilyDecisionEngine(
             fresh_model_reader=_ReactorServedFreshModelReader(models),
             day0_reader=_NoDay0Reader(),
-            predictive_builder=_ReactorServedPredictiveBuilder(served),
+            # The VALIDATED belief authority: build_center (envelope-lock) + build_sigma
+            # (realized-floor) run on the reactor's chain-of-record-debiased members —
+            # the ARM-replay-validated center+σ, NOT the reactor's legacy served mu/σ.
+            # De-bias is a no-op here (already applied upstream; see _NoOpDebiasAuthority).
+            predictive_builder=PredictiveDistributionBuilder(_NoOpDebiasAuthority()),
             # Inject a family_book_builder that assembles the FamilyBook DIRECTLY from
             # the reactor proofs' native ladders (the SAME books the reactor priced
             # each proof against) — bypassing ExecutableMarketSnapshot reconstruction.

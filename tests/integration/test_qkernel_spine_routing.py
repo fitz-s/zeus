@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-06-15 (loop-back: validated belief on the live path)
 # Authority basis: docs/rebuild/impl_w5b_integration.md (the Wave-5B reactor
 #   integration this test is the smoke for) + docs/rebuild/impl_w4_family_decision_engine.md
 #   (the spine engine the bridge drives) + the task brief (assert: (a) decision is
@@ -276,6 +276,47 @@ def test_decision_is_produced_by_the_spine_not_the_legacy_selector():
     # The spine integrated q (joint_q present => the predictive distribution was
     # live-eligible and the full pipeline ran past the FIRST gate).
     assert result.decision.joint_q is not None
+
+
+# ===========================================================================
+# (a2) LOOP-BACK invariant — the VALIDATED belief is on the live path.
+# ===========================================================================
+def test_spine_belief_uses_validated_center_not_legacy_served_mu():
+    """When the flag is ON the spine builds belief via the VALIDATED ``build_center``
+    (envelope-locked on the reactor's chain-of-record-debiased members) + ``build_sigma``
+    (realized-floor) — NOT the reactor's legacy served mu*/sigma. Proven: a WARM legacy
+    served mu (26C — the old +bias center) is IGNORED; the spine's predictive center sits
+    inside the COLD debiased-member envelope [20,23]. The pre-loop-back bridge wrapped the
+    served mu, which would put ``mu_native`` at 26 and FAIL this test.
+    """
+    family, bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.05, 0.20, 0.20, 0.05],
+        no_asks=[0.92, 0.75, 0.75, 0.92],
+        q_by_bin=[0.05, 0.45, 0.40, 0.10],
+        q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
+    )
+    # Legacy served mu is WARM (26C — the broken pre-rebuild center). The reactor's
+    # chain-of-record debiased members are COLD (~20-23C, the fresh consensus).
+    cold_members = [20.0, 21.0, 22.0, 23.0]
+    payload = _payload_with_spine_inputs(mu=26.0, sigma=3.0, members=cold_members)
+
+    result = _drive(family, proofs, payload)
+
+    assert result.decision is not None, "the spine engine must have produced a FamilyDecision"
+    pd = result.decision.predictive
+    # The VALIDATED center is envelope-locked inside the debiased member hull — NOT 26.
+    assert min(cold_members) - 1e-6 <= pd.mu_native <= max(cold_members) + 1e-6, (
+        f"spine center {pd.mu_native} escaped the debiased envelope "
+        f"[{min(cold_members)},{max(cold_members)}] — legacy served mu (26) leaked onto the live path"
+    )
+    assert pd.mu_native != pytest.approx(26.0), "the legacy warm served mu must NOT be the spine center"
+    # De-bias is a no-op at the seam (chain-of-record debias already applied upstream).
+    assert pd.debias.activation_status == "NO_ARTIFACT"
+    # Sigma comes from build_sigma (the realized-floor authority), a positive finite width
+    # — not the served sigma wrapped verbatim.
+    assert pd.sigma_native > 0.0
 
 
 # ===========================================================================
