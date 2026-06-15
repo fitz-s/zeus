@@ -347,3 +347,116 @@ than a Normal (2.7×) — no global k fixes this; it needs a heavier-tailed kern
 explicit far-shoulder mass floor; (b) the under-dispersion is lead-dependent, so the
 ideal is a per-lead k (~1.25/1.33/1.50 for 24h/72h/96h+) rather than the flat 1.30,
 which leaves 96h+ mildly under-dispersed (std(z) 1.18) and 24h mildly over (0.97).
+
+---
+
+## CENTER-WARM TEST (k_default = 1.30 live; is the cold μ\* the trade-unblock?)
+
+- Appended 2026-06-15. With k=1.30 deployed, the live spine's highest-edge
+  candidates are NO-on-its-own-modal-bin (q_yes_modal ≈ 0.27 vs market ≈ 0.35) which
+  direction-law correctly kills, leaving the direction-legal candidates with no
+  clearable edge. Hypothesis: a cold μ\* (PIT mean(z) > 0 on WU — we **settle on WU**,
+  so a cold-vs-WU center is a real P&L defect) under-weights the warm/modal bin and
+  produces exactly this pattern. Test: warm μ\* by +W·σ_served toward WU settlement
+  (a single signed residual-mean shift — confirmed correct sign for BOTH metrics:
+  k=1.30 mean(z) = +0.278 high, +0.580 low, both positive ⇒ settle runs warmer than
+  μ\* for both). Re-graded through the real `build_joint_q` with only `mu_native`
+  replaced. Same 360-family / 998-cell sample. READ-ONLY.
+
+  Note: at the **live k=1.30**, the standardized cold bias is **+0.304σ** (WU),
+  not the +0.40σ measured at k=1.0 — widening σ shrank the standardized residual. So
+  the PIT-optimal warm is +0.30σ; +0.40σ overshoots.
+
+### 1. The warm DOES fix the PIT mean (calibrates the center to WU)
+
+| warm (×σ) | mean(z) | std(z) | \|z\|>2 |
+|---|---|---|---|
+| +0.00 | +0.304 | 1.062 | 0.075 |
+| +0.20 | +0.104 | 1.062 | 0.061 |
+| +0.30 (optimal) | ≈ 0.00 | 1.062 | — |
+| +0.40 | −0.096 | 1.062 | 0.067 |
+
+mean(z) is linear in W; the PIT-mean-optimal warm is **W\* = +0.304σ** (lead-stable:
++0.31/+0.29/+0.31 for 24h/72h/96h+). **+0.20σ leaves a residual +0.10σ; +0.40σ
+overshoots to −0.10σ.** So if a center warm ships, **+0.30σ** is the calibration
+target, not +0.40.
+
+### 2. THE DECISIVE TEST — the warm does NOT surface direction-legal positive edge
+
+After-cost EV (2 % taker) of the two **direction-LEGAL** classes, by warm:
+
+| warm | YES-on-MODAL EV | (ratio q/real) | NO-on-NON-MODAL EV |
+|---|---|---|---|
+| +0.00 | **−0.069** | 1.225× | **−0.025** |
+| +0.20 | **−0.053** | 1.143× | **−0.023** |
+| +0.40 | **−0.038** | 1.072× | **−0.022** |
+
+**Neither legal class crosses zero at ANY warm.** The warm helps YES-on-modal
+(ratio q/real 1.22× → 1.07× as the modal bin calibrates) but it **never becomes
+after-cost positive** — even fully warmed, mean_q_modal 0.266 vs realized 0.249, so
+buying YES at the model's own q still loses after cost. NO-on-non-modal is flat-negative
+throughout (≈ −0.022). By ring, no NO-on-non-modal sub-class turns positive at any warm
+(near-NO and far-NO both stay −EV at the q-proxy price).
+
+**Against the REAL market the live daemon sees** (modal priced ≈ 0.35): YES-on-modal is
+**−0.16 to −0.18/$1 at every warm.** Even where the warmed modal q exceeds 0.35
+(n ≈ 60–68 cells), those bins settle YES only ~20 % of the time — far below the 0.35
+ask. **The market correctly prices the modal bin at ~0.35; the spine buying YES there
+loses heavily, warmed or not.** The root reason is structural: with 1 °C bins and
+σ ≈ 1.7 °C, **the modal bin's realized win-frequency is only ~22–25 %** — no single bin
+is a >35 % favorite, so there is no direction-legal bin on which YES can beat a
+calibrated market. The cold center is NOT the binding constraint.
+
+### 3. Do-no-harm — the warm BREAKS the favorite-NO refusal beyond +0.20σ
+
+| warm | modal/favorite-NO admits | near-NO admits (winrate) | far-NO harvest (winrate) | mean(z) overshoot |
+|---|---|---|---|---|
+| +0.00 | **0** | 830 (0.892) | 1465 (0.985) | +0.304 (ok) |
+| +0.20 | **0** | 891 (0.816) | 1154 (0.991) | +0.104 (ok) |
+| +0.40 | **424** | 1110 (0.802) | 1231 (0.989) | −0.096 (ok) |
+
+**At +0.40σ the favorite-NO refusal BREAKS** — modal/favorite-NO admits jump 0 → 424:
+warming μ\* far enough pushes the modal q_yes down so the spine starts wanting to sell
+NO on its own (warmed-past) forecast bin, and near-ring NO win-rate degrades 0.89 →
+0.80 (more selling NO near the winner). **+0.20σ keeps modal-NO admits at 0** (safe) but
+already erodes near-NO win-rate (0.89 → 0.82). The PIT-optimal +0.30σ sits between
+these — it would calibrate the mean but begins eroding the near-NO harvest and
+approaches the favorite-NO-refusal boundary. The far-NO harvest itself stays healthy
+(winrate 0.985 → 0.989) at all warms.
+
+### CENTER-WARM VERDICT
+
+**Warming μ\* to WU does NOT surface direction-legal after-cost-positive edge — the
+cold center is NOT the unblock; the constraint is elsewhere.** The +0.30σ warm
+genuinely calibrates the center (mean(z) → 0) and is a real correctness improvement to
+the predictive, but it leaves BOTH direction-legal classes net-negative
+(YES-on-modal −0.04 at the q-proxy, −0.17 against the real 0.35 market; NO-on-non-modal
+−0.022), and beyond +0.20σ it starts eroding the near-NO harvest / breaking the
+favorite-NO refusal (424 modal-NO admits at +0.40σ). The live "no legal edge" pattern
+is **structural, not a center defect**: σ ≈ 1.7 °C over 1 °C bins makes the modal bin a
+~22–25 % event, so no direction-legal YES bin can beat a calibrated market, and
+NO-on-non-modal is a ~zero-edge calibrated bet after cost. The spine's *real* edge —
+the NO-on-its-own-modal candidate (q_yes_modal 0.27 < market 0.35) — is genuine
+(the market over-prices the modal favorite) but is **direction-illegal by construction**.
+The binding question is therefore NOT the center; it is **whether the direction law
+should admit NO-on-modal when the spine's calibrated q_yes_modal is materially below the
+market** (a separate, higher-stakes policy question — that NO-on-own-forecast trade is
+exactly the favorite-NO class the refusal was built to block, so admitting it needs its
+own settlement-graded validation, not a center tweak).
+
+**Minimal center lever (if the +0.30σ warm ships anyway as a calibration fix, NOT as a
+trade-unblock):** attach a settlement-residual-mean correction inside the center
+authority, NOT a new bias lane. The served μ\* today is the raw debiased-member Huber
+consensus (`src/forecast/center.py`; `EMOS_OOS_STRENGTH_DEFAULT = 0.0`, so EMOS is
+NOT currently shifting the center, and `DebiasAuthority` is a NoOp at the live spine
+seam per `qkernel_spine_bridge._NoOpDebiasAuthority`). The correct home is the
+**`DebiasAuthority`** (`src/forecast/debias_authority.py`) — give it a per-(city,season,
+metric) settlement-residual-mean term (the `residual_mean_c = 0.4841` already computed
+and stored in `state/settlement_sigma_floor.json._meta`, the same no-leak WU-residual
+fit that produced the σ floor). Applying it there (a) calibrates μ\* to WU settlement
+by construction, (b) keeps it a single ONCE-applied de-bias inside the envelope
+invariant (`build_center` re-clamps to `[member_min, member_max]`), and (c) does NOT
+touch `emos_predictive` / the EMOS sole-calibrator path (EMOS stays the width/shape
+calibrator; the residual-mean is a separate, additive center term) — so it cannot
+re-introduce the legacy bias maze. **But per the verdict above, this is a
+calibration-quality fix, not a trade-unblock; do not deploy it expecting new fills.**
