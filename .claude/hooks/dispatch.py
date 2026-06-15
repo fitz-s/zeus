@@ -144,6 +144,30 @@ def _emit_advisory(hook_id: str, event: str, additional_context: str) -> int:
     return 0
 
 
+def _emit_rich(event: str, fields: dict[str, Any]) -> int:
+    """Emit a hookSpecificOutput carrying rich fields (updatedInput,
+    permissionDecision/Reason, additionalContext) from a handler that returned a
+    dict rather than a plain advisory string. Used by route_write for
+    SILENT-ROUTE (updatedInput) and ASK (permissionDecision). Returns 0 — the
+    rewrite/ask is carried in the stdout JSON, not the exit code."""
+    if event in _HOOK_SPECIFIC_OUTPUT_EVENTS:
+        hso: dict[str, Any] = {"hookEventName": event}
+        if "updatedInput" in fields:
+            hso["updatedInput"] = fields["updatedInput"]
+        if "permissionDecision" in fields:
+            hso["permissionDecision"] = fields["permissionDecision"]
+        if "permissionDecisionReason" in fields:
+            hso["permissionDecisionReason"] = fields["permissionDecisionReason"]
+        if fields.get("additionalContext"):
+            hso["additionalContext"] = fields["additionalContext"]
+        print(json.dumps({"hookSpecificOutput": hso}))
+    else:
+        msg = fields.get("additionalContext") or fields.get("permissionDecisionReason") or ""
+        if msg:
+            print(json.dumps({"systemMessage": msg}))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Per-hook advisory check implementations
 # ---------------------------------------------------------------------------
@@ -1902,6 +1926,11 @@ try:
 except Exception:  # noqa: BLE001 - fail-open per dispatcher charter
     _run_advisory_check_citation_grep_gate = None  # type: ignore[assignment]
 
+try:
+    from route_write import _run_advisory_check_route_write  # type: ignore[import-not-found]
+except Exception:  # noqa: BLE001 - fail-open per dispatcher charter
+    _run_advisory_check_route_write = None  # type: ignore[assignment]
+
 
 # Map hook_id -> advisory check function
 _ADVISORY_HANDLERS: dict[str, Any] = {
@@ -1935,6 +1964,13 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
 # self-test logs "no handler" and hook falls open; safe per ADVISORY-only charter).
 if _run_advisory_check_citation_grep_gate is not None:
     _ADVISORY_HANDLERS["citation_grep_gate"] = _run_advisory_check_citation_grep_gate
+
+# route_write returns a dict (updatedInput / permissionDecision) for SILENT-ROUTE
+# / ASK, a str for NUDGE, _BLOCK_SENTINEL for HARD-STOP, or None. main() handles
+# the dict shape via _emit_rich; main_multi never runs route_write (it is wired as
+# its own single-hook PreToolUse(Write) invocation, not in a --multi group).
+if _run_advisory_check_route_write is not None:
+    _ADVISORY_HANDLERS["route_write"] = _run_advisory_check_route_write
 
 
 def _run_advisory_check(
@@ -2031,6 +2067,11 @@ def main(hook_id: str) -> int:
             # Blocking check: reason already written to stderr by the check function.
             _emit_signal(hook_id, event, "block", "blocking_check", payload)
             return 2
+        if isinstance(ctx, dict):
+            # Rich return (route_write SILENT-ROUTE updatedInput / ASK). Carried
+            # in stdout JSON; exit 0.
+            _emit_signal(hook_id, event, "allow", "route_rewrite", payload)
+            return _emit_rich(event, ctx)
         _emit_signal(hook_id, event, "allow", "advisory_check", payload)
         if ctx:
             return _emit_advisory(hook_id, event, ctx)
@@ -2065,7 +2106,11 @@ def main_multi(hook_ids: list[str]) -> int:
                 blocked = True  # reason already on stderr; keep running for parity
             else:
                 _emit_signal(hook_id, event, "allow", "advisory_check", payload)
-                if ctx:
+                # main_multi aggregates advisory STRINGS only. A dict return
+                # (route_write rich shape) must never reach here — route_write is
+                # wired single-hook — but guard defensively so a future misgrouping
+                # can't break the json join.
+                if ctx and isinstance(ctx, str):
                     advisories.append(ctx)
         except Exception as exc:
             _emit_signal(hook_id, event, "error", f"dispatch_crash: {exc}", payload)

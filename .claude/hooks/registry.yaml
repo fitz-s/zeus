@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 22
+  catalog_size: 23
   sunset_default: 90d
 
 hooks:
@@ -361,3 +361,28 @@ hooks:
     telemetry:
       ritual_signal_emitted: true
     owner_module: .claude/hooks/dispatch.py
+
+  - id: route_write
+    event: PreToolUse
+    matcher: Write
+    intent: >
+      Write-router (workspace-routing-redesign PLAN §6). On a NEW-file Write, put
+      the file in its canonical home at write time by rewriting file_path via
+      updatedInput (SILENT-ROUTE) — the Write tool result reports the rewritten
+      path, so the agent's own path model is corrected with zero friction. NUDGE
+      when home is ambiguous; ASK for ambiguous authority homes; HARD-STOP (exit
+      2) ONLY on cross-tenant worktree writes or authority-file clobber — never
+      for mere misplacement. WRITE-ONLY: never reroutes Edit/MultiEdit (old_string
+      built against the original file → reroute corrupts). Registered BLOCKING so
+      removal/breakage is a protected change caught by tests/test_route_write.py.
+      S1 scope: high-precision scratch -> .omx/ + cross-tenant block; by-work
+      routing lands with S0. Fail-open on any exception (a crash never blocks a
+      write).
+    blocked_when:
+      - cross_tenant_worktree_write
+      - authority_file_clobber
+    severity: BLOCKING
+    sunset_date: 2026-12-14
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: .claude/hooks/route_write.py
