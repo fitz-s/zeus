@@ -23,6 +23,15 @@ from src.decision.decision_receipt import (
     RouteSpine,
     SizeSpine,
 )
+from src.decision.family_decision_engine import (
+    CandidateDecision,
+    FamilyDecision,
+    FamilyDecisionEngine,
+    FamilyDecisionError,
+    coherence_allows,
+    direction_law_ok,
+    forecast_bin_id,
+)
 
 __all__ = [
     "DecisionReceipt",
@@ -30,4 +39,11 @@ __all__ = [
     "QSpine",
     "RouteSpine",
     "SizeSpine",
+    "CandidateDecision",
+    "FamilyDecision",
+    "FamilyDecisionEngine",
+    "FamilyDecisionError",
+    "coherence_allows",
+    "direction_law_ok",
+    "forecast_bin_id",
 ]
