@@ -222,6 +222,34 @@ def _invalid_amount_rejection_payload(exc: Exception, *, idempotency_key: str) -
     }
 
 
+def _is_polymarket_deterministic_400(exc: Exception) -> bool:
+    """Any Polymarket ``status_code=400`` is a request-VALIDATION rejection.
+
+    A 400 means the venue rejected the HTTP request at validation BEFORE creating
+    an order (``venue_order_created=False`` always). It is therefore a DETERMINISTIC
+    submit rejection with NO venue side effect — it must NEVER be classified as an
+    ``UNKNOWN_SIDE_EFFECT``. That mis-classification latches the risk governor's
+    kill switch (``unknown_side_effect_limit=0``), which blocked EVERY subsequent
+    submission for ~8h on 2026-06-15 off a single ``'invalid post-...'`` 400 (the
+    specific ``invalid_amount`` 400 was already handled; this generalizes the class
+    so any 400 message — invalid post, tick, etc. — is a clean reject, not a latch).
+    400s are also non-retryable verbatim (same request → same 400); the family
+    re-decides next cycle on fresh inputs.
+    """
+    return type(exc).__name__ == "PolyApiException" and "status_code=400" in str(exc)
+
+
+def _generic_400_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict:
+    return {
+        "reason": "venue_rejected_400",
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+        "idempotency_key": idempotency_key,
+        "proof_class": "deterministic_venue_400",
+        "venue_order_created": False,
+    }
+
+
 def _deterministic_submit_rejection_payload(
     exc: Exception,
     *,
@@ -231,6 +259,11 @@ def _deterministic_submit_rejection_payload(
         return _geoblock_rejection_payload(exc, idempotency_key=idempotency_key)
     if _is_polymarket_invalid_amount_400(exc):
         return _invalid_amount_rejection_payload(exc, idempotency_key=idempotency_key)
+    # GENERAL 400 fallback (kept LAST so the specific invalid_amount reason_code wins
+    # for its downstream no-verbatim-retry handling): every other 400 is still a
+    # deterministic venue rejection, never an unknown side effect / governor latch.
+    if _is_polymarket_deterministic_400(exc):
+        return _generic_400_rejection_payload(exc, idempotency_key=idempotency_key)
     return None
 
 
