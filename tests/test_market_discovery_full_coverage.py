@@ -1086,12 +1086,26 @@ def test_batch_orderbook_prefetch_uses_live_proven_large_chunks(monkeypatch):
     assert summary["prefetched_orderbook_count"] > 50
 
 
-def test_tiny_prefetch_window_skips_batch_books_and_captures(monkeypatch):
-    """Default reserve math must not start a batch chunk with no prefetch window.
+def test_tiny_prefetch_window_still_attempts_one_batch_books(monkeypatch):
+    """Tiny prefetch window MUST still fire ONE batch POST /books, not fall back
+    to a per-token GET /book storm.
 
-    With ``budget_seconds`` near the default capture reserve, the prefetch
-    deadline can be only milliseconds away.  Starting one POST /books chunk in
-    that window can consume the entire cycle and produce attempted=0.
+    PER-TOKEN STORM FIX (2026-06-16, dead_order_lane_per_token_book_storm): the
+    prior behavior SKIPPED the batch entirely when (budget - reserve) fell below
+    the 0.75s minimum and returned ``prefetched_orderbook_count == 0``, dumping
+    the WHOLE family to a sequential per-token GET /book (~650ms each) inside
+    capture — strictly SLOWER than the one ~1s POST /books the skip was avoiding
+    (measured live: 104k GET /book vs 2.4k POST /books, 43:1; the budget-tight
+    warm lanes were the dominant storm source). The fix ALWAYS attempts the FIRST
+    chunk (one POST that replaces the N per-token GETs the fallback runs anyway),
+    bounded only by the client's own HTTP timeout; the min-window/deadline gate
+    now applies to the SECOND-and-later chunks only. This fixture's ~40 selected
+    tokens fit in one ``_BATCH_ORDERBOOK_CHUNK`` chunk, so exactly ONE batch
+    attempt is expected and every token is prefetched (no per-token fallback).
+
+    RED-on-revert: restoring the pre-loop ``return {}`` skip makes
+    ``get_orderbook_snapshots.call_count`` 0 and ``prefetched_orderbook_count`` 0
+    again — the exact storm condition this fix removes.
     """
     BUDGET_SECONDS = 6.0
     fake_now = 0.0
@@ -1108,9 +1122,19 @@ def test_tiny_prefetch_window_skips_batch_books_and_captures(monkeypatch):
         for idx, name in enumerate(list(ms.cities_by_name.keys())[:10], start=1)
     ]
     capture_calls: list[str] = []
+    batch_token_counts: list[int] = []
 
     def _batch_books(token_ids: list[str]) -> dict[str, dict]:
-        raise AssertionError("batch prefetch must be skipped when its window is tiny")
+        batch_token_counts.append(len(token_ids))
+        return {
+            token_id: {
+                "market": token_id,
+                "asset_id": token_id,
+                "bids": [{"price": "0.55", "size": "100"}],
+                "asks": [{"price": "0.60", "size": "100"}],
+            }
+            for token_id in token_ids
+        }
 
     def _mock_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
         capture_calls.append(str(decision.tokens.get("market_id") or ""))
@@ -1130,11 +1154,70 @@ def test_tiny_prefetch_window_skips_batch_books_and_captures(monkeypatch):
             max_outcomes=2,
         )
 
-    assert clob.get_orderbook_snapshots.call_count == 0
+    # The single-chunk family ALWAYS fires exactly one POST /books — never the
+    # per-token GET storm the old skip produced.
+    assert clob.get_orderbook_snapshots.call_count == 1
+    assert batch_token_counts and batch_token_counts[0] > 0
     assert summary["attempted"] > 0
     assert capture_calls
-    assert summary["prefetched_orderbook_count"] == 0
+    # Every selected token came from the batch — no per-token fallback (the storm).
+    assert summary["prefetched_orderbook_count"] == batch_token_counts[0]
+    assert summary["prefetched_orderbook_count"] > 0
     assert summary["snapshot_capture_reserve_seconds"] == pytest.approx(BUDGET_SECONDS - 0.05)
+
+
+def test_prefetch_first_chunk_always_fires_chunk2plus_budget_gated(monkeypatch):
+    """PER-TOKEN STORM FIX boundary antibody: the FIRST POST /books chunk always
+    fires (it replaces the per-token GET storm), while the SECOND-and-later chunks
+    of a large multi-chunk cycle remain budget-gated.
+
+    Storm root cause (2026-06-16): the pre-loop min-window skip returned ``{}`` and
+    dumped the WHOLE family to sequential per-token GET /book. The fix moves the
+    gate INTO the chunk loop and exempts chunk 0, so:
+      * no deadline                -> every chunk fires (unchanged)
+      * deadline already in the past -> chunk 0 STILL fires (one POST, no storm);
+        chunks 1+ are skipped and their tokens fall back per-token inside capture.
+
+    Driven directly against ``_prefetch_selected_orderbooks`` with a tiny chunk
+    size so a small token set spans multiple chunks. RED-on-revert: restoring the
+    pre-loop ``return {}`` skip makes the past-deadline case fire ZERO chunks.
+    """
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 2)  # 2 tokens/chunk -> 3 chunks for 6 tokens
+
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(6)]
+    chunk_calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            chunk_calls.append(list(token_ids))
+            return {t: {"asset_id": t, "bids": [], "asks": []} for t in token_ids}
+
+    # No deadline -> all 3 chunks fire (back-compat).
+    chunk_calls.clear()
+    books = ms._prefetch_selected_orderbooks(_Clob(), candidates, deadline=None)
+    assert len(chunk_calls) == 3, chunk_calls
+    assert len(books) == 6
+
+    # Deadline already in the PAST -> chunk 0 STILL fires (storm fix), chunks 1+ gated.
+    chunk_calls.clear()
+    past_deadline = time.monotonic() - 100.0
+    books = ms._prefetch_selected_orderbooks(_Clob(), candidates, deadline=past_deadline)
+    assert len(chunk_calls) == 1, (
+        "first chunk MUST always fire (one POST /books replaces the per-token GET "
+        f"storm); got {len(chunk_calls)} chunks"
+    )
+    assert len(books) == 2  # only the first chunk's tokens; the rest fall back per-token
 
 
 def test_snapshot_capture_retries_short_sqlite_lock(monkeypatch):

@@ -3890,29 +3890,47 @@ def _prefetch_selected_orderbooks(
     if not token_ids:
         return {}
 
-    if deadline is not None:
-        min_prefetch_window = _positive_float_env(
-            "ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS",
-            0.75,
-        )
-        remaining_window = deadline - time.monotonic()
-        if remaining_window < min_prefetch_window:
-            logger.info(
-                "Batch orderbook prefetch skipped: window %.3fs below %.3fs minimum",
-                remaining_window,
-                min_prefetch_window,
-            )
-            return {}
+    # PER-TOKEN STORM FIX (2026-06-16, dead_order_lane_per_token_book_storm): the
+    # tight-budget warm lanes (snapshot_budget≈14s, reserve 12s → ≈2s prefetch
+    # window, eroded below the 0.75s minimum by scheduler/function overhead) used
+    # to SKIP the batch entirely here and return {} → capture then fell back to a
+    # SEQUENTIAL per-token GET /book for EVERY token in the family (≈650ms each).
+    # That is strictly SLOWER than the one ~1s POST /books the skip was avoiding:
+    # a 22-token family becomes ≈14s of serial HTTP instead of one round-trip,
+    # exceeding the 30s snapshot freshness window and starving the decision lane
+    # (measured live: 104k GET /book vs 2.4k POST /books, 43:1; prefetched_
+    # orderbook_count=0 cycles). The min-window guard's premise (don't START a slow
+    # batch with no time left) is inverted in practice — one batch POST is always
+    # cheaper than the N per-token GETs the fallback runs anyway. So the FIRST
+    # chunk is ALWAYS attempted (bounded only by the client's own HTTP timeout, the
+    # same bound a single GET /book carries); the min-window/deadline gate applies
+    # only to the SECOND-and-later chunks of a large multi-chunk warm cycle, where
+    # deferring extra chunks to a later cycle is genuine budget protection. Per-bin
+    # fallback for tokens absent from the batch response is unchanged (capture's
+    # prefetched_orderbook=None branch, market_scanner.py:2822-2825).
+    min_prefetch_window = _positive_float_env(
+        "ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS",
+        0.75,
+    )
 
     books: dict[str, dict] = {}
-    for start in range(0, len(token_ids), _BATCH_ORDERBOOK_CHUNK):
-        if deadline is not None and time.monotonic() >= deadline:
-            logger.info(
-                "Batch orderbook prefetch stopped at budget deadline after %d/%d tokens",
-                start,
-                len(token_ids),
-            )
-            break
+    for chunk_index, start in enumerate(range(0, len(token_ids), _BATCH_ORDERBOOK_CHUNK)):
+        # Budget gate applies to chunk 2+ ONLY: the first chunk is the one POST that
+        # replaces the per-token GET storm, so it always runs. Later chunks of a
+        # multi-chunk cycle are deferred to a later cycle when the window is spent —
+        # the unfetched tokens fall back per-token inside capture, never abort.
+        if chunk_index > 0 and deadline is not None:
+            remaining_window = deadline - time.monotonic()
+            if remaining_window < min_prefetch_window:
+                logger.info(
+                    "Batch orderbook prefetch stopped after chunk %d/%d "
+                    "(window %.3fs below %.3fs minimum); remaining tokens fall back per-token",
+                    chunk_index,
+                    (len(token_ids) + _BATCH_ORDERBOOK_CHUNK - 1) // _BATCH_ORDERBOOK_CHUNK,
+                    remaining_window,
+                    min_prefetch_window,
+                )
+                break
         chunk = token_ids[start : start + _BATCH_ORDERBOOK_CHUNK]
         try:
             chunk_books = getter(chunk)
