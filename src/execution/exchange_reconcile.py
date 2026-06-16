@@ -4346,7 +4346,7 @@ def _closed_position_token_holdings_by_token(conn: sqlite3.Connection) -> dict[s
     chain_placeholders = ", ".join("?" for _ in _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES)
     rows = conn.execute(
         f"""
-        SELECT token_id, no_token_id, direction, shares
+        SELECT position_id, token_id, no_token_id, direction, shares, order_id
           FROM position_current
          WHERE phase IN ({phase_placeholders})
            AND chain_state IN ({chain_placeholders})
@@ -4357,7 +4357,19 @@ def _closed_position_token_holdings_by_token(conn: sqlite3.Connection) -> dict[s
             *tuple(sorted(_CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES)),
         ),
     ).fetchall()
-    out: dict[str, Decimal] = {}
+    # DEDUPE BY ON-CHAIN HOLDING (2026-06-16 intra-Zeus double-count antibody): the
+    # wallet holds a token's CTF balance ONCE regardless of how many position_current
+    # lifecycle rows Zeus recorded for the same fill. Multiple terminal rows that share
+    # one venue order_id are the SAME on-chain holding (observed: token
+    # 9491..517 booked under three position_ids — two voided, all 5.07 shares, one
+    # order 0x5ce1.. — summed to expected_wallet 10.14 vs exchange 5.07, freezing the
+    # M5 latch forever). Collapse a (token, order_id) group to its single
+    # representative holding (max share = the full fill); rows on DISTINCT orders are
+    # distinct fills and still sum (token 1139..946: two orders, 6+6 = 12.0 preserved).
+    # A row with no order_id cannot be proven a duplicate, so it is treated as its own
+    # distinct holding (fail toward over-counting → keep the finding rather than mask
+    # real drift). Mirrors the on-chain truth the exchange position reports.
+    holdings_by_order: dict[str, dict[str, Decimal]] = {}
     for row in rows:
         direction = str(row["direction"] or "").strip().lower()
         token = row["no_token_id"] if direction == "buy_no" else row["token_id"]
@@ -4367,7 +4379,14 @@ def _closed_position_token_holdings_by_token(conn: sqlite3.Connection) -> dict[s
         amount = _positive_decimal_or_none(row["shares"])
         if amount is None:
             continue
-        out[token_id] = out.get(token_id, Decimal("0")) + amount
+        order_id = str(row["order_id"] or "").strip()
+        # NULL/empty order_id → unique per position row so it is never collapsed.
+        group_key = order_id if order_id else f"__no_order__:{row['position_id']}"
+        token_groups = holdings_by_order.setdefault(token_id, {})
+        token_groups[group_key] = max(token_groups.get(group_key, Decimal("0")), amount)
+    out: dict[str, Decimal] = {}
+    for token_id, groups in holdings_by_order.items():
+        out[token_id] = sum(groups.values(), Decimal("0"))
     return out
 
 

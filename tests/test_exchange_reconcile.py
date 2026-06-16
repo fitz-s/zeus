@@ -2960,6 +2960,123 @@ def test_terminal_position_current_token_holding_is_expected_wallet_balance(conn
     }
 
 
+def test_duplicate_terminal_positions_same_order_count_holding_once(conn):
+    """Two terminal position_current rows for the SAME on-chain fill (same order_id)
+    must contribute the expected-wallet holding ONCE, not summed.
+
+    Regression for the 2026-06-16 M5 latch freeze: token 9491..517 was booked under
+    multiple position_ids (two voided), all 5.07 shares from ONE venue order 0x5ce1..,
+    so `_closed_position_token_holdings_by_token` summed to expected_wallet 10.14 vs
+    exchange 5.07 and re-recorded position_drift forever. RED on the pre-fix `sum()`.
+    """
+    from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
+
+    no_token = "dup-terminal-no-token"
+    shared_order = "ord-dup-terminal-shared"
+    for position_id in ("pos-dup-terminal-a", "pos-dup-terminal-b"):
+        seed_position_baseline(conn, position_id=position_id, order_id=shared_order)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'voided',
+                   chain_state = 'synced',
+                   direction = 'buy_no',
+                   no_token_id = ?,
+                   token_id = '',
+                   condition_id = 'condition-m5',
+                   market_id = 'condition-m5',
+                   shares = 5.07,
+                   order_id = ?,
+                   updated_at = ?
+             WHERE position_id = ?
+            """,
+            (no_token, shared_order, NOW.isoformat(), position_id),
+        )
+    observed = NOW + timedelta(minutes=10)
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=no_token,
+        context="ws_gap",
+        evidence={"reason": "duplicate_terminal_position_probe"},
+        recorded_at=observed - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=no_token, size="5.07")]),
+        conn,
+        context="ws_gap",
+        observed_at=observed,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_closed_position_token_holding",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
+def test_distinct_orders_same_token_still_sum_terminal_holdings(conn):
+    """Two terminal position_current rows on DISTINCT orders are distinct on-chain
+    fills and MUST still sum (the dedupe collapses only same-order duplicates).
+
+    Guards against over-collapsing: token 1139..946 holds 6+6 from two real orders =
+    expected_wallet 12.0, which must match a 12.0 exchange position (no drift).
+    """
+    from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
+
+    no_token = "distinct-orders-no-token"
+    for position_id, order_id in (
+        ("pos-distinct-a", "ord-distinct-a"),
+        ("pos-distinct-b", "ord-distinct-b"),
+    ):
+        seed_position_baseline(conn, position_id=position_id, order_id=order_id)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'settled',
+                   chain_state = 'synced',
+                   direction = 'buy_no',
+                   no_token_id = ?,
+                   token_id = '',
+                   condition_id = 'condition-m5',
+                   market_id = 'condition-m5',
+                   shares = 6.0,
+                   order_id = ?,
+                   updated_at = ?
+             WHERE position_id = ?
+            """,
+            (no_token, order_id, NOW.isoformat(), position_id),
+        )
+    observed = NOW + timedelta(minutes=10)
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=no_token,
+        context="ws_gap",
+        evidence={"reason": "distinct_orders_probe"},
+        recorded_at=observed - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=no_token, size="12.0")]),
+        conn,
+        context="ws_gap",
+        observed_at=observed,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+    resolved = conn.execute(
+        "SELECT resolution FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert resolved["resolution"] == "position_drift_closed_position_token_holding"
+
+
 def test_redeem_confirmed_settled_token_still_at_exchange_is_position_drift(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
