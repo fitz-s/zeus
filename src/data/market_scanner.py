@@ -105,8 +105,16 @@ def _snapshot_capture_busy_timeout_ms(remaining_seconds: float) -> int:
     the top of the capture loop) remains the true outer bound on the cycle.
     """
 
-    configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", "2000"))
-    floor_ms = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "1000"))
+    # 2026-06-16: the 1000ms floor / 2000ms ceiling was too short to win the zeus_trades.db
+    # WAL write lock under transient concurrent-writer contention (reactor claim/exit/poller
+    # commits). An external BEGIN IMMEDIATE probe acquired the lock in 0.91s, yet capture
+    # (floored at 1000ms under per-cycle budget pressure) gave up after ~1s -> inserted=0 ->
+    # fresh_executable_city_count=0 -> the spine starved of priceable families. Raise the
+    # floor to 4000ms (the durable minimum WAIT a contended insert gets regardless of the
+    # shrinking per-cycle budget) and the ceiling to 8000ms so a brief writer hold is WAITED
+    # out, not fail-fasted. Still bounded by the wall-clock per-cycle deadline.
+    configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", "8000"))
+    floor_ms = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "4000"))
     # The per-cycle remaining budget may TIGHTEN the wait toward the configured
     # ceiling, but it must never drop the wait below the durable floor: a contended
     # insert that waits only a few ms is the exact failure that starved coverage.
