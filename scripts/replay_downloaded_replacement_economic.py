@@ -25,9 +25,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.data.replacement_forecast_go_live_report import (  # noqa: E402
-    replacement_forecast_go_live_payload_template,
-)
+# DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the go-live payload emitter
+# (_write_go_live_payload_json + its replacement_forecast_go_live_payload_template
+# import) was REMOVED. It produced the dead promotion/readiness/rollback verdict
+# payload; this script's economic tournament + before/after analysis is unaffected.
+# See docs/evidence/timing_audit/.
 
 
 FULL_STRATEGY_LABEL = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
@@ -1288,130 +1290,6 @@ def _nested_walk_forward_passed_for_rows(
     )
 
 
-def _write_go_live_payload_json(
-    *,
-    rows: Sequence[ReplacementReplayRow],
-    coverage: Mapping[str, Any],
-    capital_json: Mapping[str, Any],
-    variants_json: Mapping[str, Any],
-    path: Path,
-    before_after_csv: Path,
-    replacement_label: str,
-) -> None:
-    payload = replacement_forecast_go_live_payload_template()
-    official_dates = sorted({row.target_date.isoformat() for row in rows})
-    observed_metrics = sorted({row.metric for row in rows})
-    refit_metric = observed_metrics[0] if len(observed_metrics) == 1 else "high"
-    metrics = capital_json.get("metrics_by_label", {})
-    replacement_metrics = metrics.get(replacement_label, {}) if isinstance(metrics, Mapping) else {}
-    q_lcb_coverage, q_lcb_covered_rows, q_lcb_official_rows = _empirical_q_lcb_coverage_for_rows(
-        rows,
-        product_label=replacement_label,
-    )
-    nested_walk_forward_passed = _nested_walk_forward_passed_for_rows(
-        rows,
-        product_label=replacement_label,
-    )
-    payload["source_fact_status"] = "CURRENT_FOR_LIVE"
-    payload["data_fact_status"] = "CURRENT_FOR_LIVE"
-    payload["before_after_rows"] = []
-    payload["min_before_after_official_days"] = 5
-    payload["min_before_after_official_rows"] = 250
-    payload["promotion_evidence"] = {
-        "official_days": len(official_dates),
-        "official_rows": int(coverage.get("before_after_matched_rows", 0)),
-        "after_cost_pnl": float(replacement_metrics.get("total_after_cost_pnl", 0.0)),
-        "q_lcb_coverage": q_lcb_coverage,
-        "anti_lookahead_violations": int(replacement_metrics.get("anti_lookahead_violations", 0)),
-        "source_availability_violations": int(replacement_metrics.get("availability_violations", 0)),
-        "unresolved_regression_clusters": 0,
-        "same_clob_replay_passed": bool(rows),
-        "nested_walk_forward_passed": nested_walk_forward_passed,
-        "same_clob_replay_scored_rows": int(coverage.get("before_after_matched_rows", 0)),
-        "same_clob_replay_blocked_rows": 0,
-        "fee_depth_fill_evidence_passed": True,
-        "unit_pnl_only": False,
-        "nested_holdout_brier": replacement_metrics.get("brier"),
-        "nested_holdout_log_loss": replacement_metrics.get("log_loss"),
-        "nested_selected_anchor_weight": 0.80,
-        "nested_selected_anchor_sigma_c": 3.00,
-        "nested_guardrail_bucket_count": 1,
-        "nested_guardrail_bucket_min_rows": int(coverage.get("before_after_matched_rows", 0)),
-        "product_specific_refit_passed": False,
-    }
-    payload["promotion_evidence_diagnostics"] = {
-        "q_lcb_coverage_proxy": "selected_wins_until_live_q_lcb_receipts_exist",
-        "q_lcb_source_counts": _q_lcb_source_counts(rows, product_label=replacement_label),
-        "q_lcb_covered_rows": q_lcb_covered_rows,
-        "q_lcb_official_rows": q_lcb_official_rows,
-        "nested_walk_forward_rule": "official_days>=5 and product_rows>=250 and selected_parameter=w0.80_sigma3.00",
-        "nested_walk_forward_passed": nested_walk_forward_passed,
-    }
-    payload["refit_evidence"] = {
-        "official_days": len(official_dates),
-        "official_rows": int(coverage.get("before_after_matched_rows", 0)),
-        "temperature_metric": refit_metric,
-        "source_family": "derived_posterior",
-        "product_id": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
-        "calibration_method": "soft_anchor_product_specific_nested_refit",
-        "enabled_evidence": [
-            "product_specific_rows",
-            "guardrail_bucket_rows",
-            "emos_product_key",
-            "baseline_calibration_not_reused",
-            "high_low_not_mixed",
-        ],
-        "min_guardrail_bucket_rows": int(coverage.get("before_after_matched_rows", 0)),
-        "high_low_mixed": len(observed_metrics) > 1,
-        "baseline_calibration_reused": False,
-        "emos_key_includes_product": True,
-        "emos_key_schema": "source_family|product_id|data_version|temperature_metric|city|season",
-        "emos_identity_evidence_status": "PRESENT",
-        "data_refit_requested": True,
-        "live_promotion_requested": False,
-    }
-    if rows:
-        exemplar = sorted(rows, key=lambda row: (row.target_date, row.city, row.metric))[0]
-        payload["readiness"] = {
-            "city": exemplar.city,
-            "target_date": exemplar.target_date.isoformat(),
-            "temperature_metric": exemplar.metric,
-            "decision_time": exemplar.decision_time.isoformat(),
-            "computed_at": exemplar.decision_time.isoformat(),
-            "expires_at": (exemplar.decision_time + timedelta(hours=2)).isoformat(),
-            "dependencies": [
-                {
-                    "role": "soft_anchor_posterior",
-                    "source_id": FULL_STRATEGY_LABEL,
-                    "product_id": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
-                    "data_version": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_low_v1",
-                    "source_run_id": f"economic-replay-{official_dates[0]}-{official_dates[-1]}" if official_dates else "economic-replay",
-                    "source_available_at": exemplar.source_available_at.isoformat(),
-                    "status": "SHADOW_ONLY",
-                    "posterior_id": 1,
-                }
-            ],
-        }
-    payload["rollback"] = {
-        "reason": "rollback path for Open-Meteo ECMWF IFS 9km plus AIFS sampled-2t soft-anchor shadow/veto switch",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "additional_source_ids_to_pause": [FULL_STRATEGY_LABEL],
-    }
-    payload["capital_replay"] = {
-        "coverage": dict(coverage),
-        "capital_tournament_json": str(path.parent / "capital_tournament.json"),
-        "strategy_variants_json": str(path.parent / "strategy_variants.json"),
-        "before_after_rows_csv": str(before_after_csv),
-        "selected_label": capital_json.get("selected_label"),
-        "selected_capital_gain_variant": variants_json.get("selected_label"),
-        "selected_roi_variant": variants_json.get("selected_roi_label"),
-        "status": capital_json.get("status"),
-        "variant_status": variants_json.get("status"),
-        "objective": "maximize_after_cost_capital_gain_with_roi_drawdown_diagnostics",
-    }
-    path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Replay downloaded replacement forecasts against real executable snapshots")
     parser.add_argument("--eval-json", type=Path, required=True)
@@ -1426,7 +1304,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--slippage-rate", type=float, default=0.01)
     parser.add_argument("--sigma-f", type=float, default=3.0)
     parser.add_argument("--min-samples", type=int, default=20)
-    parser.add_argument("--go-live-payload-json", type=Path, default=None)
     args = parser.parse_args(argv)
 
     payload = json.loads(args.eval_json.read_text(encoding="utf-8"))
@@ -1523,15 +1400,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     capital_json = replacement_tournament_result_to_jsonable(capital)
     variants_json = strategy_variant_tournament_result_to_jsonable(variants)
     write_json_artifact({"coverage": coverage, "capital": capital_json, "variants": variants_json}, args.out_dir / "executive_summary.json")
-    _write_go_live_payload_json(
-        rows=rows,
-        coverage=coverage,
-        capital_json=capital_json,
-        variants_json=variants_json,
-        path=args.go_live_payload_json or (args.out_dir / "go_live_payload.json"),
-        before_after_csv=args.out_dir / "before_after_rows.csv",
-        replacement_label=FIXED_CONFIG_LABEL,
-    )
     print(json.dumps({"status": capital.status, "selected_label": capital.selected_label, "rows": len(rows), "skipped": len(skipped), "out_dir": str(args.out_dir)}, sort_keys=True))
     return 0 if rows else 1
 

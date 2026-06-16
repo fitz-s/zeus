@@ -431,7 +431,16 @@ def test_decision_events_null_contributes_skipped(de_db):
 # ---------------------------------------------------------------------------
 
 def _make_evidence_report_db() -> sqlite3.Connection:
-    """In-memory DB with decision_events + decision_integrity_quarantine."""
+    """In-memory DB with decision_events + decision_certificates + decision_integrity_quarantine.
+
+    C2 (2026-06-16): build_evidence_report's n_decisions denominator now reads
+    decision_certificates (FinalIntentCertificate, strategy_key in payload_json), since
+    decision_events is a 0-row dead lane in production. We create both tables: decision_events
+    is retained because the regret/settled-analytics join still goes through it (and that path
+    still applies quarantine exclusion — see test_regret_decomposition_excludes_quarantined_rows).
+    """
+    from src.state.schema.decision_certificates_schema import CREATE_CERTIFICATES_SQL
+
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
@@ -453,18 +462,62 @@ def _make_evidence_report_db() -> sqlite3.Connection:
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
     """)
+    conn.execute(CREATE_CERTIFICATES_SQL)
     ensure_table(conn)
     conn.commit()
     return conn
 
 
+def _insert_final_intent_certificate(
+    conn: sqlite3.Connection, *, cert_id: str, strategy_key: str, decision_time: str
+) -> None:
+    """Seed a VERIFIED FinalIntentCertificate row for the given strategy_key.
+
+    Mirrors the active C2 denominator lane (strategy_key embedded in payload_json). No
+    decision_event_id is carried — the production FinalIntentCertificate payload does not
+    have one (src/decision_kernel/certificates/execution.py:167-228), which is exactly why
+    quarantine exclusion (keyed on opportunity_fact.decision_id = decision_event_id) cannot
+    be applied to this denominator.
+    """
+    import json
+
+    payload = json.dumps({"strategy_key": strategy_key})
+    conn.execute(
+        """INSERT INTO decision_certificates (
+            certificate_id, certificate_type, schema_version, canonicalization_version,
+            semantic_key, claim_type, mode, decision_time,
+            authority_id, authority_version, algorithm_id, algorithm_version,
+            payload_json, payload_hash, certificate_hash, verifier_status, created_at
+        ) VALUES (?, 'FinalIntentCertificate', 1, '1.0',
+                  ?, 'FINAL_INTENT', 'SHADOW', ?,
+                  'test_authority', '1.0', 'test_algorithm', '1.0',
+                  ?, 'hash_' || ?, 'cert_hash_' || ?, 'VERIFIED', ?)""",
+        (cert_id, cert_id, decision_time, payload, cert_id, cert_id, decision_time),
+    )
+
+
 def test_promotion_readiness_excludes_quarantined_decisions():
-    """build_evidence_report excludes decision_events rows tagged in quarantine."""
+    """C2 (2026-06-16): n_decisions reads decision_certificates and is NOT narrowed by quarantine.
+
+    History: this test verified that the OLD decision_events-based n_decisions denominator
+    excluded quarantined rows (NOT EXISTS on opportunity_fact.row_id = de.decision_event_id).
+    The C2 fix migrated the denominator to decision_certificates (decision_events is a 0-row
+    dead lane). FinalIntentCertificate payloads carry no decision_event_id, so there is no key
+    to join the quarantine rows against — the denominator exclusion is therefore not
+    reconstructible on certificates. This is acceptable because:
+      - n_decisions is telemetry-only (no ARM/promotion gate reads it; only reported in
+        promotion_readiness_job.py), and
+      - quarantine integrity on the GATE-relevant settled analytics (n_settled / n_wins, joined
+        through decision_events.decision_event_id) is RETAINED and covered by
+        test_regret_decomposition_excludes_quarantined_rows.
+    This test now pins the new contract: quarantining a decision does NOT change n_decisions.
+    """
     from src.analysis.evidence_report import build_evidence_report
 
     conn = _make_evidence_report_db()
 
-    # Insert 2 decision_events for the same strategy.
+    # Seed 2 FinalIntentCertificate rows for the same strategy (the active C2 denominator lane),
+    # plus the parallel decision_events rows (regret/settled join lineage).
     now = datetime.now(timezone.utc).isoformat()
     for i in range(1, 3):
         conn.execute(
@@ -474,17 +527,19 @@ def test_promotion_readiness_excludes_quarantined_decisions():
                VALUES (?, 'high', '2026-05-22', ?, ?, ?, 'strat-A')""",
             (f"mkt-{i}", now, i, f"dec-evt-{i}"),
         )
+        _insert_final_intent_certificate(
+            conn, cert_id=f"cert-{i}", strategy_key="strat-A", decision_time=now
+        )
     conn.commit()
 
-    # Baseline: both decisions counted.
+    # Baseline: both certificates counted.
     report_before = build_evidence_report(
         "strat-A", 0, conn=conn, breakeven_win_rate=0.52
     )
     assert report_before.n_decisions == 2
 
-    # Quarantine dec-evt-1 under opportunity_fact (evidence_report filters on
-    # table_name='opportunity_fact' AND row_id = de.decision_event_id, per
-    # the 1-to-1 forecast linkage anchor for decision_events).
+    # Quarantine dec-evt-1 under opportunity_fact. The certificate denominator has no
+    # decision_event_id to match, so the count is unaffected (the C2 contract).
     conn.execute(
         """INSERT INTO decision_integrity_quarantine
            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
@@ -493,12 +548,13 @@ def test_promotion_readiness_excludes_quarantined_decisions():
     )
     conn.commit()
 
-    # After quarantine: only 1 decision counted.
+    # After quarantine: n_decisions UNCHANGED (telemetry-only denominator, no cert join key).
+    # Settled-analytics exclusion is covered separately (test_regret_decomposition_*).
     report_after = build_evidence_report(
         "strat-A", 0, conn=conn, breakeven_win_rate=0.52
     )
-    assert report_after.n_decisions == 1, (
-        f"Expected 1 decision after quarantine, got {report_after.n_decisions}"
+    assert report_after.n_decisions == 2, (
+        f"C2: certificate denominator is not narrowed by quarantine, got {report_after.n_decisions}"
     )
 
 

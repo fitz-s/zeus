@@ -279,6 +279,13 @@ def test_empty_expected_steps_derives_target_window_steps_only():
 
 
 def test_available_at_is_source_available_not_issue_time():
+    # C1-AVAIL-CLOCK (2026-06-16): the event's available_at is PROOF OF POSSESSION first.
+    # build_forecast_snapshot_ready_event now prefers the snapshot's real fetch_time (the
+    # wall-clock we held the data, 04:16 in _snapshot()) over the snapshot's available_at
+    # (04:15) and over source_available_at. fetch_time is the strongest possession stamp,
+    # so it (not the cycle/issue time, and not the weaker available_at) is what the event
+    # carries. This still satisfies the original intent of this test — available_at must be
+    # a real possession clock, never the issue/cycle time.
     event = build_forecast_snapshot_ready_event(
         source_run=_source_run(),
         coverage=_coverage(),
@@ -287,7 +294,7 @@ def test_available_at_is_source_available_not_issue_time():
         received_at="2026-05-24T04:17:00+00:00",
         live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
     )
-    assert event.available_at == "2026-05-24T04:15:00+00:00"
+    assert event.available_at == "2026-05-24T04:16:00+00:00"
 
 
 def test_read_executable_forecast_blocks_future_available_at():

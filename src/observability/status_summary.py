@@ -248,6 +248,25 @@ def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | Non
     risk["infrastructure_issues"] = list(consistency_issues)
     risk["infrastructure_scope"] = "cycle_pulse"
 
+    # AB3 (2026-06-16): lane-liveness surfacing. The cycle summary is reachable
+    # HERE (the venue heartbeat-keeper process has no access to it), so this is
+    # the minimal existing channel to surface lane health onto the pulse that
+    # live_health.py reads. The check emits a logger.warning naming any
+    # decision/telemetry lane that had write failures this cycle. OBSERVABILITY
+    # ONLY — it does NOT feed consistency_issues / infrastructure_level (a dead
+    # telemetry lane must not gate or block trading; operator law: no throttles).
+    try:
+        from src.control.heartbeat_supervisor import data_lane_health_check
+
+        lane_verdict = data_lane_health_check(
+            lane_write_failures=cycle.get("lane_write_failures"),
+            decision_lane_writes=cycle.get("decision_lane_writes"),
+            expected_lanes=None,  # quiet lanes are NOT assumed dead without an explicit expectation
+        )
+        status["data_lane_liveness"] = lane_verdict
+    except Exception as exc:  # noqa: BLE001 - liveness surfacing must never break the pulse
+        logger.warning("data lane liveness check failed (non-fatal): %s", exc)
+
 
 def _refresh_minimal_runtime_read_model_for_status(status: dict) -> bool:
     """Refresh portfolio/runtime slices that make top-level freshness meaningful."""

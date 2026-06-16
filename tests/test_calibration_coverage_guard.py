@@ -336,6 +336,62 @@ def test_coverage_gap_describe_format():
 
 
 # ---------------------------------------------------------------------------
+# B — SILENT_FALLBACK elimination: borrow warning fires at DETECTION time
+# ---------------------------------------------------------------------------
+
+def test_season_only_borrow_warning_fires_at_detection_non_armed(world_conn, monkeypatch, caplog):
+    """Freshness contract B: a season-only cross-cluster Platt borrow must emit a
+    WARNING at DETECTION TIME (inside _check_city_metric_coverage), not only when
+    the top-level assert_calibration_coverage aggregates.
+
+    This means even calling calibration_coverage_report() directly (without going
+    through assert_calibration_coverage) must produce a log line naming the borrow
+    and the SILENT_FALLBACK label so the borrow is traceable in production.
+    """
+    # Lagos: no bias rows -> uncorrected -> Platt check runs.
+    _patch_platt(monkeypatch, lambda conn, *, city, today, season, metric: "borrowed:foreign_cluster")
+
+    with caplog.at_level(logging.WARNING, logger="src.observability.calibration_coverage_guard"):
+        # Use calibration_coverage_report (not assert_calibration_coverage) to verify
+        # the warning fires at detection time, not only at aggregation time.
+        report = calibration_coverage_report(
+            armed=False, conn=world_conn, cities=[_city("Lagos")], now=_NOW
+        )
+
+    platt_gaps = [g for g in report.gaps if g.layer == "platt"]
+    assert platt_gaps, "Expected a Platt gap to be detected for Lagos"
+
+    warn_text = "\n".join(r.getMessage() for r in caplog.records)
+    # The warning must name the borrow and include the SILENT_FALLBACK label.
+    assert "SILENT_FALLBACK" in warn_text, (
+        f"Expected 'SILENT_FALLBACK' in warning at detection time, got log:\n{warn_text}"
+    )
+    assert "borrowed:" in warn_text, (
+        f"Expected 'borrowed:' in warning to identify the borrow scope, got:\n{warn_text}"
+    )
+    # The city name must appear in the warning for traceability.
+    assert "Lagos" in warn_text, (
+        f"Expected city 'Lagos' in warning for traceability, got:\n{warn_text}"
+    )
+
+
+def test_season_only_borrow_warning_fires_for_identity_starvation(world_conn, monkeypatch, caplog):
+    """The detection-time warning also fires for identity-starvation (cal is None),
+    which is the other non-armed silent path (not just borrowed:<cluster>)."""
+    _patch_platt(monkeypatch, lambda conn, *, city, today, season, metric: "identity")
+
+    with caplog.at_level(logging.WARNING, logger="src.observability.calibration_coverage_guard"):
+        calibration_coverage_report(
+            armed=False, conn=world_conn, cities=[_city("Jinan")], now=_NOW
+        )
+
+    warn_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SILENT_FALLBACK" in warn_text, (
+        f"Expected 'SILENT_FALLBACK' in warning for identity-starvation, got:\n{warn_text}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # STORE-UNREADABLE resilience — #90 regression antibody
 #
 # The #90 boot guard manufactured a phantom RAW/Platt gap when the calibration

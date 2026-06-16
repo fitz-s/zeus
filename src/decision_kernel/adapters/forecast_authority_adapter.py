@@ -40,7 +40,7 @@ def build_forecast_authority_certificate(
         claim_type="forecast_authority",
         mode="NO_SUBMIT",
         decision_time=decision_time,
-        source_available_at=decision_time,
+        source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: thin status-record cert (adapter accepts no raw source_run/coverage rows, has no caller in the live reactor path — the live FORECAST_AUTHORITY clock is built from real evidence in event_reactor_adapter._forecast_authority_payload_and_clock:6634, not here); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, max_parent_* — never a freshness gate or q. decision_time is the only honest anchor.
         agent_received_at=decision_time,
         persisted_at=decision_time,
         payload={

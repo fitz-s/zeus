@@ -48,6 +48,59 @@ from src.forecast.bayes_precision_fusion import (
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_capture")
 
+
+def _available_after_decision(
+    available_at: str | datetime | None,
+    decision_utc: datetime,
+    *,
+    model_label: str = "",
+) -> bool:
+    """True iff ``available_at`` is genuinely AFTER ``decision_utc`` (arrival-guard exclusion).
+
+    FAIL-OPEN: returns False (admit) when ``available_at`` is None/empty/unparseable — the guard
+    never excludes a model on the strength of missing or malformed availability evidence. Naive
+    timestamps are interpreted as UTC (Zeus persists UTC wall-clocks).
+
+    LOUD FALLBACK: every admit on missing/malformed evidence emits a WARNING so that a model
+    admitted without availability proof is VISIBLE in logs (freshness-contract: no silent admit).
+    The model_label parameter (e.g. the model name) is included in the warning for traceability."""
+    from datetime import timezone as _tz  # noqa: PLC0415
+
+    _label = f" model={model_label!r}" if model_label else ""
+    if available_at is None:
+        _LOG.warning(
+            "BAYES_PRECISION_FUSION arrival guard: admitted%s on MISSING available_at "
+            "(fail-open; no availability evidence to exclude on)",
+            _label,
+        )
+        return False
+    try:
+        if isinstance(available_at, datetime):
+            avail = available_at
+        else:
+            text = str(available_at).strip()
+            if not text:
+                _LOG.warning(
+                    "BAYES_PRECISION_FUSION arrival guard: admitted%s on EMPTY available_at "
+                    "(fail-open; no availability evidence to exclude on)",
+                    _label,
+                )
+                return False
+            avail = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if avail.tzinfo is None:
+            avail = avail.replace(tzinfo=_tz.utc)
+        decision = decision_utc if decision_utc.tzinfo is not None else decision_utc.replace(tzinfo=_tz.utc)
+        return avail.astimezone(_tz.utc) > decision.astimezone(_tz.utc)
+    except Exception as _parse_exc:
+        _LOG.warning(
+            "BAYES_PRECISION_FUSION arrival guard: admitted%s on UNPARSEABLE available_at %r "
+            "(fail-open; malformed availability evidence ignored): %s",
+            _label,
+            available_at,
+            _parse_exc,
+        )
+        return False
+
 # Open-Meteo model ids for the single-runs forecast endpoint. icon_eu is OM's `icon_eu`;
 # jma_seamless / gem_global / gfs_global / icon_global / icon_d2 are OM model ids; the France
 # AROME-HD model is OM `meteofrance_arome_france_hd`.
@@ -221,6 +274,10 @@ class BayesPrecisionFusionCaptureResult:
     disagree_var: float
     selection: SelectedModelSet
     dropped_models: tuple[str, ...]
+    # Count of models admitted because availability evidence was missing/malformed
+    # (FAIL-OPEN path). Non-zero means the arrival guard ran without evidence for
+    # those models — visible in telemetry, never silently hidden.
+    admitted_on_missing_availability: int = 0
 
     @property
     def has_extras(self) -> bool:
@@ -250,6 +307,8 @@ def capture_bayes_precision_instruments(
     anchor_z_corrected: float,
     history_provider: BayesPrecisionFusionHistoryProvider | None = None,
     live_fetch: LiveFetchFn | None = None,
+    decision_utc: datetime | None = None,
+    model_available_at: Mapping[str, str | datetime | None] | None = None,
 ) -> BayesPrecisionFusionCaptureResult:
     """F1 — fetch the extras fail-soft, EB-correct, gate, dedup, and build fusion inputs.
 
@@ -259,18 +318,53 @@ def capture_bayes_precision_instruments(
     regionals are fetched live (fail-soft), EB-corrected from their own histories, gated by the
     polygon (regionals) and deduped (icon_seamless==icon_d2), then emitted as ModelInstruments.
 
+    ARRIVAL GUARD (C1-AVAIL-CLOCK, 2026-06-16): ``decision_utc`` + ``model_available_at`` add a
+    pre-fusion honesty gate — an extra whose honest source_available_at is in the FUTURE relative to
+    the decision instant could not have been possessed by then, so fusing it would let a
+    faster/replacement source bias q before its real availability. Such a model is EXCLUDED here.
+    SHADOW-Q-STAGED: this guard CAN change q for a cell where a provider's honest availability is
+    future vs decision — that is the point; in current production it is expected to exclude ~0 (the
+    extras' captured_at lands hours after the cycle, well before any decision). FAIL-OPEN: a model
+    is admitted when its availability is NULL/missing, or when ``decision_utc`` is not supplied
+    (legacy/test callers) — the guard never tightens on absent evidence.
+
     NEVER raises. Any failure of an individual model -> that model is dropped. A total failure
     (all extras dropped) -> empty likelihood -> the caller keeps the single-anchor posterior.
     """
     provider = history_provider or _empty_history_provider
     fetch_fn = live_fetch or _default_live_fetch
+    availability = dict(model_available_at or {})
 
     candidate_models = list(GLOBAL_LIKELIHOOD_MODELS) + list(REGIONAL_MODELS) + ["icon_seamless"]
 
     # ---- fail-soft per-model live capture ----
     present_values: dict[str, float] = {}
     dropped: list[str] = []
+    _missing_avail_count = 0  # models admitted because availability evidence was absent/malformed
     for model in candidate_models:
+        # ARRIVAL GUARD: exclude an extra whose honest availability is after the decision instant
+        # (it was not possessed yet — fusing it would bias q early). Fail-OPEN on NULL/missing
+        # availability or when decision_utc is absent. Shadow-q-staged (expected to drop ~0 today).
+        if decision_utc is not None:
+            _raw_avail = availability.get(model)
+            # Track admits on missing/malformed evidence for telemetry (loud, never silent).
+            # A model is admitted-on-missing when its availability key is absent, None, or empty
+            # string — the same cases _available_after_decision warns on internally. We count here
+            # so the BayesPrecisionFusionCaptureResult carries a visible counter the caller can surface.
+            _avail_is_missing = (
+                _raw_avail is None
+                or (isinstance(_raw_avail, str) and not _raw_avail.strip())
+            )
+            if _available_after_decision(_raw_avail, decision_utc, model_label=model):
+                _LOG.warning(
+                    "BAYES_PRECISION_FUSION arrival guard excluded %s: honest source_available_at %s "
+                    "is after decision %s (not yet possessed; shadow-q-staged)",
+                    model, _raw_avail, decision_utc.isoformat(),
+                )
+                dropped.append(model)
+                continue
+            if _avail_is_missing:
+                _missing_avail_count += 1
         try:
             value = fetch_fn(
                 model=model,
@@ -410,4 +504,5 @@ def capture_bayes_precision_instruments(
         disagree_var=disagree_var,
         selection=selection,
         dropped_models=tuple(dropped),
+        admitted_on_missing_availability=_missing_avail_count,
     )

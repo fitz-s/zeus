@@ -59,9 +59,45 @@ from src.control.entry_forecast_rollout import (
 )
 from src.data.calibration_transfer_policy import CalibrationTransferDecision
 from src.data.forecast_target_contract import ForecastTargetScope
+from src.data.release_calendar import get_entry, load_calendar_config
 from src.state.readiness_repo import write_readiness_state
 
 ENTRY_FORECAST_STRATEGY_KEY = "entry_forecast"
+
+
+def _source_cycle_expires_at(
+    *, source_id: str, track: str, source_cycle_time: datetime
+) -> datetime:
+    """Readiness expiry ANCHORED TO THE CYCLE + the calendar's max source lag (M3 fix).
+
+    The prior ``computed_at + 3h`` was a GUESS (the twin-clock disease): a forecast cycle's data is
+    lawful for ``max_source_lag_seconds`` after the CYCLE time — the calendar's own publication
+    tolerance — not 3h after we wrote the row. We read that bound from the release calendar (the
+    single authority for source lag) and anchor expiry to ``source_cycle_time``.
+
+    ``track`` may be the horizon-suffixed serving label (e.g. "mx2t6_high_full_horizon"); the
+    calendar is keyed by the base ingest track ("mx2t6_high"). We resolve the entry directly, then
+    by the longest calendar track that is a prefix of ``track`` (no hardcoded track names — the set
+    comes from the calendar itself). A missing entry raises (fail-loud) rather than guessing a TTL.
+    """
+    cycle = source_cycle_time if source_cycle_time.tzinfo else source_cycle_time.replace(tzinfo=timezone.utc)
+    cycle = cycle.astimezone(timezone.utc)
+    entry = get_entry(source_id, track)
+    if entry is None:
+        candidates = [
+            cal_track
+            for (cal_source_id, cal_track) in load_calendar_config()
+            if cal_source_id == source_id
+            and (track == cal_track or track.startswith(f"{cal_track}_"))
+        ]
+        if candidates:
+            entry = get_entry(source_id, max(candidates, key=len))
+    if entry is None:
+        raise ValueError(
+            f"release calendar has no entry for source_id={source_id!r} track={track!r}; "
+            f"cannot derive a cycle-anchored readiness expiry (refusing a guessed TTL)"
+        )
+    return cycle + timedelta(seconds=int(entry.max_source_lag_seconds))
 
 
 @dataclass(frozen=True)
@@ -181,9 +217,19 @@ def write_entry_readiness(
         promotion_evidence=promotion_evidence,
     )
 
+    track = config.high_track if scope.temperature_metric == "high" else config.low_track
+
+    # M3 (2026-06-16): readiness expiry anchors to the CYCLE + the calendar's max source lag, never
+    # to computed_at + a guessed 3h TTL (the twin-clock disease that killed lawful 26h-old data
+    # live). ``live_eligible_ttl`` is retained for call-site/signature compatibility but is no
+    # longer the expiry basis. See _source_cycle_expires_at.
     expires_at: datetime | None = None
     if status == "LIVE_ELIGIBLE":
-        expires_at = computed_utc + live_eligible_ttl
+        expires_at = _source_cycle_expires_at(
+            source_id=config.source_id,
+            track=track,
+            source_cycle_time=scope.source_cycle_time,
+        )
 
     final_readiness_id = readiness_id or f"entry-readiness-{uuid.uuid4().hex[:12]}"
 
@@ -193,7 +239,6 @@ def write_entry_readiness(
         else "mn2t6_local_calendar_day_min"
     )
     observation_field = "high_temp" if scope.temperature_metric == "high" else "low_temp"
-    track = config.high_track if scope.temperature_metric == "high" else config.low_track
 
     write_readiness_state(
         conn,

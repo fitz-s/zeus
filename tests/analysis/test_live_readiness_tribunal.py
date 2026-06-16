@@ -469,7 +469,11 @@ def _insert_decision_events(
 
     ids: optional list of decision_event_id values to set (for F3 JOIN correctness).
     If omitted, decision_event_id is left NULL.
+
+    C2 fix (2026-06-16): also inserts corresponding FinalIntentCertificate rows so
+    n_decisions (which now reads decision_certificates) counts correctly.
     """
+    import json
     for i in range(count):
         de_id = ids[i] if ids is not None else None
         conn.execute(
@@ -497,6 +501,23 @@ def _insert_decision_events(
                 "phase0_backfill",
             ),
         )
+        # Seed matching FinalIntentCertificate so the new n_decisions lane counts it.
+        cert_id = f"cert-{strategy_key}-{i}" if de_id is None else f"cert-{de_id}"
+        payload = json.dumps({"strategy_key": strategy_key})
+        conn.execute(
+            """
+            INSERT INTO decision_certificates (
+                certificate_id, certificate_type, schema_version, canonicalization_version,
+                semantic_key, claim_type, mode, decision_time,
+                authority_id, authority_version, algorithm_id, algorithm_version,
+                payload_json, payload_hash, certificate_hash, verifier_status, created_at
+            ) VALUES (?, 'FinalIntentCertificate', 1, '1.0',
+                      ?, 'FINAL_INTENT', 'SHADOW', '2026-05-01T12:00:00Z',
+                      'test_authority', '1.0', 'test_algorithm', '1.0',
+                      ?, ?, ?, 'VERIFIED', '2026-05-01T12:00:00Z')
+            """,
+            (cert_id, cert_id, payload, f"phash-{cert_id}", f"chash-{cert_id}"),
+        )
 
 
 def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
@@ -504,7 +525,7 @@ def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
 
     Regression guard for SEV2-1: verifies that positive total_regret_usd (realized > counterfactual)
     correctly maps to n_wins, and the Beta(2,2) CI lower exceeds breakeven for a strong winner.
-    Also verifies n_decisions == n_settled == 100 (decision_events denominator path).
+    Also verifies n_decisions == n_settled == 100 (decision_certificates denominator path, C2 fix).
     """
     from src.analysis.evidence_report import build_evidence_report
     from src.state.shadow_experiment_registry import register_shadow_experiment
@@ -544,7 +565,7 @@ def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
             counterfactual_pnl_usd=0.0,  # realized < counterfactual → LOSS
         )
         write_regret_decomposition(exp_id, f"evt_loss_{i}", components, conn=world_conn)
-    # Insert matching decision_events rows (authoritative n_decisions denominator)
+    # Insert matching decision_events + decision_certificates rows (n_decisions denominator, C2 fix)
     _insert_decision_events(
         world_conn, "shoulder_sell", 100,
         ids=[f"evt_win_{i}" for i in range(80)] + [f"evt_loss_{i}" for i in range(20)],
@@ -556,7 +577,7 @@ def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
     )
     assert report.n_settled == 100
     assert report.n_decisions == 100, (
-        f"n_decisions should equal n_settled (100 decision_events inserted); "
+        f"n_decisions should equal n_settled (100 decision_certificates inserted); "
         f"got n_decisions={report.n_decisions}"
     )
     assert report.n_wins == 80
@@ -662,7 +683,7 @@ def test_t4_losing_cohort_is_demote(world_conn) -> None:
             counterfactual_pnl_usd=0.0,  # realized < counterfactual → LOSS
         )
         write_regret_decomposition(exp_id, f"evt_lose_{i}", components, conn=world_conn)
-    # Insert matching decision_events rows (authoritative n_decisions denominator)
+    # Insert matching decision_events + decision_certificates rows (n_decisions denominator, C2 fix)
     _insert_decision_events(
         world_conn, "center_sell", 100,
         ids=[f"evt_lose_{i}" for i in range(100)],
@@ -674,7 +695,7 @@ def test_t4_losing_cohort_is_demote(world_conn) -> None:
     )
     assert report.n_settled == 100
     assert report.n_decisions == 100, (
-        f"n_decisions should equal n_settled (100 decision_events inserted); "
+        f"n_decisions should equal n_settled (100 decision_certificates inserted); "
         f"got n_decisions={report.n_decisions}"
     )
     assert report.n_wins == 0

@@ -35,6 +35,33 @@ _DE_SQL = """
               ?, ?, 'unknown_legacy', 27, ?)
 """
 
+_DC_SQL = """
+    INSERT INTO decision_certificates (
+        certificate_id, certificate_type, schema_version, canonicalization_version,
+        semantic_key, claim_type, mode, decision_time,
+        authority_id, authority_version, algorithm_id, algorithm_version,
+        payload_json, payload_hash, certificate_hash, verifier_status, created_at
+    ) VALUES (?, 'FinalIntentCertificate', 1, '1.0',
+              ?, 'FINAL_INTENT', 'SHADOW', ?,
+              'test_authority', '1.0', 'test_algorithm', '1.0',
+              ?, 'hash_' || ?, 'cert_hash_' || ?, 'VERIFIED', ?)
+"""
+
+
+def _insert_certificate(
+    conn: sqlite3.Connection,
+    *,
+    cert_id: str,
+    strategy_key: str,
+) -> None:
+    """Insert a FinalIntentCertificate row for the given strategy_key."""
+    import json
+    payload = json.dumps({"strategy_key": strategy_key})
+    conn.execute(
+        _DC_SQL,
+        (cert_id, cert_id, UTC_NOW, payload, cert_id, cert_id, UTC_NOW),
+    )
+
 _SE_SQL = """
     INSERT INTO shadow_experiments
         (experiment_id, strategy_id, config_hash, cohort_tag, started_at, immutable)
@@ -63,6 +90,7 @@ def _seed_chain(
     experiment_id: str,
     cohort_tag: str,
     regret: float = 0.05,
+    seed_certificate: bool = True,
 ) -> None:
     conn.execute(
         _DE_SQL,
@@ -70,6 +98,12 @@ def _seed_chain(
     )
     conn.execute(_SE_SQL, (experiment_id, strategy_key, cohort_tag, UTC_NOW))
     conn.execute(_RD_SQL, (de_id, experiment_id, regret, UTC_NOW))
+    # C2 fix: n_decisions now reads decision_certificates, not decision_events.
+    # Seed the corresponding FinalIntentCertificate row so n_decisions counts correctly.
+    # Pass seed_certificate=False for chains that should NOT appear in n_decisions
+    # (e.g. a live_decision entity that never reached the certificate lane).
+    if seed_certificate:
+        _insert_certificate(conn, cert_id=f"cert-{de_id}", strategy_key=strategy_key)
     conn.commit()
 
 
@@ -89,7 +123,9 @@ class TestSourceFilterConsistency:
             cohort_tag="cohort-A",
             regret=0.10,
         )
-        # A second chain with live_decision source — should be excluded by source filter
+        # A second chain with live_decision source — should be excluded from n_decisions.
+        # C2: source filter is not applied to decision_certificates; exclusion is modelled
+        # by not seeding a certificate for this entity (it never reached the active lane).
         _seed_chain(
             conn,
             de_id="de-live",
@@ -98,6 +134,7 @@ class TestSourceFilterConsistency:
             experiment_id="exp-live",
             cohort_tag="cohort-A",
             regret=0.20,
+            seed_certificate=False,
         )
 
         report = build_evidence_report(
@@ -112,8 +149,9 @@ class TestSourceFilterConsistency:
         assert report.n_wins == 1, f"n_wins={report.n_wins} should be 1 (regret>0)"
 
     def test_source_filter_excluded_loses_both_count_and_wins(self) -> None:
-        """When the only regret chain has a different source, n_settled=0 and n_wins=0."""
+        """When the only chain is a non-shadow source with no certificate, all metrics=0."""
         conn = _fresh_conn()
+        # C2: live_decision entity has no certificate in the active lane → n_decisions=0.
         _seed_chain(
             conn,
             de_id="de-live",
@@ -122,6 +160,7 @@ class TestSourceFilterConsistency:
             experiment_id="exp-live",
             cohort_tag="cohort-B",
             regret=0.10,
+            seed_certificate=False,
         )
 
         report = build_evidence_report(
@@ -288,6 +327,9 @@ class TestBayesianPriorContract:
             _DE_SQL,
             ("de-unsettled", "de-unsettled", UTC_NOW, UTC_NOW, "center_buy", UTC_NOW, "shadow_decision"),
         )
+        # C2 fix: unsettled decisions must also appear in decision_certificates so
+        # n_decisions counts them in the full-strategy-universe denominator (P1-7).
+        _insert_certificate(conn, cert_id="cert-de-unsettled", strategy_key="center_buy")
         conn.commit()
 
         report = build_evidence_report(

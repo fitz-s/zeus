@@ -276,7 +276,10 @@ class TestRCAMonitorLowMetricContinuity:
             market_id="m1",
             direction="buy_yes",
             p_posterior=0.42,
-            entered_at=None,
+            # M2b (2026-06-16): real entered_at — monitor_refresh refuses (no alpha) on a missing
+            # one. This metric-identity-threading test exercises the alpha path, so it needs a
+            # finite hold age.
+            entered_at="2026-07-14T12:00:00+00:00",
             target_date="2026-07-15",
             entry_model_agreement="AGREE",
         )
@@ -359,7 +362,9 @@ class TestRCAMonitorLowMetricContinuity:
             market_id="m-low",
             direction="buy_yes",
             p_posterior=0.25,
-            entered_at=None,
+            # M2b (2026-06-16): real entered_at — monitor_refresh refuses (no alpha) on a missing
+            # one. This Day0 LOW test exercises the alpha/posterior path, so it needs a finite hold age.
+            entered_at="2026-04-28T12:00:00+00:00",
             target_date="2026-04-29",
             entry_model_agreement="AGREE",
         )

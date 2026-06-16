@@ -461,7 +461,10 @@ state_machines:
       - REPLACEMENT_INTENT_IMMUTABILITY_PASS
     invariant_tests:
       - tests/test_openmeteo_ecmwf_ifs9_precision_guard.py
-      - tests/test_replacement_forecast_go_live_report.py
+      # DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): test_replacement_forecast_go_live_report.py
+      # deleted with the go_live_report verdict module. REPLACEMENT_INTENT_IMMUTABILITY_PASS
+      # coverage retained by the two sibling tests below. The GO_LIVE_ROLLBACK_* states above
+      # are now orphaned (emitting modules deleted) — flagged for topology/map-maintenance.
       - tests/test_replacement_forecast_intent_immutability.py
       - tests/test_replacement_forecast_reactor_hook.py
   edli_opportunity_event_processing:

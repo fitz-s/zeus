@@ -365,7 +365,17 @@ def build_forecast_snapshot_ready_event(
         or snapshot.get("member_count")
         or len(_json_list(snapshot.get("members_json")))
     )
-    available_at = str(snapshot.get("available_at") or source_run.get("source_available_at"))
+    # C1-AVAIL-CLOCK (2026-06-16): the FSR's stated availability is PROOF OF POSSESSION first. Prefer
+    # the snapshot's real fetch_time (the wall-clock we held the data) over any cycle-anchored
+    # placeholder, then fall through to the snapshot's available_at, then the source_run's captured_at
+    # (a real possession stamp), and only last to source_available_at. The old `snapshot.available_at
+    # or source_run.source_available_at` leaked the ~8h-early cycle when available_at was the cycle.
+    available_at = str(
+        snapshot.get("fetch_time")
+        or snapshot.get("available_at")
+        or source_run.get("captured_at")
+        or source_run.get("source_available_at")
+    )
     payload = ForecastSnapshotReadyPayload(
         city=str(snapshot.get("city") or coverage.get("city")),
         target_date=str(snapshot.get("target_date") or coverage.get("target_local_date")),

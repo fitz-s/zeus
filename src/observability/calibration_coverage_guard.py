@@ -549,6 +549,20 @@ def _check_city_metric_coverage(
         conn, city=city, today=today, season=season, metric=metric
     )
     if resolution.startswith("borrowed:") or resolution == _FALLBACK_IDENTITY:
+        # LOUD FALLBACK: emit a warning at detection time so the borrow is
+        # traceable in logs regardless of which upper-level function called us
+        # (calibration_coverage_report, assert_calibration_coverage, etc.).
+        # The SILENT_FALLBACK label is preserved in the message so log grep can
+        # find all cross-cluster borrows in production.
+        logger.warning(
+            "CALIBRATION_COVERAGE_GAP detected: %s/%s season=%s layer=%s "
+            "SILENT_FALLBACK=%s — city will borrow/degrade calibration for this cell",
+            city.name,
+            metric,
+            season,
+            _LAYER_PLATT,
+            resolution,
+        )
         gaps.append(
             CoverageGap(
                 city=city.name,

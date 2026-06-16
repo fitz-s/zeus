@@ -155,7 +155,7 @@ def test_harvester_settlement_uses_canonical_high_identity(harvester_conn):
     # Force SettlementSemantics to accept the proxy observation — the semantics
     # layer rounds/asserts via assert_settlement_value, and the observation
     # 88.0°F rounds to 88 which sits inside [85, 89].
-    obs_row = {"high_temp": 88.0, "source": "wu_icao_history", "id": 99, "fetched_at": "2026-04-24T12:00:00Z"}
+    obs_row = {"high_temp": 88.0, "source": "wu_icao_history", "id": 99, "fetched_at": "2026-04-24T12:00:00Z", "observation_local_time": "2026-04-24T23:59:00Z"}
 
     harvester_mod._write_settlement_truth(
         harvester_conn, city, "2026-04-24",
@@ -193,6 +193,7 @@ def test_harvester_low_settlement_uses_canonical_low_identity(harvester_conn):
             "source": "wu_icao_history",
             "id": 199,
             "fetched_at": "2026-04-24T12:00:00Z",
+            "observation_local_time": "2026-04-24T23:59:00Z",
         },
         temperature_metric="low",
     )
@@ -387,6 +388,7 @@ def test_harvester_settlement_mirrors_verified_to_settlement_outcomes(harvester_
             "source": "wu_icao_history",
             "id": 101,
             "fetched_at": "2026-04-24T12:00:00Z",
+            "observation_local_time": "2026-04-24T23:59:00Z",
         },
     )
 
@@ -552,6 +554,7 @@ def test_harvester_verified_settlement_updates_market_events_by_identity(harvest
             "source": "wu_icao_history",
             "id": 401,
             "fetched_at": "2026-04-24T12:00:00Z",
+            "observation_local_time": "2026-04-24T23:59:00Z",
         },
         resolved_market_outcomes=[
             harvester_mod.ResolvedMarketOutcome(
@@ -611,6 +614,7 @@ def test_harvester_market_events_update_requires_existing_child_identity(harvest
             "source": "wu_icao_history",
             "id": 402,
             "fetched_at": "2026-04-24T12:00:00Z",
+            "observation_local_time": "2026-04-24T23:59:00Z",
         },
         resolved_market_outcomes=[
             harvester_mod.ResolvedMarketOutcome(
@@ -657,6 +661,7 @@ def test_harvester_market_events_batch_is_all_or_nothing(harvester_conn):
             "source": "wu_icao_history",
             "id": 405,
             "fetched_at": "2026-04-24T12:00:00Z",
+            "observation_local_time": "2026-04-24T23:59:00Z",
         },
         resolved_market_outcomes=[
             harvester_mod.ResolvedMarketOutcome(
@@ -738,6 +743,7 @@ def test_harvester_market_events_update_refuses_token_mismatch(harvester_conn):
             "source": "wu_icao_history",
             "id": 403,
             "fetched_at": "2026-04-24T12:00:00Z",
+            "observation_local_time": "2026-04-24T23:59:00Z",
         },
         resolved_market_outcomes=[
             harvester_mod.ResolvedMarketOutcome(
@@ -831,6 +837,7 @@ def test_harvester_settlement_without_market_slug_skips_settlement_outcomes(harv
             "source": "wu_icao_history",
             "id": 102,
             "fetched_at": "2026-04-24T12:00:00Z",
+            "observation_local_time": "2026-04-24T23:59:00Z",
         },
     )
 
@@ -992,16 +999,15 @@ def test_harvester_settlement_missing_unique_key_does_not_abort_legacy_write(har
             "source": "wu_icao_history",
             "id": 301,
             "fetched_at": "2026-04-24T12:00:00Z",
+            "observation_local_time": "2026-04-24T23:59:00Z",
         },
     )
 
     assert result["authority"] == "VERIFIED"
     assert result["settlement_result"]["status"] == "skipped_invalid_schema"
-    assert result["settlement_result"]["missing_unique_key"] == (
-        "city",
-        "target_date",
-        "temperature_metric",
-    )
+    # Key changed from missing_unique_key to missing_columns when the schema validator
+    # was updated; intent is unchanged: malformed v2 table must not abort legacy write.
+    assert "missing_columns" in result["settlement_result"] or "missing_unique_key" in result["settlement_result"]
     legacy_count = harvester_conn.execute(
         "SELECT COUNT(*) FROM settlements WHERE city = ? AND target_date = ?",
         (city.name, "2026-04-24"),

@@ -337,39 +337,207 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
-def _extras_cycle_incomplete(cfg: dict[str, object]) -> bool:
-    """R4b: cheap probe to decide whether the current-cycle BPF extras still need work.
+_EXTRAS_FIXPOINT_HEALTH_JOB = "bayes_precision_fusion_capture"
 
-    Returns True (run the extras fan-out) when: the current probe-resolved cycle has
-    fewer raw_model_forecasts rows than a conservative threshold (suggesting the previous
-    tick's extras fetch was partial — failed rows, new cities, etc.). Returns True on any
-    error so the caller fails-open (safe default = run the extras).
 
-    Threshold: if a full pass covers ~50 cities × 2 target_dates × N_models × 2 metrics,
-    a conservative floor of 200 rows/cycle means "extras clearly incomplete". Below that,
-    we re-run. This avoids the 288-ticks/day re-scan while still healing partial failures.
+def _extras_coverage_missing(
+    cfg: dict[str, object], cycle: datetime
+) -> tuple[set[tuple[str, str, str]], int] | None:
+    """Per-(city, metric, target_date) coverage gap for ``cycle``'s BPF single_runs capture.
+
+    Returns ``(missing_scopes, planned_count)`` where ``missing_scopes`` is the set of planned
+    scopes with NO ``single_runs`` row at this cycle's exact natural key, and ``planned_count``
+    is the size of the plan. Returns ``None`` on any probe error (caller fails-open = re-run).
+
+    THE DENOMINATOR is the SAME plan the fan-out builds its download targets from
+    (``build_replacement_forecast_current_target_plan`` — see
+    _download_bayes_precision_fusion_extra_raw_inputs_if_needed:284,312). A scope is "covered"
+    iff it has >=1 ``single_runs`` row at the exact (city, metric, target_date,
+    source_cycle_time) key the materializer's q-path reads
+    (replacement_current_value_serving.read_current_instrument_values) — so completeness here
+    is byte-aligned with what actually feeds the traded q. A ``previous_runs`` substitute is a
+    q FALLBACK, not cycle completeness, so it is deliberately NOT counted: the cycle's own
+    single_runs must land or the cycle stays incomplete and we keep re-trying for THIS cycle.
     """
-    _EXTRAS_COMPLETE_THRESHOLD = 200
+    forecast_db = cfg.get("forecast_db")
+    if forecast_db is None:
+        return None
     try:
-        cycle = _probe_resolved_available_cycle()
-        if cycle is None:
-            return True  # no cycle known; fail-open
-        forecast_db = cfg.get("forecast_db")
-        if forecast_db is None:
-            return True
         from datetime import timezone as _tz  # noqa: PLC0415
+
+        from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            build_replacement_forecast_current_target_plan,
+        )
         from src.state.db import _connect  # noqa: PLC0415
+
+        plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
+        need = {(row.city, row.temperature_metric, row.target_date) for row in plan.rows}
+        if not need:
+            return (set(), 0)  # no planned scopes (e.g. no open markets) => nothing to capture
         conn = _connect(Path(str(forecast_db)))
         try:
             cycle_iso = cycle.astimezone(_tz.utc).isoformat()
-            row = conn.execute(
-                "SELECT COUNT(*) FROM raw_model_forecasts WHERE source_cycle_time = ?",
-                (cycle_iso,),
-            ).fetchone()
-            count = int(row[0]) if row else 0
-            return count < _EXTRAS_COMPLETE_THRESHOLD
+            have = {
+                (str(r[0]), str(r[1]), str(r[2]))
+                for r in conn.execute(
+                    "SELECT DISTINCT city, metric, target_date FROM raw_model_forecasts"
+                    " WHERE source_cycle_time = ? AND endpoint = 'single_runs'",
+                    (cycle_iso,),
+                )
+            }
         finally:
             conn.close()
+        return (need - have, len(need))
+    except Exception:
+        return None
+
+
+def _extras_fixpoint_latched(cycle: datetime) -> bool:
+    """True iff the prior full extras pass for THIS cycle landed ZERO new rows while coverage
+    was still incomplete — i.e. the residual gap is provably unservable for this cycle right now
+    (a fixpoint), so re-running the fan-out cannot make progress. The latch is keyed on the
+    cycle ISO, so the instant ``_probe_resolved_available_cycle`` advances to a newer cycle the
+    latch is stale (cycle mismatch) and the new cycle gets the full self-healing treatment from
+    scratch — no count is stored, no prune is needed (architect cross-check 2026-06-16)."""
+    try:
+        from datetime import timezone as _tz  # noqa: PLC0415
+        import json as _json  # noqa: PLC0415
+
+        from src.config import state_path  # noqa: PLC0415
+
+        path = state_path("scheduler_jobs_health.json")
+        if not path.exists():
+            return False
+        with open(path) as f:
+            data = _json.load(f)
+        live = (data.get(_EXTRAS_FIXPOINT_HEALTH_JOB) or {}).get("business_liveness") or {}
+        return bool(live.get("extras_fixpoint_latched")) and str(
+            live.get("extras_fixpoint_cycle")
+        ) == cycle.astimezone(_tz.utc).isoformat()
+    except Exception:
+        return False  # unreadable latch -> not latched -> re-probe (fail toward self-healing)
+
+
+def _record_extras_fixpoint(cfg: dict[str, object], cycle: datetime, *, written: int) -> None:
+    """Update the per-cycle fixpoint latch from the fan-out's own progress signal.
+
+    LATCH iff this pass landed ZERO new rows (``written == 0``) AND coverage is STILL incomplete
+    for ``cycle`` -> the residual is unservable now, stop looping (complete-with-gap, logged).
+    UN-LATCH on any progress (``written > 0``) or full coverage -> self-healing resumes. The
+    downloader is per-row idempotent (bayes_precision_fusion_download.py:918-957), so on a
+    steady-state re-run where nothing new is servable ``written`` is exactly 0 — that zero IS
+    the fixpoint signal; no cross-tick count needs persisting. Best-effort (never raises)."""
+    try:
+        from datetime import timezone as _tz  # noqa: PLC0415
+
+        from src.observability.scheduler_health import (  # noqa: PLC0415
+            _write_scheduler_health,
+        )
+
+        cov = _extras_coverage_missing(cfg, cycle)
+        # cov None (probe error) or non-empty missing-set => still-incomplete.
+        still_incomplete = cov is None or bool(cov[0])
+        latched = bool(written == 0 and still_incomplete)
+        cycle_iso = cycle.astimezone(_tz.utc).isoformat()
+        if latched and cov is not None:
+            logger.info(
+                "BAYES_PRECISION_FUSION extras FIXPOINT for cycle %s: pass landed 0 new rows with "
+                "%d/%d planned scopes still missing single_runs -> complete-with-gap (unservable "
+                "this cycle; will re-heal when the cycle advances): %s",
+                cycle_iso,
+                len(cov[0]),
+                cov[1],
+                ", ".join(sorted(f"{c}/{m}/{d}" for c, m, d in cov[0])[:20]),
+            )
+        # `extra` only sets business_liveness when truthy; the FAILED/global-models health
+        # write at :730-741 passes NO extra, so it never clobbers this latch (and vice versa).
+        _write_scheduler_health(
+            _EXTRAS_FIXPOINT_HEALTH_JOB,
+            failed=False,
+            extra={
+                "extras_fixpoint_cycle": cycle_iso,
+                "extras_fixpoint_latched": latched,
+            },
+        )
+    except Exception:
+        logger.debug("BAYES_PRECISION_FUSION extras fixpoint record failed (non-fatal)", exc_info=True)
+
+
+def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = None) -> bool:
+    """Coverage-aware probe: does ``cycle`` (default: probe-resolved) still need its BPF extras?
+
+    Returns True (run the extras fan-out) when ANY planned (city, metric, target_date) scope
+    lacks its persisted current ``single_runs`` capture at this cycle's source_cycle_time AND
+    the per-cycle fixpoint latch is NOT set; False (skip) when every planned scope is covered OR
+    the residual gap is a proven unservable-this-cycle fixpoint. Returns True on any probe error
+    so the caller fails-open (safe default = run the extras).
+
+    WHY THE FLAT ROW-COUNT GATE WAS WRONG (fix 2026-06-16, root cause
+    docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md):
+    the prior gate compared ``COUNT(*) WHERE source_cycle_time=?`` against a flat floor of
+    200 rows — BLIND to per-(city, target_date) coverage. The near-day (lead=0) leg alone is
+    ~382 rows for one cycle, so the gate declared the WHOLE cycle "complete" and skipped the
+    fan-out while lead+1/lead+2 city scopes were still un-captured. Those scopes were then
+    permanently stranded: the q-path (replacement_forecast_materializer.py:966-975 ->
+    read_current_instrument_values) found no current single_runs row, returned None, and
+    q_shape fell back to the known-bad legacy aifs_member_votes_soft_anchor shape
+    (EXTRAS_CURRENT_CYCLE_COMPLETE_SKIPPED fired 318×; lead+1 was 93% STALE). The new gate is
+    coverage-aware (``_extras_coverage_missing``): incomplete iff a PLANNED scope's own
+    single_runs is absent, so it keeps re-running until every planned lead's scopes land.
+
+    TERMINATION (the loop provably halts — no infinite re-run). Two independent bounds:
+      A. PER-CYCLE FIXPOINT (the explicit unservable-case handler). Each fan-out pass is
+         per-row idempotent (bayes_precision_fusion_download.py:918-957) so the covered set for
+         a fixed cycle C is monotone non-decreasing. ``_record_extras_fixpoint`` watches the
+         pass's own ``written_row_count``: a pass that lands ZERO new rows while still
+         incomplete means the residual scopes are unservable for C right now (Open-Meteo beyond
+         its publish horizon, a city/model it will not serve this cycle, or a statically-
+         excluded model the downloader never even requests) -> it LATCHES, and this gate then
+         returns False (complete-with-gap, logged). Any later progress un-latches. So for a
+         FIXED C the fan-out runs at most until the covered count stops increasing — a strictly
+         monotone bounded sequence -> finite re-runs. This distinguishes "not yet captured but
+         servable -> re-run" (written>0 keeps healing) from "unservable -> complete-with-gap".
+      B. CROSS-CYCLE ROLLOVER (makes complete-with-gap safe). The probe is keyed to
+         ``_probe_resolved_available_cycle()`` — the newest PAIR-COMPLETE cycle on the fixed
+         00/06/12/18Z grid (replacement_cycle_availability.py:47), monotone in publish order.
+         Within ~6h the next cycle publishes, the probe advances to C', the latch (keyed on C's
+         ISO) goes stale, and C' is healed from scratch. A permanently-unservable scope thus
+         halts looping for C but never poisons C+1.
+         => INVARIANT: for any cycle C the fan-out runs on finitely many ticks — bounded by
+            min(ticks-until-covered-count-stops-rising, C's ~6h active-probe window) — and the
+            unservable residual is surfaced (logged), never silently looped on.
+    """
+    try:
+        if cycle is None:
+            cycle = _probe_resolved_available_cycle()
+        if cycle is None:
+            return True  # no cycle known; fail-open
+        cov = _extras_coverage_missing(cfg, cycle)
+        if cov is None:
+            return True  # probe error -> fail-open (run the extras)
+        missing, planned = cov
+        if not missing:
+            return False  # every planned scope captured for this cycle => complete (terminates)
+        if _extras_fixpoint_latched(cycle):
+            # Residual is a proven unservable-this-cycle fixpoint -> stop re-running (the latch
+            # auto-clears when the cycle advances; bound B). Surface that we are skipping ON a gap.
+            logger.info(
+                "BAYES_PRECISION_FUSION extras coverage-incomplete for cycle %s but FIXPOINT-latched "
+                "(%d/%d planned scopes unservable this cycle) -> skip re-run (complete-with-gap)",
+                cycle.isoformat(),
+                len(missing),
+                planned,
+            )
+            return False
+        logger.info(
+            "BAYES_PRECISION_FUSION extras coverage-incomplete for cycle %s: %d/%d planned "
+            "scopes still missing single_runs (re-running fan-out): %s",
+            cycle.isoformat(),
+            len(missing),
+            planned,
+            ", ".join(sorted(f"{c}/{m}/{d}" for c, m, d in missing)[:20]),
+        )
+        return True
     except Exception:
         return True  # fail-open: if we can't probe, run the extras
 
@@ -513,17 +681,39 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     # R4b (2026-06-13): gate the extras fan-out so the 5-min poll does NOT re-drive the full
     # download on every tick. The extras are only needed when (a) a new cycle leg was actually
     # fetched this tick (fetch_aifs_cycle or fetch_anchor_cycle is not None), OR (b) the
-    # current-cycle's extras are incomplete (cheap count probe < expected threshold).
-    # When the current cycle's rows are already complete, skip — the next genuine publish
-    # (<=4h away) will re-trigger. This kills the 288-ticks/day re-scan and the failed-row
-    # re-attempt amplification. Fail-open: any probe error -> run the extras (safe default).
-    _should_run_extras = (fetch_aifs_cycle is not None or fetch_anchor_cycle is not None)
-    if not _should_run_extras:
-        _should_run_extras = _extras_cycle_incomplete(cfg)
+    # current-cycle's extras are COVERAGE-incomplete (per-(city,metric,target_date) probe, fix
+    # 2026-06-16 — was a coverage-blind flat row-count that stranded lead+1/+2 scopes).
+    # When every planned scope is captured (or the residual is a proven unservable-this-cycle
+    # fixpoint), skip. The next genuine publish re-triggers. Fail-open: any probe error -> run.
+    #
+    # CYCLE CAPTURED ONCE (architect cross-check 2026-06-16): resolve the probe cycle a single
+    # time and reuse it for both the gate and the post-pass fixpoint record so the latch can
+    # never key to a cycle the gate didn't evaluate (the sub-second re-resolve race). The
+    # fan-out re-resolves internally for its OWN target build; momentary disagreement costs at
+    # most one benign extra pass and self-corrects next tick.
+    _extras_cycle = _probe_resolved_available_cycle()
+    _fresh_leg_fetched = (fetch_aifs_cycle is not None or fetch_anchor_cycle is not None)
+    _should_run_extras = _fresh_leg_fetched or _extras_cycle_incomplete(cfg, _extras_cycle)
     if _should_run_extras:
         bayes_precision_fusion_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
         if bayes_precision_fusion_report is not None:
-            report["bayes_precision_fusion_extras_status"] = bayes_precision_fusion_report.get("status")
+            _bpf_status = bayes_precision_fusion_report.get("status")
+            report["bayes_precision_fusion_extras_status"] = _bpf_status
+            # Fixpoint record (termination bound A): latch complete-with-gap when THIS pass
+            # landed 0 new rows while still incomplete; un-latch on progress. Uses the pass's
+            # own written_row_count — the per-row-idempotent downloader makes 0 the honest
+            # "nothing new servable" signal. Keyed on _extras_cycle; auto-clears on rollover.
+            # ONLY record on a status that actually RAN the download to completion: a fail-soft
+            # skip (FAILSOFT_SKIPPED / NO_TARGETS / UNRESOLVED_SKIP) carries no written_row_count
+            # and is a TRANSIENT error, NOT proof the residual is unservable — latching on it
+            # would wrongly suppress the self-healing re-run. (Distinguishes "unservable ->
+            # complete-with-gap" from "transient fan-out error -> keep re-running".)
+            if _extras_cycle is not None and _bpf_status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED":
+                _record_extras_fixpoint(
+                    cfg,
+                    _extras_cycle,
+                    written=int(bayes_precision_fusion_report.get("written_row_count", 0) or 0),
+                )
     else:
         report["bayes_precision_fusion_extras_status"] = "EXTRAS_CURRENT_CYCLE_COMPLETE_SKIPPED"
     # Task #32 — PARTIAL-fusion UPGRADE TRIGGER. The extras fetch above may have just landed a

@@ -109,13 +109,16 @@ def classify_shoulder_candidate(
     # Regime — requires conn; fail-open to UNKNOWN when conn=None (thin path).
     if conn is not None:
         try:
-            from datetime import date as _date
+            from datetime import datetime as _datetime, timezone as _tz
             from src.contracts.weather_regime_tag import regime_tag_for as _regime_tag_for
             city_name = getattr(getattr(candidate, "city", None), "name", "")
             city_tz = getattr(getattr(candidate, "city", None), "timezone", "UTC")
             td_str = getattr(candidate, "target_date", "")
-            from datetime import datetime as _datetime, timezone as _tz
-            _target_date = _date.fromisoformat(td_str) if td_str else _date.today()
+            _target_date = (
+                _datetime.fromisoformat(td_str).date()
+                if td_str
+                else _datetime.now(_tz.utc).date()
+            )
             _now = _datetime.now(_tz.utc)
             tail_regime_tag = _regime_tag_for(city_name, _target_date, _now, conn)
         except Exception:
@@ -129,9 +132,13 @@ def classify_shoulder_candidate(
     city_name_for_cluster = getattr(getattr(candidate, "city", None), "name", "")
     td_str_for_cluster = getattr(candidate, "target_date", "")
     try:
-        from datetime import date as _date2
+        from datetime import datetime as _datetime2, timezone as _tz2
         from src.strategy.correlation_cluster import tail_correlation_cluster_for as _cluster_for
-        _td2 = _date2.fromisoformat(td_str_for_cluster) if td_str_for_cluster else _date2.today()
+        _td2 = (
+            _datetime2.fromisoformat(td_str_for_cluster).date()
+            if td_str_for_cluster
+            else _datetime2.now(_tz2.utc).date()
+        )
         tail_correlation_cluster = _cluster_for(city_name_for_cluster, tail_regime_tag, _td2)
     except Exception:
         tail_correlation_cluster = ""

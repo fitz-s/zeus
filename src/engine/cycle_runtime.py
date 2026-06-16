@@ -456,25 +456,6 @@ def _decision_source_context_from_epistemic_json(value: str | None) -> DecisionS
     return DecisionSourceContext.from_forecast_context(forecast_context)
 
 
-def _decision_source_context_with_submit_result(
-    context: DecisionSourceContext | None,
-    result: object,
-) -> DecisionSourceContext | None:
-    """Attach post-submit timing facts before persisting live decision lineage."""
-    if context is None:
-        return None
-    updates: dict[str, str] = {}
-    zeus_submit_intent_time = getattr(result, "zeus_submit_intent_time", None)
-    venue_ack_time = getattr(result, "venue_ack_time", None)
-    if zeus_submit_intent_time:
-        updates["zeus_submit_intent_time"] = str(zeus_submit_intent_time)
-    if venue_ack_time:
-        updates["venue_ack_time"] = str(venue_ack_time)
-    if not updates:
-        return context
-    return replace(context, **updates)
-
-
 def _decimal_payload(value: Decimal) -> str:
     if value.is_zero():
         return "0"
@@ -2171,6 +2152,38 @@ def _frontier_reason_prefix(reason: object) -> str:
 
 def _increment_summary_counter(summary: dict, key: str, amount: int = 1) -> None:
     summary[key] = int(summary.get(key, 0) or 0) + amount
+
+
+def _record_lane_write_failure(summary: dict, lane_name: str, exc: BaseException) -> None:
+    """Fail loud + count a swallowed decision/telemetry-lane write failure.
+
+    AB3 (2026-06-16, timing-semantics fix). A swallowed lane-write exception is
+    INDISTINGUISHABLE from a lane that simply had nothing to write — that
+    blindness is what let edli_no_submit_receipts sit dead from 2026-06-06
+    with nobody noticing. This preserves the existing fail-soft behavior
+    (``summary['degraded']`` is still set exactly as before, the cycle is NOT
+    blocked) but additionally (a) emits a logger.error naming the lane and the
+    exception, and (b) increments a per-lane failure counter on the summary so
+    a downstream liveness check can name a lane that is failing every cycle.
+    """
+    failures = summary.setdefault("lane_write_failures", {})
+    if isinstance(failures, dict):
+        failures[lane_name] = int(failures.get(lane_name, 0) or 0) + 1
+    summary["degraded"] = True  # preserve existing behavior
+    logger.error("LANE WRITE FAILED lane=%s err=%r", lane_name, exc)
+
+
+def _record_lane_write_success(summary: dict, lane_name: str) -> None:
+    """Count a successful per-cycle decision/telemetry-lane write.
+
+    AB3 (2026-06-16). The companion to ``_record_lane_write_failure``: a lane
+    that wrote zero times this cycle (no success AND no failure recorded)
+    becomes detectable downstream — a dead lane no longer looks identical to a
+    quiet one. Lightweight: a single per-lane integer on the summary.
+    """
+    writes = summary.setdefault("decision_lane_writes", {})
+    if isinstance(writes, dict):
+        writes[lane_name] = int(writes.get(lane_name, 0) or 0) + 1
 
 
 def _increment_reason_bucket(summary: dict, key: str, reason: object) -> str:
@@ -4253,8 +4266,18 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             try:
                 writer()
             except Exception as exc:  # noqa: BLE001 - derived telemetry is fail-soft.
+                # AB3: every queued decision/telemetry-lane write (opportunity_fact,
+                # probability_trace, microstructure, forward_market_substrate,
+                # shadow_signal, settlement_day_observation_authority, ...) flows
+                # through here. A swallowed exception is indistinguishable from a
+                # lane with nothing to write; name + count it so a dead lane fails
+                # loud. Behavior preserved: degraded still set, cycle not blocked.
                 deps.logger.warning("Derived discovery write failed for %s: %s", name, exc)
-                summary["degraded"] = True
+                _record_lane_write_failure(summary, name, exc)
+            else:
+                # Per-cycle success counter: a lane that never reaches this branch
+                # (zero writes AND zero failures) is detectable as dead downstream.
+                _record_lane_write_success(summary, name)
 
     def _record_microstructure(row: dict) -> None:
         payload = dict(row)
@@ -4518,10 +4541,15 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             try:
                 _write()
             except Exception as exc:
-                deps.logger.warning("Forward market substrate write failed: %s", exc)
+                # AB3: record the substrate-specific status fields, then RE-RAISE so
+                # the central _flush_derived_writes handler is the single place that
+                # logs + counts the failure (no double-count, no false success).
+                # Net behavior is identical to the prior internal swallow: degraded
+                # gets set and the cycle is not blocked — the swallow simply moves
+                # up one frame to the uniform fail-loud path.
                 summary["forward_market_substrate_status"] = "error"
                 summary["forward_market_substrate_error"] = str(exc)
-                summary["degraded"] = True
+                raise
 
         _queue_derived_write("forward_market_substrate", _write_guarded)
 
@@ -4651,6 +4679,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             if _forward_price_linkage_status_degraded(summary["forward_market_price_linkage_status"]):
                 summary["degraded"] = True
         except Exception as exc:
+            # AB3: direct (non-queued) price-linkage telemetry-lane write. Was
+            # logged but uncounted; now counted. degraded + status preserved.
             deps.logger.warning(
                 "Executable snapshot price linkage write failed for %s %s %s: %s",
                 city_name,
@@ -4659,7 +4689,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 exc,
             )
             summary["forward_market_price_linkage_status"] = "error"
-            summary["degraded"] = True
+            _record_lane_write_failure(summary, "executable_snapshot_price_linkage", exc)
         try:
             conn.commit()
         except Exception as exc:
@@ -5453,8 +5483,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         _write_shadow_signal,
                     )
                 except Exception as exc:
+                    # AB3: shadow-signal telemetry-lane build/queue failure. Was
+                    # logged but uncounted; now counted so a chronically-failing
+                    # shadow lane is detectable downstream. degraded preserved.
                     deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc, exc_info=True)
-                    summary["degraded"] = True
+                    _record_lane_write_failure(summary, "shadow_signal_build", exc)
             family_fallback_submit_satisfied = False
             for d in decisions:
                 if False:
@@ -6081,47 +6114,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     outcome="venue_ack",
                                     snapshot_fields=snapshot_fields,
                                 )
-                            # P1-3: write decision_events row after each live submit.
-                            # Fail-soft: logging/learning infrastructure must not crash the cycle.
-                            # Pass conn=None so write_decision_event opens its own world-DB
-                            # connection (P1-4: avoids lock-path mismatch with trade-DB conn).
-                            _dsc = _decision_source_context_with_submit_result(
-                                getattr(final_intent, "decision_source_context", None),
-                                result,
-                            )
-                            if _dsc is not None:
-                                try:
-                                    from src.contracts.decision_natural_key import (
-                                        make_decision_natural_key,
-                                    )
-                                    from src.state.decision_events import write_decision_event
-
-                                    _nk = make_decision_natural_key(
-                                        market_slug=candidate.slug,
-                                        temperature_metric=candidate.temperature_metric,
-                                        target_date=candidate.target_date,
-                                        observation_time=_dsc.observation_time or "",
-                                        decision_seq=0,  # overwritten atomically by write_decision_event
-                                    )
-                                    write_decision_event(
-                                        _nk,
-                                        _dsc,
-                                        None,  # ekc: reserved for future Phase-2 Kelly context
-                                        direction=str(final_intent.direction),
-                                        strategy_key=strategy_name,
-                                        target_size_usd=float(final_intent.size_value),
-                                        limit_price=float(final_intent.final_limit_price),
-                                        edge=float(d.edge.edge) if d.edge else None,
-                                        p_posterior=float(d.edge.p_posterior) if d.edge else None,
-                                        conn=None,
-                                    )
-                                except Exception as _de_exc:  # noqa: BLE001
-                                    deps.logger.warning(
-                                        "write_decision_event failed (degraded); cycle continues: %s",
-                                        _de_exc,
-                                        exc_info=True,
-                                    )
-                                    summary["degraded"] = True
                             reprice_payload["execution_path"] = "final_execution_intent"
                             reprice_payload["submitted_limit_price"] = (
                                 None if submit_rejected else submitted_limit

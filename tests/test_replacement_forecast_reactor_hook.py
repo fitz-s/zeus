@@ -313,59 +313,6 @@ def _refit_handoff_dict() -> dict[str, object]:
     }
 
 
-def _promotion_evidence_payload_dict() -> dict[str, object]:
-    payload = {
-        "promotion_evidence": _promotion_evidence().__dict__,
-        "refit_evidence": {
-            "official_days": 5,
-            "official_rows": 250,
-            "temperature_metric": "high",
-            "source_family": "derived_posterior",
-            "product_id": PRODUCT_ID,
-            "calibration_method": "soft_anchor_product_specific_nested_refit",
-            "enabled_evidence": list(REQUIRED_REFIT_EVIDENCE),
-            "min_guardrail_bucket_rows": 20,
-            "high_low_mixed": False,
-            "baseline_calibration_reused": False,
-            "emos_key_includes_product": True,
-            "emos_key_schema": "replacement_product_keyed_v1",
-            "emos_identity_evidence_status": "REPLACEMENT_EMOS_PRODUCT_IDENTITY_READY",
-            "data_refit_requested": True,
-            "live_promotion_requested": True,
-        },
-        "before_after_rows": [],
-        "min_before_after_official_days": 1,
-        "min_before_after_official_rows": 1,
-        "capital_replay": {
-            "selected_label": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00",
-            "status": "EMPIRICAL_WINNER",
-            "coverage": {
-                "source_availability_observed": True,
-                "source_availability_violations": 0,
-            },
-        },
-    }
-    for day in range(5):
-        for _ in range(50):
-            payload["before_after_rows"].append(
-                {
-                    "official_date": f"2026-06-0{day + 1}",
-                    "city": "Shanghai",
-                    "temperature_metric": "high",
-                    "guardrail_bucket": "standard",
-                    "baseline_brier": 0.30,
-                    "replacement_brier": 0.20,
-                    "baseline_log_loss": 0.70,
-                    "replacement_log_loss": 0.50,
-                    "baseline_after_cost_pnl": 0.0,
-                    "replacement_after_cost_pnl": 1.0,
-                    "truth_authority": "VERIFIED",
-                    "replay_status": "SCORED",
-                }
-            )
-    return payload
-
-
 def _switch_decision(policy, *, readiness=None, current: bool = True, live_promotion: bool = False):
     # BLOCKER 8 fail-closed boundary: a LIVE_AUTHORITY policy must thread its capital-objective
     # evidence OBJECT to the switch input -- the consuming gate now requires it explicitly
@@ -1129,72 +1076,13 @@ def test_replacement_refit_decision_missing_handoff_fails_closed(monkeypatch, tm
     assert main_module._replacement_forecast_refit_decision_from_settings() is None
 
 
-def test_replacement_promotion_evidence_is_read_from_settings_payload(monkeypatch, tmp_path) -> None:
-    evidence_path = tmp_path / "promotion_evidence.json"
-    evidence_path.write_text(json.dumps(_promotion_evidence_payload_dict()), encoding="utf-8")
-    monkeypatch.setitem(
-        main_module.settings._data,
-        "replacement_forecast_shadow",
-        {"promotion_evidence_path": str(evidence_path)},
-    )
-
-    evidence = main_module._replacement_forecast_promotion_evidence_from_settings()
-    # FIX-1 AND (ITEM B): LIVE_AUTHORITY now requires BOTH proofs. This test's load-
-    # bearing subject is that the promotion evidence is READ from settings (the
-    # `evidence == _promotion_evidence()` assertion); resolve with both evidence
-    # objects so the incidental LIVE_AUTHORITY assertion reflects the conjunction law.
-    capital_evidence = main_module._replacement_forecast_capital_objective_evidence_from_settings()
-    policy = resolve_replacement_forecast_runtime_policy(
-        _flags(shadow=True, veto=True, trade=True),
-        promotion_evidence=evidence,
-        capital_objective_evidence=capital_evidence,
-    )
-
-    assert evidence == _promotion_evidence()
-    assert policy.status == "LIVE_AUTHORITY"
-    assert policy.can_initiate_trade is True
-    assert policy.can_increase_kelly is False
-    assert policy.can_flip_direction is False
-
-
-def test_replacement_promotion_evidence_missing_payload_fails_closed(monkeypatch, tmp_path) -> None:
-    monkeypatch.setitem(
-        main_module.settings._data,
-        "replacement_forecast_shadow",
-        {"promotion_evidence_path": str(tmp_path / "missing.json")},
-    )
-
-    assert main_module._replacement_forecast_promotion_evidence_from_settings() is None
-
-
-def test_replacement_capital_objective_evidence_is_read_from_settings_payload(monkeypatch, tmp_path) -> None:
-    evidence_path = tmp_path / "promotion_evidence.json"
-    evidence_path.write_text(json.dumps(_promotion_evidence_payload_dict()), encoding="utf-8")
-    monkeypatch.setitem(
-        main_module.settings._data,
-        "replacement_forecast_shadow",
-        {"promotion_evidence_path": str(evidence_path)},
-    )
-
-    evidence = main_module._replacement_forecast_capital_objective_evidence_from_settings()
-    # FIX-1 AND (ITEM B): this test's load-bearing subject is that the capital-
-    # objective evidence is READ from settings (the `evidence == _capital_objective_
-    # evidence()` assertion); resolve with both evidence objects so the incidental
-    # LIVE_AUTHORITY assertion reflects the conjunction law (single proof => BLOCKED).
-    promotion_evidence = main_module._replacement_forecast_promotion_evidence_from_settings()
-    policy = resolve_replacement_forecast_runtime_policy(
-        _flags(shadow=True, veto=True, trade=True),
-        promotion_evidence=promotion_evidence,
-        capital_objective_evidence=evidence,
-    )
-
-    assert evidence == _capital_objective_evidence()
-    assert policy.status == "LIVE_AUTHORITY"
-    assert policy.can_initiate_trade is True
-    assert policy.can_increase_kelly is False
-    assert policy.can_flip_direction is False
-
-
+# DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the three tests that exercised
+# main._replacement_forecast_{promotion,capital_objective}_evidence_from_settings
+# (settings-payload read + missing-payload fail-closed) were REMOVED — those settings
+# parsers imported the deleted go_live_report verdict module and are gone. The resolver
+# IGNORES the evidence objects post-severance (LIVE_AUTHORITY is FLAG-ONLY), so the
+# settings-read path no longer exists to test. The runtime-policy authority law itself
+# stays pinned by tests/test_replacement_forecast_runtime_policy.py.
 def test_reactor_hook_veto_only_never_flips_direction_or_raises_values() -> None:
     policy = resolve_replacement_forecast_runtime_policy(_flags(shadow=True, veto=True))
     result = apply_replacement_forecast_reactor_hook(
