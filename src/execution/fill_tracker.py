@@ -1086,7 +1086,16 @@ def _mark_entry_filled(
     )
     pos.order_status = order_status
     pos.chain_state = "local_only"
-    pos.entered_at = now.isoformat()
+    # M2a (timing-semantics fix 2026-06-16): entered_at MUST be the venue match
+    # time reported in the WS fill payload, NOT the local fill-processing clock
+    # (`now`). It feeds hours_since_open -> compute_alpha -> live exits, so a
+    # `now()` stamp grades exit alpha against the wrong clock. Honest basis =
+    # the venue-reported timestamp; when the payload carries none, leave it
+    # ABSENT ("" — the Position.entered_at default, which every consumer's
+    # `if position.entered_at:` gate treats as missing) rather than fabricating
+    # a processing-clock value. Never now().
+    _venue_match_time = _payload_timestamp(payload if isinstance(payload, dict) else {})
+    pos.entered_at = _venue_match_time or ""
 
     lc_ok = _maybe_update_trade_lifecycle(pos, deps=deps)
     cf_ok = _maybe_emit_canonical_entry_fill(pos, deps=deps)

@@ -512,6 +512,18 @@ def _lookup_settlement_obs(
         observed_temp = _row_value(r, metric_field)
         if observed_temp is None:
             continue
+        # M1 (timing-semantics fix 2026-06-16): carry the metric-aware
+        # station-reported LOCAL observation instant (high_local_time /
+        # low_local_time) so the settlement writer can stamp settled_at from
+        # the genuine event time instead of the cron wall-clock. The column's
+        # local date equals target_date by construction (verified live: 100% of
+        # populated rows), which is the settlement contract day dispatch_era_basis
+        # keys on. Guard with `in columns` (live DB diverges from db.py CREATE);
+        # absent -> None -> writer routes to the honest-NULL/QUARANTINED path.
+        _local_time_field = "low_local_time" if metric_field == "low_temp" else "high_local_time"
+        _observation_local_time = (
+            _row_value(r, _local_time_field) if _local_time_field in columns else None
+        )
         return {
             "id": _row_value(r, "id"),
             "source": src,
@@ -523,6 +535,7 @@ def _lookup_settlement_obs(
             "authority": _row_value(r, "authority"),
             "observation_field": metric_field,
             "observed_temp": observed_temp,
+            "observation_local_time": _observation_local_time,
         }
     return None
 
@@ -1437,7 +1450,17 @@ def _write_settlement_truth(
         city.settlement_source_type, "unknown"
     )
     metric_identity = _metric_identity_for(temperature_metric)
-    settled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # M1 (timing-semantics fix 2026-06-16): settled_at is the SETTLEMENT EVENT
+    # TIME — it is written to settlements.settled_at AND fed to
+    # dispatch_era_basis() to GRADE every position's P&L. It must derive from the
+    # genuine station-reported observation instant, NEVER the cron wall-clock.
+    # recorded_at is the legitimately-now() write/reconstruction time and is kept
+    # as a SEPARATE variable. When the observation time is absent, settled_at is
+    # an honest NULL and the row is forced QUARANTINED (not gradable) — never a
+    # guessed now().
+    recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    settled_at = obs_row.get("observation_local_time") if obs_row is not None else None
+    settlement_time_missing = settled_at is None
 
     authority = "QUARANTINED"
     settlement_value: Optional[float] = None
@@ -1491,6 +1514,14 @@ def _write_settlement_truth(
                     settlement_value = rounded
                     reason = "harvester_live_obs_outside_bin"
 
+    # M1: a settlement with no genuine event time (settled_at is NULL) is NOT
+    # gradable — force QUARANTINED even if the value was bin-contained. The
+    # cron clock is never substituted for the missing observation instant.
+    if settlement_time_missing and authority == "VERIFIED":
+        authority = "QUARANTINED"
+        if reason is None:
+            reason = "harvester_live_no_observation_time"
+
     provenance = {
         "writer": "harvester_live_dr33",
         "writer_script": "src/execution/harvester.py",
@@ -1508,7 +1539,10 @@ def _write_settlement_truth(
         "physical_quantity": metric_identity.physical_quantity,
         "observation_field": metric_identity.observation_field,
         "data_version": data_version,
-        "reconstructed_at": settled_at,
+        "reconstructed_at": recorded_at,
+        "settlement_time_basis": (
+            "missing_observation_time" if settlement_time_missing else "observation_local_time"
+        ),
         "audit_ref": "docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md",
     }
     if reason is not None:
@@ -1545,10 +1579,17 @@ def _write_settlement_truth(
             ),
         )
         # Route to era-aware writer (PR 1). dispatch_era_basis selects the
-        # correct EraAuthorityBasis from settled_at date.
+        # correct EraAuthorityBasis from the settled_at (settlement-event) date.
+        # M1: dispatch_era_basis RAISES on a None date, and a NULL settled_at
+        # means the settlement is not era-gradable — so skip the era path
+        # entirely and write the QUARANTINED row directly via log_settlement
+        # (which accepts settled_at=None). recorded_at is the real write time on
+        # BOTH paths (never aliased to settled_at).
         from datetime import date as _date
-        _settled_date = _date.fromisoformat(str(settled_at)[:10])
-        _era_result = dispatch_era_basis(_settled_date)
+        _era_result = None
+        if not settlement_time_missing:
+            _settled_date = _date.fromisoformat(str(settled_at)[:10])
+            _era_result = dispatch_era_basis(_settled_date)
         _settlement_dict = {
             "city": city.name,
             "target_date": target_date,
@@ -1560,10 +1601,10 @@ def _write_settlement_truth(
             "settled_at": settled_at,
             "authority": authority,
             "provenance": provenance,
-            "recorded_at": settled_at,
+            "recorded_at": recorded_at,
             "settlement_unit": city.settlement_unit,
         }
-        if _era_result.is_admittable():
+        if _era_result is not None and _era_result.is_admittable():
             settlement_result = write_settlement_with_era_provenance(
                 _settlement_dict, _era_result.era_basis, conn=conn
             )
@@ -1580,7 +1621,7 @@ def _write_settlement_truth(
                 settled_at=settled_at,
                 authority=authority,
                 provenance=provenance,
-                recorded_at=settled_at,
+                recorded_at=recorded_at,
                 settlement_unit=city.settlement_unit,
             )
         if authority == "VERIFIED" and resolved_market_outcomes:
