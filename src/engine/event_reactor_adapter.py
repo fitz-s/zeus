@@ -4990,25 +4990,36 @@ def _execution_command_id_from_final_intent(
 # might still be live on the venue.
 # =============================================================================
 
-# Aggregate lifecycle event types whose presence makes an order's TERMINAL: once
-# any of these has occurred for an aggregate, that specific order is closed and
-# no longer rests on the venue, so it can never be a duplicate of a fresh submit.
-#   - SubmitRejected      : the venue rejected the submit (order never rested).
-#   - Reconciled          : the reconcile loop settled the order (cancel/expiry/
-#                           authenticated-absence) — terminal closure.
-#   - CapTransitioned     : the live-cap was released or consumed; RELEASED =
-#                           the order closed without a held position (reject /
-#                           reconcile / submit-disabled), CONSUMED = the order
-#                           filled into a position (the ORDER is done; sizing,
-#                           not this dedup lock, governs any add).
-#   - UserTradeObserved   : the user channel confirmed a fill (position, not an
-#                           open resting order).
-_LIVE_ORDER_TERMINAL_EVENT_TYPES = (
-    "SubmitRejected",
-    "Reconciled",
-    "CapTransitioned",
-    "UserTradeObserved",
-)
+# Terminal-event SQL fragment: returns a row IFF the aggregate has reached a
+# TERMINAL lifecycle state, correctly handling payload variants:
+#
+#   - SubmitRejected                            : venue rejected; never rested.
+#   - UserTradeObserved                         : fill confirmed; order done.
+#   - CapTransitioned  to_status=CONSUMED       : filled into position; done.
+#   - CapTransitioned  to_status=RELEASED       : closed without position; done.
+#   - CapTransitioned  to_status=PENDING_RECONCILE : cap RESERVED, order MAY
+#       still be resting live (emitted on TIMEOUT_UNKNOWN / POST_SUBMIT_UNKNOWN
+#       alongside SubmitUnknown).  NOT terminal — must SUPPRESS (fail-closed).
+#   - Reconciled       pending_reconcile=False  : fully settled; terminal.
+#   - Reconciled       pending_reconcile=True   : matched-pending-finality; NOT
+#       terminal for re-bid — must SUPPRESS (fail-closed).
+#
+# A row returned by this query means TERMINAL → RELEASE.
+# No row means ACTIVE (or indeterminate) → SUPPRESS (fail-closed).
+_TERMINAL_EVENT_SQL = """
+    SELECT 1 FROM edli_live_order_events
+    WHERE aggregate_id = ?
+      AND (
+        event_type = 'SubmitRejected'
+        OR event_type = 'UserTradeObserved'
+        OR (event_type = 'CapTransitioned'
+            AND json_extract(payload_json, '$.to_status')
+                IN ('CONSUMED', 'RELEASED'))
+        OR (event_type = 'Reconciled'
+            AND COALESCE(json_extract(payload_json, '$.pending_reconcile'), 0) = 0)
+      )
+    LIMIT 1
+"""
 
 
 def _locked_live_opportunity_active_order_reason(
@@ -5078,17 +5089,10 @@ def _locked_live_opportunity_active_order_reason(
     # the only thing that can be a duplicate of the fresh submit.
     aggregate_id = str(plan_rows[0][0])
     try:
-        event_types = {
-            str(row[0])
-            for row in live_cap_conn.execute(
-                """
-                SELECT DISTINCT event_type
-                FROM edli_live_order_events
-                WHERE aggregate_id = ?
-                """,
-                (aggregate_id,),
-            ).fetchall()
-        }
+        terminal_row = live_cap_conn.execute(
+            _TERMINAL_EVENT_SQL,
+            (aggregate_id,),
+        ).fetchone()
     except Exception as exc:  # noqa: BLE001 - fail CLOSED on a read error.
         return (
             "EDLI_LIVE_ORDER_STATE_UNREADABLE_FAIL_CLOSED:"
@@ -5096,16 +5100,19 @@ def _locked_live_opportunity_active_order_reason(
             f"aggregate_id={aggregate_id}:error={type(exc).__name__}"
         )
 
-    if event_types & set(_LIVE_ORDER_TERMINAL_EVENT_TYPES):
-        # The latest order reached a terminal lifecycle event: it is no longer a
-        # live resting/pending order. RELEASE — re-decide at the fresh price.
+    if terminal_row is not None:
+        # A qualifying terminal event (CONSUMED/RELEASED cap, SubmitRejected,
+        # UserTradeObserved, or a fully-settled Reconcile) was found.  The order
+        # is no longer resting/pending.  RELEASE — re-decide at fresh price.
+        # NOTE: CapTransitioned(to_status=PENDING_RECONCILE) does NOT match this
+        # query — it is correctly kept as ACTIVE (suppress, fail-closed).
         return None
 
-    # No terminal event observed for the latest aggregate -> the order is still
-    # ACTIVE (planned / reserved / command-created / submit-attempted /
-    # acknowledged-resting / submit-unknown / user-order-observed). Suppress the
-    # duplicate; this also covers the fail-closed UNKNOWN case (an aggregate that
-    # exists but carries no terminal marker is treated as live).
+    # No qualifying terminal event found for the latest aggregate.  This covers:
+    #   - ACTIVE states (command-created, submit-attempted, acknowledged-resting,
+    #     submit-unknown, user-order-observed with no fill, PENDING_RECONCILE)
+    #   - Indeterminate / not-yet-landed states
+    # All treated as ACTIVE: suppress the potential duplicate.
     return (
         "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
         f"condition_id={condition_id}:token_id={token_id}:direction={direction}:"

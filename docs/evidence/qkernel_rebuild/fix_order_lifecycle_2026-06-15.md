@@ -36,29 +36,48 @@ token_id, direction, side=None, limit_price=None)`. It derives ACTIVE-vs-TERMINA
 1. Find every order aggregate for the exact `(condition_id, token_id, direction)` keyed off
    its `SubmitPlanBuilt` event (which carries those three identity fields), newest first by
    `occurred_at, event_sequence`.
-2. Inspect ONLY the most-recent aggregate. Classify by the set of event types it contains:
-   - TERMINAL if it contains any of
-     `{SubmitRejected, Reconciled, CapTransitioned, UserTradeObserved}`
-     (a confirmed reject / cancel-expiry-reconcile / cap release-or-consume / fill) →
-     the order is closed, not a duplicate → **RELEASE** (`return None`): the family
-     re-enters the decision pipeline and re-decides at the fresh price.
-   - ACTIVE otherwise (planned / live-cap reserved / command-created / submit-attempted /
-     acknowledged-resting / submit-unknown / user-order-observed) → a real live order
-     exists → **SUPPRESS** (return an `EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:...`
-     reason) so we never double-submit.
+2. Inspect ONLY the most-recent aggregate. Run a payload-aware terminal-event query:
+   - **TERMINAL** (→ **RELEASE**, `return None`; the family re-bids at the fresh price):
+     - `SubmitRejected` — venue rejected; order never rested.
+     - `UserTradeObserved` — fill confirmed; order is done.
+     - `CapTransitioned` with `to_status IN ('CONSUMED', 'RELEASED')` — cap released or
+       filled into position; order done.
+     - `Reconciled` with `pending_reconcile = False` (or absent) — fully settled; done.
+   - **ACTIVE** (→ **SUPPRESS**; return `EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:...`):
+     - All other states, including:
+       - `CapTransitioned` with `to_status = 'PENDING_RECONCILE'` — cap still RESERVED;
+         order MAY still be resting live on the venue (emitted alongside `SubmitUnknown`
+         on submit TIMEOUT_UNKNOWN / POST_SUBMIT_UNKNOWN).  NOT terminal.
+       - `Reconciled` with `pending_reconcile = True` — matched-pending-finality; NOT
+         terminal for re-bid.
+       - Any other in-flight / indeterminate state.
 
 The arbitrary 0.02 price-improvement requirement is GONE — duplicate-prevention is now
 bound to genuinely ACTIVE orders only, not to historical price levels.
 
-### Lock predicate (exact)
+### Lock predicate (exact) — payload-aware terminal-event SQL
+
+```sql
+SELECT 1 FROM edli_live_order_events
+WHERE aggregate_id = <latest_aggregate_id>
+  AND (
+    event_type = 'SubmitRejected'
+    OR event_type = 'UserTradeObserved'
+    OR (event_type = 'CapTransitioned'
+        AND json_extract(payload_json, '$.to_status') IN ('CONSUMED', 'RELEASED'))
+    OR (event_type = 'Reconciled'
+        AND COALESCE(json_extract(payload_json, '$.pending_reconcile'), 0) = 0)
+  )
+LIMIT 1
+```
+
+Row found → TERMINAL → RELEASE.  No row → ACTIVE (or indeterminate) → SUPPRESS (fail-closed).
 
 ```
 latest_aggregate := most-recent SubmitPlanBuilt for (condition_id, token_id, direction)
-if no such aggregate            -> RELEASE (never planned -> nothing to duplicate)
-event_types := DISTINCT event_type WHERE aggregate_id = latest_aggregate
-if event_types ∩ {SubmitRejected, Reconciled, CapTransitioned, UserTradeObserved} ≠ ∅
-                                -> RELEASE (terminal: order closed)
-else                            -> SUPPRESS (active / in-flight / unknown)
+if no such aggregate                     -> RELEASE (never planned -> nothing to duplicate)
+if terminal SQL query returns a row      -> RELEASE (order confirmed closed)
+else                                     -> SUPPRESS (active / pending-reconcile / unknown)
 ```
 
 The "latest aggregate" rule is what makes Fix A work: after a resting order's terminal
@@ -187,13 +206,20 @@ New / rewritten tests (all pass):
   escape), `test_fixA_terminal_cancel_releases_lock_for_rebid` (TERMINAL unfilled cancel →
   re-bid allowed at the same price), `test_fixA_unknown_indeterminate_state_fails_closed_suppresses`
   (UNKNOWN → suppress), `test_fixA_no_prior_order_does_not_suppress`,
-  `test_fixA_terminal_prior_order_does_not_block_redecision_same_price` (the rewritten
-  former `..._locked_same_price` test — terminal prior order no longer blocks).
+  `test_fixA_terminal_prior_order_does_not_block_redecision_same_price` (rewritten from
+  retired price-improvement test — terminal prior order no longer blocks), plus five new
+  payload-variant tests added in the loop-back defect fix:
+  - `test_fixA_cap_transitioned_pending_reconcile_suppresses_not_terminal` (RED against
+    old bare-type-set code; GREEN after payload-aware SQL fix — the critical regression test)
+  - `test_fixA_cap_transitioned_consumed_releases_lock` (CONSUMED → terminal → release)
+  - `test_fixA_cap_transitioned_released_releases_lock` (RELEASED → terminal → release)
+  - `test_fixA_reconciled_pending_reconcile_true_suppresses` (pending=True → non-terminal → suppress)
+  - `test_fixA_reconciled_pending_reconcile_false_releases` (pending=False → terminal → release)
 
 Targeted suites (all pass, 0 new failures):
 
 - `tests/strategy/live_inference/test_rest_then_cross_policy.py` — 23 passed (18 prior + 5 new).
-- `tests/money_path/test_edli_live_canary.py` — 50 passed.
+- `tests/money_path/test_edli_live_canary.py` — 55 passed (50 prior + 5 new payload-variant tests).
 - `tests/strategy/live_inference/` (full) — all passed.
 - `tests/engine/test_rest_then_cross_adapter_seam.py`, `test_final_submit_mode_authority.py`,
   `test_mode_flip_and_recapture_semantics.py` — all passed.
@@ -227,14 +253,34 @@ available in this environment.
   rewrote the retired price-improvement test).
 - `tests/strategy/live_inference/test_rest_then_cross_policy.py` — Fix B q_lcb-cap tests.
 
+## Loop-back defect fix (2026-06-15, post-independent-review)
+
+An independent review found a HIGH-severity fail-OPEN in the first version of Fix A:
+`_LIVE_ORDER_TERMINAL_EVENT_TYPES` checked bare event-type SET MEMBERSHIP, treating the mere
+presence of `CapTransitioned` as terminal → RELEASE, ignoring `to_status`.  But
+`CapTransitioned(to_status=PENDING_RECONCILE)` — emitted alongside `SubmitUnknown` on a
+submit TIMEOUT_UNKNOWN/POST_SUBMIT_UNKNOWN — means the cap is still RESERVED and the order
+MAY STILL BE RESTING LIVE on the venue.  Releasing the lock here enables a double-submit.
+Likewise, `Reconciled(pending_reconcile=True)` (matched-pending-finality) is not terminal.
+
+The fix replaces the bare `DISTINCT event_type` set check with a payload-aware SQL query
+(`_TERMINAL_EVENT_SQL`) that reads `to_status` from `CapTransitioned` and `pending_reconcile`
+from `Reconciled` events.  The `_LIVE_ORDER_TERMINAL_EVENT_TYPES` tuple is removed entirely.
+Five regression tests (including the critical RED→GREEN
+`test_fixA_cap_transitioned_pending_reconcile_suppresses_not_terminal`) cover all payload
+variants.  Full canary suite: 78 passed (23 Fix B + 55 Fix A, including the 5 new).
+
 ## Reviewer risk
 
 The two `test_edli_live_canary.py` tests that previously pinned the retired
 historical-command + 0.02-price-improvement semantics were REWRITTEN to assert the corrected
 live-order-state behavior (terminal prior order no longer blocks a same-price re-decision).
 This is an intentional behavior change at the heart of Fix A, not a test-hack: the old
-assertions encoded the exact bug (#125). A reviewer should confirm the EDLI terminal event
-set `{SubmitRejected, Reconciled, CapTransitioned, UserTradeObserved}` is complete for every
-order-closure path in production (a closure path that lands on none of these would keep the
-family suppressed — the fail-closed direction, conservative but worth confirming against the
-full reconcile/cap-transition state machine).
+assertions encoded the exact bug (#125).
+
+A reviewer should confirm the payload-aware terminal-event SQL correctly handles every
+production CapTransitioned and Reconciled variant — specifically that the `to_status` field
+is always present in `CapTransitioned` payloads in production code paths (the test
+infrastructure seeds it explicitly; the production event-writer must also set it).  The
+fail-closed direction (PENDING_RECONCILE → suppress) means a missing `to_status` would
+suppress rather than release — the safe side.

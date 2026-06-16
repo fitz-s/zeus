@@ -530,6 +530,155 @@ def test_fixA_no_prior_order_does_not_suppress():
     assert _lock_reason(conn, limit_price=0.70) is None
 
 
+def test_fixA_cap_transitioned_pending_reconcile_suppresses_not_terminal():
+    """FIX A (#125) DEFECT REGRESSION: CapTransitioned(to_status=PENDING_RECONCILE)
+    is NOT a terminal lifecycle event.
+
+    A CapTransitioned with to_status=PENDING_RECONCILE is emitted alongside a
+    SubmitUnknown event on a submit TIMEOUT_UNKNOWN / POST_SUBMIT_UNKNOWN.  At that
+    point the cap is still RESERVED and the order MAY still be resting live on the
+    venue.  The projection classifies this NON-terminal (current_state=PENDING_RECONCILE,
+    pending_reconcile=True).  The lock MUST suppress (return not-None) — treating it
+    as TERMINAL would release the dedup lock on a potentially live order, enabling a
+    double-submit.
+
+    The previously-buggy code treated bare presence of ANY CapTransitioned event as
+    terminal → RELEASE.  This test MUST:
+      - FAIL (RED) against the old bare-event-type-set code.
+      - PASS (GREEN) after the payload-inspecting fix.
+    """
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)  # SubmitPlanBuilt + ExecutionCommandCreated
+
+    # Submit timeout → SubmitUnknown then CapTransitioned(to_status=PENDING_RECONCILE)
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=3,
+        event_type="SubmitUnknown",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=4,
+        event_type="CapTransitioned",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "to_status": "PENDING_RECONCILE",
+        },
+    )
+
+    reason = _lock_reason(conn, limit_price=0.70)
+
+    # MUST suppress — the order may still be resting live; releasing here risks a
+    # double-submit.  A correct fix returns a non-None suppress reason.
+    assert reason is not None, (
+        "CapTransitioned(to_status=PENDING_RECONCILE) must NOT release the live-order "
+        "dedup lock — the order may still be resting on the venue.  "
+        f"Got: {reason!r}"
+    )
+    assert "SUPPRESSED" in reason or "FAIL_CLOSED" in reason, (
+        f"Suppress reason should contain 'SUPPRESSED' or 'FAIL_CLOSED', got: {reason!r}"
+    )
+
+
+def test_fixA_cap_transitioned_consumed_releases_lock():
+    """FIX A (#125): CapTransitioned(to_status=CONSUMED) IS terminal — the order
+    filled into a position.  The lock must RELEASE (return None) so the family
+    can size and re-enter the pipeline."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)
+
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=3,
+        event_type="CapTransitioned",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "to_status": "CONSUMED",
+        },
+    )
+
+    assert _lock_reason(conn, limit_price=0.70) is None, (
+        "CapTransitioned(to_status=CONSUMED) is terminal — lock must release."
+    )
+
+
+def test_fixA_cap_transitioned_released_releases_lock():
+    """FIX A (#125): CapTransitioned(to_status=RELEASED) IS terminal — the cap was
+    released without a position (reject / reconcile / submit-disabled)."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)
+
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=3,
+        event_type="CapTransitioned",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "to_status": "RELEASED",
+        },
+    )
+
+    assert _lock_reason(conn, limit_price=0.70) is None, (
+        "CapTransitioned(to_status=RELEASED) is terminal — lock must release."
+    )
+
+
+def test_fixA_reconciled_pending_reconcile_true_suppresses():
+    """FIX A (#125) Reconciled(pending_reconcile=True) is NOT terminal for re-bid.
+    Matched-pending-finality: the reconcile matched a pending order but finality
+    is not confirmed.  Must SUPPRESS (fail-closed)."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)
+
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=3,
+        event_type="Reconciled",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "pending_reconcile": True,
+        },
+    )
+
+    reason = _lock_reason(conn, limit_price=0.70)
+    assert reason is not None, (
+        "Reconciled(pending_reconcile=True) must NOT release the lock — "
+        f"finality not confirmed.  Got: {reason!r}"
+    )
+
+
+def test_fixA_reconciled_pending_reconcile_false_releases():
+    """FIX A (#125): Reconciled(pending_reconcile=False) IS terminal — fully settled."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)
+
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=3,
+        event_type="Reconciled",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "pending_reconcile": False,
+        },
+    )
+
+    assert _lock_reason(conn, limit_price=0.70) is None, (
+        "Reconciled(pending_reconcile=False) is terminal — lock must release."
+    )
+
+
 def test_selector_skips_locked_candidate_and_keeps_flowing_to_next_executable():
     from src.engine import event_reactor_adapter as adapter
 
