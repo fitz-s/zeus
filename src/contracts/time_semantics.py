@@ -879,16 +879,21 @@ REGISTRY: list[Entry] = [
         source=_maker_rest_escalation_deadline_hours,
         source_ref=(
             "src/strategy/live_inference/mode_consistent_ev.py:"
-            "MAKER_REST_ESCALATION_DEADLINE_MINUTES (120)"
+            "MAKER_REST_ESCALATION_DEADLINE_MINUTES (20)"
         ),
-        basis_kind=BasisKind.MEASURED,
+        basis_kind=BasisKind.DERIVED,
         basis=(
-            "Kaplan-Meier on 108 right-censored GTC/post_only resting facts "
-            "(docs/evidence/maker_taker/2026-06-10_taker_only_root_cause.md): "
-            "cumulative fill 0.188@15min, 0.214@60min, 0.390@120min, 0.530@240min; "
-            "beyond ~240min the at-risk set is too thin to certify. 120min captures "
-            "the steep mid-section of the hazard curve while keeping the cross "
-            "option alive well before event end."
+            "2026-06-16 (120->20min): the KM fill curve (108 right-censored facts, "
+            "docs/evidence/maker_taker/2026-06-10_taker_only_root_cause.md) is nearly "
+            "FLAT 15-60min (0.188@15, 0.214@60, 0.390@120), so waiting to 120min buys "
+            "little extra maker fill but forfeits the cross for ~2h. A settlement "
+            "counterfactual (49 settled day-ahead buy_no picks, NO won 41/49=84%, "
+            "+$88 at $10/order vs $0 captured because all rested unfilled) proves the "
+            "ADMISSIBLE cross (ask+fee<=q_lcb) of the unfilled remainder is +EV after "
+            "cost. 20min keeps a real maker-first window (the ~0.19 fast-fill cohort, "
+            "honoring the Denver/Karachi rest-first antibody) then escalates to the "
+            "settlement-proven cross. Interim; fit the optimum from KM x settlement "
+            "EV per #64."
         ),
         relations=[],
     ),
@@ -907,8 +912,11 @@ REGISTRY: list[Entry] = [
         ),
         basis_kind=BasisKind.DERIVED,
         basis=(
-            "Escalation deadline (2.0h MEASURED) + 1.0h slack for the escalation "
-            "job cadence and the full-pipeline re-certification cycle."
+            "Held at 3.0h (conservative) after the escalation deadline dropped to "
+            "0.33h (2026-06-16): the rest-then-cross plan now completes in ~20min + "
+            "job-cadence slack, so a 3.0h floor leaves ample runway. Floor not "
+            "lowered in lockstep — crossing a little earlier before event end is "
+            "safe; the relation (MUST_EXCEED deadline) holds with wide margin."
         ),
         relations=[
             Relation(

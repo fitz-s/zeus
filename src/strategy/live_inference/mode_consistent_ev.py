@@ -113,19 +113,29 @@ PLACEMENT_TAKER = "taker_cross"
 # ~25-minute rests of deep-longshot quotes — the wrong population (Fitz #4).
 # =============================================================================
 
-# Escalation deadline for a resting maker entry. basis=MEASURED: the KM curve
-# reaches 0.39 cumulative fill by 120 min and the at-risk set is still thick
-# there (beyond ~240 min it is too thin to certify). Registry-tracked in
-# src/contracts/time_semantics.py as maker_rest_escalation_deadline (2.0 h).
-MAKER_REST_ESCALATION_DEADLINE_MINUTES = 120.0
+# Escalation deadline for a resting maker entry. 2026-06-16: 120 -> 20 min.
+# RATIONALE (settlement-graded): the KM fill curve is nearly FLAT 15-60 min
+# (0.188@15, 0.214@60, 0.390@120) — waiting to 120 min buys little extra maker
+# fill but forfeits the cross for 2h. A settlement counterfactual on 49 settled
+# day-ahead buy_no picks (NO won 41/49 = 84%, +$88.33 at $10/order vs $0 actually
+# captured because all rested unfilled) proves the ADMISSIBLE cross (ask+fee <=
+# q_lcb) of the unfilled remainder is POSITIVE after cost. The objective is
+# FILLS-fast (maker OR cross), NOT maker-fill-rate. 20 min keeps a real
+# maker-first window (captures the ~0.19 fast-fill cohort, honoring the
+# Denver/Karachi rest-first antibody — this is NOT an immediate cross) then
+# escalates to the settlement-proven +EV cross. basis=SETTLEMENT-EVIDENCE
+# (interim; fit the optimal deadline from the KM curve x settlement EV per #64).
+# Registry-tracked in src/contracts/time_semantics.py as
+# maker_rest_escalation_deadline (now ~0.33 h).
+MAKER_REST_ESCALATION_DEADLINE_MINUTES = 20.0
 
 # Maker fill probability AT the escalation-deadline horizon. basis=MEASURED
 # (KM @120min, all-band). Used for the recorded EV provenance of a REST
 # decision — the EV of the policy's first leg. NOT a one-shot point prior;
 # the policy, not this number, decides the mode.
-MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE = 0.39
+MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE = 0.19
 MAKER_FILL_PROBABILITY_DEADLINE_SOURCE = (
-    "km_2026_06_10_resting_facts_n108@120min:basis=MEASURED"
+    "km_2026_06_10_resting_facts_n108@~20min(0.188@15min):basis=MEASURED"
 )
 
 # Taker-immediate exception lane 1: event end too near for the rest-then-cross

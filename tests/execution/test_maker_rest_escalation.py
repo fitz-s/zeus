@@ -100,7 +100,7 @@ class TestScopeGuards:
             conn,
             command_id="c1",
             venue_order_id="o1",
-            created_at=NOW - timedelta(minutes=60),  # < 120-min deadline
+            created_at=NOW - timedelta(minutes=10),  # < 20-min deadline (2026-06-16)
         )
         clob = _FakeClob()
         stats = run_maker_rest_escalation_cycle(conn, clob, now=NOW)

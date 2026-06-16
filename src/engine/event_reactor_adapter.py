@@ -8236,7 +8236,16 @@ def _family_rest_state(
             continue
         if (
             fact_state_s in terminal_unfilled_states
-            and (matched is None or float(matched or 0.0) <= 0.0)
+            # 2026-06-16: REMOVED the `matched <= 0` disqualifier. A rest that took a
+            # PARTIAL fill and was then cancelled at the deadline (the escalation job
+            # cancels the REMAINDER — maker_rest_escalation.py) must STILL license the
+            # cross of the unfilled remainder; disqualifying it forfeited the residual
+            # edge (settlement counterfactual: 49 settled day-ahead NO picks, 84% won,
+            # +$88 vs $0 captured — the admissible cross is +EV). The re-cert sizes
+            # against existing exposure (extra_exposure_by_bin), so the partial
+            # position is not double-counted. Fully-filled orders terminate as MATCHED
+            # (not in terminal_unfilled_states), so this never re-crosses a completed
+            # order. `matched` is retained on the row read for receipt provenance.
             and created_at is not None
             and observed_at is not None
             and (observed_at - created_at).total_seconds() >= deadline_seconds

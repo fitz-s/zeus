@@ -332,11 +332,14 @@ class TestFixBConservativeQlcbCapOnCross:
 
 
 class TestConstantsProvenance:
-    def test_deadline_is_measured_basis(self):
-        """120 min comes from the KM curve (0.39 cumulative fill by 120 min,
-        n=108 right-censored resting facts). Registry-tracked."""
-        assert MAKER_REST_ESCALATION_DEADLINE_MINUTES == 120.0
-        assert MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE == 0.39
+    def test_deadline_is_settlement_derived(self):
+        """2026-06-16: deadline 120->20 min. The KM curve is flat 15-60 min, so
+        waiting to 120 forfeits the cross for ~2h; a settlement counterfactual
+        (49 settled day-ahead NO picks, 41/49=84% won, +$88 vs $0 captured) proves
+        the admissible cross of the unfilled remainder is +EV. 20 min keeps the
+        fast-fill maker window (~0.19) then escalates. Registry-tracked, DERIVED."""
+        assert MAKER_REST_ESCALATION_DEADLINE_MINUTES == 20.0
+        assert MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE == 0.19
 
     def test_event_end_floor_exceeds_deadline(self):
         """Relation: the event-end taker floor must exceed the escalation deadline
@@ -352,5 +355,5 @@ class TestConstantsProvenance:
         names = {entry.name: entry for entry in REGISTRY}
         assert "maker_rest_escalation_deadline" in names
         entry = names["maker_rest_escalation_deadline"]
-        assert entry.basis_kind.value == "MEASURED"
-        assert entry.value() == pytest.approx(2.0)  # hours
+        assert entry.basis_kind.value == "DERIVED"
+        assert entry.value() == pytest.approx(20.0 / 60.0)  # hours
