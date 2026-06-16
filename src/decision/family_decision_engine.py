@@ -893,12 +893,21 @@ class FamilyDecisionEngine:
         # case) STAYS banned — it graded after-cost NEGATIVE. NOTE: the 1.22x modal
         # over-confidence is load-bearing for this gate; RE-GRADE before any sigma/center
         # change (current sigma artifact k_default=1.30).
-        after_direction = [
-            d
-            for d in after_executable
-            if d.direction_law_ok
-            or (d.route.side == "NO" and d.economics.edge_lcb > 0.0)
-        ]
+        # Favorite-longshot relaxation, defined ONCE so the after_direction admission and
+        # the final live_candidate_passes re-proof CANNOT diverge. They diverged once
+        # (commit 3c4aeecc75 relaxed this list but the re-proof below still passed the bare
+        # `d.direction_law_ok`, which is False for a NO-on-modal candidate, so
+        # live_candidate_passes silently re-zeroed the exact harvest class this relaxation
+        # admits). Admit a candidate's direction iff it is direction-law-legal OR it is an
+        # edge-gated NO (edge_lcb = q_no_lcb - cost > 0 == the market over-prices the favorite
+        # beyond our CONSERVATIVE lower bound). Every OTHER gate (edge_lcb>0, ΔU at min/at s*,
+        # coherence, executable) still applies independently and unchanged.
+        def _direction_admitted(d):
+            return d.direction_law_ok or (
+                d.route.side == "NO" and d.economics.edge_lcb > 0.0
+            )
+
+        after_direction = [d for d in after_executable if _direction_admitted(d)]
         if not after_direction:
             return None, NO_TRADE_NO_DIRECTION_LAW
 
@@ -912,16 +921,18 @@ class FamilyDecisionEngine:
             if d.economics.edge_lcb > 0.0 and d.economics.optimal_delta_u > 0.0
         ]
         # The live pass is a final structural re-proof (executable route, direction-law
-        # proof present, coherence accepted, the vector edge/ΔU) — all already true for a
-        # survivor, so it never removes one here; it is the single contract the payoff layer
-        # owns and the selection honors.
+        # proof present, coherence accepted, the vector edge/ΔU). The direction-law proof
+        # passed here MUST be the SAME `_direction_admitted` predicate used by
+        # after_direction above — passing the bare `d.direction_law_ok` re-zeroes the
+        # edge-gated NO-on-modal harvest (live_candidate_passes hard-requires
+        # direction_law_proof_present=True). Every other vector gate still applies.
         survivors = [
             d
             for d in survivors
             if live_candidate_passes(
                 d.economics,
                 d.route,
-                direction_law_proof_present=d.direction_law_ok,
+                direction_law_proof_present=_direction_admitted(d),
                 market_coherence_accepted=d.coherence_allows,
             )
         ]
