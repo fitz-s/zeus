@@ -907,3 +907,128 @@ def test_tokyo_impossible_bin_blocked_by_coherence_before_scoring(monkeypatch):
             NO_TRADE_NO_DIRECTION_LAW,
             NO_TRADE_NO_POSITIVE_EDGE,
         ), decision.no_trade_reason
+
+
+# ===========================================================================
+# SPEC RED-on-revert #4: NO-on-modal survives _select via favorite-longshot relaxation.
+# ===========================================================================
+
+def test_no_on_modal_survives_select_via_edge_gated_relaxation():
+    """A NO-on-modal candidate (direction_law_ok=False) is admitted by _select when edge_lcb>0.
+
+    The fix: ``_select`` defines ``_direction_admitted(d)`` as::
+
+        d.direction_law_ok or (d.route.side == "NO" and d.economics.edge_lcb > 0.0)
+
+    and passes that SAME predicate to both the ``after_direction`` filter AND to
+    ``live_candidate_passes(direction_law_proof_present=_direction_admitted(d))``.
+
+    RED-on-revert: if the re-proof is reverted to
+    ``direction_law_proof_present=d.direction_law_ok`` (which is ``False`` for a
+    NO-on-modal candidate), ``live_candidate_passes`` returns ``False`` and ``_select``
+    returns ``(None, NO_TRADE_NO_POSITIVE_EDGE)``, silently re-zeroing the entire
+    favorite-longshot harvest class.
+
+    This test also confirms that a YES-on-non-modal candidate (direction_law_ok=False,
+    side="YES", edge_lcb>0) is NOT admitted: the relaxation is strictly NO-side-only.
+    Competing a YES-on-non-modal against a NO-on-modal would expose both cases to the
+    after_direction filter simultaneously; we use a separate _select call for clarity.
+    """
+    case = _case()
+    space = _outcome_space(case)
+    # The modal bin for members tightly around 25C is b25 (confirmed by
+    # test_forecast_bin_is_the_modal_bin_and_direction_law_reads_it).
+    # A NO on b25 is direction-law-ILLEGAL (d.direction_law_ok = False) but must be
+    # admitted when edge_lcb > 0.0 (the favorite-longshot relaxation).
+    modal_bin_id = "b25"
+
+    # Build a NO-on-modal route: side="NO", bin_id=b25, cost=0.72 (a realistic
+    # favorite-NO ask; the favorite-NO loses edge at cost>=0.79 per settlement evidence).
+    no_on_modal_route = _hand_route(space, side="NO", bin_id=modal_bin_id, cost=0.72)
+
+    # Build the economics: edge_lcb=0.08 (>0 so the relaxation fires AND the edge gate
+    # passes), delta_u_at_min=0.001 (>0 so live_candidate_passes passes the ΔU-at-min
+    # check), optimal_delta_u=0.05 (>0 so the ΔU gate passes).
+    no_on_modal_economics = CandidateEconomics(
+        candidate_id=no_on_modal_route.candidate_id,
+        point_ev=0.09,          # edge_lcb + small spread
+        edge_lcb=0.08,
+        delta_u_at_min=0.001,
+        optimal_stake_usd=Decimal("5"),
+        optimal_delta_u=0.05,
+        q_dot_payoff=0.22,      # model q_no = 1 - q_modal ~ 0.22 (plausible for b25 favorite)
+        cost=no_on_modal_route.route_cost.avg_cost,
+        route_id=no_on_modal_route.route_cost.route_id,
+    )
+    # direction_law_ok=False — this is the key: NO-on-modal is direction-law-ILLEGAL.
+    # The relaxation in _direction_admitted admits it anyway because side=="NO" and
+    # edge_lcb>0. coherence_allows=True (coherence does not block it).
+    no_on_modal_cand = CandidateDecision(
+        route=no_on_modal_route,
+        economics=no_on_modal_economics,
+        direction_law_ok=False,
+        coherence_allows=True,
+        robust_trade_score=0.08,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected, reason = engine._select([no_on_modal_cand])
+
+    # The candidate MUST be selected: direction-law-illegal but admitted via the
+    # edge-gated NO-on-modal relaxation.
+    assert reason is None, (
+        f"expected no no-trade reason; got {reason!r} — "
+        "reverting the re-proof to direction_law_proof_present=d.direction_law_ok "
+        "makes live_candidate_passes return False here (direction_law_ok is False)"
+    )
+    assert selected is not None, (
+        "NO-on-modal with edge_lcb>0 must be selected via the favorite-longshot "
+        "relaxation; got None — check that _direction_admitted is used in BOTH the "
+        "after_direction filter AND in the live_candidate_passes re-proof"
+    )
+    assert selected.route.side == "NO"
+    assert selected.route.bin_id == modal_bin_id
+    # The critical invariant: admitted DESPITE direction_law_ok being False.
+    assert selected.direction_law_ok is False, (
+        "expected direction_law_ok=False on the selected candidate — the test proves "
+        "admission is via edge_lcb>0 relaxation, not direction-law legality"
+    )
+
+    # ---- Confirm the relaxation is NO-side-only --------------------------------
+    # A YES-on-non-modal (direction_law_ok=False, side="YES") with edge_lcb>0 must
+    # NOT be admitted. The "after graded after-cost NEGATIVE" evidence (documented in
+    # the engine's _select comment) means buy_yes on a NON-modal bin stays banned.
+    non_modal_bin_id = "b24"
+    yes_on_non_modal_route = _hand_route(space, side="YES", bin_id=non_modal_bin_id, cost=0.30)
+    yes_on_non_modal_economics = CandidateEconomics(
+        candidate_id=yes_on_non_modal_route.candidate_id,
+        point_ev=0.11,
+        edge_lcb=0.10,          # positive edge — but the ban holds
+        delta_u_at_min=0.001,
+        optimal_stake_usd=Decimal("5"),
+        optimal_delta_u=0.05,
+        q_dot_payoff=0.40,
+        cost=yes_on_non_modal_route.route_cost.avg_cost,
+        route_id=yes_on_non_modal_route.route_cost.route_id,
+    )
+    yes_on_non_modal_cand = CandidateDecision(
+        route=yes_on_non_modal_route,
+        economics=yes_on_non_modal_economics,
+        direction_law_ok=False,
+        coherence_allows=True,
+        robust_trade_score=0.10,
+    )
+
+    selected2, reason2 = engine._select([yes_on_non_modal_cand])
+    assert selected2 is None, (
+        "YES-on-non-modal (direction_law_ok=False, side='YES') must NOT be admitted — "
+        "the favorite-longshot relaxation is NO-side-only"
+    )
+    assert reason2 == NO_TRADE_NO_DIRECTION_LAW, (
+        f"expected NO_TRADE_NO_DIRECTION_LAW for YES-on-non-modal; got {reason2!r}"
+    )
