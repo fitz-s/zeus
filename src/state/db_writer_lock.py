@@ -665,6 +665,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/verify_e2e_money_path.py",  # read_only_ro_uri: e2e money-path walker opens every DB mode=ro, SELECT-only (operator-demanded full-chain diagnostic, 2026-06-11)
         "scripts/query_decision_provenance.py",  # read_only_ro_uri: decision-provenance query opens zeus-world.db mode=ro, SELECT-only over regret/no_submit receipts — operator "一切可被溯源" query entry 2026-06-11 (docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md)
         "scripts/sigma_scale_before_after.py",  # read_only_ro_uri: sigma-scale before/after evidence table, opens forecasts/trades DBs mode=ro, SELECT-only (docs/operations/c3_sigma_calibration_surface_2026-06-12.md)
+        "scripts/prune_terminal_opportunity_events.py",  # standalone one-time/maintenance retention sweep: own short-lived zeus-world.db connection with busy_timeout + batched-delete-with-backoff; runs OUTSIDE the daemon (cooperates via SQLite file lock), NOT a daemon-path writer (docs/evidence/settlement_guard/world_db_bloat_prune_and_forecast_lane_diagnosis_2026-06-16.md)
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
         # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
