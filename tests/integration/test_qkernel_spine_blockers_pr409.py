@@ -1,5 +1,5 @@
 # Created: 2026-06-15
-# Last reused or audited: 2026-06-15
+# Last reused or audited: 2026-06-16
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
 #   corrections docs/rebuild/consult_review_pr409_round2.md §1/§3/§5. RED-on-revert
 #   tests for the FOUR live-path blockers in the q-kernel integration bridge, folding
@@ -540,3 +540,131 @@ def test_reactor_seam_passes_real_exposure_into_selection():
     src = inspect.getsource(era)
     assert "_family_existing_exposure_for_selection_by_bin_id(" in src
     assert "extra_exposure_by_bin_id=(_spine_selection_exposure or None)" in src
+
+
+# ===========================================================================
+# BLOCKER 5 — the spine->legacy overlay must map the spine's GENUINE robust
+# lower bound into q_lcb_5pct (q-space), so the legacy submit pipeline's
+# per-side gate (q_lcb <= q_point) and binary-Kelly sizing run on the spine's
+# robust economics. The bug: the overlay restamped q_posterior to the payoff-
+# space q_dot_payoff (~0.052 for a neg-risk buy_no) but LEFT q_lcb_5pct at its
+# original PROBABILITY-space value (~0.990), so q_lcb (0.990) > q_point (0.052)
+# fired Q_LCB_INVALID in _native_side_candidate_from_proof, routing EVERY spine
+# submit to the missing-recapture branch ("no fresh executable snapshot").
+#
+# CORRECT FIX: q_lcb_5pct = clamp01(edge_lcb + cost). Because the legacy edge is
+# `q_lcb - all_in_cost` and the spine's own robust edge is `edge_lcb`, setting
+# q_lcb = edge_lcb + cost makes the legacy edge reproduce edge_lcb exactly, and
+# PRESERVES the robustness margin (q_lcb <= q_point, strict when edge_lcb <
+# point_ev) — it is NOT a clamp-to-point. RED if q_lcb is left unset (still the
+# stale 0.990 probability) OR hard-clamped to q_point (= q_dot_payoff).
+# ===========================================================================
+def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev):
+    """A minimal spine ``CandidateEconomics`` for the overlay (only the fields the
+    overlay reads: q_dot_payoff, point_ev, edge_lcb, cost)."""
+    from decimal import Decimal as _D
+
+    from src.contracts.execution_price import ExecutionPrice
+    from src.decision.payoff_vector import CandidateEconomics
+
+    return CandidateEconomics(
+        candidate_id="NO:b1:DIRECT_NO:b1@proof",
+        point_ev=float(point_ev),
+        edge_lcb=float(edge_lcb),
+        delta_u_at_min=0.01,
+        optimal_stake_usd=_D("5"),
+        optimal_delta_u=0.02,
+        q_dot_payoff=float(q_dot_payoff),
+        cost=ExecutionPrice(
+            float(cost), price_type="fee_adjusted", fee_deducted=True,
+            currency="probability_units",
+        ),
+        route_id="DIRECT_NO:b1@proof",
+    )
+
+
+def _overlay_proof(*, q_posterior, q_lcb_5pct, economics):
+    """Build a real reactor ``_CandidateProof`` and overlay the given spine economics."""
+    from types import SimpleNamespace
+
+    row = _row(
+        condition_id="cond-overlay", yes_token="yes-overlay", no_token="no-overlay",
+        yes_ask=0.95, no_ask=0.05, snapshot_id="snap-overlay",
+    )
+    proof = _proof(
+        direction="buy_no",
+        row=row,
+        token_id="no-overlay",
+        q_posterior=q_posterior,
+        q_lcb_5pct=q_lcb_5pct,
+        bin_obj=Bin(low=20.0, high=20.0, unit="C", label="20C"),
+    )
+    decision = SimpleNamespace(selected=economics)
+    return bridge._overlay_spine_economics_onto_proof(proof, decision)
+
+
+def test_overlay_maps_spine_robust_lower_bound_into_q_lcb_negrisk_buy_no():
+    """Realistic neg-risk buy_no: edge_lcb=0.05, cost=0.002, q_dot_payoff=0.052, original
+    q_lcb_5pct=0.990 (stale probability space). After the overlay:
+      * q_posterior == q_dot_payoff (0.052)  — payoff-space point fair value restamped.
+      * q_lcb_5pct == clamp01(edge_lcb + cost) == clamp01(0.052) == 0.052 — the spine's
+        GENUINE robust lower bound mapped into q-space (NOT the stale 0.990, NOT a clamp).
+    Boundary case (edge_lcb == point_ev): q_lcb == q_point exactly (the margin is zero
+    here by construction, not by a clamp — point_ev = 0.050, q_lcb = q_point = 0.052).
+    RED-on-revert: if q_lcb is left at 0.990 (unset) OR forced to q_point via a hard
+    clamp-to-point, the equality below breaks (0.990 != 0.052) or the provenance of the
+    value differs.
+    """
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.052, point_ev=0.050
+    )
+    new_proof = _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.990, economics=economics)
+
+    assert new_proof.q_posterior == pytest.approx(0.052), (
+        "q_posterior must be restamped to the spine's payoff-space q_dot_payoff"
+    )
+    # The robust lower bound mapped into q-space: edge_lcb + cost == 0.052.
+    assert new_proof.q_lcb_5pct == pytest.approx(0.052), (
+        "q_lcb_5pct must be the spine's robust lower bound (edge_lcb + cost), NOT the "
+        "stale 0.990 probability and NOT left unset"
+    )
+    # It is NOT the stale probability-space value (the bug that fired Q_LCB_INVALID).
+    assert new_proof.q_lcb_5pct != pytest.approx(0.990)
+    # The §13 gate that aborted every spine submit now PASSES (q_lcb <= q_point).
+    assert new_proof.q_lcb_5pct <= new_proof.q_posterior + 1e-12, (
+        "q_lcb must satisfy the legacy per-side gate q_lcb <= q_point"
+    )
+
+
+def test_overlay_preserves_robustness_margin_when_edge_lcb_below_point_ev():
+    """Genuine robustness gap (edge_lcb=0.03 strictly below point_ev=0.05): after the
+    overlay q_lcb_5pct must sit STRICTLY BELOW q_posterior (q_point), proving the fix
+    preserves the q_lcb < q_point margin and is NOT a clamp-to-point.
+      q_dot_payoff = 0.052, point_ev = 0.050 (so cost = 0.002), edge_lcb = 0.03
+      q_point = q_dot_payoff = 0.052
+      q_lcb   = edge_lcb + cost = 0.032  < 0.052  (strict margin retained)
+    RED-on-revert: a hard clamp `q_lcb = min(orig, q_dot_payoff) = q_point` would make
+    q_lcb == q_point (margin erased), failing the strict-less-than below; leaving q_lcb
+    unset (0.990) fails the <= q_point gate.
+    """
+    economics = _selected_economics(
+        edge_lcb=0.03, cost=0.002, q_dot_payoff=0.052, point_ev=0.050
+    )
+    new_proof = _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.990, economics=economics)
+
+    assert new_proof.q_posterior == pytest.approx(0.052)
+    assert new_proof.q_lcb_5pct == pytest.approx(0.032), "q_lcb = edge_lcb + cost = 0.032"
+    assert new_proof.q_lcb_5pct < new_proof.q_posterior, (
+        "the robustness margin q_lcb < q_point must be PRESERVED when edge_lcb < point_ev "
+        "(a clamp-to-point would erase it)"
+    )
+
+
+def test_overlay_q_lcb_is_clamped_into_unit_interval():
+    """clamp01: edge_lcb + cost above 1.0 is clamped to 1.0 (never an out-of-[0,1] q_lcb
+    that would itself trip the §13 bounds check)."""
+    economics = _selected_economics(
+        edge_lcb=0.999, cost=0.05, q_dot_payoff=1.049, point_ev=0.999
+    )
+    new_proof = _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.990, economics=economics)
+    assert new_proof.q_lcb_5pct == pytest.approx(1.0), "edge_lcb+cost>1 must clamp01 to 1.0"

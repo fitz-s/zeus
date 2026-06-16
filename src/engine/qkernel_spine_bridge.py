@@ -1160,10 +1160,35 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         "trade_score": new_trade_score,
         "q_source": "qkernel_spine",
     }
-    # q_lcb_5pct: the spine's robust edge lower bound is an edge (q-price), not a bare
-    # q_lcb; keep the proof's own q_lcb_5pct (its robust q lower bound) so the
-    # q_lcb>price capital-efficiency receipt field stays a probability, while the
-    # spine's edge_lcb>0 selection guarantee is the gate that already fired.
+    # q_lcb_5pct: map the spine's GENUINE robust lower bound into q-space so the legacy
+    # submit pipeline's per-side gate (q_lcb <= q_point, event_reactor_adapter
+    # _native_side_candidate_from_proof) and its binary-Kelly sizing
+    # (f* = (q_lcb - cost)/(1 - cost)) both run on the spine's robust economics, not on
+    # a stale probability-space q_lcb that inverts against the payoff-space q_posterior.
+    #
+    # The spine's vector economics (src/decision/payoff_vector.py) are:
+    #   q_dot_payoff = q @ payoff                       (point fair value, pre-cost)
+    #   point_ev     = q_dot_payoff - cost              (point edge)
+    #   edge_lcb     = quantile(samples @ payoff - cost, alpha)
+    #              = quantile(samples @ payoff) - cost  (robust edge lower bound)
+    # The proof's q_posterior is restamped to q_dot_payoff above, so q_point = q_dot_payoff
+    # = point_ev + cost. Setting
+    #   q_lcb = edge_lcb + cost = quantile(samples @ payoff)
+    # recovers the robust LOWER BOUND of the same payoff-space fair value as the q_point.
+    # `cost` (CandidateEconomics.cost, a typed ExecutionPrice in probability_units) is the
+    # SAME all-in per-share cost the legacy edge/Kelly subtract, so the legacy edge
+    # `q_lcb - cost` reproduces the spine's own `edge_lcb` exactly, and binary Kelly sizes
+    # on edge_lcb/(1-cost) — the robust lower bound, never the point and never the raw
+    # probability. This PRESERVES the robustness margin (it is NOT a clamp-to-point):
+    # because edge_lcb <= point_ev, we get q_lcb <= q_point, strict whenever
+    # edge_lcb < point_ev (the real robust gap), so q_lcb < q_point survives.
+    try:
+        cost_value = float(selected.cost.value)
+        edge_lcb_value = float(selected.edge_lcb)
+        new_q_lcb = max(0.0, min(1.0, edge_lcb_value + cost_value))  # clamp01
+        overlay["q_lcb_5pct"] = new_q_lcb
+    except Exception:  # noqa: BLE001 — missing/typeless economics: leave q_lcb_5pct unchanged
+        pass
     try:
         return replace(proof, **overlay)
     except Exception:  # noqa: BLE001 — if the proof is not a replaceable dataclass, return as-is
