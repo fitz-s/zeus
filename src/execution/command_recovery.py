@@ -56,6 +56,7 @@ from src.state.venue_command_repo import (
     append_event,
     append_order_fact,
     append_trade_fact,
+    UNRESOLVED_SIDE_EFFECT_STATES,
 )
 
 logger = logging.getLogger(__name__)
@@ -5446,6 +5447,266 @@ def _reconcile_edli_pending_no_order_if_proven(
     return True
 
 
+# Terminal CommandEventType used to discharge an unresolved venue_commands row
+# once the event-sourced EDLI ledger has AUTHENTICATED-ABSENCE-PROVEN that the
+# venue holds no open order and no trade for the command's token. The submit
+# side-effect boundary WAS crossed (that is why the row is
+# SUBMIT_UNKNOWN_SIDE_EFFECT / UNKNOWN), so the REVIEW_CLEARED_NO_VENUE_EXPOSURE
+# path — whose no_submit_side_effect_events predicate forbids a prior
+# SUBMIT_TIMEOUT_UNKNOWN / CLOSED_MARKET_UNKNOWN event — is BY DESIGN not legal
+# here. The grammar's direct SUBMIT_UNKNOWN_SIDE_EFFECT -> SUBMIT_REJECTED edge
+# (venue_command_repo._TRANSITIONS) is the canonical terminalization for
+# "post-submit unknown, venue authenticated-confirmed no order and no trade",
+# mirroring the live-venue safe_replay_permitted_no_order_found path in
+# _reconcile_row. SUBMIT_REJECTED sits OUTSIDE _UNRESOLVED_SIDE_EFFECT_STATES so
+# the governor's count_unknown_side_effects drops and the kill switch clears.
+_EDLI_ABSENCE_SYNC_SOURCE_FUNCTION = "command_recovery._reconcile_venue_command_absence_sync"
+
+
+def _edli_reconciled_absence_for_decision(
+    conn: sqlite3.Connection,
+    *,
+    events_ref: str,
+    decision_id: str,
+) -> tuple[str, dict | None]:
+    """Resolve the unique EDLI authenticated-absence proof for a command.
+
+    The canonical EDLI <-> venue_commands link is
+    ``Reconciled.payload.execution_command_id == venue_commands.decision_id``
+    (the same join key used by _reconcile_edli_pre_venue_unknown_thresholds).
+
+    Returns ``(status, reconcile_payload)`` where status is one of:
+      * ``"absent"``  — exactly one Reconciled event whose authenticated absence
+                         proof proves venue_order_exists=false AND
+                         venue_trade_exists=false AND no matching open
+                         order/trade for the token. ``reconcile_payload`` is set.
+      * ``"exposure"``— a matching Reconciled event reports (or its proof shows)
+                         venue exposure; FAIL-CLOSED, never terminalize.
+      * ``"absent_none"`` — no Reconciled event links to this decision_id.
+      * ``"ambiguous"``  — more than one distinct EDLI aggregate links to this
+                         decision_id; FAIL-CLOSED, cannot pick one.
+
+    Reads only; never re-queries the venue and never writes the world ledger.
+    """
+
+    if not decision_id:
+        return "absent_none", None
+    rows = conn.execute(
+        f"""
+        SELECT aggregate_id, payload_json
+        FROM {events_ref}
+        WHERE event_type = 'Reconciled'
+          AND json_extract(payload_json, '$.execution_command_id') = ?
+        ORDER BY event_sequence DESC
+        """,
+        (decision_id,),
+    ).fetchall()
+    if not rows:
+        return "absent_none", None
+    distinct_aggregates = {str(_dict_row(row).get("aggregate_id") or "") for row in rows}
+    if len(distinct_aggregates) != 1:
+        return "ambiguous", None
+    payload = _json_dict(_dict_row(rows[0]).get("payload_json"))
+    proof = payload.get("authenticated_absence_proof")
+    proof = proof if isinstance(proof, dict) else {}
+    # Authenticated absence requires BOTH the reconcile verdict and the proof's
+    # own matching-exposure counts to be zero. Any positive value, a missing
+    # proof, or a non-absence verdict fails closed.
+    venue_order_exists = payload.get("venue_order_exists")
+    venue_trade_exists = payload.get("venue_trade_exists")
+    if venue_order_exists is True or venue_trade_exists is True:
+        return "exposure", None
+    if not proof:
+        return "absent_none", None
+    if str(payload.get("reconcile_reason") or "") != "AUTHENTICATED_CLOB_ABSENCE_NO_OPEN_ORDER_OR_TRADE":
+        return "absent_none", None
+    try:
+        matching_open = int(proof.get("matching_open_order_count", -1))
+        matching_trade = int(proof.get("matching_trade_count", -1))
+    except (TypeError, ValueError):
+        return "absent_none", None
+    if matching_open != 0 or matching_trade != 0:
+        return "exposure", None
+    if venue_order_exists is not False or venue_trade_exists is not False:
+        return "absent_none", None
+    return "absent", payload
+
+
+def _reconcile_venue_command_absence_sync(conn: sqlite3.Connection) -> dict:
+    """Discharge unresolved venue_commands rows already absence-proven by EDLI.
+
+    #123 / M2 gap: the EDLI event-sourced ledger (zeus-world.db) can
+    authenticated-absence-prove a stuck post-submit unknown (Reconciled +
+    CapTransitioned(RELEASED)), yet the matching venue_commands row
+    (zeus_trades.db) is never moved out of SUBMIT_UNKNOWN_SIDE_EFFECT /
+    UNKNOWN. The two systems are not synced, so the portfolio governor — which
+    counts venue_commands, not the EDLI ledger — stays latched forever.
+
+    For each venue_commands row in _UNRESOLVED_SIDE_EFFECT_STATES with no
+    venue_order_id, this pass reads the EDLI Reconciled authenticated absence
+    proof (READ-only, no venue re-query) and, ONLY when it proves
+    venue_order_exists=false AND venue_trade_exists=false with zero matching
+    open orders/trades, appends the canonical terminal
+    SUBMIT_UNKNOWN_SIDE_EFFECT -> SUBMIT_REJECTED event citing the proof hash.
+
+    FAIL-CLOSED: no proof, ambiguous link (>1 aggregate), any matching venue
+    exposure, or a present venue_order_id -> the row is left UNCHANGED. Absence
+    is NEVER inferred from local rows; only the authenticated EDLI proof can
+    discharge a row.
+
+    INV-37 (cross-DB): venue_commands lives in zeus_trades.db; the absence proof
+    lives in zeus-world.db. The world DB is ATTACHed onto the single trade
+    connection (_maybe_attach_world_for_recovery, never an independent
+    connection) and every row's terminal write is wrapped in its own SAVEPOINT,
+    matching the existing cross-DB discipline in this module.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    events_ref = _edli_live_order_events_ref(conn)
+    if not events_ref:
+        return summary
+    # Scope to the post-submit-unknown states whose grammar exposes the direct
+    # SUBMIT_REJECTED terminal edge (venue_command_repo._TRANSITIONS). The third
+    # member of _UNRESOLVED_SIDE_EFFECT_STATES, REVIEW_REQUIRED, is an
+    # operator/recovery handoff with its OWN proof-gated clearance events
+    # (_review_required_cancel_unknown_live_order_recovery / the
+    # REVIEW_CLEARED_* helpers) and has NO SUBMIT_REJECTED edge — terminalizing
+    # it here would be both grammar-illegal and a domain violation, so it is
+    # deliberately left to its existing owner.
+    states = tuple(
+        state
+        for state in sorted(UNRESOLVED_SIDE_EFFECT_STATES)
+        if state in (
+            CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
+            CommandState.UNKNOWN.value,
+        )
+    )
+    if not states:
+        return summary
+    placeholders = ",".join("?" for _ in states)
+    rows = conn.execute(
+        f"""
+        SELECT command_id, decision_id, market_id, token_id, side, price, size,
+               created_at, venue_order_id, state
+        FROM venue_commands
+        WHERE state IN ({placeholders})
+          AND COALESCE(venue_order_id, '') = ''
+        ORDER BY created_at, command_id
+        """,
+        states,
+    ).fetchall()
+    for row in rows:
+        command = _dict_row(row)
+        command_id = str(command.get("command_id") or "")
+        decision_id = str(command.get("decision_id") or "")
+        summary["scanned"] += 1
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+        sp_name = f"sp_edli_absence_sync_{safe_command_id}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            status, reconcile_payload = _edli_reconciled_absence_for_decision(
+                conn,
+                events_ref=events_ref,
+                decision_id=decision_id,
+            )
+            if status != "absent" or reconcile_payload is None:
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                if status == "exposure":
+                    logger.warning(
+                        "recovery: command %s EDLI absence sync REFUSED — authenticated "
+                        "proof reports venue exposure; leaving %s (fail-closed)",
+                        command_id, command.get("state"),
+                    )
+                elif status == "ambiguous":
+                    logger.warning(
+                        "recovery: command %s EDLI absence sync skipped — ambiguous "
+                        "EDLI link for decision_id=%s; leaving %s",
+                        command_id, decision_id, command.get("state"),
+                    )
+                summary["stayed"] += 1
+                continue
+            proof = reconcile_payload.get("authenticated_absence_proof")
+            proof = proof if isinstance(proof, dict) else {}
+            proof_token = str(proof.get("token_id") or "")
+            command_token = str(command.get("token_id") or "")
+            if not proof_token or proof_token != command_token:
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                logger.warning(
+                    "recovery: command %s EDLI absence sync skipped — proof token_id "
+                    "does not match command token_id; leaving %s (fail-closed)",
+                    command_id, command.get("state"),
+                )
+                summary["stayed"] += 1
+                continue
+            now = _now_iso()
+            payload = {
+                "schema_version": 1,
+                "reason": "edli_authenticated_absence_no_venue_order_or_trade",
+                "command_id": command_id,
+                "decision_id": decision_id,
+                "proof_class": "edli_authenticated_clob_absence",
+                "side_effect_boundary_crossed": "unknown",
+                "venue_order_created": False,
+                "safe_replay_permitted": True,
+                "previous_unknown_command_id": command_id,
+                "required_predicates": {
+                    "edli_reconcile_reason_authenticated_absence": True,
+                    "edli_venue_order_exists_false": True,
+                    "edli_venue_trade_exists_false": True,
+                    "edli_zero_matching_open_orders": True,
+                    "edli_zero_matching_trades": True,
+                    "edli_proof_token_matches_command": True,
+                    "command_has_no_venue_order_id": True,
+                },
+                "edli_absence_proof": {
+                    "aggregate_id": str(proof.get("aggregate_id") or ""),
+                    "execution_command_id": str(
+                        reconcile_payload.get("execution_command_id") or ""
+                    ),
+                    "reconcile_reason": str(reconcile_payload.get("reconcile_reason") or ""),
+                    "venue_order_exists": reconcile_payload.get("venue_order_exists"),
+                    "venue_trade_exists": reconcile_payload.get("venue_trade_exists"),
+                    "token_id": proof_token,
+                    "matching_open_order_count": int(proof.get("matching_open_order_count", 0)),
+                    "matching_trade_count": int(proof.get("matching_trade_count", 0)),
+                    "open_orders_query_complete": proof.get("open_orders_query_complete"),
+                    "trades_query_complete": proof.get("trades_query_complete"),
+                    "observed_at": proof.get("observed_at"),
+                    "proof_hash": str(proof.get("proof_hash") or ""),
+                },
+                "source_proof": {
+                    "source_commit": "runtime",
+                    "source_function": _EDLI_ABSENCE_SYNC_SOURCE_FUNCTION,
+                    "source_reason": "edli_authenticated_clob_absence",
+                },
+                "reviewed_by": "command_recovery",
+                "cleared_at": now,
+            }
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type=CommandEventType.SUBMIT_REJECTED.value,
+                occurred_at=now,
+                payload=payload,
+            )
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            summary["advanced"] += 1
+            logger.warning(
+                "recovery: command %s %s -> SUBMIT_REJECTED (EDLI authenticated "
+                "absence; proof_hash=%s; idempotency replay permitted)",
+                command_id, command.get("state"), proof.get("proof_hash"),
+            )
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: command %s EDLI absence sync failed: %s; leaving row",
+                command_id, exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
 def _reconcile_edli_pre_venue_unknown_thresholds(conn: sqlite3.Connection) -> dict:
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     events_ref = _edli_live_order_events_ref(conn)
@@ -6525,6 +6786,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += edli_pre_venue_summary["stayed"]
         summary["errors"] += edli_pre_venue_summary["errors"]
 
+        edli_absence_sync_summary = _reconcile_venue_command_absence_sync(conn)
+        summary["venue_command_absence_sync"] = edli_absence_sync_summary
+        summary["advanced"] += edli_absence_sync_summary["advanced"]
+        summary["stayed"] += edli_absence_sync_summary["stayed"]
+        summary["errors"] += edli_absence_sync_summary["errors"]
+
         live_entry_repair_summary = reconcile_live_entry_projection_repairs(conn, client=client)
         summary["live_entry_projection_repair"] = live_entry_repair_summary
         summary["advanced"] += live_entry_repair_summary["advanced"]
@@ -6801,6 +7068,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
              reconcile_completed_partial_order_facts, "completed_partial_order_facts")
     _db_pass("edli_pre_venue_unknown_thresholds",
              _reconcile_edli_pre_venue_unknown_thresholds, "edli_pre_venue_unknown_thresholds")
+    _db_pass("venue_command_absence_sync",
+             _reconcile_venue_command_absence_sync, "venue_command_absence_sync")
     _client_pass("live_entry_projection_repair",
                  reconcile_live_entry_projection_repairs, "live_entry_projection_repair", client_kw=True)
     _client_pass("filled_entry_projection_repair",
