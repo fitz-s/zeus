@@ -915,7 +915,7 @@ class FamilyDecisionEngine:
         if not after_coherence:
             return None, NO_TRADE_MARKET_INCOHERENT
 
-        survivors = [
+        edge_survivors = [
             d
             for d in after_coherence
             if d.economics.edge_lcb > 0.0 and d.economics.optimal_delta_u > 0.0
@@ -928,7 +928,7 @@ class FamilyDecisionEngine:
         # direction_law_proof_present=True). Every other vector gate still applies.
         survivors = [
             d
-            for d in survivors
+            for d in edge_survivors
             if live_candidate_passes(
                 d.economics,
                 d.route,
@@ -937,6 +937,44 @@ class FamilyDecisionEngine:
             )
         ]
         if not survivors:
+            # READ-ONLY per-gate attribution diag (2026-06-15). The spine no-trade diag
+            # logs positive-edge candidates while the reason is NO_POSITIVE_EDGE; that
+            # diag reads only flattened economics and cannot say WHICH gate dropped the
+            # harvest. This names, per top candidate, every gate flag + the per-stage
+            # survivor counts, so the exact suppressor is auditable. Fail-safe; the diag
+            # never raises into the decision path and changes no behavior.
+            try:
+                import logging as _gate_diag
+
+                _tops = sorted(
+                    scored,
+                    key=lambda d: (
+                        d.economics.edge_lcb
+                        if d.economics.edge_lcb is not None
+                        else float("-inf")
+                    ),
+                    reverse=True,
+                )[:4]
+                _rows = "; ".join(
+                    f"{d.route.side}:{d.route.bin_id} dlok={int(d.direction_law_ok)} "
+                    f"adm={int(_direction_admitted(d))} coh={int(d.coherence_allows)} "
+                    f"exec={int(d.route.route_cost.executable)} "
+                    f"e={d.economics.edge_lcb:+.4f} dU={d.economics.optimal_delta_u:+.5f} "
+                    f"dUmin={d.economics.delta_u_at_min:+.5f}"
+                    for d in _tops
+                )
+                _gate_diag.getLogger("zeus.spine_edge").info(
+                    "SELECT_GATE_DIAG n=%d exec=%d dir=%d coh=%d edge=%d live=%d tops=[%s]",
+                    len(scored),
+                    len(after_executable),
+                    len(after_direction),
+                    len(after_coherence),
+                    len(edge_survivors),
+                    len(survivors),
+                    _rows,
+                )
+            except Exception:
+                pass
             return None, NO_TRADE_NO_POSITIVE_EDGE
 
         # SELECT: argmax optimal_delta_u over the survivors. The scalar trade score is NOT
