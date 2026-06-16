@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS decision_integrity_quarantine (
     row_id                   TEXT NOT NULL,
     reason_code              TEXT NOT NULL,
     forecast_snapshot_id     TEXT,
-    recorded_at              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    recorded_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
     meta_json                TEXT NOT NULL DEFAULT '{}',
     UNIQUE(table_name, row_id, reason_code)
 )

@@ -364,6 +364,7 @@ _WLA_RESIDUAL_ALLOWLIST = frozenset({
     # idempotent. It is an operator one-shot, NOT a daemon site pending Track A.6; it
     # belongs with the operator-invoked offline backfill cluster, not the residual.
     "scripts/task_2026-06-09_drop_dead_tables.py",  # pending_track_a6: one-shot DDL maintenance script; standalone operator tool, not daemon src/
+    "scripts/migrations/normalize_observation_instants_z_suffix.py",  # operator_invoked: C3 tz-format fix; --dry-run default + SAVEPOINT; 498-row Z-suffix normalisation; daemon never imports
 })
 
 # Effective allowlist: canonical infra + residual (Track A.6 daemon sites only;

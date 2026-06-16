@@ -160,7 +160,16 @@ def write_source_run(
 
 
 def get_source_run(conn: sqlite3.Connection, source_run_id: str) -> dict[str, Any] | None:
-    row = conn.execute("SELECT * FROM source_run WHERE source_run_id = ?", (source_run_id,)).fetchone()
+    # Reader contract: None when the source_run ROW is absent OR the source_run
+    # TABLE itself is not present on this connection (minimal/legacy schema —
+    # e.g. unit-test conns or a partial forecasts DB). For a reader, a missing
+    # table means "no source_run available"; schema integrity is enforced
+    # separately (schema fingerprint / boot self-test), not by making every
+    # reader raise. This keeps the C1 possession-upgrade caller branch-free.
+    try:
+        row = conn.execute("SELECT * FROM source_run WHERE source_run_id = ?", (source_run_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
     return dict(row) if row else None
 
 

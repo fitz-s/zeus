@@ -608,8 +608,28 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     try:
         _freshness_verdict = evaluate_freshness_mid_run(STATE_DIR)
     except Exception as exc:
-        # Mid-run gate is fail-soft per design — log and proceed.
-        logger.warning("freshness_gate mid_run evaluation failed: %s", exc)
+        # Freshness contract (2026-06-16): a CRASHED gate means freshness is
+        # UNKNOWN, and UNKNOWN must never be treated as FRESH. For fail-closed
+        # modes (settlement-day / imminent-open — markets close <24h, no time to
+        # recover from a stale-signal trade) UNKNOWN -> treat as STALE and SKIP
+        # the cycle. The prior "fail-soft, proceed" let a single gate exception
+        # silently bypass the ENTIRE freshness discipline for that cycle (the
+        # silent-fallback disease). Non-fail-closed modes degrade-and-continue
+        # with an EXPLICIT tag (loud, never silent).
+        from src.engine.dispatch import settlement_day_dispatch_for_mode as _sdd_on_error
+        _fail_closed_on_error = _sdd_on_error(mode) or mode == DiscoveryMode.IMMINENT_OPEN_CAPTURE
+        logger.error(
+            "freshness_gate mid_run evaluation FAILED (freshness UNKNOWN -> %s): %s",
+            "SKIP cycle" if _fail_closed_on_error else "degrade+continue",
+            exc,
+        )
+        if _fail_closed_on_error:
+            summary["skipped"] = True
+            summary["skip_reason"] = "cycle_skipped_freshness_gate_unevaluable"
+            summary["freshness_gate_error"] = repr(exc)
+            return summary
+        summary["degraded_data"] = True
+        summary["freshness_gate_error"] = repr(exc)
         _freshness_verdict = None
     if _freshness_verdict is not None:
         # P3 cycle-axis freshness short-circuit (PLAN_v3 §6.P3 — explicitly

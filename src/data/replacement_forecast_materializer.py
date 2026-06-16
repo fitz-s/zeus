@@ -59,7 +59,9 @@ from src.data.replacement_forecast_readiness import (
     build_replacement_forecast_readiness,
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
+from src.contracts.availability_time import proof_of_possession_available_at
 from src.state.readiness_repo import write_readiness_state
+from src.state.source_run_repo import get_source_run
 from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin, build_openmeteo_ifs9_aifs_soft_anchor_result
 from src.strategy.openmeteo_ecmwf_ifs9_aifs_soft_anchor import SoftAnchorConfig
 
@@ -155,6 +157,40 @@ def _to_utc(value: datetime | str, *, field_name: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
     return parsed.astimezone(UTC)
+
+
+def _role_possession_available_at(
+    conn: sqlite3.Connection,
+    *,
+    source_run_id: str | None,
+    request_source_available_at: datetime | str,
+) -> datetime:
+    """Honest per-role availability = PROOF OF POSSESSION (C1-AVAIL-CLOCK, 2026-06-16).
+
+    Prefer the role's REAL download-complete wall-clock (``source_run.fetch_finished_at``) when a
+    ``source_run`` row exists for the role's run-id on this forecasts connection; otherwise fall
+    back to the request's per-role ``source_available_at`` (an EXISTING input, never a new guess).
+    Either candidate is routed through the canonical producer (no nominal — the candidate is itself
+    the possession time). ``forecast_posteriors.source_available_at`` is NOT NULL, so a non-null
+    value is always returned.
+
+    LIVE STATE (architect verdict 2026-06-16): only the baseline role currently writes a
+    ``source_run`` row, so this upgrades baseline to true possession today and auto-upgrades the
+    aifs/openmeteo roles for free the day they begin recording ``source_run`` rows. Reading
+    ``source_run`` here is the SAME conn/DB ``_insert_posterior`` already writes source_run rows on.
+    """
+    # source_run lookup degrades to None when the row OR the table is absent —
+    # the repo reader (get_source_run) owns that tolerance now. A missing
+    # source_run -> fall back to the request's EXISTING per-role
+    # source_available_at (not a new guess); true possession resumes wherever
+    # source_run exists (live zeus-forecasts.db).
+    run = get_source_run(conn, source_run_id) if source_run_id else None
+    fetch_finished_at = run.get("fetch_finished_at") if run else None
+    possession = fetch_finished_at or request_source_available_at
+    return _to_utc(
+        proof_of_possession_available_at(possession),
+        field_name="role_possession_available_at",
+    )
 
 
 def _date_text(value: date | str) -> str:
@@ -472,7 +508,16 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
     anchor = request.openmeteo_anchor
     target_date = _date_text(request.target_date)
     source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
-    source_available_at = _to_utc(request.openmeteo_source_available_at, field_name="openmeteo_source_available_at").isoformat()
+    # C1-AVAIL-CLOCK: anchor availability = proof of possession of the openmeteo
+    # fetch — route through the canonical producer (auto-upgrades to the real
+    # source_run.fetch_finished_at where present, else the request's existing
+    # source_available_at; never a fabricated cycle stand-in). Same sanctioned
+    # producer the posterior insert uses.
+    source_available_at = _role_possession_available_at(
+        conn,
+        source_run_id=request.openmeteo_source_run_id,
+        request_source_available_at=request.openmeteo_source_available_at,
+    ).isoformat()
     computed_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
     value_c = anchor.high_c if metric == "high" else anchor.low_c
     contributing_times = [item.isoformat() for item in anchor.contributing_valid_times_utc]
@@ -974,6 +1019,22 @@ def _replacement_bayes_precision_fusion_override(
             )
             return None
 
+        # ARRIVAL GUARD inputs (C1-AVAIL-CLOCK, 2026-06-16): the honest per-model availability is
+        # PROOF OF POSSESSION = the served row's captured_at, routed through the canonical producer
+        # (no nominal — captured_at is the real possession wall-clock). Models with no served row are
+        # absent from the map -> the capture's guard fail-OPENs (admits) them. decision_utc is the
+        # materialization decision instant (computed_at). Shadow-q-staged: expected to exclude ~0 in
+        # production (extras' captured_at lands hours after the cycle, before any decision).
+        model_available_at: dict[str, str] = {}
+        for _m, _served in served_current.items():
+            _captured = getattr(_served, "captured_at", None)
+            if _captured:
+                try:
+                    model_available_at[_m] = proof_of_possession_available_at(_captured)
+                except Exception:
+                    # Unparseable capture stamp -> omit (fail-OPEN: the guard admits the model).
+                    pass
+
         consumed_ids: list[int] = []
 
         def _persisted_then_injected_fetch(*, model, **_kwargs):
@@ -996,6 +1057,8 @@ def _replacement_bayes_precision_fusion_override(
             target_local_date=target_local_date, lead_days=lead_days,
             anchor_z_corrected=float(anchor_value_corrected_c),
             history_provider=history_provider, live_fetch=_persisted_then_injected_fetch,
+            decision_utc=computed_at,
+            model_available_at=model_available_at,
         )
         if not capture.has_extras:
             # K3 ANTIBODY (2026-06-09): all multi-model extras absent. We only reach here when
@@ -1501,10 +1564,29 @@ def _insert_posterior(
     )
     target_date = _date_text(request.target_date)
     source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
+    # C1-AVAIL-CLOCK (2026-06-16): the posterior's source_available_at is PROOF OF POSSESSION =
+    # max over the contributing roles of each role's REAL download-complete wall-clock
+    # (source_run.fetch_finished_at), falling back per-role to the request's source_available_at
+    # when that role has no source_run row. max() because a FUSED posterior could not be
+    # constructed before its LAST-arriving input landed — availability is gated by the slowest
+    # dependency. The old max(request.*_source_available_at) used the cycle-time nominal-lag GUESS
+    # (~8.4h early for the baseline) as each input; this recovers the honest possession time.
     available_at = max(
-        _to_utc(request.baseline_source_available_at, field_name="baseline_source_available_at"),
-        _to_utc(request.aifs_source_available_at, field_name="aifs_source_available_at"),
-        _to_utc(request.openmeteo_source_available_at, field_name="openmeteo_source_available_at"),
+        _role_possession_available_at(
+            conn,
+            source_run_id=request.baseline_source_run_id,
+            request_source_available_at=request.baseline_source_available_at,
+        ),
+        _role_possession_available_at(
+            conn,
+            source_run_id=request.aifs_source_run_id,
+            request_source_available_at=request.aifs_source_available_at,
+        ),
+        _role_possession_available_at(
+            conn,
+            source_run_id=request.openmeteo_source_run_id,
+            request_source_available_at=request.openmeteo_source_available_at,
+        ),
     ).isoformat()
     computed_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
     data_version = _data_version(metric)
@@ -2199,7 +2281,7 @@ def _build_readiness(
                 product_id=expected["baseline_b0"].product_id,
                 data_version=request.baseline_data_version,
                 source_run_id=request.baseline_source_run_id,
-                source_available_at=request.baseline_source_available_at,
+                source_available_at=request.baseline_source_available_at,  # AVAIL-POSSESSION-EXEMPTED: forwards the request's per-role possession input into the dependency lineage record (passthrough of an already-determined value, not a fresh stamp)
             ),
             ReplacementForecastDependency(
                 role="aifs_sampled_2t",
@@ -2207,7 +2289,7 @@ def _build_readiness(
                 product_id=AIFS_PRODUCT_ID,
                 data_version=_aifs_data_version(metric),
                 source_run_id=request.aifs_source_run_id,
-                source_available_at=request.aifs_source_available_at,
+                source_available_at=request.aifs_source_available_at,  # AVAIL-POSSESSION-EXEMPTED: forwards the request's per-role possession input into the dependency lineage record (passthrough of an already-determined value, not a fresh stamp)
                 artifact_id=request.aifs_artifact_id,
             ),
             ReplacementForecastDependency(
@@ -2216,7 +2298,7 @@ def _build_readiness(
                 product_id=ANCHOR_PRODUCT_ID,
                 data_version=_anchor_data_version(metric),
                 source_run_id=request.openmeteo_source_run_id,
-                source_available_at=request.openmeteo_source_available_at,
+                source_available_at=request.openmeteo_source_available_at,  # AVAIL-POSSESSION-EXEMPTED: forwards the request's per-role possession input into the dependency lineage record (passthrough of an already-determined value, not a fresh stamp)
                 artifact_id=request.anchor_artifact_id,
                 anchor_id=anchor_id,
             ),
@@ -2226,7 +2308,7 @@ def _build_readiness(
                 product_id=PRODUCT_ID,
                 data_version=_data_version(metric),
                 source_run_id=f"posterior:{posterior_id}",
-                source_available_at=computed_at,
+                source_available_at=computed_at,  # AVAIL-POSSESSION-EXEMPTED: derived posterior artifact — computed_at IS its availability instant (DERIVED_JUSTIFIED), not fetched-data possession
                 posterior_id=posterior_id,
             ),
         ),

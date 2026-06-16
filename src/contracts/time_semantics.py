@@ -621,14 +621,16 @@ REGISTRY: list[Entry] = [
         unit="seconds",
         kind=Kind.TTL,
         operation="how long a captured executable price stays valid for the reactor",
-        source=lambda: 30.0,
-        source_ref="src/main.py comments (30s executable-price freshness window)",
+        source=lambda: 180.0,
+        source_ref="src/data/executable_market_snapshot.py:47",
         basis_kind=BasisKind.GUESS,
         basis=(
-            "30s freshness window — guess; needs measurement of how fast CLOB top-of-"
-            "book actually moves per city/liquidity tier. Documented as a guess so the "
-            "audit can flag it; both the warm interval and refresh budget are sized "
-            "relative to it, so it is load-bearing."
+            "180s freshness window (live value; was 30s, widened 2026-06-09 #122). "
+            "Still a guess — needs measurement of how fast CLOB top-of-book actually "
+            "moves per city/liquidity tier. Both the warm interval and refresh budget "
+            "are sized relative to it, so it is load-bearing. Registry updated to "
+            "match the live value in executable_market_snapshot.py:47 (doc-rot fix "
+            "2026-06-16)."
         ),
         relations=[],
     ),

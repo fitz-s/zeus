@@ -76,6 +76,7 @@ def _get_exceptions_config():
 
 
 from src.data.openmeteo_client import PREVIOUS_RUNS_URL, fetch as openmeteo_fetch
+from src.state.db import utc_iso_now
 
 #: Internal Open-Meteo model name → canonical `forecasts.source` value.
 #: Must stay aligned with scripts/backfill_openmeteo_previous_runs.py —
@@ -383,7 +384,10 @@ def append_forecasts_window(
 
     while current <= end_date:
         chunk_end = min(current + timedelta(days=chunk_days - 1), end_date)
-        retrieved_at = datetime.now(timezone.utc).isoformat()
+        # M5-COLLECTION-CLOCK (2026-06-16): retrieved_at means "when we asked for it" — the real
+        # PRE-HTTP instant, stamped immediately before _fetch_previous_runs_chunk issues the
+        # Open-Meteo request below. Canonical utc_iso_now() producer (matches the timing fix).
+        retrieved_at = utc_iso_now()
         try:
             payload = _fetch_previous_runs_chunk(
                 city, current, chunk_end, leads=leads, models=models,
@@ -511,7 +515,7 @@ def catch_up_missing(
             f"forecasts_catchup_{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
         )
 
-    cutoff = date.today() - timedelta(days=days_back)
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=days_back)
     rows = find_pending_fills(
         conn, data_table=DataTable.FORECASTS, max_rows=200_000,
     )

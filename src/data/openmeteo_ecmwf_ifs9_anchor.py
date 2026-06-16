@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
+from src.contracts.availability_time import proof_of_possession_available_at
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
 
 
@@ -352,7 +353,15 @@ def build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
     metadata["openmeteo_single_runs_url"] = request.url()
     captured_at_utc = _parse_utc(captured_at, field_name="captured_at")
     requested_source_available_at = _parse_utc(source_available_at, field_name="source_available_at")
-    effective_source_available_at = captured_at_utc
+    # C1-AVAIL-CLOCK (2026-06-16): source availability is PROOF OF POSSESSION = our captured_at
+    # wall-clock, routed through the canonical producer. Open-Meteo serves no signed generation
+    # time, so the requested source_available_at is diagnostic-only (recorded below) and never
+    # credited as a publish; captured_at is the honest earliest-usable basis. Re-parsed to a
+    # tz-aware datetime because RawForecastArtifactManifest.to_dict() calls .astimezone(UTC).
+    effective_source_available_at = _parse_utc(
+        proof_of_possession_available_at(captured_at_utc),
+        field_name="source_available_at",
+    )
     metadata["requested_source_available_at"] = requested_source_available_at.isoformat()
     metadata["source_available_at_authority"] = "captured_at_no_signed_openmeteo_generation_time"
     if requested_source_available_at != captured_at_utc:
@@ -363,7 +372,7 @@ def build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
         product_id=PRODUCT_ID,
         data_version=data_version,
         source_cycle_time=request.run,
-        source_available_at=effective_source_available_at,
+        source_available_at=effective_source_available_at,  # AVAIL-POSSESSION-EXEMPTED: effective_source_available_at is produced by proof_of_possession_available_at(captured_at_utc) at its assignment above; this is a passthrough of that canonical value into the manifest.
         captured_at=captured_at_utc,
         request_url=SINGLE_RUNS_FORECAST_URL,
         request_params=request.params(),

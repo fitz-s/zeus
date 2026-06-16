@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -1299,6 +1300,54 @@ def _current_command_state_value(conn: sqlite3.Connection, command_id: str) -> s
         return str(row["state"])
     except Exception:
         return str(row[0])
+
+
+def _retry_persist_on_db_lock(
+    conn: sqlite3.Connection,
+    persist_fn,
+    *,
+    what: str,
+    attempts: int = 4,
+    base_sleep_s: float = 0.1,
+) -> None:
+    """Run a POST-SIDE-EFFECT persistence closure, retrying ONLY on a transient
+    SQLite 'database is locked' (C-DBLOCK-UNKNOWN, 2026-06-16).
+
+    WHY: once the venue side effect has happened the order outcome is KNOWN; all that
+    remains is to RECORD it (append_event SUBMIT_ACKED + order/trade facts + commit). A
+    transient 'database is locked' on that record write — write-write contention, or a
+    busy handler NULLed by a prior executescript (see src/state/db.py _apply_busy_timeout)
+    so the 30s budget drops to 0 and the lock raises INSTANTLY rather than waiting —
+    otherwise degrades a KNOWN-GOOD order to unknown_side_effect, which trips the
+    governor's unknown_side_effect kill-switch (limit=0, src/risk_allocator/governor.py:242)
+    and HALTS all submits until reconciled. Live evidence: 13x
+    EXECUTOR_SUBMIT_UNKNOWN:'database is locked' Jun 12-16, the dominant current no-trade.
+
+    SAFE to retry: this re-attempts only the LOCAL write — the venue is never re-called
+    here, so there is no double-submit risk. A full conn.rollback() reverts the
+    grammar-validated SAVEPOINT writes in append_event WITH the transaction, so the state
+    machine returns to its pre-ACK state and re-running the whole closure is grammar-valid
+    (the same rollback-reverts-state the existing _mark_post_submit_persistence_failure
+    relies on). Retries ONLY OperationalError matching 'database is locked'; any other
+    error (incl. the ValueError append_event raises on an illegal grammar transition)
+    propagates immediately to the caller's existing failure path.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            persist_fn()
+            return
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc).lower() or attempt == attempts:
+                raise
+            try:
+                conn.rollback()  # revert partial/uncommitted writes so the re-run is clean
+            except Exception:
+                pass
+            logger.warning(
+                "db locked persisting %s (attempt %d/%d); rolled back + retrying: %s",
+                what, attempt, attempts, exc,
+            )
+            time.sleep(base_sleep_s * attempt)
 
 
 def _mark_post_submit_persistence_failure(
@@ -2723,6 +2772,36 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=intent.idempotency_key,
             )
+        except sqlite3.OperationalError as exc:
+            # C-DBLOCK-UNKNOWN (2026-06-16): symmetric with the entry path. A transient
+            # 'database is locked' in this PRE-VENUE persist phase fires BEFORE
+            # place_limit_order — NO order was placed (side_effect_boundary_crossed=False).
+            # Without an OperationalError handler it propagated to the event-bound catch-all
+            # as POST_SUBMIT_UNKNOWN, tripping the governor unknown_side_effect kill-switch
+            # (limit=0) and HALTING all submits. It is NOT a side effect: roll back the
+            # uncommitted persist and return a CLEAN transient rejection so the candidate
+            # re-attempts next cycle. Non-lock OperationalError re-raises (unchanged).
+            if "database is locked" not in str(exc).lower():
+                raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(
+                "execute_exit_order: pre-venue persist 'database is locked' (command_id=%s "
+                "trade_id=%s) — no order placed; transient reject, retry next cycle: %s",
+                command_id, intent.trade_id, exc,
+            )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"pre_submit_db_locked_transient: {exc}",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
 
         logger.info(
             "SELL ORDER: token=%s...%s @ %.3f limit, %.2f shares (mid=%.3f, bid=%s)",
@@ -3039,7 +3118,11 @@ def execute_exit_order(
             )
 
         # SUBMIT_ACKED — order placed successfully
-        try:
+        # C-DBLOCK-UNKNOWN (2026-06-16): symmetric with the entry path. The venue side
+        # effect already happened, so this records a KNOWN outcome — retried on a transient
+        # 'database is locked' instead of degrading a good order to unknown_side_effect
+        # (which trips the governor kill-switch). See _retry_persist_on_db_lock.
+        def _persist_exit_ack_facts() -> None:
             append_event(
                 conn,
                 command_id=command_id,
@@ -3060,7 +3143,10 @@ def execute_exit_order(
                 matched_size=_venue_submit_matched_size(result),
                 source="REST",
                 observed_at=ack_time,
-                venue_timestamp=ack_time,
+                # C4 telemetry-truth: REST ACK response carries no server matchTime;
+                # venue_timestamp=None (honest absence). ack_time is Zeus receipt
+                # wall-clock only, labelled via observed_at.
+                venue_timestamp=None,
                 raw_payload_hash=_canonical_payload_hash(
                     {
                         "command_id": command_id,
@@ -3086,6 +3172,11 @@ def execute_exit_order(
             # Exit submission uses the same durable side-effect boundary as entry:
             # ACK/order facts must be visible even when the caller owns conn.
             conn.commit()
+
+        try:
+            _retry_persist_on_db_lock(
+                conn, _persist_exit_ack_facts, what="exit_ack_persistence"
+            )
         except Exception as inner:
             logger.error(
                 "execute_exit_order: SUBMIT_ACKED append_event failed (command_id=%s order_id=%s): %s",
@@ -3654,6 +3745,41 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
             )
+        except sqlite3.OperationalError as exc:
+            # C-DBLOCK-UNKNOWN (2026-06-16): a transient 'database is locked' in this
+            # PRE-VENUE persist phase (insert_command + SUBMIT_REQUESTED + collateral
+            # reserve + commit) fires BEFORE place_limit_order (line ~3838) — NO order
+            # was placed (side_effect_boundary_crossed=False). With no OperationalError
+            # handler it propagated out to the event-bound layer's catch-all, which
+            # marked it POST_SUBMIT_UNKNOWN; that tripped the governor unknown_side_effect
+            # kill-switch (limit=0, src/risk_allocator/governor.py:242) and HALTED ALL
+            # submits until reconciled. Live: this is the DOMINANT current no-trade — 13x
+            # EXECUTOR_SUBMIT_UNKNOWN:'database is locked' Jun 12-16, every one with NO
+            # venue_order_id (proof: pre-venue). It is NOT a side effect: roll back the
+            # uncommitted persist (nothing is committed until the conn.commit() above) and
+            # return a CLEAN transient rejection so the candidate re-attempts next cycle
+            # instead of halting the lane on a phantom unknown. Non-lock OperationalError
+            # re-raises (unchanged). See docs/evidence/timing_audit/exec_submit_reject_breakdown_2026-06-16.md.
+            if "database is locked" not in str(exc).lower():
+                raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(
+                "_live_order: pre-venue persist 'database is locked' (command_id=%s "
+                "trade_id=%s) — no order placed; transient reject, retry next cycle: %s",
+                command_id, trade_id, exc,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"pre_submit_db_locked_transient: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+            )
 
         # -----------------------------------------------------------------------
         # Phase 4: V2 endpoint-identity preflight (INV-25 / K5)
@@ -4121,7 +4247,12 @@ def _live_order(
                 )
 
         # SUBMIT_ACKED
-        try:
+        # C-DBLOCK-UNKNOWN (2026-06-16): the venue side effect already happened, so this
+        # records a KNOWN outcome. Extracted to a closure so a transient 'database is
+        # locked' is retried (rollback + re-run) instead of degrading a good order to
+        # unknown_side_effect (which trips the governor kill-switch). See
+        # _retry_persist_on_db_lock.
+        def _persist_entry_ack_facts() -> None:
             append_event(
                 conn,
                 command_id=command_id,
@@ -4143,7 +4274,10 @@ def _live_order(
                 matched_size=matched_size,
                 source="REST",
                 observed_at=ack_time,
-                venue_timestamp=ack_time,
+                # C4 telemetry-truth: REST ACK response carries no server matchTime;
+                # venue_timestamp=None (honest absence). ack_time is Zeus receipt
+                # wall-clock only, labelled via observed_at.
+                venue_timestamp=None,
                 raw_payload_hash=_canonical_payload_hash(
                     {
                         "command_id": command_id,
@@ -4168,7 +4302,10 @@ def _live_order(
                     fill_price=fill_price,
                     source="REST",
                     observed_at=ack_time,
-                    venue_timestamp=ack_time,
+                    # C4 telemetry-truth: REST ACK carry no server matchTime;
+                    # venue_timestamp=None (honest absence). Real match time
+                    # arrives via the WS user-channel (matchtime field).
+                    venue_timestamp=None,
                     tx_hash=fill_tx_hash,
                     raw_payload_hash=_canonical_payload_hash(
                         {
@@ -4206,6 +4343,11 @@ def _live_order(
             # the caller provided an external connection. A crash after SDK ACK
             # but before the outer cycle commit would lose the venue order record.
             conn.commit()
+
+        try:
+            _retry_persist_on_db_lock(
+                conn, _persist_entry_ack_facts, what="entry_ack_persistence"
+            )
         except Exception as inner:
             logger.error(
                 "_live_order: SUBMIT_ACKED append_event failed (command_id=%s order_id=%s): %s",

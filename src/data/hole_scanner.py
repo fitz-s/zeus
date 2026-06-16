@@ -41,7 +41,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -305,7 +305,7 @@ class HoleScanner:
         # other tables and for backward-compat callers that don't pass it.
         self.forecasts_conn = forecasts_conn if forecasts_conn is not None else conn
         self.config = config if config is not None else ExceptionsConfig.load()
-        self.today = today if today is not None else date.today()
+        self.today = today if today is not None else datetime.now(timezone.utc).date()
 
     def _get_covered_keys(self, data_table: DataTable) -> set[tuple[str, str, str]]:
         """Return {(city, data_source, target_date)} already in data_coverage

@@ -147,6 +147,7 @@ from src.state.db import log_selection_family_fact, log_selection_hypothesis_fac
 from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
 from src.contracts.decision_evidence import DecisionEvidence
 from src.contracts.no_trade_reason import NoTradeReason
+from src.contracts.availability_time import proof_of_possession_available_at
 from src.observability.counters import increment as _cnt_inc
 from src.contracts.ensemble_snapshot_provenance import assert_data_version_allowed, validate_members_unit
 from src.contracts.executable_market_snapshot import (
@@ -6623,7 +6624,14 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
         fetch_time_value = _snapshot_time_value(ens_result.get("fetch_time"))
         if fetch_time_value is None:
             raise ValueError("ENS snapshot missing fetch_time")
-        available_at_value = _forecast_available_time_value(ens_result) or fetch_time_value
+        # C1-AVAIL-CLOCK (2026-06-16): available_at is PROOF OF POSSESSION = fetch_time (the real
+        # wall-clock we held the snapshot). It is NOT ens_result['available_at'], which the ingest
+        # (ecmwf_open_data_ingest.py:346) hard-falls-back to run_init_dt == the model cycle time —
+        # the ~8.4h-early stamp (verified live: available_at == cycle in 5000/5000 rows, == fetch_time
+        # in 0) that poisoned every FSR/decision_certificate lineage clock and the fusion arrival gate.
+        # No real provider-publication estimate is available here, so no nominal is credited (the
+        # cycle is a guess, never a publish time). Routed through the canonical antibody producer.
+        available_at_value = proof_of_possession_available_at(fetch_time_value)
 
         # P10D S3: stamp temperature_metric on each snapshot row so LOW rows
         # are distinguishable from HIGH rows in the legacy table.

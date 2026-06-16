@@ -750,6 +750,24 @@ def _resolve_unified_exit_bias_native(
         return None
 
 
+def _hours_since_open_or_nan(position) -> float:
+    """Hold age in hours from a REAL ``entered_at``; NaN when ``entered_at`` is
+    missing or malformed. M2b (timing-semantics fix 2026-06-16): never the
+    fabricated 48h — NaN routes the caller to an explicit refuse so a missing
+    hold-age authority is treated as missing, not as "old enough to exit".
+    Shared by both monitor-refresh paths so they grade hold age identically.
+    """
+    if not position.entered_at:
+        return float("nan")
+    try:
+        entered = datetime.fromisoformat(position.entered_at)
+        if entered.tzinfo is None:
+            entered = entered.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - entered).total_seconds() / 3600.0
+    except Exception:
+        return float("nan")
+
+
 def _refresh_ens_member_counting(
     *,
     position: Position,
@@ -1183,21 +1201,10 @@ def _refresh_ens_member_counting(
         p_cal_full = p_raw_vector if len(all_bins) > 1 else np.array([p_cal_yes], dtype=float)
         applied = [*base_applied]
 
-    # M2b (timing-semantics fix 2026-06-16): hours_since_open MUST be derived
-    # from a real entered_at; when entered_at is missing or malformed the basis
-    # is UNKNOWN, so use an honest NaN sentinel rather than fabricating a 48h
-    # hold age. NaN is checked below and routes to an explicit refuse (the gate
-    # must REFUSE on missing authority, not silently grade exits against a
-    # 2-day fiction). Never hardcode 48.0.
-    hours_since_open = float("nan")
-    if position.entered_at:
-        try:
-            entered = datetime.fromisoformat(position.entered_at)
-            if entered.tzinfo is None:
-                entered = entered.replace(tzinfo=timezone.utc)
-            hours_since_open = (datetime.now(timezone.utc) - entered).total_seconds() / 3600.0
-        except Exception:
-            pass  # Malformed timestamp → leave NaN → alpha gate refuses below
+    # M2b (timing-semantics fix 2026-06-16): hold age from a REAL entered_at;
+    # NaN when missing/malformed -> explicit refuse below (never the fabricated
+    # 48h). Shared helper so both refresh paths grade hold age identically.
+    hours_since_open = _hours_since_open_or_nan(position)
 
     # K1/#68: verify calibration authority before computing alpha.
     # Same gate as evaluator.py — check for UNVERIFIED calibration rows.
@@ -1655,18 +1662,9 @@ def _refresh_day0_observation(
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "metric_extrema_missing"]
     ensemble_spread = TemperatureDelta(float(np.std(member_extrema)), city.settlement_unit)
 
-    # M2b (timing-semantics fix 2026-06-16): honest NaN sentinel — never the
-    # fabricated 48h. NaN routes to the explicit refuse guard before
-    # compute_alpha below (twin of the ENS-member-counting path).
-    hours_since_open = float("nan")
-    if position.entered_at:
-        try:
-            entered = datetime.fromisoformat(position.entered_at)
-            if entered.tzinfo is None:
-                entered = entered.replace(tzinfo=timezone.utc)
-            hours_since_open = (datetime.now(timezone.utc) - entered).total_seconds() / 3600.0
-        except Exception:
-            pass  # Malformed timestamp → leave NaN → alpha gate refuses below
+    # M2b: hold age from a REAL entered_at (shared helper; twin of the
+    # ENS-member-counting path). NaN -> explicit refuse below.
+    hours_since_open = _hours_since_open_or_nan(position)
 
     # K1/#68: verify calibration authority before computing alpha.
     # Slice P2-A2 (PR #19 phase 2, 2026-04-26): twin of the gate above —

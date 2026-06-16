@@ -243,26 +243,44 @@ def test_reader_crossdb_attach(three_dbs, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_ghost_table_defeats_exclusion_red(three_dbs, monkeypatch):
-    """Regression proof: ghost quarantine in world DB no-ops exclusion ONLY when
-    trade DB path is unreachable (branch-3 fallback fires).
+    """C2 (2026-06-16): the n_decisions denominator (decision_certificates) is never narrowed
+    by quarantine, so a decision is counted regardless of ghost/trade-attach reachability.
 
-    The CRITICAL finding showed the prior code preferred branch-3 (unqualified
-    ghost) over branch-2 (ATTACH trade) whenever a ghost table existed in world.
-    The fix reorders branches so branch-2 (ATTACH trade) fires first.
+    History: this RED test proved the ghost-table attack on the OLD decision_events-based
+    denominator — an empty ghost quarantine in world DB with an unreachable trade DB made the
+    exclusion no-op, so the decision survived (n_decisions=1). The C2 fix migrated the
+    denominator to decision_certificates, whose FinalIntentCertificate payload carries no
+    decision_event_id, so quarantine exclusion is no longer applied to n_decisions at all (it
+    is retained on the gate-relevant regret/settled analytics, joined via decision_event_id).
+    The numeric expectation is unchanged (n_decisions=1) but the reason is stronger: the
+    certificate denominator counts the decision irrespective of any ghost-vs-ATTACH branch.
 
-    This test proves the remaining attack vector: if trade DB is missing from disk,
-    branch-3 fires and a ghost table yields an empty read → exclusion no-ops.
-    We document this by:
-      1. Creating a ghost in world DB.
-      2. Monkeypatching trade path to a nonexistent file (simulates deleted/missing trade DB).
-      3. Asserting n_decisions=1 (ghost fallback → no exclusion).
-
-    The companion GREEN test (test_run_world_tables_no_ghost_green) proves that
-    in normal operation (trade DB present) the ghost is bypassed and exclusion fires.
+    The ATTACH/ghost branch-ordering itself is still exercised by build_evidence_report for the
+    regret-path quarantine exclusion; see the writer/GREEN tests for the trade-DB-write proof.
     """
     from src.analysis.evidence_report import build_evidence_report
+    from src.state.schema.decision_certificates_schema import CREATE_CERTIFICATES_SQL
 
     world_path, trade_path, forecasts_path = three_dbs
+
+    # C2: seed the active denominator lane — one FinalIntentCertificate for xdb_strat in world DB.
+    import json as _json
+    wconn_cert = sqlite3.connect(str(world_path))
+    wconn_cert.execute(CREATE_CERTIFICATES_SQL)
+    wconn_cert.execute(
+        """INSERT INTO decision_certificates (
+            certificate_id, certificate_type, schema_version, canonicalization_version,
+            semantic_key, claim_type, mode, decision_time,
+            authority_id, authority_version, algorithm_id, algorithm_version,
+            payload_json, payload_hash, certificate_hash, verifier_status, created_at
+        ) VALUES ('xdb-cert-1', 'FinalIntentCertificate', 1, '1.0',
+                  'xdb-cert-1', 'FINAL_INTENT', 'SHADOW', '2026-05-22T10:00:00+00:00',
+                  'a', '1.0', 'b', '1.0',
+                  ?, 'h1', 'ch1', 'VERIFIED', '2026-05-22T10:00:00+00:00')""",
+        (_json.dumps({"strategy_key": "xdb_strat"}),),
+    )
+    wconn_cert.commit()
+    wconn_cert.close()
 
     # Create a ghost quarantine table in world DB (simulates prior buggy ensure_table call).
     wconn_ghost = sqlite3.connect(str(world_path))
@@ -302,9 +320,10 @@ def test_ghost_table_defeats_exclusion_red(three_dbs, monkeypatch):
     )
     wconn.close()
 
-    # RED: empty ghost selected, trade unreachable → exclusion no-ops → n_decisions=1.
+    # C2: certificate denominator counts the decision regardless of ghost/trade reachability
+    # (no decision_event_id on the certificate to apply quarantine exclusion). n_decisions=1.
     assert report.n_decisions == 1, (
-        f"RED: expected 1 (empty ghost → no exclusion), got {report.n_decisions}"
+        f"C2: certificate denominator is not narrowed by quarantine, got {report.n_decisions}"
     )
 
 

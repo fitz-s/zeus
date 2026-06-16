@@ -5372,7 +5372,7 @@ def _build_live_cap_certificate_from_ledger(
         claim_type=claims.LIVE_CAP,
         mode="LIVE",
         decision_time=decision_time,
-        source_available_at=decision_time,
+        source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (submit-disabled LIVE_CAP reservation record generated AT decision_time, wraps no external source); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, max_parent_* monotonicity — never a freshness gate or q. decision_time is the only honest anchor.
         agent_received_at=decision_time,
         persisted_at=decision_time,
         payload=payload,

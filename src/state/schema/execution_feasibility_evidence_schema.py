@@ -1,9 +1,24 @@
-"""EDLI execution_feasibility_evidence schema owner."""
+"""EDLI execution_feasibility_evidence schema owner.
+
+C4 telemetry-truth (2026-06-16) — HONEST_NULL_COLUMNS declaration:
+
+    order_intent_time, submit_time, latency_ms are permanently write-NULL.
+    No post-fill UPDATE path exists: the EDLI execution lane writes this row
+    at decision time before fill confirmation arrives; the fill confirmation
+    arrives on a separate WS event with no back-link to re-update this row.
+    Do NOT fabricate these values with datetime.now() or 0.
+
+HONEST_NULL_COLUMNS = {"order_intent_time", "submit_time", "latency_ms"}
+"""
 
 from __future__ import annotations
 
 import sqlite3
 
+# C4 telemetry-truth: these columns are permanently write-NULL. The EDLI lane
+# has no post-fill UPDATE path to populate them after fill confirmation arrives.
+# Do NOT assign datetime.now(), 0, or any synthetic value to these columns.
+HONEST_NULL_COLUMNS = frozenset({"order_intent_time", "submit_time", "latency_ms"})
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS execution_feasibility_evidence (

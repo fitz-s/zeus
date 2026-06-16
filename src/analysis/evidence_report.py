@@ -1,10 +1,10 @@
 # Created: 2026-05-21
-# Last reused or audited: 2026-05-23
+# Last reused or audited: 2026-06-16
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase6_evidence_ladder/PHASE_6_PLAN.md §T4
 #                  + docs/operations/task_2026-05-21_mainline_completion_authority/07_PHASE_6_EVIDENCE_LADDER.md §Object model
 """EvidenceReport — per-strategy evidence aggregator.
 
-Aggregates decision_events, no_trade_events, regret_decompositions, and
+Aggregates decision_certificates, no_trade_events, regret_decompositions, and
 shadow_experiments data for a given strategy into a structured report consumed
 by the LiveReadinessTribunal.
 
@@ -126,20 +126,20 @@ def build_evidence_report(
     """Build an EvidenceReport by querying the world DB.
 
     Queries:
-      - decision_events: authoritative n_decisions denominator (strategy_key filter)
+      - decision_certificates: n_decisions denominator (FinalIntentCertificate,
+        strategy_key in payload_json).  decision_events was 0-row (C2 dead lane).
       - no_trade_events: structured strategy_key count, excluding degraded rows
       - regret_decompositions: n_settled, n_wins (total_regret_usd > 0 = WIN),
         mean_regret, joined through decision_events to verify strategy_key+source match
+        (regret join through decision_events retained until regret path is also migrated)
 
     Optional scoping:
       - experiment_id: restrict regret analytics to a single experiment;
-                       n_decisions denominator is NOT narrowed by experiment because
-                       decision_events has no experiment FK — unsettled decisions must
-                       remain in the denominator.
+                       n_decisions denominator is NOT narrowed by experiment.
       - cohort_tag:    restrict regret analytics to a cohort (same caveat)
-      - source:        restrict denominator, no_trade_events, AND regret analytics
-                       (via de.source JOIN on decision_events) to a specific source
-                       ('phase0_backfill', 'live_decision', 'shadow_decision')
+      - source:        no-op for n_decisions (certificate payload source field does not
+                       map to the old decision_events source provenance values);
+                       still applied to no_trade_events and regret analytics.
 
     breakeven_win_rate must be supplied by the caller (strategy-specific value from
     the profile registry). No default — a hardcoded 0.5 silently miscalibrates the
@@ -156,10 +156,8 @@ def build_evidence_report(
             "no generic default — use strategy profile registry value."
         )
 
-    # n_decisions: authoritative denominator from decision_events.
-    # Filtered by source when provided. NOT narrowed by experiment_id/cohort_tag
-    # because decision_events has no experiment FK — scoping via regret_decompositions
-    # would exclude unsettled decisions, corrupting the denominator (P1-7 fix).
+    # n_decisions: denominator from decision_certificates (FinalIntentCertificate).
+    # NOT narrowed by experiment_id/cohort_tag (no FK on certificates).
     tables = {
         row[0]
         for row in conn.execute(
@@ -200,26 +198,21 @@ def build_evidence_report(
         # Non-fatal: quarantine exclusion is best-effort on learning paths.
         pass
 
-    if "decision_events" in tables:
-        _de_params: list = [strategy_id]
-        _de_filters = "WHERE strategy_key = ?"
-        if source is not None:
-            _de_filters += " AND source = ?"
-            _de_params.append(source)
-        # Exclude decision_events rows whose opportunity_fact entry is quarantined
-        # (non-contributing forecast extrema). Uses the opportunity_fact quarantine
-        # row_id (= opportunity_fact.decision_id = decision_events.decision_event_id)
-        # rather than the decision_events hash row_id, since the link is 1-to-1 and
-        # decision_event_id IS unique on opportunity_fact.
-        if _quarantine_ref is not None:
-            _de_filters += (
-                f" AND NOT EXISTS ("
-                f"SELECT 1 FROM {_quarantine_ref} q"
-                f" WHERE q.table_name = 'opportunity_fact'"
-                f" AND q.row_id = de.decision_event_id)"
-            )
-        _de_decision_sql = f"SELECT COUNT(*) FROM decision_events de {_de_filters}"
-        n_decisions_row = conn.execute(_de_decision_sql, _de_params).fetchone()
+    # C2 dead-lane fix (2026-06-16): decision_events is 0-row (gated behind a
+    # venue_ack that fires ~once/28d); decision_certificates (1.27M rows) is the
+    # active provenance path.  Count FinalIntentCertificate rows by strategy_key
+    # (embedded in payload_json) as the n_decisions denominator.
+    # source filter is not applicable here: the certificate payload 'source' field
+    # encodes the builder name ("existing_final_intent_builder"), not the provenance
+    # source used by the old decision_events schema.  n_decisions is telemetry-only
+    # (no ARM gate reads it) so dropping the unmappable filter is safe.
+    if "decision_certificates" in tables:
+        _dc_sql = (
+            "SELECT COUNT(*) FROM decision_certificates"
+            " WHERE certificate_type = 'FinalIntentCertificate'"
+            " AND json_extract(payload_json, '$.strategy_key') = ?"
+        )
+        n_decisions_row = conn.execute(_dc_sql, [strategy_id]).fetchone()
         n_decisions = int(n_decisions_row[0] or 0)
     else:
         n_decisions = 0

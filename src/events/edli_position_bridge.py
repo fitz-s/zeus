@@ -530,6 +530,7 @@ def _build_bridge_position(
     avg_fill_price: float,
     fees: float,
     filled_at: str,
+    posted_at: str | None = None,
     env: str,
 ):
     """Construct a Position carrying the legacy ``record_entry`` field semantics.
@@ -571,7 +572,11 @@ def _build_bridge_position(
         strategy_key=str(identity["strategy_key"]),
         order_id=identity.get("venue_order_id") or identity.get("execution_command_id") or "",
         order_status="filled",
-        order_posted_at=filled_at,
+        # C4 telemetry-truth: order_posted_at = real submit time (venue_commands.created_at,
+        # threaded as posted_at); NULL if the command row is absent — never the synthetic fill
+        # wall-clock (which would collapse submit→fill latency to 0). Consumers use getattr(...,None)
+        # + COALESCE, and the column is nullable, so NULL is safe.
+        order_posted_at=posted_at,
         entered_at=filled_at,
         entered_at_authority="verified_entry_fill",
         entry_fill_verified=True,
@@ -908,8 +913,27 @@ def materialize_position_current_from_edli_fill(
         )
 
     now = now or datetime.now(timezone.utc)
+    # 'now' is the bridge reconcile wall-clock — NOT the real fill time.
+    # Only use it for position lifecycle fields (_build_bridge_position) where a
+    # reference time is required; do NOT persist it as a telemetry event time.
     filled_at = now.isoformat()
     env = _bridge_env()
+
+    # C4 telemetry-truth: resolve posted_at from the real submit-intent time
+    # (venue_commands.created_at). If the command row is absent, posted_at stays
+    # NULL so latency_seconds computes NULL (honest absence, not synthetic 0.0).
+    _cmd_id = identity.get("execution_command_id") or ""
+    _cmd_created_at: str | None = None
+    if _cmd_id:
+        try:
+            _cmd_row = conn.execute(
+                "SELECT created_at FROM venue_commands WHERE command_id = ? LIMIT 1",
+                (_cmd_id,),
+            ).fetchone()
+            if _cmd_row is not None:
+                _cmd_created_at = str(_cmd_row[0]) if _cmd_row[0] else None
+        except Exception:
+            pass  # Table absent (legacy DB) — posted_at stays NULL
 
     pos = _build_bridge_position(
         aggregate_id=aggregate_id,
@@ -918,6 +942,7 @@ def materialize_position_current_from_edli_fill(
         avg_fill_price=avg_fill_price,
         fees=fees,
         filled_at=filled_at,
+        posted_at=_cmd_created_at,
         env=env,
     )
 
@@ -975,8 +1000,13 @@ def materialize_position_current_from_edli_fill(
         decision_id=identity["final_intent_id"] or None,
         command_id=identity["execution_command_id"] or None,
         strategy_key=str(identity["strategy_key"]),
-        posted_at=filled_at,
-        filled_at=filled_at,
+        # C4 telemetry-truth: posted_at = venue_commands.created_at (real
+        # submit-intent time); NULL if command row absent (honest absence, so
+        # latency_seconds computes NULL rather than synthetic 0.0).
+        # filled_at = NULL (bridge reconcile wall-clock is not the real fill time;
+        # no fill timestamp is available in the EDLI event payload).
+        posted_at=_cmd_created_at,
+        filled_at=None,
         submitted_price=avg_fill_price,
         fill_price=avg_fill_price,
         shares=filled_size,

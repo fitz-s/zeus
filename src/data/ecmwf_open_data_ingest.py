@@ -343,7 +343,15 @@ def _fetch_db_payload(
         "times": all_times,
         "members_hourly": members_hourly.tolist(),
         "issue_time": (provenance["issue_time"] or run_init_dt.isoformat()),
-        "available_at": (provenance["available_at"] or run_init_dt.isoformat()),
+        # C1-AVAIL-CLOCK (2026-06-16): NEVER fall back to run_init_dt (the model cycle) for
+        # available_at — that stamped the cycle as proof-of-possession (~8.4h early) and poisoned
+        # every downstream lineage clock + the fusion arrival gate. The real possession time is
+        # fetch_time, stamped at the snapshot writer (evaluator.py:_store_ens_snapshot via
+        # proof_of_possession_available_at). When no genuine possession time exists in the
+        # provenance rows here, emit None (honest absence) — never a cycle guess. Downstream is
+        # None-safe: ensemble_client only sets available_at when non-None, and the writer derives
+        # it from fetch_time regardless.
+        "available_at": provenance["available_at"],
         "fetch_time": captured_at.isoformat(),
         "captured_at": captured_at.isoformat(),
         "recorded_at": provenance["recorded_at"] or "",

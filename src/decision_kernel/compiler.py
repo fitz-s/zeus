@@ -192,7 +192,7 @@ class DecisionCompiler:
             algorithm_version="v1",
             parent_edges=(edge("clock_mode", clock),),
             parent_certificates=(clock,),
-            source_available_at=decision_time,
+            source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (NO_SUBMIT_MODE record generated AT decision_time, wraps no external source); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, max_parent_* monotonicity — never a freshness gate or q. decision_time is the only honest anchor.
             agent_received_at=decision_time,
             persisted_at=decision_time,
         )
@@ -242,7 +242,7 @@ class DecisionCompiler:
                     "header_persisted_at_semantics": "decision_kernel_generated_at_decision_time",
                     "db_created_at_may_follow_header_persisted_at": True,
                 },
-                source_available_at=decision_time,
+                source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (NO_SUBMIT decision generated AT decision_time per generated_at_decision_time payload flag, wraps no external source); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, max_parent_* monotonicity — never a freshness gate or q. decision_time is the only honest anchor.
                 agent_received_at=decision_time,
                 persisted_at=decision_time,
             )
@@ -303,7 +303,7 @@ class DecisionCompiler:
             authority_version=DECISION_KERNEL_AUTHORITY_VERSION,
             algorithm_id="decision_kernel.clock",
             algorithm_version="v1",
-            source_available_at=decision_time,
+            source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (CLOCK_MODE record; clock_source=reactor_decision_time, wraps no external source); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, max_parent_* monotonicity — never a freshness gate or q. decision_time is the only honest anchor.
             agent_received_at=decision_time,
             persisted_at=decision_time,
         )
