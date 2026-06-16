@@ -744,6 +744,11 @@ class OpportunityEventReactor:
                 # cycle.
                 if budget is not None and (time.monotonic() - cycle_start) >= budget:
                     return result
+                # JIT pre-warm THIS family's executable snapshot fresh, in-cycle, immediately
+                # before deciding it (outside any txn — the prior unit committed). Closes the
+                # end-of-cycle-drain timing bug where a refreshed book goes stale across the ~60s
+                # cycle gap before re-decision (212k EXECUTABLE_SNAPSHOT_BLOCKED requeues/day).
+                self._prewarm_event_family_snapshot(event)
                 self._process_event_unit(event, decision_time=decision_time, result=result)
                 if remaining is not None:
                     remaining -= 1
@@ -1148,6 +1153,53 @@ class OpportunityEventReactor:
         if not city or not target_date or metric not in {"high", "low"}:
             return None
         return (city, target_date, metric)
+
+    def _prewarm_event_family_snapshot(self, event: OpportunityEvent) -> None:
+        """JIT pre-warm THIS event's executable snapshot IMMEDIATELY BEFORE its decision, so it
+        satisfies the freshness gate THIS cycle instead of perpetually requeuing on the
+        end-of-cycle self-heal.
+
+        THE TIMING BUG THIS CLOSES (#122 / GOAL #83 — measured live 2026-06-16: 212,159
+        EXECUTABLE_SNAPSHOT_BLOCKED requeues/day, the dominant cross-suppressor by 40x). The
+        always-decidable drain (:meth:`_drain_substrate_refreshes`) refreshes a blocked family's
+        book at the END of the reactor cycle, but the family is re-decided at the START of the
+        NEXT cycle ~60s later — past the snapshot freshness window (30s) — so the just-captured
+        book is stale again at decision time and the family requeues FOREVER. Capturing the book
+        in the SAME cycle, immediately before the gate, makes the snapshot < the freshness window
+        old when the gate reads it, so it PASSES and the family reaches the decision spine. The
+        49-city pending set vs ~21-city/cycle warm coverage made the tail of cities depend ENTIRELY
+        on this (broken) self-heal; the pre-warm decouples a family's freshness from warm-cycle
+        coverage. NOT a window loosening (settlement-honest 30s gate is untouched): it makes the
+        book genuinely fresh, it does not relax what "fresh" means.
+
+        Runs OUTSIDE any txn: the loop body's prior unit-of-work has committed + released before
+        this call (the no-network-in-txn law — the SAME guarantee the end-of-cycle drain relies
+        on). Debounced via the SHARED ``_family_refresh_last_at`` + ``_FAMILY_REFRESH_DEBOUNCE_SECONDS``
+        (= freshness window / 2): a family refreshed within that window is skipped (its book is
+        still fresh), so a single fetch serves both the pre-warm and the drain and there is no
+        double-fetch. Fail-soft: a refresher failure (or absent refresher, e.g. tests) is swallowed
+        and the gate simply fails closed and requeues as before — byte-identical to pre-invariant
+        behavior when ``_family_snapshot_refresher`` is None.
+        """
+        refresher = self._family_snapshot_refresher
+        if refresher is None:
+            return
+        family = self._family_identity(event)
+        if family is None:
+            return
+        city, target_date, metric = family
+        key = f"{city}|{target_date}|{metric}"
+        now = time.monotonic()
+        prev = self._family_refresh_last_at.get(key)
+        if prev is not None and (now - prev) < _FAMILY_REFRESH_DEBOUNCE_SECONDS:
+            return  # refreshed within the window — the book is still fresh, no re-fetch
+        # Mark BEFORE the call (debounce spaces ATTEMPTS, not successes), so a slow/failing
+        # refresh still debounces the end-of-cycle drain off this family.
+        self._family_refresh_last_at[key] = now
+        try:
+            refresher(city=city, target_date=target_date, metric=metric)
+        except Exception:  # noqa: BLE001 — pre-warm is best-effort; gate fails closed if still stale
+            pass
 
     def _record_substrate_block(
         self, event: OpportunityEvent, *, kind: str
