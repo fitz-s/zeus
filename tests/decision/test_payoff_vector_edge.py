@@ -49,6 +49,7 @@ from src.decision.payoff_vector import (
     build_candidate_route,
     edge_lower_bound,
     live_candidate_passes,
+    optimize_vector_stake,
     point_fair_value,
     scalar_trade_score,
 )
@@ -62,6 +63,7 @@ from src.probability.outcome_space import (
     OutcomeSpace,
     compute_topology_hash,
 )
+from src.strategy.utility_ranker import FamilyPayoffMatrix, PortfolioExposureVector
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +378,53 @@ def test_scalar_q_minus_cost_cannot_select_candidate():
         direction_law_proof_present=True,
         market_coherence_accepted=True,
     )
+
+
+def test_optimize_vector_stake_sanitizes_nan_delta_u_at_min(monkeypatch):
+    """A ruin-straddle NaN at venue-min stake cannot poison a positive-edge candidate."""
+
+    class _Level:
+        price = Decimal("0.10")
+        size = Decimal("100")
+
+    class _FeeModel:
+        @staticmethod
+        def all_in_price(price: Decimal) -> Decimal:
+            return price
+
+    class _Curve:
+        levels = (_Level(),)
+        fee_model = _FeeModel()
+        min_order_size = Decimal("5")
+
+    class _Candidate:
+        is_tradeable = True
+        executable_cost_curve = _Curve()
+
+    calls = {"n": 0}
+
+    def _fake_robust_delta_u(candidate, stake_usd, **kwargs):
+        calls["n"] += 1
+        if stake_usd == Decimal("0.50"):
+            return float("nan")
+        return 0.01
+
+    monkeypatch.setattr("src.decision.payoff_vector.robust_delta_u", _fake_robust_delta_u)
+
+    stake, optimal_delta_u, delta_u_at_min = optimize_vector_stake(
+        _Candidate(),
+        band=object(),
+        omega=object(),
+        matrix=object(),
+        exposure=object(),
+        max_stake_usd=Decimal("10"),
+    )
+
+    assert calls["n"] > 1
+    assert stake > Decimal("0")
+    assert optimal_delta_u == pytest.approx(0.01)
+    assert delta_u_at_min == 0.0
+
 
 
 def test_vector_positive_but_unexecutable_route_cannot_select():

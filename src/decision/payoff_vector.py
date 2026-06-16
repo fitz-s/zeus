@@ -127,6 +127,7 @@ DRIFT RESOLVED (recorded per operator law; see docs/rebuild/impl_w4_payoff_vecto
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal, Mapping, Sequence
@@ -503,6 +504,8 @@ def optimize_vector_stake(
         )
 
     delta_u_at_min = _ru(lo)
+    if not math.isfinite(delta_u_at_min):
+        delta_u_at_min = 0.0
 
     best_u = float("-inf")
     best_s = Decimal("0")
