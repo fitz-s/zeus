@@ -38,6 +38,7 @@ from src.state.decision_chain import (
     store_settlement_records,
 )
 from src.state.db import (
+    forecasts_connection_with_trades_flocked,
     get_forecasts_connection,
     get_trade_connection,
     get_world_connection,
@@ -855,214 +856,248 @@ def run_harvester() -> dict:
             "positions_settled": 0,
             "total_pairs": 0,
         }
-    # Split connections: trade DB for position/settlement events, shared DB for
-    # ensemble snapshots and calibration pairs.
-    trade_conn = get_trade_connection()
-    shared_conn = get_forecasts_connection()
+    # INV-37 (ChatGPT PR#408 review B1, 2026-06-14): use a SINGLE connection with
+    # forecasts.db as MAIN and zeus_trades.db ATTACHed as 'trades'. A single
+    # SAVEPOINT wraps all writes so the entire settlement cycle is all-or-nothing.
+    # Previously two independent connections (get_trade_connection +
+    # get_forecasts_connection) committed separately, leaving a crash window between
+    # the two commits that could write settlement truth without settling positions
+    # (or the reverse) — logically impossible, contaminating calibration/PnL/redeem.
+    #
+    # SQLite name resolution on this connection:
+    #   forecasts-class tables (settlements, calibration_pairs, observations,
+    #   ensemble_snapshots) → MAIN (forecasts.db) — live tables exist here.
+    #   trade-class tables (position_current, position_events, decision_log,
+    #   chronicle, settlement_commands) → NOT in forecasts.db main → found in
+    #   the attached 'trades' schema (zeus_trades.db).
     portfolio = load_portfolio()
 
     settled_events = _fetch_settled_events()
     logger.info("Harvester: found %d settled events", len(settled_events))
-    stage2_preflight = (
-        _preflight_harvester_stage2_db_shape(trade_conn, shared_conn)
-        if settled_events
-        else {
-            "stage2_status": "not_run_no_settled_events",
-            "stage2_missing_trade_tables": [],
-            "stage2_missing_shared_tables": [],
-        }
-    )
-    stage2_ready = stage2_preflight.get("stage2_status") == "ready"
-    if settled_events and not stage2_ready:
-        logger.warning(
-            "Harvester Stage-2 skipped by DB shape preflight: trade_missing=%s shared_missing=%s",
-            stage2_preflight.get("stage2_missing_trade_tables", []),
-            stage2_preflight.get("stage2_missing_shared_tables", []),
+
+    with forecasts_connection_with_trades_flocked(write_class="live") as conn:
+        # conn serves as both the former trade_conn and shared_conn.
+        # Forecasts-class writes use bare table names → MAIN (forecasts.db).
+        # Trade-class writes use bare table names → not in forecasts.db main →
+        # resolved via ATTACHed 'trades' schema (zeus_trades.db).
+        stage2_preflight = (
+            _preflight_harvester_stage2_db_shape(conn, conn)
+            if settled_events
+            else {
+                "stage2_status": "not_run_no_settled_events",
+                "stage2_missing_trade_tables": [],
+                "stage2_missing_shared_tables": [],
+            }
         )
+        stage2_ready = stage2_preflight.get("stage2_status") == "ready"
+        if settled_events and not stage2_ready:
+            logger.warning(
+                "Harvester Stage-2 skipped by DB shape preflight: trade_missing=%s shared_missing=%s",
+                stage2_preflight.get("stage2_missing_trade_tables", []),
+                stage2_preflight.get("stage2_missing_shared_tables", []),
+            )
 
-    total_pairs = 0
-    positions_settled = 0
-    settlement_records: list[SettlementRecord] = []
-    tracker = get_tracker()
-    tracker_dirty = False
+        total_pairs = 0
+        positions_settled = 0
+        settlement_records: list[SettlementRecord] = []
+        tracker = get_tracker()
+        tracker_dirty = False
 
-    for event in settled_events:
+        # Wrap all writes in a single SAVEPOINT — the atomicity boundary required
+        # by INV-37. On exception the SAVEPOINT is rolled back so neither the
+        # forecasts-class writes nor the trade-class writes persist.
+        conn.execute("SAVEPOINT harvester_settlement")
+        _savepoint_released = False
         try:
-            city = _match_city(
-                (event.get("title") or "").lower(),
-                event.get("slug", ""),
-            )
-            if city is None:
-                continue
-
-            target_date = _extract_target_date(event)
-            if target_date is None:
-                continue
-            temperature_metric = infer_temperature_metric(
-                event.get("title", ""),
-                event.get("slug", ""),
-                *[
-                    str(market.get("question") or market.get("groupItemTitle") or "")
-                    for market in event.get("markets", []) or []
-                ],
-            )
-
-            resolved_market_outcomes = _extract_resolved_market_outcomes(event)
-            winning_market_outcomes = [
-                outcome for outcome in resolved_market_outcomes if outcome.yes_won
-            ]
-            if len(winning_market_outcomes) != 1:
-                # Exactly one YES-resolved child is required to avoid resolving
-                # malformed Gamma payloads into multiple winners.
-                if winning_market_outcomes:
-                    logger.warning(
-                        "harvester_live: skipping %s %s due ambiguous resolved winners=%d slug=%s",
-                        city.name,
-                        target_date,
-                        len(winning_market_outcomes),
+            for event in settled_events:
+                try:
+                    city = _match_city(
+                        (event.get("title") or "").lower(),
                         event.get("slug", ""),
                     )
-                continue
-            winning_market_outcome = winning_market_outcomes[0]
-            pm_bin_lo, pm_bin_hi = (
-                winning_market_outcome.range_low,
-                winning_market_outcome.range_high,
-            )
+                    if city is None:
+                        continue
 
-            # Derive the canonical text-form winning_bin label that downstream
-            # learning + position-settlement pipelines (harvest_settlement,
-            # _settle_positions) expect as `winning_label`. Without this the
-            # broad except-handler below would silently swallow a NameError
-            # under flag-ON and the learning pipeline would 100% no-op
-            # (code-reviewer P0 finding, Phase 2 verification 2026-04-23).
-            winning_label = _canonical_bin_label(pm_bin_lo, pm_bin_hi, city.settlement_unit)
-            if winning_label is None:
-                logger.warning(
-                    "harvester_live: both pm_bin_lo and pm_bin_hi are None after _find_winning_bin; "
-                    "skipping %s %s (degenerate bin; should be unreachable)",
-                    city.name, target_date,
-                )
-                continue
+                    target_date = _extract_target_date(event)
+                    if target_date is None:
+                        continue
+                    temperature_metric = infer_temperature_metric(
+                        event.get("title", ""),
+                        event.get("slug", ""),
+                        *[
+                            str(market.get("question") or market.get("groupItemTitle") or "")
+                            for market in event.get("markets", []) or []
+                        ],
+                    )
 
-            # Look up source-family-correct obs for SettlementSemantics gate.
-            obs_row = _lookup_settlement_obs(
-                shared_conn,
-                city,
-                target_date,
-                temperature_metric=temperature_metric,
-            )
-            if obs_row is None:
-                # No obs yet; don't write a quarantine row — retry next cycle when obs lands.
-                # (Alternative: write QUARANTINED with harvester_live_no_obs; skip for DR-33-A
-                # to avoid polluting the table with transient no-obs rows during obs-collector lag.)
-                logger.debug(
-                    "harvester_live: skipping %s %s — no source-correct obs yet",
-                    city.name, target_date,
-                )
-                continue
+                    resolved_market_outcomes = _extract_resolved_market_outcomes(event)
+                    winning_market_outcomes = [
+                        outcome for outcome in resolved_market_outcomes if outcome.yes_won
+                    ]
+                    if len(winning_market_outcomes) != 1:
+                        # Exactly one YES-resolved child is required to avoid resolving
+                        # malformed Gamma payloads into multiple winners.
+                        if winning_market_outcomes:
+                            logger.warning(
+                                "harvester_live: skipping %s %s due ambiguous resolved winners=%d slug=%s",
+                                city.name,
+                                target_date,
+                                len(winning_market_outcomes),
+                                event.get("slug", ""),
+                            )
+                        continue
+                    winning_market_outcome = winning_market_outcomes[0]
+                    pm_bin_lo, pm_bin_hi = (
+                        winning_market_outcome.range_low,
+                        winning_market_outcome.range_high,
+                    )
 
-            # Canonical-authority write: SettlementSemantics gate + INV-14 + provenance_json.
-            truth_result = _write_settlement_truth(
-                shared_conn, city, target_date, pm_bin_lo, pm_bin_hi,
-                event_slug=event.get("slug", ""),
-                obs_row=obs_row,
-                resolved_market_outcomes=resolved_market_outcomes,
-                temperature_metric=temperature_metric,
-            )
-            if str(truth_result.get("authority") or "").upper() != "VERIFIED":
-                logger.warning(
-                    "harvester_live: refusing learning/position settlement for %s %s "
-                    "because settlement truth authority=%s reason=%s",
-                    city.name,
-                    target_date,
-                    truth_result.get("authority"),
-                    truth_result.get("reason"),
-                )
-                continue
-            winning_label = str(truth_result.get("winning_bin") or winning_label)
+                    # Derive the canonical text-form winning_bin label that downstream
+                    # learning + position-settlement pipelines (harvest_settlement,
+                    # _settle_positions) expect as `winning_label`. Without this the
+                    # broad except-handler below would silently swallow a NameError
+                    # under flag-ON and the learning pipeline would 100% no-op
+                    # (code-reviewer P0 finding, Phase 2 verification 2026-04-23).
+                    winning_label = _canonical_bin_label(pm_bin_lo, pm_bin_hi, city.settlement_unit)
+                    if winning_label is None:
+                        logger.warning(
+                            "harvester_live: both pm_bin_lo and pm_bin_hi are None after _find_winning_bin; "
+                            "skipping %s %s (degenerate bin; should be unreachable)",
+                            city.name, target_date,
+                        )
+                        continue
 
-            # Extract all bin labels and use decision-time snapshots for calibration
-            all_labels = _extract_all_bin_labels(event)
-            learning_contexts = []
-            if stage2_ready:
-                # shared_conn: _snapshot_contexts_for_market reads ensemble_snapshots (shared)
-                # and position_events via query_settlement_events — pass trade_conn for event
-                # spine queries, shared_conn for snapshot lookups.
-                snapshot_contexts, dropped_rows = _snapshot_contexts_for_market(
-                    trade_conn, shared_conn, portfolio, city.name, target_date
-                )
-                _log_snapshot_context_resolution(
-                    trade_conn,
-                    city=city.name,
-                    target_date=target_date,
-                    snapshot_contexts=snapshot_contexts,
-                    dropped_rows=dropped_rows,
-                )
-                learning_contexts = [
-                    context
-                    for context in snapshot_contexts
-                    if context.get("learning_snapshot_ready", False)
-                    and context.get("authority_level") != "working_state_fallback"
-                ]
-            event_pairs = 0
-            for context in learning_contexts:
-                if context.get("temperature_metric") != temperature_metric:
-                    continue
-                # T1C: route through maybe_write_learning_pair() which enforces
-                # source/lineage authority before calling harvest_settlement().
-                event_pairs += maybe_write_learning_pair(
-                    shared_conn,
-                    city,
-                    target_date,
-                    winning_label,
-                    all_labels,
-                    context,
-                    temperature_metric,
-                )
-            total_pairs += event_pairs
-            if event_pairs > 0:
-                maybe_refit_bucket(shared_conn, city, target_date)
+                    # Look up source-family-correct obs for SettlementSemantics gate.
+                    obs_row = _lookup_settlement_obs(
+                        conn,
+                        city,
+                        target_date,
+                        temperature_metric=temperature_metric,
+                    )
+                    if obs_row is None:
+                        # No obs yet; don't write a quarantine row — retry next cycle when obs lands.
+                        # (Alternative: write QUARANTINED with harvester_live_no_obs; skip for DR-33-A
+                        # to avoid polluting the table with transient no-obs rows during obs-collector lag.)
+                        logger.debug(
+                            "harvester_live: skipping %s %s — no source-correct obs yet",
+                            city.name, target_date,
+                        )
+                        continue
 
-            # Settle held positions in this market
-            n_settled = _settle_positions(
-                trade_conn,
-                portfolio,
-                city.name,
-                target_date,
-                winning_label,
-                settlement_records=settlement_records,
-                strategy_tracker=tracker,
-                settlement_authority="VERIFIED",
-                settlement_truth_source="harvester_live_verified_settlement",
-                settlement_market_slug=str(event.get("slug", "") or ""),
-                settlement_temperature_metric=temperature_metric,
-                settlement_source=str(city.settlement_source or ""),
-                settlement_value=truth_result.get("settlement_value"),
-            )
-            positions_settled += n_settled
-            if n_settled > 0:
-                tracker_dirty = True
+                    # Canonical-authority write: SettlementSemantics gate + INV-14 + provenance_json.
+                    truth_result = _write_settlement_truth(
+                        conn, city, target_date, pm_bin_lo, pm_bin_hi,
+                        event_slug=event.get("slug", ""),
+                        obs_row=obs_row,
+                        resolved_market_outcomes=resolved_market_outcomes,
+                        temperature_metric=temperature_metric,
+                    )
+                    if str(truth_result.get("authority") or "").upper() != "VERIFIED":
+                        logger.warning(
+                            "harvester_live: refusing learning/position settlement for %s %s "
+                            "because settlement truth authority=%s reason=%s",
+                            city.name,
+                            target_date,
+                            truth_result.get("authority"),
+                            truth_result.get("reason"),
+                        )
+                        continue
+                    winning_label = str(truth_result.get("winning_bin") or winning_label)
 
-        except Exception as e:
-            logger.error("Harvester error for event %s: %s",
-                         event.get("slug", "?"), e)
+                    # Extract all bin labels and use decision-time snapshots for calibration
+                    all_labels = _extract_all_bin_labels(event)
+                    learning_contexts = []
+                    if stage2_ready:
+                        # conn resolves ensemble_snapshots (forecasts-class, MAIN) and
+                        # position_events (trade-class, via ATTACHed 'trades' schema).
+                        snapshot_contexts, dropped_rows = _snapshot_contexts_for_market(
+                            conn, conn, portfolio, city.name, target_date
+                        )
+                        _log_snapshot_context_resolution(
+                            conn,
+                            city=city.name,
+                            target_date=target_date,
+                            snapshot_contexts=snapshot_contexts,
+                            dropped_rows=dropped_rows,
+                        )
+                        learning_contexts = [
+                            context
+                            for context in snapshot_contexts
+                            if context.get("learning_snapshot_ready", False)
+                            and context.get("authority_level") != "working_state_fallback"
+                        ]
+                    event_pairs = 0
+                    for context in learning_contexts:
+                        if context.get("temperature_metric") != temperature_metric:
+                            continue
+                        # T1C: route through maybe_write_learning_pair() which enforces
+                        # source/lineage authority before calling harvest_settlement().
+                        event_pairs += maybe_write_learning_pair(
+                            conn,
+                            city,
+                            target_date,
+                            winning_label,
+                            all_labels,
+                            context,
+                            temperature_metric,
+                        )
+                    total_pairs += event_pairs
+                    if event_pairs > 0:
+                        maybe_refit_bucket(conn, city, target_date)
 
-    # T1C: settlement record write is now isolated in record_settlement_result().
-    # No redeem transitions here; those occur inside _settle_positions() via
-    # enqueue_redeem_command() which wraps the settlement_commands.request_redeem call.
-    n_written = record_settlement_result(trade_conn, settlement_records, stage2_preflight)
+                    # Settle held positions in this market
+                    n_settled = _settle_positions(
+                        conn,
+                        portfolio,
+                        city.name,
+                        target_date,
+                        winning_label,
+                        settlement_records=settlement_records,
+                        strategy_tracker=tracker,
+                        settlement_authority="VERIFIED",
+                        settlement_truth_source="harvester_live_verified_settlement",
+                        settlement_market_slug=str(event.get("slug", "") or ""),
+                        settlement_temperature_metric=temperature_metric,
+                        settlement_source=str(city.settlement_source or ""),
+                        settlement_value=truth_result.get("settlement_value"),
+                    )
+                    positions_settled += n_settled
+                    if n_settled > 0:
+                        tracker_dirty = True
+
+                except Exception as e:
+                    logger.error("Harvester error for event %s: %s",
+                                 event.get("slug", "?"), e)
+
+            # T1C: settlement record write is now isolated in record_settlement_result().
+            # No redeem transitions here; those occur inside _settle_positions() via
+            # enqueue_redeem_command() which wraps the settlement_commands.request_redeem call.
+            n_written = record_settlement_result(conn, settlement_records, stage2_preflight)
+
+            # INV-37 / DT#1: release the SAVEPOINT (makes all writes permanent on commit)
+            # then commit the single connection. Both forecasts-class and trade-class
+            # writes commit atomically — the crash window between two independent
+            # commits is eliminated.
+            conn.execute("RELEASE SAVEPOINT harvester_settlement")
+            _savepoint_released = True
+            conn.commit()
+
+        except Exception:
+            if not _savepoint_released:
+                try:
+                    conn.execute("ROLLBACK TO SAVEPOINT harvester_settlement")
+                    conn.execute("RELEASE SAVEPOINT harvester_settlement")
+                except Exception:
+                    pass
+            raise
+
     legacy_settlement_records_skipped = (
         len(settlement_records) - n_written if settlement_records and n_written == 0 else 0
     )
 
-    # DT#1 / INV-17: DB commits FIRST, then JSON exports.
-    # harvester has no artifact row, so db_op returns None.
+    # DT#1 / INV-17: JSON exports AFTER DB commit.
     _portfolio_settled = positions_settled > 0
     _tracker_dirty = tracker_dirty
-
-    def _db_op_trade() -> None:
-        trade_conn.commit()
-        shared_conn.commit()
 
     def _export_portfolio_h() -> None:
         if _portfolio_settled:
@@ -1072,14 +1107,11 @@ def run_harvester() -> dict:
         if _tracker_dirty:
             save_tracker(tracker)
 
-    commit_then_export(
-        trade_conn,
-        db_op=_db_op_trade,
-        json_exports=[_export_portfolio_h, _export_tracker_h],
-    )
-
-    trade_conn.close()
-    shared_conn.close()
+    for _export_fn in [_export_portfolio_h, _export_tracker_h]:
+        try:
+            _export_fn()
+        except Exception as _exp_exc:
+            logger.warning("harvester: JSON export failed (non-fatal): %s", _exp_exc)
 
     return {
         "settlements_found": len(settled_events),
