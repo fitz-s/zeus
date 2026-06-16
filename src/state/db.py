@@ -652,6 +652,77 @@ def get_forecasts_connection_with_world(
                     pass
 
 
+@contextlib.contextmanager
+def forecasts_connection_with_trades_flocked(
+    *,
+    write_class: WriteClass | str = "live",
+):
+    """Context manager: forecasts.db as MAIN with zeus_trades.db ATTACHed as 'trades'.
+
+    INV-37 harvester fix (ChatGPT PR#408 review B1, 2026-06-14): the settlement
+    harvester must write BOTH forecasts-class tables (settlements, calibration_pairs,
+    ensemble_snapshots, observations) AND trade-class tables (position_current,
+    position_events, decision_log, chronicle, settlement_commands) in a SINGLE
+    atomic SAVEPOINT.  Opening two independent connections and committing them
+    separately violates INV-37 — a crash / busy / kill between the two commits
+    leaves logically impossible state (settlement truth written but positions not
+    settled, or the reverse).
+
+    This helper opens forecasts.db as MAIN and ATTACHes zeus_trades.db as the
+    'trades' schema, so:
+
+      - forecasts-class bare names (settlements, calibration_pairs, observations,
+        ensemble_snapshots) resolve to MAIN (forecasts.db) ✓
+      - trade-class bare names (position_current, position_events, decision_log,
+        chronicle, settlement_commands, executable_market_snapshots) are NOT present
+        in forecasts.db so SQLite name resolution finds them in the attached
+        'trades' schema (zeus_trades.db) ✓
+
+    Single SAVEPOINT spanning all writes makes the entire settlement cycle
+    all-or-nothing per INV-37 law.
+
+    Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
+    (``zeus-forecasts.db`` before ``zeus_trades.db``) to prevent deadlocks with
+    other cross-DB writers (v4 §3.1.3 invariant).
+
+    Authority: ChatGPT PR#408 review B1 INV-37,
+    docs/evidence/pr408_review/chatgpt_deep_review_2026-06-14.md
+    Created: 2026-06-14
+    Last audited: 2026-06-14
+    """
+    from src.state.db_writer_lock import (
+        canonical_lock_order,
+        db_writer_lock,
+    )
+    resolved = _resolve_write_class(write_class)
+    if resolved is None:
+        from src.state.db_writer_lock import WriteClass as _WC
+        resolved = _WC.LIVE
+    # Canonical alphabetical sort: zeus-forecasts.db < zeus_trades.db
+    ordered_paths = canonical_lock_order(
+        [ZEUS_FORECASTS_DB_PATH, _zeus_trade_db_path()]
+    )
+    with db_writer_lock(ordered_paths[0], resolved):
+        with db_writer_lock(ordered_paths[1], resolved):
+            conn = _connect(ZEUS_FORECASTS_DB_PATH, write_class=resolved)
+            try:
+                attached = {
+                    row[1]
+                    for row in conn.execute("PRAGMA database_list").fetchall()
+                }
+                if "trades" not in attached:
+                    conn.execute(
+                        "ATTACH DATABASE ? AS trades",
+                        (str(_zeus_trade_db_path()),),
+                    )
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001 — best-effort close
+                    pass
+
+
 def get_backtest_connection(
     *, write_class: WriteClass | str | None = None,
 ) -> sqlite3.Connection:
