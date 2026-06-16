@@ -7717,18 +7717,29 @@ def _generate_candidate_proofs(
         and "_edli_spine_mu_native" not in payload
     ):
         try:
-            # Bind the spine belief to the event's CAUSAL forecast snapshot (allow_latest=False).
+            # Bind the spine belief to the event's CAUSAL forecast snapshot.
             # All forecast lead buckets are now admitted (the 24h-only replay gate is removed),
             # so the causal cycle's lead (e.g. a 06-16 target on the 06-14 cycle = ~48h = the
-            # 72h bucket) is tradeable with its conservative per-lead σ-floor. allow_latest=True
-            # was counter-productive here: it pushed near-term targets into the day0 bucket
-            # (excluded) and raised for forecast families (=> MU_SIGMA). The causal snapshot is
-            # the family's own bound forecast and reliably carries its member envelope.
-            _spine_snap = _forecast_snapshot_row_for_event(
+            # 72h bucket) is tradeable with its conservative per-lead σ-floor. The causal
+            # snapshot is the family's own bound forecast and reliably carries its member
+            # envelope.
+            #
+            # ROOT-CAUSE FIX (2026-06-16 MU_SIGMA_NOT_STASHED): source the row through
+            # _bound_forecast_snapshot_row_for_spine, NOT _forecast_snapshot_row_for_event.
+            # The latter additionally runs the executable-forecast READER-BLOCK trade-
+            # eligibility gate (_forecast_snapshot_reader_block_reason), which raises
+            # FORECAST_READER_* for live FORECAST_SNAPSHOT_READY families; this fail-soft
+            # except swallowed that raise → the spine got SPINE_INPUTS_UNAVAILABLE:
+            # MU_SIGMA_NOT_STASHED universally even though the bound snapshot carried a valid
+            # 51-member envelope. Trade eligibility is already owned by the live replacement
+            # authority lane; re-deciding it here just to READ members was redundant and the
+            # actual defect. The accessor keeps the same data-INTEGRITY predicates (VERIFIED /
+            # causality OK / not boundary-ambiguous / available_at ≤ decision_time / pinned to
+            # causal_snapshot_id) so this is pure input THREADING — no decision-math change.
+            _spine_snap = _bound_forecast_snapshot_row_for_spine(
                 forecast_conn,
                 event=event,
                 family=family,
-                allow_latest=False,
                 decision_time=decision_time,
             )
             if _spine_snap is not None:
@@ -11140,6 +11151,74 @@ def _canonical_probability_and_fdr_proof(
             pass
 
     return q_by_condition, lcb_by_direction, p_values, prefilter, probability_evidence
+
+
+def _bound_forecast_snapshot_row_for_spine(
+    conn: sqlite3.Connection,
+    *,
+    event: OpportunityEvent,
+    family,
+    decision_time: datetime,
+) -> dict[str, Any] | None:
+    """Fetch the family's BOUND causal ensemble_snapshots row for the spine member envelope.
+
+    The Q-KERNEL SPINE INPUTS block (``_generate_candidate_proofs``) needs ONLY the bound
+    forecast's ensemble member envelope (the empirical center/dispersion). It previously
+    sourced that row through ``_forecast_snapshot_row_for_event``, which additionally runs
+    the executable-forecast READER-BLOCK trade-eligibility gate
+    (``_forecast_snapshot_reader_block_reason`` → source_run/coverage/executable-reader
+    revalidation). That gate raises ``FORECAST_READER_*`` for live FORECAST_SNAPSHOT_READY
+    families (e.g. ``scope_incomplete`` when the coverage scope is not matched, or a
+    live-eligibility block) and the spine block's fail-soft ``except`` swallowed it — so the
+    spine got ``MU_SIGMA_NOT_STASHED`` universally even though the bound snapshot carried a
+    valid member envelope. The reader-block gate is a TRADE-eligibility check; the LIVE
+    decision lane (replacement authority) already owns trade eligibility, so re-deciding it
+    here only to read members is both redundant and the actual failure.
+
+    This accessor applies the SAME data-INTEGRITY predicates the causal fetch uses
+    (VERIFIED authority, causality OK, not boundary-ambiguous, available_at ≤ decision_time,
+    pinned to the event's ``causal_snapshot_id``) and returns the row dict — WITHOUT the
+    trade-eligibility reader-block gate. Members are still validated downstream by
+    ``_snapshot_members`` (raises ⇒ honest MU_SIGMA). Read-only; never feeds q, sizing, or
+    submit — only the spine's predictive member envelope.
+    """
+    if event.event_type not in _FORECAST_DECISION_EVENT_TYPES:
+        return None
+    table_ref = _authority_table_ref(conn, "ensemble_snapshots")
+    if table_ref is None:
+        return None
+    columns = _table_ref_columns(conn, table_ref)
+    required = {"city", "target_date", "temperature_metric", "snapshot_id"}
+    if not required.issubset(columns):
+        return None
+    predicates = ["city = ?", "target_date = ?", "temperature_metric = ?"]
+    params: list[object] = [family.city, family.target_date, family.metric]
+    predicates.append("CAST(snapshot_id AS TEXT) = ?")
+    params.append(str(event.causal_snapshot_id or ""))
+    if "available_at" in columns:
+        predicates.append("available_at <= ?")
+        params.append(decision_time.astimezone(UTC).isoformat())
+    if "authority" in columns:
+        predicates.append("COALESCE(authority, 'VERIFIED') = 'VERIFIED'")
+    if "causality_status" in columns:
+        predicates.append("COALESCE(causality_status, 'OK') = 'OK'")
+    if "boundary_ambiguous" in columns:
+        predicates.append("COALESCE(boundary_ambiguous, 0) = 0")
+    order_field = "available_at" if "available_at" in columns else "snapshot_id"
+    cur = conn.execute(
+        f"""
+        SELECT *
+        FROM {table_ref}
+        WHERE {' AND '.join(predicates)}
+        ORDER BY {order_field} DESC
+        """,
+        tuple(params),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    names = [description[0] for description in cur.description]
+    return {name: row[name] for name in names} if isinstance(row, sqlite3.Row) else dict(zip(names, row))
 
 
 def _forecast_snapshot_row_for_event(
