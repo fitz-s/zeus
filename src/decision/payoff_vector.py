@@ -601,6 +601,11 @@ def optimize_vector_stake(
     def _ru(stake: Decimal) -> float:
         return prepared.robust_at(stake)
 
+    # import BEFORE first use: the delta_u_at_min NaN guard below references _math, so a
+    # later `import math as _math` made _math a function-local that was unbound here ->
+    # UnboundLocalError -> SPINE_WIRING_FAULT -> every spine decision crashed (no crosses).
+    import math as _math
+
     delta_u_at_min = _ru(lo)
     if not _math.isfinite(delta_u_at_min):
         delta_u_at_min = 0.0
@@ -629,8 +634,6 @@ def optimize_vector_stake(
         span_lo = max(lo, pass_best_s - step)
         span_hi = min(hi, pass_best_s + step)
         steps = _REFINE_STEPS
-
-    import math as _math
 
     if not _math.isfinite(best_u) or best_u <= 0.0 or best_s <= Decimal("0"):
         return Decimal("0"), (best_u if _math.isfinite(best_u) else 0.0), delta_u_at_min
