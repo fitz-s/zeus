@@ -80,7 +80,7 @@ OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 # strictly less than this so a cycle finishes before its next trigger; otherwise
 # max_instances=1 skips every overlapping run ("maximum number of running instances
 # reached"), the executable substrate is never refreshed, and the armed daemon is
-# starved of candidates. The interval also stays within the 30s executable-price
+# starved of candidates. The interval also stays within the 180s executable-price
 # freshness window. The invariant is asserted at job registration.
 _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
 
@@ -3467,7 +3467,7 @@ def _refresh_pending_family_snapshots(
 
     # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
     # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
-    # INTERVAL_SECONDS, 20s) and MUST stay within the 30s executable-price freshness
+    # INTERVAL_SECONDS, 20s) and MUST stay within the 180s executable-price freshness
     # window. The prior 29.0 default predated the reactor→warm-cycle split (blame
     # 014408394f, sized for the old 1-min reactor interval) and was never re-aligned:
     # a 29s budget on a 20s interval guarantees the cycle overruns its own trigger,
@@ -3763,7 +3763,7 @@ def _refresh_pending_family_snapshots(
             def _fetch_gamma_slug(job: dict) -> dict:
                 remaining = max(0.1, gamma_deadline - time.monotonic())
                 _gamma_timeout = min(
-                    max(1.0, float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "10.0"))),
+                    max(1.0, float(os.environ.get("ZEUS_DISCOVERY_GAMMA_TIMEOUT_SECONDS", "10.0"))),
                     remaining,
                 )
                 slug = str(job["slug"])
@@ -5109,6 +5109,31 @@ def _join_boot_wallet_warm(
         )
 
 
+def _warn_if_cadence_uncovered(
+    effective_sweep_period_s: float,
+    freshness_window_s: float,
+) -> None:
+    """Cadence-coverage guard (C5, timing-semantics fix 2026-06-16).
+
+    BASIS: the selection freshness window is only honored when the daemon's
+    effective sweep cadence keeps pace.  If effective_sweep_period_s exceeds
+    freshness_window_s, the snapshot captured in one cycle is already past the
+    freshness deadline by the time the next cycle even starts, so every
+    selection silently reads stale data and falls back — the exact
+    reactor-lane starvation fixed in #122, now guarded explicitly.
+
+    WARNING only — does NOT raise, does NOT exit, does NOT block boot.
+    """
+    if effective_sweep_period_s > freshness_window_s:
+        logger.warning(
+            "CADENCE UNCOVERED: effective sweep period %.1fs exceeds selection "
+            "freshness window %.1fs; selections will read stale data and fall "
+            "back. Shorten sweep or widen freshness.",
+            effective_sweep_period_s,
+            freshness_window_s,
+        )
+
+
 # Sentinel: distinguishes "caller handed a warm record (possibly None)" from
 # "no warm record supplied — gate must self-fetch via current()".
 _WALLET_RECORD_UNSET = object()
@@ -5577,62 +5602,13 @@ def _replacement_forecast_refit_decision_from_settings():
         return None
 
 
-def _replacement_forecast_promotion_evidence_from_settings():
-    from src.config import PROJECT_ROOT
-    from src.data.replacement_forecast_go_live_report import (
-        replacement_forecast_promotion_evidence_from_payload,
-    )
-
-    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
-    raw_path = cfg.get("promotion_evidence_path") or "state/replacement_forecast_shadow/promotion_evidence.json"
-    path = Path(str(raw_path))
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
-        logger.warning("replacement forecast promotion evidence unreadable: %s", exc)
-        return None
-    if not isinstance(payload, dict):
-        logger.warning("replacement forecast promotion evidence must be a JSON object: %s", path)
-        return None
-    try:
-        return replacement_forecast_promotion_evidence_from_payload(payload)
-    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
-        logger.warning("replacement forecast promotion evidence invalid: %s", exc)
-        return None
-
-
-def _replacement_forecast_capital_objective_evidence_from_settings():
-    from src.config import PROJECT_ROOT
-    from src.data.replacement_forecast_go_live_report import (
-        replacement_forecast_capital_objective_evidence_from_payload,
-    )
-
-    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
-    raw_path = cfg.get("promotion_evidence_path") or "state/replacement_forecast_shadow/promotion_evidence.json"
-    path = Path(str(raw_path))
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
-        logger.warning("replacement forecast capital objective evidence unreadable: %s", exc)
-        return None
-    if not isinstance(payload, dict):
-        logger.warning("replacement forecast capital objective evidence must be a JSON object: %s", path)
-        return None
-    try:
-        return replacement_forecast_capital_objective_evidence_from_payload(payload)
-    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
-        logger.warning("replacement forecast capital objective evidence invalid: %s", exc)
-        return None
-
-
+# DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the promotion / capital-objective
+# evidence parsers (_replacement_forecast_{promotion,capital_objective}_evidence_from_
+# settings) were REMOVED. They imported the deleted go_live_report verdict module and
+# fed the runtime-policy resolver / switch-decision evaluator — both of which IGNORE
+# these objects post-operator-severance (commits b646f99339 + 54a53334a9: LIVE_AUTHORITY
+# is FLAG-ONLY). The two live-adapter call sites now pass None (the adapter default),
+# which is behavior-identical. See docs/evidence/timing_audit/.
 def _sqlite_table_names(conn) -> tuple[str, ...]:
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
     names: list[str] = []
@@ -5981,8 +5957,11 @@ def _edli_event_reactor_cycle() -> None:
         process_pending_decision_time = datetime.now(timezone.utc)
         replacement_forecast_runtime_flags = _replacement_forecast_runtime_flags_from_settings()
         replacement_forecast_refit_decision = _replacement_forecast_refit_decision_from_settings()
-        replacement_forecast_promotion_evidence = _replacement_forecast_promotion_evidence_from_settings()
-        replacement_forecast_capital_objective_evidence = _replacement_forecast_capital_objective_evidence_from_settings()
+        # DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the runtime-policy resolver and
+        # switch-decision evaluator IGNORE these evidence objects post-severance
+        # (LIVE_AUTHORITY is FLAG-ONLY). None is behavior-identical to the deleted parsers.
+        replacement_forecast_promotion_evidence = None
+        replacement_forecast_capital_objective_evidence = None
         replacement_forecast_baseline_bundle_provider = replacement_forecast_baseline_bundle_provider_from_forecast_conn(
             forecasts_conn
         )
@@ -9133,6 +9112,18 @@ def main():
     # Stale source_health.json → degrade per source family; trading continues.
     # Phase 3 will promote ABSENT result here to a hard FATAL (currently warn).
     _startup_freshness_check()
+
+    # C5 cadence-coverage guard (timing-semantics fix 2026-06-16): warn if the
+    # effective warm-cycle sweep period exceeds the selection freshness window.
+    # _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS is the APScheduler interval for the
+    # executable-snapshot substrate warmer; FRESHNESS_WINDOW_DEFAULT is the
+    # timedelta used by ExecutableMarketSnapshot to mark a captured snapshot stale.
+    # If the cadence exceeds the window, every selection reads stale data silently.
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    _warn_if_cadence_uncovered(
+        _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS,
+        FRESHNESS_WINDOW_DEFAULT.total_seconds(),
+    )
 
     # G6 antibody (2026-04-26, fixed 2026-04-26 per con-nyx CONDITION C1):
     # Refuse boot if any non-allowlisted strategy is enabled. Must run AFTER
