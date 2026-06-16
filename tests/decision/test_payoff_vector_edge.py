@@ -63,6 +63,7 @@ from src.probability.outcome_space import (
     OutcomeSpace,
     compute_topology_hash,
 )
+from src.strategy.utility_ranker import FamilyPayoffMatrix, PortfolioExposureVector
 
 
 # ---------------------------------------------------------------------------

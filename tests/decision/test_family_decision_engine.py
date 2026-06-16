@@ -60,6 +60,7 @@ from src.contracts.executable_cost_curve import (
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.family_decision_engine import (
+    CALIBRATED_NONMODAL_Q_FLOOR,
     NO_TRADE_NO_DIRECTION_LAW,
     NO_TRADE_NO_POSITIVE_EDGE,
     NO_TRADE_PREDICTIVE_NOT_LIVE_ELIGIBLE,
@@ -467,11 +468,63 @@ def test_forecast_bin_is_the_modal_bin_and_direction_law_reads_it():
     no_b27 = build_candidate_route(
         candidate_id="n27", instrument=_inst("NO", "b27"), route_cost=_rc("NO", "b27"), omega=space
     )
-    # YES legal ONLY on the forecast bin; NO legal ONLY off it.
-    assert direction_law_ok(yes_b25, forecast_bin=fbin) is True
-    assert direction_law_ok(yes_b27, forecast_bin=fbin) is False
-    assert direction_law_ok(no_b25, forecast_bin=fbin) is False
-    assert direction_law_ok(no_b27, forecast_bin=fbin) is True
+    # YES on the forecast bin is always legal regardless of its point-q (it IS the modal bin).
+    assert direction_law_ok(yes_b25, forecast_bin=fbin, point_q=0.6) is True
+    # NO is legal ONLY off the forecast bin (NO direction unchanged by the 2026-06-15 relax).
+    assert direction_law_ok(no_b25, forecast_bin=fbin, point_q=0.6) is False
+    assert direction_law_ok(no_b27, forecast_bin=fbin, point_q=0.02) is True
+    # Non-modal YES (b27): legal IFF point-q reaches the settlement-validated calibrated floor.
+    # Below the floor (the far tail with no settlement coverage) it stays modal-only-illegal;
+    # at/above the floor it is admitted as a calibrated Arrow-Debreu claim (relax 2026-06-15).
+    assert (
+        direction_law_ok(yes_b27, forecast_bin=fbin, point_q=CALIBRATED_NONMODAL_Q_FLOOR - 0.01)
+        is False
+    )
+    assert (
+        direction_law_ok(yes_b27, forecast_bin=fbin, point_q=CALIBRATED_NONMODAL_Q_FLOOR)
+        is True
+    )
+
+
+def test_nonmodal_yes_in_calibrated_domain_is_admitted_far_tail_still_modal_only():
+    """RED-on-revert for the 2026-06-15 settlement-justified direction-law relax.
+
+    The modal-only YES rule (pre-2026-06-15) suppressed settlement-CALIBRATED non-modal YES
+    candidates: 6,450 settled non-modal bin-obs grade the non-modal tail in (0.05,0.35] at
+    pred/real 1.05× (docs/evidence/qkernel_rebuild/nonmodal_bin_calibration_2026-06-15.md F1),
+    while the modal bin the rule trusts grades 1.28× over-dispersed (F2) — the premise was
+    inverted. The relax admits a non-modal YES whose point-q is INSIDE the validated
+    calibrated domain (>= CALIBRATED_NONMODAL_Q_FLOOR), and keeps the far tail (below the
+    floor, no settlement coverage, where the over-dispersed served σ + the conservative
+    edge_lcb quantile amplify rather than shield) modal-only.
+
+    A reversion to the modal-only rule (``return route.bin_id == forecast_bin`` for YES) makes
+    the calibrated-domain assertion RED: the in-domain non-modal YES would flip to illegal.
+    """
+    fbin = "b25"
+
+    def yes_on(bin_id: str) -> CandidateRoute:
+        return build_candidate_route(
+            candidate_id=f"y:{bin_id}",
+            instrument=_inst("YES", bin_id),
+            route_cost=_rc("YES", bin_id),
+            omega=_outcome_space(_case()),
+        )
+
+    # In-domain non-modal YES (point-q at/above the calibrated floor) — ADMITTED by the relax,
+    # REFUSED by a modal-only revert. This is the load-bearing RED-on-revert assertion.
+    assert direction_law_ok(yes_on("b24"), forecast_bin=fbin, point_q=0.22) is True
+    assert direction_law_ok(yes_on("b23"), forecast_bin=fbin, point_q=0.10) is True
+    assert (
+        direction_law_ok(yes_on("b26"), forecast_bin=fbin, point_q=CALIBRATED_NONMODAL_Q_FLOOR)
+        is True
+    )
+    # Far-tail non-modal YES (point-q below the validated floor) — STILL modal-only-illegal:
+    # the settlement evidence does not reach here and edge_lcb amplifies the over-dispersed σ.
+    assert direction_law_ok(yes_on("b28"), forecast_bin=fbin, point_q=0.02) is False
+    assert direction_law_ok(yes_on("b_high"), forecast_bin=fbin, point_q=0.0004) is False
+    # The forecast (modal) bin YES is always legal; its point-q is irrelevant.
+    assert direction_law_ok(yes_on("b25"), forecast_bin=fbin, point_q=0.0) is True
 
 
 # Small helpers for the primitive check above.
@@ -627,7 +680,6 @@ def test_decide_filters_direction_then_coherence_then_edge_then_argmax_delta_u(m
         if d.economics.candidate_id == decision.selected.candidate_id
     )
     assert selected_decision.route.side == "YES"
-    assert selected_decision.route.bin_id == "b25"
     # The whole filter chain held on the selected candidate.
     assert selected_decision.direction_law_ok
     assert selected_decision.coherence_allows
@@ -652,11 +704,16 @@ def test_decide_filters_direction_then_coherence_then_edge_then_argmax_delta_u(m
         max(d.economics.optimal_delta_u for d in passing)
     )
 
-    # The direction-law filter genuinely dropped the non-forecast-bin YES candidates: a YES on
-    # b24 / b26 (not the forecast bin) was enumerated but is NOT direction-law-legal, so it
-    # never reached selection even if its raw economics were positive.
+    # Post-2026-06-15 relax: a non-modal YES whose point-q is INSIDE the settlement-validated
+    # calibrated domain (point_q >= CALIBRATED_NONMODAL_Q_FLOOR) is now direction-law-LEGAL.
+    # b24 is an adjacent ring bin with point_q ~0.22 (well above the 0.05 floor), so its YES is
+    # admitted as a calibrated Arrow-Debreu claim — it is no longer suppressed by the rule.
     yes_b24 = [d for d in decision.candidate_decisions if d.route.side == "YES" and d.route.bin_id == "b24"]
-    assert yes_b24 and yes_b24[0].direction_law_ok is False
+    assert yes_b24 and yes_b24[0].direction_law_ok is True
+    assert (
+        decision.candidate_decisions  # the b24 point-q clears the validated floor
+        and jq.q_by_bin_id["b24"] >= CALIBRATED_NONMODAL_Q_FLOOR
+    )
 
 
 def test_select_uses_argmax_delta_u_not_scalar_trade_score(monkeypatch):
