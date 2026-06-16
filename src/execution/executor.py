@@ -517,17 +517,37 @@ def _assert_collateral_allows_buy(
 
 def _refresh_entry_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> dict:
     """Refresh collateral truth synchronously on the submit path before preflight."""
+    import time as _time
+
     from src.data.polymarket_client import PolymarketClient
     from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
 
-    try:
-        client = PolymarketClient()
-        adapter = client._ensure_v2_adapter()
-        snapshot = CollateralLedger(conn).refresh(adapter)
-    except CollateralInsufficient:
-        raise
-    except Exception as exc:
-        raise CollateralInsufficient(f"collateral_refresh_failed: {exc}") from exc
+    # 2026-06-16 (#122): a TRANSIENT `database is locked` on the collateral WRITE is NOT
+    # CollateralInsufficient — conflating them REJECTED decided harvest orders on transient
+    # zeus_trades.db write-contention (no in-process trade-write mutex; the snapshot-capture
+    # writer thrashes the WAL lock). Retry the brief write a bounded number of times; the
+    # lock clears well under a second. Only a GENUINE CollateralInsufficient, a non-lock
+    # error, or a lock persisting past every retry surfaces (then the order is simply
+    # re-decided next cycle — never a silent loss, never a fabricated insufficiency).
+    _LOCK_RETRIES = 5
+    _LOCK_BACKOFF_SECONDS = 0.4
+    client = PolymarketClient()
+    adapter = client._ensure_v2_adapter()
+    snapshot = None
+    for _attempt in range(_LOCK_RETRIES):
+        try:
+            snapshot = CollateralLedger(conn).refresh(adapter)
+            break
+        except CollateralInsufficient:
+            raise
+        except sqlite3.OperationalError as exc:
+            if "lock" not in str(exc).lower() or _attempt == _LOCK_RETRIES - 1:
+                raise CollateralInsufficient(f"collateral_refresh_failed: {exc}") from exc
+            _time.sleep(_LOCK_BACKOFF_SECONDS)
+        except Exception as exc:
+            raise CollateralInsufficient(f"collateral_refresh_failed: {exc}") from exc
+    if snapshot is None:
+        raise CollateralInsufficient("collateral_refresh_failed: lock_retries_exhausted")
     if snapshot.authority_tier == "DEGRADED":
         raise CollateralInsufficient("collateral_snapshot_degraded: refreshed_before_submit")
     return _capability_component(
