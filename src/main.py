@@ -2624,6 +2624,27 @@ def _edli_next_redecision_source() -> str:
     return f"cycle-{_edli_redecision_boot_token}-{n}"
 
 
+def _edli_next_escalation_cross_source() -> str:
+    """Return the next ESCALATION-cross re-decision emit source.
+
+    Format ``escalation_cross-{TOKEN}-{N}`` — same restart-/within-process-unique
+    scheme as ``_edli_next_redecision_source`` (shared boot token + monotonic N) so
+    each escalation re-decision gets a distinct idempotency_key and does NOT dedup
+    against the consumed FSR or the continuous ``cycle-*`` re-emit. The
+    ``escalation_cross-`` PREFIX is the discriminator the claim-tier authority
+    (``src.events.event_priority.claim_tier_expr_sql``) keys off to rank these
+    re-decisions at Tier 0 — below the 49-deep per-city round-robin (redecide-block
+    fix 2026-06-16). N has no internal hyphens, so ``split('-')[-1]`` stays an int
+    for the fairness-cursor parse in scan_committed_snapshots.
+    """
+    from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
+
+    global _edli_redecision_cycle_index
+    n = _edli_redecision_cycle_index
+    _edli_redecision_cycle_index = n + 1
+    return f"{ESCALATION_CROSS_SOURCE_PREFIX}{_edli_redecision_boot_token}-{n}"
+
+
 def _reset_edli_redecision_cycle_index() -> None:
     """Test hook: reset the monotonic redecision cycle counter to 0."""
     global _edli_redecision_cycle_index
@@ -6292,6 +6313,141 @@ def _edli_command_recovery_cycle() -> None:
         logger.info("edli_command_recovery: %s", summary)
 
 
+def _escalation_families_from_cancelled(
+    cancelled: list[dict],
+    trade_conn,
+    forecasts_conn,
+) -> set[tuple[str, str, str]]:
+    """Recover the ``(city, target_date, metric)`` family key for each just-cancelled
+    escalation rest, from VENUE TRUTH (no cached-belief dependency).
+
+    Path (both legs are the canonical, already-proven joins):
+      1. ``venue_commands.token_id`` -> ``condition_id`` via the freshest
+         ``executable_market_snapshots.selected_outcome_token_id`` row (the SAME
+         token->condition resolution the continuous-redecision rest screen uses,
+         ``_edli_open_maker_rests_for_screen``).
+      2. ``condition_id`` -> ``(city, target_date, temperature_metric)`` via
+         ``market_events`` (forecasts DB) — the canonical condition->family map the
+         FSR re-emit machinery already trusts (its ``market_filter`` joins the same
+         table on city/target_date/metric).
+
+    Pure reads on read-only connections. Best-effort per entry: a row that cannot be
+    resolved (no snapshot, no market_events) is SKIPPED (the standard round-robin
+    still reaches it eventually) rather than crashing the cancel job.
+    """
+    token_ids = {str(e.get("token_id") or "") for e in cancelled if e.get("token_id")}
+    if not token_ids:
+        return set()
+    cond_by_token: dict[str, str] = {}
+    try:
+        tph = ",".join("?" for _ in token_ids)
+        for cr in trade_conn.execute(
+            f"""
+            SELECT selected_outcome_token_id, condition_id,
+                   ROW_NUMBER() OVER (PARTITION BY selected_outcome_token_id
+                                      ORDER BY captured_at DESC) AS rn
+            FROM executable_market_snapshots
+            WHERE selected_outcome_token_id IN ({tph})
+            """,
+            tuple(token_ids),
+        ).fetchall():
+            if cr[2] == 1 and cr[0] and cr[1]:
+                cond_by_token[str(cr[0])] = str(cr[1])
+    except Exception:  # noqa: BLE001 — token->condition resolution is best-effort
+        cond_by_token = {}
+    cond_ids = {c for c in cond_by_token.values() if c}
+    if not cond_ids:
+        return set()
+    families: set[tuple[str, str, str]] = set()
+    try:
+        cph = ",".join("?" for _ in cond_ids)
+        for fr in forecasts_conn.execute(
+            f"""
+            SELECT DISTINCT city, target_date, temperature_metric
+            FROM market_events
+            WHERE condition_id IN ({cph})
+            """,
+            tuple(cond_ids),
+        ).fetchall():
+            city, target_date, metric = (
+                str(fr[0] or ""), str(fr[1] or ""), str(fr[2] or "")
+            )
+            if city and target_date and metric:
+                families.add((city, target_date, metric))
+    except Exception:  # noqa: BLE001 — condition->family map is best-effort
+        return set()
+    return families
+
+
+def _emit_escalation_cross_redecisions(
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+    received_at: str,
+) -> int:
+    """Emit ONE escalation-origin EDLI_REDECISION_PENDING per just-cancelled, ARMED
+    family so the reactor re-decides it on the NEXT cycle (it jumps the 49-deep
+    per-city round-robin via its Tier-0 claim, redecide-block fix 2026-06-16).
+
+    Routed through the EXISTING FSR re-emit machinery (``scan_committed_snapshots``
+    with ``restrict_to_families``), so the payload is the identical committed-snapshot
+    FSR shape the forecast-decision pipeline already binds — only the trigger label
+    (EDLI_REDECISION_PENDING) and the ``escalation_cross-`` source differ. The world
+    DB event-write runs under the world-write mutex (mirrors ``_edli_emit_*`` and the
+    continuous-redecision screen), so the WAL write lock is released by COMMIT before
+    any other writer interleaves.
+
+    ``already_pending_keys`` is DELIBERATELY NOT passed: a pending FSR for this family
+    is exactly what is stuck behind the round-robin, so the escalation re-decision
+    must be emitted regardless of it (the Tier-0 lane is what un-starves it). The
+    phase/strictly-past floors inside scan_committed_snapshots still apply
+    (fail-closed: a phase-closed family emits zero — the cross cannot happen anyway).
+    """
+    if not families:
+        return 0
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.forecast_snapshot_ready import (
+        ForecastSnapshotReadyTrigger,
+        executable_forecast_live_eligible_reader,
+    )
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_world_connection,
+        world_write_mutex as _world_write_mutex,
+    )
+
+    world = get_world_connection()
+    forecasts_ro = get_forecasts_connection_read_only()
+    emit_mutex = _world_write_mutex()
+    emit_mutex.acquire()
+    try:
+        trig = ForecastSnapshotReadyTrigger(
+            EventWriter(world),
+            live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
+        )
+        emitted = trig.scan_committed_snapshots(
+            forecasts_conn=forecasts_ro,
+            decision_time=decision_time,
+            received_at=received_at,
+            limit=None,
+            source=_edli_next_escalation_cross_source(),
+            event_type="EDLI_REDECISION_PENDING",
+            restrict_to_families=families,
+        )
+        world.commit()
+        return len(emitted)
+    finally:
+        emit_mutex.release()
+        try:
+            forecasts_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            world.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @_scheduler_job("maker_rest_escalation")
 def _maker_rest_escalation_cycle() -> None:
     """K4.0 REST-THEN-CROSS deadline owner (consolidated overhaul 2026-06-11).
@@ -6333,9 +6489,61 @@ def _maker_rest_escalation_cycle() -> None:
         conn.close()
 
     clob = PolymarketClient()
-    stats = run_cancels_for_expired_rests(expired, clob)
+    # ESCALATION RE-DECISION (redecide-block fix 2026-06-16): harvest the families
+    # whose rest was CONFIRMED-cancelled so we can emit a Tier-0 re-decision for
+    # each — the just-cancelled, ARMED family crosses as TAKER_ESCALATED_AFTER_REST
+    # on the NEXT cycle instead of waiting ~2-3h for the 49-deep per-city
+    # round-robin. The collect rides an out-parameter so `stats` stays byte-identical.
+    cancelled_entries: list[dict] = []
+    stats = run_cancels_for_expired_rests(
+        expired, clob, collect_cancelled=cancelled_entries
+    )
     if stats["scanned"]:
         logger.info("maker_rest_escalation: %s", stats)
+
+    # FAIL-CLOSED on the re-decision emit: any error here must NOT crash the cancel
+    # job (the cancels already succeeded; the worst case without the re-decision is
+    # the pre-fix behavior — the family waits for the round-robin). Connection-free
+    # in the cancel phase is preserved: the family-recovery reads and the world-DB
+    # event-write both run HERE in the caller (which owns DB access), AFTER the
+    # venue cancels, never during them.
+    if cancelled_entries and edli_cfg.get("event_writer_enabled"):
+        try:
+            from src.state.db import (
+                get_forecasts_connection_read_only,
+                get_trade_connection_read_only as _get_trade_ro,
+            )
+
+            now = datetime.now(timezone.utc)
+            trade_ro = _get_trade_ro()
+            forecasts_ro = get_forecasts_connection_read_only()
+            try:
+                families = _escalation_families_from_cancelled(
+                    cancelled_entries, trade_ro, forecasts_ro
+                )
+            finally:
+                try:
+                    trade_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    forecasts_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            emitted = _emit_escalation_cross_redecisions(
+                families, decision_time=now, received_at=now.isoformat()
+            )
+            logger.info(
+                "maker_rest_escalation: escalation re-decision emit "
+                "cancelled=%d families_resolved=%d events_emitted=%d",
+                len(cancelled_entries), len(families), emitted,
+            )
+        except Exception as _redecide_exc:  # noqa: BLE001 — fail-closed: never crash the cancel job
+            logger.warning(
+                "maker_rest_escalation: escalation re-decision emit failed "
+                "(non-fatal; family will wait for the round-robin): %r",
+                _redecide_exc,
+            )
 
 
 def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
