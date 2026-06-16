@@ -235,6 +235,102 @@ class TestExceptionLanes:
         assert decision.chosen_ev == float("-inf")
 
 
+class TestFixBConservativeQlcbCapOnCross:
+    """FIX B (#127): a taker cross may NEVER execute above the conservative q_lcb.
+
+    The settlement-honest cap: a taker lane is admissible ONLY when the FRESH
+    all-in taker cost clears q_lcb. The Chengdu live case (best_ask 0.73 vs
+    q_lcb 0.72) must stay MAKER / no-trade — a correct outcome, not a forced
+    fill and not a taker the cert builder would have to reject. A genuinely
+    fillable escalation (fresh ask all-in <= q_lcb) becomes a real cross.
+    """
+
+    def test_chengdu_ask_above_qlcb_stays_maker_on_escalation(self):
+        """best_ask 0.73 all-in > q_lcb 0.72: even an ESCALATED rest (deadline
+        passed) must NOT cross — it stays maker / re-rests. No 0.73 fill."""
+        decision = select_rest_then_cross_mode(
+            q_lcb=0.72,
+            taker_all_in_cost=0.73,  # fresh ask all-in ABOVE the conservative bound
+            p_fill_taker=1.0,
+            best_bid=0.71,
+            best_ask=0.73,
+            tick_size=0.01,
+            reservation=0.72,
+            escalated_after_rest=True,
+            minutes_to_event_end=20 * 60.0,
+        )
+        assert decision.chosen_mode == "MAKER"
+        assert decision.policy == POLICY_MAKER_TAKER_FORBIDDEN
+
+    def test_chengdu_ask_above_qlcb_stays_maker_near_event_end(self):
+        """The same ask-above-q_lcb book near the event end must STILL not cross:
+        the q_lcb cap dominates the event-end taker lane (never cross above q_lcb)."""
+        decision = select_rest_then_cross_mode(
+            q_lcb=0.72,
+            taker_all_in_cost=0.73,
+            p_fill_taker=1.0,
+            best_bid=0.71,
+            best_ask=0.73,
+            tick_size=0.01,
+            reservation=0.72,
+            minutes_to_event_end=TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES - 1.0,
+        )
+        assert decision.chosen_mode == "MAKER"
+        assert decision.policy == POLICY_REST_DEFAULT
+
+    def test_escalation_with_fresh_allin_clearing_qlcb_crosses(self):
+        """After a rest times out, if the FRESH taker all-in cost STILL clears
+        q_lcb (ask all-in 0.70 <= q_lcb 0.72), the escalation crosses -> real fill."""
+        decision = select_rest_then_cross_mode(
+            q_lcb=0.72,
+            taker_all_in_cost=0.70,  # fresh ask all-in clears the conservative bound
+            p_fill_taker=1.0,
+            best_bid=0.69,
+            best_ask=0.70,
+            tick_size=0.01,
+            reservation=0.72,
+            escalated_after_rest=True,
+            minutes_to_event_end=20 * 60.0,
+        )
+        assert decision.chosen_mode == "TAKER"
+        assert decision.policy == POLICY_TAKER_ESCALATED_AFTER_REST
+        # The crossing cost never exceeds the conservative bound.
+        assert decision.ev_taker is not None
+        assert 0.70 <= 0.72  # cross all-in <= q_lcb (the HARD LAW)
+
+    def test_event_end_near_with_allin_clearing_qlcb_crosses(self):
+        """Near the event end, a fresh taker all-in that clears q_lcb crosses."""
+        decision = select_rest_then_cross_mode(
+            q_lcb=0.72,
+            taker_all_in_cost=0.70,
+            p_fill_taker=1.0,
+            best_bid=0.69,
+            best_ask=0.70,
+            tick_size=0.01,
+            reservation=0.72,
+            minutes_to_event_end=TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES - 1.0,
+        )
+        assert decision.chosen_mode == "TAKER"
+        assert decision.policy == POLICY_TAKER_EVENT_END_NEAR
+
+    def test_maker_inadmissible_but_cross_would_exceed_qlcb_no_trade(self):
+        """One-sided book (maker structurally impossible) where the only taker
+        cross would exceed q_lcb: NO trade (never cross above the bound), not a
+        forced taker. Conservative-entry law holds even when maker is impossible."""
+        decision = select_rest_then_cross_mode(
+            q_lcb=0.72,
+            taker_all_in_cost=0.73,  # the only available cross exceeds q_lcb
+            p_fill_taker=1.0,
+            best_bid=None,           # no bid -> maker limit unconstructible here
+            best_ask=0.73,
+            tick_size=0.01,
+            reservation=0.005,       # below tick -> maker_limit_price -> None
+            minutes_to_event_end=20 * 60.0,
+        )
+        assert decision.chosen_mode == "MAKER"
+        assert decision.chosen_ev == float("-inf")  # trade-score gate rejects: no trade
+
+
 class TestConstantsProvenance:
     def test_deadline_is_measured_basis(self):
         """120 min comes from the KM curve (0.39 cumulative fill by 120 min,

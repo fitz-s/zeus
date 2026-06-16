@@ -4572,7 +4572,14 @@ def _build_live_execution_command_certificates(
                 f"fresh_mode=TAKER:reason=FRESH_BOOK_EV_FAVORS_CROSS_FOR_PROVEN_MAKER:"
                 f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
             )
-        already_locked_reason = _locked_live_opportunity_no_price_improvement_reason(
+        # FIX A (#125): live-order-state duplicate lock. Suppress THIS submit only
+        # while an order for the same (token, direction) is genuinely ACTIVE on the
+        # venue (open/pending/in-flight/unknown). After a TERMINAL unfilled cancel
+        # the lock releases and the family re-decides at the fresh price — no
+        # arbitrary 2c price-improvement requirement, full re-certification still
+        # applies downstream. Fail-closed: an unreadable/indeterminate live state
+        # suppresses (never a double-submit).
+        already_locked_reason = _locked_live_opportunity_active_order_reason(
             live_cap_conn,
             condition_id=str(final_intent.payload["condition_id"]),
             token_id=str(final_intent.payload["token_id"]),
@@ -4954,84 +4961,179 @@ def _execution_command_id_from_final_intent(
     )
 
 
+# =============================================================================
+# FIX A (#125, 2026-06-15): LIVE-ORDER-STATE active-order lock.
+#
+# The retired predicate (_locked_live_opportunity_no_price_improvement_reason)
+# was a HISTORICAL-COMMAND lock: it suppressed re-bidding the same
+# (condition/token/direction) whenever ANY past aggregate had reached
+# ExecutionCommandCreated and lacked a SubmitRejected, UNLESS the limit price
+# improved by >= 0.02. That arbitrary 0.02-improvement gate meant a resting
+# maker order that timed out UNFILLED at 900s (terminal CANCEL, no
+# SubmitRejected, usually no 2c price move) left the family permanently
+# suppressed — it NEVER re-bid (live evidence: lone Chengdu 06-17 buy_no @0.72
+# rested 1c under the 0.73 ask, would time out, never re-decide).
+#
+# The replacement is a LIVE-ORDER-STATE lock keyed on the aggregate lifecycle:
+# suppress a NEW submit ONLY while an order for that (token, direction) is
+# genuinely ACTIVE (OPEN / PENDING / in-flight / UNKNOWN — a real live order, so
+# we never double-submit). The moment the latest order for the family reaches a
+# TERMINAL lifecycle event (a confirmed cancel/expiry/reject/reconcile/cap
+# release, or a fill) the lock RELEASES: the family re-enters the normal
+# decision pipeline at the fresh price (re-rest or cross per the rest-then-cross
+# policy), still requiring FULL re-certification downstream (no gate bypassed).
+# The 0.02-improvement requirement is GONE — duplicate prevention is now bounded
+# to genuinely ACTIVE orders, not to historical price levels.
+#
+# FAIL-CLOSED: a family whose live-order state is UNKNOWN / indeterminate is
+# treated as ACTIVE (suppress) — never risk a double-submit on an order that
+# might still be live on the venue.
+# =============================================================================
+
+# Aggregate lifecycle event types whose presence makes an order's TERMINAL: once
+# any of these has occurred for an aggregate, that specific order is closed and
+# no longer rests on the venue, so it can never be a duplicate of a fresh submit.
+#   - SubmitRejected      : the venue rejected the submit (order never rested).
+#   - Reconciled          : the reconcile loop settled the order (cancel/expiry/
+#                           authenticated-absence) — terminal closure.
+#   - CapTransitioned     : the live-cap was released or consumed; RELEASED =
+#                           the order closed without a held position (reject /
+#                           reconcile / submit-disabled), CONSUMED = the order
+#                           filled into a position (the ORDER is done; sizing,
+#                           not this dedup lock, governs any add).
+#   - UserTradeObserved   : the user channel confirmed a fill (position, not an
+#                           open resting order).
+_LIVE_ORDER_TERMINAL_EVENT_TYPES = (
+    "SubmitRejected",
+    "Reconciled",
+    "CapTransitioned",
+    "UserTradeObserved",
+)
+
+
+def _locked_live_opportunity_active_order_reason(
+    live_cap_conn: sqlite3.Connection | None,
+    *,
+    condition_id: str,
+    token_id: str,
+    direction: str,
+    side: str | None = None,
+    limit_price: float | None = None,
+) -> str | None:
+    """Suppress a NEW submit ONLY while a LIVE order for the family is active.
+
+    FIX A (#125). Duplicate-prevention lock derived from the
+    ``edli_live_order_events`` aggregate lifecycle (the live-order-state
+    projection), NOT from "any historical command that is not a SubmitRejected".
+
+    For the given (condition_id, token_id, direction) we find every order
+    aggregate (keyed off its ``SubmitPlanBuilt`` event, which carries those three
+    identity fields) and classify the LATEST aggregate's lifecycle:
+
+      * TERMINAL (cancel/expiry/reject/reconcile/cap-release, or a fill) -> the
+        order is closed, NOT an active duplicate -> RELEASE (return None): the
+        family re-enters the pipeline and re-decides at the fresh price.
+      * ACTIVE (any state up to and including an acknowledged resting order, an
+        in-flight submit, or a pending-reconcile) -> a real live order exists ->
+        SUPPRESS (return a reason) so we never double-submit.
+
+    FAIL-CLOSED: on any query error, or an aggregate present but indeterminate,
+    treat as ACTIVE and suppress — never risk a second live order on a family
+    whose true venue state we cannot read. ``side`` / ``limit_price`` are
+    accepted for call-site compatibility and observability only; they no longer
+    gate (the retired 0.02 price-improvement requirement is gone).
+    """
+
+    if live_cap_conn is None or not condition_id or not token_id or not direction:
+        return None
+    try:
+        LiveOrderAggregateLedger(live_cap_conn)
+        # Latest aggregate for this exact family key, by its SubmitPlanBuilt event.
+        plan_rows = live_cap_conn.execute(
+            """
+            SELECT plan.aggregate_id, plan.occurred_at
+            FROM edli_live_order_events AS plan
+            WHERE plan.event_type = 'SubmitPlanBuilt'
+              AND json_extract(plan.payload_json, '$.condition_id') = ?
+              AND json_extract(plan.payload_json, '$.token_id') = ?
+              AND json_extract(plan.payload_json, '$.direction') = ?
+            ORDER BY plan.occurred_at DESC, plan.event_sequence DESC
+            LIMIT 64
+            """,
+            (condition_id, token_id, direction),
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - dedup must fail CLOSED (suppress).
+        return (
+            "EDLI_LIVE_ORDER_STATE_UNREADABLE_FAIL_CLOSED:"
+            f"condition_id={condition_id}:token_id={token_id}:direction={direction}:"
+            f"error={type(exc).__name__}"
+        )
+    if not plan_rows:
+        # No order has ever been planned for this family -> nothing can be a
+        # duplicate -> the family is free to submit.
+        return None
+
+    # Inspect ONLY the most-recent aggregate for the family: an earlier, already
+    # terminal order must not keep the family locked, and a newer active order is
+    # the only thing that can be a duplicate of the fresh submit.
+    aggregate_id = str(plan_rows[0][0])
+    try:
+        event_types = {
+            str(row[0])
+            for row in live_cap_conn.execute(
+                """
+                SELECT DISTINCT event_type
+                FROM edli_live_order_events
+                WHERE aggregate_id = ?
+                """,
+                (aggregate_id,),
+            ).fetchall()
+        }
+    except Exception as exc:  # noqa: BLE001 - fail CLOSED on a read error.
+        return (
+            "EDLI_LIVE_ORDER_STATE_UNREADABLE_FAIL_CLOSED:"
+            f"condition_id={condition_id}:token_id={token_id}:direction={direction}:"
+            f"aggregate_id={aggregate_id}:error={type(exc).__name__}"
+        )
+
+    if event_types & set(_LIVE_ORDER_TERMINAL_EVENT_TYPES):
+        # The latest order reached a terminal lifecycle event: it is no longer a
+        # live resting/pending order. RELEASE — re-decide at the fresh price.
+        return None
+
+    # No terminal event observed for the latest aggregate -> the order is still
+    # ACTIVE (planned / reserved / command-created / submit-attempted /
+    # acknowledged-resting / submit-unknown / user-order-observed). Suppress the
+    # duplicate; this also covers the fail-closed UNKNOWN case (an aggregate that
+    # exists but carries no terminal marker is treated as live).
+    return (
+        "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
+        f"condition_id={condition_id}:token_id={token_id}:direction={direction}:"
+        f"aggregate_id={aggregate_id}"
+    )
+
+
+# Back-compat alias: the historical-command predicate name is retained as a thin
+# pointer to the live-order-state lock so any out-of-tree caller resolves to the
+# corrected semantics. The signature is a superset of the old one (the retired
+# ``improve_delta`` keyword is accepted and ignored).
 def _locked_live_opportunity_no_price_improvement_reason(
     live_cap_conn: sqlite3.Connection | None,
     *,
     condition_id: str,
     token_id: str,
     direction: str,
-    side: str,
-    limit_price: float | None,
-    improve_delta: float = 0.02,
+    side: str | None = None,
+    limit_price: float | None = None,
+    improve_delta: float = 0.02,  # retired; accepted for signature compatibility.
 ) -> str | None:
-    """Return a suppression reason when a locked opportunity has not repriced better.
-
-    Continuous redecision may keep scanning fresh forecast events, but once the
-    money path has locked a specific condition/token/direction into an execution
-    command, identical later cycles must not emit another will-trade chain.  A
-    later cycle is allowed only when the final limit price materially improves.
-    For BUY directions that means a lower limit; for SELL directions, a higher
-    limit.
-    """
-
-    if live_cap_conn is None or not condition_id or not token_id or not direction:
-        return None
-    LiveOrderAggregateLedger(live_cap_conn)
-    rows = live_cap_conn.execute(
-        """
-        SELECT
-            json_extract(plan.payload_json, '$.limit_price') AS prior_limit_price,
-            plan.aggregate_id,
-            plan.occurred_at
-        FROM edli_live_order_events AS plan
-        WHERE plan.event_type = 'SubmitPlanBuilt'
-          AND json_extract(plan.payload_json, '$.condition_id') = ?
-          AND json_extract(plan.payload_json, '$.token_id') = ?
-          AND json_extract(plan.payload_json, '$.direction') = ?
-          AND EXISTS (
-              SELECT 1
-              FROM edli_live_order_events AS command
-              WHERE command.aggregate_id = plan.aggregate_id
-                AND command.event_type = 'ExecutionCommandCreated'
-          )
-          AND NOT EXISTS (
-              SELECT 1
-              FROM edli_live_order_events AS rejected
-              WHERE rejected.aggregate_id = plan.aggregate_id
-                AND rejected.event_type = 'SubmitRejected'
-          )
-        ORDER BY plan.occurred_at DESC
-        LIMIT 64
-        """,
-        (condition_id, token_id, direction),
-    ).fetchall()
-    prior_prices = [
-        price
-        for price in (_optional_float(row[0]) for row in rows)
-        if price is not None
-    ]
-    if not prior_prices:
-        return None
-    side_upper = str(side or "").strip().upper()
-    if limit_price is None:
-        return (
-            "EDLI_LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT:"
-            f"condition_id={condition_id}:token_id={token_id}:direction={direction}"
-        )
-    if side_upper == "SELL":
-        prior_best = max(prior_prices)
-        if limit_price >= prior_best + improve_delta - 1e-9:
-            return None
-        comparison = f"prior_best_limit={prior_best:.6g}:current_limit={limit_price:.6g}:required_delta={improve_delta:.6g}"
-    else:
-        prior_best = min(prior_prices)
-        if limit_price <= prior_best - improve_delta + 1e-9:
-            return None
-        comparison = f"prior_best_limit={prior_best:.6g}:current_limit={limit_price:.6g}:required_delta={improve_delta:.6g}"
-    return (
-        "EDLI_LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT:"
-        f"condition_id={condition_id}:token_id={token_id}:direction={direction}:"
-        f"{comparison}"
+    return _locked_live_opportunity_active_order_reason(
+        live_cap_conn,
+        condition_id=condition_id,
+        token_id=token_id,
+        direction=direction,
+        side=side,
+        limit_price=limit_price,
     )
 
 
@@ -9578,9 +9680,13 @@ def _locked_candidate_no_price_improvement_reason(
     live_cap_conn: sqlite3.Connection | None,
     proof: _CandidateProof,
 ) -> str | None:
+    # FIX A (#125): the selector-stage duplicate lock is the SAME live-order-state
+    # predicate as the cert-build seam — suppress only while a real ACTIVE order
+    # exists for the (token, direction); release after a terminal cancel/expiry so
+    # the candidate re-enters ranking at the fresh price.
     execution_price = getattr(proof, "execution_price", None)
     limit_price = _optional_float(getattr(execution_price, "value", None))
-    return _locked_live_opportunity_no_price_improvement_reason(
+    return _locked_live_opportunity_active_order_reason(
         live_cap_conn,
         condition_id=str(getattr(getattr(proof, "candidate", None), "condition_id", "") or ""),
         token_id=str(getattr(proof, "token_id", "") or ""),

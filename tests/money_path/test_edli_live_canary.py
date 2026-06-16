@@ -417,10 +417,92 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
     assert projection["current_state"] == "CAP_TRANSITIONED"
 
 
-def test_locked_live_opportunity_suppresses_redecision_without_price_improvement():
+def _seed_active_family_order(conn, *, aggregate_id="aggregate-1"):
+    """An OPEN/in-flight order for (condition-1, token-no-1, buy_no): no terminal event."""
+    _insert_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="SubmitPlanBuilt",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "condition_id": "condition-1",
+            "token_id": "token-no-1",
+            "direction": "buy_no",
+            "limit_price": 0.70,
+        },
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+        },
+    )
+
+
+def _lock_reason(conn, *, limit_price=0.70):
     from src.engine import event_reactor_adapter as adapter
 
+    return adapter._locked_live_opportunity_active_order_reason(
+        conn,
+        condition_id="condition-1",
+        token_id="token-no-1",
+        direction="buy_no",
+        side="BUY",
+        limit_price=limit_price,
+    )
+
+
+def test_fixA_active_live_order_suppresses_new_submit():
+    """FIX A (#125): a genuinely ACTIVE (OPEN/in-flight) order for the family blocks
+    a duplicate submit — regardless of any price improvement (the retired 0.02 gate
+    is gone). Duplicate-prevention is bound to ACTIVE orders only."""
     conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)
+
+    # Same price AND a materially better (lower) buy price are BOTH suppressed:
+    # an active live order must never be duplicated, price-improvement irrelevant.
+    same_price = _lock_reason(conn, limit_price=0.70)
+    much_better = _lock_reason(conn, limit_price=0.50)
+
+    assert same_price is not None
+    assert same_price.startswith("EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED")
+    assert much_better is not None  # no price-improvement escape while order is live
+
+
+def test_fixA_terminal_cancel_releases_lock_for_rebid():
+    """FIX A (#125): after the latest family order reaches a TERMINAL lifecycle event
+    (a confirmed cancel/expiry/reconcile of an UNFILLED resting maker — the 900s
+    timeout case), the lock RELEASES so the family re-bids at the fresh price."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)
+    # The resting maker times out unfilled at 900s -> reconcile records the terminal
+    # closure (a CANCEL/expiry, no SubmitRejected, no 2c price move). Terminal.
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=3,
+        event_type="Reconciled",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+    )
+
+    # Same price as the timed-out rest -> NOT suppressed (the old 0.02 gate would
+    # have permanently blocked this exact re-bid). The family re-enters the pipeline.
+    assert _lock_reason(conn, limit_price=0.70) is None
+
+
+def test_fixA_unknown_indeterminate_state_fails_closed_suppresses():
+    """FIX A (#125) fail-closed: a family order that exists but carries NO terminal
+    marker (state UNKNOWN/indeterminate) is treated as ACTIVE — suppress, never risk
+    a double-submit on an order that might still be live on the venue."""
+    conn = sqlite3.connect(":memory:")
+    # Only a SubmitPlanBuilt: planned/in-flight, no terminal event -> active/unknown.
     _insert_live_order_event(
         conn,
         aggregate_id="aggregate-1",
@@ -435,46 +517,17 @@ def test_locked_live_opportunity_suppresses_redecision_without_price_improvement
             "limit_price": 0.70,
         },
     )
-    _insert_live_order_event(
-        conn,
-        aggregate_id="aggregate-1",
-        sequence=2,
-        event_type="ExecutionCommandCreated",
-        payload={
-            "event_id": "event-1",
-            "final_intent_id": "intent-1",
-            "execution_command_id": "command-1",
-        },
-    )
 
-    unchanged = adapter._locked_live_opportunity_no_price_improvement_reason(
-        conn,
-        condition_id="condition-1",
-        token_id="token-no-1",
-        direction="buy_no",
-        side="BUY",
-        limit_price=0.70,
-    )
-    one_tick_better = adapter._locked_live_opportunity_no_price_improvement_reason(
-        conn,
-        condition_id="condition-1",
-        token_id="token-no-1",
-        direction="buy_no",
-        side="BUY",
-        limit_price=0.69,
-    )
-    materially_better = adapter._locked_live_opportunity_no_price_improvement_reason(
-        conn,
-        condition_id="condition-1",
-        token_id="token-no-1",
-        direction="buy_no",
-        side="BUY",
-        limit_price=0.68,
-    )
+    assert _lock_reason(conn, limit_price=0.70) is not None
 
-    assert unchanged is not None
-    assert one_tick_better is not None
-    assert materially_better is None
+
+def test_fixA_no_prior_order_does_not_suppress():
+    """FIX A (#125): a family that has never planned an order is free to submit."""
+    conn = sqlite3.connect(":memory:")
+    from src.state.schema.edli_live_order_events_schema import ensure_tables
+
+    ensure_tables(conn)
+    assert _lock_reason(conn, limit_price=0.70) is None
 
 
 def test_selector_skips_locked_candidate_and_keeps_flowing_to_next_executable():
@@ -627,7 +680,13 @@ def test_selector_does_not_fall_back_to_locked_candidate_when_all_executable_loc
     assert selected is None
 
 
-def test_submit_disabled_redecision_returns_no_submit_for_locked_same_price(monkeypatch):
+def test_fixA_terminal_prior_order_does_not_block_redecision_same_price(monkeypatch):
+    """FIX A (#125): a prior order that reached a TERMINAL state (here the
+    SUBMIT_DISABLED path ends in CapTransitioned RELEASED) must NOT block a fresh
+    same-family, same-price re-decision. The retired historical-command lock
+    suppressed this as 'no price improvement'; the live-order-state lock RELEASES
+    once the prior order is terminal, so the family re-enters the pipeline and the
+    second cycle builds its own full live-order aggregate."""
     from src.engine import event_reactor_adapter as adapter
     from src.riskguard.risk_level import RiskLevel
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
@@ -664,9 +723,10 @@ def test_submit_disabled_redecision_returns_no_submit_for_locked_same_price(monk
 
     assert first.side_effect_status == "SUBMIT_DISABLED"
     assert event_count_after_first == 6
-    assert second.side_effect_status == "NO_SUBMIT"
-    assert second.reason.startswith("EDLI_LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT")
-    assert _table_count(conn, "edli_live_order_events") == event_count_after_first
+    # The prior aggregate is terminal (CapTransitioned RELEASED). The same-price
+    # re-decision is NOT suppressed: it builds its own SUBMIT_DISABLED aggregate.
+    assert second.side_effect_status == "SUBMIT_DISABLED"
+    assert _table_count(conn, "edli_live_order_events") == 2 * event_count_after_first
 
 
 def test_live_build_failure_rolls_back_partial_live_order_aggregate(monkeypatch):
