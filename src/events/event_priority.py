@@ -90,11 +90,13 @@ def day0_is_tradeable_for_scope(edli_live_scope: str | None) -> bool:
 
 
 # Distinguishing prefix on the ``source`` of an escalation-originated re-decision
-# (redecide-block fix 2026-06-16). The escalation cancel job emits an
-# EDLI_REDECISION_PENDING for a JUST-CANCELLED, ARMED family using a source that
+# (redecide-block fix 2026-06-16). The escalation cancel job emits a
+# FORECAST_SNAPSHOT_READY for a JUST-CANCELLED, ARMED family using a source that
 # starts with this prefix; the claim-tier CASE keys off it (plus the event_type)
 # to rank ONLY those re-decisions at Tier 0 — below the 49-deep per-city
 # round-robin. No other emitter uses this prefix, so the lane is exact.
+# EDLI_REDECISION_PENDING is DORMANT (hard-blocked at 6+ dispatch sites); routing
+# through FSR avoids patching every site while keeping the Tier-0 identity.
 ESCALATION_CROSS_SOURCE_PREFIX: Final[str] = "escalation_cross-"
 
 
@@ -108,9 +110,11 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
     source, two consumers; the ``ASC`` form can never drift from the column form.
 
     Tiers (lower integer = claimed first):
-      0  ESCALATION-ORIGIN EDLI_REDECISION_PENDING (source starts with
+      0  ESCALATION-ORIGIN FORECAST_SNAPSHOT_READY (source starts with
          ``escalation_cross-``) — a JUST-CANCELLED, ARMED escalation family whose
-         next certified decision crosses as TAKER_ESCALATED_AFTER_REST. This is a
+         next certified decision crosses as TAKER_ESCALATED_AFTER_REST. Routed
+         through the FSR path (not the dormant EDLI_REDECISION_PENDING type) so
+         the full dispatch chain processes it without hard-block gaps. This is a
          confirmed-armed, settlement-proven +EV cross, NOT a shadow, so it ranks
          ABOVE the entire per-city round-robin and fires on the next cycle instead
          of waiting ~2-3h for the 49-deep rotation (redecide-block fix
@@ -133,14 +137,15 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
     byte-identical to the historical authority. The escalation-origin Tier-0
     clause is ALWAYS present (independent of the day0 scope).
 
-    NON-ESCALATION FAIRNESS IS UNTOUCHED: the escalation clause matches ONLY an
-    EDLI_REDECISION_PENDING whose source begins with ``escalation_cross-``. Every
-    other event (FSR, continuous-redecision ``cycle-*`` EDLI_REDECISION_PENDING,
-    day0, channel) evaluates EXACTLY as before, so the 2026-06-11 per-city
-    round-robin law holds verbatim for all of them.
+    NON-ESCALATION FAIRNESS IS UNTOUCHED: the escalation clause matches ONLY a
+    FORECAST_SNAPSHOT_READY whose source begins with ``escalation_cross-``. A
+    regular FSR (source ``forecast_snapshot_ready_trigger`` or ``cycle-*``) does
+    NOT match and stays Tier 1. Every other event (continuous-redecision
+    EDLI_REDECISION_PENDING, day0, channel) evaluates EXACTLY as before, so the
+    2026-06-11 per-city round-robin law holds verbatim for all of them.
     """
     escalation_tier0_clause = (
-        "WHEN e.event_type = 'EDLI_REDECISION_PENDING'\n"
+        "WHEN e.event_type = 'FORECAST_SNAPSHOT_READY'\n"
         "                 AND e.source LIKE '" + ESCALATION_CROSS_SOURCE_PREFIX + "%'\n"
         "                THEN 0\n              "
     )

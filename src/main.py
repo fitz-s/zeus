@@ -6431,7 +6431,7 @@ def _emit_escalation_cross_redecisions(
             received_at=received_at,
             limit=None,
             source=_edli_next_escalation_cross_source(),
-            event_type="EDLI_REDECISION_PENDING",
+            event_type="FORECAST_SNAPSHOT_READY",
             restrict_to_families=families,
         )
         world.commit()
