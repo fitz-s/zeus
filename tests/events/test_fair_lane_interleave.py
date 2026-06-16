@@ -26,9 +26,12 @@ def _types(events):
     return [e.event_type for e in events]
 
 
-def test_interleave_alternates_lanes_day0_first():
+def test_interleave_alternates_lanes_forecast_first():
+    # FORECAST-FIRST (2026-06-16): the harvest lane holds the FIRST slot so that under a
+    # budget that completes only ~1 decision, the forecast/spine lane is the one that runs.
     out = _fair_lane_interleave([_ev(D, 0), _ev(D, 1), _ev(D, 2), _ev(F, 0), _ev(F, 1)])
-    assert _types(out) == [D, F, D, F, D], "day0 keeps first slot; lanes alternate 1:1"
+    assert _types(out) == [F, D, F, D, D], "forecast holds first slot; lanes alternate 1:1"
+    assert out[0].event_type == F, "harvest lane must get the first (guaranteed) budget slot"
 
 
 def test_spine_lane_gets_half_the_budget_under_day0_flood():
@@ -53,7 +56,7 @@ def test_within_lane_order_preserved():
 
 def test_redecision_counts_as_forecast_lane():
     out = _fair_lane_interleave([_ev(D, 0), _ev(D, 1), _ev(R, 0)])
-    assert _types(out) == [D, R, D], "EDLI_REDECISION_PENDING is a forecast-decision lane event"
+    assert _types(out) == [R, D, D], "EDLI_REDECISION_PENDING is a forecast-decision lane event (first slot)"
 
 
 def test_no_forecast_events_unchanged_fast_path():

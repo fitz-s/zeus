@@ -129,13 +129,23 @@ def _fair_lane_interleave(events: list) -> list:
 
     fetch_pending returns all Tier-0 DAY0_EXTREME_UPDATED before any Tier-1
     FORECAST_SNAPSHOT_READY; under a bounded per-cycle decision budget (~3-4 slow
-    decisions) the day0 lane consumes the whole budget and the forecast/spine lane is
-    never processed. This interleaves the two DECISION lanes so each gets a fair half of
-    the budget. The forecast lane and the rest each keep their incoming (per-city-fair)
-    order; only the cross-lane alternation is added. The 'rest' (day0) takes the first
-    slot — preserving its realized-observation freshness bias — without starving the
-    spine. Order-only: each family is decided on its own fresh inputs, so processing
-    order does not affect decision correctness.
+    decisions, and in the live degenerate case where ONE decision eats the whole 45s
+    budget, effectively ~1) the day0 lane consumes the whole budget and the
+    forecast/spine harvest lane is never processed. This interleaves the two DECISION
+    lanes 1:1 so each gets a fair half of the budget. The forecast lane and the rest
+    each keep their incoming (per-city-fair) order; only the cross-lane alternation is
+    added.
+
+    FORECAST-FIRST (2026-06-16, live zero-fill root cause): the forecast harvest lane
+    (the q-kernel spine — the operator's alpha target) takes the FIRST slot. Live
+    2026-06-16: 176 FORECAST_SNAPSHOT_READY families sat attempt_count=0 (never claimed)
+    while the reactor claimed ~2 day0 families/cycle, because day0 held the first slot
+    and a single slow day0 decision exhausted the 45s budget before the alternation ever
+    reached a forecast family (processed=0 forecast decisions / 12min). When the budget
+    only completes ~1 decision, whichever lane holds the first slot is the ONLY lane that
+    runs — so the harvest lane must hold it. Order-only: each family is decided on its
+    own fresh inputs, so processing order does not affect decision correctness; this only
+    changes which lane is guaranteed budget under starvation.
     """
     forecast = [e for e in events if getattr(e, "event_type", None) in _FORECAST_DECISION_EVENT_TYPES]
     if not forecast:
@@ -145,12 +155,12 @@ def _fair_lane_interleave(events: list) -> list:
         return events
     out: list = []
     i = j = 0
-    while i < len(rest) or j < len(forecast):
-        if i < len(rest):
-            out.append(rest[i])
+    while i < len(forecast) or j < len(rest):
+        if i < len(forecast):
+            out.append(forecast[i])
             i += 1
-        if j < len(forecast):
-            out.append(forecast[j])
+        if j < len(rest):
+            out.append(rest[j])
             j += 1
     return out
 
