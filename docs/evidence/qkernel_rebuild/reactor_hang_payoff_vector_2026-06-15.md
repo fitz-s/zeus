@@ -55,8 +55,82 @@ matching the per-draw `if p<=0: continue` skip), same alpha-quantile.
 - Money-path: 328 passed; the only 3 failures are the pre-existing
   `test_finding_b_free_cash_bound.py` cases (free-cash bankroll binding, unrelated).
 
-## Live signal to confirm
-Reactor cycle results landing every ~45 s (not every 10-13 min); CPU off the 100% peg;
-forecast families reaching a spine price decision instead of universal
-`EXECUTABLE_SNAPSHOT_STALE`. The success bar remains unchanged: a real settlement-graded
-positive-after-cost fill, not one forced order.
+## Live signal — CONFIRMED (post-deploy, PID 21155)
+- Reactor cycle results now land every ~1-2 min (was frozen 10-13 min); CPU off the 100% peg
+  (53% during warm boot vs the old 103-106% spin).
+- The spine reaches real economic verdicts on live forecast families (`NO_POSITIVE_EDGE_CANDIDATE`
+  at 08:33/08:35) — the first continuous live spine pricing.
+- **FIRST LIVE ORDER IN 3 DAYS** at 08:49:25 local (13:49 UTC): `LIVE ORDER: buy_no @ 0.700,
+  8.08 shares` on a 06-17 forecast-lead family (gamma 2549710, NO token 817703737212…). The
+  reactor cycle reported `processed=1 proof_accepted=1 rejected=0 reasons=[]` — the first
+  accepted proof of the session. Prior live order was 06-12 08:04 (67 total ever).
+- The order carries the full certificate chain (PreSubmitRevalidation → ExecutionCommand →
+  ExecutionReceipt, LIVE mode, authority edli.final_intent_executor_bou) — a properly
+  revalidated submission, not a fluke. State: ACKED/resting (limit, 900 s timeout).
+
+The un-hang was the proximate cause: 660 s cycles staled every snapshot before its family
+could fill; un-hung, the decision path carries through to a certified live submission again.
+
+CONTINUITY CONFIRMED (not a one-off): a SECOND spine order at 09:30:32 local —
+`buy_no @ 0.74, 9.81 sh` on another 06-17 forecast family (gamma 2549499). Two accepted
+proofs / two live buy_no orders in ~40 min, both edge_lcb>0-gated.
+
+FILL — the goal's currency (09:38:26 local): the second order **FILLED** — `buy_no 9.81 sh
+@ 0.74` (~$7.26), state ACKED→FILLED 8 min after submit; on-chain confirmed at 09:43:08
+(`TOKEN_BLOCK_AUTO_CLEARED ... chain_bal=9.8100` — 9.81 NO shares held on-chain). This is a
+real, on-chain-verified alpha position from the rebuilt spine, the direct end-to-end result
+of the un-hang fix (3 days of dead submission → priced → submitted → FILLED). It settles
+06-17; the NO leg pays $9.81 vs $7.26 cost if the bin does not hit (the spine's edge_lcb>0
+asserted NO prob > 0.74). The first order (`buy_no @ 0.70`) remains resting as a maker bid
+below the 0.77 NO ask. SUCCESS BAR not yet fully met: needs the 06-17 settlement to grade
+positive AND continued continuous positive-after-cost fills — but the money path is live
+end-to-end again, with a filled on-chain position to settlement-grade.
+
+## Still open (the goal is NOT met by one resting order)
+- This order must FILL and settle positive-after-cost (06-17 settlement).
+- Continuity: the reactor must keep producing accepted proofs (most current cycles still hit
+  legacy `TRADE_SCORE_NON_POSITIVE` / `FDR_REJECTED` on day0 families — the spine forecast lane
+  is the edge source and must be reached more often).
+- The success bar is unchanged: continuous settlement-graded positive-after-cost fills, not
+  one order.
+
+## Next systemic suppressor — band over-dispersion (unified root; under settlement-grading)
+The edge diag + the live book surfaced ONE root behind two suppressions:
+
+1. **YES-tail point-edge suppressed** (`SPINE_NOTRADE_EDGE_DIAG`, family 95571e6b): positive-edge
+   YES candidates (`edge_lcb=+0.041`, `dU=+0.0027`, pt_ev=+0.091, cost 0.090; and `+0.012`,
+   cost 0.031) on NON-modal bins are killed at `_select` step 2 by `direction_law_ok`
+   (`family_decision_engine.py:405` — YES legal only on the modal bin). NO is legal on any
+   non-modal bin (why the live `buy_no @0.70` order was allowed).
+
+2. **NO maker-bid fill suppressed** (live CLOB book for the order's token): our `buy_no @0.70`
+   is the TOP no-bid; the lowest NO ask is 0.77. The order passed `edge_lcb>0` ⇒ q_lcb_no>0.70,
+   and the point q_no is higher still — so the ask (0.77) plausibly sits BETWEEN our conservative
+   q_lcb_no (0.70) and our point q_no. We rest a maker bid at the conservative q_lcb instead of
+   crossing to a point-edge taker fill, so it never fills.
+
+Both trace to an **over-dispersed predictive band**: a too-wide σ widens the q_lcb↔point gap,
+simultaneously inflating point-q on the tails (item 1) and crushing the conservative q_lcb bound
+(item 2). Prime knob: `sigma_authority.build_sigma` serves `σ = max(global_lead_bucket_floor =
+1.31 + 0.10·lead_days, realized/fused width)`; the global floor likely binds above realized at
+2-day lead (≥1.51 °C). **Do NOT retune blind** (operator law: settlement-validated calibration,
+no fixed numbers). Background analyst is settlement-grading the over-dispersion factor per lead
+bucket (non-modal-bin q calibration + a taker-cross counterfactual) → docs/evidence/qkernel_rebuild/
+nonmodal_bin_calibration_2026-06-15.md. The calibrated σ-floor / band correction deploys on that
+verdict. Tasks: #121 (this), cross-ref #98 (σ over-dispersion), #91 (q_lcb caps).
+
+## LIVE-spine confirmation: direction-law is the active suppressor (5 diag samples, 2026-06-15)
+Across 5 `SPINE_NOTRADE_EDGE_DIAG` families today the top candidate consistently carries
+POSITIVE conservative edge — `edge_lcb` +0.032..+0.043, `pt_ev` +0.08..+0.09, `dU`>0 — yet the
+family is `NO_POSITIVE_EDGE_CANDIDATE` because those are YES on NON-MODAL bins, killed at
+`_select` step 2 by `direction_law_ok`; the direction-law-LEGAL candidates have ~zero edge
+(`edge_lcb` +0.0004, `dU`<0). The live spine's OWN 5th-percentile bound clears the killed
+candidates → on these families the band is NOT the binding suppressor; the direction-law is,
+overriding the spine's positive-edge verdict. This is the LIVE-path confirmation of the analyst's
+shadow finding (#121: non-modal q calibrated). Relaxation (admit edge_lcb>0 non-modal YES) stays
+gated on the live spine's non-modal SETTLEMENT calibration — the diag log accrues the killed-
+candidate set for 06-17+ grading — but the suppressor is confirmed on the live decision path, not
+just shadow. NOTE the wider-σ caveat: the live spine's build_sigma floor is wider than the shadow
+chain, so its non-modal tail q is higher; whether that is still calibrated (relax is safe) or
+over-inflated (direction-law correctly guards) is the exact thing the 06-17+ settlement of these
+diag candidates resolves.

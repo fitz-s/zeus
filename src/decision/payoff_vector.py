@@ -602,6 +602,8 @@ def optimize_vector_stake(
         return prepared.robust_at(stake)
 
     delta_u_at_min = _ru(lo)
+    if not _math.isfinite(delta_u_at_min):
+        delta_u_at_min = 0.0
 
     best_u = float("-inf")
     best_s = Decimal("0")
