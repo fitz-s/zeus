@@ -401,19 +401,28 @@ def test_optimize_vector_stake_sanitizes_nan_delta_u_at_min(monkeypatch):
         is_tradeable = True
         executable_cost_curve = _Curve()
 
+    class _Band:
+        alpha = 0.05
+
+    # optimize_vector_stake sizes via _PreparedSizing.robust_at (NOT the old per-call
+    # robust_delta_u). Monkeypatch the prepared sizer so its construction is inert and
+    # robust_at returns a ruin-straddle NaN exactly at the venue-min stake
+    # (lo = all_in_price(0.10) * min_order_size(5) = 0.50) and a finite positive ΔU above.
     calls = {"n": 0}
 
-    def _fake_robust_delta_u(candidate, stake_usd, **kwargs):
-        calls["n"] += 1
-        if stake_usd == Decimal("0.50"):
-            return float("nan")
-        return 0.01
+    class _FakePrepared:
+        def __init__(self, *a, **k):
+            pass
 
-    monkeypatch.setattr("src.decision.payoff_vector.robust_delta_u", _fake_robust_delta_u)
+        def robust_at(self, stake_usd):
+            calls["n"] += 1
+            return float("nan") if stake_usd == Decimal("0.50") else 0.01
+
+    monkeypatch.setattr("src.decision.payoff_vector._PreparedSizing", _FakePrepared)
 
     stake, optimal_delta_u, delta_u_at_min = optimize_vector_stake(
         _Candidate(),
-        band=object(),
+        band=_Band(),
         omega=object(),
         matrix=object(),
         exposure=object(),
@@ -423,6 +432,8 @@ def test_optimize_vector_stake_sanitizes_nan_delta_u_at_min(monkeypatch):
     assert calls["n"] > 1
     assert stake > Decimal("0")
     assert optimal_delta_u == pytest.approx(0.01)
+    # The NaN at venue-min stake is sanitized to 0.0 (exercises the _math.isfinite guard —
+    # RED if `import math as _math` is below this guard's use: UnboundLocalError).
     assert delta_u_at_min == 0.0
 
 
