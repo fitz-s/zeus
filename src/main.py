@@ -6996,6 +6996,36 @@ def _world_wal_checkpoint_cycle() -> None:
         )
 
 
+@_scheduler_job("trades_wal_checkpoint")
+def _trades_wal_checkpoint_cycle() -> None:
+    """Periodic zeus_trades.db WAL TRUNCATE backstop (2026-06-16) — trade-DB twin.
+
+    The 810 MB ``state/zeus_trades.db-wal`` incident (2026-06-16, live): a long-lived
+    reader pinned the WAL floor, the -wal never truncated, ``executable_market_
+    snapshots`` writes failed ``database is locked`` (auto-checkpoint contention on
+    every write) → ``fresh_executable_city_count=0`` → the q-kernel spine could not
+    price fresh families → no crosses. zeus-world.db had this backstop; the trade DB
+    did not. Same discipline/observability as ``_world_wal_checkpoint_cycle``: a
+    dedicated short-lived connection, no write mutex, the (busy, log, checkpointed)
+    triple ALWAYS logged; a chronic ``busy == 1`` is the loud signal that a reader is
+    not releasing the trade-DB floor. Fail-soft via the decorator.
+    """
+    from src.state.db import checkpoint_trades_wal
+
+    busy, log_frames, ckpt_frames = checkpoint_trades_wal()
+    if busy == 0:
+        logger.info(
+            "trades WAL checkpoint(TRUNCATE): OK busy=%d log_frames=%d checkpointed=%d",
+            busy, log_frames, ckpt_frames,
+        )
+    else:
+        logger.warning(
+            "trades WAL checkpoint(TRUNCATE): BUSY busy=%d log_frames=%d checkpointed=%d "
+            "— a reader is pinning the trade-DB WAL floor (long-lived reader not releasing)",
+            busy, log_frames, ckpt_frames,
+        )
+
+
 def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
     try:
         value = int(config.get(key, default))
@@ -9723,6 +9753,17 @@ def main():
     scheduler.add_job(
         _world_wal_checkpoint_cycle, "interval", seconds=90,
         id="world_wal_checkpoint", next_run_time=_utc_run_time_after(120.0),
+        max_instances=1, coalesce=True,
+    )
+    # zeus_trades.db WAL TRUNCATE backstop (2026-06-16, the 810MB -wal incident).
+    # The trade DB had no checkpoint backstop (only zeus-world.db did), so a reader
+    # pinning the floor let zeus_trades.db-wal grow unbounded → snapshot-capture
+    # writes failed `database is locked` → fresh_executable_city_count=0 → the spine
+    # starved of priceable families. Same 90s cadence; offset start so it doesn't
+    # fire in lockstep with the world checkpoint.
+    scheduler.add_job(
+        _trades_wal_checkpoint_cycle, "interval", seconds=90,
+        id="trades_wal_checkpoint", next_run_time=_utc_run_time_after(135.0),
         max_instances=1, coalesce=True,
     )
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env

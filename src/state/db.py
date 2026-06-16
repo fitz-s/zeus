@@ -591,6 +591,37 @@ def checkpoint_world_wal() -> tuple[int, int, int]:
         conn.close()
 
 
+def checkpoint_trades_wal() -> tuple[int, int, int]:
+    """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` on zeus_trades.db; return its triple.
+
+    THE BACKSTOP (2026-06-16) — the zeus_trades.db twin of ``checkpoint_world_wal``.
+
+    Root (live-evidenced 2026-06-16): ``state/zeus_trades.db-wal`` grew to 810 MB
+    because a long-lived READER connection in the live daemon held a WAL snapshot
+    (read-mark) across cycles, pinning the WAL floor so ``wal_checkpoint`` returned
+    BUSY and never truncated → unbounded growth → ``executable_market_snapshots``
+    writes failed ``database is locked`` (auto-checkpoint contention on every write)
+    → ``fresh_executable_city_count=0`` → the q-kernel spine could not price fresh
+    families → no crosses. zeus-world.db already had this backstop; the trade DB did
+    not. Same lock discipline: a dedicated short-lived connection, NO process-global
+    write mutex (a checkpoint is not a write txn; SQLite serializes checkpoints
+    internally), closed immediately so it never itself becomes a floor-pinning reader.
+
+    Returns the ``(busy, log_frames, checkpointed_frames)`` triple:
+      * ``busy == 0`` → checkpoint completed; the WAL was truncated.
+      * ``busy == 1`` → a reader still pinned the floor (loud signal; not silenced).
+    """
+    conn = _connect(_zeus_trade_db_path(), write_class=None)
+    try:
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        busy = int(row[0]) if row is not None else 1
+        log_frames = int(row[1]) if row is not None else -1
+        ckpt_frames = int(row[2]) if row is not None else -1
+        return (busy, log_frames, ckpt_frames)
+    finally:
+        conn.close()
+
+
 @contextlib.contextmanager
 def get_forecasts_connection_with_world(
     *,
