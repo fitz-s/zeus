@@ -208,29 +208,36 @@ def test_fsr_expiry_unbroken_by_day0_generalization():
     assert _status_of(conn, fsr_active.event_id) == "pending"
 
 
-def test_day0_frontier_band_settled_is_swept_fsr_margin_preserved():
+def test_day0_frontier_band_settled_is_swept_fsr_live_preserved():
     """The FRONTIER-BAND gap: a day0 whose target local day has ENDED but sits in the
     Oceania -1-day margin (e.g. yesterday) was previously SPARED — it then piled up at
     the Tier-0 claim priority and starved tradeable FSR. day0's today-inclusive frontier
-    now sweeps it, while FSR keeps the conservative margin (a same-frontier-band FSR is
-    NOT swept)."""
+    now sweeps it. A LIVE FSR (venue still open, local day not yet ended) in the same
+    band must NOT be swept.
+
+    Decision 2026-06-05T12:30Z → Auckland (UTC+12) local 2026-06-06 00:30.
+    - Auckland/2026-06-05: local day ended at 12:00Z; venue closed at 12:00Z → POST_TRADING.
+      Both day0 AND FSR for this settled date are swept.
+    - Auckland/2026-06-06: local day NOT ended (ends at 2026-06-06T12:00Z); venue NOT closed
+      (venue close for 06-06 = 2026-06-06T12:00Z, still future) → SETTLEMENT_DAY → kept.
+    """
     conn = _world_conn()
     store = EventStore(conn)
-    # decision 2026-06-05T12:30Z → Auckland (UTC+12) local 2026-06-06 00:30, so its
-    # 2026-06-05 local day has just ENDED; frontier_floor=2026-06-05 (margin band).
     decision = "2026-06-05T12:30:00+00:00"
+    # Settled day0 for 2026-06-05 (both local-day-past AND POST_TRADING) → must be swept.
     settled_day0 = _day0_event("Auckland", "2026-06-05", "high", available_at="2026-06-05T11:00:00+00:00")
-    band_fsr = _fsr_event("Auckland", "2026-06-05", "snap-band", available_at="2026-06-05T11:00:00+00:00")
+    # Live FSR for the NEXT day 2026-06-06 (venue open, local day open) → must be kept.
+    live_fsr = _fsr_event("Auckland", "2026-06-06", "snap-live", available_at="2026-06-05T11:00:00+00:00")
     store.insert_or_ignore(settled_day0)
-    store.insert_or_ignore(band_fsr)
+    store.insert_or_ignore(live_fsr)
 
     store.archive_expired_candidates(decision_time=decision)
 
     assert _status_of(conn, settled_day0.event_id) == "expired", (
         "a settled past-local-day day0 in the frontier band must now be swept off Tier-0"
     )
-    assert _status_of(conn, band_fsr.event_id) == "pending", (
-        "FSR keeps its conservative -1-day margin (frontier-band FSR not swept)"
+    assert _status_of(conn, live_fsr.event_id) == "pending", (
+        "a live FSR (venue open, local day not ended) must NOT be archived"
     )
 
 

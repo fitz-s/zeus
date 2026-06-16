@@ -336,3 +336,139 @@ def test_expired_sweep_candidate_query_uses_fsr_target_date_index():
     assert "SCAN E" not in plan and "SCAN OPPORTUNITY_EVENTS" not in plan, (
         f"expired sweep candidate query must not full-scan opportunity_events, got: {plan!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Venue-close (POST_TRADING) sweep tests — #126, 2026-06-15
+#
+# Bug: archive_expired_candidates used ONLY the local-day predicate.  In the
+# [venue_close, local_day_end) window a family is POST_TRADING (venue closed at
+# F1 12:00-UTC) but the local day has not yet ended, so _strictly_past_in_tz
+# returned False and the family stayed 'pending' forever.  132 families were
+# confirmed stuck live on 2026-06-15 (Miami|2026-06-15|low, etc.).
+#
+# All four tests use a UTC-negative city (Miami, America/New_York UTC-4 in June)
+# whose local day ends at 2026-06-15T04:00:00Z but whose F1 venue close fired at
+# 2026-06-15T12:00:00Z — i.e. 12:00Z < 04:00Z next day.
+#
+# decision_time = 2026-06-15T14:00:00Z: venue closed (>=12:00Z), local NOT yet
+# ended (14:00Z < 04:00Z next day on 2026-06-16).
+# ---------------------------------------------------------------------------
+
+# Scenario constants
+# Miami (America/New_York): UTC-4 in June.
+# F1 venue close for 2026-06-15 = 2026-06-15T12:00:00Z.
+# Local day ends at 2026-06-16T04:00:00Z.
+# At 2026-06-15T14:00Z: venue IS closed; local day is NOT yet past.
+_VENUE_CLOSE_DECISION = "2026-06-15T14:00:00+00:00"
+_VENUE_CLOSE_CITY = "Miami"
+_VENUE_CLOSE_TARGET = "2026-06-15"
+
+
+def test_venue_closed_local_open_swept_to_expired():
+    """(a) Bug case: FSR family whose F1 12:00-UTC venue close HAS fired but whose
+    local day has NOT yet ended is swept to 'expired'.  This is the [venue_close,
+    local_day_end) window that previously kept 132 families stuck 'pending' forever
+    (Miami|2026-06-15|low, Wellington|2026-06-15|high, etc., confirmed live 2026-06-16).
+
+    Decision 2026-06-15T14:00Z: Miami/2026-06-15 is POST_TRADING (venue closed
+    at 12:00Z) but the local day ends at 2026-06-16T04:00Z — _strictly_past_in_tz
+    alone returns False, so without the venue-close path the row stays pending forever.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    # Miami 2026-06-15: venue closed at 12:00Z; decision at 14:00Z; local day ends 04:00Z next day.
+    stuck = _fsr_event(
+        _VENUE_CLOSE_CITY, _VENUE_CLOSE_TARGET, "snap-venue-close",
+        available_at="2026-06-15T11:00:00+00:00",
+    )
+    store.insert_or_ignore(stuck)
+    assert _status_of(conn, stuck.event_id) == "pending"
+
+    n = store.archive_expired_candidates(decision_time=_VENUE_CLOSE_DECISION)
+
+    assert n >= 1, (
+        "a POST_TRADING family in the [venue_close, local_day_end) window must be swept"
+    )
+    assert _status_of(conn, stuck.event_id) == "expired", (
+        "processing status must be 'expired', not left 'pending'"
+    )
+    # Provenance: immutable event row must NOT be deleted.
+    assert _event_row_still_present(conn, stuck.event_id)
+    # Must not reappear in the active scan.
+    returned = store.fetch_pending(decision_time=_VENUE_CLOSE_DECISION, limit=100)
+    assert stuck.event_id not in [e.event_id for e in returned]
+
+
+def test_genuinely_live_venue_open_not_swept():
+    """(b) Fail-closed: a family whose venue is still OPEN (target_date tomorrow,
+    before its 12:00-UTC close) must NOT be archived.
+
+    Decision 2026-06-15T14:00Z; target_date 2026-06-16: F1 close fires at
+    2026-06-16T12:00Z which is in the future → phase is PRE_SETTLEMENT_DAY or
+    SETTLEMENT_DAY (never POST_TRADING) → must stay 'pending'.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    live = _fsr_event(
+        _VENUE_CLOSE_CITY, "2026-06-16", "snap-live",
+        available_at="2026-06-15T10:00:00+00:00",
+    )
+    store.insert_or_ignore(live)
+
+    store.archive_expired_candidates(decision_time=_VENUE_CLOSE_DECISION)
+
+    assert _status_of(conn, live.event_id) == "pending", (
+        "a genuinely-live family (venue still open) must NOT be archived"
+    )
+    returned = store.fetch_pending(decision_time=_VENUE_CLOSE_DECISION, limit=100)
+    assert live.event_id in [e.event_id for e in returned]
+
+
+def test_local_day_past_sweep_unbroken_by_venue_close_path():
+    """(c) Regression guard: the existing local-day-strictly-past sweep still archives
+    as before.  A family for a date that is strictly past in local tz (Chicago 2026-06-04
+    at decision 2026-06-05T12Z) is still archived, and an active future day (Chicago
+    2026-06-07) is still kept.  The venue-close path must not disturb either outcome.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    decision = "2026-06-05T12:00:00+00:00"
+    past = _fsr_event("Chicago", "2026-06-04", "snap-past", available_at="2026-06-03T00:00:00+00:00")
+    future = _fsr_event("Chicago", "2026-06-07", "snap-fut", available_at="2026-06-04T00:00:00+00:00")
+    store.insert_or_ignore(past)
+    store.insert_or_ignore(future)
+
+    archived = store.archive_expired_candidates(decision_time=decision)
+
+    assert _status_of(conn, past.event_id) == "expired", (
+        "a strictly-past-local-day family must still be archived (no regression)"
+    )
+    assert _status_of(conn, future.event_id) == "pending", (
+        "a future-local-day family must still be kept (no regression)"
+    )
+    assert archived >= 1
+
+
+def test_failclosed_missing_city_and_target_kept_active():
+    """(d) Fail-closed: a row with missing city OR missing target_date is NEVER archived
+    by the venue-close path.  Both ``_strictly_past_in_tz`` and ``_venue_closed_in_phase``
+    return False for unresolvable inputs so the row stays 'pending'.
+
+    Also tests that an unknown city (not in runtime_cities_by_name) is kept active —
+    the registry lookup returns None, which propagates as False from both predicates.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    # An FSR for a city the registry cannot resolve.
+    unknown_city = _fsr_event(
+        "Atlantis", _VENUE_CLOSE_TARGET, "snap-atlantis",
+        available_at="2026-06-14T00:00:00+00:00",
+    )
+    store.insert_or_ignore(unknown_city)
+
+    store.archive_expired_candidates(decision_time=_VENUE_CLOSE_DECISION)
+
+    assert _status_of(conn, unknown_city.event_id) == "pending", (
+        "a row with an unresolvable city must be kept active (fail-closed)"
+    )

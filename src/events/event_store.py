@@ -315,6 +315,32 @@ class EventStore:
         settlement_day_entry_utc(target_date + 1 day)``). Same predicate, shared with
         the read floor (``_event_strictly_past_in_tz``) so the two can never diverge.
 
+        VENUE-CLOSE (POST_TRADING) SWEEP (#126, 2026-06-15): also archives any family
+        whose Polymarket venue has closed (POST_TRADING) at ``decision_time`` but whose
+        local day has NOT yet ended — the ``[venue_close, local_day_end)`` window. The
+        venue closes at the F1 12:00-UTC anchor of target_date; at that moment the book
+        is gone (no fresh executable snapshot, no receipt possible), yet the local-day
+        predicate alone reports the family TIMELY and keeps it ``'pending'`` forever.
+        Live root-cause 2026-06-16: 132 families stuck ``'pending'`` (target_date
+        2026-06-15, venue closed 2026-06-15T12:00Z at ~02:00Z next day) clogged
+        ``_edli_pending_entity_keys``, EDLI re-decision emitted 0 new families every
+        cycle (``edli_redecision: enqueued=0 batch=60 skipped_pending=132``), harvest
+        lane dark, zero orders.
+
+        The fix reuses the EXACT authority the reactor's ``_venue_market_closed_horizon``
+        (horizon b) uses: ``market_phase_for_decision`` with the F1 12:00-UTC geometric
+        close anchor (``_f1_fallback_end_utc``). No venue HTTP probe, no new clock.
+        Fail-closed: city/tz/date unresolvable → KEEP active (same contract as the
+        reactor). Only POST_TRADING/RESOLVED archives; PRE_SETTLEMENT/SETTLEMENT/open →
+        kept.
+
+        The candidate band is widened from the old local-day-only floor to also capture
+        rows whose ``target_date <= venue_close_ceiling`` (the latest target_date whose
+        F1-12:00-UTC close COULD have fired at ``decision_time``). This is the date
+        portion of ``(decision_time - 12h)`` in UTC. Rows in the new venue-close band
+        that are NOT actually POST_TRADING are filtered out in the Python loop (fail-
+        closed); the SQL band is the NECESSARY condition, Python is the SUFFICIENT gate.
+
         OCEANIA-FRONTIER cheap pre-filter: only rows whose ``target_date`` is at or
         after ``frontier_local_date - 1`` (the current local date in the
         globally-earliest-rolling timezone, Oceania UTC+13/+12, minus one day for the
@@ -340,9 +366,9 @@ class EventStore:
         silently drop a real candidate.
 
         IDEMPOTENT + budget-safe: only ``pending``/``processing`` rows are touched and
-        only those proven strictly-past; a re-run at the same decision time is a no-op.
-        ``batch_limit`` bounds the rows examined per call so a one-time 1.7M backlog
-        drains across cycles instead of in one giant transaction.
+        only those proven strictly-past or venue-closed; a re-run at the same decision
+        time is a no-op.  ``batch_limit`` bounds the rows examined per call so a one-
+        time 1.7M backlog drains across cycles instead of in one giant transaction.
 
         Returns the number of processing rows transitioned to ``expired``.
         """
@@ -369,6 +395,13 @@ class EventStore:
         except ValueError:
             day0_floor = frontier_floor
 
+        # VENUE-CLOSE BAND (#126, 2026-06-15): The F1 12:00-UTC close for target_date T
+        # fires at T+12h in UTC. Any target_date T whose close has already fired satisfies
+        # decision_time >= T+12h  ⟺  T <= decision_time - 12h (UTC date part).
+        # This ceiling captures the widest target_date that COULD be POST_TRADING now;
+        # rows in this band that are not actually POST_TRADING are filtered in Python.
+        venue_close_ceiling = _venue_close_target_ceiling(decision_time_utc)
+
         candidate_rows = self.conn.execute(
             """
             SELECT e.event_id,
@@ -383,14 +416,17 @@ class EventStore:
               AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
               AND (
                     (e.event_type = 'FORECAST_SNAPSHOT_READY'
-                       AND json_extract(e.payload_json, '$.target_date') < ?)
+                       AND (   json_extract(e.payload_json, '$.target_date') < ?
+                            OR json_extract(e.payload_json, '$.target_date') <= ?))
                  OR (e.event_type = 'DAY0_EXTREME_UPDATED'
-                       AND json_extract(e.payload_json, '$.target_date') < ?)
+                       AND (   json_extract(e.payload_json, '$.target_date') < ?
+                            OR json_extract(e.payload_json, '$.target_date') <= ?))
               )
             ORDER BY json_extract(e.payload_json, '$.target_date') ASC
             LIMIT ?
             """,
-            (self.consumer_name, frontier_floor, day0_floor, batch_limit),
+            (self.consumer_name, frontier_floor, venue_close_ceiling,
+             day0_floor, venue_close_ceiling, batch_limit),
         ).fetchall()
 
         expired_ids: list[str] = []
@@ -398,7 +434,8 @@ class EventStore:
             event_id = row[0]
             city = row[1]
             target_date = row[2]
-            if self._strictly_past_in_tz(city, target_date, decision_time_utc):
+            if self._strictly_past_in_tz(city, target_date, decision_time_utc) or \
+               self._venue_closed_in_phase(city, target_date, decision_time_utc):
                 expired_ids.append(event_id)
 
         now = _utc_now()
@@ -924,6 +961,60 @@ class EventStore:
             return False
         return decision_time_utc >= day_after_entry
 
+    @staticmethod
+    def _venue_closed_in_phase(
+        city: str | None, target_date: str | None, decision_time_utc: datetime
+    ) -> bool:
+        """True iff the Polymarket venue market for ``city``/``target_date`` has entered
+        POST_TRADING (or RESOLVED) at ``decision_time`` — using the EXACT authority the
+        reactor's ``_venue_market_closed_horizon`` (horizon b) uses.
+
+        Authority: ``market_phase_for_decision`` with the F1 12:00-UTC geometric close
+        anchor (``_f1_fallback_end_utc(target_local_date)``).  No venue HTTP probe, no
+        new clock, no external state — purely city-tz + target_date + decision_time.
+
+        FAIL-CLOSED: missing city/target_date, unresolvable city config/tz, or ANY
+        exception → returns False (NOT closed) so the row is KEPT active.  Mislabeling
+        an open family as closed would silently drop a live candidate, which is the
+        unrecoverable failure mode.
+
+        Only POST_TRADING and RESOLVED return True; every other phase (PRE_TRADING,
+        PRE_SETTLEMENT_DAY, SETTLEMENT_DAY) returns False.
+
+        #126, 2026-06-15: closes the ``[venue_close, local_day_end)`` gap where the
+        local-day predicate alone (``_strictly_past_in_tz``) reported a POST_TRADING
+        family as still TIMELY and left it ``'pending'`` forever (132 families confirmed
+        live; root-cause docs/evidence/qkernel_rebuild/fix_venue_close_sweep_2026-06-15.md).
+        """
+        if not city or not target_date:
+            return False
+        try:
+            from datetime import date as _date_cls
+
+            from src.config import runtime_cities_by_name
+            from src.strategy.market_phase import (
+                MarketPhase,
+                _f1_fallback_end_utc,
+                market_phase_for_decision,
+            )
+
+            city_config = runtime_cities_by_name().get(city)
+            tz = getattr(city_config, "timezone", None) if city_config is not None else None
+            if not tz:
+                return False
+            target_local_date = _date_cls.fromisoformat(str(target_date))
+            phase = market_phase_for_decision(
+                target_local_date=target_local_date,
+                city_timezone=tz,
+                decision_time_utc=decision_time_utc,
+                polymarket_start_utc=None,
+                polymarket_end_utc=_f1_fallback_end_utc(target_local_date),
+            )
+        except Exception:
+            # Fail-closed: any unresolvable input keeps the row active.
+            return False
+        return phase in (MarketPhase.POST_TRADING, MarketPhase.RESOLVED)
+
     def _is_timely(self, event: OpportunityEvent, decision_time_utc: datetime) -> bool:
         """Claim-floor timeliness gate (STEP 3a).
 
@@ -1216,6 +1307,30 @@ def _oceania_frontier_target_floor(decision_time_utc: datetime) -> str:
     except Exception:
         return "0001-01-01"
     return (frontier_local_date - timedelta(days=1)).isoformat()
+
+
+def _venue_close_target_ceiling(decision_time_utc: datetime) -> str:
+    """ISO date string: the latest ``target_date`` whose F1 12:00-UTC venue close
+    COULD have fired at ``decision_time``.
+
+    The Polymarket weather venue closes at 12:00 UTC of ``target_date`` (the F1
+    anchor, ``_f1_fallback_end_utc``).  A family with target_date T is POST_TRADING
+    iff ``decision_time >= T 12:00 UTC``, i.e. ``T <= decision_time - 12h`` (UTC date
+    part).  Any target_date UP TO AND INCLUDING this date is a candidate for the
+    venue-close check in Python; target_dates strictly after it cannot yet be
+    POST_TRADING (their 12:00-UTC anchor has not fired).
+
+    This is a NECESSARY-CONDITION band, not a SUFFICIENT one — the Python loop's
+    ``_venue_closed_in_phase`` call is the sufficient gate (fail-closed).
+
+    Fail-safe: on arithmetic error returns a date far in the past (no rows matched)
+    — never an over-archive.
+    """
+    try:
+        shifted = decision_time_utc - timedelta(hours=12)
+        return shifted.date().isoformat()
+    except Exception:
+        return "0001-01-01"
 
 
 def _utc_now() -> str:
