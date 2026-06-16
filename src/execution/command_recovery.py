@@ -4335,6 +4335,25 @@ def _point_order_terminal_for_partial_remainder(client, venue_order_id: str) -> 
     status = str(raw.get("status") or raw.get("state") or "").upper()
     if status in _TERMINAL_NO_FILL_VENUE_STATUSES:
         return True, status, raw
+    # GONE-ORDER TERMINAL PROOF (2026-06-16): a PARTIAL whose remainder is already
+    # confirmed ABSENT from client.get_open_orders (the only candidates that reach
+    # this function — see reconcile_partial_remainders) and whose client.get_order
+    # returns UNKNOWN/empty (the venue has NO live record: OrderState(status='UNKNOWN',
+    # raw={}) -> _venue_order_payload synthesizes only {'status':'UNKNOWN','orderID':..}
+    # with no size/matched/price fields) is GONE — the unfilled remainder was cancelled/
+    # purged and the venue retains no order. Absent-from-open-orders + no-live-record is
+    # terminal proof; the recorded matched_size (the real partial fill) is preserved on
+    # the EXPIRED fact. Without this, such orders sit PARTIALLY_MATCHED forever (open ->
+    # HOLD_REST_IN_PROGRESS blocks the family; NOT terminal_unfilled -> never escalates),
+    # zero new ENTRY orders despite a healthy +edge decision lane (live 2026-06-16). A
+    # LIVE/RESTING/PARTIALLY_MATCHED/MATCHED/FILLED status (a real live/fill record) is
+    # NOT terminalized here — only the no-live-record UNKNOWN/absent case.
+    _has_live_order_data = any(
+        raw.get(k) not in (None, "")
+        for k in ("size", "original_size", "size_matched", "matched", "price", "side", "remaining")
+    )
+    if status in {"UNKNOWN", "NOT_FOUND", ""} and not _has_live_order_data:
+        return True, status or "NOT_FOUND", raw
     return False, status or "UNKNOWN", raw
 
 
