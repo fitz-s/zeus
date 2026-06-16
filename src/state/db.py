@@ -239,6 +239,20 @@ def _connect(
     # C-level handler that executescript() can null; this PRAGMA is the durable
     # budget. Connection PRAGMA only — INV-37 / txn semantics unchanged.
     _apply_busy_timeout(conn)
+    # 2026-06-16 (the 810MB zeus_trades.db-wal incident): a long-lived reader pins the
+    # trade-DB WAL floor, so the default auto-checkpoint (every 1000 pages, fired on EVERY
+    # commit) can never TRUNCATE (busy) and instead CONTENDS the WAL write lock with
+    # concurrent writers -> executable_market_snapshots writes fail "database is locked" ->
+    # fresh_executable_city_count=0 -> the q-kernel spine is starved of priceable families.
+    # Disable auto-checkpoint on the trade DB so a write NEVER blocks on a checkpoint; the
+    # periodic checkpoint_trades_wal backstop (main.py _trades_wal_checkpoint_cycle, 90s)
+    # reclaims the WAL instead. Trade DB only (world/forecasts keep their own management).
+    try:
+        if db_path == _zeus_trade_db_path():
+            conn.execute("PRAGMA wal_autocheckpoint=0")
+    except Exception:
+        # Path resolution must never break connection setup; default checkpointing stands.
+        pass
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
         _cnt_inc(f"db_connect_write_class_{resolved.value}_total")
