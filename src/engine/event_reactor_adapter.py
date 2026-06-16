@@ -13767,7 +13767,45 @@ def _snapshot_rows_by_condition_and_direction(rows: list[dict[str, Any]]) -> dic
     return out
 
 
+# DECISION-SELECTION price window (NOT the execution price authority). Operator design law
+# 2026-05-30 (see _latest_snapshot_rows_for_event_family docstring): "freshness 针对价格不针对
+# 市场; 市场捕捉了不会突然消失" — PRICE-freshness for the actually-traded bin is enforced at
+# SUBMISSION: the fresh JIT /book witness re-validates TAKER_BUY_TOUCH_EXCEEDS_RESERVATION
+# against the q_lcb reservation on a FRESH book (event_reactor_adapter.py ~4355), so execution
+# can NEVER cross above the conservative bound regardless of this window. The 30s
+# _K1_DEFAULT_PRESUBMIT_FRESHNESS_SECONDS is the EXECUTION/JIT authority; applying it at
+# DECISION-selection contradicted the design law AND transient-requeued families faster than
+# the ~5.4min warm-capture cadence could refresh them (live 2026-06-15: families_needing_refresh
+# oscillated 1→116 of 188; processed=0 decisions/cycle; the Qingdao 2026-06-13 q=0.679-vs-ask-0.30
+# 6-min-old row "blocked all day" class). The SELECTION window only bounds WHICH captured row may
+# be selected; a price-drifted selection is caught and clean-rejected at submit (never filled
+# above q_lcb). Sized to span one full warm-capture interval + jitter so a family is decidable
+# across the whole inter-capture gap. Interim constant pending #64 staleness fitting; its
+# correctness is BOUNDED by the submit-time authority, not by this value.
+_DECISION_SELECTION_PRICE_WINDOW_SECONDS = 600.0
+
+
 def _snapshot_price_stale_reason(row: dict[str, Any], *, decision_time: datetime) -> str | None:
+    checked_at = decision_time.astimezone(UTC)
+    # SELECTION freshness: prefer captured_at + the wide selection window. EXECUTION
+    # price-freshness is enforced at submission (the fresh JIT witness), NOT here. Fall back
+    # to the stored execution freshness_deadline only when captured_at is unavailable
+    # (fail-safe to the tight gate, never looser than the legacy behaviour).
+    captured_raw = row.get("captured_at")
+    if captured_raw not in {None, ""}:
+        try:
+            selection_deadline = _parse_utc(str(captured_raw)) + timedelta(
+                seconds=_DECISION_SELECTION_PRICE_WINDOW_SECONDS
+            )
+            if selection_deadline < checked_at:
+                return (
+                    "EXECUTABLE_SNAPSHOT_STALE:"
+                    f"selection_deadline={selection_deadline.isoformat()}:"
+                    f"decision_time={checked_at.isoformat()}"
+                )
+            return None
+        except Exception:
+            pass  # fall through to the stored execution-deadline path (fail-safe)
     deadline_raw = row.get("freshness_deadline")
     if deadline_raw in {None, ""}:
         return "EXECUTABLE_SNAPSHOT_STALE:freshness_deadline_missing"
@@ -13775,7 +13813,6 @@ def _snapshot_price_stale_reason(row: dict[str, Any], *, decision_time: datetime
         deadline = _parse_utc(str(deadline_raw))
     except Exception:
         return "EXECUTABLE_SNAPSHOT_STALE:freshness_deadline_invalid"
-    checked_at = decision_time.astimezone(UTC)
     if deadline < checked_at:
         return (
             "EXECUTABLE_SNAPSHOT_STALE:"
