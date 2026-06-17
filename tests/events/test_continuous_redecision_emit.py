@@ -579,7 +579,7 @@ def test_restricted_redecision_filters_before_fairness_window():
 
 
 def test_held_position_families_are_admitted_to_redecision(monkeypatch):
-    """Held families are admission inputs even when no new-entry screen fires."""
+    """Held families are monitor inputs even when no new-entry screen fires."""
 
     monkeypatch.setattr(
         main,
@@ -595,6 +595,54 @@ def test_held_position_families_are_admitted_to_redecision(monkeypatch):
     assert main._edli_current_held_position_family_keys() == {
         ("Tokyo", "2026-06-04", "high")
     }
+
+
+def test_held_position_forecast_reemit_uses_forecast_phase_gate(monkeypatch):
+    """Only forecast-admissible held families should enter forecast re-emission."""
+
+    calls: list[tuple[str, str, str]] = []
+
+    def _fake_market_phase_admits(*, city, target_date, metric, decision_time, market_row):
+        assert decision_time == datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc)
+        assert market_row == {}
+        calls.append((city, target_date, metric))
+        return city == "Shenzhen"
+
+    monkeypatch.setattr(
+        "src.strategy.market_phase.market_phase_admits",
+        _fake_market_phase_admits,
+    )
+
+    assert main._edli_reemittable_held_position_family_keys(
+        {
+            ("Tokyo", "2026-06-18", "low"),
+            ("Shenzhen", "2026-06-19", "high"),
+        },
+        decision_time=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
+    ) == {("Shenzhen", "2026-06-19", "high")}
+    assert set(calls) == {
+        ("Tokyo", "2026-06-18", "low"),
+        ("Shenzhen", "2026-06-19", "high"),
+    }
+
+
+def test_redecision_screen_separates_held_monitor_from_forecast_reemit():
+    """The screen must not count every held monitor family as forecast re-emitted."""
+
+    screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+
+    assert (
+        "held_reemit_families = _edli_reemittable_held_position_family_keys"
+        in screen_src
+    )
+    assert (
+        "all_families = set(family_keys) | rest_pull_families | held_reemit_families"
+        in screen_src
+    )
+    assert "held_monitor_families=%d held_reemit_families=%d" in screen_src
+    assert "no_current_edge_rest_or_forecast_reemit_exposure" in inspect.getsource(
+        main._edli_expire_unadmitted_redecision_pending
+    )
 
 
 def test_held_position_family_provider_excludes_closed_phases():

@@ -6653,7 +6653,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 if key is not None and all(key):
                     rest_pull_families.add(key)
         held_families = _edli_current_held_position_family_keys()
-        all_families = set(family_keys) | rest_pull_families | held_families
+        held_reemit_families = _edli_reemittable_held_position_family_keys(
+            held_families,
+            decision_time=now,
+        )
+        all_families = set(family_keys) | rest_pull_families | held_reemit_families
         expired_unadmitted = 0
         if not all_families:
             from src.state.db import world_write_mutex as _world_write_mutex
@@ -6676,10 +6680,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     pass
             logger.info(
                 "edli_redecision_screen: entry_candidates=%d entry_families=0 rest_pulls=%d "
-                "held_families=0 families_reemitted=0 "
+                "held_monitor_families=%d held_reemit_families=0 families_reemitted=0 "
                 "events_emitted=0 rests_cancelled=0 expired_unadmitted=%d reason=no_screened_families",
                 len(redecisions),
                 len(rest_pulls),
+                len(held_families),
                 expired_unadmitted,
             )
             return
@@ -6753,9 +6758,10 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 
         logger.info(
             "edli_redecision_screen: entry_candidates=%d entry_families=%d rest_pulls=%d "
-            "held_families=%d families_reemitted=%d "
+            "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d "
             "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d",
             len(redecisions), len(family_keys), len(rest_pulls), len(held_families),
+            len(held_reemit_families),
             len(all_families), len(emitted), cancelled, expired_unadmitted,
         )
     finally:
@@ -7070,10 +7076,11 @@ def _edli_emit_forecast_snapshot_events(
 
 
 def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
-    """Current held-position families for redecision admission.
+    """Current held-position families for monitor/redecision admission.
 
-    This is an admission gate, not a priority hint: any family with real position_current
-    exposure must keep receiving EDLI_REDECISION_PENDING events even if no new-entry edge fires.
+    This is the broad monitor universe: any family with real position_current exposure must
+    keep receiving position-monitor attention even when no new-entry edge fires. Forecast
+    re-emission is narrower and phase-gated by _edli_reemittable_held_position_family_keys().
     Fail-soft matches the reactor held-family provider; a read failure must not crash the daemon.
     """
 
@@ -7097,6 +7104,48 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
         key = (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
         if all(key):
             out.add(key)
+    return out
+
+
+def _edli_reemittable_held_position_family_keys(
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+) -> set[tuple[str, str, str]]:
+    """Held-position families that may enter forecast redecision this tick.
+
+    Day0 / post-trading held positions are still managed by the chain-sync and exit
+    monitor lanes. They must not be logged as forecast re-emitted or keep stale
+    EDLI_REDECISION_PENDING rows alive, because the FSR trigger will drop them with
+    the same forecast-only phase predicate.
+    """
+
+    if not families:
+        return set()
+    from src.strategy.market_phase import market_phase_admits
+
+    out: set[tuple[str, str, str]] = set()
+    for city, target_date, metric in families:
+        try:
+            admitted = market_phase_admits(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_time=decision_time,
+                market_row={},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "edli_redecision_screen: held-position phase read failed; "
+                "family not forecast-reemitted this tick: city=%r target_date=%r metric=%r error=%r",
+                city,
+                target_date,
+                metric,
+                exc,
+            )
+            continue
+        if admitted:
+            out.add((city, target_date, metric))
     return out
 
 
@@ -7155,7 +7204,7 @@ def _edli_expire_unadmitted_redecision_pending(
                SET processing_status = 'expired',
                    processed_at = ?,
                    updated_at = ?,
-                   last_error = 'REDECISION_ADMISSION_EXPIRED:no_current_edge_or_held_exposure'
+                   last_error = 'REDECISION_ADMISSION_EXPIRED:no_current_edge_rest_or_forecast_reemit_exposure'
              WHERE consumer_name = 'edli_reactor_v1'
                AND processing_status = 'pending'
                AND event_id IN ({placeholders})
