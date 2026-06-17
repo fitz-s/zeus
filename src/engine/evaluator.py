@@ -105,6 +105,7 @@ from src.signal.day0_high_nowcast_signal import (
 from src.signal.day0_low_distribution import (
     build_pre_day0_low_empirical_conditioning,
     load_pre_day0_low_empirical_model,
+    pre_day0_low_empirical_live_policy,
 )
 from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import (
@@ -4305,17 +4306,22 @@ def evaluate_candidate(
                     city.timezone,
                     decision_time_utc,
                 )
-                from src.data.day0_fast_obs import (
-                    PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS,
-                    get_fast_obs_emitter,
-                )
+                from src.data.day0_fast_obs import get_fast_obs_emitter
 
-                if 0.0 < lead_hours_pre_day0 <= PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS:
+                empirical_model = load_pre_day0_low_empirical_model()
+                empirical_policy = pre_day0_low_empirical_live_policy(empirical_model)
+                if empirical_policy is None:
+                    raise RuntimeError("pre-Day0 LOW empirical model policy unavailable")
+                max_lead_hours, trailing_lookback_hours, model_policy_basis = empirical_policy
+
+                if 0.0 < lead_hours_pre_day0 <= max_lead_hours:
 
                     low_window = get_fast_obs_emitter().latest_pre_day0_low_window(
                         city,
                         target_d.isoformat(),
                         as_of=decision_time_utc,
+                        lookback_hours=trailing_lookback_hours,
+                        max_lead_hours=max_lead_hours,
                     )
                     if low_window is not None:
                         obs_age_minutes = max(
@@ -4334,7 +4340,6 @@ def evaluate_candidate(
                             ).total_seconds()
                             / 60.0,
                         )
-                        empirical_model = load_pre_day0_low_empirical_model()
                         conditioning = build_pre_day0_low_empirical_conditioning(
                             member_mins=np.asarray(analysis_member_extrema, dtype=float),
                             window_low=low_window.window_low,
@@ -4368,10 +4373,20 @@ def evaluate_candidate(
                                     "residual_sample_count": int(
                                         conditioning.residual_sample_count
                                     ),
+                                    "holdout_nll": (
+                                        float(conditioning.holdout_nll)
+                                        if conditioning.holdout_nll is not None
+                                        else None
+                                    ),
                                     "residual_quantile_count": int(
                                         conditioning.residual_quantiles.size
                                     ),
                                     "lead_bucket_hours": int(conditioning.lead_bucket_hours),
+                                    "max_lead_hours": float(max_lead_hours),
+                                    "trailing_lookback_hours": float(
+                                        conditioning.trailing_lookback_hours
+                                    ),
+                                    "model_policy_basis": model_policy_basis,
                                     "source": "aviationweather_metar",
                                     "station_id": low_window.station_id,
                                     "unit": low_window.unit,

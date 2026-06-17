@@ -227,6 +227,8 @@ class TestPreDay0LowCarryover:
             city=city,
             target_date="2026-06-18",
             as_of=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
+            lookback_hours=3.0,
+            max_lead_hours=4.0,
         )
         assert window is not None
         assert window.window_low == pytest.approx(12.0)
@@ -257,6 +259,11 @@ class TestPreDay0LowCarryover:
         model = {
             "model_version": PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
             "source_table": "test_observation_instants",
+            "live_policy": {
+                "max_lead_hours": 4.0,
+                "trailing_lookback_hours": 1.0,
+                "basis": "test",
+            },
             "by_city": {
                 "London": {
                     "lead_buckets": {
@@ -313,10 +320,16 @@ class TestPreDay0LowCarryover:
         model = {
             "model_version": PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
             "source_table": "test_observation_instants",
+            "live_policy": {
+                "max_lead_hours": 4.0,
+                "trailing_lookback_hours": 1.0,
+                "basis": "test",
+            },
             "by_city": {
                 "London": {
                     "lead_buckets": {
-                        "3": {"n": 240, "residual_quantiles": [-1.0, 0.0, 1.0]}
+                        "3": {"n": 240, "residual_quantiles": [-1.0, 0.0, 1.0]},
+                        "4": {"n": 240, "residual_quantiles": [-1.5, -0.5, 0.5]},
                     }
                 }
             },
@@ -336,11 +349,15 @@ class TestPreDay0LowCarryover:
         ) is None
         assert build_pre_day0_low_empirical_conditioning(
             **kwargs,
-            lead_hours_to_target_start=3.50,
+            lead_hours_to_target_start=4.50,
         ) is None
         assert build_pre_day0_low_empirical_conditioning(
             **kwargs,
             lead_hours_to_target_start=3.00,
+        ) is not None
+        assert build_pre_day0_low_empirical_conditioning(
+            **kwargs,
+            lead_hours_to_target_start=4.00,
         ) is not None
 
 

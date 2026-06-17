@@ -75,11 +75,12 @@ DEFAULT_MIN_FETCH_INTERVAL_S = 90.0
 #: encodes is a valid local-day extreme for entry-probability computation.
 FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
 
-# Soft entry signal for tomorrow's LOW markets: only the final three local hours
-# immediately before target day can inform midnight carryover. Earlier lows on
-# T-1 are not target-day facts and must not enter this lane.
-PRE_DAY0_LOW_CARRYOVER_LOOKBACK_HOURS = 3.0
-PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS = 3.0
+# Soft entry signal for tomorrow's LOW markets. These are defaults only; the
+# live evaluator uses the deployed empirical residual model's policy. The
+# window is trailing as-of, not fixed to target midnight, so the runtime anchor
+# matches the historical calibration surface.
+PRE_DAY0_LOW_CARRYOVER_LOOKBACK_HOURS = 1.0
+PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS = 12.0
 
 
 @dataclass(frozen=True)
@@ -462,8 +463,8 @@ def pre_day0_low_window_for_target(
 ) -> Optional[PreDay0LowWindow]:
     """Return the late-evening T-1 LOW window for a future target local day.
 
-    The window is bounded to ``[target_midnight - lookback, as_of]`` and only
-    active while ``as_of`` is strictly before the target local day begins. This
+    The window is bounded to ``[as_of - lookback, as_of]`` and only active
+    while ``as_of`` is strictly before the target local day begins. This
     deliberately excludes the full prior-day low: a cold print at 06:00 on T-1
     is not evidence that tomorrow's 00:00-02:00 low has already been locked in.
     """
@@ -482,7 +483,7 @@ def pre_day0_low_window_for_target(
         if lead_hours <= 0.0 or lead_hours > float(max_lead_hours):
             return None
         lookback = max(0.25, float(lookback_hours))
-        window_start_utc = target_start_utc - timedelta(hours=lookback)
+        window_start_utc = ref - timedelta(hours=lookback)
         previous_local_day = target - timedelta(days=1)
     except Exception:
         return None

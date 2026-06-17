@@ -32,7 +32,7 @@ from src.contracts.settlement_semantics import apply_settlement_rounding
 if TYPE_CHECKING:
     from src.types import Bin
 
-PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION = "pre_day0_low_carryover_residual_v1"
+PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION = "pre_day0_low_current_temp_residual_v2"
 DEFAULT_PRE_DAY0_LOW_EMPIRICAL_MODEL_PATH = (
     Path(__file__).resolve().parents[2] / "state" / "pre_day0_low_carryover_empirical.json"
 )
@@ -45,8 +45,8 @@ class PreDay0LowEmpiricalConditioning:
 
     ``conditioned_member_mins`` is the full sample space:
     min(forecast_member_low, late_window_low + empirical_residual_quantile).
-    The residuals are fitted from verified historical hourly observations, so
-    no arbitrary blend weight is needed.
+    The residuals are fitted from historical hourly current-temperature
+    observations with holdout evidence, so no arbitrary blend weight is needed.
     """
 
     conditioned_member_mins: np.ndarray
@@ -59,6 +59,9 @@ class PreDay0LowEmpiricalConditioning:
     residual_source: str
     model_version: str
     unit: str
+    trailing_lookback_hours: float
+    model_policy_basis: str
+    holdout_nll: float | None = None
 
 
 def build_day0_low_distribution(
@@ -103,14 +106,44 @@ def load_pre_day0_low_empirical_model(path: str | Path | None = None) -> Optiona
     return _load_pre_day0_low_empirical_model_cached(str(effective))
 
 
-def _pre_day0_low_lead_bucket(lead_hours_to_target_start: float) -> Optional[int]:
+def pre_day0_low_empirical_live_policy(
+    model: Optional[dict[str, Any]],
+) -> tuple[float, float, str] | None:
+    """Return ``(max_lead_hours, trailing_lookback_hours, basis)`` for a model."""
+    if not model:
+        return None
+    policy = model.get("live_policy") or {}
+    try:
+        max_lead = float(policy.get("max_lead_hours", 3.0))
+        trailing = float(policy.get("trailing_lookback_hours", 1.0))
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(max_lead) or not np.isfinite(trailing):
+        return None
+    if max_lead <= 0.0 or trailing <= 0.0:
+        return None
+    basis = str(policy.get("basis") or "empirical_residual_holdout")
+    return max_lead, trailing, basis
+
+
+def _pre_day0_low_lead_bucket(
+    lead_hours_to_target_start: float,
+    *,
+    max_lead_hours: float,
+) -> Optional[int]:
     try:
         lead = float(lead_hours_to_target_start)
     except (TypeError, ValueError):
         return None
-    if not np.isfinite(lead) or lead <= 0.0 or lead > 3.0:
+    try:
+        max_lead = float(max_lead_hours)
+    except (TypeError, ValueError):
         return None
-    return max(1, min(3, int(math.ceil(lead - 1e-12))))
+    if not np.isfinite(lead) or not np.isfinite(max_lead):
+        return None
+    if lead <= 0.0 or max_lead <= 0.0 or lead > max_lead:
+        return None
+    return max(1, min(int(math.ceil(max_lead)), int(math.ceil(lead - 1e-12))))
 
 
 def _residual_entry(
@@ -173,11 +206,15 @@ def build_pre_day0_low_empirical_conditioning(
         return None
     if not all(np.isfinite(v) for v in (low, lead)):
         return None
-    bucket = _pre_day0_low_lead_bucket(lead)
-    if bucket is None:
-        return None
     effective_model = load_pre_day0_low_empirical_model() if model is _MODEL_SENTINEL else model
     if not effective_model:
+        return None
+    policy = pre_day0_low_empirical_live_policy(effective_model)
+    if policy is None:
+        return None
+    max_lead, trailing_lookback, policy_basis = policy
+    bucket = _pre_day0_low_lead_bucket(lead, max_lead_hours=max_lead)
+    if bucket is None:
         return None
 
     u = str(unit or "").upper()
@@ -209,6 +246,13 @@ def build_pre_day0_low_empirical_conditioning(
         residual_source=str(effective_model.get("source_table") or "unknown"),
         model_version=str(effective_model.get("model_version") or ""),
         unit=u or "UNKNOWN",
+        trailing_lookback_hours=float(trailing_lookback),
+        model_policy_basis=policy_basis,
+        holdout_nll=(
+            float(entry["holdout_nll"])
+            if entry.get("holdout_nll") is not None
+            else None
+        ),
     )
 
 
