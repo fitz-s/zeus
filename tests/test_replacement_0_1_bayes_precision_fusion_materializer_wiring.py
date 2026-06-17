@@ -207,9 +207,9 @@ def test_flag_off_materialized_posterior_byte_identical(monkeypatch) -> None:
     row_a = _row(conn_a, pid_a)
 
     # Even with seams installed and history present, OFF flag means the resolver returns None.
-    _install_seams(monkeypatch, live_values={"gfs_global": 25.0, "icon_global": 26.0,
-                                             "gem_global": 24.0, "jma_seamless": 27.0, "icon_eu": 25.5},
-                   history_models=["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"])
+    _install_seams(monkeypatch, live_values={"ukmo_global_deterministic_10km": 25.0, "icon_global": 26.0,
+                                             "icon_eu": 25.5},
+                   history_models=["ecmwf_ifs", "ukmo_global_deterministic_10km", "icon_global", "icon_eu"])
     conn_b = _conn()
     pid_b = mod._insert_posterior(conn_b, _request(), metric="high", anchor_id=1)
     row_b = _row(conn_b, pid_b)
@@ -233,12 +233,14 @@ def test_flag_on_fusion_changes_posterior_and_writes_emos_identity(monkeypatch) 
 
     _enable_flag(monkeypatch)
     # Globals pull the center well below the OM9 27.0 anchor -> the fused center shifts mass.
-    _install_seams(monkeypatch, live_values={"gfs_global": 23.0, "icon_global": 23.5,
-                                             "gem_global": 22.5, "jma_seamless": 24.0, "icon_eu": 23.2},
-                   history_models=["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"])
+    # 2026-06-17: gfs_global/gem_global dropped; for Paris (EU) the decorrelated globals are
+    # {icon_global/icon_eu (DWD), ukmo_global (UKMO)} — NCEP/CMC absent (non-CONUS), JMA dropped.
+    _install_seams(monkeypatch, live_values={"ukmo_global_deterministic_10km": 23.0, "icon_global": 23.5,
+                                             "icon_eu": 23.2},
+                   history_models=["ecmwf_ifs", "ukmo_global_deterministic_10km", "icon_global", "icon_eu"])
     conn_on = _conn()
-    _seed_current_single_runs(conn_on, live_values={"gfs_global": 23.0, "icon_global": 23.5,
-                                                    "gem_global": 22.5, "jma_seamless": 24.0, "icon_eu": 23.2})
+    _seed_current_single_runs(conn_on, live_values={"ukmo_global_deterministic_10km": 23.0, "icon_global": 23.5,
+                                                    "icon_eu": 23.2})
     pid_on = mod._insert_posterior(conn_on, _request(), metric="high", anchor_id=1)
     row_on = _row(conn_on, pid_on)
     q_on = row_on["q_json"]
@@ -253,7 +255,7 @@ def test_flag_on_fusion_changes_posterior_and_writes_emos_identity(monkeypatch) 
     # box at lead 1, so the DWD/ICON family rep is icon_eu (the in-EU nest); icon_global is the
     # suppressed provider duplicate. The non-ICON decorrelated globals all stay.
     used = set(fusion["used_models"][1:])
-    assert used >= {"gfs_global", "gem_global", "jma_seamless"}
+    assert used >= {"ukmo_global_deterministic_10km"}
     icon_family = used & {"icon_global", "icon_eu", "icon_d2"}
     assert icon_family == {"icon_eu"}, f"exactly one DWD-ICON rep (icon_eu in-EU), got {icon_family}"
     # F6 identity components present.
@@ -271,21 +273,23 @@ def test_flag_on_fusion_changes_posterior_and_writes_emos_identity(monkeypatch) 
 def test_flag_on_dropped_global_fuses_with_remaining(monkeypatch) -> None:
     _disable_other_layers(monkeypatch)
     _enable_flag(monkeypatch)
-    # icon_global FAILS to fetch (None) -> dropped; the rest fuse.
-    _install_seams(monkeypatch, live_values={"gfs_global": 23.0, "icon_global": None,  # type: ignore[dict-item]
-                                             "gem_global": 22.5, "jma_seamless": 24.0, "icon_eu": 23.2},
-                   history_models=["ecmwf_ifs", "gfs_global", "gem_global", "jma_seamless", "icon_eu"])
+    # icon_global FAILS to fetch (None) -> dropped; the rest fuse. 2026-06-17: gfs_global/gem_global
+    # dropped from the fusion; for Paris the surviving decorrelated globals are ukmo_global (+
+    # the in-EU DWD rep icon_eu); JMA was dropped too.
+    _install_seams(monkeypatch, live_values={"ukmo_global_deterministic_10km": 23.0, "icon_global": None,  # type: ignore[dict-item]
+                                             "icon_eu": 23.2},
+                   history_models=["ecmwf_ifs", "ukmo_global_deterministic_10km", "icon_eu"])
     conn = _conn()
     # icon_global has NO persisted current row -> it is dropped (the q path never network-fetches
     # it). The rest are persisted and fuse.
-    _seed_current_single_runs(conn, live_values={"gfs_global": 23.0,
-                                                 "gem_global": 22.5, "jma_seamless": 24.0, "icon_eu": 23.2})
+    _seed_current_single_runs(conn, live_values={"ukmo_global_deterministic_10km": 23.0,
+                                                 "icon_eu": 23.2})
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
     assert "icon_global" in prov["dropped_models"]
     assert "icon_global" not in prov["used_models"]
     assert prov["method"] == "T2_BAYES"
-    assert {"gfs_global", "gem_global", "jma_seamless", "icon_eu"} <= set(prov["used_models"])
+    assert {"ukmo_global_deterministic_10km", "icon_eu"} <= set(prov["used_models"])
 
 
 def test_flag_on_all_extras_absent_falls_back_byte_identical(monkeypatch) -> None:
@@ -330,12 +334,12 @@ def test_flag_on_capture_exception_is_failsoft(monkeypatch) -> None:
 def test_flag_on_icon_d2_enters_in_paris_polygon(monkeypatch) -> None:
     _disable_other_layers(monkeypatch)
     _enable_flag(monkeypatch)
-    _install_seams(monkeypatch, live_values={"gfs_global": 23.0, "icon_global": 23.5, "gem_global": 22.5,
-                                             "jma_seamless": 24.0, "icon_eu": 23.2, "icon_d2": 23.1},
-                   history_models=["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu", "icon_d2"])
+    _install_seams(monkeypatch, live_values={"ukmo_global_deterministic_10km": 23.0, "icon_global": 23.5,
+                                             "icon_eu": 23.2, "icon_d2": 23.1},
+                   history_models=["ecmwf_ifs", "ukmo_global_deterministic_10km", "icon_global", "icon_eu", "icon_d2"])
     conn = _conn()
-    _seed_current_single_runs(conn, live_values={"gfs_global": 23.0, "icon_global": 23.5, "gem_global": 22.5,
-                                                 "jma_seamless": 24.0, "icon_eu": 23.2, "icon_d2": 23.1})
+    _seed_current_single_runs(conn, live_values={"ukmo_global_deterministic_10km": 23.0, "icon_global": 23.5,
+                                                 "icon_eu": 23.2, "icon_d2": 23.1})
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
     assert "icon_d2" in prov["used_models"]
@@ -353,14 +357,14 @@ def test_flag_on_icon_d2_absent_in_moscow_zero_leak(monkeypatch) -> None:
 
     monkeypatch.setattr(cfg, "runtime_cities_by_name", lambda: {"Moscow": _City()})
     monkeypatch.setattr("src.data.replacement_forecast_materializer.runtime_cities_by_name", lambda: {"Moscow": _City()}, raising=False)
-    _install_seams(monkeypatch, live_values={"gfs_global": 23.0, "icon_global": 23.5, "gem_global": 22.5,
-                                             "jma_seamless": 24.0, "icon_eu": 23.2, "icon_d2": 23.1},
-                   history_models=["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu", "icon_d2"])
+    _install_seams(monkeypatch, live_values={"ukmo_global_deterministic_10km": 23.0, "icon_global": 23.5,
+                                             "icon_eu": 23.2, "icon_d2": 23.1},
+                   history_models=["ecmwf_ifs", "ukmo_global_deterministic_10km", "icon_global", "icon_eu", "icon_d2"])
     conn = _conn()
     moscow_req = _request(city="Moscow", tz="Europe/Moscow")
     _seed_current_single_runs(conn, request=moscow_req,
-                              live_values={"gfs_global": 23.0, "icon_global": 23.5, "gem_global": 22.5,
-                                           "jma_seamless": 24.0, "icon_eu": 23.2, "icon_d2": 23.1})
+                              live_values={"ukmo_global_deterministic_10km": 23.0, "icon_global": 23.5,
+                                           "icon_eu": 23.2, "icon_d2": 23.1})
     pid = mod._insert_posterior(conn, moscow_req, metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
     assert "icon_d2" not in prov["used_models"], "Moscow out-of-polygon: icon_d2 must be ABSENT (zero-leak)"
@@ -372,9 +376,9 @@ def test_flag_on_dedup_drops_icon_seamless(monkeypatch) -> None:
     _enable_flag(monkeypatch)
     # icon_seamless fetched, but bit-identical history to icon_d2 -> deduped.
     monkeypatch.setattr(mod._replacement_bayes_precision_fusion_override, "_live_fetch",
-                        _make_live_fetch({"gfs_global": 23.0, "icon_eu": 23.2,
+                        _make_live_fetch({"ukmo_global_deterministic_10km": 23.0, "icon_eu": 23.2,
                                           "icon_d2": 23.1, "icon_seamless": 23.1}), raising=False)
-    hist = _make_history(["ecmwf_ifs", "gfs_global", "icon_eu"])
+    hist = _make_history(["ecmwf_ifs", "ukmo_global_deterministic_10km", "icon_eu"])
     # icon_d2 and icon_seamless share an IDENTICAL forecast series (alias).
     shared = ModelHistory(model="icon_d2", forecast_values=tuple(20.0 + 0.1 * i for i in range(30)),
                           settlement_values=tuple(20.0 + 0.0 * i for i in range(30)))
@@ -388,7 +392,7 @@ def test_flag_on_dedup_drops_icon_seamless(monkeypatch) -> None:
 
     monkeypatch.setattr(mod._replacement_bayes_precision_fusion_override, "_history_provider", _provider, raising=False)
     conn = _conn()
-    _seed_current_single_runs(conn, live_values={"gfs_global": 23.0, "icon_eu": 23.2,
+    _seed_current_single_runs(conn, live_values={"ukmo_global_deterministic_10km": 23.0, "icon_eu": 23.2,
                                                  "icon_d2": 23.1, "icon_seamless": 23.1})
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
@@ -435,34 +439,35 @@ def _seed_current_previous_runs(conn, *, model: str, value: float, request=None)
 def test_flag_on_previous_runs_substitution_fuses_identically_and_is_branded(monkeypatch) -> None:
     _disable_other_layers(monkeypatch)
     _enable_flag(monkeypatch)
-    live = {"gfs_global": 23.0, "icon_global": 23.5, "gem_global": 22.5,
-            "jma_seamless": 24.0, "icon_eu": 23.2}
-    hist = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"]
+    # 2026-06-17: the original substitution vehicle was jma_seamless (dropped from the fusion);
+    # the test is pinned on a surviving provider, ukmo_global, with icon_eu the single_runs ref.
+    live = {"icon_global": 23.5, "ukmo_global_deterministic_10km": 23.0, "icon_eu": 23.2}
+    hist = ["ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km", "icon_eu"]
 
-    # A: jma served via single_runs (the forward capture).
+    # A: ukmo_global served via single_runs (the forward capture).
     _install_seams(monkeypatch, live_values=live, history_models=hist)
     conn_a = _conn()
     _seed_current_single_runs(conn_a, live_values=live)
     pid_a = mod._insert_posterior(conn_a, _request(), metric="high", anchor_id=1)
     row_a = _row(conn_a, pid_a)
 
-    # B: jma's single_runs row ABSENT (the JMA-at-06Z structural case); the SAME value persisted
-    # as its previous_runs row at the same natural key. The injected live seam serves NOTHING for
-    # jma (None), so if the substitution broke, jma would be DROPPED and q would differ — the
-    # byte-identity below is therefore discriminating, not vacuous.
-    live_without_jma = {k: v for k, v in live.items() if k != "jma_seamless"}
-    _install_seams(monkeypatch, live_values=live_without_jma, history_models=hist)
+    # B: ukmo_global's single_runs row ABSENT (the structural-cadence case); the SAME value
+    # persisted as its previous_runs row at the same natural key. The injected live seam serves
+    # NOTHING for ukmo_global (None), so if the substitution broke it would be DROPPED and q would
+    # differ — the byte-identity below is therefore discriminating, not vacuous.
+    live_without_ukmo = {k: v for k, v in live.items() if k != "ukmo_global_deterministic_10km"}
+    _install_seams(monkeypatch, live_values=live_without_ukmo, history_models=hist)
     conn_b = _conn()
-    _seed_current_single_runs(conn_b, live_values=live_without_jma)
-    _seed_current_previous_runs(conn_b, model="jma_seamless", value=24.0)
+    _seed_current_single_runs(conn_b, live_values=live_without_ukmo)
+    _seed_current_previous_runs(conn_b, model="ukmo_global_deterministic_10km", value=23.0)
     pid_b = mod._insert_posterior(conn_b, _request(), metric="high", anchor_id=1)
     row_b = _row(conn_b, pid_b)
 
     assert row_a["q_json"] == row_b["q_json"], (
-        "the fused q must be BYTE-IDENTICAL whether jma's current value arrived via single_runs "
-        "or via the previous_runs substitution — any divergence means the substituted instrument "
-        "was special-cased (manual down-weighting / drop), which is forbidden: the lead-bucket "
-        "history residual variance is the only honest pricing of the older run"
+        "the fused q must be BYTE-IDENTICAL whether ukmo_global's current value arrived via "
+        "single_runs or via the previous_runs substitution — any divergence means the substituted "
+        "instrument was special-cased (manual down-weighting / drop), which is forbidden: the "
+        "lead-bucket history residual variance is the only honest pricing of the older run"
     )
     prov_a = json.loads(row_a["provenance_json"])["bayes_precision_fusion"]
     prov_b = json.loads(row_b["provenance_json"])["bayes_precision_fusion"]
@@ -470,12 +475,12 @@ def test_flag_on_previous_runs_substitution_fuses_identically_and_is_branded(mon
     assert prov_a["decorrelated_providers_served"] == prov_b["decorrelated_providers_served"]
     # Brand law: the substitution is recorded per instrument, never silent.
     serving_b = prov_b["current_value_serving"]
-    assert serving_b["jma_seamless"]["served_via"] == "previous_runs"
-    assert serving_b["jma_seamless"]["previous_run_substitution"] is True
-    assert serving_b["gfs_global"]["served_via"] == "single_runs"
+    assert serving_b["ukmo_global_deterministic_10km"]["served_via"] == "previous_runs"
+    assert serving_b["ukmo_global_deterministic_10km"]["previous_run_substitution"] is True
+    assert serving_b["icon_eu"]["served_via"] == "single_runs"
     serving_a = prov_a["current_value_serving"]
-    assert serving_a["jma_seamless"]["served_via"] == "single_runs"
-    assert serving_a["jma_seamless"]["previous_run_substitution"] is False
+    assert serving_a["ukmo_global_deterministic_10km"]["served_via"] == "single_runs"
+    assert serving_a["ukmo_global_deterministic_10km"]["previous_run_substitution"] is False
 
 
 def test_upgrade_trigger_note_lands_on_the_posterior_provenance(monkeypatch) -> None:

@@ -61,25 +61,40 @@ NBM_MODEL = "ncep_nbm_conus"
 UKMO_UK_MODEL = "ukmo_uk_deterministic_2km"
 # 2026-06-17 PRECISION-INPUT FIX (operator directive: "the data we use is 9km level and the
 # regional data is even more precise; your 25 and 15 and the not-precise cell is breaking the
-# fusion calculation"). Settlement-graded evidence (state/zeus-forecasts.db, recent settled WU
-# highs, previous-runs raw bias — NO statistical correction): the coarse globals run ~1-2C cold
-# vs settlement (jma_seamless -2.10, the coarse-cell offshore-snap offender; gfs_global -0.86;
-# icon_global -1.08; ukmo_global -1.10) while the high-resolution station-resolving models are
-# near-zero raw bias (gfs_hrrr 3km CONUS +0.004 MAE 1.33; gem_hrdps 2.5km N-America +0.86;
-# the in-EU icon_d2/arome/ukmo_uk already in the set, all ~0 bias). The fix feeds the PRECISE
-# raw data where the city is covered — it does NOT touch the T2 fusion math, only its inputs.
-#   gfs_hrrr — NOAA HRRR 3km CONUS deterministic. NCEP-family HIGH-RES rep: in-CONUS it carries
-#     the NOAA family and SUPPRESSES gfs_global (0.25/25km) + ncep_nbm (the 13km blend), exactly
-#     the most-specific-first single-rep doctrine that already governs icon_d2>icon_eu>icon_global.
-#   gem_hrdps_continental — CMC HRDPS 2.5km North-America deterministic. CMC/GEM-family HIGH-RES
-#     rep: in-domain it carries the CMC family and SUPPRESSES gem_global (the ~15km global).
+# fusion calculation"; "no 25km model we don't use them and don't download"). Settlement-graded
+# evidence (state/zeus-forecasts.db, recent settled WU highs, previous-runs raw bias — NO
+# statistical correction): the coarse globals run ~1-2C cold vs settlement (gfs_global -0.86;
+# gem_global similar coarse-cell cold; icon_global -1.08; ukmo_global -1.10) while the
+# high-resolution station-resolving models are near-zero raw bias (gfs_hrrr 3km CONUS +0.004
+# MAE 1.33; gem_hrdps 2.5km N-America +0.86; the in-EU icon_d2/arome/ukmo_uk already in the set,
+# all ~0 bias).
+#   gfs_hrrr — NOAA HRRR 3km CONUS deterministic. The NCEP-family rep in-CONUS.
+#   gem_hrdps_continental — CMC HRDPS 2.5km North-America deterministic. The CMC-family rep
+#     in N-America.
+# 2026-06-17 COARSE-GLOBAL REMOVAL (this commit): gfs_global (0.25°/25km) and gem_global (~15km)
+# are DROPPED from selection entirely — not merely suppressed in-CONUS. Removing them from
+# DECORR_GLOBALS removes them from GLOBAL_LIKELIHOOD_MODELS and hence from
+# bayes_precision_fusion_download.BAYES_PRECISION_FUSION_EXTRA_MODELS, so they are no longer
+# fused AND no longer downloaded (forward single_runs + previous_runs both stop; the existing
+# de-bias history rows age out). CONSEQUENCE: NCEP is repped ONLY by gfs_hrrr/ncep_nbm (CONUS)
+# and CMC ONLY by gem_hrdps (N-America); OUTSIDE those nest domains NCEP/CMC have NO rep and are
+# structurally absent — the domain-aware completeness contract
+# (replacement_fusion_upgrade_trigger.expected_provider_families_for_city) does NOT expect them
+# there, so a non-CONUS/non-NA city is COMPLETE on {DWD, JMA, UKMO} (+ ECMWF anchor) with no
+# phantom upgrade loop. icon_global/ukmo_global remain the always-global reps.
+# 2026-06-17 JMA DROP (operator, settlement-graded): jma_seamless is the COLDEST/least-precise
+# declared global — recent lead-1 day-ahead settlement raw bias -1.46, MAE 2.124 (n=1002), worse
+# than the just-dropped gfs_global (1.696) and far worse than the 9km anchor (1.309) and the
+# regional nests (icon_eu 1.062). It is the ONLY JMA-family member, so dropping it removes the
+# JMA decorrelated family entirely → the contract reduces to {NCEP, DWD, CMC, UKMO} + the ECMWF
+# anchor. (Caveat on record: the historical residuals were measured at the pre-2026-06-17 coords,
+# so part of jma's cold may be coarse-cell offshore-snap; the finer model-subset combinations are
+# to be RE-TESTED on clean post-coord-fix settled data — operator-deferred.) This also thins
+# decorrelation diversity (JMA was the only non-Western global); accepted pending that re-test.
 GFS_HRRR_MODEL = "gfs_hrrr"
 GEM_HRDPS_MODEL = "gem_hrdps_continental"
 DECORR_GLOBALS = (
-    "gfs_global",
     "icon_global",
-    "gem_global",
-    "jma_seamless",
     UKMO_GLOBAL_MODEL,
 )
 ICON_EU_MODEL = "icon_eu"
@@ -103,20 +118,20 @@ REGIONAL_MODELS = (
 # tuple is ordered highest-resolution-first; selection walks it and keeps the first eligible.
 ICON_FAMILY = ("icon_d2", ICON_EU_MODEL, "icon_global")
 # 2026-06-09: the SAME single-rep mechanism, two more instances (one mechanism, K<<N):
-#   NCEP/NOAA family — all three are the SAME NOAA physics at different scopes (gfs_hrrr 3km
-#   CONUS nest > ncep_nbm ~13km CONUS blend > gfs_global 0.25/25km), so feeding two as
-#   independent triple-counts one error source. 2026-06-17: gfs_hrrr (3km, +0.004 raw bias) is
-#   the most-specific NOAA rep — in-CONUS it carries the family and ncep_nbm + gfs_global are
-#   suppressed as provider dups; outside CONUS gfs_hrrr/nbm are ineligible and gfs_global carries
-#   the family. This kills the HRRR<->NBM<->GFS correlation double-count.
-NCEP_FAMILY = (GFS_HRRR_MODEL, NBM_MODEL, "gfs_global")
+#   NCEP/NOAA family — gfs_hrrr 3km CONUS nest and ncep_nbm ~13km CONUS blend are the SAME NOAA
+#   physics at different scopes; feeding two as independent double-counts one error source.
+#   gfs_hrrr (3km, +0.004 raw bias) is the most-specific NOAA rep — in-CONUS it carries the
+#   family and ncep_nbm is suppressed as a provider dup. 2026-06-17 COARSE-GLOBAL REMOVAL: the
+#   0.25°/25km gfs_global is no longer in the family — OUTSIDE CONUS both members are
+#   domain-ineligible, so NCEP has NO rep there (structurally absent, not expected).
+NCEP_FAMILY = (GFS_HRRR_MODEL, NBM_MODEL)
 #   UKMO family — the UKV 2km nest and the 10km global are the same Met Office physics; in
 #   the UK the 2km nest is the rep (ukmo_global suppressed), elsewhere the global carries it.
 UKMO_FAMILY = (UKMO_UK_MODEL, UKMO_GLOBAL_MODEL)
-#   CMC/GEM family (2026-06-17) — HRDPS 2.5km North-America nest and the GDPS ~15km global are
-#   the same Environment-Canada physics; in-domain the 2.5km nest is the rep (gem_global
-#   suppressed), elsewhere the global carries it. Adds station-resolving precision for N-America.
-GEM_FAMILY = (GEM_HRDPS_MODEL, "gem_global")
+#   CMC/GEM family (2026-06-17) — repped ONLY by the HRDPS 2.5km North-America nest. The GDPS
+#   ~15km global (gem_global) was DROPPED in the coarse-global removal, so OUTSIDE N-America CMC
+#   has NO rep (structurally absent, not expected). In-domain the 2.5km nest carries the family.
+GEM_FAMILY = (GEM_HRDPS_MODEL,)
 PROVIDER_FAMILIES = (ICON_FAMILY, NCEP_FAMILY, UKMO_FAMILY, GEM_FAMILY)
 
 # Alias dedup thresholds (spec §3: corr > 0.995 AND mean|delta| < eps).
@@ -131,8 +146,8 @@ _REGIONAL_DOMAIN_KEY = {
     "meteofrance_arome_france_hd": "meteofrance_arome_france_hd",
     ICON_EU_MODEL: ICON_EU_MODEL,
     # 2026-06-09 PROMOTION (operator-directed): ncep_nbm_conus is the domain-gated NCEP-family
-    # CONUS rep (suppresses gfs_global in-domain); ukmo_uk_deterministic_2km is the London
-    # regional expert (UKMO-family rep in the UK). Both gated by their own config polygons.
+    # CONUS blend (suppressed by gfs_hrrr when the 3km nest is present); ukmo_uk_deterministic_2km
+    # is the London regional expert (UKMO-family rep in the UK). Both gated by their own polygons.
     "ncep_nbm_conus": "ncep_nbm_conus",
     "ukmo_uk_deterministic_2km": "ukmo_uk_deterministic_2km",
     # 2026-06-17 precision-input fix: high-res CONUS / N-America regional experts, each gated by
@@ -380,8 +395,8 @@ def select_models(
     # The FIRST eligible member (most-specific-first) is the family rep; every other PRESENT
     # global-scope member of the family is suppressed as a provider duplicate — a second
     # eligible rep AND a present-but-ineligible member both count (e.g. icon_eu out-of-EU must
-    # never ride alongside icon_global; NBM must never ride alongside gfs_global). Regional
-    # non-reps are simply absent (out-of-polygon -> excluded_regionals), never "global dups".
+    # never ride alongside icon_global; ncep_nbm must never ride alongside gfs_hrrr in-CONUS).
+    # Regional non-reps are simply absent (out-of-polygon -> excluded_regionals), never "global dups".
     def _family_member_eligible(member: str) -> bool:
         if member in dropped_aliases:
             return False

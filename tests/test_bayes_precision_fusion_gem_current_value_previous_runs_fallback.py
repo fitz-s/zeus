@@ -125,7 +125,12 @@ def test_gem_fallback_respects_natural_key_cycle() -> None:
     assert "gem_global" not in out
 
 
-def test_download_skips_gem_single_runs_leg_but_keeps_previous_runs_leg(tmp_path) -> None:
+def test_download_no_longer_fetches_dropped_globals(tmp_path) -> None:
+    # 2026-06-17 COARSE-GLOBAL REMOVAL + JMA DROP: gem_global (~15km GDPS), gfs_global (0.25/25km)
+    # and the settlement-cold jma_seamless were dropped from model_selection.DECORR_GLOBALS, so
+    # they leave BAYES_PRECISION_FUSION_EXTRA_MODELS and are no longer requested in EITHER leg
+    # (forward single_runs OR previous_runs). The generalized previous_runs-substitution lane stays
+    # alive for the models that remain (proven by the ukmo_global case in test_fusion_upgrade_trigger).
     from datetime import UTC, datetime
 
     from src.data.bayes_precision_fusion_download import (
@@ -158,9 +163,8 @@ def test_download_skips_gem_single_runs_leg_but_keeps_previous_runs_leg(tmp_path
         forecast_db=db, cycle=datetime(2026, 6, 9, 0, tzinfo=UTC), targets=[target],
         single_runs_fetch=_single, previous_runs_fetch=_previous,
     )
-    assert "gem_global" not in single_calls, (
-        "the single-runs API structurally cannot serve GDPS — the known-dead request leg must "
-        "not be fired (51-cities of fail-soft noise masquerading as a transient drop)"
-    )
-    assert "gem_global" in prev_calls  # the GDPS capture lane stays alive
-    assert "gfs_global" in single_calls  # other models unaffected
+    for dropped in ("gem_global", "gfs_global", "jma_seamless"):
+        assert dropped not in single_calls, f"{dropped} dropped from the fusion -> no single_runs fetch"
+        assert dropped not in prev_calls, f"{dropped} dropped from the fusion -> no previous_runs fetch"
+    # the models that remain are still fetched (lane alive)
+    assert "icon_global" in single_calls and "ukmo_global_deterministic_10km" in single_calls

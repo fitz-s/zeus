@@ -361,30 +361,19 @@ SOURCES: dict[str, ForecastSourceSpec] = {
     # multi-model posterior. They are DISABLED plumbing rows until the BAYES_PRECISION_FUSION fusion flag
     # (replacement_0_1_bayes_precision_fusion_enabled, default-OFF) AND an ingest path activate them;
     # the per-model live capture is fail-soft (a missing source is simply dropped).
-    "openmeteo_gfs_global": ForecastSourceSpec(
-        source_id="openmeteo_gfs_global",
-        tier="disabled",
-        kind="forecast_table",
-        enabled_by_default=False,
-        model_name="gfs_global",
-        allowed_roles=("diagnostic",),
-        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
-    ),
+    # 2026-06-17 COARSE-GLOBAL REMOVAL: the openmeteo_gfs_global (0.25°/25km) and
+    # openmeteo_gem_global (~15km) forward plumbing specs were DELETED — those models are no
+    # longer in the fusion (model_selection.DECORR_GLOBALS) nor fetched. Their forward source_id
+    # was always `<model>_single_runs` (bayes_precision_fusion_download), so these disabled
+    # registry rows were vestigial; their de-bias-history specs (gfs_previous_runs /
+    # gem_previous_runs, above) are RETAINED so existing history rows stay interpretable as they
+    # age out — same diagnostic class as the kept ecmwf_previous_runs anchor bridge.
     "openmeteo_icon_global": ForecastSourceSpec(
         source_id="openmeteo_icon_global",
         tier="disabled",
         kind="forecast_table",
         enabled_by_default=False,
         model_name="icon_global",
-        allowed_roles=("diagnostic",),
-        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
-    ),
-    "openmeteo_gem_global": ForecastSourceSpec(
-        source_id="openmeteo_gem_global",
-        tier="disabled",
-        kind="forecast_table",
-        enabled_by_default=False,
-        model_name="gem_global",
         allowed_roles=("diagnostic",),
         degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
     ),

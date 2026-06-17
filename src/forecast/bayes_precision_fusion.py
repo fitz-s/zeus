@@ -56,11 +56,12 @@ DISAGREE_W = 0.5     # weight on cross-source spread added into fusion sigma^2.
 TAU0_FLOOR = 0.8     # floor on prior std tau0.
 COMMON_DATES_MIN = 5  # >=5 date-aligned common rows before Ledoit-Wolf shrink; else diagonal C0.
 
-# Source identities (spec §3) — the production anchor + decorrelated globals + regionals.
+# Source identity (spec §3). Only the anchor is consumed by this module's fusion math. The
+# model-set authority (decorrelated globals + regionals) lives SOLELY in
+# src.forecast.model_selection. 2026-06-17: the duplicate DECORR_GLOBALS / ICON_EU_MODEL /
+# REGIONAL_MODELS that previously sat here were dead (no importer, no in-file use) AND listed the
+# now-removed coarse globals gfs_global/gem_global — deleted to keep one authority and no drift.
 ANCHOR_MODEL = "ecmwf_ifs"                       # universal 0.1 anchor = prior mean.
-DECORR_GLOBALS = ("gfs_global", "icon_global", "gem_global", "jma_seamless")
-ICON_EU_MODEL = "icon_eu"                        # DWD global/EU rep carried at all leads.
-REGIONAL_MODELS = ("icon_d2", "meteofrance_arome_france_hd")
 
 
 # ---- EB bias (walk-forward) ---------------------------------------------------------

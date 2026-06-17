@@ -53,19 +53,73 @@ SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
 # NOT here: the anchor is the PRIOR (not a decorrelated likelihood provider) and icon_seamless is
 # the alias-dedup probe (dropped from the fused Sigma, never a provider). The materializer imports
 # DECORRELATED_PROVIDER_FAMILIES so the two sites can never drift on what counts as a provider.
-# 2026-06-17 PRECISION-INPUT FIX: the high-res NOAA (gfs_hrrr 3km) and CMC (gem_hrdps 2.5km)
-# nests are the SAME physical providers as gfs_global/ncep_nbm and gem_global — they belong with
-# their family so an in-CONUS city served by the high-res nest still registers NCEP/CMC presence
-# (the family-completeness count must not under-report just because the precise nest won the rep).
+# 2026-06-17 COARSE-GLOBAL REMOVAL: the 0.25°/25km gfs_global and ~15km gem_global are dropped
+# from the fusion (model_selection.DECORR_GLOBALS), so they are no longer family members here.
+# NCEP is now repped ONLY by its CONUS nests (gfs_hrrr 3km / ncep_nbm ~13km) and CMC ONLY by the
+# HRDPS 2.5km North-America nest — both DOMAIN-GATED. OUTSIDE those nest domains NCEP/CMC have no
+# servable member and are STRUCTURALLY ABSENT for that city; the flat 5-family count would then
+# false-flag them as "missing". `expected_provider_families_for_city` below is the per-city
+# domain-aware expected set that replaces the flat count at the materializer's completeness gate.
+# 2026-06-17 JMA DROP (operator, settlement-graded): jma_seamless (the only JMA member) is the
+# coldest/least-precise global (lead-1 raw bias -1.46, MAE 2.124) and was dropped from the fusion
+# (model_selection.DECORR_GLOBALS). The JMA family is therefore REMOVED entirely here — no member
+# can ever serve, so it must never be expected anywhere. The contract is now {NCEP, DWD, CMC, UKMO}.
 DECORRELATED_PROVIDER_FAMILIES: dict[str, tuple[str, ...]] = {
-    "NCEP": ("gfs_hrrr", "gfs_global", "ncep_nbm_conus"),
+    "NCEP": ("gfs_hrrr", "ncep_nbm_conus"),
     "DWD": ("icon_d2", "icon_eu", "icon_global"),
-    "CMC": ("gem_hrdps_continental", "gem_global"),
-    "JMA": ("jma_seamless",),
+    "CMC": ("gem_hrdps_continental",),
     "UKMO": ("ukmo_global_deterministic_10km", "ukmo_uk_deterministic_2km"),
 }
 
+# The GLOBAL maximum family count (every family servable). Retained as the fail-open fallback for
+# expected_provider_families_for_city when a city's coords cannot be resolved; the LIVE
+# completeness gate uses the per-city expected set, never this flat count.
 EXPECTED_DECORRELATED_PROVIDER_COUNT = len(DECORRELATED_PROVIDER_FAMILIES)
+
+
+def expected_provider_families_for_city(lat: float, lon: float, lead_days: int) -> frozenset[str]:
+    """THE per-city, per-LEAD domain-aware expected provider-family set (2026-06-17 removal).
+
+    A decorrelated provider family is EXPECTED for a city AT THIS LEAD only if it has a member
+    that is SERVABLE there-and-then: a pure-global member (available worldwide at any lead) OR a
+    domain-gated member whose polygon covers (lat, lon) AND whose max_lead_days cap is not
+    exceeded at ``lead_days``. After the coarse-global drop, NCEP (gfs_hrrr / ncep_nbm, both
+    CONUS) and CMC (gem_hrdps, N-America) are nest-only; outside those domains — OR at a lead
+    PAST the nest's max_lead_days cap (gfs_hrrr=2, ncep_nbm=3, gem_hrdps=2) — they are NOT
+    expected, so a non-CONUS/non-NA city, AND a CONUS/NA city at far lead, is COMPLETE on the
+    pure globals {DWD, UKMO} (+ anchor) with no phantom PARTIAL flag and no upgrade re-enqueue.
+
+    LEAD-AWARENESS IS LOAD-BEARING (2026-06-17 critic fix): lead 0 is NOT "the most permissive
+    lead" — it is the OPPOSITE. A nest eligible at lead 0 becomes INELIGIBLE past its cap, so a
+    lead-0 expected set over-expects NCEP/CMC at far lead (CONUS lead>=4 / NA lead>=3) and
+    re-fires the exact phantom-PARTIAL + upgrade loop this contract exists to kill. The expected
+    set MUST be evaluated at the lead the fusion actually serves (the city-local lead).
+
+    The "is this member domain-gated" test is `_REGIONAL_DOMAIN_KEY` membership — the SAME gate
+    `regional_eligible` itself keys on. A member NOT in `_REGIONAL_DOMAIN_KEY` is a pure global
+    (icon_global / ukmo_global) servable at any lead; this correctly treats the domain-gated
+    global `ncep_nbm_conus` (CONUS-only, NOT in REGIONAL_MODELS) as gated, which a
+    `REGIONAL_MODELS`-only test would miss. Fail-soft: any error -> all families expected (the
+    conservative pre-removal behavior; never silently under-reports completeness).
+    """
+    try:
+        from src.forecast.model_selection import (  # noqa: PLC0415
+            _REGIONAL_DOMAIN_KEY,
+            regional_eligible,
+        )
+
+        def _member_servable(member: str) -> bool:
+            if member in _REGIONAL_DOMAIN_KEY:
+                return regional_eligible(member, lat=lat, lon=lon, lead_days=int(lead_days))
+            return True  # pure global member: servable worldwide at any lead
+
+        expected: set[str] = set()
+        for family, members in DECORRELATED_PROVIDER_FAMILIES.items():
+            if any(_member_servable(m) for m in members):
+                expected.add(family)
+        return frozenset(expected)
+    except Exception:
+        return frozenset(DECORRELATED_PROVIDER_FAMILIES)
 
 
 def decorrelated_provider_families_of(models: "set[str] | frozenset[str] | tuple[str, ...]") -> frozenset[str]:
@@ -148,6 +202,43 @@ def _latest_posterior_served(
     return source_cycle_iso, decorrelated_provider_families_of(set(str(m) for m in used))
 
 
+def _city_latlon(city: str) -> tuple[float, float] | None:
+    """Resolve a city's (lat, lon) from the live runtime city map. None when the city is unknown
+    or the map cannot be read (caller fails OPEN to all-families-expected). Single source of
+    truth for coords — the SAME runtime_cities_by_name the materializer's q path reads, so the
+    upgrade trigger and the fusion can never disagree on where a city is."""
+    try:
+        from src.config import runtime_cities_by_name  # noqa: PLC0415
+
+        city_obj = runtime_cities_by_name().get(city)
+        if city_obj is None:
+            return None
+        return float(getattr(city_obj, "lat")), float(getattr(city_obj, "lon"))
+    except Exception:
+        return None
+
+
+def _scope_lead_days(city: str, target_date: str, cycle_iso: str) -> int:
+    """City-LOCAL lead (days) from the posterior's cycle to the target date — the lead at which
+    the fusion serves this scope. Used to evaluate the per-city expected set at the REAL lead
+    (the nests are lead-capped: gfs_hrrr=2, ncep_nbm=3, gem_hrdps=2), so a far-lead CONUS/NA scope
+    does NOT over-expect NCEP/CMC. Fail-soft to lead 0 (the MOST-expecting / loudest direction:
+    over-expect -> PARTIAL/upgrade, never a silent false-COMPLETE)."""
+    try:
+        from datetime import date as _date, datetime as _dt  # noqa: PLC0415
+        from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+        from src.config import runtime_cities_by_name  # noqa: PLC0415
+
+        cycle_dt = _dt.fromisoformat(str(cycle_iso).replace("Z", "+00:00"))
+        city_obj = runtime_cities_by_name().get(city)
+        tz = getattr(city_obj, "timezone", None) if city_obj is not None else None
+        cycle_local = cycle_dt.astimezone(ZoneInfo(tz)).date() if tz else cycle_dt.date()
+        return max(0, (_date.fromisoformat(str(target_date)) - cycle_local).days)
+    except Exception:
+        return 0
+
+
 def scope_capture_offers_larger_provider_set(
     conn: sqlite3.Connection, *, city: str, target_date: str, metric: str
 ) -> dict[str, object]:
@@ -176,16 +267,31 @@ def scope_capture_offers_larger_provider_set(
         conn, city=city, target_date=target_date, metric=metric, source_cycle_iso=source_cycle_iso
     )
     capturable = decorrelated_provider_families_of(capturable_models)
-    new_families = capturable - served
-    # STRICT superset: the capturable set must add a family the served set lacks. A served set with
-    # no fusion (empty) is NOT upgraded here — there is no smaller-set posterior to grow (the
-    # single-anchor fallback is a separate concern handled by the missing-capture gate).
-    is_upgrade = bool(served) and bool(new_families) and served.issubset(capturable)
+    # DOMAIN-AWARE gate (2026-06-17 coarse-global removal): a family that is STRUCTURALLY ABSENT
+    # for this city (NCEP/CMC outside their nest domains, now that the global fallbacks are gone)
+    # must NEVER trigger an upgrade re-enqueue — there is no provider that can ever land, so the
+    # chase would loop forever. Intersect capturable with the per-city expected set so only a
+    # family that is BOTH capturable AND expected-here can count as a growth target. Fail-open
+    # (expected = all families) when coords are missing, which preserves the exact pre-removal
+    # comparison (capturable already excludes structurally-absent families via missing rows).
+    _latlon = _city_latlon(city)
+    _lead = _scope_lead_days(city, target_date, source_cycle_iso)
+    expected = (
+        expected_provider_families_for_city(_latlon[0], _latlon[1], _lead)
+        if _latlon is not None
+        else frozenset(DECORRELATED_PROVIDER_FAMILIES)
+    )
+    capturable_expected = capturable & expected
+    new_families = capturable_expected - served
+    # STRICT superset: the capturable-and-expected set must add a family the served set lacks. A
+    # served set with no fusion (empty) is NOT upgraded here — there is no smaller-set posterior
+    # to grow (the single-anchor fallback is a separate concern handled by the missing-capture gate).
+    is_upgrade = bool(served) and bool(new_families) and served.issubset(capturable_expected)
     return {
         "is_upgrade": is_upgrade,
         "source_cycle_time": source_cycle_iso,
         "served_families": sorted(served),
-        "capturable_families": sorted(capturable),
+        "capturable_families": sorted(capturable_expected),
         "new_families": sorted(new_families),
     }
 

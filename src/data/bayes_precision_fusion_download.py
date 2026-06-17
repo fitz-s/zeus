@@ -12,9 +12,11 @@
 #   Reduces ~9.5-12k HTTP/day to ~600-900. q-path byte-identical (same rows, fewer fetches).
 """F1 step-2/3/9 — the FORWARD + walk-forward BAYES_PRECISION_FUSION multi-model download/persist job.
 
-For each current-target (city, metric, target_date, lead) x the 8 extra Open-Meteo models
-(decorrelated globals gfs_global/icon_global/gem_global/jma_seamless + icon_eu + in-domain
-regionals icon_d2/arome + icon_seamless for alias-dedup), this job:
+For each current-target (city, metric, target_date, lead) x the extra Open-Meteo models
+(decorrelated globals icon_global/ukmo_global + icon_eu + the domain-gated CONUS/N-America nests
+ncep_nbm/gfs_hrrr/gem_hrdps + in-domain regionals icon_d2/arome/ukmo_uk + icon_seamless for
+alias-dedup), this job: (2026-06-17: the coarse globals gfs_global 25km / gem_global 15km AND the
+settlement-cold jma_seamless were DROPPED from the fusion, so they are no longer fetched here.)
 
   (1) FORWARD single_runs fetch  — today's current-target value at the fixed cycle (live capture
       for replay; SPEC §3 single-runs identity). REUSES bayes_precision_fusion_capture._default_live_fetch.
@@ -112,6 +114,11 @@ BAYES_PRECISION_FUSION_DOWNSCALING_POLICY = "none"         # no statistical down
 # and BLOCKER 3 (the ifs025->ifs9 bridge). Falls back to '<model>_previous_runs'.
 OPENMETEO_PREVIOUS_RUNS_SOURCE_ID: dict[str, str] = {
     ANCHOR_MODEL: "ecmwf_previous_runs",
+    # 2026-06-17: gfs_global/gem_global/jma_seamless were dropped from the FORWARD fusion, but
+    # these previous-runs routing entries are RETAINED — they are the de-bias-HISTORY layer (the
+    # same class as the kept ecmwf_previous_runs / gfs_previous_runs / gem_previous_runs / jma_
+    # previous_runs registry specs), and resolve the product-identity of the existing history rows
+    # as they age out. They are not forward-fetch surface.
     "gfs_global": "gfs_previous_runs",
     "icon_global": "icon_previous_runs",
     "icon_eu": "icon_previous_runs",
@@ -290,12 +297,18 @@ BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS: tuple[str, ...] = ()
 # gem exception in _read_persisted_current_capture. gem_seamless was REJECTED as a substitute:
 # it serves HRDPS/RDPS for North-American cities — a different physical product than the GDPS
 # history (the source-identity violation class of the EB-bias wrong-set bug ff7f33dd5b).
-SINGLE_RUNS_UNSERVABLE_MODELS: tuple[str, ...] = ("gem_global",)
+# 2026-06-17: gem_global (the only member) was dropped from the fusion, so no fetched model is
+# single-runs-unservable any more — this list is now empty (the previous_runs-substitution path it
+# guarded is still exercised by the surviving providers).
+SINGLE_RUNS_UNSERVABLE_MODELS: tuple[str, ...] = ()
 
-# R3 — Per-model run cadence: the UTC init hours each provider actually publishes.
-# Fetching a model at a non-publishing cycle re-pulls the SAME underlying run under a
-# wrong source_cycle_time (measured: jma_seamless 531 rows@06Z + 612@18Z = redundant).
-# Models not listed here default to all four {0,6,12,18}.
+# R3 — Per-model run cadence: the UTC init hours each provider actually publishes. Fetching a model
+# at a non-publishing cycle re-pulls the SAME underlying run under a wrong source_cycle_time.
+# Models not listed here default to all four {0,6,12,18}. NOTE (2026-06-17): jma_seamless and
+# gem_global — the ONLY restricted-cadence models — were dropped from the fusion, so this gate is
+# currently DORMANT (no fetched model is listed). The entries are kept as ACCURATE provider-cadence
+# reference (and are pinned by test_openmeteo_call_budget); they re-arm automatically if a restricted-
+# cadence model is ever re-added.
 MODEL_PUBLISH_CYCLE_HOURS: dict[str, frozenset[int]] = {
     "jma_seamless": frozenset({0, 12}),   # JMA GSM/seamless init 00/12Z only
     "gem_global":   frozenset({0, 12}),   # CMC GDPS 00/12Z only
@@ -336,8 +349,8 @@ OPENMETEO_PREVIOUS_RUNS_MODEL_IDS: dict[str, str] = {
 #     domain-limited. We reuse the icon_d2 polygon as the EU-presence gate (model_selection
 #     already does this: icon_eu_in_eu_domain = regional_eligible("icon_d2", ...)).
 #
-# Globals (gfs_global, icon_global, gem_global, jma_seamless, ecmwf_ifs) are worldwide;
-# they are never skipped here.
+# The fetched globals (icon_global, ukmo_global, ecmwf_ifs) are worldwide; they are never skipped
+# here. (gfs_global/gem_global/jma_seamless were dropped 2026-06-17 — no longer fetched.)
 _DOMAIN_GATED_MODELS: frozenset[str] = (
     frozenset(REGIONAL_MODELS)
     | frozenset({ICON_EU_MODEL})

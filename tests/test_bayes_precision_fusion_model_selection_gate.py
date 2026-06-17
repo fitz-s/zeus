@@ -64,7 +64,7 @@ def test_arome_eligible_only_in_france() -> None:
 def test_select_models_paris_in_domain_enters_both_regionals() -> None:
     present = {
         "ecmwf_ifs": 4.7, "gfs_global": 5.1, "icon_global": 3.7, "gem_global": 5.0,
-        "jma_seamless": 3.8, "icon_eu": 4.1, "icon_d2": 4.2,
+        "jma_seamless": 3.8, "ukmo_global_deterministic_10km": 4.5, "icon_eu": 4.1, "icon_d2": 4.2,
         "meteofrance_arome_france_hd": 4.3,
     }
     sel = select_models(present_models=present, lat=PARIS[0], lon=PARIS[1], lead_days=1)
@@ -72,7 +72,11 @@ def test_select_models_paris_in_domain_enters_both_regionals() -> None:
     # BLOCKER 9 / spec §4(2): one representative per provider family. icon_d2 is the in-domain
     # DWD-ICON rep here, so icon_global AND icon_eu are BOTH suppressed from the globals — the
     # DWD/ICON family contributes exactly one instrument (icon_d2 as the regional expert).
-    assert sel.likelihood_globals == ("gfs_global", "gem_global", "jma_seamless")
+    # 2026-06-17 COARSE-GLOBAL REMOVAL + JMA DROP: gfs_global/gem_global/jma_seamless are present
+    # as STRAY values but are no longer in the selection vocabulary -> they NEVER enter the fusion.
+    # Paris (EU; no NCEP/CMC nest in-domain) keeps only ukmo_global as a likelihood global.
+    assert sel.likelihood_globals == ("ukmo_global_deterministic_10km",)
+    assert not ({"gfs_global", "gem_global", "jma_seamless"} & set(sel.used_models))
     assert set(sel.regional_experts) == {"icon_d2", "meteofrance_arome_france_hd"}
     assert sel.excluded_regionals == ()
     assert set(sel.dropped_provider_dups) == {"icon_global", "icon_eu"}

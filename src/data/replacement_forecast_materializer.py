@@ -1072,16 +1072,18 @@ class _BayesPrecisionFusionFusionOverride:
     # substrate is too thin AND no conservative default applies (caller falls back to the
     # AIFS-shape soft-anchor q).
     predictive_sigma_c: float | None = None
-    # FIX 1 (2026-06-09): the K3 decorrelated-provider completeness verdict computed INSIDE the
-    # fusion (the same "served %d/5" determination the materializer already logs). True =
-    # all 5 declared decorrelated providers served (-> FUSED_NORMAL_FULL); False = INCOMPLETE
-    # (-> FUSED_NORMAL_PARTIAL). The materializer REUSES this; it never re-derives a parallel
-    # provider check (single-builder).
+    # FIX 1 (2026-06-09; 2026-06-17 per-city): the K3 decorrelated-provider completeness verdict
+    # computed INSIDE the fusion. True = every provider family EXPECTED AT THIS CITY is served
+    # (-> FUSED_NORMAL_FULL); False = an expected family is absent (-> FUSED_NORMAL_PARTIAL). The
+    # expected set is per-city domain-aware (3 for non-CONUS/non-NA after the coarse-global
+    # removal, up to 5 in CONUS), NOT a flat 5. The materializer REUSES this; it never re-derives
+    # a parallel provider check (single-builder).
     decorrelated_providers_complete: bool = False
-    # FIX 5 (2026-06-09): capture-status provenance. count of the 5 decorrelated providers whose
-    # CURRENT value entered the fused set for this cell, and the count expected (5). Recording only.
+    # FIX 5 (2026-06-09; 2026-06-17 per-city): capture-status provenance. count of the
+    # EXPECTED-here decorrelated providers whose CURRENT value entered the fused set, and the
+    # per-city expected count. Recording only.
     decorrelated_providers_served: int = 0
-    decorrelated_providers_expected: int = 5
+    decorrelated_providers_expected: int = 0
     # Task #32 follow-up (brand law): per-instrument serving provenance for every model that
     # entered the fused set — which endpoint served its CURRENT value (served_via), the served
     # row id/cycle/capture stamp/age, and its lead bucket. A previous_runs substitution (a
@@ -1340,34 +1342,41 @@ def _replacement_bayes_precision_fusion_override(
         )
 
         used_models = tuple(fused.used_models)
-        # K3 ANTIBODY (2026-06-09): surface a STRUCTURALLY-incomplete decorrelated set LOUDLY. The
-        # 4 declared decorrelated PROVIDERS are NOAA(gfs) / DWD-ICON(one of icon_d2|icon_eu|
-        # icon_global) / CMC(gem) / JMA(jma). gem_global's single_runs is unavailable at 06z/18z
-        # cycles (12h cadence) so the ensemble silently ran as 3 -> a permanently-unservable model
-        # must never masquerade as a transient drop. Log expected-vs-served providers per cell.
+        # K3 ANTIBODY (2026-06-09; 2026-06-17 domain-aware): surface a STRUCTURALLY-incomplete
+        # decorrelated set LOUDLY — but ONLY for a family that is EXPECTED at this city. The
+        # declared decorrelated PROVIDERS are NCEP / DWD-ICON / CMC / JMA / UKMO. 2026-06-17
+        # COARSE-GLOBAL REMOVAL: NCEP (gfs_hrrr/ncep_nbm, CONUS) and CMC (gem_hrdps, N-America)
+        # lost their global fallbacks, so OUTSIDE those nest domains they are STRUCTURALLY ABSENT,
+        # not a transient drop — a non-CONUS city legitimately fuses {DWD,JMA,UKMO} and is
+        # COMPLETE. expected_provider_families_for_city(lat,lon) is THE per-city expected set
+        # (domain-gated via the SAME polygon the download + selection use), replacing the old
+        # flat /5 count; missing = expected_for_city − served. The warning now fires only for an
+        # EXPECTED-but-absent family (a genuine transient drop), never a structurally-absent one.
         # SINGLE-AUTHORITY provider-family mapping (Task #32): the model->decorrelated-provider
         # family map lives in replacement_fusion_upgrade_trigger.DECORRELATED_PROVIDER_FAMILIES so
         # the fusion's served/missing determination and the upgrade trigger's served/capturable
-        # comparison can never drift on what counts as a provider. 2026-06-09 promotion: families
-        # are rep-based — NBM is the NCEP rep in-CONUS, the UKV 2km nest the UKMO rep in the UK —
-        # so each family is served when ANY of its members is in used_models.
+        # comparison can never drift on what counts as a provider, NOR on what is expected where.
         from src.data.replacement_fusion_upgrade_trigger import (  # noqa: PLC0415
             DECORRELATED_PROVIDER_FAMILIES,
-            EXPECTED_DECORRELATED_PROVIDER_COUNT,
             decorrelated_provider_families_of,
+            expected_provider_families_for_city,
         )
 
         _served_families = decorrelated_provider_families_of(set(used_models))
+        # Per-city AND per-LEAD: the nests are lead-capped, so the expected set must be evaluated
+        # at the SAME city-local lead the fusion serves (lead_days, computed above) — NOT lead 0,
+        # which would over-expect NCEP/CMC at far lead and false-flag PARTIAL (2026-06-17 critic fix).
+        _expected_families = expected_provider_families_for_city(lat, lon, lead_days)
         _missing_providers = [
             f"{fam}/{'|'.join(DECORRELATED_PROVIDER_FAMILIES[fam])}"
-            for fam in DECORRELATED_PROVIDER_FAMILIES
+            for fam in sorted(_expected_families)
             if fam not in _served_families
         ]
-        # FIX 1/FIX 5 (2026-06-09): the SINGLE K3 completeness verdict reused by the q-mode +
-        # capture-status provenance. 5 declared decorrelated providers; served = 5 - missing.
-        # This is the ONLY provider-count determination — the q-mode FULL/PARTIAL split and the
-        # FIX-5 capture_status both read it (no parallel re-derivation).
-        _decorrelated_expected = EXPECTED_DECORRELATED_PROVIDER_COUNT
+        # FIX 1/FIX 5 (2026-06-09; 2026-06-17 per-city): the SINGLE K3 completeness verdict reused
+        # by the q-mode + capture-status provenance. Expected = the families servable AT THIS CITY;
+        # served = expected − missing. This is the ONLY provider-count determination — the q-mode
+        # FULL/PARTIAL split and the FIX-5 capture_status both read it (no parallel re-derivation).
+        _decorrelated_expected = len(_expected_families)
         _decorrelated_served = _decorrelated_expected - len(_missing_providers)
         _decorrelated_complete = not _missing_providers
         if _missing_providers:
@@ -1375,10 +1384,10 @@ def _replacement_bayes_precision_fusion_override(
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
                     "replacement_0_1 BAYES_PRECISION_FUSION fusion decorrelated-provider INCOMPLETE for %s %s: served "
-                    "%d/5, missing %s (used=%s). A structurally-unservable provider (e.g. gem 12h-"
-                    "cadence single_runs) must be resolved explicitly, not silently dropped.",
-                    request.city, metric, _decorrelated_served, _missing_providers,
-                    list(used_models),
+                    "%d/%d expected-here, missing %s (used=%s). An EXPECTED-but-absent provider (a "
+                    "transient single_runs drop) must be resolved explicitly, not silently dropped.",
+                    request.city, metric, _decorrelated_served, _decorrelated_expected,
+                    _missing_providers, list(used_models),
                 )
             except Exception:
                 pass

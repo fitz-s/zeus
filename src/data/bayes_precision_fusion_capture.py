@@ -105,13 +105,11 @@ def _available_after_decision(
         return False
 
 # Open-Meteo model ids for the single-runs forecast endpoint. icon_eu is OM's `icon_eu`;
-# jma_seamless / gem_global / gfs_global / icon_global / icon_d2 are OM model ids; the France
-# AROME-HD model is OM `meteofrance_arome_france_hd`.
+# icon_global / icon_d2 are OM model ids; the France AROME-HD model is OM
+# `meteofrance_arome_france_hd`. (2026-06-17: gfs_global/gem_global/jma_seamless were DROPPED from
+# the fusion — their forward entries are removed; `.get(model, model)` covers any stray lookup.)
 OPENMETEO_MODEL_IDS: dict[str, str] = {
-    "gfs_global": "gfs_global",
     "icon_global": "icon_global",
-    "gem_global": "gem_global",
-    "jma_seamless": "jma_seamless",
     "icon_eu": "icon_eu",
     "icon_d2": "icon_d2",
     "meteofrance_arome_france_hd": "meteofrance_arome_france_hd",
