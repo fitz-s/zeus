@@ -584,10 +584,81 @@ def test_fixA_cap_transitioned_pending_reconcile_suppresses_not_terminal():
     )
 
 
-def test_fixA_cap_transitioned_consumed_releases_lock():
-    """FIX A (#125): CapTransitioned(to_status=CONSUMED) IS terminal — the order
-    filled into a position.  The lock must RELEASE (return None) so the family
-    can size and re-enter the pipeline."""
+def test_fixA_cap_transitioned_consumed_suppresses_resting_live_order():
+    """FIX A (#125) DEFECT REGRESSION (live-money 2026-06-16):
+    CapTransitioned(to_status=CONSUMED) is NOT terminal.
+
+    CONSUMED is emitted the instant a submit SUCCEEDS (status=SUBMITTED) and the
+    order is RESTING LIVE on the venue — the cap is COMMITTED to that resting
+    order.  There is NO fill at this point; a fill is a later, separate
+    UserTradeObserved event.  Treating CONSUMED as terminal made EVERY successful
+    resting order instantly release its own duplicate lock, so a re-decision of
+    the same family (same token/direction, same or worse price) placed a SECOND
+    concurrent resting ENTRY order -> ~2x intended exposure.
+
+    Live evidence: buy_no token
+    35015396764119764057109967922516391182815114821189461579432074152958132060729
+    rested TWICE @0.570 (18:40:20 then 18:47:19) because the first aggregate's
+    CapTransitioned(CONSUMED) released the lock for the second event.
+
+    A CONSUMED-resting order is ACTIVE -> the lock MUST SUPPRESS (return
+    not-None).  This test:
+      - FAILS (RED) against the buggy `IN ('CONSUMED', 'RELEASED')` terminal set.
+      - PASSES (GREEN) after CONSUMED is dropped from the terminal set.
+    """
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)
+
+    # Submit SUCCESS -> order rests live -> CapTransitioned(to_status=CONSUMED).
+    # No UserTradeObserved (no fill).  The order is resting, ACTIVE.
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=3,
+        event_type="VenueSubmitAcknowledged",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "venue_order_id": "0x72aee028",
+        },
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=4,
+        event_type="CapTransitioned",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "to_status": "CONSUMED",
+        },
+    )
+
+    # Re-decision at the SAME price (0.70) as the resting order: must HOLD.
+    same_price = _lock_reason(conn, limit_price=0.70)
+    assert same_price is not None, (
+        "CapTransitioned(to_status=CONSUMED) is a RESTING-LIVE order, NOT a fill "
+        "and NOT terminal — the lock MUST suppress the duplicate ENTRY.  "
+        f"Got: {same_price!r}"
+    )
+    assert "SUPPRESSED" in same_price or "FAIL_CLOSED" in same_price, (
+        f"Suppress reason should contain 'SUPPRESSED' or 'FAIL_CLOSED', got: {same_price!r}"
+    )
+
+    # A re-decision at a WORSE (higher buy) price must ALSO hold — never two
+    # concurrent resting ENTRY orders on the same family-side, regardless of price.
+    worse_price = _lock_reason(conn, limit_price=0.72)
+    assert worse_price is not None, (
+        "A non-improving re-bid against a CONSUMED resting order must suppress.  "
+        f"Got: {worse_price!r}"
+    )
+
+
+def test_fixA_cap_transitioned_consumed_then_fill_releases_lock():
+    """FIX A (#125): once a CONSUMED-resting order actually FILLS, the later
+    UserTradeObserved IS terminal and releases the lock — so a genuinely closed
+    (filled) order does not lock the family forever.  This guards the fix from
+    over-suppressing: CONSUMED-resting suppresses, CONSUMED+fill releases."""
     conn = sqlite3.connect(":memory:")
     _seed_active_family_order(conn)
 
@@ -602,9 +673,21 @@ def test_fixA_cap_transitioned_consumed_releases_lock():
             "to_status": "CONSUMED",
         },
     )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=4,
+        event_type="UserTradeObserved",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "fill_authority_state": "FILL_CONFIRMED",
+        },
+    )
 
     assert _lock_reason(conn, limit_price=0.70) is None, (
-        "CapTransitioned(to_status=CONSUMED) is terminal — lock must release."
+        "A CONSUMED order that subsequently FILLED (UserTradeObserved) IS "
+        "terminal — the lock must release."
     )
 
 

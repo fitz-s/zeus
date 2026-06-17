@@ -4995,7 +4995,13 @@ def _execution_command_id_from_final_intent(
 #
 #   - SubmitRejected                            : venue rejected; never rested.
 #   - UserTradeObserved                         : fill confirmed; order done.
-#   - CapTransitioned  to_status=CONSUMED       : filled into position; done.
+#   - CapTransitioned  to_status=CONSUMED       : cap COMMITTED to a SUBMITTED
+#       order that is RESTING LIVE on the venue — emitted on submit SUCCESS
+#       (status=SUBMITTED), BEFORE any fill (the fill is a later
+#       UserTradeObserved).  The order is ACTIVE, not done.  NOT terminal —
+#       must SUPPRESS, or every resting order instantly releases its own
+#       duplicate lock and the family re-bids a SECOND concurrent ENTRY
+#       (live-money defect 2026-06-16: token …2060729 double-rested @0.570).
 #   - CapTransitioned  to_status=RELEASED       : closed without position; done.
 #   - CapTransitioned  to_status=PENDING_RECONCILE : cap RESERVED, order MAY
 #       still be resting live (emitted on TIMEOUT_UNKNOWN / POST_SUBMIT_UNKNOWN
@@ -5013,8 +5019,7 @@ _TERMINAL_EVENT_SQL = """
         event_type = 'SubmitRejected'
         OR event_type = 'UserTradeObserved'
         OR (event_type = 'CapTransitioned'
-            AND json_extract(payload_json, '$.to_status')
-                IN ('CONSUMED', 'RELEASED'))
+            AND json_extract(payload_json, '$.to_status') = 'RELEASED')
         OR (event_type = 'Reconciled'
             AND COALESCE(json_extract(payload_json, '$.pending_reconcile'), 0) = 0)
       )
@@ -5101,16 +5106,19 @@ def _locked_live_opportunity_active_order_reason(
         )
 
     if terminal_row is not None:
-        # A qualifying terminal event (CONSUMED/RELEASED cap, SubmitRejected,
+        # A qualifying terminal event (RELEASED cap, SubmitRejected,
         # UserTradeObserved, or a fully-settled Reconcile) was found.  The order
         # is no longer resting/pending.  RELEASE — re-decide at fresh price.
-        # NOTE: CapTransitioned(to_status=PENDING_RECONCILE) does NOT match this
-        # query — it is correctly kept as ACTIVE (suppress, fail-closed).
+        # NOTE: CapTransitioned(to_status=CONSUMED) does NOT match this query —
+        # CONSUMED is the cap-commit of a SUBMITTED order resting LIVE (no fill
+        # yet), so it is correctly kept as ACTIVE (suppress).  PENDING_RECONCILE
+        # likewise does not match — kept ACTIVE (suppress, fail-closed).
         return None
 
     # No qualifying terminal event found for the latest aggregate.  This covers:
     #   - ACTIVE states (command-created, submit-attempted, acknowledged-resting,
-    #     submit-unknown, user-order-observed with no fill, PENDING_RECONCILE)
+    #     cap-CONSUMED-resting-live, submit-unknown, user-order-observed with no
+    #     fill, PENDING_RECONCILE)
     #   - Indeterminate / not-yet-landed states
     # All treated as ACTIVE: suppress the potential duplicate.
     return (
