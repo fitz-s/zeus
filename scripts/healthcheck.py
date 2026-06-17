@@ -825,6 +825,12 @@ def _launchctl_loaded_contract(
         item["issues"].append("loaded_working_directory_mismatch")
     if environment.get("PYTHONPATH") != str(root_path):
         item["issues"].append("loaded_pythonpath_mismatch")
+    if label == _launchd_label():
+        forbidden_shadow_env = _forbidden_live_shadow_env(environment)
+        if forbidden_shadow_env:
+            item["issues"].append(
+                "loaded_live_trading_shadow_env_present:" + ",".join(forbidden_shadow_env)
+            )
     if module != expected_module:
         item["issues"].append("loaded_program_module_mismatch")
     if heartbeat_timing:
@@ -836,6 +842,17 @@ def _launchctl_loaded_contract(
         item["issues"].extend(timing_issues)
     item["ok"] = not item["issues"]
     return item
+
+
+def _forbidden_live_shadow_env(environment: dict) -> list[str]:
+    """Return env keys that contradict the live-trading launchd contract."""
+    forbidden: list[str] = []
+    for key, value in environment.items():
+        key_text = str(key)
+        value_text = str(value)
+        if "SHADOW" in key_text.upper() or value_text.lower() == "edli_shadow_no_submit":
+            forbidden.append(key_text)
+    return sorted(forbidden)
 
 
 def _launchd_contracts(
@@ -911,6 +928,12 @@ def _launchd_contracts(
             item["issues"].append("working_directory_mismatch")
         if env.get("PYTHONPATH") != str(root_path):
             item["issues"].append("pythonpath_mismatch")
+        if label == _launchd_label():
+            forbidden_shadow_env = _forbidden_live_shadow_env(env)
+            if forbidden_shadow_env:
+                item["issues"].append(
+                    "live_trading_shadow_env_present:" + ",".join(forbidden_shadow_env)
+                )
         if module != expected_module:
             item["issues"].append("program_module_mismatch")
         if heartbeat_timing:

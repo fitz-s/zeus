@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=2026-05-20
+# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=2026-06-17
 # Purpose: Antibody test for architecture/cascade_liveness_contract.yaml; enforces
 #   that every state-machine table with *_INTENT_CREATED rows has a registered
 #   APScheduler poller in src/main.py, and that every terminal_states_with_operator_action
@@ -130,6 +130,12 @@ def _scheduler_job_ids_at_boot() -> set[str]:
                         else:
                             job_ids.add(jid)
     return job_ids
+
+
+def test_live_scheduler_registers_no_shadow_jobs():
+    """The live trading daemon must not schedule shadow/no-submit organs."""
+    job_ids = _scheduler_job_ids_at_boot()
+    assert not {job_id for job_id in job_ids if "shadow" in job_id.lower()}
 
 
 def _state_transitions_in_module(module_path: Path) -> Iterable[str]:

@@ -849,6 +849,43 @@ def test_launchd_contracts_reject_non_dict_environment_without_crashing(monkeypa
     assert "pythonpath_mismatch" in live_item["issues"]
 
 
+def test_launchd_contracts_reject_live_trading_shadow_env(monkeypatch, tmp_path):
+    root = tmp_path / "zeus"
+    launchagents = tmp_path / "LaunchAgents"
+    specs = {}
+    for label, module in _LAUNCHD_TEST_SPECS:
+        env_extra = (
+            {"ZEUS_OPPORTUNITY_BOOK_SHADOW": "1"}
+            if label == "com.zeus.live-trading"
+            else None
+        )
+        plist_path = _write_launchd_plist(
+            launchagents,
+            label=label,
+            module=module,
+            root=root,
+            env_extra=env_extra,
+        )
+        specs[label] = _launchctl_print_output(
+            label=label,
+            module=module,
+            root=root,
+            plist_path=plist_path,
+            env_extra=env_extra,
+        )
+    _mock_launchctl_loaded_contracts(monkeypatch, specs)
+
+    result = _ORIGINAL_LAUNCHD_CONTRACTS(launchagents, root=root)
+
+    assert result["ok"] is False
+    live_item = next(item for item in result["items"] if item["label"] == "com.zeus.live-trading")
+    assert "live_trading_shadow_env_present:ZEUS_OPPORTUNITY_BOOK_SHADOW" in live_item["issues"]
+    assert (
+        "loaded_live_trading_shadow_env_present:ZEUS_OPPORTUNITY_BOOK_SHADOW"
+        in live_item["issues"]
+    )
+
+
 def test_source_health_status_requires_writer_and_sources_fresh(monkeypatch, tmp_path):
     source_health_path = _write_source_health(tmp_path / "source_health.json")
     monkeypatch.setattr(healthcheck, "_source_health_path", lambda: source_health_path)

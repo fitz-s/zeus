@@ -1292,55 +1292,6 @@ def _settlement_guard_report_tick() -> None:
     run_settlement_guard_report()
 
 
-@_scheduler_job("shadow_comparator")
-def _shadow_comparator_tick() -> None:
-    """Daily standing shadow-vs-live comparator (operator-approved, K<<N organ).
-
-    The ONE comparator every promotion uses instead of a bespoke harness. For
-    each registered shadow candidate (immediate customer: day0_remaining_day_q),
-    it READS the persisted shadow + live q for each settled cohort cell, grades
-    both against the VERIFIED settlement via grade_receipt (the ONE Direction-Law
-    truth function — never recomputes domain logic), and emits a running
-    scoreboard with a PROMOTE_SUPPORTED | LIVE_BETTER | INSUFFICIENT_N verdict:
-      - state/shadow_comparator.json (machine)
-      - docs/evidence/shadow_comparisons/<date>_shadow_comparison.md (human)
-    plus a one-line INFO verdict per candidate in this daemon's log.
-
-    Co-located with the settlement-guard tick (same WORLD+forecasts read shape,
-    same daily cadence). Read-only; honest absence (INSUFFICIENT_N) when a
-    candidate's shadow lane is not yet persisting a comparable q — never a
-    fabricated cohort. Import is local to keep src.main import-light.
-    """
-    from src.analysis.shadow_comparator import run_shadow_comparator_job
-
-    report = run_shadow_comparator_job()
-    for cand in report.get("candidates", []):
-        logger.info("shadow_comparator[%s]: %s", cand["name"], cand["verdict_line"])
-
-
-@_scheduler_job("day0_shadow_enrichment")
-def _day0_shadow_enrichment_tick() -> None:
-    """Grade SETTLED candidate-bearing day0 shadow receipts against VERIFIED truth.
-
-    Closes the day0-evidence gap (operator 2026-06-11): later_outcome /
-    would_have_won were 0% populated on the day0 lane because no writer existed.
-    This tick joins no_trade_regret_events (day0 shadow rows carrying
-    direction + bin_label) to VERIFIED forecasts.settlement_outcomes, grades each
-    through the canonical grade_receipt (Direction Law + HK preimage), and writes
-    the outcome via NoTradeRegretLedger.enrich_after_settlement. PURE-DB (no
-    network) and NEVER-SUBMIT / NEVER-FABRICATE: only already-candidate-bearing
-    receipts with a VERIFIED settlement are graded. Co-located with the
-    shadow-comparator tick (same WORLD+forecasts read shape, same cadence).
-    """
-    from src.analysis.day0_shadow_enrichment import run_day0_shadow_enrichment_job
-
-    report = run_day0_shadow_enrichment_job()
-    logger.info(
-        "day0_shadow_enrichment: status=%s enriched=%s",
-        report.get("status"), report.get("enriched", report.get("error")),
-    )
-
-
 @_scheduler_job("settlement_skill_attribution")
 def _settlement_skill_attribution_tick() -> None:
     """Grade every SETTLED position into a skill category (operator 2026-06-12 law).
@@ -1353,8 +1304,8 @@ def _settlement_skill_attribution_tick() -> None:
     MISS so a lucky win can no longer masquerade as system health. The skill
     win-rate = SKILL_WIN / (SKILL_WIN + LUCKY_WIN + SKILL_LOSS + MISCALIBRATED_LOSS).
 
-    Runs after the settlement harvesting + day0 enrichment ticks (settlement truth
-    already landed). Idempotent per position (UNIQUE(position_id)); backfills every
+    Runs after the settlement harvesting tick (settlement truth already landed).
+    Idempotent per position (UNIQUE(position_id)); backfills every
     historically-settled position on first run. Sole writer of
     settlement_attribution. Import local to keep src.main import-light.
     """
@@ -10016,31 +9967,12 @@ def main():
         _settlement_guard_report_tick, "cron", hour=9, minute=15,
         id="settlement_guard_report", max_instances=1, coalesce=True,
     )
-    # Standing shadow-vs-live comparator — 09:20 UTC, just after the settlement-
-    # guard tick (same WORLD+forecasts read shape, settlement truth already
-    # landed). Read-only; writes state/shadow_comparator.json +
-    # docs/evidence/shadow_comparisons/<date>.md + a one-line verdict per
-    # candidate. INSUFFICIENT_N (honest absence) until a shadow lane persists a
-    # comparable q.
-    scheduler.add_job(
-        _shadow_comparator_tick, "cron", hour=9, minute=20,
-        id="shadow_comparator", max_instances=1, coalesce=True,
-    )
-    # Day0 shadow-receipt outcome enrichment — 09:25 UTC, after the shadow
-    # comparator (settlement truth already landed). Grades SETTLED candidate-bearing
-    # day0 receipts (later_outcome / would_have_won) against VERIFIED truth via the
-    # canonical grade_receipt. PURE-DB, idempotent, never-submit/never-fabricate.
-    # Closes the 0%-populated day0 grading layer (operator 2026-06-11).
-    scheduler.add_job(
-        _day0_shadow_enrichment_tick, "cron", hour=9, minute=25,
-        id="day0_shadow_enrichment", max_instances=1, coalesce=True,
-    )
-    # Settlement skill-attribution — 09:30 UTC, after settlement harvesting +
-    # day0 enrichment (settlement truth already landed). Grades each settled
-    # position into a skill category (SKILL_WIN / LUCKY_WIN / SKILL_LOSS /
-    # MISCALIBRATED_LOSS / STALE_DECISION) so a lucky win can no longer fake
-    # system health (operator 2026-06-12 law). Idempotent per position; backfills
-    # history on first run. Sole writer of settlement_attribution.
+    # Settlement skill-attribution — 09:30 UTC, after settlement harvesting.
+    # Grades each settled position into a skill category (SKILL_WIN / LUCKY_WIN /
+    # SKILL_LOSS / MISCALIBRATED_LOSS / STALE_DECISION) so a lucky win can no
+    # longer fake system health (operator 2026-06-12 law). Idempotent per
+    # position; backfills history on first run. Sole writer of
+    # settlement_attribution.
     scheduler.add_job(
         _settlement_skill_attribution_tick, "cron", hour=9, minute=30,
         id="settlement_skill_attribution", max_instances=1, coalesce=True,
