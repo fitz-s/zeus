@@ -809,6 +809,75 @@ class TestLiveOrderCommandSplit:
         MockClient.assert_not_called()
         assert mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
 
+    def test_entry_same_token_recent_terminal_command_cools_down_before_persistence(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """A top-ranked token cannot be retried immediately after any entry command."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+
+        token_id = "tok-cooldown-entry"
+        snapshot_id = _ensure_snapshot(mem_conn, token_id=token_id)
+        envelope_id = _ensure_envelope(
+            mem_conn,
+            token_id=token_id,
+            price=Decimal("0.40"),
+            size=Decimal("10.0"),
+        )
+        mem_conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, last_event_id, created_at,
+                updated_at, review_required_reason
+            ) VALUES (
+                'cmd-recent-cancelled', ?, ?, 'pos-recent-cancelled',
+                'dec-recent-cancelled', 'idem-recent-cancelled', 'ENTRY',
+                'mkt-test-001', ?, 'BUY', 10.0, 0.40, 'order-cancelled',
+                'CANCELLED', NULL, '2026-06-17T16:30:00+00:00',
+                ?, NULL
+            )
+            """,
+            (
+                snapshot_id,
+                envelope_id,
+                token_id,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        mem_conn.commit()
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_entry_intent(mem_conn, token_id=token_id)
+
+        with patch("src.state.venue_command_repo.insert_command") as insert_command, patch(
+            "src.data.polymarket_client.PolymarketClient"
+        ) as MockClient:
+            result = _live_order(
+                trade_id="trd-cooldown-attempt",
+                intent=intent,
+                shares=11.0,
+                conn=mem_conn,
+                decision_id="dec-cooldown-attempt",
+            )
+
+        assert result.status == "rejected"
+        assert result.reason == "entry_cooldown:same_token_entry_cooling_down"
+        assert result.command_state == "REJECTED"
+        insert_command.assert_not_called()
+        MockClient.assert_not_called()
+        assert mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
+
     def test_final_intent_legacy_envelope_ignores_pre_submit_audit_only_gaps(self):
         """FinalExecutionIntent handoff must use the same pre-submit integrity split."""
         from src.contracts.execution_intent import FinalExecutionIntent

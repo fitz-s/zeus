@@ -157,6 +157,7 @@ _ENTRY_DUPLICATE_OPEN_COMMAND_STATES = frozenset(
 _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES = frozenset(
     {"REJECTED", "SUBMIT_REJECTED", "CANCELLED", "EXPIRED"}
 )
+_ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
 
 
 def _quote_sql_identifier(identifier: str) -> str:
@@ -297,6 +298,114 @@ def _entry_maker_only_component(
         "order_type": order_type,
         "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
         "post_only": True,
+    }
+
+
+def _parse_sqlite_timestamp(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _entry_same_token_cooldown_component(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    candidate_position_id: str,
+    now: datetime | None = None,
+) -> dict:
+    """Throttle repeated ENTRY attempts for a top-ranked token."""
+
+    token = str(token_id or "").strip()
+    if not token:
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": False,
+            "reason": "missing_token_id",
+        }
+    if not _table_exists(conn, "venue_commands"):
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "missing_venue_commands_table",
+        }
+    row = conn.execute(
+        """
+        SELECT command_id, position_id, state, created_at, updated_at
+        FROM venue_commands
+        WHERE intent_kind = 'ENTRY'
+          AND side = 'BUY'
+          AND token_id = ?
+          AND position_id != ?
+        ORDER BY updated_at DESC, created_at DESC
+        LIMIT 1
+        """,
+        (token, candidate_position_id),
+    ).fetchone()
+    if row is None:
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "allowed_no_prior_entry",
+            "token_id": token,
+        }
+    if isinstance(row, sqlite3.Row):
+        command_id = str(row["command_id"])
+        position_id = str(row["position_id"])
+        state = str(row["state"])
+        created_at = row["created_at"]
+        updated_at = row["updated_at"]
+    else:
+        command_id = str(row[0])
+        position_id = str(row[1])
+        state = str(row[2])
+        created_at = row[3]
+        updated_at = row[4]
+    last_seen = _parse_sqlite_timestamp(updated_at) or _parse_sqlite_timestamp(created_at)
+    if last_seen is None:
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": False,
+            "reason": "prior_entry_timestamp_unparseable",
+            "existing_command_id": command_id,
+            "existing_position_id": position_id,
+            "existing_command_state": state,
+        }
+    now_utc = now or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    age_seconds = (now_utc.astimezone(timezone.utc) - last_seen).total_seconds()
+    remaining_seconds = _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - age_seconds
+    if remaining_seconds > 0:
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": False,
+            "reason": "same_token_entry_cooling_down",
+            "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
+            "remaining_seconds": int(remaining_seconds),
+            "existing_command_id": command_id,
+            "existing_position_id": position_id,
+            "existing_command_state": state,
+            "existing_updated_at": str(updated_at or ""),
+            "existing_created_at": str(created_at or ""),
+        }
+    return {
+        "component": "entry_same_token_cooldown",
+        "allowed": True,
+        "reason": "allowed_cooldown_elapsed",
+        "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
+        "age_seconds": int(age_seconds),
+        "existing_command_id": command_id,
+        "existing_command_state": state,
     }
 
 
@@ -3892,6 +4001,35 @@ def _live_order(
                 command_state="REJECTED",
             )
 
+        cooldown_component = _entry_same_token_cooldown_component(
+            conn,
+            token_id=intent.token_id,
+            candidate_position_id=trade_id,
+        )
+        if not cooldown_component.get("allowed"):
+            reason = str(
+                cooldown_component.get("reason") or "same_token_entry_cooldown"
+            )
+            logger.warning(
+                "_live_order: same-token entry cooldown blocked before command "
+                "persistence for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                cooldown_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"entry_cooldown:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                intent_id=None,
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
+
         decision_source_component = _entry_decision_source_component(intent)
         if not decision_source_component.get("allowed"):
             reason = str(decision_source_component.get("reason") or "invalid_decision_source_context")
@@ -4007,6 +4145,7 @@ def _live_order(
                             collateral_refresh_component,
                             collateral_component,
                             entries_pause_component,
+                            cooldown_component,
                             duplicate_same_token_component,
                             decision_source_component,
                             corrected_identity_component,
