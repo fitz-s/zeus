@@ -1,0 +1,3136 @@
+{
+ "Amsterdam": {
+  "elevation_m": -3.4,
+  "lat": "52.308601",
+  "lon": "4.76389",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 52.26713,
+    "cell_lon": 4.824399,
+    "d_eff_m": 6180.9,
+    "delta_z_m": -9.4
+   },
+   "gem_global": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 52.350006,
+    "cell_lon": 4.800003,
+    "d_eff_m": 5217.2,
+    "delta_z_m": -9.4
+   },
+   "gfs_global": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 52.30719,
+    "cell_lon": 4.8046875,
+    "d_eff_m": 2778.1,
+    "delta_z_m": -9.4
+   },
+   "icon_d2": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 52.3,
+    "cell_lon": 4.7599998,
+    "d_eff_m": 992.3,
+    "delta_z_m": -9.4
+   },
+   "icon_eu": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 52.3125,
+    "cell_lon": 4.75,
+    "d_eff_m": 1039.0,
+    "delta_z_m": -9.4
+   },
+   "icon_global": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 52.25,
+    "cell_lon": 4.75,
+    "d_eff_m": 6584.3,
+    "delta_z_m": -9.4
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 52.5,
+    "cell_lon": 5.0,
+    "d_eff_m": 26636.5,
+    "delta_z_m": -9.4
+   },
+   "meteofrance_arome_france_hd": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 52.309998,
+    "cell_lon": 4.76,
+    "d_eff_m": 306.7,
+    "delta_z_m": -9.4
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 52.3125,
+    "cell_lon": 4.78125,
+    "d_eff_m": 1257.3,
+    "delta_z_m": -9.4
+   },
+   "ukmo_uk_deterministic_2km": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 52.314274,
+    "cell_lon": 4.7794952,
+    "d_eff_m": 1234.2,
+    "delta_z_m": -9.4
+   }
+  },
+  "station": "EHAM"
+ },
+ "Ankara": {
+  "elevation_m": 952.5,
+  "lat": "40.128101",
+  "lon": "32.995098",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 948.0,
+    "cell_lat": 40.105446,
+    "cell_lon": 33.02521,
+    "d_eff_m": 3592.0,
+    "delta_z_m": 4.5
+   },
+   "gem_global": {
+    "cell_elevation_m": 948.0,
+    "cell_lat": 40.200012,
+    "cell_lon": 33.000015,
+    "d_eff_m": 8007.0,
+    "delta_z_m": 4.5
+   },
+   "gfs_global": {
+    "cell_elevation_m": 948.0,
+    "cell_lat": 40.123657,
+    "cell_lon": 33.046875,
+    "d_eff_m": 4429.9,
+    "delta_z_m": 4.5
+   },
+   "icon_d2": {
+    "cell_elevation_m": 948.0,
+    "cell_lat": 40.125,
+    "cell_lon": 33.0,
+    "d_eff_m": 540.9,
+    "delta_z_m": 4.5
+   },
+   "icon_eu": {
+    "cell_elevation_m": 948.0,
+    "cell_lat": 40.125,
+    "cell_lon": 33.0,
+    "d_eff_m": 540.9,
+    "delta_z_m": 4.5
+   },
+   "icon_global": {
+    "cell_elevation_m": 948.0,
+    "cell_lat": 40.125,
+    "cell_lon": 33.0,
+    "d_eff_m": 540.9,
+    "delta_z_m": 4.5
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 948.0,
+    "cell_lat": 40.0,
+    "cell_lon": 33.0,
+    "d_eff_m": 14250.3,
+    "delta_z_m": 4.5
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 948.0,
+    "cell_lat": 40.125,
+    "cell_lon": 33.046875,
+    "d_eff_m": 4415.7,
+    "delta_z_m": 4.5
+   }
+  },
+  "station": "LTAC"
+ },
+ "Atlanta": {
+  "elevation_m": 312.7,
+  "lat": "33.6367",
+  "lon": "-84.428101",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 302.0,
+    "cell_lat": 33.63796,
+    "cell_lon": -84.41687,
+    "d_eff_m": 1049.1,
+    "delta_z_m": 10.7
+   },
+   "gem_global": {
+    "cell_elevation_m": 302.0,
+    "cell_lat": 33.600006,
+    "cell_lon": -84.45,
+    "d_eff_m": 4556.3,
+    "delta_z_m": 10.7
+   },
+   "gfs_global": {
+    "cell_elevation_m": 302.0,
+    "cell_lat": 33.680443,
+    "cell_lon": -84.375,
+    "d_eff_m": 6914.7,
+    "delta_z_m": 10.7
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 302.0,
+    "cell_lat": 33.6268,
+    "cell_lon": -84.41876,
+    "d_eff_m": 1399.9,
+    "delta_z_m": 10.7
+   },
+   "icon_global": {
+    "cell_elevation_m": 302.0,
+    "cell_lat": 33.625,
+    "cell_lon": -84.375,
+    "d_eff_m": 5085.5,
+    "delta_z_m": 10.7
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 302.0,
+    "cell_lat": 33.5,
+    "cell_lon": -84.5,
+    "d_eff_m": 16596.0,
+    "delta_z_m": 10.7
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 302.0,
+    "cell_lat": 33.643177,
+    "cell_lon": -84.41493,
+    "d_eff_m": 1416.1,
+    "delta_z_m": 10.7
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 302.0,
+    "cell_lat": 33.65625,
+    "cell_lon": -84.375,
+    "d_eff_m": 5374.6,
+    "delta_z_m": 10.7
+   }
+  },
+  "station": "KATL"
+ },
+ "Auckland": {
+  "elevation_m": 7.0,
+  "lat": "-37.01199",
+  "lon": "174.786331",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -36.942005,
+    "cell_lon": 174.78261,
+    "d_eff_m": 7789.0,
+    "delta_z_m": 2.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -37.05,
+    "cell_lon": 174.75,
+    "d_eff_m": 5316.4,
+    "delta_z_m": 2.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -36.960617,
+    "cell_lon": 174.84375,
+    "d_eff_m": 7657.8,
+    "delta_z_m": 2.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -37.0,
+    "cell_lon": 174.875,
+    "d_eff_m": 7985.6,
+    "delta_z_m": 2.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -37.0,
+    "cell_lon": 175.0,
+    "d_eff_m": 19020.0,
+    "delta_z_m": 2.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -37.03125,
+    "cell_lon": 174.79688,
+    "d_eff_m": 2337.4,
+    "delta_z_m": 2.0
+   }
+  },
+  "station": "NZAA"
+ },
+ "Austin": {
+  "elevation_m": 165.2,
+  "lat": "30.197535",
+  "lon": "-97.662015",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 149.0,
+    "cell_lat": 30.193321,
+    "cell_lon": -97.684204,
+    "d_eff_m": 2183.4,
+    "delta_z_m": 16.2
+   },
+   "gem_global": {
+    "cell_elevation_m": 149.0,
+    "cell_lat": 30.150002,
+    "cell_lon": -97.649994,
+    "d_eff_m": 5410.3,
+    "delta_z_m": 16.2
+   },
+   "gfs_global": {
+    "cell_elevation_m": 149.0,
+    "cell_lat": 30.165962,
+    "cell_lon": -97.61719,
+    "d_eff_m": 5557.8,
+    "delta_z_m": 16.2
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 149.0,
+    "cell_lat": 30.189205,
+    "cell_lon": -97.66044,
+    "d_eff_m": 938.5,
+    "delta_z_m": 16.2
+   },
+   "icon_global": {
+    "cell_elevation_m": 149.0,
+    "cell_lat": 30.25,
+    "cell_lon": -97.625,
+    "d_eff_m": 6832.4,
+    "delta_z_m": 16.2
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 149.0,
+    "cell_lat": 30.0,
+    "cell_lon": -97.5,
+    "d_eff_m": 26932.9,
+    "delta_z_m": 16.2
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 149.0,
+    "cell_lat": 30.20344,
+    "cell_lon": -97.65874,
+    "d_eff_m": 728.1,
+    "delta_z_m": 16.2
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 149.0,
+    "cell_lat": 30.1875,
+    "cell_lon": -97.59375,
+    "d_eff_m": 6655.2,
+    "delta_z_m": 16.2
+   }
+  },
+  "station": "KAUS"
+ },
+ "Beijing": {
+  "elevation_m": 35.4,
+  "lat": "40.077349",
+  "lon": "116.596702",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 33.0,
+    "cell_lat": 40.105446,
+    "cell_lon": 116.59665,
+    "d_eff_m": 3124.2,
+    "delta_z_m": 2.4
+   },
+   "gem_global": {
+    "cell_elevation_m": 33.0,
+    "cell_lat": 40.050003,
+    "cell_lon": 116.55002,
+    "d_eff_m": 5002.8,
+    "delta_z_m": 2.4
+   },
+   "gfs_global": {
+    "cell_elevation_m": 33.0,
+    "cell_lat": 40.123657,
+    "cell_lon": 116.60156,
+    "d_eff_m": 5165.8,
+    "delta_z_m": 2.4
+   },
+   "icon_global": {
+    "cell_elevation_m": 33.0,
+    "cell_lat": 40.125,
+    "cell_lon": 116.625,
+    "d_eff_m": 5819.6,
+    "delta_z_m": 2.4
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 33.0,
+    "cell_lat": 40.0,
+    "cell_lon": 116.5,
+    "d_eff_m": 11905.8,
+    "delta_z_m": 2.4
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 33.0,
+    "cell_lat": 40.03125,
+    "cell_lon": 116.578125,
+    "d_eff_m": 5364.3,
+    "delta_z_m": 2.4
+   }
+  },
+  "station": "ZBAA"
+ },
+ "Buenos Aires": {
+  "elevation_m": 20.4,
+  "lat": "-34.8222",
+  "lon": "-58.5358",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": -34.833042,
+    "cell_lon": -58.51712,
+    "d_eff_m": 2088.2,
+    "delta_z_m": 2.4
+   },
+   "gem_global": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": -34.8,
+    "cell_lon": -58.499992,
+    "d_eff_m": 4096.4,
+    "delta_z_m": 2.4
+   },
+   "gfs_global": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": -34.85193,
+    "cell_lon": -58.59375,
+    "d_eff_m": 6237.1,
+    "delta_z_m": 2.4
+   },
+   "icon_global": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": -34.875,
+    "cell_lon": -58.5,
+    "d_eff_m": 6718.8,
+    "delta_z_m": 2.4
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": -35.0,
+    "cell_lon": -58.5,
+    "d_eff_m": 20038.1,
+    "delta_z_m": 2.4
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": -34.78125,
+    "cell_lon": -58.5,
+    "d_eff_m": 5605.2,
+    "delta_z_m": 2.4
+   }
+  },
+  "station": "SAEZ"
+ },
+ "Busan": {
+  "elevation_m": 1.8,
+  "lat": "35.179501",
+  "lon": "128.938004",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 35.184532,
+    "cell_lon": 128.91582,
+    "d_eff_m": 2092.3,
+    "delta_z_m": -0.2
+   },
+   "gem_global": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 35.250008,
+    "cell_lon": 129.0,
+    "d_eff_m": 9653.3,
+    "delta_z_m": -0.2
+   },
+   "gfs_global": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 35.203384,
+    "cell_lon": 128.90625,
+    "d_eff_m": 3921.6,
+    "delta_z_m": -0.2
+   },
+   "icon_global": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 35.125,
+    "cell_lon": 129.0,
+    "d_eff_m": 8276.2,
+    "delta_z_m": -0.2
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 35.2,
+    "cell_lon": 128.9375,
+    "d_eff_m": 2279.8,
+    "delta_z_m": -0.2
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 35.15625,
+    "cell_lon": 128.95312,
+    "d_eff_m": 2927.8,
+    "delta_z_m": -0.2
+   }
+  },
+  "station": "RKPK"
+ },
+ "Cape Town": {
+  "elevation_m": 46.0,
+  "lat": "-33.97403",
+  "lon": "18.604333",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": -33.989456,
+    "cell_lon": 18.651686,
+    "d_eff_m": 4691.0,
+    "delta_z_m": 4.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": -33.899998,
+    "cell_lon": 18.600006,
+    "d_eff_m": 8241.7,
+    "delta_z_m": 4.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": -34.031883,
+    "cell_lon": 18.632812,
+    "d_eff_m": 6948.0,
+    "delta_z_m": 4.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": -34.0,
+    "cell_lon": 18.625,
+    "d_eff_m": 3459.7,
+    "delta_z_m": 4.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": -34.0,
+    "cell_lon": 18.5,
+    "d_eff_m": 10043.5,
+    "delta_z_m": 4.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": -33.9375,
+    "cell_lon": 18.5625,
+    "d_eff_m": 5602.4,
+    "delta_z_m": 4.0
+   }
+  },
+  "station": "FACT"
+ },
+ "Chengdu": {
+  "elevation_m": 495.3,
+  "lat": "30.558257",
+  "lon": "103.945966",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 492.0,
+    "cell_lat": 30.544815,
+    "cell_lon": 103.97647,
+    "d_eff_m": 3281.2,
+    "delta_z_m": 3.3
+   },
+   "gem_global": {
+    "cell_elevation_m": 492.0,
+    "cell_lat": 30.600006,
+    "cell_lon": 103.95001,
+    "d_eff_m": 4658.4,
+    "delta_z_m": 3.3
+   },
+   "gfs_global": {
+    "cell_elevation_m": 492.0,
+    "cell_lat": 30.51741,
+    "cell_lon": 103.94531,
+    "d_eff_m": 4542.4,
+    "delta_z_m": 3.3
+   },
+   "icon_global": {
+    "cell_elevation_m": 492.0,
+    "cell_lat": 30.5,
+    "cell_lon": 104.0,
+    "d_eff_m": 8291.4,
+    "delta_z_m": 3.3
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 492.0,
+    "cell_lat": 30.5,
+    "cell_lon": 104.0,
+    "d_eff_m": 8291.4,
+    "delta_z_m": 3.3
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 492.0,
+    "cell_lat": 30.5625,
+    "cell_lon": 103.921875,
+    "d_eff_m": 2354.5,
+    "delta_z_m": 3.3
+   }
+  },
+  "station": "ZUUU"
+ },
+ "Chicago": {
+  "elevation_m": 207.3,
+  "lat": "41.9786",
+  "lon": "-87.9048",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 213.0,
+    "cell_lat": 42.003513,
+    "cell_lon": -87.90393,
+    "d_eff_m": 2771.1,
+    "delta_z_m": -5.7
+   },
+   "gem_global": {
+    "cell_elevation_m": 213.0,
+    "cell_lat": 42.0,
+    "cell_lon": -87.899994,
+    "d_eff_m": 2412.5,
+    "delta_z_m": -5.7
+   },
+   "gem_hrdps_continental": {
+    "cell_elevation_m": 213.0,
+    "cell_lat": 41.974777,
+    "cell_lon": -87.910126,
+    "d_eff_m": 612.0,
+    "delta_z_m": -5.7
+   },
+   "gfs_global": {
+    "cell_elevation_m": 213.0,
+    "cell_lat": 41.998047,
+    "cell_lon": -87.890625,
+    "d_eff_m": 2459.4,
+    "delta_z_m": -5.7
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 213.0,
+    "cell_lat": 41.979725,
+    "cell_lon": -87.89026,
+    "d_eff_m": 1208.4,
+    "delta_z_m": -5.7
+   },
+   "icon_global": {
+    "cell_elevation_m": 213.0,
+    "cell_lat": 42.0,
+    "cell_lon": -87.875,
+    "d_eff_m": 3424.7,
+    "delta_z_m": -5.7
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 213.0,
+    "cell_lat": 42.0,
+    "cell_lon": -88.0,
+    "d_eff_m": 8220.0,
+    "delta_z_m": -5.7
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 213.0,
+    "cell_lat": 41.975227,
+    "cell_lon": -87.90365,
+    "d_eff_m": 386.9,
+    "delta_z_m": -5.7
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 213.0,
+    "cell_lat": 42.0,
+    "cell_lon": -87.890625,
+    "d_eff_m": 2652.3,
+    "delta_z_m": -5.7
+   }
+  },
+  "station": "KORD"
+ },
+ "Chongqing": {
+  "elevation_m": 416.1,
+  "lat": "29.712254",
+  "lon": "106.651895",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 407.0,
+    "cell_lat": 29.771528,
+    "cell_lon": 106.62021,
+    "d_eff_m": 7266.3,
+    "delta_z_m": 9.1
+   },
+   "gem_global": {
+    "cell_elevation_m": 407.0,
+    "cell_lat": 29.700005,
+    "cell_lon": 106.650024,
+    "d_eff_m": 1374.0,
+    "delta_z_m": 9.1
+   },
+   "gfs_global": {
+    "cell_elevation_m": 407.0,
+    "cell_lat": 29.697365,
+    "cell_lon": 106.640625,
+    "d_eff_m": 1981.4,
+    "delta_z_m": 9.1
+   },
+   "icon_global": {
+    "cell_elevation_m": 407.0,
+    "cell_lat": 29.75,
+    "cell_lon": 106.625,
+    "d_eff_m": 4935.6,
+    "delta_z_m": 9.1
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 407.0,
+    "cell_lat": 29.5,
+    "cell_lon": 106.5,
+    "d_eff_m": 27797.1,
+    "delta_z_m": 9.1
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 407.0,
+    "cell_lat": 29.71875,
+    "cell_lon": 106.59375,
+    "d_eff_m": 5661.5,
+    "delta_z_m": 9.1
+   }
+  },
+  "station": "ZUCK"
+ },
+ "Dallas": {
+  "elevation_m": 148.4,
+  "lat": "32.844776",
+  "lon": "-96.847653",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 145.0,
+    "cell_lat": 32.864674,
+    "cell_lon": -96.829865,
+    "d_eff_m": 2767.0,
+    "delta_z_m": 3.4
+   },
+   "gem_global": {
+    "cell_elevation_m": 145.0,
+    "cell_lat": 32.850006,
+    "cell_lon": -96.899994,
+    "d_eff_m": 4924.0,
+    "delta_z_m": 3.4
+   },
+   "gfs_global": {
+    "cell_elevation_m": 145.0,
+    "cell_lat": 32.860397,
+    "cell_lon": -96.796875,
+    "d_eff_m": 5051.3,
+    "delta_z_m": 3.4
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 145.0,
+    "cell_lat": 32.83876,
+    "cell_lon": -96.83506,
+    "d_eff_m": 1353.4,
+    "delta_z_m": 3.4
+   },
+   "icon_global": {
+    "cell_elevation_m": 145.0,
+    "cell_lat": 32.875,
+    "cell_lon": -96.875,
+    "d_eff_m": 4221.3,
+    "delta_z_m": 3.4
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 145.0,
+    "cell_lat": 33.0,
+    "cell_lon": -97.0,
+    "d_eff_m": 22363.2,
+    "delta_z_m": 3.4
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 145.0,
+    "cell_lat": 32.846817,
+    "cell_lon": -96.858536,
+    "d_eff_m": 1041.7,
+    "delta_z_m": 3.4
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 145.0,
+    "cell_lat": 32.8125,
+    "cell_lon": -96.890625,
+    "d_eff_m": 5385.3,
+    "delta_z_m": 3.4
+   }
+  },
+  "station": "KDAL"
+ },
+ "Denver": {
+  "elevation_m": 1725.8,
+  "lat": "39.701698",
+  "lon": "-104.751999",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 1709.0,
+    "cell_lat": 39.683655,
+    "cell_lon": -104.75,
+    "d_eff_m": 2013.6,
+    "delta_z_m": 16.8
+   },
+   "gem_global": {
+    "cell_elevation_m": 1709.0,
+    "cell_lat": 39.75,
+    "cell_lon": -104.7,
+    "d_eff_m": 6973.0,
+    "delta_z_m": 16.8
+   },
+   "gfs_global": {
+    "cell_elevation_m": 1709.0,
+    "cell_lat": 39.65506,
+    "cell_lon": -104.765625,
+    "d_eff_m": 5315.4,
+    "delta_z_m": 16.8
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 1709.0,
+    "cell_lat": 39.70821,
+    "cell_lon": -104.73675,
+    "d_eff_m": 1492.0,
+    "delta_z_m": 16.8
+   },
+   "icon_global": {
+    "cell_elevation_m": 1709.0,
+    "cell_lat": 39.75,
+    "cell_lon": -104.75,
+    "d_eff_m": 5373.7,
+    "delta_z_m": 16.8
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 1709.0,
+    "cell_lat": 39.5,
+    "cell_lon": -105.0,
+    "d_eff_m": 30894.5,
+    "delta_z_m": 16.8
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 1709.0,
+    "cell_lat": 39.69671,
+    "cell_lon": -104.75657,
+    "d_eff_m": 678.6,
+    "delta_z_m": 16.8
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 1709.0,
+    "cell_lat": 39.65625,
+    "cell_lon": -104.765625,
+    "d_eff_m": 5186.4,
+    "delta_z_m": 16.8
+   }
+  },
+  "station": "KBKF"
+ },
+ "Guangzhou": {
+  "elevation_m": 15.2,
+  "lat": "23.392401",
+  "lon": "113.299004",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 15.0,
+    "cell_lat": 23.37434,
+    "cell_lon": 113.2563,
+    "d_eff_m": 4798.9,
+    "delta_z_m": 0.2
+   },
+   "gem_global": {
+    "cell_elevation_m": 15.0,
+    "cell_lat": 23.400002,
+    "cell_lon": 113.25,
+    "d_eff_m": 5071.9,
+    "delta_z_m": 0.2
+   },
+   "gfs_global": {
+    "cell_elevation_m": 15.0,
+    "cell_lat": 23.3713,
+    "cell_lon": 113.32031,
+    "d_eff_m": 3199.1,
+    "delta_z_m": 0.2
+   },
+   "icon_global": {
+    "cell_elevation_m": 15.0,
+    "cell_lat": 23.375,
+    "cell_lon": 113.25,
+    "d_eff_m": 5362.7,
+    "delta_z_m": 0.2
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 15.0,
+    "cell_lat": 23.5,
+    "cell_lon": 113.5,
+    "d_eff_m": 23739.8,
+    "delta_z_m": 0.2
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 15.0,
+    "cell_lat": 23.4375,
+    "cell_lon": 113.34375,
+    "d_eff_m": 6781.9,
+    "delta_z_m": 0.2
+   }
+  },
+  "station": "ZGGG"
+ },
+ "Helsinki": {
+  "elevation_m": 54.6,
+  "lat": "60.318363",
+  "lon": "24.963341",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 48.0,
+    "cell_lat": 60.351494,
+    "cell_lon": 24.929577,
+    "d_eff_m": 4126.1,
+    "delta_z_m": 6.6
+   },
+   "gem_global": {
+    "cell_elevation_m": 48.0,
+    "cell_lat": 60.300003,
+    "cell_lon": 24.90001,
+    "d_eff_m": 4041.6,
+    "delta_z_m": 6.6
+   },
+   "gfs_global": {
+    "cell_elevation_m": 48.0,
+    "cell_lat": 60.273346,
+    "cell_lon": 24.960938,
+    "d_eff_m": 5007.4,
+    "delta_z_m": 6.6
+   },
+   "icon_d2": {
+    "cell_elevation_m": 48.0,
+    "cell_lat": 60.3125,
+    "cell_lon": 24.9375,
+    "d_eff_m": 1565.2,
+    "delta_z_m": 6.6
+   },
+   "icon_eu": {
+    "cell_elevation_m": 48.0,
+    "cell_lat": 60.3125,
+    "cell_lon": 24.9375,
+    "d_eff_m": 1565.2,
+    "delta_z_m": 6.6
+   },
+   "icon_global": {
+    "cell_elevation_m": 48.0,
+    "cell_lat": 60.375,
+    "cell_lon": 25.0,
+    "d_eff_m": 6612.8,
+    "delta_z_m": 6.6
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 48.0,
+    "cell_lat": 60.5,
+    "cell_lon": 25.0,
+    "d_eff_m": 20297.2,
+    "delta_z_m": 6.6
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 48.0,
+    "cell_lat": 60.28125,
+    "cell_lon": 25.03125,
+    "d_eff_m": 5570.2,
+    "delta_z_m": 6.6
+   }
+  },
+  "station": "EFHK"
+ },
+ "Hong Kong": {
+  "elevation_m": 32.0,
+  "lat": "22.3022",
+  "lon": "114.1742",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 38.0,
+    "cell_lat": 22.319859,
+    "cell_lon": 114.198555,
+    "d_eff_m": 3183.2,
+    "delta_z_m": -6.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 38.0,
+    "cell_lat": 22.350006,
+    "cell_lon": 114.150024,
+    "d_eff_m": 5868.7,
+    "delta_z_m": -6.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 38.0,
+    "cell_lat": 22.316956,
+    "cell_lon": 114.25781,
+    "d_eff_m": 8756.2,
+    "delta_z_m": -6.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 38.0,
+    "cell_lat": 22.25,
+    "cell_lon": 114.125,
+    "d_eff_m": 7701.9,
+    "delta_z_m": -6.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 38.0,
+    "cell_lat": 22.5,
+    "cell_lon": 114.0,
+    "d_eff_m": 28363.1,
+    "delta_z_m": -6.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 38.0,
+    "cell_lat": 22.3125,
+    "cell_lon": 114.1875,
+    "d_eff_m": 1784.3,
+    "delta_z_m": -6.0
+   }
+  },
+  "station": "HKO_HQ"
+ },
+ "Houston": {
+  "elevation_m": 14.0,
+  "lat": "29.645336",
+  "lon": "-95.276812",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 12.0,
+    "cell_lat": 29.63093,
+    "cell_lon": -95.318665,
+    "d_eff_m": 4350.6,
+    "delta_z_m": 2.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 12.0,
+    "cell_lat": 29.700005,
+    "cell_lon": -95.25,
+    "d_eff_m": 6607.8,
+    "delta_z_m": 2.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 12.0,
+    "cell_lat": 29.697365,
+    "cell_lon": -95.27344,
+    "d_eff_m": 5794.5,
+    "delta_z_m": 2.0
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 12.0,
+    "cell_lat": 29.632,
+    "cell_lon": -95.266014,
+    "d_eff_m": 1813.3,
+    "delta_z_m": 2.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 12.0,
+    "cell_lat": 29.625,
+    "cell_lon": -95.25,
+    "d_eff_m": 3439.3,
+    "delta_z_m": 2.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 12.0,
+    "cell_lat": 29.5,
+    "cell_lon": -95.5,
+    "d_eff_m": 26963.9,
+    "delta_z_m": 2.0
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 12.0,
+    "cell_lat": 29.634115,
+    "cell_lon": -95.28868,
+    "d_eff_m": 1694.8,
+    "delta_z_m": 2.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 12.0,
+    "cell_lat": 29.625,
+    "cell_lon": -95.34375,
+    "d_eff_m": 6853.3,
+    "delta_z_m": 2.0
+   }
+  },
+  "station": "KHOU"
+ },
+ "Istanbul": {
+  "elevation_m": 99.1,
+  "lat": "41.274874",
+  "lon": "28.732136",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 78.0,
+    "cell_lat": 41.23023,
+    "cell_lon": 28.75358,
+    "d_eff_m": 5278.0,
+    "delta_z_m": 21.1
+   },
+   "gem_global": {
+    "cell_elevation_m": 78.0,
+    "cell_lat": 41.25,
+    "cell_lon": 28.65001,
+    "d_eff_m": 7400.8,
+    "delta_z_m": 21.1
+   },
+   "gfs_global": {
+    "cell_elevation_m": 78.0,
+    "cell_lat": 41.29515,
+    "cell_lon": 28.828125,
+    "d_eff_m": 8331.3,
+    "delta_z_m": 21.1
+   },
+   "icon_d2": {
+    "cell_elevation_m": 78.0,
+    "cell_lat": 41.25,
+    "cell_lon": 28.75,
+    "d_eff_m": 3143.2,
+    "delta_z_m": 21.1
+   },
+   "icon_eu": {
+    "cell_elevation_m": 78.0,
+    "cell_lat": 41.25,
+    "cell_lon": 28.75,
+    "d_eff_m": 3143.2,
+    "delta_z_m": 21.1
+   },
+   "icon_global": {
+    "cell_elevation_m": 78.0,
+    "cell_lat": 41.25,
+    "cell_lon": 28.75,
+    "d_eff_m": 3143.2,
+    "delta_z_m": 21.1
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 78.0,
+    "cell_lat": 41.5,
+    "cell_lon": 28.5,
+    "d_eff_m": 31649.3,
+    "delta_z_m": 21.1
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 78.0,
+    "cell_lat": 41.25,
+    "cell_lon": 28.6875,
+    "d_eff_m": 4644.3,
+    "delta_z_m": 21.1
+   }
+  },
+  "station": "LTFM"
+ },
+ "Jakarta": {
+  "elevation_m": 25.6,
+  "lat": "-6.266989",
+  "lon": "106.890318",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 23.0,
+    "cell_lat": -6.2917395,
+    "cell_lon": 106.87029,
+    "d_eff_m": 3531.9,
+    "delta_z_m": 2.6
+   },
+   "gem_global": {
+    "cell_elevation_m": 23.0,
+    "cell_lat": -6.2999954,
+    "cell_lon": 106.95001,
+    "d_eff_m": 7549.7,
+    "delta_z_m": 2.6
+   },
+   "gfs_global": {
+    "cell_elevation_m": 23.0,
+    "cell_lat": -6.2674866,
+    "cell_lon": 106.875,
+    "d_eff_m": 1694.0,
+    "delta_z_m": 2.6
+   },
+   "icon_global": {
+    "cell_elevation_m": 23.0,
+    "cell_lat": -6.25,
+    "cell_lon": 106.875,
+    "d_eff_m": 2536.8,
+    "delta_z_m": 2.6
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 23.0,
+    "cell_lat": -6.5,
+    "cell_lon": 107.0,
+    "d_eff_m": 28604.5,
+    "delta_z_m": 2.6
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 23.0,
+    "cell_lat": -6.28125,
+    "cell_lon": 106.875,
+    "d_eff_m": 2319.7,
+    "delta_z_m": 2.6
+   }
+  },
+  "station": "WIHH"
+ },
+ "Jeddah": {
+  "elevation_m": 14.6,
+  "lat": "21.680241",
+  "lon": "39.157436",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 7.0,
+    "cell_lat": 21.68717,
+    "cell_lon": 39.190575,
+    "d_eff_m": 3509.7,
+    "delta_z_m": 7.6
+   },
+   "gem_global": {
+    "cell_elevation_m": 7.0,
+    "cell_lat": 21.750008,
+    "cell_lon": 39.15001,
+    "d_eff_m": 7795.6,
+    "delta_z_m": 7.6
+   },
+   "gfs_global": {
+    "cell_elevation_m": 7.0,
+    "cell_lat": 21.731209,
+    "cell_lon": 39.140625,
+    "d_eff_m": 5927.5,
+    "delta_z_m": 7.6
+   },
+   "icon_global": {
+    "cell_elevation_m": 7.0,
+    "cell_lat": 21.75,
+    "cell_lon": 39.125,
+    "d_eff_m": 8449.6,
+    "delta_z_m": 7.6
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 7.0,
+    "cell_lat": 21.5,
+    "cell_lon": 39.0,
+    "d_eff_m": 25819.5,
+    "delta_z_m": 7.6
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 7.0,
+    "cell_lat": 21.65625,
+    "cell_lon": 39.09375,
+    "d_eff_m": 7101.3,
+    "delta_z_m": 7.6
+   }
+  },
+  "station": "OEJN"
+ },
+ "Jinan": {
+  "elevation_m": 23.2,
+  "lat": "36.857201",
+  "lon": "117.216003",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 22.0,
+    "cell_lat": 36.871704,
+    "cell_lon": 117.23685,
+    "d_eff_m": 2457.7,
+    "delta_z_m": 1.2
+   },
+   "gem_global": {
+    "cell_elevation_m": 22.0,
+    "cell_lat": 36.9,
+    "cell_lon": 117.150024,
+    "d_eff_m": 7555.7,
+    "delta_z_m": 1.2
+   },
+   "gfs_global": {
+    "cell_elevation_m": 22.0,
+    "cell_lat": 36.843475,
+    "cell_lon": 117.1875,
+    "d_eff_m": 2960.0,
+    "delta_z_m": 1.2
+   },
+   "icon_global": {
+    "cell_elevation_m": 22.0,
+    "cell_lat": 36.875,
+    "cell_lon": 117.25,
+    "d_eff_m": 3614.4,
+    "delta_z_m": 1.2
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 22.0,
+    "cell_lat": 37.0,
+    "cell_lon": 117.0,
+    "d_eff_m": 24915.2,
+    "delta_z_m": 1.2
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 22.0,
+    "cell_lat": 36.84375,
+    "cell_lon": 117.28125,
+    "d_eff_m": 5995.2,
+    "delta_z_m": 1.2
+   }
+  },
+  "station": "ZSJN"
+ },
+ "Karachi": {
+  "elevation_m": 30.5,
+  "lat": "24.9065",
+  "lon": "67.160797",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 24.0,
+    "cell_lat": 24.920912,
+    "cell_lon": 67.161285,
+    "d_eff_m": 1603.3,
+    "delta_z_m": 6.5
+   },
+   "gem_global": {
+    "cell_elevation_m": 24.0,
+    "cell_lat": 24.900002,
+    "cell_lon": 67.20001,
+    "d_eff_m": 4020.3,
+    "delta_z_m": 6.5
+   },
+   "gfs_global": {
+    "cell_elevation_m": 24.0,
+    "cell_lat": 24.894241,
+    "cell_lon": 67.14844,
+    "d_eff_m": 1847.0,
+    "delta_z_m": 6.5
+   },
+   "icon_global": {
+    "cell_elevation_m": 24.0,
+    "cell_lat": 24.875,
+    "cell_lon": 67.125,
+    "d_eff_m": 5030.5,
+    "delta_z_m": 6.5
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 24.0,
+    "cell_lat": 25.0,
+    "cell_lon": 67.0,
+    "d_eff_m": 19258.3,
+    "delta_z_m": 6.5
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 24.0,
+    "cell_lat": 24.9375,
+    "cell_lon": 67.21875,
+    "d_eff_m": 6784.9,
+    "delta_z_m": 6.5
+   }
+  },
+  "station": "OPKC"
+ },
+ "Kuala Lumpur": {
+  "elevation_m": 21.0,
+  "lat": "2.74558",
+  "lon": "101.709999",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": 2.7768013,
+    "cell_lon": 101.71084,
+    "d_eff_m": 3472.9,
+    "delta_z_m": 3.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": 2.7000046,
+    "cell_lon": 101.70001,
+    "d_eff_m": 5187.8,
+    "delta_z_m": 3.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": 2.7530136,
+    "cell_lon": 101.71875,
+    "d_eff_m": 1275.9,
+    "delta_z_m": 3.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": 2.75,
+    "cell_lon": 101.75,
+    "d_eff_m": 4469.9,
+    "delta_z_m": 3.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": 2.5,
+    "cell_lon": 101.5,
+    "d_eff_m": 35913.8,
+    "delta_z_m": 3.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 18.0,
+    "cell_lat": 2.71875,
+    "cell_lon": 101.671875,
+    "d_eff_m": 5179.8,
+    "delta_z_m": 3.0
+   }
+  },
+  "station": "WMKK"
+ },
+ "Lagos": {
+  "elevation_m": 41.1,
+  "lat": "6.57737",
+  "lon": "3.32116",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 25.0,
+    "cell_lat": 6.572935,
+    "cell_lon": 3.324937,
+    "d_eff_m": 646.0,
+    "delta_z_m": 16.1
+   },
+   "gem_global": {
+    "cell_elevation_m": 25.0,
+    "cell_lat": 6.600006,
+    "cell_lon": 3.300003,
+    "d_eff_m": 3434.7,
+    "delta_z_m": 16.1
+   },
+   "gfs_global": {
+    "cell_elevation_m": 25.0,
+    "cell_lat": 6.6189423,
+    "cell_lon": 3.28125,
+    "d_eff_m": 6387.7,
+    "delta_z_m": 16.1
+   },
+   "icon_global": {
+    "cell_elevation_m": 25.0,
+    "cell_lat": 6.625,
+    "cell_lon": 3.375,
+    "d_eff_m": 7963.5,
+    "delta_z_m": 16.1
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 25.0,
+    "cell_lat": 6.5,
+    "cell_lon": 3.5,
+    "d_eff_m": 21548.6,
+    "delta_z_m": 16.1
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 25.0,
+    "cell_lat": 6.5625,
+    "cell_lon": 3.375,
+    "d_eff_m": 6173.0,
+    "delta_z_m": 16.1
+   }
+  },
+  "station": "DNMM"
+ },
+ "London": {
+  "elevation_m": 5.8,
+  "lat": "51.505299",
+  "lon": "0.055278",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 51.493847,
+    "cell_lon": 0.0,
+    "d_eff_m": 4032.7,
+    "delta_z_m": 1.8
+   },
+   "gem_global": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 51.450012,
+    "cell_lon": 0.0,
+    "d_eff_m": 7242.2,
+    "delta_z_m": 1.8
+   },
+   "gfs_global": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 51.487137,
+    "cell_lon": 0.0,
+    "d_eff_m": 4326.9,
+    "delta_z_m": 1.8
+   },
+   "icon_d2": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 51.5,
+    "cell_lon": 0.059999943,
+    "d_eff_m": 673.8,
+    "delta_z_m": 1.8
+   },
+   "icon_eu": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 51.5,
+    "cell_lon": 0.0625,
+    "d_eff_m": 772.7,
+    "delta_z_m": 1.8
+   },
+   "icon_global": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 51.5,
+    "cell_lon": 0.0,
+    "d_eff_m": 3871.3,
+    "delta_z_m": 1.8
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 51.5,
+    "cell_lon": 0.0,
+    "d_eff_m": 3871.3,
+    "delta_z_m": 1.8
+   },
+   "meteofrance_arome_france_hd": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 51.51,
+    "cell_lon": 0.059999466,
+    "d_eff_m": 616.5,
+    "delta_z_m": 1.8
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 51.46875,
+    "cell_lon": 0.0,
+    "d_eff_m": 5582.7,
+    "delta_z_m": 1.8
+   },
+   "ukmo_uk_deterministic_2km": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 51.507725,
+    "cell_lon": 0.042434692,
+    "d_eff_m": 928.9,
+    "delta_z_m": 1.8
+   }
+  },
+  "station": "EGLC"
+ },
+ "Los Angeles": {
+  "elevation_m": 38.1,
+  "lat": "33.942501",
+  "lon": "-118.407997",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 44.0,
+    "cell_lat": 33.919155,
+    "cell_lon": -118.391525,
+    "d_eff_m": 3008.1,
+    "delta_z_m": -5.9
+   },
+   "gem_global": {
+    "cell_elevation_m": 44.0,
+    "cell_lat": 33.9,
+    "cell_lon": -118.35,
+    "d_eff_m": 7139.4,
+    "delta_z_m": -5.9
+   },
+   "gfs_global": {
+    "cell_elevation_m": 44.0,
+    "cell_lat": 33.91474,
+    "cell_lon": -118.359375,
+    "d_eff_m": 5445.4,
+    "delta_z_m": -5.9
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 44.0,
+    "cell_lat": 33.94541,
+    "cell_lon": -118.40222,
+    "d_eff_m": 623.4,
+    "delta_z_m": -5.9
+   },
+   "icon_global": {
+    "cell_elevation_m": 44.0,
+    "cell_lat": 34.0,
+    "cell_lon": -118.375,
+    "d_eff_m": 7080.7,
+    "delta_z_m": -5.9
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 44.0,
+    "cell_lat": 34.0,
+    "cell_lon": -118.5,
+    "d_eff_m": 10623.5,
+    "delta_z_m": -5.9
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 44.0,
+    "cell_lat": 33.937355,
+    "cell_lon": -118.41536,
+    "d_eff_m": 888.1,
+    "delta_z_m": -5.9
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 44.0,
+    "cell_lat": 33.9375,
+    "cell_lon": -118.40625,
+    "d_eff_m": 579.0,
+    "delta_z_m": -5.9
+   }
+  },
+  "station": "KLAX"
+ },
+ "Lucknow": {
+  "elevation_m": 125.0,
+  "lat": "26.760599",
+  "lon": "80.889297",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 123.0,
+    "cell_lat": 26.74868,
+    "cell_lon": 80.840706,
+    "d_eff_m": 5003.4,
+    "delta_z_m": 2.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 123.0,
+    "cell_lat": 26.700005,
+    "cell_lon": 80.850006,
+    "d_eff_m": 7786.1,
+    "delta_z_m": 2.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 123.0,
+    "cell_lat": 26.768631,
+    "cell_lon": 80.859375,
+    "d_eff_m": 3102.1,
+    "delta_z_m": 2.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 123.0,
+    "cell_lat": 26.75,
+    "cell_lon": 80.875,
+    "d_eff_m": 1845.0,
+    "delta_z_m": 2.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 123.0,
+    "cell_lat": 27.0,
+    "cell_lon": 81.0,
+    "d_eff_m": 28795.6,
+    "delta_z_m": 2.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 123.0,
+    "cell_lat": 26.71875,
+    "cell_lon": 80.859375,
+    "d_eff_m": 5521.2,
+    "delta_z_m": 2.0
+   }
+  },
+  "station": "VILK"
+ },
+ "Madrid": {
+  "elevation_m": 609.0,
+  "lat": "40.493407",
+  "lon": "-3.572249",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 601.0,
+    "cell_lat": 40.52724,
+    "cell_lon": -3.5593262,
+    "d_eff_m": 3917.5,
+    "delta_z_m": 8.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 601.0,
+    "cell_lat": 40.5,
+    "cell_lon": -3.5999908,
+    "d_eff_m": 2457.7,
+    "delta_z_m": 8.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 601.0,
+    "cell_lat": 40.475113,
+    "cell_lon": -3.515625,
+    "d_eff_m": 5203.0,
+    "delta_z_m": 8.0
+   },
+   "icon_d2": {
+    "cell_elevation_m": 601.0,
+    "cell_lat": 40.5,
+    "cell_lon": -3.5625,
+    "d_eff_m": 1103.2,
+    "delta_z_m": 8.0
+   },
+   "icon_eu": {
+    "cell_elevation_m": 601.0,
+    "cell_lat": 40.5,
+    "cell_lon": -3.5625,
+    "d_eff_m": 1103.2,
+    "delta_z_m": 8.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 601.0,
+    "cell_lat": 40.5,
+    "cell_lon": -3.625,
+    "d_eff_m": 4520.3,
+    "delta_z_m": 8.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 601.0,
+    "cell_lat": 40.5,
+    "cell_lon": -3.5,
+    "d_eff_m": 6153.0,
+    "delta_z_m": 8.0
+   },
+   "meteofrance_arome_france_hd": {
+    "cell_elevation_m": 601.0,
+    "cell_lat": 40.49,
+    "cell_lon": -3.5700006,
+    "d_eff_m": 423.9,
+    "delta_z_m": 8.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 601.0,
+    "cell_lat": 40.5,
+    "cell_lon": -3.515625,
+    "d_eff_m": 4843.8,
+    "delta_z_m": 8.0
+   }
+  },
+  "station": "LEMD"
+ },
+ "Manila": {
+  "elevation_m": 22.9,
+  "lat": "14.5086",
+  "lon": "121.019997",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 13.0,
+    "cell_lat": 14.516696,
+    "cell_lon": 121.05752,
+    "d_eff_m": 4138.3,
+    "delta_z_m": 9.9
+   },
+   "gem_global": {
+    "cell_elevation_m": 13.0,
+    "cell_lat": 14.700005,
+    "cell_lon": 121.05002,
+    "d_eff_m": 21527.0,
+    "delta_z_m": 9.9
+   },
+   "gfs_global": {
+    "cell_elevation_m": 13.0,
+    "cell_lat": 14.467949,
+    "cell_lon": 121.05469,
+    "d_eff_m": 5863.6,
+    "delta_z_m": 9.9
+   },
+   "icon_global": {
+    "cell_elevation_m": 13.0,
+    "cell_lat": 14.5,
+    "cell_lon": 121.125,
+    "d_eff_m": 11344.1,
+    "delta_z_m": 9.9
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 13.0,
+    "cell_lat": 14.5,
+    "cell_lon": 121.0,
+    "d_eff_m": 2355.5,
+    "delta_z_m": 9.9
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 13.0,
+    "cell_lat": 14.53125,
+    "cell_lon": 121.078125,
+    "d_eff_m": 6745.0,
+    "delta_z_m": 9.9
+   }
+  },
+  "station": "RPLL"
+ },
+ "Mexico City": {
+  "elevation_m": 2229.9,
+  "lat": "19.435822",
+  "lon": "-99.07033",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 2223.0,
+    "cell_lat": 19.437609,
+    "cell_lon": -99.10715,
+    "d_eff_m": 3866.0,
+    "delta_z_m": 6.9
+   },
+   "gem_global": {
+    "cell_elevation_m": 2223.0,
+    "cell_lat": 19.500008,
+    "cell_lon": -99.0,
+    "d_eff_m": 10261.8,
+    "delta_z_m": 6.9
+   },
+   "gfs_global": {
+    "cell_elevation_m": 2223.0,
+    "cell_lat": 19.388222,
+    "cell_lon": -99.02344,
+    "d_eff_m": 7224.7,
+    "delta_z_m": 6.9
+   },
+   "icon_global": {
+    "cell_elevation_m": 2223.0,
+    "cell_lat": 19.375,
+    "cell_lon": -99.125,
+    "d_eff_m": 8866.5,
+    "delta_z_m": 6.9
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 2223.0,
+    "cell_lat": 19.5,
+    "cell_lon": -99.0,
+    "d_eff_m": 10261.1,
+    "delta_z_m": 6.9
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 2223.0,
+    "cell_lat": 19.40625,
+    "cell_lon": -99.140625,
+    "d_eff_m": 8071.8,
+    "delta_z_m": 6.9
+   }
+  },
+  "station": "MMMX"
+ },
+ "Miami": {
+  "elevation_m": 2.4,
+  "lat": "25.796011",
+  "lon": "-80.289751",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 25.764498,
+    "cell_lon": -80.2941,
+    "d_eff_m": 3531.0,
+    "delta_z_m": 0.4
+   },
+   "gem_global": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 25.800003,
+    "cell_lon": -80.24999,
+    "d_eff_m": 4005.2,
+    "delta_z_m": 0.4
+   },
+   "gfs_global": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 25.831436,
+    "cell_lon": -80.27344,
+    "d_eff_m": 4264.1,
+    "delta_z_m": 0.4
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 25.787653,
+    "cell_lon": -80.28457,
+    "d_eff_m": 1064.3,
+    "delta_z_m": 0.4
+   },
+   "icon_global": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 25.75,
+    "cell_lon": -80.25,
+    "d_eff_m": 6482.2,
+    "delta_z_m": 0.4
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 26.0,
+    "cell_lon": -80.5,
+    "d_eff_m": 30932.0,
+    "delta_z_m": 0.4
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 25.792175,
+    "cell_lon": -80.28597,
+    "d_eff_m": 570.3,
+    "delta_z_m": 0.4
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 25.78125,
+    "cell_lon": -80.296875,
+    "d_eff_m": 1789.6,
+    "delta_z_m": 0.4
+   }
+  },
+  "station": "KMIA"
+ },
+ "Milan": {
+  "elevation_m": 234.1,
+  "lat": "45.6306",
+  "lon": "8.72811",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 221.0,
+    "cell_lat": 45.58875,
+    "cell_lon": 8.773584,
+    "d_eff_m": 5845.3,
+    "delta_z_m": 13.1
+   },
+   "gem_global": {
+    "cell_elevation_m": 221.0,
+    "cell_lat": 45.600006,
+    "cell_lon": 8.700012,
+    "d_eff_m": 4043.4,
+    "delta_z_m": 13.1
+   },
+   "gfs_global": {
+    "cell_elevation_m": 221.0,
+    "cell_lat": 45.629684,
+    "cell_lon": 8.671875,
+    "d_eff_m": 4373.9,
+    "delta_z_m": 13.1
+   },
+   "icon_d2": {
+    "cell_elevation_m": 221.0,
+    "cell_lat": 45.64,
+    "cell_lon": 8.719999,
+    "d_eff_m": 1220.7,
+    "delta_z_m": 13.1
+   },
+   "icon_eu": {
+    "cell_elevation_m": 221.0,
+    "cell_lat": 45.625,
+    "cell_lon": 8.75,
+    "d_eff_m": 1812.5,
+    "delta_z_m": 13.1
+   },
+   "icon_global": {
+    "cell_elevation_m": 221.0,
+    "cell_lat": 45.625,
+    "cell_lon": 8.75,
+    "d_eff_m": 1812.5,
+    "delta_z_m": 13.1
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 221.0,
+    "cell_lat": 45.5,
+    "cell_lon": 8.5,
+    "d_eff_m": 22939.6,
+    "delta_z_m": 13.1
+   },
+   "meteofrance_arome_france_hd": {
+    "cell_elevation_m": 221.0,
+    "cell_lat": 45.63,
+    "cell_lon": 8.73,
+    "d_eff_m": 161.4,
+    "delta_z_m": 13.1
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 221.0,
+    "cell_lat": 45.65625,
+    "cell_lon": 8.71875,
+    "d_eff_m": 2943.5,
+    "delta_z_m": 13.1
+   },
+   "ukmo_uk_deterministic_2km": {
+    "cell_elevation_m": 221.0,
+    "cell_lat": 45.626133,
+    "cell_lon": 8.726532,
+    "d_eff_m": 511.6,
+    "delta_z_m": 13.1
+   }
+  },
+  "station": "LIMC"
+ },
+ "Moscow": {
+  "elevation_m": 208.8,
+  "lat": "55.591499",
+  "lon": "37.261501",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 196.0,
+    "cell_lat": 55.641476,
+    "cell_lon": 37.24138,
+    "d_eff_m": 5699.0,
+    "delta_z_m": 12.8
+   },
+   "gem_global": {
+    "cell_elevation_m": 196.0,
+    "cell_lat": 55.65001,
+    "cell_lon": 37.200012,
+    "d_eff_m": 7565.4,
+    "delta_z_m": 12.8
+   },
+   "gfs_global": {
+    "cell_elevation_m": 196.0,
+    "cell_lat": 55.58737,
+    "cell_lon": 37.265625,
+    "d_eff_m": 527.2,
+    "delta_z_m": 12.8
+   },
+   "icon_d2": {
+    "cell_elevation_m": 196.0,
+    "cell_lat": 55.5625,
+    "cell_lon": 37.25,
+    "d_eff_m": 3304.6,
+    "delta_z_m": 12.8
+   },
+   "icon_eu": {
+    "cell_elevation_m": 196.0,
+    "cell_lat": 55.5625,
+    "cell_lon": 37.25,
+    "d_eff_m": 3304.6,
+    "delta_z_m": 12.8
+   },
+   "icon_global": {
+    "cell_elevation_m": 196.0,
+    "cell_lat": 55.625,
+    "cell_lon": 37.25,
+    "d_eff_m": 3794.5,
+    "delta_z_m": 12.8
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 196.0,
+    "cell_lat": 55.5,
+    "cell_lon": 37.5,
+    "d_eff_m": 18127.9,
+    "delta_z_m": 12.8
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 196.0,
+    "cell_lat": 55.59375,
+    "cell_lon": 37.265625,
+    "d_eff_m": 360.3,
+    "delta_z_m": 12.8
+   }
+  },
+  "station": "UUWW"
+ },
+ "Munich": {
+  "elevation_m": 453.2,
+  "lat": "48.353802",
+  "lon": "11.7861",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 453.0,
+    "cell_lat": 48.330402,
+    "cell_lon": 11.758794,
+    "d_eff_m": 3292.9,
+    "delta_z_m": 0.2
+   },
+   "gem_global": {
+    "cell_elevation_m": 453.0,
+    "cell_lat": 48.300003,
+    "cell_lon": 11.850006,
+    "d_eff_m": 7622.9,
+    "delta_z_m": 0.2
+   },
+   "gfs_global": {
+    "cell_elevation_m": 453.0,
+    "cell_lat": 48.324112,
+    "cell_lon": 11.8359375,
+    "d_eff_m": 4946.6,
+    "delta_z_m": 0.2
+   },
+   "icon_d2": {
+    "cell_elevation_m": 453.0,
+    "cell_lat": 48.36,
+    "cell_lon": 11.779999,
+    "d_eff_m": 823.5,
+    "delta_z_m": 0.2
+   },
+   "icon_eu": {
+    "cell_elevation_m": 453.0,
+    "cell_lat": 48.375,
+    "cell_lon": 11.8125,
+    "d_eff_m": 3059.4,
+    "delta_z_m": 0.2
+   },
+   "icon_global": {
+    "cell_elevation_m": 453.0,
+    "cell_lat": 48.375,
+    "cell_lon": 11.75,
+    "d_eff_m": 3559.3,
+    "delta_z_m": 0.2
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 453.0,
+    "cell_lat": 48.5,
+    "cell_lon": 12.0,
+    "d_eff_m": 22657.7,
+    "delta_z_m": 0.2
+   },
+   "meteofrance_arome_france_hd": {
+    "cell_elevation_m": 453.0,
+    "cell_lat": 48.35,
+    "cell_lon": 11.789999,
+    "d_eff_m": 511.6,
+    "delta_z_m": 0.2
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 453.0,
+    "cell_lat": 48.375,
+    "cell_lon": 11.8125,
+    "d_eff_m": 3059.4,
+    "delta_z_m": 0.2
+   }
+  },
+  "station": "EDDM"
+ },
+ "NYC": {
+  "elevation_m": 6.4,
+  "lat": "40.777199",
+  "lon": "-73.872597",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 40.808434,
+    "cell_lon": -73.89206,
+    "d_eff_m": 3840.2,
+    "delta_z_m": 5.4
+   },
+   "gem_global": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 40.800003,
+    "cell_lon": -73.799995,
+    "d_eff_m": 6617.4,
+    "delta_z_m": 5.4
+   },
+   "gem_hrdps_continental": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 40.77649,
+    "cell_lon": -73.87106,
+    "d_eff_m": 151.5,
+    "delta_z_m": 5.4
+   },
+   "gfs_global": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 40.826553,
+    "cell_lon": -73.828125,
+    "d_eff_m": 6643.0,
+    "delta_z_m": 5.4
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 40.76809,
+    "cell_lon": -73.862785,
+    "d_eff_m": 1307.1,
+    "delta_z_m": 5.4
+   },
+   "icon_global": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 40.75,
+    "cell_lon": -73.875,
+    "d_eff_m": 3031.2,
+    "delta_z_m": 5.4
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 41.0,
+    "cell_lon": -74.0,
+    "d_eff_m": 26990.1,
+    "delta_z_m": 5.4
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 40.78742,
+    "cell_lon": -73.88108,
+    "d_eff_m": 1342.3,
+    "delta_z_m": 5.4
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 40.78125,
+    "cell_lon": -73.828125,
+    "d_eff_m": 3771.6,
+    "delta_z_m": 5.4
+   }
+  },
+  "station": "KLGA"
+ },
+ "Panama City": {
+  "elevation_m": 9.4,
+  "lat": "8.97334",
+  "lon": "-79.555603",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 8.963093,
+    "cell_lon": -79.57648,
+    "d_eff_m": 2560.5,
+    "delta_z_m": 4.4
+   },
+   "gem_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 9.000008,
+    "cell_lon": -79.49999,
+    "d_eff_m": 6789.7,
+    "delta_z_m": 4.4
+   },
+   "gfs_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 8.961929,
+    "cell_lon": -79.57031,
+    "d_eff_m": 2054.1,
+    "delta_z_m": 4.4
+   },
+   "icon_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 9.0,
+    "cell_lon": -79.5,
+    "d_eff_m": 6788.4,
+    "delta_z_m": 4.4
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 9.0,
+    "cell_lon": -79.5,
+    "d_eff_m": 6788.4,
+    "delta_z_m": 4.4
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 9.0,
+    "cell_lon": -79.59375,
+    "d_eff_m": 5132.4,
+    "delta_z_m": 4.4
+   }
+  },
+  "station": "MPMG"
+ },
+ "Paris": {
+  "elevation_m": 66.4,
+  "lat": "48.962276",
+  "lon": "2.436539",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": 48.963093,
+    "cell_lon": 2.4489796,
+    "d_eff_m": 912.8,
+    "delta_z_m": 24.4
+   },
+   "gem_global": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": 48.90001,
+    "cell_lon": 2.4000092,
+    "d_eff_m": 7420.1,
+    "delta_z_m": 24.4
+   },
+   "gfs_global": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": 48.909866,
+    "cell_lon": 2.4609375,
+    "d_eff_m": 6094.1,
+    "delta_z_m": 24.4
+   },
+   "icon_d2": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": 48.96,
+    "cell_lon": 2.4399996,
+    "d_eff_m": 357.6,
+    "delta_z_m": 24.4
+   },
+   "icon_eu": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": 48.9375,
+    "cell_lon": 2.4375,
+    "d_eff_m": 2755.9,
+    "delta_z_m": 24.4
+   },
+   "icon_global": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": 49.0,
+    "cell_lon": 2.375,
+    "d_eff_m": 6145.3,
+    "delta_z_m": 24.4
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": 49.0,
+    "cell_lon": 2.5,
+    "d_eff_m": 6248.5,
+    "delta_z_m": 24.4
+   },
+   "meteofrance_arome_france_hd": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": 48.96,
+    "cell_lon": 2.4399996,
+    "d_eff_m": 357.6,
+    "delta_z_m": 24.4
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": 48.9375,
+    "cell_lon": 2.390625,
+    "d_eff_m": 4339.5,
+    "delta_z_m": 24.4
+   },
+   "ukmo_uk_deterministic_2km": {
+    "cell_elevation_m": 42.0,
+    "cell_lat": 48.95803,
+    "cell_lon": 2.4282532,
+    "d_eff_m": 767.4,
+    "delta_z_m": 24.4
+   }
+  },
+  "station": "LFPB"
+ },
+ "Qingdao": {
+  "elevation_m": 9.1,
+  "lat": "36.361953",
+  "lon": "120.088171",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 8.0,
+    "cell_lat": 36.379612,
+    "cell_lon": 120.039116,
+    "d_eff_m": 4811.0,
+    "delta_z_m": 1.1
+   },
+   "gem_global": {
+    "cell_elevation_m": 8.0,
+    "cell_lat": 36.300003,
+    "cell_lon": 120.150024,
+    "d_eff_m": 8840.4,
+    "delta_z_m": 1.1
+   },
+   "gfs_global": {
+    "cell_elevation_m": 8.0,
+    "cell_lat": 36.374878,
+    "cell_lon": 120.11719,
+    "d_eff_m": 2969.3,
+    "delta_z_m": 1.1
+   },
+   "icon_global": {
+    "cell_elevation_m": 8.0,
+    "cell_lat": 36.375,
+    "cell_lon": 120.125,
+    "d_eff_m": 3602.6,
+    "delta_z_m": 1.1
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 8.0,
+    "cell_lat": 36.35,
+    "cell_lon": 120.0625,
+    "d_eff_m": 2655.4,
+    "delta_z_m": 1.1
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 8.0,
+    "cell_lat": 36.375,
+    "cell_lon": 120.09375,
+    "d_eff_m": 1534.3,
+    "delta_z_m": 1.1
+   }
+  },
+  "station": "ZSQD"
+ },
+ "San Francisco": {
+  "elevation_m": 4.0,
+  "lat": "37.619806",
+  "lon": "-122.374821",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 37.57469,
+    "cell_lon": -122.40001,
+    "d_eff_m": 5485.6,
+    "delta_z_m": 3.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 37.65,
+    "cell_lon": -122.399994,
+    "d_eff_m": 4023.2,
+    "delta_z_m": 3.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 37.54637,
+    "cell_lon": -122.34375,
+    "d_eff_m": 8612.5,
+    "delta_z_m": 3.0
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 37.62612,
+    "cell_lon": -122.400154,
+    "d_eff_m": 2339.0,
+    "delta_z_m": 3.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 37.5,
+    "cell_lon": -122.25,
+    "d_eff_m": 17277.9,
+    "delta_z_m": 3.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 37.5,
+    "cell_lon": -122.5,
+    "d_eff_m": 17298.0,
+    "delta_z_m": 3.0
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 37.619633,
+    "cell_lon": -122.37051,
+    "d_eff_m": 380.2,
+    "delta_z_m": 3.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 1.0,
+    "cell_lat": 37.59375,
+    "cell_lon": -122.34375,
+    "d_eff_m": 3985.7,
+    "delta_z_m": 3.0
+   }
+  },
+  "station": "KSFO"
+ },
+ "Sao Paulo": {
+  "elevation_m": 750.1,
+  "lat": "-23.431274",
+  "lon": "-46.469954",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 743.0,
+    "cell_lat": -23.44464,
+    "cell_lon": -46.46689,
+    "d_eff_m": 1518.7,
+    "delta_z_m": 7.1
+   },
+   "gem_global": {
+    "cell_elevation_m": 743.0,
+    "cell_lat": -23.399994,
+    "cell_lon": -46.5,
+    "d_eff_m": 4636.5,
+    "delta_z_m": 7.1
+   },
+   "gfs_global": {
+    "cell_elevation_m": 743.0,
+    "cell_lat": -23.488441,
+    "cell_lon": -46.523438,
+    "d_eff_m": 8376.8,
+    "delta_z_m": 7.1
+   },
+   "icon_global": {
+    "cell_elevation_m": 743.0,
+    "cell_lat": -23.375,
+    "cell_lon": -46.5,
+    "d_eff_m": 6968.2,
+    "delta_z_m": 7.1
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 743.0,
+    "cell_lat": -23.5,
+    "cell_lon": -46.5,
+    "d_eff_m": 8233.6,
+    "delta_z_m": 7.1
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 743.0,
+    "cell_lat": -23.4375,
+    "cell_lon": -46.40625,
+    "d_eff_m": 6536.0,
+    "delta_z_m": 7.1
+   }
+  },
+  "station": "SBGR"
+ },
+ "Seattle": {
+  "elevation_m": 132.0,
+  "lat": "47.447943",
+  "lon": "-122.310276",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 118.0,
+    "cell_lat": 47.41652,
+    "cell_lon": -122.31148,
+    "d_eff_m": 3495.3,
+    "delta_z_m": 14.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 118.0,
+    "cell_lat": 47.40001,
+    "cell_lon": -122.25,
+    "d_eff_m": 6997.9,
+    "delta_z_m": 14.0
+   },
+   "gem_hrdps_continental": {
+    "cell_elevation_m": 118.0,
+    "cell_lat": 47.45144,
+    "cell_lon": -122.30603,
+    "d_eff_m": 503.1,
+    "delta_z_m": 14.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 118.0,
+    "cell_lat": 47.504074,
+    "cell_lon": -122.34375,
+    "d_eff_m": 6729.4,
+    "delta_z_m": 14.0
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 118.0,
+    "cell_lat": 47.46013,
+    "cell_lon": -122.309906,
+    "d_eff_m": 1355.4,
+    "delta_z_m": 14.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 118.0,
+    "cell_lat": 47.5,
+    "cell_lon": -122.25,
+    "d_eff_m": 7350.5,
+    "delta_z_m": 14.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 118.0,
+    "cell_lat": 47.5,
+    "cell_lon": -122.5,
+    "d_eff_m": 15389.6,
+    "delta_z_m": 14.0
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 118.0,
+    "cell_lat": 47.455242,
+    "cell_lon": -122.30594,
+    "d_eff_m": 874.6,
+    "delta_z_m": 14.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 118.0,
+    "cell_lat": 47.4375,
+    "cell_lon": -122.34375,
+    "d_eff_m": 2772.3,
+    "delta_z_m": 14.0
+   }
+  },
+  "station": "KSEA"
+ },
+ "Seoul": {
+  "elevation_m": 7.0,
+  "lat": "37.469101",
+  "lon": "126.450996",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 37.50439,
+    "cell_lon": 126.43143,
+    "d_eff_m": 4286.9,
+    "delta_z_m": 2.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 37.65,
+    "cell_lon": 126.600006,
+    "d_eff_m": 24023.6,
+    "delta_z_m": 2.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 37.429222,
+    "cell_lon": 126.44531,
+    "d_eff_m": 4462.7,
+    "delta_z_m": 2.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 37.625,
+    "cell_lon": 126.5,
+    "d_eff_m": 17865.4,
+    "delta_z_m": 2.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 37.45,
+    "cell_lon": 126.4375,
+    "d_eff_m": 2435.2,
+    "delta_z_m": 2.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": 37.5,
+    "cell_lon": 126.421875,
+    "d_eff_m": 4290.4,
+    "delta_z_m": 2.0
+   }
+  },
+  "station": "RKSI"
+ },
+ "Shanghai": {
+  "elevation_m": 3.96,
+  "lat": "31.1433",
+  "lon": "121.8053",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 31.177504,
+    "cell_lon": 121.78359,
+    "d_eff_m": 4328.1,
+    "delta_z_m": 2.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 31.050003,
+    "cell_lon": 121.80002,
+    "d_eff_m": 10386.3,
+    "delta_z_m": 2.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 31.103157,
+    "cell_lon": 121.75781,
+    "d_eff_m": 6352.9,
+    "delta_z_m": 2.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 31.125,
+    "cell_lon": 121.875,
+    "d_eff_m": 6939.0,
+    "delta_z_m": 2.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 31.15,
+    "cell_lon": 121.8125,
+    "d_eff_m": 1012.2,
+    "delta_z_m": 2.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 2.0,
+    "cell_lat": 31.125,
+    "cell_lon": 121.640625,
+    "d_eff_m": 15805.0,
+    "delta_z_m": 2.0
+   }
+  },
+  "station": "ZSPD"
+ },
+ "Shenzhen": {
+  "elevation_m": 4.0,
+  "lat": "22.639474",
+  "lon": "113.803262",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 3.0,
+    "cell_lat": 22.671352,
+    "cell_lon": 113.856544,
+    "d_eff_m": 6516.0,
+    "delta_z_m": 1.0
+   },
+   "gem_global": {
+    "cell_elevation_m": 3.0,
+    "cell_lat": 22.800003,
+    "cell_lon": 113.850006,
+    "d_eff_m": 18482.7,
+    "delta_z_m": 1.0
+   },
+   "gfs_global": {
+    "cell_elevation_m": 3.0,
+    "cell_lat": 22.668404,
+    "cell_lon": 113.90625,
+    "d_eff_m": 11047.0,
+    "delta_z_m": 1.0
+   },
+   "icon_global": {
+    "cell_elevation_m": 3.0,
+    "cell_lat": 22.625,
+    "cell_lon": 113.875,
+    "d_eff_m": 7536.5,
+    "delta_z_m": 1.0
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 3.0,
+    "cell_lat": 22.5,
+    "cell_lon": 114.0,
+    "d_eff_m": 25467.6,
+    "delta_z_m": 1.0
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 3.0,
+    "cell_lat": 22.59375,
+    "cell_lon": 113.765625,
+    "d_eff_m": 6385.5,
+    "delta_z_m": 1.0
+   }
+  },
+  "station": "ZGSZ"
+ },
+ "Singapore": {
+  "elevation_m": 6.7,
+  "lat": "1.35019",
+  "lon": "103.994003",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 1.3708259,
+    "cell_lon": 103.94466,
+    "d_eff_m": 5945.8,
+    "delta_z_m": 2.7
+   },
+   "gem_global": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 1.3500061,
+    "cell_lon": 103.95001,
+    "d_eff_m": 4890.5,
+    "delta_z_m": 2.7
+   },
+   "gfs_global": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 1.3472214,
+    "cell_lon": 103.94531,
+    "d_eff_m": 5423.0,
+    "delta_z_m": 2.7
+   },
+   "icon_global": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 1.375,
+    "cell_lon": 104.0,
+    "d_eff_m": 2838.2,
+    "delta_z_m": 2.7
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 1.5,
+    "cell_lon": 104.0,
+    "d_eff_m": 16671.4,
+    "delta_z_m": 2.7
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 1.40625,
+    "cell_lon": 104.0625,
+    "d_eff_m": 9840.5,
+    "delta_z_m": 2.7
+   }
+  },
+  "station": "WSSS"
+ },
+ "Taipei": {
+  "elevation_m": 5.5,
+  "lat": "25.067244",
+  "lon": "121.552822",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 25.06151,
+    "cell_lon": 121.5194,
+    "d_eff_m": 3426.2,
+    "delta_z_m": 1.5
+   },
+   "gem_global": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 25.050003,
+    "cell_lon": 121.5,
+    "d_eff_m": 5655.5,
+    "delta_z_m": 1.5
+   },
+   "gfs_global": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 25.01139,
+    "cell_lon": 121.52344,
+    "d_eff_m": 6880.0,
+    "delta_z_m": 1.5
+   },
+   "icon_global": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 25.125,
+    "cell_lon": 121.5,
+    "d_eff_m": 8338.9,
+    "delta_z_m": 1.5
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 25.05,
+    "cell_lon": 121.5625,
+    "d_eff_m": 2151.0,
+    "delta_z_m": 1.5
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 4.0,
+    "cell_lat": 25.03125,
+    "cell_lon": 121.5,
+    "d_eff_m": 6658.3,
+    "delta_z_m": 1.5
+   }
+  },
+  "station": "RCSS"
+ },
+ "Tel Aviv": {
+  "elevation_m": 41.1,
+  "lat": "32.011398",
+  "lon": "34.8867",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 36.0,
+    "cell_lat": 32.021088,
+    "cell_lon": 34.849216,
+    "d_eff_m": 3694.7,
+    "delta_z_m": 5.1
+   },
+   "gem_global": {
+    "cell_elevation_m": 36.0,
+    "cell_lat": 31.950005,
+    "cell_lon": 34.950012,
+    "d_eff_m": 9069.8,
+    "delta_z_m": 5.1
+   },
+   "gfs_global": {
+    "cell_elevation_m": 36.0,
+    "cell_lat": 32.04035,
+    "cell_lon": 34.921875,
+    "d_eff_m": 4621.7,
+    "delta_z_m": 5.1
+   },
+   "icon_d2": {
+    "cell_elevation_m": 36.0,
+    "cell_lat": 32.0,
+    "cell_lon": 34.875,
+    "d_eff_m": 1680.3,
+    "delta_z_m": 5.1
+   },
+   "icon_eu": {
+    "cell_elevation_m": 36.0,
+    "cell_lat": 32.0,
+    "cell_lon": 34.875,
+    "d_eff_m": 1680.3,
+    "delta_z_m": 5.1
+   },
+   "icon_global": {
+    "cell_elevation_m": 36.0,
+    "cell_lat": 32.0,
+    "cell_lon": 34.875,
+    "d_eff_m": 1680.3,
+    "delta_z_m": 5.1
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 36.0,
+    "cell_lat": 32.0,
+    "cell_lon": 35.0,
+    "d_eff_m": 10758.3,
+    "delta_z_m": 5.1
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 36.0,
+    "cell_lat": 31.96875,
+    "cell_lon": 34.875,
+    "d_eff_m": 4868.9,
+    "delta_z_m": 5.1
+   }
+  },
+  "station": "LLBG"
+ },
+ "Tokyo": {
+  "elevation_m": 10.7,
+  "lat": "35.549678",
+  "lon": "139.786958",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 35.606327,
+    "cell_lon": 139.74292,
+    "d_eff_m": 7452.5,
+    "delta_z_m": 4.7
+   },
+   "gem_global": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 35.550003,
+    "cell_lon": 139.65002,
+    "d_eff_m": 12388.7,
+    "delta_z_m": 4.7
+   },
+   "gfs_global": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 35.554832,
+    "cell_lon": 139.6875,
+    "d_eff_m": 9015.9,
+    "delta_z_m": 4.7
+   },
+   "icon_global": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 35.5,
+    "cell_lon": 139.75,
+    "d_eff_m": 6457.6,
+    "delta_z_m": 4.7
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 35.55,
+    "cell_lon": 139.8125,
+    "d_eff_m": 2311.0,
+    "delta_z_m": 4.7
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 6.0,
+    "cell_lat": 35.53125,
+    "cell_lon": 139.78125,
+    "d_eff_m": 2113.2,
+    "delta_z_m": 4.7
+   }
+  },
+  "station": "RJTT"
+ },
+ "Toronto": {
+  "elevation_m": 173.4,
+  "lat": "43.675935",
+  "lon": "-79.629421",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 183.0,
+    "cell_lat": 43.690685,
+    "cell_lon": -79.68326,
+    "d_eff_m": 4629.6,
+    "delta_z_m": -9.6
+   },
+   "gem_global": {
+    "cell_elevation_m": 183.0,
+    "cell_lat": 43.65001,
+    "cell_lon": -79.649994,
+    "d_eff_m": 3324.0,
+    "delta_z_m": -9.6
+   },
+   "gem_hrdps_continental": {
+    "cell_elevation_m": 183.0,
+    "cell_lat": 43.669792,
+    "cell_lon": -79.63104,
+    "d_eff_m": 695.4,
+    "delta_z_m": -9.6
+   },
+   "gfs_global": {
+    "cell_elevation_m": 183.0,
+    "cell_lat": 43.638138,
+    "cell_lon": -79.6875,
+    "d_eff_m": 6284.5,
+    "delta_z_m": -9.6
+   },
+   "gfs_hrrr": {
+    "cell_elevation_m": 183.0,
+    "cell_lat": 43.683117,
+    "cell_lon": -79.63774,
+    "d_eff_m": 1041.8,
+    "delta_z_m": -9.6
+   },
+   "icon_global": {
+    "cell_elevation_m": 183.0,
+    "cell_lat": 43.625,
+    "cell_lon": -79.625,
+    "d_eff_m": 5674.9,
+    "delta_z_m": -9.6
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 183.0,
+    "cell_lat": 43.5,
+    "cell_lon": -79.5,
+    "d_eff_m": 22166.8,
+    "delta_z_m": -9.6
+   },
+   "ncep_nbm_conus": {
+    "cell_elevation_m": 183.0,
+    "cell_lat": 43.67054,
+    "cell_lon": -79.64179,
+    "d_eff_m": 1161.7,
+    "delta_z_m": -9.6
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 183.0,
+    "cell_lat": 43.6875,
+    "cell_lon": -79.59375,
+    "d_eff_m": 3143.5,
+    "delta_z_m": -9.6
+   }
+  },
+  "station": "CYYZ"
+ },
+ "Warsaw": {
+  "elevation_m": 110.3,
+  "lat": "52.165699",
+  "lon": "20.9671",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 105.0,
+    "cell_lat": 52.196835,
+    "cell_lon": 20.922508,
+    "d_eff_m": 4607.6,
+    "delta_z_m": 5.3
+   },
+   "gem_global": {
+    "cell_elevation_m": 105.0,
+    "cell_lat": 52.200012,
+    "cell_lon": 21.000015,
+    "d_eff_m": 4426.5,
+    "delta_z_m": 5.3
+   },
+   "gfs_global": {
+    "cell_elevation_m": 105.0,
+    "cell_lat": 52.19005,
+    "cell_lon": 20.976562,
+    "d_eff_m": 2783.5,
+    "delta_z_m": 5.3
+   },
+   "icon_d2": {
+    "cell_elevation_m": 105.0,
+    "cell_lat": 52.1875,
+    "cell_lon": 20.9375,
+    "d_eff_m": 3154.4,
+    "delta_z_m": 5.3
+   },
+   "icon_eu": {
+    "cell_elevation_m": 105.0,
+    "cell_lat": 52.1875,
+    "cell_lon": 20.9375,
+    "d_eff_m": 3154.4,
+    "delta_z_m": 5.3
+   },
+   "icon_global": {
+    "cell_elevation_m": 105.0,
+    "cell_lat": 52.125,
+    "cell_lon": 21.0,
+    "d_eff_m": 5051.8,
+    "delta_z_m": 5.3
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 105.0,
+    "cell_lat": 52.0,
+    "cell_lon": 21.0,
+    "d_eff_m": 18561.5,
+    "delta_z_m": 5.3
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 105.0,
+    "cell_lat": 52.125,
+    "cell_lon": 20.953125,
+    "d_eff_m": 4624.9,
+    "delta_z_m": 5.3
+   }
+  },
+  "station": "EPWA"
+ },
+ "Wellington": {
+  "elevation_m": 12.5,
+  "lat": "-41.326839",
+  "lon": "174.806862",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -41.300526,
+    "cell_lon": 174.70589,
+    "d_eff_m": 8926.3,
+    "delta_z_m": 7.5
+   },
+   "gem_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -41.249996,
+    "cell_lon": 174.90002,
+    "d_eff_m": 11558.2,
+    "delta_z_m": 7.5
+   },
+   "gfs_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -41.295143,
+    "cell_lon": 174.72656,
+    "d_eff_m": 7576.7,
+    "delta_z_m": 7.5
+   },
+   "icon_global": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -41.25,
+    "cell_lon": 174.75,
+    "d_eff_m": 9776.1,
+    "delta_z_m": 7.5
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -41.5,
+    "cell_lon": 175.0,
+    "d_eff_m": 25102.7,
+    "delta_z_m": 7.5
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 5.0,
+    "cell_lat": -41.34375,
+    "cell_lon": 174.79688,
+    "d_eff_m": 2056.8,
+    "delta_z_m": 7.5
+   }
+  },
+  "station": "NZWN"
+ },
+ "Wuhan": {
+  "elevation_m": 34.4,
+  "lat": "30.774798",
+  "lon": "114.213723",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 34.0,
+    "cell_lat": 30.75571,
+    "cell_lon": 114.226685,
+    "d_eff_m": 2457.4,
+    "delta_z_m": 0.4
+   },
+   "gem_global": {
+    "cell_elevation_m": 34.0,
+    "cell_lat": 30.750008,
+    "cell_lon": 114.150024,
+    "d_eff_m": 6681.5,
+    "delta_z_m": 0.4
+   },
+   "gfs_global": {
+    "cell_elevation_m": 34.0,
+    "cell_lat": 30.751709,
+    "cell_lon": 114.25781,
+    "d_eff_m": 4933.2,
+    "delta_z_m": 0.4
+   },
+   "icon_global": {
+    "cell_elevation_m": 34.0,
+    "cell_lat": 30.75,
+    "cell_lon": 114.25,
+    "d_eff_m": 4429.2,
+    "delta_z_m": 0.4
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 34.0,
+    "cell_lat": 31.0,
+    "cell_lon": 114.0,
+    "d_eff_m": 32295.6,
+    "delta_z_m": 0.4
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 34.0,
+    "cell_lat": 30.75,
+    "cell_lon": 114.1875,
+    "d_eff_m": 3725.8,
+    "delta_z_m": 0.4
+   }
+  },
+  "station": "ZHHH"
+ },
+ "Zhengzhou": {
+  "elevation_m": 150.9,
+  "lat": "34.526497",
+  "lon": "113.849165",
+  "models": {
+   "ecmwf_ifs": {
+    "cell_elevation_m": 147.0,
+    "cell_lat": 34.551846,
+    "cell_lon": 113.83354,
+    "d_eff_m": 3161.2,
+    "delta_z_m": 3.9
+   },
+   "gem_global": {
+    "cell_elevation_m": 147.0,
+    "cell_lat": 34.500008,
+    "cell_lon": 113.850006,
+    "d_eff_m": 2946.5,
+    "delta_z_m": 3.9
+   },
+   "gfs_global": {
+    "cell_elevation_m": 147.0,
+    "cell_lat": 34.50049,
+    "cell_lon": 113.90625,
+    "d_eff_m": 5976.6,
+    "delta_z_m": 3.9
+   },
+   "icon_global": {
+    "cell_elevation_m": 147.0,
+    "cell_lat": 34.5,
+    "cell_lon": 113.875,
+    "d_eff_m": 3779.4,
+    "delta_z_m": 3.9
+   },
+   "jma_seamless": {
+    "cell_elevation_m": 147.0,
+    "cell_lat": 34.5,
+    "cell_lon": 114.0,
+    "d_eff_m": 14130.7,
+    "delta_z_m": 3.9
+   },
+   "ukmo_global_deterministic_10km": {
+    "cell_elevation_m": 147.0,
+    "cell_lat": 34.5,
+    "cell_lon": 113.90625,
+    "d_eff_m": 6003.1,
+    "delta_z_m": 3.9
+   }
+  },
+  "station": "ZHCC"
+ }
+}

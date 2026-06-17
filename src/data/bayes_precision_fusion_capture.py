@@ -45,6 +45,9 @@ from src.forecast.bayes_precision_fusion import (
     ModelInstrument,
     eb_bias,
 )
+from src.forecast.grid_representativeness_loader import (
+    sigma_repr_sq_for as _sigma_repr_sq_for,
+)
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_capture")
 
@@ -221,6 +224,9 @@ def _default_live_fetch(
     try:
         from urllib.parse import urlencode  # noqa: PLC0415
 
+        from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+            BAYES_PRECISION_FUSION_CELL_SELECTION,
+        )
         from src.data.openmeteo_client import fetch  # noqa: PLC0415
         from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
             SINGLE_RUNS_FORECAST_URL,
@@ -242,6 +248,9 @@ def _default_live_fetch(
             "forecast_hours": forecast_hours,
             "temperature_unit": "celsius",
             "timezone": timezone_name,
+            # 2026-06-17 land-cell fix: read the airport's LAND surface, not the offshore sea
+            # cell (the systematic coastal cold drag). Matches the recorded product identity.
+            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
         payload = fetch(
             SINGLE_RUNS_FORECAST_URL,
@@ -283,6 +292,9 @@ class BayesPrecisionFusionCaptureResult:
     # (FAIL-OPEN path). Non-zero means the arrival guard ran without evidence for
     # those models — visible in telemetry, never silently hidden.
     admitted_on_missing_availability: int = 0
+    # v3 rule 5: the anchor cell's sigma_repr^2 (degC^2), widening the fusion prior tau0.
+    # 0.0 when the grid-representativeness deploy flag is OFF or the anchor cell is unknown.
+    anchor_sigma_repr_sq: float = 0.0
 
     @property
     def has_extras(self) -> bool:
@@ -314,6 +326,7 @@ def capture_bayes_precision_instruments(
     live_fetch: LiveFetchFn | None = None,
     decision_utc: datetime | None = None,
     model_available_at: Mapping[str, str | datetime | None] | None = None,
+    apply_grid_representativeness: bool = False,
 ) -> BayesPrecisionFusionCaptureResult:
     """F1 — fetch the extras fail-soft, EB-correct, gate, dedup, and build fusion inputs.
 
@@ -430,6 +443,14 @@ def capture_bayes_precision_instruments(
     # ---- EB-correct + build instruments for the SELECTED set (globals then regionals) ----
     # BLOCKER 2: each instrument carries residuals_by_target_date so the fusion aligns the
     # covariance by date (the cross-model Sigma is estimated only over the common target_dates).
+    # v3 rule 5 (grid representativeness): per-instrument sigma_repr^2 from the persisted
+    # native-cell d_eff/delta_z table — ADDED to the fusion Sigma diagonal. Fail-soft loader
+    # (unknown city/model -> 0.0); the whole layer is inert when the deploy flag is OFF.
+    def _repr_sq(model_name: str) -> float:
+        if not apply_grid_representativeness:
+            return 0.0
+        return _sigma_repr_sq_for(city, model_name)
+
     instruments: list[ModelInstrument] = []
     for m in selection.likelihood_globals:
         z, n = _eb_corrected(m, present_values[m], histories.get(m), parent_bias)
@@ -437,7 +458,7 @@ def capture_bayes_precision_instruments(
         instruments.append(ModelInstrument(
             model=m, z=z, train_residuals=tuple(h.residuals) if h else (),
             residuals_by_date=h.residual_by_target_date if h else {},
-            n_train=n, is_regional=False,
+            n_train=n, is_regional=False, sigma_repr_sq=_repr_sq(m),
         ))
     for m in selection.regional_experts:
         z, n = _eb_corrected(m, present_values[m], histories.get(m), parent_bias)
@@ -445,7 +466,7 @@ def capture_bayes_precision_instruments(
         instruments.append(ModelInstrument(
             model=m, z=z, train_residuals=tuple(h.residuals) if h else (),
             residuals_by_date=h.residual_by_target_date if h else {},
-            n_train=n, is_regional=True,
+            n_train=n, is_regional=True, sigma_repr_sq=_repr_sq(m),
         ))
 
     # ---- anchor prior (EB-corrected center + walk-forward residual std) ----
@@ -502,6 +523,11 @@ def capture_bayes_precision_instruments(
     else:
         disagree_var = 0.0
 
+    # v3 rule 5: the anchor (ecmwf_ifs 9km cell) carries its OWN representativeness error,
+    # widening the prior spread (tau0) inside the fusion. 0.0 when the flag is OFF or the cell
+    # is unknown -> tau0 unchanged.
+    anchor_sigma_repr_sq = _repr_sq(ANCHOR_MODEL)
+
     return BayesPrecisionFusionCaptureResult(
         anchor_z=anchor_z,
         anchor_tau0=anchor_tau0,
@@ -510,4 +536,5 @@ def capture_bayes_precision_instruments(
         selection=selection,
         dropped_models=tuple(dropped),
         admitted_on_missing_availability=_missing_avail_count,
+        anchor_sigma_repr_sq=anchor_sigma_repr_sq,
     )

@@ -244,7 +244,7 @@ _SEED_REQUIRED_TEXT_KEYS: tuple[str, ...] = (
     "temperature_metric",
     "computed_at",
     "baseline_source_run_id",
-    "aifs_source_run_id",
+    # AIFS DROPPED (operator directive 2026-06-17): aifs_source_run_id is no longer hard-required.
     "openmeteo_source_run_id",
     "openmeteo_payload_json",
     "precision_metadata_json",
@@ -256,6 +256,9 @@ _SEED_OPTIONAL_TEXT_KEYS: tuple[str, ...] = (
     "expires_at",
     "baseline_data_version",
     "baseline_source_available_at",
+    # AIFS DROPPED (operator directive 2026-06-17): AIFS source-run id / available-at are optional
+    # cross-check provenance now, validated for type IF present, never required.
+    "aifs_source_run_id",
     "aifs_source_available_at",
     "openmeteo_source_available_at",
 )
@@ -323,16 +326,20 @@ def _validate_aifs_input(
     kind: str,
     schema_version: str,
 ) -> tuple[str, str]:
-    """Enforce the one-of AIFS-input selector rule shared by SEED and REQUEST."""
+    """AIFS-input selector (one-of), now OPTIONAL.
+
+    AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): AIFS is no longer fetched, so a
+    seed/request no longer REQUIRES an aifs_samples_json / aifs_grib_path selector. When one IS
+    present (transition / archived runs) it is validated and threaded through as cross-check
+    provenance; when ABSENT this returns ("", "") (the materializer materializes the fused Normal
+    with aifs_extraction=None). ``kind`` / ``schema_version`` retained for signature stability.
+    """
+    del kind, schema_version  # no longer used (absence is allowed, not a violation)
     for key in ("aifs_samples_json", "aifs_grib_path"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return key, value.strip()
-    raise ContractViolation(
-        kind,
-        schema_version,
-        "missing AIFS input selector: requires non-empty aifs_samples_json or aifs_grib_path",
-    )
+    return "", ""
 
 
 def validate_materialization_seed(payload: Mapping[str, object]) -> MaterializationSeed:
@@ -373,7 +380,7 @@ def validate_materialization_seed(payload: Mapping[str, object]) -> Materializat
         temperature_metric=metric,
         computed_at=text_values["computed_at"],
         baseline_source_run_id=text_values["baseline_source_run_id"],
-        aifs_source_run_id=text_values["aifs_source_run_id"],
+        aifs_source_run_id=optional_text["aifs_source_run_id"],
         openmeteo_source_run_id=text_values["openmeteo_source_run_id"],
         openmeteo_payload_json=text_values["openmeteo_payload_json"],
         precision_metadata_json=text_values["precision_metadata_json"],

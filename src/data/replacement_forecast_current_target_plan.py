@@ -39,16 +39,21 @@ class ReplacementForecastCurrentTargetPlanRow:
 
     @property
     def can_seed(self) -> bool:
+        # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): seeding no longer waits on an AIFS
+        # manifest — the fused Normal posterior needs the OM9 anchor (+ the multi-model fusion rows),
+        # NOT AIFS. Requiring an AIFS manifest here would FREEZE freshness once AIFS stops being
+        # fetched (can_seed never True → the cron can never materialize a fresh cycle).
         return (
             not self.covered
             and not self.day0_observed_extreme_required
-            and self.aifs_manifest_count > 0
             and self.openmeteo_manifest_count > 0
         )
 
     @property
     def missing_aifs_manifest(self) -> bool:
-        return not self.covered and self.aifs_manifest_count <= 0
+        # AIFS DROPPED: a missing AIFS manifest is never a blocker — AIFS is no longer fetched. Always
+        # False so the readiness gate (missing_aifs_manifest_count) can never stall on AIFS.
+        return False
 
     @property
     def missing_openmeteo_manifest(self) -> bool:

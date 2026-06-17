@@ -136,7 +136,11 @@ def _replacement_forecast_live_materialization_enabled() -> bool:
 
 # The two raw-artifact sources this downloader owns. The cycle high-water mark is the MIN over
 # BOTH of MAX(source_cycle_time): a half-downloaded cycle (one source lagging) is NOT current.
-_CURRENT_TARGET_ARTIFACT_SOURCE_IDS = ("ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km")
+# AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): currency is gated on the OM9 anchor leg
+# ONLY. The fused Normal posterior depends on the OM9 anchor + the multi-model fusion rows, NOT AIFS.
+# Keeping ecmwf_aifs_ens here would FREEZE the high-water mark once AIFS stops being fetched (MIN over
+# both legs returns the stale/None AIFS cycle forever → the cron can never prove currency to advance).
+_CURRENT_TARGET_ARTIFACT_SOURCE_IDS = ("openmeteo_ecmwf_ifs_9km",)
 
 
 def _max_downloaded_current_target_cycle(forecast_db: Path) -> datetime | None:
@@ -184,14 +188,20 @@ def _probe_resolved_available_cycle() -> datetime | None:
     """
     from src.data.replacement_cycle_availability import (  # noqa: PLC0415
         newest_complete_cycle,
-        probe_aifs_cycle_available,
         probe_anchor_available_any,
         resolve_cycle_leg_availability,
     )
 
+    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): the fetchable cycle is now gated on
+    # the ANCHOR leg ALONE — AIFS is no longer downloaded, so it can no longer be a completeness
+    # requirement. We inject probe_aifs=lambda: True (a CALLER-side decoupling that keeps the shared,
+    # antibody-tested replacement_cycle_availability module untouched) so CycleLegAvailability.complete
+    # reduces to anchor_available. This does NOT re-introduce the "guessed run" the no-guess antibody
+    # forbids: the cycle is STILL selected by the real anchor probe (probe_anchor_available_any), never
+    # a wall-clock − release-lag guess; only the (now-irrelevant) AIFS leg is treated as satisfied.
     availability = resolve_cycle_leg_availability(
         datetime.now(timezone.utc),
-        probe_aifs=probe_aifs_cycle_available,
+        probe_aifs=lambda _cycle: True,
         probe_anchor=probe_anchor_available_any,
     )
     return newest_complete_cycle(availability)
@@ -261,7 +271,10 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
         cycle=cycle,
         limit=int(cfg.get("download_limit") or 10),
         write_db=True,
-        skip_aifs=False,
+        # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): the production current-target
+        # download no longer fetches the AIFS ensemble. Only the OM9 anchor leg is downloaded; the
+        # fused Normal posterior materializes from the anchor + the multi-model fusion rows.
+        skip_aifs=True,
         skip_openmeteo=False,
         release_lag_hours=release_lag_hours,
         anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
@@ -607,28 +620,28 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     )
     from src.data.replacement_cycle_availability import (  # noqa: PLC0415
         newest_complete_cycle,
-        probe_aifs_cycle_available,
         probe_anchor_available_any,
         resolve_cycle_leg_availability,
     )
 
     now = datetime.now(timezone.utc)
+    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): probe + fetch the ANCHOR leg only.
+    # probe_aifs=lambda: True keeps completeness anchor-gated (the shared module is untouched); the
+    # AIFS leg is never fetched (fetch_aifs_cycle pinned None below). No guessed run is introduced —
+    # the anchor probe still selects the cycle.
     availability = resolve_cycle_leg_availability(
         now,
-        probe_aifs=probe_aifs_cycle_available,
+        probe_aifs=lambda _cycle: True,
         probe_anchor=probe_anchor_available_any,
     )
-    aifs_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "ecmwf_aifs_ens")
     anchor_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "openmeteo_ecmwf_ifs_9km")
-    newest_aifs_published = next((a.cycle for a in availability if a.aifs_available), None)
     newest_anchor_published = next((a.cycle for a in availability if a.anchor_available), None)
 
-    fetch_aifs_cycle = (
-        newest_aifs_published
-        if newest_aifs_published is not None
-        and (aifs_have is None or newest_aifs_published > aifs_have)
-        else None
-    )
+    # AIFS DROPPED: the AIFS leg is never fetched; pin its fetch cycle to None so the fetch loop and
+    # the extras gate (which OR fetch_aifs_cycle with fetch_anchor_cycle) behave as anchor-only.
+    newest_aifs_published = None
+    aifs_have = None
+    fetch_aifs_cycle = None
     fetch_anchor_cycle = (
         newest_anchor_published
         if newest_anchor_published is not None
@@ -654,8 +667,10 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
         # Leg currency does not imply the same-cycle multimodel extras exist (2026-06-11:
         # legs poll-fetched at 00Z while every extras row sat unfetched → q_lcb NULL).
         report["status"] = "AVAILABILITY_POLL_CURRENT"
+    # AIFS DROPPED (operator directive 2026-06-17): the AIFS fetch leg is removed entirely — only the
+    # anchor leg is fetched (skip_aifs=True). fetch_aifs_cycle is pinned None above; the leg tuple no
+    # longer carries an "aifs" entry so AIFS is never downloaded even if that variable were revived.
     for leg, cycle, skip_aifs, skip_openmeteo in (
-        ("aifs", fetch_aifs_cycle, False, True),
         ("anchor", fetch_anchor_cycle, True, False),
     ):
         if cycle is None:

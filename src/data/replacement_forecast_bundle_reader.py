@@ -215,7 +215,11 @@ def _dependency_source_run_mismatch(
     readiness: ReplacementForecastReadinessDecision,
     posterior_dependency_json: Mapping[str, Any],
 ) -> bool:
-    for role in ("baseline_b0", "aifs_sampled_2t", "openmeteo_ifs9_anchor"):
+    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): the AIFS leg is no longer a required
+    # dependency role for the source-run-id consistency check. The fused posterior depends on the
+    # baseline + OM9 anchor + multi-model fusion rows, not AIFS; a posterior is no longer born with an
+    # aifs_sampled_2t dependency, so requiring it here would reject every drop-AIFS row.
+    for role in ("baseline_b0", "openmeteo_ifs9_anchor"):
         readiness_dependency = _readiness_dependency_by_role(readiness, role)
         if readiness_dependency is None:
             return True

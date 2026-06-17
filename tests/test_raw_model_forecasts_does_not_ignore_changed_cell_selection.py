@@ -62,9 +62,13 @@ def test_changed_cell_selection_changes_request_identity() -> None:
     the conflict below could never fire -- the bug would be silent again.)"""
     import src.data.bayes_precision_fusion_download as dl
 
-    id_nearest = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
+    # Pin both selections explicitly (the live DEFAULT is now "land", 2026-06-17 land-cell fix),
+    # so this antibody tests the mechanism — nearest vs land are distinct products — regardless
+    # of which is the default.
     orig = dl.BAYES_PRECISION_FUSION_CELL_SELECTION
     try:
+        dl.BAYES_PRECISION_FUSION_CELL_SELECTION = "nearest"
+        id_nearest = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
         dl.BAYES_PRECISION_FUSION_CELL_SELECTION = "land"
         id_land = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
     finally:
@@ -83,11 +87,11 @@ def test_changed_cell_selection_same_logical_key_is_not_ignored() -> None:
     import src.data.bayes_precision_fusion_download as dl
 
     conn = _conn()
-    id_nearest = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
-    _persist_rows(conn, [_row_with_identity(id_nearest, value=19.5)])
-
     orig = dl.BAYES_PRECISION_FUSION_CELL_SELECTION
     try:
+        dl.BAYES_PRECISION_FUSION_CELL_SELECTION = "nearest"  # live default is now "land"
+        id_nearest = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
+        _persist_rows(conn, [_row_with_identity(id_nearest, value=19.5)])
         dl.BAYES_PRECISION_FUSION_CELL_SELECTION = "land"
         id_land = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
     finally:
@@ -110,11 +114,11 @@ def test_changed_cell_selection_audit_row_records_both_requests() -> None:
     import src.data.bayes_precision_fusion_download as dl
 
     conn = _conn()
-    id_nearest = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
-    _persist_rows(conn, [_row_with_identity(id_nearest, value=19.5)])
-
     orig = dl.BAYES_PRECISION_FUSION_CELL_SELECTION
     try:
+        dl.BAYES_PRECISION_FUSION_CELL_SELECTION = "nearest"  # live default is now "land"
+        id_nearest = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
+        _persist_rows(conn, [_row_with_identity(id_nearest, value=19.5)])
         dl.BAYES_PRECISION_FUSION_CELL_SELECTION = "land"
         id_land = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
     finally:

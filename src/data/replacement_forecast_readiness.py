@@ -134,7 +134,11 @@ def build_replacement_forecast_readiness(
     computed_at: datetime | str,
     expires_at: datetime | str | None,
     dependencies: Sequence[ReplacementForecastDependency],
-    required_roles: Sequence[str] = ("baseline_b0", "aifs_sampled_2t", "openmeteo_ifs9_anchor", "soft_anchor_posterior"),
+    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): aifs_sampled_2t is no longer a
+    # required readiness role. The live q is the multi-model fused Normal (fused_normal_direct) which
+    # carries ZERO AIFS dependency, so readiness no longer waits on or validates an AIFS leg. The
+    # AIFS modules remain on disk but uncalled; this tuple is the authority for what readiness gates.
+    required_roles: Sequence[str] = ("baseline_b0", "openmeteo_ifs9_anchor", "soft_anchor_posterior"),
 ) -> ReplacementForecastReadinessDecision:
     if not city:
         raise ValueError("city must be set")

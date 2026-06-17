@@ -265,7 +265,11 @@ def _latest_readiness_artifact_inventory(
     latest_posterior: Mapping[str, object] | None,
     assume_available: bool,
 ) -> tuple[str, Mapping[str, int]]:
-    required_roles = ("aifs_sampled_2t", "openmeteo_ifs9_anchor")
+    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): the live readiness artifact inventory
+    # no longer requires an aifs_sampled_2t dependency role — the materializer no longer emits one, so
+    # requiring it here would report MISSING_DEPENDENCY_ROLE for every drop-AIFS posterior. Only the
+    # OM9 anchor leg is inventoried (the baseline + fused rows are validated elsewhere).
+    required_roles = ("openmeteo_ifs9_anchor",)
     empty_counts = {role: 0 for role in required_roles}
     if assume_available:
         return "ASSUMED_READY", empty_counts

@@ -177,7 +177,10 @@ def score_replacement_forecast_same_clob_replay(row: ReplacementForecastSameClob
     source_available_at_max = max(source_times.values()) if source_times else None
     processed_at_max = max(processed_times.values()) if processed_times else None
     reasons: list[str] = []
-    required_roles = {"baseline_b0", "aifs_sampled_2t", "openmeteo_ifs9_anchor", "soft_anchor_posterior"}
+    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): a replay no longer requires an
+    # aifs_sampled_2t source/processed time — the fused Normal posterior carries no AIFS dependency,
+    # so a drop-AIFS replay row legitimately has no AIFS leg. baseline + OM9 anchor + posterior remain.
+    required_roles = {"baseline_b0", "openmeteo_ifs9_anchor", "soft_anchor_posterior"}
     missing_roles = sorted(required_roles - set(source_times))
     if missing_roles:
         reasons.append("REPLACEMENT_REPLAY_SOURCE_AVAILABILITY_MISSING")

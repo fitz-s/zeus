@@ -222,19 +222,21 @@ def _load_seed_json(path: Path) -> dict[str, object]:
 
 
 def _looks_like_seed(payload: dict[str, object]) -> bool:
+    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): a seed no longer carries AIFS
+    # source-run / samples keys. The discriminator is the baseline + OM9 anchor + precision + bins
+    # shape; AIFS keys are optional cross-check provenance and are NOT part of the seed signature.
     required = {
         "city",
         "target_date",
         "temperature_metric",
         "computed_at",
         "baseline_source_run_id",
-        "aifs_source_run_id",
         "openmeteo_source_run_id",
         "openmeteo_payload_json",
         "precision_metadata_json",
         "bins",
     }
-    return required.issubset(payload) and ("aifs_samples_json" in payload or "aifs_grib_path" in payload)
+    return required.issubset(payload)
 
 
 def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, object]) -> bool:

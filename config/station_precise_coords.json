@@ -1,0 +1,434 @@
+{
+ "Amsterdam": {
+  "distance_from_citiesjson_m": 1,
+  "elevation_m": -3.4,
+  "lat": "52.308601",
+  "lon": "4.76389",
+  "source": "OurAirports",
+  "station": "EHAM"
+ },
+ "Ankara": {
+  "distance_from_citiesjson_m": 14,
+  "elevation_m": 952.5,
+  "lat": "40.128101",
+  "lon": "32.995098",
+  "source": "OurAirports",
+  "station": "LTAC"
+ },
+ "Atlanta": {
+  "distance_from_citiesjson_m": 1521,
+  "elevation_m": 312.7,
+  "lat": "33.6367",
+  "lon": "-84.428101",
+  "source": "OurAirports",
+  "station": "KATL"
+ },
+ "Auckland": {
+  "distance_from_citiesjson_m": 671,
+  "elevation_m": 7.0,
+  "lat": "-37.01199",
+  "lon": "174.786331",
+  "source": "OurAirports",
+  "station": "NZAA"
+ },
+ "Austin": {
+  "distance_from_citiesjson_m": 2404,
+  "elevation_m": 165.2,
+  "lat": "30.197535",
+  "lon": "-97.662015",
+  "source": "OurAirports",
+  "station": "KAUS"
+ },
+ "Beijing": {
+  "distance_from_citiesjson_m": 745,
+  "elevation_m": 35.4,
+  "lat": "40.077349",
+  "lon": "116.596702",
+  "source": "OurAirports",
+  "station": "ZBAA"
+ },
+ "Buenos Aires": {
+  "distance_from_citiesjson_m": 29,
+  "elevation_m": 20.4,
+  "lat": "-34.8222",
+  "lon": "-58.5358",
+  "source": "OurAirports",
+  "station": "SAEZ"
+ },
+ "Busan": {
+  "distance_from_citiesjson_m": 56,
+  "elevation_m": 1.8,
+  "lat": "35.179501",
+  "lon": "128.938004",
+  "source": "OurAirports",
+  "station": "RKPK"
+ },
+ "Cape Town": {
+  "distance_from_citiesjson_m": 1027,
+  "elevation_m": 46.0,
+  "lat": "-33.97403",
+  "lon": "18.604333",
+  "source": "OurAirports",
+  "station": "FACT"
+ },
+ "Chengdu": {
+  "distance_from_citiesjson_m": 2230,
+  "elevation_m": 495.3,
+  "lat": "30.558257",
+  "lon": "103.945966",
+  "source": "OurAirports",
+  "station": "ZUUU"
+ },
+ "Chicago": {
+  "distance_from_citiesjson_m": 3019,
+  "elevation_m": 207.3,
+  "lat": "41.9786",
+  "lon": "-87.9048",
+  "source": "OurAirports",
+  "station": "KORD"
+ },
+ "Chongqing": {
+  "distance_from_citiesjson_m": 1400,
+  "elevation_m": 416.1,
+  "lat": "29.712254",
+  "lon": "106.651895",
+  "source": "OurAirports",
+  "station": "ZUCK"
+ },
+ "Dallas": {
+  "distance_from_citiesjson_m": 1314,
+  "elevation_m": 148.4,
+  "lat": "32.844776",
+  "lon": "-96.847653",
+  "source": "OurAirports",
+  "station": "KDAL"
+ },
+ "Denver": {
+  "distance_from_citiesjson_m": 1358,
+  "elevation_m": 1725.8,
+  "lat": "39.701698",
+  "lon": "-104.751999",
+  "source": "OurAirports",
+  "station": "KBKF"
+ },
+ "Guangzhou": {
+  "distance_from_citiesjson_m": 817,
+  "elevation_m": 15.2,
+  "lat": "23.392401",
+  "lon": "113.299004",
+  "source": "OurAirports",
+  "station": "ZGGG"
+ },
+ "Helsinki": {
+  "distance_from_citiesjson_m": 1022,
+  "elevation_m": 54.6,
+  "lat": "60.318363",
+  "lon": "24.963341",
+  "source": "OurAirports",
+  "station": "EFHK"
+ },
+ "Hong Kong": {
+  "distance_from_citiesjson_m": null,
+  "elevation_m": 32.0,
+  "lat": "22.3022",
+  "lon": "114.1742",
+  "source": "HKO headquarters (city-center settlement)",
+  "station": "HKO_HQ"
+ },
+ "Houston": {
+  "distance_from_citiesjson_m": 518,
+  "elevation_m": 14.0,
+  "lat": "29.645336",
+  "lon": "-95.276812",
+  "source": "OurAirports",
+  "station": "KHOU"
+ },
+ "Istanbul": {
+  "distance_from_citiesjson_m": 1652,
+  "elevation_m": 99.1,
+  "lat": "41.274874",
+  "lon": "28.732136",
+  "source": "OurAirports",
+  "station": "LTFM"
+ },
+ "Jakarta": {
+  "distance_from_citiesjson_m": 75,
+  "elevation_m": 25.6,
+  "lat": "-6.266989",
+  "lon": "106.890318",
+  "source": "OurAirports",
+  "station": "WIHH"
+ },
+ "Jeddah": {
+  "distance_from_citiesjson_m": 1031,
+  "elevation_m": 14.6,
+  "lat": "21.680241",
+  "lon": "39.157436",
+  "source": "OurAirports",
+  "station": "OEJN"
+ },
+ "Jinan": {
+  "distance_from_citiesjson_m": 900,
+  "elevation_m": 23.2,
+  "lat": "36.857201",
+  "lon": "117.216003",
+  "source": "OurAirports",
+  "station": "ZSJN"
+ },
+ "Karachi": {
+  "distance_from_citiesjson_m": 2255,
+  "elevation_m": 30.5,
+  "lat": "24.9065",
+  "lon": "67.160797",
+  "source": "OurAirports",
+  "station": "OPKC"
+ },
+ "Kuala Lumpur": {
+  "distance_from_citiesjson_m": 472,
+  "elevation_m": 21.0,
+  "lat": "2.74558",
+  "lon": "101.709999",
+  "source": "OurAirports",
+  "station": "WMKK"
+ },
+ "Lagos": {
+  "distance_from_citiesjson_m": 45,
+  "elevation_m": 41.1,
+  "lat": "6.57737",
+  "lon": "3.32116",
+  "source": "OurAirports",
+  "station": "DNMM"
+ },
+ "London": {
+  "distance_from_citiesjson_m": 38,
+  "elevation_m": 5.8,
+  "lat": "51.505299",
+  "lon": "0.055278",
+  "source": "OurAirports",
+  "station": "EGLC"
+ },
+ "Los Angeles": {
+  "distance_from_citiesjson_m": 2032,
+  "elevation_m": 38.1,
+  "lat": "33.942501",
+  "lon": "-118.407997",
+  "source": "OurAirports",
+  "station": "KLAX"
+ },
+ "Lucknow": {
+  "distance_from_citiesjson_m": 53,
+  "elevation_m": 125.0,
+  "lat": "26.760599",
+  "lon": "80.889297",
+  "source": "OurAirports",
+  "station": "VILK"
+ },
+ "Madrid": {
+  "distance_from_citiesjson_m": 3379,
+  "elevation_m": 609.0,
+  "lat": "40.493407",
+  "lon": "-3.572249",
+  "source": "OurAirports",
+  "station": "LEMD"
+ },
+ "Manila": {
+  "distance_from_citiesjson_m": 1731,
+  "elevation_m": 22.9,
+  "lat": "14.5086",
+  "lon": "121.019997",
+  "source": "OurAirports",
+  "station": "RPLL"
+ },
+ "Mexico City": {
+  "distance_from_citiesjson_m": 176,
+  "elevation_m": 2229.9,
+  "lat": "19.435822",
+  "lon": "-99.07033",
+  "source": "OurAirports",
+  "station": "MMMX"
+ },
+ "Miami": {
+  "distance_from_citiesjson_m": 2860,
+  "elevation_m": 2.4,
+  "lat": "25.796011",
+  "lon": "-80.289751",
+  "source": "OurAirports",
+  "station": "KMIA"
+ },
+ "Milan": {
+  "distance_from_citiesjson_m": 45,
+  "elevation_m": 234.1,
+  "lat": "45.6306",
+  "lon": "8.72811",
+  "source": "OurAirports",
+  "station": "LIMC"
+ },
+ "Moscow": {
+  "distance_from_citiesjson_m": 64,
+  "elevation_m": 208.8,
+  "lat": "55.591499",
+  "lon": "37.261501",
+  "source": "OurAirports",
+  "station": "UUWW"
+ },
+ "Munich": {
+  "distance_from_citiesjson_m": 2090,
+  "elevation_m": 453.2,
+  "lat": "48.353802",
+  "lon": "11.7861",
+  "source": "OurAirports",
+  "station": "EDDM"
+ },
+ "NYC": {
+  "distance_from_citiesjson_m": 693,
+  "elevation_m": 6.4,
+  "lat": "40.777199",
+  "lon": "-73.872597",
+  "source": "OurAirports",
+  "station": "KLGA"
+ },
+ "Panama City": {
+  "distance_from_citiesjson_m": 708,
+  "elevation_m": 9.4,
+  "lat": "8.97334",
+  "lon": "-79.555603",
+  "source": "OurAirports",
+  "station": "MPMG"
+ },
+ "Paris": {
+  "distance_from_citiesjson_m": 815,
+  "elevation_m": 66.4,
+  "lat": "48.962276",
+  "lon": "2.436539",
+  "source": "OurAirports",
+  "station": "LFPB"
+ },
+ "Qingdao": {
+  "distance_from_citiesjson_m": 105,
+  "elevation_m": 9.1,
+  "lat": "36.361953",
+  "lon": "120.088171",
+  "source": "OurAirports",
+  "station": "ZSQD"
+ },
+ "San Francisco": {
+  "distance_from_citiesjson_m": 812,
+  "elevation_m": 4.0,
+  "lat": "37.619806",
+  "lon": "-122.374821",
+  "source": "OurAirports",
+  "station": "KSFO"
+ },
+ "Sao Paulo": {
+  "distance_from_citiesjson_m": 126,
+  "elevation_m": 750.1,
+  "lat": "-23.431274",
+  "lon": "-46.469954",
+  "source": "OurAirports",
+  "station": "SBGR"
+ },
+ "Seattle": {
+  "distance_from_citiesjson_m": 479,
+  "elevation_m": 132.0,
+  "lat": "47.447943",
+  "lon": "-122.310276",
+  "source": "OurAirports",
+  "station": "KSEA"
+ },
+ "Seoul": {
+  "distance_from_citiesjson_m": 11,
+  "elevation_m": 7.0,
+  "lat": "37.469101",
+  "lon": "126.450996",
+  "source": "OurAirports",
+  "station": "RKSI"
+ },
+ "Shanghai": {
+  "distance_from_citiesjson_m": 0,
+  "elevation_m": 3.96,
+  "lat": "31.1433",
+  "lon": "121.8053",
+  "source": "cities.json re-pin e80c101c4c (verified WU/METAR ZSPD) + OurAirports elev",
+  "station": "ZSPD"
+ },
+ "Shenzhen": {
+  "distance_from_citiesjson_m": 59,
+  "elevation_m": 4.0,
+  "lat": "22.639474",
+  "lon": "113.803262",
+  "source": "OurAirports",
+  "station": "ZGSZ"
+ },
+ "Singapore": {
+  "distance_from_citiesjson_m": 2388,
+  "elevation_m": 6.7,
+  "lat": "1.35019",
+  "lon": "103.994003",
+  "source": "OurAirports",
+  "station": "WSSS"
+ },
+ "Taipei": {
+  "distance_from_citiesjson_m": 212,
+  "elevation_m": 5.5,
+  "lat": "25.067244",
+  "lon": "121.552822",
+  "source": "OurAirports",
+  "station": "RCSS"
+ },
+ "Tel Aviv": {
+  "distance_from_citiesjson_m": 53,
+  "elevation_m": 41.1,
+  "lat": "32.011398",
+  "lon": "34.8867",
+  "source": "OurAirports",
+  "station": "LLBG"
+ },
+ "Tokyo": {
+  "distance_from_citiesjson_m": 653,
+  "elevation_m": 10.7,
+  "lat": "35.549678",
+  "lon": "139.786958",
+  "source": "OurAirports",
+  "station": "RJTT"
+ },
+ "Toronto": {
+  "distance_from_citiesjson_m": 342,
+  "elevation_m": 173.4,
+  "lat": "43.675935",
+  "lon": "-79.629421",
+  "source": "OurAirports",
+  "station": "CYYZ"
+ },
+ "Warsaw": {
+  "distance_from_citiesjson_m": 513,
+  "elevation_m": 110.3,
+  "lat": "52.165699",
+  "lon": "20.9671",
+  "source": "OurAirports",
+  "station": "EPWA"
+ },
+ "Wellington": {
+  "distance_from_citiesjson_m": 468,
+  "elevation_m": 12.5,
+  "lat": "-41.326839",
+  "lon": "174.806862",
+  "source": "OurAirports",
+  "station": "NZWN"
+ },
+ "Wuhan": {
+  "distance_from_citiesjson_m": 1235,
+  "elevation_m": 34.4,
+  "lat": "30.774798",
+  "lon": "114.213723",
+  "source": "OurAirports",
+  "station": "ZHHH"
+ },
+ "Zhengzhou": {
+  "distance_from_citiesjson_m": 1076,
+  "elevation_m": 150.9,
+  "lat": "34.526497",
+  "lon": "113.849165",
+  "source": "OurAirports",
+  "station": "ZHCC"
+ }
+}

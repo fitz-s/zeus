@@ -135,11 +135,30 @@ def test_replacement_replay_blocks_source_after_decision_and_missing_roles() -> 
     assert late.status == "BLOCKED"
     assert "REPLACEMENT_REPLAY_SOURCE_AFTER_DECISION_TIME" in late.reason_codes
 
+    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): aifs_sampled_2t is no longer a
+    # required replay role, so popping it no longer blocks. Re-pointed to a still-required role
+    # (openmeteo_ifs9_anchor) to exercise the missing-source-availability block.
     missing = _source_times()
-    missing.pop("aifs_sampled_2t")
+    missing.pop("openmeteo_ifs9_anchor")
     missing_role = score_replacement_forecast_same_clob_replay(_row(source_available_at_by_role=missing))
     assert missing_role.status == "BLOCKED"
     assert "REPLACEMENT_REPLAY_SOURCE_AVAILABILITY_MISSING" in missing_role.reason_codes
+
+
+def test_replacement_replay_scores_with_no_aifs_source_time() -> None:
+    # AIFS-DROP RED-on-revert (operator directive 2026-06-17): a replay row with NO aifs_sampled_2t
+    # source/processed time still SCORES — AIFS is no longer a required replay leg. If aifs is
+    # re-added to required_roles this BLOCKS on REPLACEMENT_REPLAY_SOURCE_AVAILABILITY_MISSING.
+    src_no_aifs = _source_times()
+    src_no_aifs.pop("aifs_sampled_2t")
+    proc_no_aifs = _processed_times()
+    proc_no_aifs.pop("aifs_sampled_2t")
+    result = score_replacement_forecast_same_clob_replay(
+        _row(source_available_at_by_role=src_no_aifs, processed_at_by_role=proc_no_aifs)
+    )
+    assert result.scored is True
+    assert "REPLACEMENT_REPLAY_SOURCE_AVAILABILITY_MISSING" not in result.reason_codes
+    assert "REPLACEMENT_REPLAY_PROCESSED_AT_MISSING" not in result.reason_codes
 
 
 def test_replacement_replay_blocks_processing_or_derived_posterior_after_decision() -> None:

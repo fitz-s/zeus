@@ -92,7 +92,17 @@ _RMF_LOGICAL_KEY_COLUMNS = (
 OPENMETEO_PROVIDER = "open-meteo"
 SINGLE_RUNS_SOURCE_FAMILY = "openmeteo_single_runs"
 PREVIOUS_RUNS_SOURCE_FAMILY = "openmeteo_previous_runs"
-BAYES_PRECISION_FUSION_CELL_SELECTION = "nearest"          # OM default cell pick (nearest gridpoint to requested).
+# 2026-06-17 CELL-SELECTION FIX (operator "fix the math, not a hardcoded value"): the prior
+# "nearest" pick snapped coastal airports to the nearest OFFSHORE grid cell, so the model
+# returned the SEA-surface temperature (cold by day) instead of the airport's land surface — the
+# systematic cold drag. "land" picks the nearest LAND gridpoint (OM prefers >50%-land cells), i.e.
+# the model's value AT the airport, not over water. This is a DATA-precision fix (finer data
+# closer to the airport), NOT a de-bias / fitted offset. Settlement-graded proof (ecmwf_ifs, all
+# cities, high+low, last 10 settled days, n=452): pooled MAE 1.121 -> 0.996 (-0.125, -11%); cold
+# bias -0.595 -> -0.423; worst offender Tokyo high -4.09 -> -1.34. Inland airports are unaffected
+# (nearest IS land there). cell_selection is part of the BLOCKER-4 product identity, so the land
+# captures accumulate their OWN de-bias history (never mixed with the legacy nearest history).
+BAYES_PRECISION_FUSION_CELL_SELECTION = "land"             # nearest LAND gridpoint (airport surface, not offshore sea cell).
 BAYES_PRECISION_FUSION_ELEVATION_PARAM = "requested"       # OM elevation = requested point (no override).
 BAYES_PRECISION_FUSION_DOWNSCALING_POLICY = "none"         # no statistical downscaling applied to the raw value.
 
@@ -415,6 +425,11 @@ def _default_previous_runs_fetch(
             "models": om_model,
             "temperature_unit": "celsius",  # NEVER the settlement unit (C/F mix antibody)
             "timezone": timezone_name,
+            # 2026-06-17 land-cell fix: the walk-forward de-bias history must train on the SAME
+            # land-surface cell the live value reads (else land-current is corrected by
+            # nearest-history). cell_selection is in the product identity -> the land history
+            # accrues under its own hash, never mixed with the legacy nearest residuals.
+            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
         payload = fetch(
             PREVIOUS_RUNS_URL,

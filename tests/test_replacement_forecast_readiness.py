@@ -89,12 +89,14 @@ def test_replacement_readiness_is_shadow_only_when_all_dependencies_are_availabl
     assert decision.status == READY_STATUS
     assert decision.reason_codes == ("REPLACEMENT_DEPENDENCIES_READY",)
     assert decision.expires_at == _dt(6)
+    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): aifs_sampled_2t is no longer a
+    # required readiness role. The live q is the multi-model fused Normal (zero AIFS dependency).
     assert decision.dependency_json["required_roles"] == [
         "baseline_b0",
-        "aifs_sampled_2t",
         "openmeteo_ifs9_anchor",
         "soft_anchor_posterior",
     ]
+    assert "aifs_sampled_2t" not in decision.dependency_json["required_roles"]
     assert decision.dependency_json["missing_roles"] == []
     assert decision.dependency_json["unavailable_roles"] == []
     assert decision.dependency_json["identity_mismatch_roles"] == []
@@ -108,17 +110,21 @@ def test_replacement_readiness_validates_dependency_identity_by_metric() -> None
     assert low.status == READY_STATUS
     dependencies = {row["role"]: row for row in low.dependency_json["dependencies"]}
     assert dependencies["baseline_b0"]["data_version"] == "ecmwf_opendata_mn2t3_local_calendar_day_min"
-    assert dependencies["aifs_sampled_2t"]["data_version"] == "ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_min"
+    # AIFS DROPPED: aifs_sampled_2t is no longer a required role, so it is not part of the validated
+    # dependency payload (the role loop iterates required roles only).
+    assert "aifs_sampled_2t" not in dependencies
     assert dependencies["openmeteo_ifs9_anchor"]["data_version"] == "openmeteo_ecmwf_ifs9_anchor_localday_low"
     assert dependencies["soft_anchor_posterior"]["data_version"] == "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_low_v1"
 
 
 def test_replacement_readiness_blocks_role_identity_mismatch() -> None:
-    decision = _decision(dependencies=_deps(product_mismatch_role="aifs_sampled_2t"))
+    # AIFS DROPPED: re-pointed from aifs_sampled_2t (no longer a required role, so its identity is
+    # never checked) to openmeteo_ifs9_anchor — a still-required role whose identity is validated.
+    decision = _decision(dependencies=_deps(product_mismatch_role="openmeteo_ifs9_anchor"))
 
     assert decision.status == BLOCKED_STATUS
     assert "REPLACEMENT_DEPENDENCY_IDENTITY_MISMATCH" in decision.reason_codes
-    assert decision.dependency_json["identity_mismatch_roles"] == ["aifs_sampled_2t"]
+    assert decision.dependency_json["identity_mismatch_roles"] == ["openmeteo_ifs9_anchor"]
 
 
 def test_replacement_readiness_blocks_missing_dependency() -> None:
@@ -140,11 +146,26 @@ def test_replacement_readiness_blocks_dependency_after_decision_time() -> None:
 
 
 def test_replacement_readiness_blocks_dependency_not_ready() -> None:
-    decision = _decision(dependencies=_deps(blocked_role="aifs_sampled_2t"))
+    # AIFS DROPPED: re-pointed from aifs_sampled_2t to openmeteo_ifs9_anchor (a still-required role);
+    # a blocked AIFS leg can no longer block readiness because AIFS is no longer required.
+    decision = _decision(dependencies=_deps(blocked_role="openmeteo_ifs9_anchor"))
 
     assert decision.status == BLOCKED_STATUS
     assert decision.reason_codes == ("REPLACEMENT_DEPENDENCY_NOT_READY",)
-    assert decision.dependency_json["blocked_roles"] == ["aifs_sampled_2t"]
+    assert decision.dependency_json["blocked_roles"] == ["openmeteo_ifs9_anchor"]
+
+
+def test_replacement_readiness_ready_with_no_aifs_dependency() -> None:
+    # AIFS-DROP RED-on-revert (operator directive 2026-06-17): readiness is READY with ONLY the
+    # baseline + OM9 anchor + posterior legs and NO aifs_sampled_2t dependency at all. If aifs is
+    # re-added to required_roles, this BLOCKS on REPLACEMENT_DEPENDENCY_MISSING.
+    deps_no_aifs = tuple(d for d in _deps() if d.role != "aifs_sampled_2t")
+    decision = _decision(dependencies=deps_no_aifs)
+
+    assert decision.status == READY_STATUS
+    assert decision.reason_codes == ("REPLACEMENT_DEPENDENCIES_READY",)
+    assert "aifs_sampled_2t" not in decision.dependency_json["required_roles"]
+    assert decision.dependency_json["missing_roles"] == []
 
 
 def test_replacement_readiness_blocks_missing_or_expired_expiry() -> None:

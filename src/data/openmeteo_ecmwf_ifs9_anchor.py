@@ -165,6 +165,14 @@ class OpenMeteoEcmwfIfs9AnchorRequest:
         return self.run.strftime("%Y-%m-%dT%H:%M")
 
     def params(self) -> dict[str, Any]:
+        # 2026-06-17 land-cell fix: the 9km ecmwf_ifs anchor (the fusion PRIOR) must read the
+        # airport's LAND surface, not the nearest OFFSHORE cell. OM's default was "nearest",
+        # which snapped coastal airports over water (the cold drag — Tokyo high -4.09 -> -1.34
+        # with land, all-cities settlement MAE 1.121 -> 0.996). Pure data-precision, not a de-bias.
+        from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+            BAYES_PRECISION_FUSION_CELL_SELECTION,
+        )
+
         return {
             "latitude": self.latitude,
             "longitude": self.longitude,
@@ -174,6 +182,7 @@ class OpenMeteoEcmwfIfs9AnchorRequest:
             "forecast_hours": self.forecast_hours,
             "temperature_unit": self.temperature_unit,
             "timezone": self.timezone_name,
+            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
 
     def url(self) -> str:

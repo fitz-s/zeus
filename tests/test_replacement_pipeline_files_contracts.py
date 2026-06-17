@@ -206,16 +206,22 @@ def test_scout_stub_also_rejected_as_seed() -> None:
         validate_materialization_seed(_scout_stub())
 
 
-def test_request_missing_aifs_input_is_rejected(tmp_path) -> None:
+def test_request_without_aifs_input_is_accepted(tmp_path) -> None:
+    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): a request with NO AIFS input selector
+    # is now ACCEPTED (the inverse of the old contract). AIFS is no longer fetched; the materializer
+    # produces the multi-model fused Normal with aifs_extraction=None.
     seed = _write_seed_artifacts(tmp_path)
     result = build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
     assert result.ok
     payload = dict(result.request)
     payload.pop("aifs_samples_json", None)
     payload.pop("aifs_grib_path", None)
-    with pytest.raises(ContractViolation) as excinfo:
-        validate_materialization_request(payload)
-    assert "AIFS input selector" in str(excinfo.value)
+    payload.pop("aifs_source_run_id", None)
+    payload.pop("aifs_source_available_at", None)
+    validated = validate_materialization_request(payload)
+    assert validated.aifs_input_key == ""
+    assert validated.aifs_input_value == ""
+    assert validated.aifs_source_run_id == ""
 
 
 def test_request_wrong_typed_number_is_rejected(tmp_path) -> None:

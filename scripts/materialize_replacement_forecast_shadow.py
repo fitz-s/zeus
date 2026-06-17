@@ -169,7 +169,13 @@ def main(argv: list[str] | None = None) -> int:
             if payload.get("openmeteo_anchor_artifact_id") in (None, "")
             else int(payload["openmeteo_anchor_artifact_id"])
         )
+        # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): AIFS is no longer fetched, so the
+        # input no longer REQUIRES an aifs_samples_json / aifs_grib_path selector. When one IS present
+        # (transition / archived runs) the extraction is built and threaded through as cross-check
+        # provenance; when ABSENT aifs_extraction stays None and the materializer materializes the
+        # multi-model fused Normal without it.
         aifs_grib_identity: Mapping[str, object] | None = None
+        aifs_samples: list | None = None
         if "aifs_samples_json" in payload:
             aifs_payload = _load_json(_resolve_input_path(payload["aifs_samples_json"], base_dir=base_dir))
             if not isinstance(aifs_payload, Mapping):
@@ -194,8 +200,6 @@ def main(argv: list[str] | None = None) -> int:
                 "step_hours_hash": _identity_tuple_hash(aifs_point_extraction.step_hours),
                 "raw_sha256": aifs_point_extraction.raw_sha256,
             }
-        else:
-            raise ValueError("input JSON requires aifs_samples_json or aifs_grib_path")
         if "openmeteo_payload_json" in payload:
             openmeteo_payload = _load_json(_resolve_input_path(payload["openmeteo_payload_json"], base_dir=base_dir))
             if not isinstance(openmeteo_payload, Mapping):
@@ -211,14 +215,16 @@ def main(argv: list[str] | None = None) -> int:
                     timezone_name=str(payload["city_timezone"]),
                 )
             )
-        aifs_extraction = extract_aifs_sampled_2t_localday(
-            aifs_samples,
-            city_timezone=str(payload["city_timezone"]),
-            target_local_date=target_date,
-            source_cycle_time=source_cycle_time,
-        )
-        if aifs_grib_identity is not None:
-            aifs_extraction = replace(aifs_extraction, **dict(aifs_grib_identity))
+        aifs_extraction = None
+        if aifs_samples is not None:
+            aifs_extraction = extract_aifs_sampled_2t_localday(
+                aifs_samples,
+                city_timezone=str(payload["city_timezone"]),
+                target_local_date=target_date,
+                source_cycle_time=source_cycle_time,
+            )
+            if aifs_grib_identity is not None:
+                aifs_extraction = replace(aifs_extraction, **dict(aifs_grib_identity))
         openmeteo_anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
             openmeteo_payload,
             city_timezone=str(payload["city_timezone"]),
@@ -243,8 +249,12 @@ def main(argv: list[str] | None = None) -> int:
             baseline_data_version=str(payload["baseline_data_version"]),
             baseline_source_available_at=_dt(str(payload["baseline_source_available_at"]), field_name="baseline_source_available_at"),
             aifs_extraction=aifs_extraction,
-            aifs_source_run_id=str(payload["aifs_source_run_id"]),
-            aifs_source_available_at=_dt(str(payload["aifs_source_available_at"]), field_name="aifs_source_available_at"),
+            aifs_source_run_id=(str(payload["aifs_source_run_id"]) if payload.get("aifs_source_run_id") else None),
+            aifs_source_available_at=(
+                _dt(str(payload["aifs_source_available_at"]), field_name="aifs_source_available_at")
+                if payload.get("aifs_source_available_at")
+                else None
+            ),
             openmeteo_anchor=openmeteo_anchor,
             openmeteo_source_run_id=str(payload.get("openmeteo_source_run_id") or ""),
             openmeteo_source_available_at=_dt(str(payload["openmeteo_source_available_at"]), field_name="openmeteo_source_available_at"),
