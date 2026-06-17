@@ -6705,7 +6705,8 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         all_families = set(family_keys) | rest_pull_families | held_families
         if not all_families:
             logger.info(
-                "edli_redecision_screen: entry_fired=%d rest_pulls=%d held_families=0 families_reemitted=0 "
+                "edli_redecision_screen: entry_candidates=%d entry_families=0 rest_pulls=%d "
+                "held_families=0 families_reemitted=0 "
                 "events_emitted=0 rests_cancelled=0 reason=no_screened_families",
                 len(redecisions),
                 len(rest_pulls),
@@ -6775,9 +6776,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             cancelled = cstats.get("cancelled", 0)
 
         logger.info(
-            "edli_redecision_screen: entry_fired=%d rest_pulls=%d held_families=%d families_reemitted=%d "
+            "edli_redecision_screen: entry_candidates=%d entry_families=%d rest_pulls=%d "
+            "held_families=%d families_reemitted=%d "
             "events_emitted=%d rests_cancelled=%d",
-            len(redecisions), len(rest_pulls), len(held_families), len(all_families), len(emitted), cancelled,
+            len(redecisions), len(family_keys), len(rest_pulls), len(held_families),
+            len(all_families), len(emitted), cancelled,
         )
     finally:
         _edli_redecision_screen_lock.release()
