@@ -5901,12 +5901,17 @@ def _edli_event_reactor_cycle() -> None:
                     # coverage_fairness_emit_enabled flag (and the None-source one-shot OFF
                     # path that left A-L permanently dark) is DELETED.
                     _fair_source = _edli_next_redecision_source()
+                    _fsr_pending = _edli_pending_entity_keys(
+                        conn,
+                        event_types=("FORECAST_SNAPSHOT_READY",),
+                    )
                     _edli_emit_forecast_snapshot_events(
                         conn,
                         decision_time=now,
                         received_at=received_at,
                         limit=forecast_emit_limit,
                         source=_fair_source,
+                        already_pending_keys=_fsr_pending,
                     )
                 except sqlite3.OperationalError as _emit_lock_exc:
                     if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
@@ -5917,39 +5922,11 @@ def _edli_event_reactor_cycle() -> None:
                         )
                     else:
                         raise
-            # Continuous re-decision (Wave-1 2026-06-12: now UNCONDITIONAL when event writing
-            # is enabled — this is the fill-rate ORGAN, not an optional feature). Re-emit
-            # FSR-equivalent events for committed market-backed families each cycle, with a
-            # per-cycle distinct source so they do NOT dedup to the consumed FSR. Routing
-            # through the pending path makes _refresh_pending_family_snapshots capture fresh
-            # prices just-in-time → the reactor re-decides every ~60s instead of once per 12h
-            # forecast. The former redecision_continuous_enabled gate and redecision_max_per_cycle
-            # cap are DELETED. Coverage is governed by the WRAPPING fair cursor: a monotonic
-            # `cycle-N` source advances the round-robin window (which now wraps modulo the
-            # family count — see CoverageFairnessRequest.select_rows), so a fixed per-cycle
-            # batch reaches EVERY family within ceil(N/batch) cycles and NONE is ever dropped.
-            # already_pending skip avoids duplicate piling. Non-fatal: never breaks the cycle.
-            if True:
-                try:
-                    # Fixed per-cycle batch fed to the wrapping fair cursor (no settings cap):
-                    # full coverage in ceil(N/batch) cycles, no silent tail drop.
-                    _rd_batch = _EDLI_REDECISION_FAIR_BATCH
-                    _rd_source = _edli_next_redecision_source()
-                    _rd_pending = _edli_pending_entity_keys(conn)
-                    _rd_n = _edli_emit_forecast_snapshot_events(
-                        conn,
-                        decision_time=now,
-                        received_at=received_at,
-                        limit=_rd_batch,
-                        source=_rd_source,
-                        already_pending_keys=_rd_pending,
-                    )
-                    logger.info(
-                        "edli_redecision: enqueued=%d batch=%d skipped_pending=%d (wrapping fair cursor)",
-                        _rd_n, _rd_batch, len(_rd_pending),
-                    )
-                except Exception as _rd_exc:  # noqa: BLE001 — continuous re-decision is non-fatal
-                    logger.warning("edli_redecision: enqueue failed (non-fatal): %r", _rd_exc)
+            # Continuous re-decision admission is intentionally NOT all-universe here.
+            # The dedicated screen job below owns EDLI_REDECISION_PENDING and admits only
+            # families with confirmed trade value, maker rests needing action, or held
+            # positions with money at risk. The reactor still emits ordinary
+            # FORECAST_SNAPSHOT_READY candidates for new-entry discovery above.
             if (
                 edli_cfg.get("day0_extreme_trigger_enabled")
                 and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
@@ -6831,10 +6808,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 key = by_family.get(rest.family_id)
                 if key is not None and all(key):
                     rest_pull_families.add(key)
-        all_families = set(family_keys) | rest_pull_families
+        held_families = _edli_current_held_position_family_keys()
+        all_families = set(family_keys) | rest_pull_families | held_families
         if not all_families:
             logger.info(
-                "edli_redecision_screen: entry_fired=%d rest_pulls=%d families_reemitted=0 "
+                "edli_redecision_screen: entry_fired=%d rest_pulls=%d held_families=0 families_reemitted=0 "
                 "events_emitted=0 rests_cancelled=0 reason=no_screened_families",
                 len(redecisions),
                 len(rest_pulls),
@@ -6865,7 +6843,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 EventWriter(world),
                 live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
             )
-            pending = _edli_pending_entity_keys(world)
+            pending = _edli_pending_entity_keys(world, event_types=(REDECISION_EVENT_TYPE,))
             emitted = trig.scan_committed_snapshots(
                 forecasts_conn=forecasts_ro,
                 decision_time=now,
@@ -6904,9 +6882,9 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             cancelled = cstats.get("cancelled", 0)
 
         logger.info(
-            "edli_redecision_screen: entry_fired=%d rest_pulls=%d families_reemitted=%d "
+            "edli_redecision_screen: entry_fired=%d rest_pulls=%d held_families=%d families_reemitted=%d "
             "events_emitted=%d rests_cancelled=%d",
-            len(redecisions), len(rest_pulls), len(all_families), len(emitted), cancelled,
+            len(redecisions), len(rest_pulls), len(held_families), len(all_families), len(emitted), cancelled,
         )
     finally:
         _edli_redecision_screen_lock.release()
@@ -7219,7 +7197,42 @@ def _edli_emit_forecast_snapshot_events(
         forecasts_conn.close()
 
 
-def _edli_pending_entity_keys(world_conn) -> set[str]:
+def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
+    """Current held-position families for redecision admission.
+
+    This is an admission gate, not a priority hint: any family with real position_current
+    exposure must keep receiving EDLI_REDECISION_PENDING events even if no new-entry edge fires.
+    Fail-soft matches the reactor held-family provider; a read failure must not crash the daemon.
+    """
+
+    provider = _edli_reactor_held_family_provider()
+    if provider is None:
+        return set()
+    try:
+        raw_families = provider()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "edli_redecision_screen: held-position family read failed; held families not admitted this tick: %r",
+            exc,
+        )
+        return set()
+    out: set[tuple[str, str, str]] = set()
+    for family in raw_families or ():
+        try:
+            city, target_date, metric = family
+        except (TypeError, ValueError):
+            continue
+        key = (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        if all(key):
+            out.add(key)
+    return out
+
+
+def _edli_pending_entity_keys(
+    world_conn,
+    *,
+    event_types: tuple[str, ...] = ("FORECAST_SNAPSHOT_READY",),
+) -> set[str]:
     """entity_keys of opportunity_events still unprocessed for the EDLI reactor consumer.
 
     Passed as ``already_pending_keys`` to the continuous re-decision emit so families with a
@@ -7247,16 +7260,21 @@ def _edli_pending_entity_keys(world_conn) -> set[str]:
             world_conn.execute("PRAGMA busy_timeout = 250")
         except Exception:  # noqa: BLE001
             saved_busy_timeout_ms = None
+        event_type_values = tuple(str(t).strip() for t in event_types if str(t).strip())
+        if not event_type_values:
+            return set()
+        placeholders = ",".join("?" for _ in event_type_values)
         try:
             rows = world_conn.execute(
-                """
+                f"""
                 SELECT DISTINCT e.entity_key
                 FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
                 JOIN opportunity_events e ON e.event_id = p.event_id
                 WHERE p.consumer_name = 'edli_reactor_v1'
                   AND p.processing_status IN ('pending', 'processing', 'claimed')
-                  AND e.event_type = 'FORECAST_SNAPSHOT_READY'
-            """
+                  AND e.event_type IN ({placeholders})
+            """,
+                event_type_values,
             ).fetchall()
         except Exception:  # noqa: BLE001 — fail-open: no skip set (cap still bounds)
             return set()

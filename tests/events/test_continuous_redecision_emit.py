@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-05-31
+# Last reused or audited: 2026-06-17
 # Authority basis: GOAL #36 continuous trading + PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md.
 #   Proves the continuous re-decision emit: scan_committed_snapshots(source=<per-cycle>) re-emits a
 #   fresh FSR-equivalent each cycle (distinct event_id) instead of deduping to the consumed FSR, so
@@ -96,6 +96,42 @@ def _scan(trig, fc, *, source=None, already_pending_keys=None, decision_time=Non
     return trig.scan_committed_snapshots(
         forecasts_conn=fc, decision_time=decision_time, received_at="2026-05-24T04:17:00+00:00",
         source=source, already_pending_keys=already_pending_keys,
+    )
+
+
+def _ready_payload(
+    *,
+    city: str = "Chicago",
+    target_date: str = "2026-06-04",
+    metric: str = "high",
+    source_run_id: str = "run-1",
+    snapshot_id: str = "snap-1",
+    available_at: str = "2026-06-03T00:00:00+00:00",
+) -> ForecastSnapshotReadyPayload:
+    return ForecastSnapshotReadyPayload(
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        source_id="ecmwf-open-data",
+        source_run_id=source_run_id,
+        cycle="00",
+        track="ens",
+        snapshot_id=snapshot_id,
+        snapshot_hash=snapshot_id,
+        captured_at=available_at,
+        available_at=available_at,
+        required_fields_present=True,
+        required_steps_present=True,
+        member_count=51,
+        min_members_floor=40,
+        completeness_status="COMPLETE",
+        required_steps=[0, 3, 6],
+        observed_steps=[0, 3, 6],
+        expected_members=51,
+        source_run_status="COMMITTED",
+        source_run_completeness_status="COMPLETE",
+        coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
     )
 
 
@@ -289,6 +325,56 @@ def test_prune_working_set_expires_superseded_fsr_across_source_runs():
     assert statuses[new.event_id] == "pending"
 
 
+def test_prune_working_set_expires_superseded_redecision_by_family():
+    """Continuous redecision supersession keeps the newest EDLI_REDECISION_PENDING per family."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+
+    def _rd(source_run_id: str, available_at: str):
+        return make_opportunity_event(
+            event_type="EDLI_REDECISION_PENDING",
+            entity_key=f"London|2026-06-07|low|{source_run_id}",
+            source="edli_redecision:screen",
+            observed_at=available_at,
+            available_at=available_at,
+            received_at=available_at,
+            causal_snapshot_id=source_run_id,
+            payload=_ready_payload(
+                city="London",
+                target_date="2026-06-07",
+                metric="low",
+                source_run_id=source_run_id,
+                snapshot_id=source_run_id,
+                available_at=available_at,
+            ),
+            priority=50,
+        )
+
+    old = _rd("2026-06-05T00Z", "2026-06-05T00:00:00+00:00")
+    new = _rd("2026-06-06T00Z", "2026-06-06T00:00:00+00:00")
+    store.insert_or_ignore(old)
+    store.insert_or_ignore(new)
+
+    archived = store.archive_superseded_forecast_snapshot_events(batch_limit=10)
+
+    assert archived == 1
+    statuses = dict(
+        world.execute(
+            """
+            SELECT event_id, processing_status
+              FROM opportunity_event_processing
+             WHERE consumer_name = ?
+            """,
+            (store.consumer_name,),
+        ).fetchall()
+    )
+    assert statuses[old.event_id] == "expired"
+    assert statuses[new.event_id] == "pending"
+
+
 def test_redecision_skip_set_ignores_pending_channel_events():
     """Channel-cache events must not make forecast families look already pending."""
 
@@ -315,6 +401,78 @@ def test_redecision_skip_set_ignores_pending_channel_events():
     store.insert_or_ignore(channel)
 
     assert main._edli_pending_entity_keys(world) == set()
+
+
+def test_redecision_skip_set_is_event_type_scoped():
+    """FSR backlog must not block screened/held EDLI_REDECISION_PENDING admission."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    fsr = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Chicago|2026-06-04|high|run-fsr",
+        source="forecast",
+        observed_at="2026-06-03T00:00:00+00:00",
+        available_at="2026-06-03T00:00:00+00:00",
+        received_at="2026-06-03T00:00:00+00:00",
+        causal_snapshot_id="snap-fsr",
+        payload=_ready_payload(source_run_id="run-fsr", snapshot_id="snap-fsr"),
+        priority=50,
+    )
+    redecision = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Tokyo|2026-06-04|high|run-rd",
+        source="edli_redecision:screen",
+        observed_at="2026-06-03T00:00:00+00:00",
+        available_at="2026-06-03T00:00:00+00:00",
+        received_at="2026-06-03T00:00:00+00:00",
+        causal_snapshot_id="snap-rd",
+        payload=_ready_payload(
+            city="Tokyo",
+            source_run_id="run-rd",
+            snapshot_id="snap-rd",
+        ),
+        priority=50,
+    )
+    store.insert_or_ignore(fsr)
+    store.insert_or_ignore(redecision)
+
+    assert main._edli_pending_entity_keys(world) == {fsr.entity_key}
+    assert main._edli_pending_entity_keys(
+        world,
+        event_types=("EDLI_REDECISION_PENDING",),
+    ) == {redecision.entity_key}
+
+
+def test_redecision_admission_is_screen_job_only():
+    """The reactor cycle may emit FSR discovery, but EDLI_REDECISION_PENDING belongs to the screen."""
+
+    reactor_src = inspect.getsource(main._edli_event_reactor_cycle)
+    screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+
+    assert "event_type=REDECISION_EVENT_TYPE" not in reactor_src
+    assert "event_type=REDECISION_EVENT_TYPE" in screen_src
+
+
+def test_held_position_families_are_admitted_to_redecision(monkeypatch):
+    """Held families are admission inputs even when no new-entry screen fires."""
+
+    monkeypatch.setattr(
+        main,
+        "_edli_reactor_held_family_provider",
+        lambda: lambda: frozenset(
+            {
+                ("Tokyo", "2026-06-04", "high"),
+                ("", "2026-06-04", "low"),
+            }
+        ),
+    )
+
+    assert main._edli_current_held_position_family_keys() == {
+        ("Tokyo", "2026-06-04", "high")
+    }
 
 
 def test_redecision_cycle_prunes_before_snapshotting_pending_keys():

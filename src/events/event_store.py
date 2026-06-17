@@ -843,6 +843,7 @@ class EventStore:
             """
             SELECT
                 e.event_id,
+                e.event_type,
                 e.entity_key,
                 json_extract(e.payload_json, '$.city') AS city,
                 json_extract(e.payload_json, '$.target_date') AS target_date,
@@ -852,7 +853,7 @@ class EventStore:
                 ON e.event_id = p.event_id
              WHERE p.consumer_name = ?
                AND p.processing_status IN ('pending', 'processing')
-               AND e.event_type = 'FORECAST_SNAPSHOT_READY'
+               AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
                AND e.entity_key IS NOT NULL
              ORDER BY e.available_at ASC, e.received_at ASC, e.event_id ASC
              LIMIT ?
@@ -862,15 +863,16 @@ class EventStore:
         if not candidate_rows:
             return 0
 
-        _FsrPruneKey = tuple[str, str, str, str] | tuple[str, str]
+        _FsrPruneKey = tuple[str, str, str, str, str] | tuple[str, str, str]
 
         def _prune_key(row: sqlite3.Row | tuple) -> _FsrPruneKey:
-            city = str(row[2] or "").strip()
-            target_date = str(row[3] or "").strip()
-            metric = str(row[4] or "").strip()
+            event_type = str(row[1] or "").strip()
+            city = str(row[3] or "").strip()
+            target_date = str(row[4] or "").strip()
+            metric = str(row[5] or "").strip()
             if city and target_date and metric:
-                return ("family", city, target_date, metric)
-            return ("entity", str(row[1] or ""))
+                return ("family", event_type, city, target_date, metric)
+            return ("entity", event_type, str(row[2] or ""))
 
         candidate_keys = {
             key for row in candidate_rows if (key := _prune_key(row))[-1]
@@ -878,7 +880,7 @@ class EventStore:
         keeper_ids: set[str] = set()
         for prune_key in candidate_keys:
             if prune_key[0] == "family":
-                _, city, target_date, metric = prune_key
+                _, event_type, city, target_date, metric = prune_key
                 key_predicate = (
                     "json_extract(e.payload_json, '$.city') = ? "
                     "AND json_extract(e.payload_json, '$.target_date') = ? "
@@ -886,7 +888,7 @@ class EventStore:
                 )
                 key_params = (city, target_date, metric)
             else:
-                _, entity_key = prune_key
+                _, event_type, entity_key = prune_key
                 key_predicate = "e.entity_key = ?"
                 key_params = (entity_key,)
             keeper_row = self.conn.execute(
@@ -896,7 +898,7 @@ class EventStore:
                   JOIN opportunity_event_processing p
                     ON p.event_id = e.event_id
                    AND p.consumer_name = ?
-                 WHERE e.event_type = 'FORECAST_SNAPSHOT_READY'
+                 WHERE e.event_type = ?
                    AND {key_predicate}
                    AND p.processing_status IN ('pending', 'processing')
                  ORDER BY
@@ -909,9 +911,9 @@ class EventStore:
                    e.available_at DESC,
                    e.received_at DESC,
                    e.event_id DESC
-                 LIMIT 1
+                LIMIT 1
                 """,
-                (self.consumer_name, *key_params),
+                (self.consumer_name, event_type, *key_params),
             ).fetchone()
             if keeper_row is not None:
                 keeper_ids.add(str(keeper_row[0]))

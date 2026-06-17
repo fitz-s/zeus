@@ -267,17 +267,19 @@ class TestAutoResumeNoop:
 # ---------------------------------------------------------------------------
 
 class TestAutoResumeFailOpen:
-    def test_r5_no_boot_sha_warns_and_returns(self, caplog):
+    def test_r5_no_boot_sha_warns_and_returns(self, tmp_path, caplog):
         """Boot SHA not captured → WARNING logged, no crash."""
-        with patch.object(main_module, "_BOOT_STATE", {"sha": None, "ts": None}):
-            with caplog.at_level(logging.WARNING, logger="zeus"):
-                cp._control_state["entries_paused"] = True
-                cp._control_state["entries_pause_reason"] = "deployment_freshness_4h_divergence"
-                try:
-                    _boot_deployment_freshness_auto_resume()
-                finally:
-                    cp._control_state["entries_paused"] = False
-                    cp._control_state["entries_pause_reason"] = None
+        _, conn = _setup_world_db(tmp_path)
+        _seed_deployment_freshness_pause(conn)
+        conn.close()
+
+        factory = _make_conn_factory(tmp_path / "world.db")
+        with patch("src.state.db.get_world_connection", side_effect=factory):
+            with patch("src.control.control_plane.get_world_connection", side_effect=factory):
+                cp.refresh_control_state()
+                with patch.object(main_module, "_BOOT_STATE", {"sha": None, "ts": None}):
+                    with caplog.at_level(logging.WARNING, logger="zeus"):
+                        _boot_deployment_freshness_auto_resume()
         assert "boot SHA not captured" in caplog.text
 
     def test_r6_git_failure_warns_and_returns(self, tmp_path, caplog):
