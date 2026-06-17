@@ -30,9 +30,11 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from src.contracts import EntryMethod
 from src.engine.position_belief import (
     DEFAULT_MAX_AGE_HOURS,
     SELECTED_METHOD_REPLACEMENT_POSTERIOR,
@@ -214,6 +216,18 @@ class TestMonitorPrimaryAuthority:
             p_posterior=0.855,
         )
 
+    def test_day0_yes_bin_probability_converts_to_held_side_for_buy_no(self):
+        import src.engine.monitor_refresh as mr
+
+        assert mr._held_side_probability_from_yes_bin_probability(
+            0.23,
+            "buy_yes",
+        ) == pytest.approx(0.23)
+        assert mr._held_side_probability_from_yes_bin_probability(
+            0.23,
+            "buy_no",
+        ) == pytest.approx(0.77)
+
     def test_fresh_belief_attests_without_legacy_chain(self, monkeypatch):
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb
@@ -270,6 +284,93 @@ class TestMonitorPrimaryAuthority:
             v.startswith("replacement_posterior_stale")
             for v in pos.applied_validations
         )
+
+    def test_stale_belief_on_target_local_day_uses_day0_observation_lane(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        belief = ReplacementBelief(
+            held_side_prob=0.758, q_yes_bin=0.242, posterior_id="p9",
+            computed_at="2026-06-12T00:00:00+00:00", age_hours=99.0,
+            fresh=False, bin_key=BIN, direction="buy_no",
+        )
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: belief)
+        observed = []
+
+        def fake_day0_refresh(**kw):
+            observed.append(kw["position"].entry_method)
+            mr._set_monitor_probability_fresh(kw["position"], True)
+            return 0.64, ["day0_observation"]
+
+        monkeypatch.setattr(
+            mr,
+            "_refresh_day0_observation",
+            fake_day0_refresh,
+        )
+        monkeypatch.setattr(
+            mr,
+            "_refresh_ens_member_counting",
+            lambda **kw: (_ for _ in ()).throw(AssertionError("ENS fallback must not run")),
+        )
+        pos = self._pos()
+        pos.state = "active"
+        pos.target_date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        city = type(
+            "City",
+            (),
+            {"timezone": "Asia/Shanghai", "settlement_source_type": "wu_icao"},
+        )()
+
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos,
+            conn=None,
+            city=city,
+            target_d=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+        )
+
+        assert observed == [EntryMethod.DAY0_OBSERVATION.value]
+        assert prob == pytest.approx(0.64)
+        assert refresh_pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
+        assert is_fresh is True
+
+    def test_day0_monitor_accepts_incomplete_window_only_as_bound(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+
+        pos = self._pos()
+        obs = {
+            "observation_time": NOW.isoformat(),
+            "coverage_status": "WINDOW_INCOMPLETE",
+        }
+        monkeypatch.setattr(mr, "_fetch_day0_observation", lambda city, target_d: obs)
+        monkeypatch.setattr(
+            mr,
+            "_day0_observation_source_rejection_reason",
+            lambda *args, **kwargs: None,
+        )
+        allow_flags = []
+
+        def fake_quality(*args, allow_incomplete_window_bound=False, **kwargs):
+            allow_flags.append(allow_incomplete_window_bound)
+            return "stop_after_quality_assertion"
+
+        monkeypatch.setattr(
+            mr,
+            "_day0_observation_quality_rejection_reason",
+            fake_quality,
+        )
+
+        prob, validations = mr._refresh_day0_observation(
+            position=pos,
+            current_p_market=0.12,
+            conn=None,
+            city=type("City", (), {"name": "Chengdu"})(),
+            target_d=NOW.date(),
+        )
+
+        assert allow_flags == [True]
+        assert prob == pytest.approx(pos.p_posterior)
+        assert "day0_observation_bound_only:coverage_window_incomplete" in validations
+        assert "observation_quality_gate" in validations
 
     def test_missing_belief_annotates_and_falls_through(self, monkeypatch):
         import src.engine.monitor_refresh as mr

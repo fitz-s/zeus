@@ -12,13 +12,14 @@ restore intent: a function name says WHAT the value is, and the value-equivalenc
 test (tests/test_one_minus_value_equivalence.py) makes the obfuscated shape a
 detectable regression.
 
-IMPORTANT: ``one_minus`` is for legitimate complement-of-1 scalars (a *remaining*
-fraction after a discount, a Kelly denominator ``1 - price``). It is NOT a licence
-to derive a Polymarket NO-side probability from a YES posterior — that remains
-forbidden (Polymarket YES/NO are independent executable assets). The AST guard in
-tests/test_probability_complement_ast_guard.py continues to forbid ``1 - x`` at the
-live probability sites; these helpers exist for the non-probability scalar math
-(discounts, Kelly denominators, payout odds) that was gratuitously obfuscated.
+IMPORTANT: ``one_minus`` is for legitimate complement-of-1 scalars: a *remaining*
+fraction after a discount, a Kelly denominator ``1 - price``, or an explicitly
+named point-outcome conversion such as q(NO event) from q(YES event). It is NOT a
+licence to derive a NO-token executable price from a YES-token price, or to turn
+a YES lower confidence bound into a NO lower confidence bound. The AST guard in
+tests/test_probability_complement_ast_guard.py continues to forbid open-coded
+``1 - x`` at live probability sites so every complement has to pass through a
+named semantic boundary.
 """
 
 from __future__ import annotations

@@ -255,6 +255,7 @@ from src.strategy.redecision import (
     SUBMIT_ABORT_STATES,
 )
 from src.types.market import Bin
+from src.contracts.probability_arithmetic import one_minus
 # QLCB_HONESTY.md FIX-C — the EXISTING settlement σ-floor (state/settlement_sigma_floor.json,
 # 232 cells, median 3.18C realized residual) + its WMO-aware settlement-preimage bin
 # integrator. Module-level so the live replacement q_lcb floor reuses the SAME antibody
@@ -10709,9 +10710,9 @@ def _replacement_edge_p_value(
             cost=float(cost),
         )
     return _bound_implied_edge_p_value(
-        q_point=1.0 - float(q_yes),
+        q_point=one_minus(float(q_yes)),
         q_lcb=float(no_lcb),
-        q_ucb=1.0 - yes_lcb_raw,
+        q_ucb=one_minus(yes_lcb_raw),
         cost=float(cost),
     )
 

@@ -29,6 +29,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 
+from src.contracts.probability_arithmetic import one_minus
+
 
 def _fee_at(price: float) -> float:
     """Canonical price-dependent Polymarket taker fee for ``price`` (probability units).
@@ -423,7 +425,7 @@ def screen_reprice(
     yes_post = float(belief.p_posterior_vec[idx])
     if side not in {"buy_yes", "buy_no"}:
         return None
-    current = yes_post if side == "buy_yes" else 1.0 - yes_post
+    current = yes_post if side == "buy_yes" else one_minus(yes_post)
     delta = float(resting_posterior) - current  # >0 means belief WORSENED against the held side
     if delta >= belief_reprice_delta - _EPS:
         return RepriceDecision(
@@ -546,7 +548,7 @@ def read_freshest_executable_prices(
         # YES buy: pay the ask. NO buy: pay 1 - best_bid (the NO ask implied by the YES book).
         if 0.0 < top_ask < 1.0:
             out[(cid, "buy_yes")] = PriceQuote(price=top_ask, freshness_deadline=deadline)
-        no_ask = 1.0 - top_bid
+        no_ask = one_minus(top_bid)
         if 0.0 < no_ask < 1.0:
             out[(cid, "buy_no")] = PriceQuote(price=no_ask, freshness_deadline=deadline)
     return out
@@ -602,7 +604,7 @@ def read_freshest_resting_best_bids(
             continue
         if 0.0 < yes_bid < 1.0:
             out[(cid, "buy_yes")] = PriceQuote(price=yes_bid, freshness_deadline=deadline)
-        no_bid = 1.0 - yes_ask
+        no_bid = one_minus(yes_ask)
         if 0.0 < no_bid < 1.0:
             out[(cid, "buy_no")] = PriceQuote(price=no_bid, freshness_deadline=deadline)
     return out

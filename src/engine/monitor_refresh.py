@@ -19,8 +19,10 @@ Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_
 
 import logging
 import sqlite3
+import copy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -120,6 +122,14 @@ def _model_only_native_posterior(p_native: float) -> float:
     if not np.isfinite(p) or not 0.0 <= p <= 1.0:
         raise ValueError(f"native monitor probability must be in [0, 1], got {p!r}")
     return p
+
+
+def _held_side_probability_from_yes_bin_probability(p_yes_bin: float, direction: str) -> float:
+    """Convert a YES-bin point probability into the held-side outcome space."""
+    p_yes = _model_only_native_posterior(p_yes_bin)
+    if str(direction) == "buy_no":
+        return _model_only_native_posterior(one_minus(p_yes))
+    return p_yes
 
 
 @dataclass(frozen=True)
@@ -373,6 +383,22 @@ def _track_belief_staleness(pos: Position) -> None:
             getattr(pos, "direction", "?"),
             count,
         )
+
+
+def _is_position_target_local_day(pos: Position, city, target_d) -> bool:
+    if target_d is None:
+        return False
+    try:
+        target_date_value = target_d if isinstance(target_d, date) else date.fromisoformat(str(target_d))
+    except Exception:
+        return False
+    timezone_name = str(getattr(city, "timezone", "") or "").strip()
+    try:
+        local_today = datetime.now(ZoneInfo(timezone_name)).date()
+    except Exception:
+        local_today = datetime.now(timezone.utc).date()
+    return target_date_value == local_today
+
 
 def _enqueue_single_family_belief_reseed_failsoft(
     *, city: str, target_date: str, metric: str
@@ -1282,13 +1308,10 @@ def _refresh_ens_member_counting(
             city.name, anomaly_removed * 100,
         )
 
-    if position.direction == "buy_no":
-        _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, [
-            *applied,
-            "buy_no_independent_monitor_probability_missing",
-        ]
-    p_cal_native = p_cal_yes
+    p_cal_native = _held_side_probability_from_yes_bin_probability(
+        p_cal_yes,
+        position.direction,
+    )
 
     current_p_posterior = _model_only_native_posterior(p_cal_native)
 
@@ -1327,8 +1350,23 @@ def _fetch_day0_observation(city: Position | object, target_d: date):
         return get_current_observation(city)
 
 
+def _is_position_day0_quote_eligible(pos: Position) -> bool:
+    if _position_state_value(pos) == "day0_window":
+        return True
+    city = cities_by_name.get(str(getattr(pos, "city", "") or ""))
+    if city is None:
+        return False
+    if str(getattr(city, "settlement_source_type", "") or "") != "wu_icao":
+        return False
+    try:
+        target_d = date.fromisoformat(str(getattr(pos, "target_date", "") or ""))
+    except Exception:
+        return False
+    return _is_position_target_local_day(pos, city, target_d)
+
+
 def _day0_bid_only_monitor_quote(conn, clob: PolymarketClient, pos: Position, token_id: str) -> HeldTokenMonitorQuote | None:
-    if _position_state_value(pos) != "day0_window" or not hasattr(clob, "get_orderbook"):
+    if not _is_position_day0_quote_eligible(pos) or not hasattr(clob, "get_orderbook"):
         return None
     try:
         from src.data.market_scanner import _top_book_level_decimal
@@ -1488,16 +1526,23 @@ def _refresh_day0_observation(
             source_rejection,
         ]
 
+    coverage_validations: list[str] = []
+    obs_coverage_status = str(_day0_observation_field(obs, "coverage_status", "") or "").strip().upper()
+    if obs_coverage_status == "WINDOW_INCOMPLETE":
+        coverage_validations.append("day0_observation_bound_only:coverage_window_incomplete")
+
     quality_rejection = _day0_observation_quality_rejection_reason(
         city,
         obs,
         temperature_metric,
         decision_time=datetime.now(timezone.utc),
+        allow_incomplete_window_bound=True,
     )
     if quality_rejection is not None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, [
             "day0_observation",
+            *coverage_validations,
             "observation_quality_gate",
             quality_rejection,
         ]
@@ -1630,6 +1675,7 @@ def _refresh_day0_observation(
         p_cal_full = p_cal_vector
         applied = [
             "day0_observation",
+            *coverage_validations,
             "fresh_ens_fetch",
             *forecast_source_validations,
             "mc_instrument_noise",
@@ -1645,6 +1691,7 @@ def _refresh_day0_observation(
         p_cal_full = np.array([p_cal_yes], dtype=float)
         applied = [
             "day0_observation",
+            *coverage_validations,
             "fresh_ens_fetch",
             *forecast_source_validations,
             "mc_instrument_noise",
@@ -1655,6 +1702,7 @@ def _refresh_day0_observation(
         p_cal_full = p_raw_vector if len(all_bins) > 1 else np.array([p_cal_yes], dtype=float)
         applied = [
             "day0_observation",
+            *coverage_validations,
             "fresh_ens_fetch",
             *forecast_source_validations,
             "mc_instrument_noise",
@@ -1712,13 +1760,10 @@ def _refresh_day0_observation(
         hours_since_open=hours_since_open,
         authority_verified=_authority_verified,
     ).value_for_consumer("ev")
-    if position.direction == "buy_no":
-        _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, [
-            *applied,
-            "buy_no_independent_monitor_probability_missing",
-        ]
-    p_cal_native = p_cal_yes
+    p_cal_native = _held_side_probability_from_yes_bin_probability(
+        p_cal_yes,
+        position.direction,
+    )
     current_p_posterior = _model_only_native_posterior(p_cal_native)
 
     # A1: Stash bootstrap-relevant data for fresh CI computation in refresh_position
@@ -2266,6 +2311,10 @@ def monitor_probability_refresh(
             _position_state_value(pos) == "day0_window"
             and str(getattr(city, "settlement_source_type", "") or "") == "wu_icao"
         )
+        or (
+            _is_position_target_local_day(pos, city, target_d)
+            and str(getattr(city, "settlement_source_type", "") or "") == "wu_icao"
+        )
     )
 
     # BELIEF-AUTHORITY FAULT (regime law U1/U2, 2026-06-12): a position whose
@@ -2312,12 +2361,10 @@ def monitor_probability_refresh(
     refresh_pos = pos
     day0_unsupported_forecast_fallback = False
     day0_observation_unavailable_forecast_fallback = False
-    if (
-        _position_state_value(pos) == "day0_window"
-        and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value
-    ):
+    if _would_use_day0_lane and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
         if str(getattr(city, "settlement_source_type", "") or "") == "wu_icao":
-            refresh_pos = replace(pos, entry_method=EntryMethod.DAY0_OBSERVATION.value)
+            refresh_pos = copy.copy(pos)
+            refresh_pos.entry_method = EntryMethod.DAY0_OBSERVATION.value
         else:
             day0_unsupported_forecast_fallback = True
     setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)

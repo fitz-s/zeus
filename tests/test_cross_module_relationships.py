@@ -341,6 +341,7 @@ def test_monitor_refresh_updates_exit_context_freshness():
     # --- Case A: monitor_refresh succeeds → fresh_prob_is_fresh=True ---
     pos_fresh = SimpleNamespace(
         trade_id="test-fresh",
+        p_posterior=0.55,
         last_monitor_prob_is_fresh=True,
         last_monitor_market_price=0.55,
         last_monitor_market_price_is_fresh=True,
@@ -372,6 +373,7 @@ def test_monitor_refresh_updates_exit_context_freshness():
     # --- Case B: monitor_refresh fallback/failure → fresh_prob_is_fresh=False ---
     pos_stale = SimpleNamespace(
         trade_id="test-stale",
+        p_posterior=0.55,
         last_monitor_prob_is_fresh=False,  # monitor_refresh.py line 372: fallback sets False
         last_monitor_market_price=0.55,
         last_monitor_market_price_is_fresh=False,

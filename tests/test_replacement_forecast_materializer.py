@@ -30,6 +30,7 @@ from src.data.replacement_forecast_materializer import (
     ReplacementForecastMaterializeRequest,
     _QLCB_BASIS,
     _ensure_forecast_posteriors_live_authority_check,
+    _ensure_replacement_identity_columns,
     _replacement_trade_authority_status,
     materialize_replacement_forecast_shadow,
 )
@@ -281,6 +282,95 @@ def test_forecast_posteriors_live_authority_check_migration_preserves_rows() -> 
         q_ucb_map=None,
         q_lcb_basis=_QLCB_BASIS,
     ) == "DIAGNOSTIC_ONLY"
+
+
+def test_legacy_anchor_schema_migration_preserves_raw_shadow_parent_fk() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_ONLY'))
+        );
+        INSERT INTO raw_forecast_artifacts (artifact_id, trade_authority_status)
+        VALUES (1, 'SHADOW_ONLY');
+
+        CREATE TABLE deterministic_forecast_anchors (
+            anchor_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+            anchor_value_c REAL NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            artifact_id INTEGER REFERENCES raw_forecast_artifacts(artifact_id),
+            model TEXT NOT NULL,
+            native_grid TEXT,
+            delivery_grid_resolution TEXT,
+            interpolation_method TEXT,
+            contributing_times_json TEXT NOT NULL DEFAULT '[]',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
+            training_allowed INTEGER NOT NULL DEFAULT 0
+                CHECK (training_allowed = 0),
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            anchor_identity_hash TEXT,
+            UNIQUE(source_id, product_id, data_version, city, target_date, temperature_metric, source_cycle_time)
+        );
+        INSERT INTO deterministic_forecast_anchors (
+            source_id, product_id, data_version, city, target_date, temperature_metric,
+            anchor_value_c, source_cycle_time, source_available_at, captured_at,
+            artifact_id, model, trade_authority_status, anchor_identity_hash
+        ) VALUES (
+            'openmeteo_ecmwf_ifs_9km',
+            'openmeteo_ecmwf_ifs9_deterministic_anchor_v1',
+            'openmeteo_ecmwf_ifs9_anchor_localday_high',
+            'Chengdu',
+            '2026-06-17',
+            'high',
+            25.65,
+            '2026-06-17T00:00:00+00:00',
+            '2026-06-17T11:21:16+00:00',
+            '2026-06-17T12:08:19+00:00',
+            1,
+            'ecmwf_ifs9',
+            'SHADOW_ONLY',
+            'anchor-hash'
+        );
+
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            openmeteo_anchor_id INTEGER REFERENCES deterministic_forecast_anchors(anchor_id),
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY'))
+        );
+        """
+    )
+
+    _ensure_replacement_identity_columns(conn)
+
+    raw_status = conn.execute(
+        "SELECT trade_authority_status FROM raw_forecast_artifacts WHERE artifact_id = 1"
+    ).fetchone()["trade_authority_status"]
+    anchor_status = conn.execute(
+        "SELECT trade_authority_status FROM deterministic_forecast_anchors WHERE anchor_id = 1"
+    ).fetchone()["trade_authority_status"]
+    conn.execute(
+        "INSERT INTO forecast_posteriors (openmeteo_anchor_id, trade_authority_status) VALUES (?, ?)",
+        (1, "LIVE_AUTHORITY"),
+    )
+
+    assert raw_status == "SHADOW_ONLY"
+    assert anchor_status == "DIAGNOSTIC_ONLY"
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_materializer_keeps_readiness_separate_by_baseline_source_run() -> None:

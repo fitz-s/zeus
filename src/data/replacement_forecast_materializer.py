@@ -329,7 +329,26 @@ def _ensure_diagnostic_only_trade_authority_check(conn: sqlite3.Connection, tabl
     if row is None:
         return
     create_sql = str(row[0] if not isinstance(row, sqlite3.Row) else row["sql"])
-    if "trade_authority_status" not in create_sql or "DIAGNOSTIC_ONLY" in create_sql:
+    normalized_create_sql = create_sql
+    for parent_table in (
+        "raw_forecast_artifacts",
+        "deterministic_forecast_anchors",
+        "forecast_posteriors",
+        "replacement_shadow_decisions",
+        "raw_model_forecasts",
+    ):
+        normalized_create_sql = normalized_create_sql.replace(
+            f"{parent_table}__pre_diagnostic_authority_check",
+            parent_table,
+        )
+    needs_fk_normalization = normalized_create_sql != create_sql
+    if "trade_authority_status" not in create_sql:
+        if needs_fk_normalization:
+            _rebuild_table_preserving_rows(conn, table_name, normalized_create_sql)
+        return
+    if "DIAGNOSTIC_ONLY" in create_sql:
+        if needs_fk_normalization:
+            _rebuild_table_preserving_rows(conn, table_name, normalized_create_sql)
         return
     old_checks = (
         "CHECK (trade_authority_status IN ('SHADOW_ONLY'))",
@@ -367,7 +386,7 @@ def _ensure_diagnostic_only_trade_authority_check(conn: sqlite3.Connection, tabl
     )
     conn.execute(f"ALTER TABLE {table_name} RENAME TO {legacy_table}")
     conn.execute(
-        create_sql.replace(old_check, new_check)
+        normalized_create_sql.replace(old_check, new_check)
         .replace("DEFAULT 'SHADOW_ONLY'", "DEFAULT 'DIAGNOSTIC_ONLY'")
         .replace("DEFAULT 'SHADOW_VETO_ONLY'", "DEFAULT 'DIAGNOSTIC_ONLY'")
     )
@@ -378,15 +397,45 @@ def _ensure_diagnostic_only_trade_authority_check(conn: sqlite3.Connection, tabl
     conn.execute(f"DROP TABLE {legacy_table}")
 
 
+def _rebuild_table_preserving_rows(
+    conn: sqlite3.Connection,
+    table_name: str,
+    create_sql: str,
+) -> None:
+    legacy_table = f"{table_name}__pre_diagnostic_authority_check"
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (legacy_table,),
+    ).fetchone():
+        raise RuntimeError(f"legacy migration table already exists: {legacy_table}")
+    column_names = [
+        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    ]
+    if not column_names:
+        return
+    quoted_columns = ", ".join(f'"{name}"' for name in column_names)
+    conn.execute(f"ALTER TABLE {table_name} RENAME TO {legacy_table}")
+    conn.execute(create_sql)
+    conn.execute(
+        f"INSERT INTO {table_name} ({quoted_columns}) "
+        f"SELECT {quoted_columns} FROM {legacy_table}"
+    )
+    conn.execute(f"DROP TABLE {legacy_table}")
+
+
 def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
     """Keep old PR399 shadow DBs fail-closed instead of returning stale rows."""
 
+    conn.execute("PRAGMA defer_foreign_keys=ON")
+    # Only replacement-derived tables moved from the legacy shadow vocabulary to
+    # DIAGNOSTIC_ONLY/LIVE_AUTHORITY. Raw artifacts and raw model captures remain
+    # source-input evidence with SHADOW_ONLY semantics; rebuilding those parent
+    # tables here can break child FKs before the current posterior is written.
     for table_name in (
-        "raw_forecast_artifacts",
         "deterministic_forecast_anchors",
         "forecast_posteriors",
         "replacement_shadow_decisions",
-        "raw_model_forecasts",
     ):
         _ensure_diagnostic_only_trade_authority_check(conn, table_name)
     anchor_columns = _table_columns(conn, "deterministic_forecast_anchors")
@@ -412,12 +461,14 @@ def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
             WHERE anchor_identity_hash IS NOT NULL
         """
     )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_topology
-            ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
-        """
-    )
+    posterior_columns = _table_columns(conn, "forecast_posteriors")
+    if {"city", "target_date", "temperature_metric", "bin_topology_hash", "computed_at"}.issubset(posterior_columns):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_topology
+                ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
+            """
+        )
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash

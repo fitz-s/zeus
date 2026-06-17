@@ -504,7 +504,7 @@ def _buy_no_exit_context_for_quote_split(*, p_market_quote: float) -> EdgeContex
 
 
 def test_buy_no_monitor_refresh_never_hardcodes_zero_probability():
-    """buy_no monitor authority must be independent evidence, not a synthetic 0.0."""
+    """buy_no monitor authority must be held-side evidence, not synthetic 0.0."""
     repo_root = Path(__file__).resolve().parents[1]
     source = (repo_root / "src" / "engine" / "monitor_refresh.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -529,7 +529,8 @@ def test_buy_no_monitor_refresh_never_hardcodes_zero_probability():
         "buy_no monitor probability must not be hardcoded to 0.0; missing "
         f"independent NO authority must fail closed. Offending lines: {offenders}"
     )
-    assert "buy_no_independent_monitor_probability_missing" in source
+    assert "_held_side_probability_from_yes_bin_probability" in source
+    assert "buy_no_independent_monitor_probability_missing" not in source
 
 
 def test_buy_no_missing_monitor_probability_cannot_trigger_divergence_panic_exit():
@@ -643,6 +644,27 @@ def test_day0_monitor_quote_refresh_uses_executable_bid_when_asks_absent(monkeyp
     assert quote.best_bid == pytest.approx(0.998)
     assert quote.best_ask is None
     assert quote.ask_size == pytest.approx(0.0)
+    assert quote.diagnostic_market_price == pytest.approx(0.998)
+
+
+def test_target_local_day_active_position_uses_bid_only_quote_when_asks_absent(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    monkeypatch.setitem(
+        monitor_refresh.cities_by_name,
+        "NYC",
+        types.SimpleNamespace(timezone="America/New_York", settlement_source_type="wu_icao"),
+    )
+    target_date = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    pos = _position(target_date=target_date)
+    pos.state = "active"
+
+    quote = monitor_refresh.monitor_quote_refresh(None, _BidOnlyDay0Clob(), pos)
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.998)
+    assert quote.best_ask is None
     assert quote.diagnostic_market_price == pytest.approx(0.998)
 
 

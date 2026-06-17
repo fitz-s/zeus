@@ -13,8 +13,11 @@ Post-fix:
     _DAY0_COVERAGE_WINDOW_GRACE_HOURS hours after local midnight (first_hour > grace).
     At exactly grace_hours the sample is still within the window → "OK" / "LOW_COVERAGE".
   - _fetch_wu_observation() calls _compute_day0_coverage_status() and stores the result.
-  - _day0_observation_quality_rejection_reason() blocks WINDOW_INCOMPLETE so
-    evaluator rejects day0 candidates whose extrema cannot be trusted.
+  - _day0_observation_quality_rejection_reason() blocks WINDOW_INCOMPLETE by
+    default so evaluator rejects day0 entry candidates whose extrema cannot be
+    trusted as complete local-day extrema.
+  - Held-position monitor may explicitly accept WINDOW_INCOMPLETE as a
+    one-sided observed bound: HIGH floor / LOW ceiling.
 """
 from __future__ import annotations
 
@@ -68,7 +71,7 @@ def _make_obs(
 
 
 class TestCoverageWindowGate:
-    """P1-1: WINDOW_INCOMPLETE must block quality gate; OK must pass through."""
+    """P1-1: WINDOW_INCOMPLETE blocks entry quality gate by default."""
 
     def test_window_incomplete_returns_rejection(self) -> None:
         """T_P1_1a: WINDOW_INCOMPLETE coverage_status → quality rejection returned."""
@@ -90,6 +93,23 @@ class TestCoverageWindowGate:
             _NYC, obs, LOW_LOCALDAY_MIN, decision_time=_DECISION_TIME
         )
         assert reason is not None
+
+    def test_window_incomplete_can_pass_as_explicit_monitor_bound(self) -> None:
+        """Held monitor can use incomplete-window observations as one-sided bounds.
+
+        This does not claim full local-day extrema. It only allows the Day0
+        signal to consume observed_high_so_far as a HIGH floor or low_so_far as
+        a LOW ceiling while later maturity/exit gates decide authority.
+        """
+        obs = _make_obs(coverage_status="WINDOW_INCOMPLETE")
+        reason = _day0_observation_quality_rejection_reason(
+            _NYC,
+            obs,
+            HIGH_LOCALDAY_MAX,
+            decision_time=_DECISION_TIME,
+            allow_incomplete_window_bound=True,
+        )
+        assert reason is None
 
     def test_ok_coverage_passes_quality_gate(self) -> None:
         """T_P1_1c: OK coverage_status is not blocked by the window gate."""

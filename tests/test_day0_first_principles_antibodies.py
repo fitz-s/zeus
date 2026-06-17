@@ -442,12 +442,16 @@ class TestDay0TransitionMonotonicity:
         assert 'trigger="DAY0_OBSERVATION_REVERSAL"' not in source
         assert 'trigger="DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE"' in source
 
-    def test_buy_no_day0_monitor_probability_stays_independent(self):
-        """Static antibody: the monitor day0 lane must keep refusing to feed a
-        buy_no position a fresh day0 'model probability' derived from YES-side
-        math (the estimator-switch artifact source for buy_no)."""
+    def test_buy_no_day0_monitor_probability_uses_explicit_held_side_conversion(self):
+        """Static antibody: buy_no monitor probability must be explicitly held-side.
+
+        The Day0 signal estimates the YES outcome for the bin. A buy_no held
+        position needs the complementary outcome probability, but not a NO-token
+        executable price or confidence-bound shortcut.
+        """
         source = (ROOT / "src" / "engine" / "monitor_refresh.py").read_text(encoding="utf-8")
-        assert "buy_no_independent_monitor_probability_missing" in source
+        assert "_held_side_probability_from_yes_bin_probability" in source
+        assert "buy_no_independent_monitor_probability_missing" not in source
 
 
 # ===========================================================================
