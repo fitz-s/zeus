@@ -89,8 +89,8 @@
         "auckland"
       ],
       "noaa": null,
-      "lat": -37.01199,
-      "lon": 174.786331,
+      "lat": -37.008099,
+      "lon": 174.792007,
       "wu_station": "NZAA",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1535,6 +1535,7 @@
       "discovered_via": "Polymarket market description — 5 markets confirmed: Apr 8/9/11/12/15 2026",
       "confirmed_by": "web_search Polymarket snippets + audit 2026-04-15"
     },
-    "2026-06-17: lat/lon corrected to precise WU settlement-station coords (4dp, station_precise_coords.json/OurAirports). Config previously held approximate coords off by up to 3.4km, violating _coord_note; live forecast fetch (replacement_forecast_production.py) requests at these coords so the wrong cell was sampled."
+    "2026-06-17: lat/lon corrected to precise WU settlement-station coords (4dp, station_precise_coords.json/OurAirports). Config previously held approximate coords off by up to 3.4km, violating _coord_note; live forecast fetch (replacement_forecast_production.py) requests at these coords so the wrong cell was sampled.",
+    "2026-06-17: Auckland NZAA re-pinned to OurAirports (-37.008099,174.792007); station_precise_coords value was ~1.5km off (caught by independent Polymarket/OurAirports verify, polymarket_station_verify.md)."
   ]
 }
