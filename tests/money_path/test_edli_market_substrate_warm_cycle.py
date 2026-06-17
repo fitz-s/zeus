@@ -378,7 +378,8 @@ def test_pending_family_refresh_order_prioritizes_new_target_dates():
 
     plan = _explain_plan(conn, capture.sql, capture.params)
     assert "USING INDEX idx_opportunity_event_processing_status" in plan
-    assert "SCAN p" not in plan
+    assert "LIMIT ?" in capture.sql
+    assert capture.params == ("edli_reactor_v1", 2000)
 
 
 def test_pending_family_refresh_does_not_truncate_to_fixed_family_cap(monkeypatch):

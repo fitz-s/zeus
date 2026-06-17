@@ -3165,16 +3165,39 @@ def _run_venue_heartbeat_loop(cadence_seconds: float) -> None:
         time.sleep(max(0.1, cadence_seconds - elapsed))
 
 
-def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
+def _pending_family_refresh_event_window_limit() -> int:
+    raw = os.environ.get("ZEUS_PENDING_FAMILY_REFRESH_EVENT_WINDOW_LIMIT", "2000")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 2000
+    return max(100, min(10000, value))
+
+
+def _pending_family_rows_for_refresh(
+    world_conn,
+    *,
+    consumer_name: str,
+    event_window_limit: int | None = None,
+):
+    if event_window_limit is None:
+        event_window_limit = _pending_family_refresh_event_window_limit()
+    event_window_limit = max(100, min(10000, int(event_window_limit)))
     return world_conn.execute(
         """
+        WITH pending AS (
+            SELECT p.event_id
+            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            WHERE p.consumer_name = ? AND p.processing_status = 'pending'
+            ORDER BY p.updated_at DESC
+            LIMIT ?
+        )
         SELECT
             json_extract(e.payload_json, '$.city')        AS city,
             json_extract(e.payload_json, '$.target_date') AS target_date,
             json_extract(e.payload_json, '$.metric')      AS metric
-        FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+        FROM pending p
         JOIN opportunity_events e ON e.event_id = p.event_id
-        WHERE p.consumer_name = ? AND p.processing_status = 'pending'
         GROUP BY city, target_date, metric
         -- Refresh the newest target date first. Old target-date rows can remain
         -- pending after a market has disappeared from Gamma; if they consume the
@@ -3186,7 +3209,7 @@ def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
             MAX(e.available_at) DESC,
             MIN(e.event_id) ASC
         """,
-        (consumer_name,),
+        (consumer_name, event_window_limit),
     ).fetchall()
 
 
