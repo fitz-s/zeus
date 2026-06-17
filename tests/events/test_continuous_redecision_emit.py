@@ -449,7 +449,7 @@ def test_redecision_skip_set_is_event_type_scoped():
     ) == {redecision.entity_key}
 
 
-def test_unadmitted_screen_redecision_pending_is_expired():
+def test_unadmitted_redecision_pending_is_expired():
     """Pending redecisions must remain backed by current edge/rest/held admission."""
 
     world = sqlite3.connect(":memory:")
@@ -459,7 +459,7 @@ def test_unadmitted_screen_redecision_pending_is_expired():
     stale = make_opportunity_event(
         event_type="EDLI_REDECISION_PENDING",
         entity_key="San Francisco|2026-06-17|high|run-stale",
-        source="edli_redecision:screen",
+        source="escalation_cross-stale",
         observed_at="2026-06-17T15:00:00+00:00",
         available_at="2026-06-17T15:00:00+00:00",
         received_at="2026-06-17T15:00:00+00:00",
@@ -476,7 +476,7 @@ def test_unadmitted_screen_redecision_pending_is_expired():
     admitted = make_opportunity_event(
         event_type="EDLI_REDECISION_PENDING",
         entity_key="Tokyo|2026-06-18|low|run-held",
-        source="edli_redecision:screen",
+        source="cycle-admitted",
         observed_at="2026-06-17T15:00:00+00:00",
         available_at="2026-06-17T15:00:00+00:00",
         received_at="2026-06-17T15:00:00+00:00",

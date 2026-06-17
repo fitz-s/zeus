@@ -7155,7 +7155,7 @@ def _edli_expire_unadmitted_redecision_pending(
     *,
     decision_time: str,
 ) -> int:
-    """Expire screen-origin redecision rows no longer backed by edge or held exposure."""
+    """Expire pending redecision rows no longer backed by edge/rest/held admission."""
 
     from src.events.continuous_redecision import REDECISION_EVENT_TYPE as _REDECISION_EVENT_TYPE
 
@@ -7171,7 +7171,6 @@ def _edli_expire_unadmitted_redecision_pending(
              WHERE p.consumer_name = 'edli_reactor_v1'
                AND p.processing_status = 'pending'
                AND e.event_type = ?
-               AND e.source LIKE 'edli_redecision:%'
             """,
             (_REDECISION_EVENT_TYPE,),
         ).fetchall()
