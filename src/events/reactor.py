@@ -1578,6 +1578,9 @@ class OpportunityEventReactor:
                 family_id=str(belief.get("family_id") or ""),
                 city=str(belief.get("city") or ""),
                 target_date=str(belief.get("target_date") or ""),
+                temperature_metric=str(
+                    belief.get("temperature_metric") or belief.get("metric") or ""
+                ),
                 snapshot_id=str(belief.get("snapshot_id") or ""),
                 calibrator_model_hash=str(belief.get("calibrator_model_hash") or "identity"),
                 bin_labels=list(belief.get("bin_labels") or []),

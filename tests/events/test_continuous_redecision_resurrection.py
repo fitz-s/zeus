@@ -58,13 +58,15 @@ class _SqlCaptureConn:
 
 
 def _cache(conn, *, family_id="hyp|live|Wuhan|2026-06-12|high|disc", p_yes=0.99,
-           snapshot_id="snap1", cond="0xc30", recorded_at="2026-06-12T00:00:00+00:00"):
+           snapshot_id="snap1", cond="0xc30", recorded_at="2026-06-12T00:00:00+00:00",
+           temperature_metric="high"):
     cr.cache_belief(
         conn,
         family_id=family_id, city="Wuhan", target_date="2026-06-12",
         snapshot_id=snapshot_id, calibrator_model_hash="identity",
         bin_labels=["b29", "b30"], p_posterior_vec=[0.001, p_yes],
-        recorded_at=recorded_at, condition_ids=["0xc29", cond],
+        recorded_at=recorded_at, temperature_metric=temperature_metric,
+        condition_ids=["0xc29", cond],
     )
 
 
@@ -195,6 +197,19 @@ def test_entry_screen_fires_on_buy_no_edge_appeared():
     )
     keys = {(e.family_id, e.bin_label, e.direction) for e in fired}
     assert ("hyp|live|Wuhan|2026-06-12|high|disc", "b30", "buy_no") in keys
+
+
+def test_screened_family_keys_uses_persisted_metric_for_hash_family_id():
+    world = _mem_world()
+    family_id = "edli_family_hash_without_metric"
+    _cache(world, family_id=family_id, temperature_metric="low")
+
+    keys = cr.screened_family_keys(
+        world,
+        [cr.EnqueuedRedecision(family_id, "b30", "buy_yes", 0.12)],
+    )
+
+    assert keys == {("Wuhan", "2026-06-12", "low")}
 
 
 def test_entry_screen_silent_when_no_edge():

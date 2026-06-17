@@ -160,6 +160,7 @@ def ensure_belief_cache_schema(conn: sqlite3.Connection) -> None:
             recorded_at TEXT NOT NULL,
             city TEXT,
             target_date TEXT,
+            temperature_metric TEXT,
             decision_snapshot_id TEXT,
             bin_labels_json TEXT,
             p_posterior_json TEXT,
@@ -171,6 +172,10 @@ def ensure_belief_cache_schema(conn: sqlite3.Connection) -> None:
     # expected no-op). Column-subset-safe per assert_db_matches_registry (extra columns permitted).
     try:
         conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN condition_ids_json TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN temperature_metric TEXT;")
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -195,6 +200,7 @@ def write_belief_row(
     bin_labels: list[str],
     p_posterior_vec: list[float],
     recorded_at: str,
+    temperature_metric: str = "",
     condition_ids: list[str] | None = None,
 ) -> None:
     """Write ONE belief row through the GIVEN connection — NO commit, NO new connection.
@@ -210,46 +216,62 @@ def write_belief_row(
     reads latest. condition_ids is parallel to bin_labels (empty string for bins with no market)."""
     decision_id = _belief_decision_id(family_id, snapshot_id, calibrator_model_hash)
     cond_json = json.dumps([str(c or "") for c in (condition_ids or [])])
+    metric = str(temperature_metric or _metric_from_family_id(family_id) or "").strip()
+    has_metric_col = _has_temperature_metric_column(conn)
     if _has_condition_ids_column(conn):
+        metric_col = ", temperature_metric" if has_metric_col else ""
+        metric_placeholder = ", ?" if has_metric_col else ""
+        metric_update = ", temperature_metric=excluded.temperature_metric" if has_metric_col else ""
+        values = [
+            "trace_" + decision_id, decision_id, recorded_at,
+            city, target_date, snapshot_id,
+            json.dumps(list(bin_labels)), json.dumps([float(x) for x in p_posterior_vec]),
+            cond_json,
+        ]
+        if has_metric_col:
+            values.insert(5, metric)
         conn.execute(
-            """
+            f"""
             INSERT INTO probability_trace_fact
                 (trace_id, decision_id, trace_status, missing_reason_json, recorded_at,
-                 city, target_date, decision_snapshot_id, bin_labels_json, p_posterior_json,
+                 city, target_date{metric_col}, decision_snapshot_id, bin_labels_json, p_posterior_json,
                  condition_ids_json)
-            VALUES (?, ?, 'complete', '[]', ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, 'complete', '[]', ?, ?, ?{metric_placeholder}, ?, ?, ?, ?)
             ON CONFLICT(decision_id) DO UPDATE SET
                 recorded_at=excluded.recorded_at,
                 bin_labels_json=excluded.bin_labels_json,
                 p_posterior_json=excluded.p_posterior_json,
                 condition_ids_json=excluded.condition_ids_json
+                {metric_update}
             """,
-            (
-                "trace_" + decision_id, decision_id, recorded_at,
-                city, target_date, snapshot_id,
-                json.dumps(list(bin_labels)), json.dumps([float(x) for x in p_posterior_vec]),
-                cond_json,
-            ),
+            tuple(values),
         )
     else:
         # Legacy DB not yet migrated: write without condition_ids (P2 screen will skip price-join
         # for these rows). Never fail-closed on a missing optional column.
+        metric_col = ", temperature_metric" if has_metric_col else ""
+        metric_placeholder = ", ?" if has_metric_col else ""
+        metric_update = ", temperature_metric=excluded.temperature_metric" if has_metric_col else ""
+        values = [
+            "trace_" + decision_id, decision_id, recorded_at,
+            city, target_date, snapshot_id,
+            json.dumps(list(bin_labels)), json.dumps([float(x) for x in p_posterior_vec]),
+        ]
+        if has_metric_col:
+            values.insert(5, metric)
         conn.execute(
-            """
+            f"""
             INSERT INTO probability_trace_fact
                 (trace_id, decision_id, trace_status, missing_reason_json, recorded_at,
-                 city, target_date, decision_snapshot_id, bin_labels_json, p_posterior_json)
-            VALUES (?, ?, 'complete', '[]', ?, ?, ?, ?, ?, ?)
+                 city, target_date{metric_col}, decision_snapshot_id, bin_labels_json, p_posterior_json)
+            VALUES (?, ?, 'complete', '[]', ?, ?, ?{metric_placeholder}, ?, ?, ?)
             ON CONFLICT(decision_id) DO UPDATE SET
                 recorded_at=excluded.recorded_at,
                 bin_labels_json=excluded.bin_labels_json,
                 p_posterior_json=excluded.p_posterior_json
+                {metric_update}
             """,
-            (
-                "trace_" + decision_id, decision_id, recorded_at,
-                city, target_date, snapshot_id,
-                json.dumps(list(bin_labels)), json.dumps([float(x) for x in p_posterior_vec]),
-            ),
+            tuple(values),
         )
 
 
@@ -264,6 +286,7 @@ def cache_belief(
     bin_labels: list[str],
     p_posterior_vec: list[float],
     recorded_at: str,
+    temperature_metric: str = "",
     condition_ids: list[str] | None = None,
 ) -> None:
     """Standalone (test / offline) belief writer: writes the row AND commits on its own connection.
@@ -274,6 +297,7 @@ def cache_belief(
     write_belief_row(
         conn,
         family_id=family_id, city=city, target_date=target_date,
+        temperature_metric=temperature_metric,
         snapshot_id=snapshot_id, calibrator_model_hash=calibrator_model_hash,
         bin_labels=bin_labels, p_posterior_vec=p_posterior_vec, recorded_at=recorded_at,
         condition_ids=condition_ids,
@@ -293,6 +317,14 @@ def _metric_from_family_id(family_id: str) -> str:
     return ""
 
 
+def _has_temperature_metric_column(conn: sqlite3.Connection) -> bool:
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(probability_trace_fact)").fetchall()}
+    except sqlite3.Error:
+        return False
+    return "temperature_metric" in cols
+
+
 def _row_to_belief(row: sqlite3.Row) -> CachedBelief | None:
     parsed = _parse_belief_decision_id(row["decision_id"])
     if parsed is None or not row["p_posterior_json"] or not row["bin_labels_json"]:
@@ -303,6 +335,10 @@ def _row_to_belief(row: sqlite3.Row) -> CachedBelief | None:
         cond_raw = row["condition_ids_json"]
     except (IndexError, KeyError):
         cond_raw = None
+    try:
+        row_metric = str(row["temperature_metric"] or "").strip()
+    except (IndexError, KeyError):
+        row_metric = ""
     condition_ids = json.loads(cond_raw) if cond_raw else []
     return CachedBelief(
         family_id=family_id,
@@ -314,7 +350,7 @@ def _row_to_belief(row: sqlite3.Row) -> CachedBelief | None:
         p_posterior_vec=json.loads(row["p_posterior_json"]),
         recorded_at=row["recorded_at"],
         condition_ids=list(condition_ids),
-        metric=_metric_from_family_id(family_id),
+        metric=row_metric or _metric_from_family_id(family_id),
     )
 
 
@@ -329,6 +365,8 @@ def _all_latest_beliefs(conn: sqlite3.Connection) -> list[CachedBelief]:
     cols = "decision_id, recorded_at, city, target_date, bin_labels_json, p_posterior_json"
     if _has_condition_ids_column(conn):
         cols += ", condition_ids_json"
+    if _has_temperature_metric_column(conn):
+        cols += ", temperature_metric"
     rows = conn.execute(
         f"SELECT {cols} FROM probability_trace_fact "
         "WHERE decision_id LIKE ? ORDER BY recorded_at DESC",

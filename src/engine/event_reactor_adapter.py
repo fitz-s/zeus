@@ -7840,6 +7840,7 @@ def _generate_candidate_proofs(
                     "family_id": str(family.family_id),
                     "city": str(family.city),
                     "target_date": str(family.target_date),
+                    "temperature_metric": str(getattr(family, "metric", "") or ""),
                     "snapshot_id": _snap_id,
                     "calibrator_model_hash": _calib_hash,
                     "bin_labels": _bin_labels,

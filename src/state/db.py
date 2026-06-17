@@ -1633,6 +1633,7 @@ def init_schema(
             candidate_id TEXT,
             city TEXT,
             target_date TEXT,
+            temperature_metric TEXT,
             range_label TEXT,
             direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
             mode TEXT,
@@ -2524,6 +2525,10 @@ def init_schema(
     # Additive, NULL for every legacy row; column-subset-safe per assert_db_matches_registry.
     try:
         conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN condition_ids_json TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN temperature_metric TEXT;")
     except sqlite3.OperationalError:
         pass
 
