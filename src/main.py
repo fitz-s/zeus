@@ -6981,7 +6981,7 @@ def _edli_mainstream_warm_cycle() -> None:
 
 @_scheduler_job("world_wal_checkpoint")
 def _world_wal_checkpoint_cycle() -> None:
-    """Periodic zeus-world.db WAL TRUNCATE backstop (2026-06-04, part 2).
+    """Periodic zeus-world.db WAL PASSIVE checkpoint backstop.
 
     Root (critic-proven, live): ``state/zeus-world.db-wal`` grew to GBs because
     long-lived READER connections held a WAL snapshot across cycles, pinning the
@@ -6989,29 +6989,29 @@ def _world_wal_checkpoint_cycle() -> None:
     truncated → unbounded growth → eventual lock-starvation of opportunity_events
     emission (30-min ZERO candidates). Part 1 releases each long-lived reader's
     snapshot per cycle so the floor advances; THIS job is the periodic backstop
-    that reclaims the freed frames via ``PRAGMA wal_checkpoint(TRUNCATE)``.
+    that checkpoints freed frames via ``PRAGMA wal_checkpoint(PASSIVE)``.
 
     Observability: the ``(busy, log_frames, checkpointed_frames)`` triple is
-    ALWAYS logged. ``busy == 0`` = truncated; a CHRONIC ``busy == 1`` is a loud
+    ALWAYS logged. ``busy == 0`` = safe frames copied; a CHRONIC ``busy == 1`` is a loud
     signal that a reader is still pinning the floor (a part-1 regression) — it is
     NOT silenced. Not a table writer; ``checkpoint_world_wal`` uses a dedicated
-    short-lived connection and does NOT take the world write mutex (a checkpoint
-    is not a write txn; SQLite serializes checkpoints internally), so it never
-    blocks world writers for its duration. Fail-soft via the decorator.
+    short-lived connection and does NOT take the world write mutex. PASSIVE mode
+    must not wait behind live writers, so it cannot block held-position monitor
+    redecision. Fail-soft via the decorator.
     """
     from src.state.db import checkpoint_world_wal
 
     busy, log_frames, ckpt_frames = checkpoint_world_wal()
     if busy == 0:
         logger.info(
-            "world WAL checkpoint(TRUNCATE): OK busy=%d log_frames=%d checkpointed=%d",
+            "world WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d",
             busy, log_frames, ckpt_frames,
         )
     else:
-        # BUSY = a reader still pins the WAL floor; TRUNCATE could not run.
+        # BUSY = a reader still pins the WAL floor.
         # Loud (warning) so chronic starvation is visible, not silent.
         logger.warning(
-            "world WAL checkpoint(TRUNCATE): BUSY busy=%d log_frames=%d checkpointed=%d "
+            "world WAL checkpoint(PASSIVE): BUSY busy=%d log_frames=%d checkpointed=%d "
             "— a reader is pinning the WAL floor (part-1 per-cycle release regression?)",
             busy, log_frames, ckpt_frames,
         )
@@ -7019,7 +7019,7 @@ def _world_wal_checkpoint_cycle() -> None:
 
 @_scheduler_job("trades_wal_checkpoint")
 def _trades_wal_checkpoint_cycle() -> None:
-    """Periodic zeus_trades.db WAL TRUNCATE backstop (2026-06-16) — trade-DB twin.
+    """Periodic zeus_trades.db WAL PASSIVE checkpoint backstop — trade-DB twin.
 
     The 810 MB ``state/zeus_trades.db-wal`` incident (2026-06-16, live): a long-lived
     reader pinned the WAL floor, the -wal never truncated, ``executable_market_
@@ -7029,19 +7029,20 @@ def _trades_wal_checkpoint_cycle() -> None:
     did not. Same discipline/observability as ``_world_wal_checkpoint_cycle``: a
     dedicated short-lived connection, no write mutex, the (busy, log, checkpointed)
     triple ALWAYS logged; a chronic ``busy == 1`` is the loud signal that a reader is
-    not releasing the trade-DB floor. Fail-soft via the decorator.
+    not releasing the trade-DB floor. PASSIVE mode must not wait behind the live
+    monitor writer. Fail-soft via the decorator.
     """
     from src.state.db import checkpoint_trades_wal
 
     busy, log_frames, ckpt_frames = checkpoint_trades_wal()
     if busy == 0:
         logger.info(
-            "trades WAL checkpoint(TRUNCATE): OK busy=%d log_frames=%d checkpointed=%d",
+            "trades WAL checkpoint(PASSIVE): OK busy=%d log_frames=%d checkpointed=%d",
             busy, log_frames, ckpt_frames,
         )
     else:
         logger.warning(
-            "trades WAL checkpoint(TRUNCATE): BUSY busy=%d log_frames=%d checkpointed=%d "
+            "trades WAL checkpoint(PASSIVE): BUSY busy=%d log_frames=%d checkpointed=%d "
             "— a reader is pinning the trade-DB WAL floor (long-lived reader not releasing)",
             busy, log_frames, ckpt_frames,
         )

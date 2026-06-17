@@ -551,7 +551,7 @@ def world_write_lock(
 
 
 def checkpoint_world_wal() -> tuple[int, int, int]:
-    """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` on zeus-world.db; return its triple.
+    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus-world.db; return its triple.
 
     THE BACKSTOP (2026-06-04 WAL checkpoint-starvation fix, part 2).
 
@@ -566,11 +566,11 @@ def checkpoint_world_wal() -> tuple[int, int, int]:
     function is the periodic backstop that actually reclaims the freed frames.
 
     Returns the ``(busy, log_frames, checkpointed_frames)`` triple from
-    ``wal_checkpoint(TRUNCATE)``:
-      * ``busy == 0`` → checkpoint completed; the WAL was truncated.
-      * ``busy == 1`` → a reader still pinned the floor (TRUNCATE could not run);
-        a CHRONIC busy is the loud signal that a reader is not releasing — it is
-        NOT silenced. The caller logs the triple so this is observable.
+    ``wal_checkpoint(PASSIVE)``. PASSIVE checkpoints copy all currently safe WAL
+    frames without waiting for readers/writers or trying to truncate the file.
+    That preserves live writer priority: a checkpoint must never sit in SQLite's
+    busy handler while held-position monitor/redecision work is waiting to write.
+    A chronic non-zero ``busy`` result is still observable in caller logs.
 
     Lock discipline: a checkpoint is NOT a write transaction. SQLite serializes
     checkpoints internally (the checkpoint lock), so this MUST NOT take the
@@ -581,7 +581,7 @@ def checkpoint_world_wal() -> tuple[int, int, int]:
     """
     conn = _connect(ZEUS_WORLD_DB_PATH, write_class=None)
     try:
-        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         # Row is (busy, log, checkpointed). Normalise to ints for callers/logs.
         busy = int(row[0]) if row is not None else 1
         log_frames = int(row[1]) if row is not None else -1
@@ -592,7 +592,7 @@ def checkpoint_world_wal() -> tuple[int, int, int]:
 
 
 def checkpoint_trades_wal() -> tuple[int, int, int]:
-    """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` on zeus_trades.db; return its triple.
+    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus_trades.db; return its triple.
 
     THE BACKSTOP (2026-06-16) — the zeus_trades.db twin of ``checkpoint_world_wal``.
 
@@ -607,13 +607,13 @@ def checkpoint_trades_wal() -> tuple[int, int, int]:
     write mutex (a checkpoint is not a write txn; SQLite serializes checkpoints
     internally), closed immediately so it never itself becomes a floor-pinning reader.
 
-    Returns the ``(busy, log_frames, checkpointed_frames)`` triple:
-      * ``busy == 0`` → checkpoint completed; the WAL was truncated.
-      * ``busy == 1`` → a reader still pinned the floor (loud signal; not silenced).
+    Returns the ``(busy, log_frames, checkpointed_frames)`` triple. PASSIVE mode
+    is intentional for live: reclaim safe frames without waiting behind active
+    monitor writers or blocking the next held-position redecision tick.
     """
     conn = _connect(_zeus_trade_db_path(), write_class=None)
     try:
-        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         busy = int(row[0]) if row is not None else 1
         log_frames = int(row[1]) if row is not None else -1
         ckpt_frames = int(row[2]) if row is not None else -1
