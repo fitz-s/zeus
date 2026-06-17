@@ -5,7 +5,16 @@
 #   identity-Platt on the exit/monitor p_raw sites so EXIT belief matches ENTRY belief.
 """Monitor refresh: recompute fresh probability for held positions.
 
-Blueprint v2 §7 Layer 1: Recompute probability with SAME METHOD as entry.
+Blueprint v2 §7 Layer 1: recompute the held-side probability.
+
+PRIMARY AUTHORITY (corrected 2026-06-16): ``monitor_probability_refresh`` reads
+the multi-model fused posterior ``forecast_posteriors`` (via
+``position_belief.load_replacement_belief``, sourced from ``raw_model_forecasts``)
+— the SAME source family as the entry decision. The legacy ENS member-counting
+and day0 refreshers below it are explicit fallback telemetry: the ENS path reads
+``ensemble_snapshots`` (a single-model ECMWF ensemble) and is NOT the entry
+authority — the "SAME METHOD as entry" parity holds ONLY for the replacement
+posterior primary lane, and is STALE for the legacy ens/day0 refreshers.
 Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_raw).
 """
 
@@ -562,14 +571,26 @@ def _read_monitor_executable_forecast(
     target_d: date,
     temperature_metric: MetricIdentity,
 ) -> tuple[dict | None, str | None]:
-    """Read monitor probability from the same executable forecast authority as entry.
+    """Legacy/fallback ENSEMBLE executable-forecast read — NOT the live entry authority.
 
-    Live ecmwf_open_data entry uses producer/source-run readiness plus
-    ensemble_snapshots.  A held-position monitor must not fall back to the
-    legacy Open-Meteo ``fetch_ensemble`` adapter for that source, because that
-    path cannot prove the executable forecast reader contract.  Non-real sqlite
-    connections return ``(None, None)`` so legacy unit tests and diagnostic
-    callsites keep their existing fallback behavior.
+    PROVENANCE (corrected 2026-06-16, spine source-divergence fix): the live
+    entry decision authority is the multi-model fused posterior
+    ``forecast_posteriors`` (read via ``position_belief.load_replacement_belief``,
+    sourced from ``raw_model_forecasts`` provider fusion) — NOT this reader. This
+    function reads ``ensemble_snapshots`` (51 ``ecmwf_ens`` members of a single
+    model) through the executable-forecast contract. It is a SUPPRESSED legacy
+    fallback: for replacement-authority (edli) positions the belief-authority-fault
+    guard in ``monitor_probability_refresh`` returns BEFORE the ensemble registry
+    is dispatched (see the ``legacy_belief_substitution_suppressed`` early return),
+    so this path is NOT used as the freshness authority for those positions. It is
+    reached only as ``applied``-list telemetry and, for legacy non-edli positions
+    not covered by a fresh ``forecast_posteriors`` row, as a last-resort center.
+
+    A held-position monitor must not fall back to the legacy Open-Meteo
+    ``fetch_ensemble`` adapter for that source, because that path cannot prove the
+    executable forecast reader contract.  Non-real sqlite connections return
+    ``(None, None)`` so legacy unit tests and diagnostic callsites keep their
+    existing fallback behavior.
     """
 
     if not isinstance(conn, sqlite3.Connection):
@@ -2266,17 +2287,30 @@ def monitor_probability_refresh(
         )
     )
 
-    # BELIEF-AUTHORITY FAULT (regime law U1/U2, 2026-06-12): a replacement-chain
-    # position whose replacement belief is stale/missing must NOT have the gap
-    # papered over by the legacy ENS forecast belief (the Denver 2026-06-12
-    # incident: stale 0.79 masked as fresh while the market said 0.22). For these
-    # positions we (a) mark belief NOT-fresh, (b) emit BELIEF_AUTHORITY_FAULT,
-    # (c) fire a fail-soft single-family reseed so the SAME authority refreshes
-    # next cycle — and return WITHOUT the cross-era substitution. The day0
-    # nowcast lane is exempt (it is settlement-day observation, not a forecast-
-    # belief substitution). Legacy-entered (non-edli) positions keep the legacy
-    # path, clearly branded.
-    if _position_is_replacement_authority(pos) and not _would_use_day0_lane:
+    # BELIEF-AUTHORITY FAULT (regime law U1/U2, 2026-06-12): a position whose
+    # replacement belief is stale/missing must NOT have the gap papered over by
+    # the legacy ENS forecast belief (the Denver 2026-06-12 incident: stale 0.79
+    # masked as fresh while the market said 0.22). For these positions we (a) mark
+    # belief NOT-fresh, (b) emit BELIEF_AUTHORITY_FAULT, (c) fire a fail-soft
+    # single-family reseed so the SAME authority refreshes next cycle — and return
+    # WITHOUT the cross-era substitution. The day0 nowcast lane is exempt (it is
+    # settlement-day observation, not a forecast-belief substitution).
+    #
+    # SOURCE-PARITY WIDENING (2026-06-16, spine source-divergence fix, plan Option
+    # A): the guard formerly fired only for replacement-authority (edli) positions,
+    # leaving LEGACY non-edli positions to substitute the cold single-model
+    # ``ensemble_snapshots`` EMOS center — the same cold-center divergence the entry
+    # spine fix removed, re-introduced on the held side. The guard is now widened to
+    # ALL non-day0 positions: a legacy position with a fresh ``forecast_posteriors``
+    # row already returned fresh ABOVE (``load_replacement_belief`` is position-
+    # agnostic); one with a stale/missing posterior is marked belief-unavailable
+    # (fail-closed hold) rather than exiting off a cold ensemble center. VERIFIED
+    # PREREQUISITE: all live legacy held positions (Houston aef7968f active;
+    # Chengdu ad59da00 / Hong Kong day0_window) have ``forecast_posteriors`` coverage
+    # for their family, so widening never strands a held position with NO belief
+    # source — the same-family reseed re-materializes on the SAME authority next
+    # cycle. The ensemble registry below is retained ONLY as applied-list telemetry.
+    if not _would_use_day0_lane:
         _set_monitor_probability_fresh(pos, False)
         _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
         _append_monitor_validation(pos, "legacy_belief_substitution_suppressed")

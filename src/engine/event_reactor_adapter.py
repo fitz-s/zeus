@@ -7720,10 +7720,21 @@ def _generate_candidate_proofs(
     # Bias-safe: the producer applies whatever de-bias is live (currently off => raw envelope, the
     # ARM-validated center) — NOT a new/contaminated correction. Fail-soft: any error stashes
     # nothing and never disturbs the decision.
-    if (
-        getattr(event, "event_type", None) in _FORECAST_DECISION_EVENT_TYPES
-        and "_edli_spine_mu_native" not in payload
-    ):
+    # SOURCE-PARITY AUTHORITY (2026-06-16, canonical-stash pre-emption fix): the
+    # multi-model producer is AUTHORITATIVE for the spine-decision keys. The guard
+    # formerly skipped when ``_edli_spine_mu_native`` was already in the payload —
+    # but the canonical Stage-0 stash (``_market_analysis_from_event_snapshot``,
+    # observability-only) populates that key from ``ensemble_snapshots`` on a
+    # replacement-flag-OFF fall-through, which then PRE-EMPTED this raw_model_forecasts
+    # fix and silently seeded the spine from the cold ECMWF-ensemble center again. We
+    # now ALWAYS run the multi-model accessor for forecast-decision events; when it
+    # SUCCEEDS it OVERWRITES the decision-consumed keys (mu/sigma/raw+debiased members)
+    # with the ``raw_model_forecasts`` envelope, so an ensemble-derived value can never
+    # reach a spine DECISION. When it returns None (fail-closed: <3 members / no causal
+    # cycle) the canonical observability keys are left untouched (honest receipt + a
+    # typed SPINE_INPUTS_UNAVAILABLE no-trade downstream). The accessor is ONE indexed
+    # SQL query (NOT the ~22-CLOB-fetch q-build), so running it unconditionally is cheap.
+    if getattr(event, "event_type", None) in _FORECAST_DECISION_EVENT_TYPES:
         try:
             # Bind the spine belief to the event's CAUSAL forecast snapshot.
             # All forecast lead buckets are now admitted (the 24h-only replay gate is removed),
@@ -11952,6 +11963,16 @@ def _market_analysis_from_event_snapshot(
                 )
             except Exception:  # noqa: BLE001
                 pass
+        # OBSERVABILITY-ONLY (source-parity note 2026-06-16): these keys are derived
+        # from the snapshot's ``ensemble_snapshots`` members and feed the DecisionReceipt
+        # for the canonical / Day0 path. They are NOT the authoritative spine-decision
+        # source: the live producer in ``_generate_candidate_proofs`` UNCONDITIONALLY
+        # runs ``_spine_multimodel_members_for_event`` (raw_model_forecasts) and
+        # OVERWRITES ``_edli_spine_mu_native`` / ``_edli_spine_sigma_native`` /
+        # ``_edli_spine_{raw,debiased}_members_native`` when that accessor succeeds, so a
+        # spine DECISION is never seeded from these ensemble-derived values. (Day0 is
+        # excluded from the spine entirely.) Do NOT re-add a guard that lets these
+        # pre-empt the multi-model producer — that was the cold-center regression.
         if _spine_mu is not None:
             payload["_edli_spine_mu_native"] = float(_spine_mu)
         if _spine_sigma is not None:
@@ -12204,7 +12225,14 @@ def _maybe_bias_decay_kelly_haircut(
     WARN (never crash or zero a live size). Flag-gated: edli.bias_decay_kelly_haircut_enabled.
     """
     try:
-        if str(q_source or "").strip().lower() in {"emos", "raw_honest"}:
+        # ZERO-LEGACY (2026-06-16): qkernel_spine is a one-calibrator regime whose
+        # center is ALREADY bias-corrected at source (multi-model raw_model_forecasts
+        # fusion + settlement-residual de-bias). The legacy per-city ENSEMBLE-bias
+        # haircut (model_bias_ens / edli_per_city_v1) must NOT also halve the spine's
+        # Kelly — that double-penalizes an already-corrected size. With emos/raw_honest
+        # already exempt, exempting qkernel_spine removes this legacy haircut from the
+        # entire LIVE decision path.
+        if str(q_source or "").strip().lower() in {"emos", "raw_honest", "qkernel_spine"}:
             return kelly_multiplier, False, None, "one_calibrator_regime"
         ev = settings["edli"]
         if not bool(ev.get("bias_decay_kelly_haircut_enabled", False)):

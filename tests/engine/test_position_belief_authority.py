@@ -367,10 +367,20 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
         assert is_fresh is False
         assert "BELIEF_AUTHORITY_FAULT" in pos.applied_validations
 
-    def test_legacy_entered_position_still_gets_legacy_path(self, monkeypatch):
-        """A pre-replacement (non-edli trade_id) position is NOT replacement
-        authority — it keeps the legacy fall-through, with no BELIEF_AUTHORITY_FAULT
-        suppression and no reseed."""
+    def test_legacy_entered_position_suppressed_under_source_parity_widening(self, monkeypatch):
+        """SOURCE-PARITY WIDENING (2026-06-16, spine source-divergence fix, plan
+        Option A): a LEGACY (non-edli) non-day0 position with a stale/missing
+        replacement belief is now ALSO suppressed (fail-closed) rather than
+        substituting the cold single-model ``ensemble_snapshots`` EMOS center —
+        the same cold-center divergence the entry spine fix removed, formerly
+        re-introduced on the held side for legacy positions. The legacy ENS path
+        MUST NOT run; belief is marked not-fresh + BELIEF_AUTHORITY_FAULT + a
+        same-family reseed re-materializes the SAME authority next cycle.
+
+        RED-on-revert: restoring the edli-only guard
+        (``_position_is_replacement_authority(pos) and not _would_use_day0_lane``)
+        re-enables the ensemble substitution for legacy positions → ``legacy_called``
+        becomes ``["ens"]`` → this test fails."""
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb
 
@@ -383,15 +393,58 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
         reseeds = []
         monkeypatch.setattr(
             mr, "_enqueue_single_family_belief_reseed_failsoft",
-            lambda **kw: reseeds.append(kw),
+            lambda **kw: reseeds.append(kw) or {"status": "ok", "enqueued": True},
         )
 
         pos = self._edli_pos(trade_id="legacy-trade-77")  # NON-edli
+        _, _, is_fresh = mr.monitor_probability_refresh(
+            pos, conn=None, city=object(), target_d=None,
+        )
+
+        # Legacy ENS forecast belief was NOT substituted (the cold-center seam is
+        # closed for legacy positions too); belief is fail-closed-unavailable and a
+        # same-family reseed was enqueued on the SAME authority.
+        assert legacy_called == [], "legacy ENS path must not run for a non-day0 legacy fault"
+        assert is_fresh is False
+        assert "BELIEF_AUTHORITY_FAULT" in pos.applied_validations
+        assert "legacy_belief_substitution_suppressed" in pos.applied_validations
+        assert len(reseeds) == 1
+        assert reseeds[0] == {
+            "city": "Karachi", "target_date": "2026-06-12", "metric": "high",
+        }
+
+    def test_legacy_day0_window_position_keeps_day0_lane(self, monkeypatch):
+        """The day0 nowcast lane remains EXEMPT from the widened guard: a legacy
+        day0_window position over a wu_icao settlement city still falls through to
+        its refresher (day0 settlement-day observation is a distinct authority, not
+        a forecast-belief substitution). This pins that the widening did NOT
+        swallow the day0 lane."""
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: self._stale_belief())
+        legacy_called = []
+        monkeypatch.setattr(
+            mr, "_refresh_ens_member_counting",
+            lambda **kw: legacy_called.append("ens") or (0.5, []),
+        )
+        monkeypatch.setattr(
+            mr, "_refresh_day0_observation",
+            lambda **kw: legacy_called.append("day0") or (0.5, []),
+        )
+        reseeds = []
+        monkeypatch.setattr(
+            mr, "_enqueue_single_family_belief_reseed_failsoft",
+            lambda **kw: reseeds.append(kw),
+        )
+
+        pos = self._edli_pos(trade_id="legacy-trade-78")  # NON-edli
+        pos.entry_method = "day0_observation"  # routes _would_use_day0_lane True
         mr.monitor_probability_refresh(pos, conn=None, city=object(), target_d=None)
 
-        # Legacy path ran; no fault suppression; no reseed.
-        assert legacy_called == ["ens"]
+        # The day0-exempt branch was taken: NOT suppressed, no fault, no reseed.
         assert "legacy_belief_substitution_suppressed" not in pos.applied_validations
+        assert "BELIEF_AUTHORITY_FAULT" not in pos.applied_validations
         assert reseeds == []
 
 

@@ -694,8 +694,14 @@ def test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch(monkeyp
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", _recompute)
 
-    tight_quote_pos = _position(entry_price=0.44, p_posterior=0.58)
-    wide_quote_pos = _position(entry_price=0.44, p_posterior=0.58)
+    # SOURCE-PARITY WIDENING (2026-06-16): the belief-authority-fault suppressor now
+    # fires for ALL non-day0 positions (not just edli), so a non-day0 legacy position
+    # with no fresh forecast_posteriors row no longer reaches the ens registry dispatch
+    # (it is fail-closed instead). This test exercises the quote-vs-posterior dispatch
+    # SEAM (recompute receives entry price, not the live quote) — lane-agnostic — so we
+    # route through the day0-exempt lane (NYC is wu_icao) to reach that seam.
+    tight_quote_pos = _position(entry_price=0.44, p_posterior=0.58, state="day0_window")
+    wide_quote_pos = _position(entry_price=0.44, p_posterior=0.58, state="day0_window")
 
     tight_ctx = monitor_refresh.refresh_position(
         conn,
@@ -724,11 +730,19 @@ def test_monitor_quote_refresh_survives_microstructure_log_failure(monkeypatch):
 
     monkeypatch.setattr("src.state.db.log_microstructure", _raise_log_failure)
     monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
-    def _recompute(position, current_p_market, registry, **context):
-        monitor_refresh._set_monitor_probability_fresh(position, True)
-        return 0.63
 
-    monkeypatch.setattr(monitor_refresh, "recompute_native_probability", _recompute)
+    # This test pins the MID-price quote seam (0.45) survives a microstructure log
+    # failure. Mid quoting is the non-day0 lane (the day0 lane is bid-only), so we keep a
+    # non-day0 position. After the source-parity widening (2026-06-16) a non-day0 legacy
+    # position with no fresh forecast_posteriors row is fail-closed at the belief-authority
+    # suppressor and never reaches recompute_native_probability — so we stub the PRIMARY
+    # belief lane (monitor_probability_refresh) to return a fresh posterior (0.63), exactly
+    # as a fresh forecast_posteriors row would, without standing up a forecasts DB.
+    def _fresh_primary_belief(position, *, conn, city, target_d):
+        monitor_refresh._set_monitor_probability_fresh(position, True)
+        return 0.63, position, True
+
+    monkeypatch.setattr(monitor_refresh, "monitor_probability_refresh", _fresh_primary_belief)
 
     pos = _position(entry_price=0.44, p_posterior=0.58)
     edge_ctx = monitor_refresh.refresh_position(

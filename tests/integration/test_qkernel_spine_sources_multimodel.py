@@ -243,3 +243,55 @@ def test_spine_producer_fail_closed_when_fewer_than_three_models():
         conn, event=_Event(), family=_Family(), decision_time=DECISION_TIME
     )
     assert out is None, "fewer than 3 models must fail closed (no ensemble fallback)"
+
+
+def test_live_producer_is_authoritative_and_not_preempted_by_canonical_stash():
+    """RED-on-revert (Task 2, canonical-stash pre-emption fix 2026-06-16): the live
+    spine producer in ``_generate_candidate_proofs`` MUST run its multi-model
+    ``raw_model_forecasts`` accessor UNCONDITIONALLY for forecast-decision events and
+    OVERWRITE the spine-decision keys — it must NOT skip when ``_edli_spine_mu_native``
+    is already present in the payload.
+
+    THE DEFECT this guards: the canonical Stage-0 stash
+    (``_market_analysis_from_event_snapshot``, observability-only) populates
+    ``_edli_spine_mu_native`` from ``ensemble_snapshots`` on a replacement-flag-OFF
+    fall-through. The producer's former guard
+    ``and "_edli_spine_mu_native" not in payload`` then SKIPPED the raw_model_forecasts
+    fix, so the spine silently decided on the cold ECMWF-ensemble center again.
+
+    Structural assertion (robust to line numbers): the producer's guard for the
+    Q-KERNEL SPINE INPUTS block contains the ``_FORECAST_DECISION_EVENT_TYPES`` test
+    but NOT the ``"_edli_spine_mu_native" not in payload`` skip. Reverting to the
+    skip-guard re-introduces the pre-emption → this test fails.
+    """
+    import ast
+    import inspect
+
+    src = inspect.getsource(era._generate_candidate_proofs)
+    tree = ast.parse(src)
+
+    # Find the `if` whose test references _FORECAST_DECISION_EVENT_TYPES and that guards
+    # the spine-input population (its body assigns _spine_multimodel ...).
+    spine_guards = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test_src = ast.get_source_segment(src, node.test) or ast.dump(node.test)
+        body_src = ast.get_source_segment(src, node) or ""
+        if (
+            "_FORECAST_DECISION_EVENT_TYPES" in test_src
+            and "_spine_multimodel_members_for_event" in body_src
+        ):
+            spine_guards.append(test_src)
+
+    assert spine_guards, (
+        "could not locate the Q-KERNEL SPINE INPUTS guard that calls "
+        "_spine_multimodel_members_for_event in _generate_candidate_proofs"
+    )
+    for guard in spine_guards:
+        assert "_edli_spine_mu_native" not in guard, (
+            "the spine-input producer guard must NOT skip when _edli_spine_mu_native is "
+            "already in the payload — that lets the canonical ensemble_snapshots stash "
+            "pre-empt the raw_model_forecasts multi-model source (the cold-center "
+            "regression). The producer must run unconditionally and overwrite."
+        )

@@ -465,11 +465,15 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
 
     The Stage-0 producer stashed ``_edli_spine_mu_native`` / ``_edli_spine_sigma_native``
     / ``_edli_spine_debiased_members_native`` (and the raw members / q vector) on the
-    THREADED payload at the single point where they were all in scope. These are the
-    reactor's ALREADY-COMPUTED, ARM-validated center/width/envelope — the q the spine
-    integrates is built over the SAME N(mu*, sigma). Returns ``None`` when the served
-    predictive inputs are genuinely absent (the caller emits a typed no-trade rather
-    than fabricating a center).
+    THREADED payload at the single point where they were all in scope. Source-corrected
+    2026-06-16: the live producer sources the member envelope from ``raw_model_forecasts``
+    (the multi-model deterministic fusion, NOT ``ensemble_snapshots``). These members are
+    the RAW multi-model envelope — NOT chain-of-record-debiased and NOT lifted from an
+    "ARM-validated" run; the ARM replay reads the SAME ``raw_model_forecasts`` source, but
+    the center/width here are recomputed live by ``build_center`` / ``build_sigma`` over
+    that envelope (the q the spine integrates is built over the SAME N(mu*, sigma) the
+    bridge constructs). Returns ``None`` when the served predictive inputs are genuinely
+    absent (the caller emits a typed no-trade rather than fabricating a center).
     """
     mu = payload.get("_edli_spine_mu_native")
     sigma = payload.get("_edli_spine_sigma_native")
@@ -890,12 +894,17 @@ def decide_family_via_spine(
         engine = FamilyDecisionEngine(
             fresh_model_reader=_ReactorServedFreshModelReader(models),
             day0_reader=_NoDay0Reader(),
-            # The VALIDATED belief authority: build_center (envelope-lock) + build_sigma
-            # (realized-floor) run on the reactor's chain-of-record-debiased members —
-            # the ARM-replay-validated center+σ, NOT the reactor's legacy served mu/σ.
-            # De-bias: no-op by default (already applied upstream; see
-            # _NoOpDebiasAuthority). When the operator enables the settlement-residual
-            # seam (ZEUS_SPINE_SETTLE_RESID_DEBIAS=1), this is a per-case DebiasAuthority
+            # The belief authority: build_center (envelope-lock) + build_sigma
+            # (realized-floor) run on the reactor's RAW MULTI-MODEL member envelope
+            # sourced from ``raw_model_forecasts`` (~7-13 decorrelated NWP providers,
+            # latest cycle per model at the family's causal cycle) — NOT the reactor's
+            # legacy served mu/σ. Source-corrected 2026-06-16: these members are RAW,
+            # NOT chain-of-record-debiased, and are NOT "the ARM-replay-validated
+            # center+σ" — the ARM replay reads the SAME ``raw_model_forecasts`` table
+            # but the live center is recomputed here, not lifted from a validated run.
+            # De-bias: no-op by default (``_NoOpDebiasAuthority`` → raw envelope is the
+            # center). When the operator enables the settlement-residual seam
+            # (ZEUS_SPINE_SETTLE_RESID_DEBIAS=1), this is a per-case DebiasAuthority
             # seeded with the walk-forward settlement-residual artifact that corrects the
             # proven ~0.5C cold-center bias. Default-OFF: no live behavior change here.
             predictive_builder=PredictiveDistributionBuilder(_spine_debias_authority(case)),
