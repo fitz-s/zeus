@@ -102,6 +102,10 @@ from src.signal.day0_high_nowcast_signal import (
     Day0HighNowcastSignal,
     NotApplicableHorizon as _NowcastNotApplicableHorizon,
 )
+from src.signal.day0_low_distribution import (
+    blend_pre_day0_low_carryover_probabilities,
+    build_pre_day0_low_carryover_conditioning,
+)
 from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes, select_hours_for_target_date
 from src.control.control_plane import get_edge_threshold_multiplier
@@ -3511,6 +3515,8 @@ def evaluate_candidate(
     # When True, the calibration step below uses identity-Platt (A4 lockstep) so this
     # entry path's belief matches the EDLI reactor entry belief. Default False → unchanged.
     _unified_bias_applied = False
+    _pre_day0_low_carryover_context: dict | None = None
+    _pre_day0_low_carryover_applied = False
     selected_method = (
         EntryMethod.DAY0_OBSERVATION.value
         if is_day0_mode
@@ -4286,6 +4292,107 @@ def evaluate_candidate(
             entry_validations = ["ens_fetch", "mc_instrument_noise"]
             if _unified_bias_applied:
                 entry_validations.append("exit_bias_family_unify")
+        if temperature_metric.is_low() and decision_time is not None:
+            try:
+                decision_time_utc = decision_time.astimezone(timezone.utc)
+                lead_hours_pre_day0 = lead_hours_to_date_start(
+                    target_d,
+                    city.timezone,
+                    decision_time_utc,
+                )
+                if 0.0 < lead_hours_pre_day0 <= 4.0:
+                    from src.data.day0_fast_obs import get_fast_obs_emitter
+
+                    low_window = get_fast_obs_emitter().latest_pre_day0_low_window(
+                        city,
+                        target_d.isoformat(),
+                        as_of=decision_time_utc,
+                    )
+                    if low_window is not None:
+                        obs_age_minutes = max(
+                            0.0,
+                            (
+                                decision_time_utc
+                                - low_window.last_obs_time.astimezone(timezone.utc)
+                            ).total_seconds()
+                            / 60.0,
+                        )
+                        low_age_minutes = max(
+                            0.0,
+                            (
+                                decision_time_utc
+                                - low_window.low_obs_time.astimezone(timezone.utc)
+                            ).total_seconds()
+                            / 60.0,
+                        )
+                        conditioning = build_pre_day0_low_carryover_conditioning(
+                            member_mins=np.asarray(analysis_member_extrema, dtype=float),
+                            window_low=low_window.window_low,
+                            current_temp=low_window.current_temp,
+                            lead_hours_to_target_start=lead_hours_pre_day0,
+                            observation_age_minutes=obs_age_minutes,
+                            low_age_minutes=low_age_minutes,
+                            unit=city.settlement_unit,
+                        )
+                        if conditioning is not None:
+                            carryover_p_raw = p_raw_vector_from_maxes(
+                                conditioning.conditioned_member_mins,
+                                city,
+                                settlement_semantics,
+                                bins,
+                                n_mc=ensemble_n_mc(),
+                            )
+                            blended_p_raw = blend_pre_day0_low_carryover_probabilities(
+                                base_p_raw=p_raw,
+                                carryover_p_raw=carryover_p_raw,
+                                weight=conditioning.weight,
+                            )
+                            if blended_p_raw is not None:
+                                p_raw = blended_p_raw
+                                _pre_day0_low_carryover_applied = True
+                                _pre_day0_low_carryover_context = {
+                                    "belief_source": "pre_day0_low_carryover_nowcast",
+                                    "belief_kind": "soft_probability_conditioning",
+                                    "hard_fact": False,
+                                    "absorbing": False,
+                                    "metric": "low",
+                                    "target_date": target_d.isoformat(),
+                                    "source": "aviationweather_metar",
+                                    "station_id": low_window.station_id,
+                                    "unit": low_window.unit,
+                                    "window_start_time": low_window.window_start_time.isoformat(),
+                                    "target_start_time": low_window.target_start_time.isoformat(),
+                                    "window_low": float(low_window.window_low),
+                                    "current_temp": float(low_window.current_temp),
+                                    "low_obs_time": low_window.low_obs_time.isoformat(),
+                                    "last_obs_time": low_window.last_obs_time.isoformat(),
+                                    "last_receipt_time": (
+                                        low_window.last_receipt_time.isoformat()
+                                        if low_window.last_receipt_time is not None
+                                        else None
+                                    ),
+                                    "sample_count": int(low_window.sample_count),
+                                    "lead_hours_to_target_start": float(
+                                        conditioning.lead_hours_to_target_start
+                                    ),
+                                    "observation_age_minutes": float(
+                                        conditioning.observation_age_minutes
+                                    ),
+                                    "low_age_minutes": float(conditioning.low_age_minutes),
+                                    "anchor_temp": float(conditioning.anchor_temp),
+                                    "effective_ceiling": float(conditioning.effective_ceiling),
+                                    "carryover_weight": float(conditioning.weight),
+                                    "calibration_policy": "identity_platt_when_applied",
+                                }
+                                entry_validations.append("pre_day0_low_carryover_nowcast")
+            except Exception as exc:
+                logger.warning(
+                    "PRE_DAY0_LOW_CARRYOVER_SKIPPED city=%s target_date=%s exc=%s: %s",
+                    city.name,
+                    target_d.isoformat(),
+                    type(exc).__name__,
+                    exc,
+                )
         day0_forecast_context = None
         lead_days_for_calibration = lead_days
 
@@ -4641,6 +4748,17 @@ def evaluate_candidate(
         _tot = float(_arr.sum())
         p_cal = (_arr / _tot) if _tot > 0.0 else _arr
         entry_validations.extend(["identity_platt_bias_unify", "normalization"])
+    elif _pre_day0_low_carryover_applied:
+        # Late T-1 LOW carryover changes the p_raw signal domain by mixing a
+        # qualified observation feature into the forecast vector. Existing
+        # Platt rows were fit on unconditioned forecast p_raw, so keep the
+        # conditioned probability as the calibrated entry belief. The maturity
+        # gate below still requires a live calibrator bucket to exist.
+        _authority_verified = True
+        _arr = np.asarray(p_raw, dtype=float)
+        _tot = float(_arr.sum())
+        p_cal = (_arr / _tot) if _tot > 0.0 else _arr
+        entry_validations.extend(["identity_platt_pre_day0_low_carryover", "normalization"])
     elif cal is not None:
         p_cal = calibrate_and_normalize(
             p_raw,
@@ -5287,7 +5405,11 @@ def evaluate_candidate(
             else None
         ),
         bootstrap_signal_type=(
-            "day0_observation_fused" if is_day0_mode else "generic_ensemble"
+            "day0_observation_fused"
+            if is_day0_mode
+            else "pre_day0_low_carryover"
+            if _pre_day0_low_carryover_applied
+            else "generic_ensemble"
         ),
         # K1: legacy evaluator path (not the EDLI event-bound live-q seam). The K1
         # sharpness gate targets the EDLI live path; here it is exempt so behaviour is
@@ -5308,6 +5430,8 @@ def evaluate_candidate(
     )
     if day0_forecast_context is not None:
         forecast_context["day0"] = day0_forecast_context
+    if _pre_day0_low_carryover_context is not None:
+        forecast_context["pre_day0_low_carryover"] = _pre_day0_low_carryover_context
     forecast_issue_time = _snapshot_issue_time_value(ens_result)
     forecast_valid_time = _snapshot_valid_time_value(target_date, ens_result)
     forecast_fetch_time = _snapshot_time_value(ens_result.get("fetch_time"))

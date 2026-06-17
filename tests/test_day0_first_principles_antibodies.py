@@ -184,6 +184,124 @@ class TestAbsorbingBoundary:
 
 
 # ===========================================================================
+# R1B — pre-Day0 LOW carryover is a soft entry signal, not a hard fact
+# ===========================================================================
+
+class TestPreDay0LowCarryover:
+    @staticmethod
+    def _london_city():
+        return SimpleNamespace(
+            name="London",
+            timezone="Europe/London",
+            settlement_unit="C",
+            settlement_source_type="wu_icao",
+            wu_station="EGLL",
+            instrument_noise_override=0.0,
+            lat=51.47,
+        )
+
+    @staticmethod
+    def _metar(ts: str, temp_c: float, station: str = "EGLL"):
+        from src.data.day0_fast_obs import MetarReport
+
+        return MetarReport(
+            station_id=station,
+            obs_time=datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc),
+            receipt_time=datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc),
+            temp_c=temp_c,
+            metar_type="METAR",
+            raw=f"{station} 172230Z AUTO T01200080",
+        )
+
+    def test_pre_day0_low_window_ignores_prior_day_morning_low(self):
+        from src.data.day0_fast_obs import pre_day0_low_window_for_target
+
+        city = self._london_city()
+        window = pre_day0_low_window_for_target(
+            [
+                self._metar("2026-06-17T05:00:00Z", 5.0),    # previous-day low, outside late window
+                self._metar("2026-06-17T20:30:00Z", 13.0),   # 21:30 BST
+                self._metar("2026-06-17T22:30:00Z", 12.0),   # 23:30 BST
+                self._metar("2026-06-17T22:35:00Z", 3.0, "EGSS"),  # wrong station
+            ],
+            city=city,
+            target_date="2026-06-18",
+            as_of=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
+        )
+        assert window is not None
+        assert window.window_low == pytest.approx(12.0)
+        assert window.current_temp == pytest.approx(12.0)
+        assert window.sample_count == 2
+
+    def test_pre_day0_low_carryover_moves_probability_without_certainty(self):
+        import numpy as np
+
+        from src.contracts import SettlementSemantics
+        from src.signal.day0_low_distribution import (
+            blend_pre_day0_low_carryover_probabilities,
+            build_pre_day0_low_carryover_conditioning,
+        )
+        from src.signal.ensemble_signal import p_raw_vector_from_maxes
+        from src.types.market import Bin
+
+        city = self._london_city()
+        sem = SettlementSemantics.for_city(city)
+        bins = [
+            Bin(None, 11.0, "C", "11°C or below"),
+            Bin(12.0, 12.0, "C", "12°C"),
+            Bin(13.0, 13.0, "C", "13°C"),
+            Bin(14.0, None, "C", "14°C or higher"),
+        ]
+        member_mins = np.full(51, 15.0)
+        base = p_raw_vector_from_maxes(member_mins, city, sem, bins, n_mc=32)
+        conditioning = build_pre_day0_low_carryover_conditioning(
+            member_mins=member_mins,
+            window_low=12.0,
+            current_temp=12.0,
+            lead_hours_to_target_start=0.25,
+            observation_age_minutes=15.0,
+            low_age_minutes=15.0,
+            unit="C",
+        )
+        assert conditioning is not None
+        carry = p_raw_vector_from_maxes(
+            conditioning.conditioned_member_mins, city, sem, bins, n_mc=32
+        )
+        blended = blend_pre_day0_low_carryover_probabilities(
+            base_p_raw=base,
+            carryover_p_raw=carry,
+            weight=conditioning.weight,
+        )
+        assert blended is not None
+        assert base[3] == pytest.approx(1.0)
+        assert blended[2] > 0.50
+        assert blended[2] < 0.999
+        assert 0.0 < conditioning.weight < 0.70
+
+    def test_pre_day0_low_carryover_not_active_after_start_or_too_early(self):
+        import numpy as np
+
+        from src.signal.day0_low_distribution import build_pre_day0_low_carryover_conditioning
+
+        kwargs = dict(
+            member_mins=np.full(51, 15.0),
+            window_low=12.0,
+            current_temp=12.0,
+            observation_age_minutes=10.0,
+            low_age_minutes=10.0,
+            unit="C",
+        )
+        assert build_pre_day0_low_carryover_conditioning(
+            **kwargs,
+            lead_hours_to_target_start=-0.10,
+        ) is None
+        assert build_pre_day0_low_carryover_conditioning(
+            **kwargs,
+            lead_hours_to_target_start=4.50,
+        ) is None
+
+
+# ===========================================================================
 # R2 — stale-obs boundary guard (latency-aware dead/alive decisions)
 # ===========================================================================
 

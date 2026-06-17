@@ -46,7 +46,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Optional
 from zoneinfo import ZoneInfo
 
@@ -74,6 +74,12 @@ DEFAULT_MIN_FETCH_INTERVAL_S = 90.0
 #: At 15 min the cache is still fresh enough that the running extreme it
 #: encodes is a valid local-day extreme for entry-probability computation.
 FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
+
+# Soft entry signal for tomorrow's LOW markets: only the late local evening
+# immediately before target day can inform midnight carryover. Earlier lows on
+# T-1 are not target-day facts and must not enter this lane.
+PRE_DAY0_LOW_CARRYOVER_LOOKBACK_HOURS = 3.0
+PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS = 4.0
 
 
 @dataclass(frozen=True)
@@ -249,6 +255,32 @@ class FastObsExtremes:
     quarantined_implausible: int = 0
 
 
+@dataclass(frozen=True)
+class PreDay0LowWindow:
+    """Late T-1 observation window that may softly inform tomorrow's LOW.
+
+    This is not a Day0 hard fact. It is a station/unit/time qualified, fresh
+    observation feature for entry probability conditioning before local
+    midnight. The target-day low can still occur later and lower.
+    """
+
+    city: str
+    station_id: str
+    target_date: str
+    unit: str
+    window_start_time: datetime
+    target_start_time: datetime
+    window_low: float
+    current_temp: float
+    low_obs_time: datetime
+    first_obs_time: datetime
+    last_obs_time: datetime
+    last_receipt_time: Optional[datetime]
+    sample_count: int
+    skipped_unit_law: int
+    quarantined_implausible: int = 0
+
+
 # --- METAR PLAUSIBILITY BOUND (adversarial review 2026-06-10 fix 4) ----------
 # One corrupt/spoofed METAR value must not permanently ratchet the monotone
 # running extreme (emission is irreversible by design). Two checks, applied
@@ -415,6 +447,88 @@ def running_extremes_for_local_day(
         first_obs_time=values[0][0], last_obs_time=values[-1][0],
         last_receipt_time=max(receipts) if receipts else None,
         sample_count=len(values), skipped_unit_law=skipped,
+        quarantined_implausible=quarantined,
+    )
+
+
+def pre_day0_low_window_for_target(
+    reports: Iterable[MetarReport],
+    *,
+    city: Any,
+    target_date: date | str,
+    as_of: Optional[datetime] = None,
+    lookback_hours: float = PRE_DAY0_LOW_CARRYOVER_LOOKBACK_HOURS,
+    max_lead_hours: float = PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS,
+) -> Optional[PreDay0LowWindow]:
+    """Return the late-evening T-1 LOW window for a future target local day.
+
+    The window is bounded to ``[target_midnight - lookback, as_of]`` and only
+    active while ``as_of`` is strictly before the target local day begins. This
+    deliberately excludes the full prior-day low: a cold print at 06:00 on T-1
+    is not evidence that tomorrow's 00:00-02:00 low has already been locked in.
+    """
+    try:
+        tz = ZoneInfo(str(getattr(city, "timezone")))
+        unit = str(getattr(city, "settlement_unit", "F") or "F").upper()
+        station = str(getattr(city, "wu_station", "") or "").strip().upper()
+        target = date.fromisoformat(str(target_date)[:10]) if not isinstance(target_date, date) else target_date
+        ref = (as_of or datetime.now(UTC))
+        if ref.tzinfo is None:
+            return None
+        ref = ref.astimezone(UTC)
+        target_start_local = datetime.combine(target, datetime.min.time(), tzinfo=tz)
+        target_start_utc = target_start_local.astimezone(UTC)
+        lead_hours = (target_start_utc - ref).total_seconds() / 3600.0
+        if lead_hours <= 0.0 or lead_hours > float(max_lead_hours):
+            return None
+        lookback = max(0.25, float(lookback_hours))
+        window_start_utc = target_start_utc - timedelta(hours=lookback)
+        previous_local_day = target - timedelta(days=1)
+    except Exception:
+        return None
+
+    values: list[tuple[datetime, float, Optional[datetime]]] = []
+    skipped = 0
+    for report in reports:
+        if report.station_id != station:
+            continue
+        obs_time = report.obs_time.astimezone(UTC)
+        if obs_time < window_start_utc or obs_time > ref:
+            continue
+        if obs_time.astimezone(tz).date() != previous_local_day:
+            continue
+        value = settlement_temp_for_report(report, unit)
+        if value is None:
+            if report.temp_c is not None:
+                skipped += 1
+            continue
+        values.append((obs_time, value, report.receipt_time))
+
+    values.sort(key=lambda item: item[0])
+    city_name = str(getattr(city, "name", ""))
+    values, quarantined = filter_plausible_values(
+        values, unit=unit, city_name=city_name, month=previous_local_day.month
+    )
+    if not values:
+        return None
+    temps = [v for _, v, _ in values]
+    low_idx = int(min(range(len(values)), key=lambda i: values[i][1]))
+    receipts = [r for _, _, r in values if r is not None]
+    return PreDay0LowWindow(
+        city=city_name,
+        station_id=station,
+        target_date=target.isoformat(),
+        unit=unit,
+        window_start_time=window_start_utc,
+        target_start_time=target_start_utc,
+        window_low=float(temps[low_idx]),
+        current_temp=float(temps[-1]),
+        low_obs_time=values[low_idx][0],
+        first_obs_time=values[0][0],
+        last_obs_time=values[-1][0],
+        last_receipt_time=max(receipts) if receipts else None,
+        sample_count=len(values),
+        skipped_unit_law=skipped,
         quarantined_implausible=quarantined,
     )
 
@@ -737,6 +851,49 @@ class Day0FastObsEmitter:
         if extremes.sample_count == 0:
             return None
         return extremes
+
+    def latest_pre_day0_low_window(
+        self,
+        city: Any,
+        target_date: str,
+        *,
+        as_of: Optional[datetime] = None,
+        lookback_hours: float = PRE_DAY0_LOW_CARRYOVER_LOOKBACK_HOURS,
+        max_lead_hours: float = PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS,
+    ) -> Optional[PreDay0LowWindow]:
+        """Return a fresh cached late T-1 LOW window for tomorrow's LOW entry.
+
+        This is a probability feature, not an absorbing fact. It therefore
+        shares the ENTRY freshness rule with ``latest_extremes`` and never opens
+        a network request or recovers old event-store facts.
+        """
+        source = fast_obs_source_for_city(city)
+        if source is None:
+            return None
+        with self._lock:
+            reports = list(self._cached_reports)
+            cache_monotonic = self._cache_fetched_monotonic
+        if not reports:
+            return None
+        cache_age_s = time.monotonic() - cache_monotonic
+        if cache_age_s > FAST_LANE_ENTRY_MAX_CACHE_AGE_S:
+            return None
+        effective_as_of = (as_of or datetime.now(UTC)).astimezone(UTC)
+        try:
+            return pre_day0_low_window_for_target(
+                reports,
+                city=city,
+                target_date=target_date,
+                as_of=effective_as_of,
+                lookback_hours=lookback_hours,
+                max_lead_hours=max_lead_hours,
+            )
+        except Exception as exc:
+            logger.warning(
+                "PRE_DAY0_LOW_WINDOW_FAILED city=%s target_date=%s exc=%s: %s",
+                getattr(city, "name", "?"), target_date, type(exc).__name__, exc,
+            )
+            return None
 
     def prefetch(
         self,
