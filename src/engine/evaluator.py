@@ -102,6 +102,7 @@ from src.signal.day0_high_nowcast_signal import (
     Day0HighNowcastSignal,
     NotApplicableHorizon as _NowcastNotApplicableHorizon,
 )
+from src.signal.day0_low_nowcast_signal import Day0LowNowcastSignal
 from src.signal.day0_window import remaining_member_extrema_for_day0
 from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes, select_hours_for_target_date
 from src.control.control_plane import get_edge_threshold_multiplier
@@ -4129,7 +4130,12 @@ def evaluate_candidate(
         # (INV-37: world conn from evaluate_candidate must not touch forecasts DB).
         # T4 F4: deferred write — stash params here, write after v2_snapshot_meta
         # is populated so bin_grid_id can be threaded from ensemble_snapshots.
-        if temperature_metric.is_high() and hours_remaining <= 6.0:
+        # T2 nowcast side-write for BOTH metrics. HIGH uses the horizon Platt model;
+        # LOW uses the physical ceiling-preimage (deterministic, no Platt model —
+        # current_temp diagnostic only). Same deferred-write path (_nowcast_write_params),
+        # which is metric-agnostic. Fail-soft: a shadow side-write must NEVER break the
+        # money path, so a broad guard wraps the stash.
+        if (temperature_metric.is_high() or temperature_metric.is_low()) and hours_remaining <= 6.0:
             _obs_time_for_nowcast = _day0_observation_field(
                 candidate.observation, "observation_time"
             )
@@ -4141,20 +4147,34 @@ def evaluate_candidate(
                     )
                     _horizon_model = read_latest_platt_fit()
                     if _horizon_model is not None:
-                        _nowcast = Day0HighNowcastSignal(
-                            observed_high_so_far=float(observed_high_so_far or 0.0),
-                            member_maxes_remaining=extrema.maxes,
-                            current_temp=float(current_temp),
-                            hours_remaining=hours_remaining,
-                            model=_horizon_model,
-                            unit=city.settlement_unit or "F",
-                            observation_source=str(
-                                _day0_observation_field(candidate.observation, "source", "")
-                            ),
-                            observation_time=str(_obs_time_for_nowcast),
-                            temporal_context=temporal_context,
-                            round_fn=settlement_semantics.round_values,
+                        _obs_source = str(
+                            _day0_observation_field(candidate.observation, "source", "")
                         )
+                        if temperature_metric.is_low():
+                            _nowcast = Day0LowNowcastSignal(
+                                observed_low_so_far=float(observed_low_so_far or 0.0),
+                                member_mins_remaining=extrema.mins,
+                                current_temp=float(current_temp),
+                                hours_remaining=hours_remaining,
+                                unit=city.settlement_unit or "F",
+                                observation_source=_obs_source,
+                                observation_time=str(_obs_time_for_nowcast),
+                                temporal_context=temporal_context,
+                                round_fn=settlement_semantics.round_values,
+                            )
+                        else:
+                            _nowcast = Day0HighNowcastSignal(
+                                observed_high_so_far=float(observed_high_so_far or 0.0),
+                                member_maxes_remaining=extrema.maxes,
+                                current_temp=float(current_temp),
+                                hours_remaining=hours_remaining,
+                                model=_horizon_model,
+                                unit=city.settlement_unit or "F",
+                                observation_source=_obs_source,
+                                observation_time=str(_obs_time_for_nowcast),
+                                temporal_context=temporal_context,
+                                round_fn=settlement_semantics.round_values,
+                            )
                         _p_nowcast_vec = _nowcast.p_vector(bins)
                         _nowcast_write_params = {
                             "market_slug": str(candidate.slug or ""),
@@ -4170,6 +4190,13 @@ def evaluate_candidate(
                         }
                 except _NowcastNotApplicableHorizon:
                     pass  # horizon guard fired; no write
+                except Exception as _nowcast_stash_exc:  # shadow side-write: never break money path
+                    logger.warning(
+                        "[DAY0_NOWCAST_STASH_FAILED] metric=%s slug=%s exc=%s",
+                        temperature_metric.temperature_metric,
+                        str(candidate.slug or ""),
+                        _nowcast_stash_exc,
+                    )
         raw_arr = extrema.maxes if extrema.maxes is not None else extrema.mins
         required_member_floor = ensemble_member_count() if required_hour_indices is not None else 1
         if raw_arr is None or np.count_nonzero(np.isfinite(raw_arr)) < required_member_floor:
