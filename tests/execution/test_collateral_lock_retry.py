@@ -1,5 +1,5 @@
 # Created: 2026-06-16
-# Last audited: 2026-06-16
+# Last reused/audited: 2026-06-17
 # Authority basis: #122 / GOAL #83 — ARCH_PLAN_EVIDENCE
 #   docs/evidence/qkernel_rebuild/fix_122_collateral_lock_retry_2026-06-16.md
 """A TRANSIENT `database is locked` on the pre-submit collateral refresh must RETRY,
@@ -25,6 +25,12 @@ def _patch(monkeypatch, refresh_side_effect):
     class _StubLedger:
         def __init__(self, conn):  # noqa: D401
             pass
+
+        def snapshot(self):
+            return SimpleNamespace(
+                authority_tier="DEGRADED",
+                captured_at=datetime(2026, 6, 16, tzinfo=timezone.utc),
+            )
 
         def refresh(self, adapter):
             return refresh_side_effect()
@@ -56,6 +62,61 @@ def test_transient_lock_retries_then_succeeds(monkeypatch):
     out = ex._refresh_entry_collateral_snapshot_for_submit(sqlite3.connect(":memory:"))
     assert calls["n"] == 3  # two transient locks retried, third succeeds
     assert out["allowed"] is True
+
+
+def test_fresh_snapshot_reused_without_adapter_fetch(monkeypatch):
+    from src.execution.collateral import refresh_collateral_snapshot_for_submit
+    from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=1_000_000,
+            pusd_allowance_micro=1_000_000,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime.now(timezone.utc),
+            authority_tier="CHAIN",
+        )
+    )
+
+    class ClientShouldNotBeConstructed:
+        def __init__(self, *args, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("fresh collateral snapshot should not refresh")
+
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        ClientShouldNotBeConstructed,
+    )
+
+    out = refresh_collateral_snapshot_for_submit(
+        conn,
+        action="exit_submit",
+        reuse_fresh_snapshot=True,
+    )
+    assert out["allowed"] is True
+    assert out["details"]["reused_fresh_snapshot"] is True
+
+
+def test_exit_refresh_wrapper_retries_transient_lock(monkeypatch):
+    calls = {"n": 0}
+
+    def side():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise sqlite3.OperationalError("database is locked")
+        return _ok_snapshot()
+
+    ex, _ci = _patch(monkeypatch, side)
+    out = ex._refresh_exit_collateral_snapshot_for_submit(sqlite3.connect(":memory:"))
+    assert calls["n"] == 2
+    assert out["allowed"] is True
+    assert out["details"]["action"] == "exit_submit"
 
 
 def test_genuine_insufficiency_does_not_retry(monkeypatch):

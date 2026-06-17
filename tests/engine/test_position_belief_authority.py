@@ -16,12 +16,12 @@ permanently-stale belief and the exit gate could never fire. These tests pin:
 
 1. ``load_replacement_belief`` reads the freshest posterior row, indexes the
    held bin by its venue range-label, converts to held-side space exactly once,
-   and brands freshness from an explicit age budget — stale is returned as
-   information, absence and unparseable timestamps fail closed.
+   and brands freshness from the live source-cycle clock when available —
+   stale is returned as information, absence and unparseable timestamps fail closed.
 2. ``monitor_probability_refresh`` treats the replacement belief as PRIMARY:
    a fresh row attests freshness without consulting the legacy chain; a stale
-   or missing row falls through to legacy with an honest annotation and can
-   never borrow freshness.
+   or missing row cannot borrow freshness from the legacy ENS chain. Non-day0
+   positions fault/reseed; day0 observation remains a separate authority.
 3. The belief-dead watchdog escalates after N consecutive stale-belief cycles
    while the market price stays fresh (719 silent cycles can never recur).
 """
@@ -53,7 +53,8 @@ def forecasts_db(tmp_path):
         """
         CREATE TABLE forecast_posteriors (
             posterior_id TEXT, city TEXT, target_date TEXT,
-            temperature_metric TEXT, computed_at TEXT, q_json TEXT
+            temperature_metric TEXT, computed_at TEXT, q_json TEXT,
+            source_cycle_time TEXT
         )
         """
     )
@@ -63,11 +64,11 @@ def forecasts_db(tmp_path):
 
 
 def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
-            target_date="2026-06-12", metric="high"):
+            target_date="2026-06-12", metric="high", source_cycle_time=None):
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?)",
-        (posterior_id, city, target_date, metric, computed_at, json.dumps(q)),
+        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?)",
+        (posterior_id, city, target_date, metric, computed_at, json.dumps(q), source_cycle_time),
     )
     conn.commit()
     conn.close()
@@ -116,10 +117,38 @@ class TestLoadReplacementBelief:
 
     def test_stale_row_returned_with_fresh_false(self, forecasts_db):
         """Staleness is information, absence is not — the caller annotates and
-        falls through to legacy telemetry, but never brands this fresh."""
+        must never brand this fresh."""
         _insert(forecasts_db, posterior_id="p1",
                 computed_at=(NOW - timedelta(hours=DEFAULT_MAX_AGE_HOURS + 5)).isoformat(),
                 q={BIN: 0.242})
+        belief = _load(forecasts_db)
+        assert belief is not None
+        assert belief.fresh is False
+
+    def test_source_cycle_clock_controls_live_schema_freshness(self, forecasts_db):
+        """Live posteriors stay lawful by the shared source-cycle horizon, not
+        the old 9h computed_at monitor clock."""
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=14)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=24)).isoformat(),
+            q={BIN: 0.242},
+        )
+        belief = _load(forecasts_db)
+        assert belief is not None
+        assert belief.fresh is True
+        assert belief.freshness_basis == "source_cycle_time"
+        assert belief.source_cycle_age_hours == pytest.approx(24.0)
+
+    def test_source_cycle_clock_still_fails_closed_after_bound(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=14)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=36)).isoformat(),
+            q={BIN: 0.242},
+        )
         belief = _load(forecasts_db)
         assert belief is not None
         assert belief.fresh is False
@@ -259,11 +288,11 @@ class TestMonitorPrimaryAuthority:
 
 
 class TestReplacementAuthorityFaultSuppressesLegacy:
-    """Regime law U1/U2 (2026-06-12) + Denver incident: a REPLACEMENT-authority
-    held position (edli trade_id) whose replacement belief is stale/missing must
-    NOT be papered over by the legacy ENS forecast belief. Instead: not-fresh +
-    BELIEF_AUTHORITY_FAULT + a fail-soft single-family reseed. A LEGACY-entered
-    (non-edli) position still gets the legacy path, clearly branded."""
+    """Regime law U1/U2 (2026-06-12), Denver incident, and 2026-06-16 source
+    parity widening: a non-day0 held position whose replacement belief is
+    stale/missing must NOT be papered over by legacy ENS forecast belief.
+    Instead: not-fresh + BELIEF_AUTHORITY_FAULT + fail-soft single-family reseed.
+    The day0 observation lane remains separately authorized."""
 
     def _edli_pos(self, trade_id="edli-belief-1", entry_method="ens_member_counting"):
         from src.state.portfolio import Position
@@ -377,10 +406,9 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
         MUST NOT run; belief is marked not-fresh + BELIEF_AUTHORITY_FAULT + a
         same-family reseed re-materializes the SAME authority next cycle.
 
-        RED-on-revert: restoring the edli-only guard
-        (``_position_is_replacement_authority(pos) and not _would_use_day0_lane``)
-        re-enables the ensemble substitution for legacy positions → ``legacy_called``
-        becomes ``["ens"]`` → this test fails."""
+        RED-on-revert: restoring an edli-only guard re-enables ensemble
+        substitution for legacy positions -> ``legacy_called`` becomes
+        ``["ens"]`` -> this test fails."""
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb
 

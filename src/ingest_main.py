@@ -942,10 +942,10 @@ def _replacement_availability_poll_tick():
     """
     from src.data.replacement_forecast_production import (  # noqa: PLC0415
         _replacement_cycle_availability_poll_if_needed,
-        _replacement_forecast_shadow_materialization_queue_config,
+        _replacement_forecast_live_materialization_queue_config,
     )
 
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    cfg = _replacement_forecast_live_materialization_queue_config()
     report = _replacement_cycle_availability_poll_if_needed(cfg)
     if report is None:
         return

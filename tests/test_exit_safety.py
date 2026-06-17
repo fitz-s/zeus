@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-21
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Last reused/audited: 2026-06-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-06-17; last_reused=2026-06-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml; task.md B1/B3 live-runtime follow-up
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -1512,6 +1512,7 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
     exit_context = ExitContext(
         exit_reason="EDGE_REVERSAL",
         current_market_price=0.50,
+        current_market_price_is_fresh=True,
         best_bid=0.49,
     )
     captured: dict[str, object] = {}
@@ -1912,6 +1913,7 @@ def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(mo
     exit_context = ExitContext(
         exit_reason="EDGE_REVERSAL",
         current_market_price=0.50,
+        current_market_price_is_fresh=True,
         best_bid=0.49,
     )
 
@@ -1953,6 +1955,128 @@ def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(mo
     assert portfolio.positions == [position]
 
 
+def test_live_exit_refreshes_collateral_before_sell_preflight(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    calls = []
+    position = Position(
+        trade_id="pos-refresh-before-collateral",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.50,
+        size_usd=10.0,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="holding",
+        strategy_key="opening_inertia",
+    )
+    portfolio = PortfolioState(positions=[position])
+    exit_context = ExitContext(
+        exit_reason="EDGE_REVERSAL",
+        current_market_price=0.50,
+        current_market_price_is_fresh=True,
+        best_bid=0.49,
+    )
+
+    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", lambda *args, **kwargs: {})
+
+    def fake_refresh(active_conn):
+        assert active_conn is conn
+        calls.append("refresh")
+        return {"component": "collateral_snapshot_refresh", "allowed": True}
+
+    def fake_check(*args, **kwargs):
+        assert calls == ["refresh"]
+        calls.append("check")
+        return False, "ctf_tokens_insufficient: token_id=yes-token-001 required=20 available=0"
+
+    monkeypatch.setattr(exit_lifecycle, "_refresh_exit_collateral_snapshot_for_submit", fake_refresh)
+    monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", fake_check)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("submit must not run")),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        exit_context,
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome.startswith("collateral_blocked: ctf_tokens_insufficient")
+    assert calls == ["refresh", "check"]
+    assert position.exit_state == "retry_pending"
+
+
+def test_live_exit_collateral_refresh_failure_retries_before_preflight(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.collateral_ledger import CollateralInsufficient
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-refresh-failed",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.50,
+        size_usd=10.0,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="holding",
+        strategy_key="opening_inertia",
+    )
+    portfolio = PortfolioState(positions=[position])
+    exit_context = ExitContext(
+        exit_reason="EDGE_REVERSAL",
+        current_market_price=0.50,
+        current_market_price_is_fresh=True,
+        best_bid=0.49,
+    )
+
+    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_exit_collateral_snapshot_for_submit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            CollateralInsufficient("collateral_refresh_failed: network")
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("preflight must not run")),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        exit_context,
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome == "collateral_blocked: collateral_refresh_failed: network"
+    assert position.exit_state == "retry_pending"
+    assert position.last_exit_error == "collateral_refresh_failed: network"
+
+
 def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import ExitContext, PortfolioState, Position
@@ -1979,6 +2103,7 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
     exit_context = ExitContext(
         exit_reason="SETTLEMENT_IMMINENT",
         current_market_price=0.99,
+        current_market_price_is_fresh=True,
         best_bid=0.99,
         hours_to_settlement=1.0,
         position_state="day0_window",
@@ -2066,6 +2191,7 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
     exit_context = ExitContext(
         exit_reason="MODEL_DIVERGENCE_PANIC",
         current_market_price=0.99,
+        current_market_price_is_fresh=True,
         best_bid=0.99,
         hours_to_settlement=1.0,
         position_state="day0_window",

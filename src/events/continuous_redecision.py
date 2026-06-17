@@ -421,9 +421,9 @@ def screen_reprice(
     if idx >= len(belief.p_posterior_vec):
         return None
     yes_post = float(belief.p_posterior_vec[idx])
-    if side != "buy_yes":
+    if side not in {"buy_yes", "buy_no"}:
         return None
-    current = yes_post
+    current = yes_post if side == "buy_yes" else 1.0 - yes_post
     delta = float(resting_posterior) - current  # >0 means belief WORSENED against the held side
     if delta >= belief_reprice_delta - _EPS:
         return RepriceDecision(
@@ -552,6 +552,62 @@ def read_freshest_executable_prices(
     return out
 
 
+def read_freshest_resting_best_bids(
+    trade_conn: sqlite3.Connection,
+    *,
+    condition_ids: set[str],
+) -> dict[tuple[str, str], PriceQuote]:
+    """Build a ``(condition_id, direction) -> best bid`` map for maker-rest checks.
+
+    Entry edge screening consumes executable ask cost. Resting maker orders need
+    same-side best bid; using ask cost here turns ordinary spread into false
+    ``BOOK_MOVED`` churn.
+    """
+    if not condition_ids:
+        return {}
+    try:
+        cols = {row[1] for row in trade_conn.execute(
+            "PRAGMA table_info(executable_market_snapshots)").fetchall()}
+    except sqlite3.Error:
+        return {}
+    if not {"condition_id", "orderbook_top_bid", "orderbook_top_ask",
+            "freshness_deadline", "captured_at"}.issubset(cols):
+        return {}
+    placeholders = ",".join("?" for _ in condition_ids)
+    rows = trade_conn.execute(
+        f"""
+        WITH latest AS (
+            SELECT condition_id, orderbook_top_bid, orderbook_top_ask, freshness_deadline,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY condition_id ORDER BY captured_at DESC
+                   ) AS rn
+            FROM executable_market_snapshots
+            WHERE condition_id IN ({placeholders})
+        )
+        SELECT condition_id, orderbook_top_bid, orderbook_top_ask, freshness_deadline
+        FROM latest WHERE rn = 1
+        """,
+        tuple(condition_ids),
+    ).fetchall()
+    out: dict[tuple[str, str], PriceQuote] = {}
+    for row in rows:
+        cid = str(row[0] or "")
+        deadline = str(row[3] or "")
+        if not cid or not deadline:
+            continue
+        try:
+            yes_bid = float(row[1])
+            yes_ask = float(row[2])
+        except (TypeError, ValueError):
+            continue
+        if 0.0 < yes_bid < 1.0:
+            out[(cid, "buy_yes")] = PriceQuote(price=yes_bid, freshness_deadline=deadline)
+        no_bid = 1.0 - yes_ask
+        if 0.0 < no_bid < 1.0:
+            out[(cid, "buy_no")] = PriceQuote(price=no_bid, freshness_deadline=deadline)
+    return out
+
+
 def screen_entry_redecisions(
     world_conn: sqlite3.Connection,
     trade_conn: sqlite3.Connection,
@@ -642,7 +698,7 @@ def screen_resting_orders(
     price wiggle on the SAME snapshot never reaches a cancel. Pure read; returns decisions only — the
     scheduler job enqueues the redecision and the reactor performs the actual cancel via the existing
     maker_rest_escalation cancel path (never a new venue call site)."""
-    price_by_cid = read_freshest_executable_prices(
+    bid_by_cid = read_freshest_resting_best_bids(
         trade_conn, condition_ids={r.condition_id for r in open_rests if r.condition_id}
     )
     out: list[tuple[OpenRest, RepriceDecision]] = []
@@ -666,12 +722,9 @@ def screen_resting_orders(
             )
         if decision is None:
             # 3) Moved-book pull: our limit has fallen >1 tick behind the live best bid for our side.
-            quote = price_by_cid.get((rest.condition_id, rest.side))
-            if quote is not None:
-                # quote.price is the current ask we'd pay; a maker rest sits at-or-below it. If our
-                # limit is more than REST_BOOK_DRIFT_TICKS below the current implied best, the book
-                # walked away and we are off-queue → pull and re-quote.
-                drift = float(quote.price) - float(rest.limit_price)
+            bid = bid_by_cid.get((rest.condition_id, rest.side))
+            if bid is not None:
+                drift = float(bid.price) - float(rest.limit_price)
                 if drift > REST_BOOK_DRIFT_TICKS * TICK_SIZE + _EPS:
                     decision = RepriceDecision(
                         family_id=rest.family_id, bin_label=rest.bin_label, side=rest.side,

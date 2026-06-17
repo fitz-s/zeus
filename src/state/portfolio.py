@@ -2226,8 +2226,12 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         chain_state=str(row.get("chain_state") or ""),
         exit_state=str(row.get("exit_state") or ""),
         last_monitor_prob=row.get("last_monitor_prob"),
+        last_monitor_prob_is_fresh=bool(row.get("last_monitor_prob_is_fresh") or False),
         last_monitor_edge=row.get("last_monitor_edge"),
         last_monitor_market_price=row.get("last_monitor_market_price"),
+        last_monitor_market_price_is_fresh=bool(
+            row.get("last_monitor_market_price_is_fresh") or False
+        ),
         admin_exit_reason=str(row.get("admin_exit_reason") or ""),
         entry_fill_verified=bool(row.get("entry_fill_verified", False)),
         # PR #352 (Part-5 audit Finding 1): the durable projection stores chain

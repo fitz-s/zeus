@@ -1,26 +1,24 @@
 # Created: 2026-06-10
 # Last reused/audited: 2026-06-10
 # Authority basis: funnel autopsy 2026-06-10 — buy_no FDR p-value reconciled with the
-#   certified fused NO posterior (operator directive: "the hypothesis test contradicts
-#   the certified probability and must be RECONCILED, not weakened"). Root cause: the
-#   live replacement_0_1 path hardcoded p_value[buy_no]=1.0, so every buy_no
-#   UNCONDITIONALLY failed BH-FDR (q=0.10 can never admit p=1.0) even when the native
-#   NO robust lower bound (1 - q_ucb_yes) cleared the native NO cost by >10c. Stale law:
-#   the hardcode was correct when the NO authority was a disabled placeholder (q_no==0,
-#   no q_ucb); it became artificial once the native NO authority went live.
-"""Relationship test: certified fused NO posterior <-> BH-FDR p-value (cross-module).
+#   certified fused NO posterior. Root cause: the live replacement_0_1 path
+#   formerly hardcoded p_value[buy_no]=1.0, then later used {0,1} LCB pass/fail
+#   flags as p-values. Both are misleading: the p-value must be the empirical
+#   false-edge rate over the posterior bootstrap draws, while the robust LCB
+#   pass/fail decision remains a separate prefilter.
+"""Relationship test: certified fused NO posterior <-> empirical edge p-value.
 
 This is a RELATIONSHIP test (Fitz methodology): it does not check a single function's
 output, it checks the property that holds ACROSS the boundary where the certified
 probability authority (the fused posterior's q_ucb -> native NO q_lcb) flows into the
-FDR hypothesis-test layer (p_value). The invariant:
+selection layer (p_value). The invariant:
 
     a buy_no whose native robust NO lower bound (1 - q_ucb_yes) exceeds the native NO
-    cost MUST receive an edge-positive (0.0) FDR p-value — the SAME indicator the buy_yes
-    leg receives — so BH-FDR cannot reject a hypothesis the certified posterior backs.
+    cost MUST pass the binary robust-LCB prefilter, while its p_value records the
+    empirical share of bootstrap draws where q_no <= cost.
 
-A buy_no with NO edge (lower bound below cost) must still receive p=1.0 and be rejected:
-the gate is reconciled, not removed.
+A buy_no with NO robust edge must fail the prefilter even if its empirical p_value is
+graded rather than 1.0. The gate is reconciled, not removed.
 """
 from __future__ import annotations
 
@@ -73,6 +71,14 @@ def _replacement_bundle() -> SimpleNamespace:
             "replacement_q_mode": "FUSED_NORMAL_FULL",
             "q_shape": "fused_normal_direct",
             "q_lcb_basis": "fused_center_bootstrap_p05",
+            "q_bootstrap_samples_by_bin": {
+                # cond-22 NO side: 10/200 draws are <= 0.87, so p_value is
+                # empirical 0.05 while the robust lower bound still clears cost.
+                "bin-22": ([0.14] * 10) + ([0.10] * 190),
+                # cond-28 NO side: 120/200 draws are <= 0.45, so p_value is
+                # graded 0.60 while the robust lower bound fails cost.
+                "bin-28": ([0.60] * 120) + ([0.40] * 80),
+            },
             "aifs_member_count": 51,
             "aifs_probabilities": {"bin-22": 4 / 51, "bin-28": 41 / 51},
             "bin_topology": [
@@ -121,14 +127,14 @@ def _run(native_costs):
         mp.undo()
 
 
-def test_buy_no_with_certified_edge_gets_edge_positive_fdr_p_value() -> None:
-    """cond-22 NO: native NO q_lcb 0.88 > NO cost 0.72 -> p_value MUST be 0.0 (admit)."""
+def test_buy_no_with_certified_edge_gets_empirical_edge_p_value() -> None:
+    """cond-22 NO: native NO q_lcb 0.88 > NO cost -> prefilter admits; p is empirical."""
     native_costs = {
         ("cond-22", "buy_yes"): (None, ExecutionPrice(0.08, "ask", fee_deducted=True, currency="probability_units"), 0.08, None, None),
         ("cond-28", "buy_yes"): (None, ExecutionPrice(0.80, "ask", fee_deducted=True, currency="probability_units"), 0.80, None, None),
         # Favorite-longshot NO on the distant tail: cheap-ish NO cost well under the
         # certified native NO lower bound (0.88).
-        ("cond-22", "buy_no"): (None, ExecutionPrice(0.72, "ask", fee_deducted=True, currency="probability_units"), 0.72, None, None),
+        ("cond-22", "buy_no"): (None, ExecutionPrice(0.87, "ask", fee_deducted=True, currency="probability_units"), 0.87, None, None),
         ("cond-28", "buy_no"): (None, ExecutionPrice(0.45, "ask", fee_deducted=True, currency="probability_units"), 0.45, None, None),
     }
     _q, lcb, p_values, prefilter, _ev = _run(native_costs)
@@ -137,16 +143,17 @@ def test_buy_no_with_certified_edge_gets_edge_positive_fdr_p_value() -> None:
     from src.calibration.qlcb_provenance import _qlcb_float
 
     assert _qlcb_float(lcb[("cond-22", "buy_no")]) == pytest.approx(0.88, abs=1e-9)
-    # INVARIANT: FDR p-value reconciled with that certified edge -> edge-positive.
-    assert p_values[("cond-22", "buy_no")] == 0.0
+    # INVARIANT: p_value is the finite-sample-corrected empirical false-edge
+    # rate, not a binary gate.
+    assert p_values[("cond-22", "buy_no")] == pytest.approx(11 / 201)
     assert prefilter[("cond-22", "buy_no")] is True
 
 
 def test_buy_no_without_edge_still_rejected_by_fdr() -> None:
-    """cond-28 NO: native NO q_lcb 0.08 < NO cost 0.45 -> p_value MUST stay 1.0 (reject).
+    """cond-28 NO: native NO q_lcb 0.08 < NO cost 0.45 -> prefilter rejects.
 
-    Reconciliation is one-directional: a NO with no certified edge is NOT admitted. The
-    gate is preserved, not weakened.
+    Reconciliation is one-directional: p_value may be graded from samples, but a NO
+    with no certified robust edge is NOT admitted. The gate is preserved, not weakened.
     """
     native_costs = {
         ("cond-22", "buy_yes"): (None, ExecutionPrice(0.08, "ask", fee_deducted=True, currency="probability_units"), 0.08, None, None),
@@ -157,7 +164,7 @@ def test_buy_no_without_edge_still_rejected_by_fdr() -> None:
     }
     _q, _lcb, p_values, prefilter, _ev = _run(native_costs)
 
-    assert p_values[("cond-28", "buy_no")] == 1.0
+    assert p_values[("cond-28", "buy_no")] == pytest.approx(121 / 201)
     assert prefilter[("cond-28", "buy_no")] is False
 
 

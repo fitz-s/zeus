@@ -161,7 +161,7 @@ def _replacement_materialization_inventory(forecast_db: Path) -> tuple[int, int,
                         SELECT COUNT(*)
                         FROM forecast_posteriors
                         WHERE source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
-                          AND trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                          AND trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY')
                         """
                     ).fetchone()[0]
                 )
@@ -171,7 +171,7 @@ def _replacement_materialization_inventory(forecast_db: Path) -> tuple[int, int,
                            trade_authority_status, training_allowed, computed_at
                     FROM forecast_posteriors
                     WHERE source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
-                      AND trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                      AND trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY')
                     ORDER BY posterior_id DESC
                     LIMIT 1
                     """
@@ -507,13 +507,10 @@ def build_replacement_forecast_live_dry_run_report(
         raise TypeError("request must be ReplacementForecastLiveDryRunInput")
     root = Path(request.root)
     flags = {key: bool(request.runtime_flags.get(key, False)) for key in REQUIRED_FLAGS}
-    # DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the resolver IGNORES the
-    # promotion / capital-objective evidence objects post-operator-severance
-    # (LIVE_AUTHORITY is FLAG-ONLY; runtime_policy.py:234-311 reads only the 5 flags),
-    # and the preflight already DISCARDED the evidence-status. The configured-evidence
-    # loader (which imported the deleted go_live_report verdict module) is removed; the
-    # preflight resolves the SAME flag-derived policy.status as the live daemon — this
-    # is behavior-identical. See docs/evidence/timing_audit/.
+    # The resolver ignores the old promotion / capital-objective evidence objects and
+    # resolves the same flag-derived policy.status as the live daemon. That policy is
+    # necessary but not sufficient for live trading: the materialized posterior row must
+    # also be row-level LIVE_AUTHORITY with fused q and certified bootstrap bounds.
     policy = resolve_replacement_forecast_runtime_policy(
         flags,
         promotion_evidence=None,
@@ -588,7 +585,7 @@ def build_replacement_forecast_live_dry_run_report(
     if latest_readiness_artifact_status not in {"READY", "ASSUMED_READY", "NOT_APPLICABLE_NO_POSTERIOR"}:
         reasons.append("REPLACEMENT_DRY_RUN_LATEST_READINESS_ARTIFACTS_NOT_READY")
     if (
-        policy.can_read_shadow_posterior
+        policy.can_initiate_trade
         and not request.assume_replacement_shadow_schema_initialized
         and current_target_coverage_status not in {"READY", "NO_CURRENT_TARGETS"}
     ):

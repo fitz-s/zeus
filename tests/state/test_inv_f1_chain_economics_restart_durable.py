@@ -62,8 +62,10 @@ def _write_balance_only_position_current(conn: sqlite3.Connection) -> None:
         "entry_price": 0.10,
         "p_posterior": 0.62,
         "last_monitor_prob": None,
+        "last_monitor_prob_is_fresh": 1,
         "last_monitor_edge": None,
         "last_monitor_market_price": None,
+        "last_monitor_market_price_is_fresh": 1,
         "decision_snapshot_id": "snap-restart",
         "entry_method": "ens_member_counting",
         "strategy_key": "settlement_capture",
@@ -168,6 +170,11 @@ def test_chain_economics_survive_restart() -> None:
         f"has_chain_observed_authority={pos.has_chain_observed_authority!r} — "
         f"False means fill_authority was not preserved, so chain routing is void."
     )
+
+    # 5b. monitor freshness authority bits survive restart; otherwise a reload
+    # can manufacture INCOMPLETE_EXIT_CONTEXT from position_current alone.
+    assert pos.last_monitor_prob_is_fresh is True
+    assert pos.last_monitor_market_price_is_fresh is True
 
     # 6. effective_exposure().source_authority must be 'venue_position_observed'
     exposure = pos.effective_exposure()

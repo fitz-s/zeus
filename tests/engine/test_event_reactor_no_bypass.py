@@ -840,13 +840,12 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
 def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
     """Insert the minimum replacement forecast readiness + posterior rows so that
     _replacement_authority_probability_and_fdr_proof completes past the READINESS_MISSING
-    and BUNDLE_BLOCKED gates. This is required because LIVE_AUTHORITY is now FLAG-ONLY
-    (operator directive 2026-06-08; commit b646f99339): with all flags True in settings.json,
-    every receipt attempt enters the replacement path.
+    and BUNDLE_BLOCKED gates. Runtime-policy LIVE_AUTHORITY is flag-derived, but the
+    live bundle reader also requires a row-level LIVE_AUTHORITY posterior carrier.
 
     The posterior's bin_topology_hash is computed dynamically from the market_events already
     in `conn` so it matches _current_market_bin_topology_hash exactly.
-    Authority: operator directive 2026-06-08 (flag-only LIVE_AUTHORITY)."""
+    Authority: replacement live row authority requires flags plus a live-grade posterior."""
     import hashlib as _hashlib
     import json as _json
 
@@ -975,7 +974,7 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             ?,
             'Chicago', '2026-05-25', 'high',
             ?,
-            'SHADOW_VETO_ONLY', 0,
+            'LIVE_AUTHORITY', 0,
             ?, ?, ?,
             ?,
             'fixture-identity-hash', 'fixture-dep-hash', 'fixture-config-hash',

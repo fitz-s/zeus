@@ -171,15 +171,15 @@ def _blocked_result(
     )
 
 
-def _shadow_unavailable_result(
+def _diagnostic_unavailable_result(
     candidate: ReplacementForecastCandidateView,
     *,
     reason_codes: tuple[str, ...],
 ) -> ReplacementForecastReactorHookResult:
-    """Keep replacement shadow/veto advisory when its own evidence is unavailable."""
+    """Keep baseline values when replacement diagnostic evidence is unavailable."""
 
     return ReplacementForecastReactorHookResult(
-        status="SHADOW_ONLY",
+        status="DIAGNOSTIC_ONLY",
         reason_codes=reason_codes,
         effective_direction=candidate.baseline_direction,
         effective_q_posterior=candidate.baseline_q_posterior,
@@ -581,9 +581,8 @@ def build_replacement_forecast_event_hook(
                 reason_code=reason_code,
             )
         replacement_bundle = bundle_result.bundle if bundle_result is not None and bundle_result.ok else None
-        # Wave-2 item 1: single q authority — the replacement q_lcb is used directly for
-        # every policy status (no baseline cap). The SHADOW_VETO down-clamp remains downstream
-        # in the veto guardrail (it can only lower q_lcb, never raise it).
+        # Wave-2 item 1: single q authority — the replacement q_lcb is used directly
+        # only when the live hook returns LIVE_AUTHORITY.
         candidate_view = _candidate_view_from_proof(
             proof,
             decision_time,
@@ -596,16 +595,6 @@ def build_replacement_forecast_event_hook(
             replacement_bundle=replacement_bundle,
             readiness=readiness,
         )
-        if hook_result.status == "SHADOW_VETO_ONLY":
-            try:
-                _write_replacement_shadow_decision(request.forecast_conn, hook_result)
-            except Exception:
-                if policy.status != "LIVE_AUTHORITY":
-                    return _shadow_unavailable_result(
-                        candidate_view,
-                        reason_codes=("REPLACEMENT_SHADOW_DECISION_WRITE_FAILED",),
-                    )
-                return _blocked_result(candidate_view, reason_code="REPLACEMENT_SHADOW_DECISION_WRITE_FAILED")
         return hook_result
 
     return _hook

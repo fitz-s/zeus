@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-05-17; last_reused=2026-05-17
+# Lifecycle: created=2026-04-30; last_reviewed=2026-06-17; last_reused=2026-06-17
 # Purpose: Lock healthcheck relationship predicates for live daemon, launchd, entry capability, and settlement truth.
 # Reuse: Run when scripts/healthcheck.py health predicates or live readiness status fields change.
 # Created: 2026-04-30
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-06-17
 # Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; healthcheck live-only runtime contract; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 from __future__ import annotations
 import pytest
@@ -17,8 +17,20 @@ from scripts import healthcheck
 _ORIGINAL_LAUNCHD_CONTRACTS = healthcheck._launchd_contracts
 _ORIGINAL_SOURCE_HEALTH_STATUS = healthcheck._source_health_status
 _ORIGINAL_LIVE_DB_HOLDER_STATUS = healthcheck._live_db_holder_status
+_ORIGINAL_POSITION_CURRENT_SCHEMA_STATUS = healthcheck._position_current_schema_status
+_ORIGINAL_FORECAST_POSTERIORS_SCHEMA_STATUS = (
+    healthcheck._forecast_posteriors_live_authority_schema_status
+)
 _ORIGINAL_PROCESS_LOADED_CODE_STATUS = healthcheck._process_loaded_code_status
 _ORIGINAL_SETTLEMENT_TRUTH_STATUS = healthcheck._settlement_truth_status
+
+_LAUNCHD_TEST_SPECS = (
+    ("com.zeus.live-trading", "src.main"),
+    ("com.zeus.data-ingest", "src.ingest_main"),
+    ("com.zeus.riskguard-live", "src.riskguard.riskguard"),
+    ("com.zeus.forecast-live", "src.ingest.forecast_live_daemon"),
+    ("com.zeus.venue-heartbeat", "src.control.heartbeat_supervisor"),
+)
 
 
 @pytest.fixture(autouse=True)
@@ -91,11 +103,48 @@ def _mock_live_db_holder_status(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _mock_position_current_schema_status(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_position_current_schema_status",
+        lambda: {"ok": True, "path": "/tmp/zeus_trades.db", "missing_columns": []},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_forecast_posteriors_schema_status(monkeypatch):
+    monkeypatch.setattr(
+        healthcheck,
+        "_forecast_posteriors_live_authority_schema_status",
+        lambda: {
+            "ok": True,
+            "path": "/tmp/zeus-forecasts.db",
+            "issue": None,
+            "live_authority_status_supported": True,
+        },
+    )
+
+
+@pytest.fixture(autouse=True)
 def _mock_process_loaded_code_status(monkeypatch):
     monkeypatch.setattr(
         healthcheck,
         "_process_loaded_code_status",
         lambda launchd_contracts: {"ok": True, "issue": None, "stale": [], "unattested": [], "items": []},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_optional_live_projection_paths(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        healthcheck,
+        "_live_health_composite_path",
+        lambda: tmp_path / "missing-live-health-composite.json",
+    )
+    monkeypatch.setattr(
+        healthcheck,
+        "_venue_heartbeat_keeper_path",
+        lambda: tmp_path / "missing-venue-heartbeat-keeper.json",
     )
 
 
@@ -314,7 +363,14 @@ def _write_launchd_plist(
     throttle_interval=30,
     working_directory=None,
     pythonpath=None,
+    env_extra=None,
 ):
+    env = {
+        "PYTHONPATH": str(pythonpath or root),
+        "ZEUS_MODE": "live",
+    }
+    if env_extra:
+        env.update(env_extra)
     payload = {
         "Label": label,
         "ProgramArguments": [str(root / ".venv" / "bin" / "python"), "-m", module],
@@ -322,10 +378,7 @@ def _write_launchd_plist(
         "RunAtLoad": run_at_load,
         "KeepAlive": keep_alive,
         "ThrottleInterval": throttle_interval,
-        "EnvironmentVariables": {
-            "PYTHONPATH": str(pythonpath or root),
-            "ZEUS_MODE": "live",
-        },
+        "EnvironmentVariables": env,
     }
     path = launchagents_dir / f"{label}.plist"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -355,7 +408,15 @@ def _launchctl_print_output(
     working_directory=None,
     pythonpath=None,
     last_exit_code="",
+    env_extra=None,
 ):
+    env_lines = [
+        f"\t\tPYTHONPATH => {pythonpath or root}",
+        f"\t\tXPC_SERVICE_NAME => {label}",
+    ]
+    if env_extra:
+        env_lines.extend(f"\t\t{key} => {value}" for key, value in env_extra.items())
+    env_text = "\n".join(env_lines)
     properties = []
     if keep_alive:
         properties.append("keepalive")
@@ -378,8 +439,7 @@ def _launchctl_print_output(
 \tworking directory = {working_directory or root}
 
 \tenvironment = {{
-\t\tPYTHONPATH => {pythonpath or root}
-\t\tXPC_SERVICE_NAME => {label}
+{env_text}
 \t}}
 
 \tminimum runtime = {minimum_runtime}
@@ -406,12 +466,7 @@ def test_launchd_contracts_require_restart_policy_and_repo_identity(monkeypatch,
     launchagents = tmp_path / "LaunchAgents"
     monkeypatch.setenv("ZEUS_MODE", "live")
     specs = {}
-    for label, module in (
-        ("com.zeus.live-trading", "src.main"),
-        ("com.zeus.data-ingest", "src.ingest_main"),
-        ("com.zeus.riskguard-live", "src.riskguard.riskguard"),
-        ("com.zeus.forecast-live", "src.ingest.forecast_live_daemon"),
-    ):
+    for label, module in _LAUNCHD_TEST_SPECS:
         plist_path = _write_launchd_plist(launchagents, label=label, module=module, root=root)
         specs[label] = _launchctl_print_output(
             label=label,
@@ -429,7 +484,103 @@ def test_launchd_contracts_require_restart_policy_and_repo_identity(monkeypatch,
         "com.zeus.data-ingest",
         "com.zeus.riskguard-live",
         "com.zeus.forecast-live",
+        "com.zeus.venue-heartbeat",
     }
+
+
+def test_launchd_contracts_reject_venue_heartbeat_timeout_that_consumes_cadence(
+    monkeypatch,
+    tmp_path,
+):
+    root = tmp_path / "zeus"
+    launchagents = tmp_path / "LaunchAgents"
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    specs = {}
+    for label, module in _LAUNCHD_TEST_SPECS:
+        env_extra = (
+            {
+                "ZEUS_HEARTBEAT_CADENCE_SECONDS": "5",
+                "ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS": "4",
+            }
+            if label == "com.zeus.venue-heartbeat"
+            else None
+        )
+        plist_path = _write_launchd_plist(
+            launchagents,
+            label=label,
+            module=module,
+            root=root,
+            env_extra=env_extra,
+        )
+        specs[label] = _launchctl_print_output(
+            label=label,
+            module=module,
+            root=root,
+            plist_path=plist_path,
+            env_extra=env_extra,
+        )
+    _mock_launchctl_loaded_contracts(monkeypatch, specs)
+
+    result = _ORIGINAL_LAUNCHD_CONTRACTS(launchagents, root=root)
+
+    assert result["ok"] is False
+    venue = next(item for item in result["items"] if item["label"] == "com.zeus.venue-heartbeat")
+    assert "heartbeat_http_timeout_exceeds_half_cadence" in venue["issues"]
+    assert "loaded_heartbeat_http_timeout_exceeds_half_cadence" in venue["issues"]
+    assert venue["heartbeat_timing"] == {"cadence_seconds": 5, "http_timeout_seconds": 4.0}
+    assert venue["loaded"]["heartbeat_timing"] == {
+        "cadence_seconds": 5,
+        "http_timeout_seconds": 4.0,
+    }
+
+
+def test_launchd_contracts_reject_stale_loaded_venue_heartbeat_timeout(
+    monkeypatch,
+    tmp_path,
+):
+    root = tmp_path / "zeus"
+    launchagents = tmp_path / "LaunchAgents"
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    specs = {}
+    for label, module in _LAUNCHD_TEST_SPECS:
+        disk_env = (
+            {
+                "ZEUS_HEARTBEAT_CADENCE_SECONDS": "5",
+                "ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS": "1",
+            }
+            if label == "com.zeus.venue-heartbeat"
+            else None
+        )
+        loaded_env = (
+            {
+                "ZEUS_HEARTBEAT_CADENCE_SECONDS": "5",
+                "ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS": "4",
+            }
+            if label == "com.zeus.venue-heartbeat"
+            else disk_env
+        )
+        plist_path = _write_launchd_plist(
+            launchagents,
+            label=label,
+            module=module,
+            root=root,
+            env_extra=disk_env,
+        )
+        specs[label] = _launchctl_print_output(
+            label=label,
+            module=module,
+            root=root,
+            plist_path=plist_path,
+            env_extra=loaded_env,
+        )
+    _mock_launchctl_loaded_contracts(monkeypatch, specs)
+
+    result = _ORIGINAL_LAUNCHD_CONTRACTS(launchagents, root=root)
+
+    assert result["ok"] is False
+    venue = next(item for item in result["items"] if item["label"] == "com.zeus.venue-heartbeat")
+    assert "heartbeat_http_timeout_exceeds_half_cadence" not in venue["issues"]
+    assert "loaded_heartbeat_http_timeout_exceeds_half_cadence" in venue["issues"]
 
 
 def test_launchd_contracts_treat_running_forecast_prior_exit_as_historical(monkeypatch, tmp_path):
@@ -437,12 +588,7 @@ def test_launchd_contracts_treat_running_forecast_prior_exit_as_historical(monke
     launchagents = tmp_path / "LaunchAgents"
     monkeypatch.setenv("ZEUS_MODE", "live")
     specs = {}
-    for label, module in (
-        ("com.zeus.live-trading", "src.main"),
-        ("com.zeus.data-ingest", "src.ingest_main"),
-        ("com.zeus.riskguard-live", "src.riskguard.riskguard"),
-        ("com.zeus.forecast-live", "src.ingest.forecast_live_daemon"),
-    ):
+    for label, module in _LAUNCHD_TEST_SPECS:
         plist_path = _write_launchd_plist(launchagents, label=label, module=module, root=root)
         specs[label] = _launchctl_print_output(
             label=label,
@@ -468,12 +614,7 @@ def test_launchd_contracts_reject_prior_exit_when_job_not_running(monkeypatch, t
     launchagents = tmp_path / "LaunchAgents"
     monkeypatch.setenv("ZEUS_MODE", "live")
     specs = {}
-    for label, module in (
-        ("com.zeus.live-trading", "src.main"),
-        ("com.zeus.data-ingest", "src.ingest_main"),
-        ("com.zeus.riskguard-live", "src.riskguard.riskguard"),
-        ("com.zeus.forecast-live", "src.ingest.forecast_live_daemon"),
-    ):
+    for label, module in _LAUNCHD_TEST_SPECS:
         plist_path = _write_launchd_plist(launchagents, label=label, module=module, root=root)
         specs[label] = _launchctl_print_output(
             label=label,
@@ -951,6 +1092,109 @@ def test_live_db_holder_status_allows_riskguard_live_owner(monkeypatch, tmp_path
     assert result["unknown_long_lived_holders"] == []
 
 
+def test_position_current_schema_status_rejects_missing_monitor_freshness_cols(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_POSITION_CURRENT_SCHEMA_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "POSITION_CURRENT_MONITOR_FRESHNESS_SCHEMA_DRIFT"
+    assert result["missing_columns"] == [
+        "last_monitor_market_price_is_fresh",
+        "last_monitor_prob_is_fresh",
+    ]
+
+
+def test_position_current_schema_status_accepts_monitor_freshness_cols(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL,
+            last_monitor_prob_is_fresh INTEGER,
+            last_monitor_market_price_is_fresh INTEGER
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_POSITION_CURRENT_SCHEMA_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["missing_columns"] == []
+
+
+def test_forecast_posteriors_schema_status_rejects_missing_live_authority_status(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus-forecasts.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY'))
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_forecast_db_path", lambda: db_path)
+
+    result = _ORIGINAL_FORECAST_POSTERIORS_SCHEMA_STATUS()
+
+    assert result["ok"] is False
+    assert result["issue"] == "FORECAST_POSTERIORS_LIVE_AUTHORITY_SCHEMA_DRIFT"
+    assert result["live_authority_status_supported"] is False
+
+
+def test_forecast_posteriors_schema_status_accepts_live_authority_status(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus-forecasts.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'LIVE_AUTHORITY'))
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_forecast_db_path", lambda: db_path)
+
+    result = _ORIGINAL_FORECAST_POSTERIORS_SCHEMA_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["live_authority_status_supported"] is True
+
+
 def test_live_db_holder_status_blocks_long_lived_forecast_holder(monkeypatch, tmp_path):
     db_path = tmp_path / "zeus_trades.db"
     db_path.write_text("")
@@ -1207,6 +1451,119 @@ def test_healthcheck_is_not_healthy_when_live_health_composite_is_degraded(monke
     assert result["live_health_composite_issue"] == "STATUS_SUMMARY_STALE(861s)"
     assert result["healthy"] is False
     assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_rejects_composite_healthy_when_execution_capability_is_blocked(
+    monkeypatch,
+    tmp_path,
+):
+    """A healthy composite cannot override current entry/exit gate blockers."""
+    status_path = tmp_path / "status_summary.json"
+    composite_path = tmp_path / "live_health_composite.json"
+    keeper_path = tmp_path / "venue-heartbeat-keeper.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload(
+        execution_capability={
+            "entry": {
+                "status": "blocked",
+                "global_allow_submit": False,
+                "blocked_components": ["heartbeat_supervisor", "risk_allocator_global"],
+            },
+            "exit": {
+                "status": "blocked",
+                "global_allow_submit": False,
+                "blocked_components": ["heartbeat_supervisor"],
+            },
+        }
+    )))
+    composite_path.write_text(json.dumps({
+        "healthy": True,
+        "status": "HEALTHY",
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "failing_surfaces": [],
+        "surfaces": {},
+    }))
+    keeper_path.write_text(json.dumps({
+        "health": "HEALTHY",
+        "resting_order_safe": True,
+        "written_at": datetime.now(timezone.utc).isoformat(),
+    }))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_live_health_composite_path", lambda: composite_path)
+    monkeypatch.setattr(healthcheck, "_venue_heartbeat_keeper_path", lambda: keeper_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["live_health_composite_ok"] is False
+    assert result["live_health_composite_issue"] == (
+        "LIVE_HEALTH_COMPOSITE_CONTRADICTS_CURRENT_FACTS(execution_capability)"
+    )
+    assert result["live_health_composite"]["contradictions"][0]["surface"] == (
+        "execution_capability"
+    )
+    assert result["healthy"] is False
+
+
+def test_healthcheck_rejects_composite_healthy_when_venue_heartbeat_is_lost(
+    monkeypatch,
+    tmp_path,
+):
+    """Daemon heartbeat health is not venue-heartbeat/order-safety health."""
+    status_path = tmp_path / "status_summary.json"
+    composite_path = tmp_path / "live_health_composite.json"
+    keeper_path = tmp_path / "venue-heartbeat-keeper.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload()))
+    composite_path.write_text(json.dumps({
+        "healthy": True,
+        "status": "HEALTHY",
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "failing_surfaces": [],
+        "surfaces": {},
+    }))
+    keeper_path.write_text(json.dumps({
+        "health": "LOST",
+        "resting_order_safe": False,
+        "written_at": datetime.now(timezone.utc).isoformat(),
+    }))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_live_health_composite_path", lambda: composite_path)
+    monkeypatch.setattr(healthcheck, "_venue_heartbeat_keeper_path", lambda: keeper_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["live_health_composite_ok"] is False
+    assert result["live_health_composite_issue"] == (
+        "LIVE_HEALTH_COMPOSITE_CONTRADICTS_CURRENT_FACTS(venue_heartbeat)"
+    )
+    assert result["live_health_composite"]["contradictions"][0]["surface"] == "venue_heartbeat"
+    assert result["healthy"] is False
 
 
 def test_healthcheck_is_not_healthy_when_live_health_composite_is_stale(monkeypatch, tmp_path):
@@ -1722,6 +2079,48 @@ def test_healthcheck_is_not_healthy_when_unknown_long_lived_db_holder_exists(mon
 
     assert result["live_db_holders_ok"] is False
     assert result["live_db_holders_issue"] == "LIVE_DB_UNKNOWN_LONG_LIVED_HOLDER"
+    assert result["healthy"] is False
+    assert healthcheck.exit_code_for(result) == 1
+
+
+def test_healthcheck_is_not_healthy_when_position_current_schema_drifts(
+    monkeypatch, tmp_path
+):
+    status_path = tmp_path / "status_summary.json"
+    risk_path = tmp_path / "risk_state.db"
+    zeus_db_path = tmp_path / "zeus.db"
+    status_path.write_text(json.dumps(_status_payload()))
+    _write_risk_state(risk_path)
+    _write_no_trade_artifact(zeus_db_path)
+
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setattr(healthcheck, "_status_path", lambda: status_path)
+    monkeypatch.setattr(healthcheck, "_risk_state_path", lambda: risk_path)
+    monkeypatch.setattr(healthcheck, "_zeus_db_path", lambda: zeus_db_path)
+    monkeypatch.setattr(
+        healthcheck,
+        "_position_current_schema_status",
+        lambda: {
+            "ok": False,
+            "path": str(tmp_path / "zeus_trades.db"),
+            "issue": "POSITION_CURRENT_MONITOR_FRESHNESS_SCHEMA_DRIFT",
+            "missing_columns": ["last_monitor_prob_is_fresh"],
+        },
+    )
+
+    class _Result:
+        returncode = 0
+        stdout = "123\t0\tcom.zeus.live-trading\n"
+
+    monkeypatch.setattr(healthcheck.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    result = healthcheck.check()
+
+    assert result["position_current_schema_ok"] is False
+    assert (
+        result["position_current_schema_issue"]
+        == "POSITION_CURRENT_MONITOR_FRESHNESS_SCHEMA_DRIFT"
+    )
     assert result["healthy"] is False
     assert healthcheck.exit_code_for(result) == 1
 

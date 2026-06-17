@@ -2079,8 +2079,8 @@ def _selection_pi_min() -> float:
     license computation (A2: 0.90).
 
     The EB-shrinkage decision-replacement flag was REMOVED 2026-06-13 in the
-    q-shadow gate-mass collapse: the live selection gate is the BH/FDR pass
-    UNCONDITIONALLY. This threshold now parameterizes only the shadow telemetry
+    q-shadow gate-mass collapse: the live selection gate remains edge-FDR with
+    a robust-LCB prefilter, not EB shrinkage. This threshold now parameterizes only the shadow telemetry
     (lfsr / edge_shrunk / edge_shrunk_posterior_sd / selection_authority stamped
     on edli_no_submit_receipts for the winner's-curse slope diagnostic); it never
     influences the live decision."""
@@ -2101,6 +2101,9 @@ class _SelectionShrinkageVerdict:
     eb_licensed: bool | None  # None when not computable (no executable universe)
 
 
+_BH_EDGE_FDR_AUTHORITY = "BH_EDGE_FDR"
+
+
 def _compute_selection_shrinkage(
     *,
     proofs: "list[_CandidateProof]",
@@ -2118,9 +2121,12 @@ def _compute_selection_shrinkage(
 
     Returns the shadow quantities (always) plus the EB license verdict (when an
     executable universe exists). selection_authority names the gate that decided:
-    "EB_SHRINKAGE" when the flag is ON, "BH_FDR" when OFF (current behavior).
-    Fail-soft: any construction error leaves the quantities None and authority
-    "BH_FDR" so the live BH path is never disturbed by shadow computation.
+    "EB_SHRINKAGE" when the flag is ON, "BH_EDGE_FDR" when OFF. The latter is
+    deliberately not the old ambiguous "BH_FDR" label: authority A2 condemns
+    the old {0,1} p-value BH path as vacuous, while this gate consumes edge
+    p-values plus a separate robust-LCB prefilter. Fail-soft: any construction
+    error leaves the quantities None and authority "BH_EDGE_FDR" so the live
+    gate is never disturbed by shadow computation.
     """
     from src.strategy.selection_shrinkage import (
         eb_shrink_edges,
@@ -2128,7 +2134,7 @@ def _compute_selection_shrinkage(
         select_license,
     )
 
-    authority = "EB_SHRINKAGE" if authority_on else "BH_FDR"
+    authority = "EB_SHRINKAGE" if authority_on else _BH_EDGE_FDR_AUTHORITY
     try:
         z95 = 1.6448536269514722  # Phi^{-1}(0.95): the 5% one-sided LCB z
         e_hat: list[float] = []
@@ -2148,8 +2154,8 @@ def _compute_selection_shrinkage(
             token_order.append(cp.token_id)
         if selected_token_id not in token_order:
             # The selected bin had no executable price in the universe — cannot
-            # shrink. Shadow quantities stay None; BH remains the authority.
-            return _SelectionShrinkageVerdict(None, None, None, "BH_FDR", None)
+            # shrink. Shadow quantities stay None; edge-FDR remains the authority.
+            return _SelectionShrinkageVerdict(None, None, None, _BH_EDGE_FDR_AUTHORITY, None)
         sel_idx = token_order.index(selected_token_id)
         res = eb_shrink_edges(e_hat, s_each)  # single family → family-clustered tau^2
         edge_shrunk = float(res.shrunk_mean[sel_idx])
@@ -2172,8 +2178,8 @@ def _compute_selection_shrinkage(
             eb_licensed=bool(lic.licensed),
         )
     except Exception:
-        # Fail-soft: shadow computation must never disturb the live BH path.
-        return _SelectionShrinkageVerdict(None, None, None, "BH_FDR", None)
+        # Fail-soft: shadow computation must never disturb the live edge-FDR gate.
+        return _SelectionShrinkageVerdict(None, None, None, _BH_EDGE_FDR_AUTHORITY, None)
 
 
 def _build_event_bound_no_submit_receipt_core(
@@ -2715,62 +2721,7 @@ def _build_event_bound_no_submit_receipt_core(
                     family_complete=True,
                     replacement_forecast=replacement_forecast_receipt_tag,
                 )
-            if replacement_hook_result.status == "SHADOW_VETO_ONLY":
-                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
-                if replacement_hook_result.effective_direction != direction:
-                    return EventSubmissionReceipt(
-                        False,
-                        event.event_id,
-                        event.causal_snapshot_id,
-                        reason="REPLACEMENT_FORECAST_HOOK_DIRECTION_FLIP",
-                        city=family.city,
-                        target_date=family.target_date,
-                        metric=family.metric,
-                        condition_id=str(candidate.condition_id or ""),
-                        token_id=selected_token_id,
-                        executable_snapshot_id=proof.executable_snapshot_id,
-                        family_id=family.family_id,
-                        bin_label=candidate.bin.label,
-                        direction=direction,
-                        q_live=proof.q_posterior,
-                        q_lcb_5pct=proof.q_lcb_5pct,
-                        c_fee_adjusted=execution_price.value,
-                        c_cost_95pct=proof.c_cost_95pct,
-                        p_fill_lcb=proof.p_fill_lcb,
-                        trade_score=proof.trade_score,
-                        native_quote_available=True,
-                        source_status="MATCH",
-                        family_complete=True,
-                        replacement_forecast=replacement_forecast_receipt_tag,
-                    )
-                # Wave-2 item 1 (2026-06-12): SINGLE q AUTHORITY. The replacement chain is the
-                # strategy of record and carries its own q_lcb; the legacy baseline LCB no longer
-                # JOINS as a cap. The replacement hook's effective_q_lcb is used directly. On the
-                # SHADOW_VETO path the veto artifact already guarantees effective_q_lcb <=
-                # baseline (it can only veto DOWN — ReplacementForecastVetoDecision invariant), so
-                # this is behavior-identical to the former min() here while removing the explicit
-                # baseline-cap join. The baseline value is retained DIAGNOSTICS-ONLY: it is already
-                # recorded in the replacement receipt provenance as baseline_q_lcb, and stamped
-                # here as baseline_q_lcb_reference. It NEVER joins min() against the live q.
-                effective_q_lcb = replacement_hook_result.effective_q_lcb
-                if isinstance(replacement_forecast_receipt_tag, dict):
-                    replacement_forecast_receipt_tag = {
-                        **replacement_forecast_receipt_tag,
-                        "baseline_q_lcb_reference": float(proof.q_lcb_5pct),
-                    }
-                effective_trade_score = _robust_trade_score_from_generated_inputs(
-                    q_posterior=proof.q_posterior,
-                    q_lcb_5pct=effective_q_lcb,
-                    execution_price=execution_price,
-                    c_cost_95pct=proof.c_cost_95pct,
-                    p_fill_lcb=proof.p_fill_lcb,
-                )
-                proof = dataclass_replace(
-                    proof,
-                    q_lcb_5pct=effective_q_lcb,
-                    trade_score=effective_trade_score,
-                )
-            elif replacement_hook_result.status == "LIVE_AUTHORITY":
+            if replacement_hook_result.status == "LIVE_AUTHORITY":
                 replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
                 effective_proof = _replacement_live_authority_proof_for_direction(
                     proofs=proofs,
@@ -2857,7 +2808,7 @@ def _build_event_bound_no_submit_receipt_core(
                     q_lcb_5pct=effective_q_lcb,
                     trade_score=effective_trade_score,
                 )
-            elif replacement_hook_result.status == "SHADOW_ONLY":
+            elif replacement_hook_result.status == "DIAGNOSTIC_ONLY":
                 replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
             elif replacement_hook_result.status != "DISABLED":
                 replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
@@ -2914,12 +2865,13 @@ def _build_event_bound_no_submit_receipt_core(
         )
     hypothesis_id = f"{family.family_id}:{selected_token_id}"
     # C2 (task #60): compute the posterior lfsr + EB-shrunk selected edge over the
-    # family's executable bins. SHADOW-ONLY: the BH/FDR pass is the unconditional
+    # family's executable bins. SHADOW-ONLY: the edge-p-value FDR pass is the unconditional
     # live selection gate. The EB-shrinkage decision-replacement flag was REMOVED
     # 2026-06-13 in the q-shadow gate-mass collapse; ``authority_on=False`` pins the
-    # shadow stamp to selection_authority="BH_FDR" (byte-identical to the prior
-    # flag-OFF live path) while the lfsr / edge_shrunk quantities are still computed
-    # and stamped on edli_no_submit_receipts for the winner's-curse slope diagnostic.
+    # shadow stamp to selection_authority="BH_EDGE_FDR" while the lfsr /
+    # edge_shrunk quantities are still computed and stamped on edli_no_submit_receipts
+    # for the winner's-curse slope diagnostic. The old "BH_FDR" label was misleading:
+    # authority A2 condemns {0,1}-p-value BH as vacuous.
     _shrink = _compute_selection_shrinkage(
         proofs=proofs,
         selected_token_id=selected_token_id,
@@ -2980,7 +2932,7 @@ def _build_event_bound_no_submit_receipt_core(
             source_status="MATCH",
             family_complete=False,
         ))
-    # GATE DECISION: the BH/FDR pass is the unconditional live selection authority
+    # GATE DECISION: edge-p-value FDR is the unconditional live selection authority
     # (the EB-shrinkage decision-replacement flag was REMOVED 2026-06-13). Shadow
     # quantities are stamped on the receipt regardless.
     _gate_passed = fdr.passed
@@ -6482,6 +6434,192 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     )
 
 
+# mx2t3 carrier-decouple (GATE-1 C): the members_json_source a posterior-provenance forecast
+# authority carries — MUST equal src/decision_kernel/verifier.POSTERIOR_MEMBERS_JSON_SOURCE (kept as
+# a local literal to avoid an adapter→verifier import cycle; the two MUST agree).
+_POSTERIOR_MEMBERS_JSON_SOURCE = "raw_model_forecasts.multimodel"
+_REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
+# The posterior applied-validations set the cert verifier/compiler require for posterior provenance
+# (verifier.REQUIRED_POSTERIOR_FORECAST_VALIDATIONS). Stamped only when the posterior row exists and
+# the decorrelated model floor is met — never fabricated.
+_POSTERIOR_APPLIED_VALIDATIONS: tuple[str, ...] = (
+    "posterior_complete_by_construction",
+    "decorrelated_model_count_floor",
+    "causality_status_ok",
+    "authority_verified",
+    "available_at_not_future",
+)
+
+
+def _forecast_authority_payload_from_posterior(
+    conn: sqlite3.Connection,
+    *,
+    event: OpportunityEvent,
+    family,
+    payload: dict[str, object],
+    decision_time: datetime,
+) -> tuple[dict[str, Any], EvidenceClock] | None:
+    """GATE-1 C: build the no-submit cert's FORECAST_AUTHORITY payload + clock from
+    ``forecast_posteriors`` + ``raw_model_forecasts`` (mx2t3-independent), NOT ensemble_snapshots.
+
+    Returns the SAME-shaped ``(payload_out, EvidenceClock)`` the ensemble path returns, but with
+    posterior provenance: ``members_json_source='raw_model_forecasts.multimodel'``,
+    ``members_json_hash=sha256(sorted native member set)``, ``source_run_id=posterior_identity_hash``,
+    the decorrelated model count as expected==observed members, and the posterior applied-validations
+    set. The cert verifier/compiler validate this via the EQUALLY-STRICT posterior branch.
+
+    Internal-consistency keys are set so the bundle cross-checks hold:
+      * ``forecast_source_id`` / ``source_id`` == the FSR ``payload['source_id']`` (source_truth eq);
+      * ``source_run_id`` == ``payload['source_run_id']`` (== posterior_identity_hash; chain eq);
+      * ``snapshot_id`` == the neutral ``rmf-...`` ``event.causal_snapshot_id`` (causal eq);
+      * ``members_json_hash`` is read by BOTH the forecast and belief cells from this one dict.
+
+    FAIL-CLOSED: returns ``None`` (→ caller's ensemble path, which then raises if no ensemble row)
+    when the posterior row, the raw_model_forecasts member set, or the city config is missing, or
+    fewer than 3 decorrelated members survive — never fabricates a cert.
+    """
+    city_config = runtime_cities_by_name().get(family.city)
+    if city_config is None:
+        return None
+    posterior_table = _authority_table_ref(conn, "forecast_posteriors")
+    if posterior_table is None:
+        return None
+    _decision_iso = decision_time.astimezone(UTC).isoformat()
+    try:
+        prow = conn.execute(
+            f"""
+            SELECT source_id, source_cycle_time, source_available_at, computed_at,
+                   posterior_identity_hash, data_version
+              FROM {posterior_table}
+             WHERE product_id = ?
+               AND city = ? AND target_date = ? AND temperature_metric = ?
+               AND (source_available_at IS NULL OR source_available_at <= ?)
+               AND (computed_at IS NULL OR computed_at <= ?)
+             ORDER BY source_cycle_time DESC, computed_at DESC, posterior_id DESC
+             LIMIT 1
+            """,
+            (
+                _REPLACEMENT_0_1_PRODUCT_ID,
+                family.city,
+                family.target_date,
+                family.metric,
+                _decision_iso,
+                _decision_iso,
+            ),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — fall back to the ensemble path on any read fault
+        return None
+    if prow is None:
+        return None
+    (
+        p_source_id,
+        p_source_cycle_time,
+        p_source_available_at,
+        p_computed_at,
+        p_identity_hash,
+        p_data_version,
+    ) = prow
+    if not p_identity_hash or not p_source_cycle_time:
+        return None
+    # The decorrelated multi-model member set for this family/cycle (the SAME set the spine used).
+    members = _spine_multimodel_members_for_event(
+        conn, event=event, family=family, decision_time=decision_time
+    )
+    if members is None:
+        return None
+    members_native, _causal_sct = members
+    if len(members_native) < 3:
+        return None
+    member_count = len(members_native)
+    members_json_hash = stable_hash(tuple(sorted(float(v) for v in members_native)))
+    metric = family.metric
+    # source_id / source_run_id MUST match what source_truth reads off the FSR payload so the
+    # cert's source_truth.source_id==forecast.forecast_source_id and source_run_id chain eq hold.
+    source_id = _nonnull(payload.get("source_id")) or _nonnull(p_source_id) or "openmeteo"
+    source_run_id = _nonnull(payload.get("source_run_id")) or str(p_identity_hash)
+    snapshot_id = _nonnull(getattr(event, "causal_snapshot_id", None)) or str(p_identity_hash)
+    payload_out = {
+        "identity": snapshot_id,
+        "snapshot_id": snapshot_id,
+        "reader_authority": "forecast_posteriors.replacement_0_1",
+        "reader_status": FORECAST_LIVE_ELIGIBLE_STATUS,
+        "reader_reason_code": None,
+        "city": family.city,
+        "target_date": family.target_date,
+        "metric": metric,
+        "temperature_metric": metric,
+        "members_extrema_metric_identity": metric,
+        "members_extrema_transform": _members_extrema_transform(metric),
+        "members_json_source": _POSTERIOR_MEMBERS_JSON_SOURCE,
+        "members_json_hash": members_json_hash,
+        "target_local_date": family.target_date,
+        "city_timezone": city_config.timezone,
+        "settlement_unit": str(getattr(city_config, "settlement_unit", "C") or "C"),
+        "members_unit": str(getattr(city_config, "settlement_unit", "C") or "C"),
+        "unit": str(getattr(city_config, "settlement_unit", "C") or "C"),
+        "unit_authority_source": "city_config.settlement_unit",
+        "local_date_window_hash": stable_hash(
+            {
+                "city": family.city,
+                "target_date": family.target_date,
+                "temperature_metric": metric,
+                "members_json_hash": members_json_hash,
+                "source_cycle_time": str(p_source_cycle_time),
+            }
+        ),
+        "forecast_source_id": source_id,
+        "source_id": source_id,
+        "model": _POSTERIOR_MEMBERS_JSON_SOURCE,
+        "model_family": _POSTERIOR_MEMBERS_JSON_SOURCE,
+        "forecast_issue_time": str(p_source_cycle_time),
+        "forecast_valid_time": None,
+        "forecast_fetch_time": _nonnull(p_computed_at),
+        "forecast_available_at": _nonnull(p_source_available_at),
+        "degradation_level": None,
+        "decision_time": _decision_iso,
+        "decision_time_status": "OK",
+        "forecast_data_version": _nonnull(p_data_version) or _POSTERIOR_MEMBERS_JSON_SOURCE,
+        "source_cycle_time": str(p_source_cycle_time),
+        "source_issue_time": _nonnull(p_source_available_at) or str(p_source_cycle_time),
+        "horizon_profile": _posterior_horizon_profile(str(p_source_cycle_time)),
+        "source_run_id": source_run_id,
+        "coverage_id": str(p_identity_hash),
+        "posterior_identity_hash": str(p_identity_hash),
+        "manifest_hash": str(p_identity_hash),
+        # Posterior completeness-by-construction: model COUNT is the completeness metric (the
+        # ensemble member/step floors do not apply). expected==observed==count, count>=3.
+        "expected_members": member_count,
+        "observed_members": member_count,
+        "required_steps": (str(p_source_cycle_time)[:10],),
+        "observed_steps": (str(p_source_cycle_time)[:10],),
+        "source_run_status": "COMPLETE",
+        "source_run_completeness_status": "COMPLETE",
+        "coverage_completeness_status": "COMPLETE",
+        "coverage_readiness_status": "LIVE_ELIGIBLE",
+        "applied_validations": _POSTERIOR_APPLIED_VALIDATIONS,
+        "source_available_at": _nonnull(p_source_available_at),
+        "fetch_started_at": None,
+        "fetch_finished_at": _nonnull(p_computed_at),
+        "captured_at": _nonnull(p_computed_at),
+    }
+    source_time = _parse_utc(p_source_available_at)
+    agent_time = _parse_utc(p_computed_at) or source_time
+    persisted_time = _parse_utc(p_computed_at) or source_time
+    if source_time is None or agent_time is None or persisted_time is None:
+        return None
+    return payload_out, EvidenceClock(source_time, agent_time, persisted_time)
+
+
+def _posterior_horizon_profile(source_cycle_time: str) -> str:
+    """Derive the horizon stratum from the posterior cycle hour (00/12 → 'full', else 'short') —
+    the SAME derivation the ensemble path uses via derive_phase2_keys_from_ens_result."""
+    try:
+        hour = int(str(source_cycle_time)[11:13])
+    except (ValueError, IndexError):
+        return "full"
+    return "full" if hour in (0, 12) else "short"
+
+
 def _forecast_authority_payload_and_clock(
     conn: sqlite3.Connection,
     *,
@@ -6490,6 +6628,22 @@ def _forecast_authority_payload_and_clock(
     payload: dict[str, object],
     decision_time: datetime,
 ) -> tuple[dict[str, Any], EvidenceClock]:
+    # mx2t3 carrier-decouple (GATE-1 C): under the replacement lane the no-submit cert's forecast
+    # authority is built from forecast_posteriors + raw_model_forecasts (mx2t3-independent) instead
+    # of the cold ensemble_snapshots row + read_executable_forecast(members_json). This runs for the
+    # FORECAST decision lanes ONLY (NOT day0 — day0 keeps its ensemble base, carrier_decouple_plan
+    # §4). Forked on the SAME _replacement_authority_enabled() flag the live q is gated by; the
+    # legacy ensemble path below is untouched for flag-OFF and for day0.
+    if (
+        _replacement_authority_enabled()
+        and event.event_type in _FORECAST_DECISION_EVENT_TYPES
+        and event.event_type not in _DAY0_LANE_EVENT_TYPES
+    ):
+        posterior = _forecast_authority_payload_from_posterior(
+            conn, event=event, family=family, payload=payload, decision_time=decision_time
+        )
+        if posterior is not None:
+            return posterior
     allow_latest = event.event_type == "DAY0_EXTREME_UPDATED"
     snapshot = _forecast_snapshot_row_for_event(
         conn,
@@ -10454,6 +10608,114 @@ def _replacement_no_lcb_for_bin(
     return 0.0
 
 
+def _normal_cdf(value: float) -> float:
+    return float(0.5 * (1.0 + math.erf(float(value) / math.sqrt(2.0))))
+
+
+def _bound_implied_edge_p_value(
+    *,
+    q_point: float,
+    q_lcb: float,
+    q_ucb: float,
+    cost: float,
+) -> float:
+    """Compatibility p-value for legacy rows without stored bootstrap samples.
+
+    This is not the preferred authority. New fused-center rows carry
+    provenance_json.q_bootstrap_samples_by_bin, which lets the adapter compute
+    empirical ``mean(q_draw - cost <= 0)`` directly. Older rows only have point,
+    lower, and upper quantiles; infer a conservative one-sided normal tail from
+    the wider side of that interval rather than reverting to the misleading
+    binary ``0.0 if q_lcb > cost else 1.0`` gate.
+    """
+
+    qp = float(min(max(q_point, 0.0), 1.0))
+    ql = float(min(max(q_lcb, 0.0), qp))
+    qu = float(min(max(q_ucb, qp), 1.0))
+    c = float(min(max(cost, 0.0), 1.0))
+    z95 = 1.6448536269514722
+    sd_terms: list[float] = []
+    if qp > ql:
+        sd_terms.append((qp - ql) / z95)
+    if qu > qp:
+        sd_terms.append((qu - qp) / z95)
+    if not sd_terms:
+        return 1.0 if qp <= c else 0.0
+    sd = max(max(sd_terms), 1e-6)
+    return float(min(max(_normal_cdf((c - qp) / sd), 0.0), 1.0))
+
+
+def _replacement_edge_p_value(
+    replacement_bundle: object,
+    *,
+    bin_id: str,
+    direction: str,
+    cost: float,
+    q_yes: float,
+    yes_lcb: float,
+    no_lcb: float,
+) -> float:
+    """Empirical edge p-value for the replacement path.
+
+    Preferred path: use the materializer's stored per-bin YES probability
+    bootstrap draws and compute ``P(q_side <= cost)``. For NO, the side
+    samples are the per-draw complement ``1 - q_yes_draw``. This is the quantity
+    the strategy contract expects in the FDR/selection seam: ``mean(edge <= 0)``.
+    Use a plus-one finite-sample correction so finite bootstrap evidence never
+    manufactures an exact zero p-value.
+
+    Compatibility path: legacy rows predate stored draw vectors, so derive a
+    graded bound-implied tail from q/q_lcb/q_ucb. That path is explicitly not the
+    empirical authority, but it is materially less misleading than the old
+    binary LCB-pass flag.
+    """
+
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    samples_by_bin = (
+        provenance.get("q_bootstrap_samples_by_bin")
+        if isinstance(provenance, Mapping)
+        else None
+    )
+    if isinstance(samples_by_bin, Mapping):
+        raw_samples = samples_by_bin.get(bin_id)
+        if isinstance(raw_samples, (list, tuple)) and raw_samples:
+            arr = np.asarray(raw_samples, dtype=float).ravel()
+            arr = arr[np.isfinite(arr)]
+            if arr.size:
+                side = arr if direction == "buy_yes" else 1.0 - arr
+                side = np.clip(side, 0.0, 1.0)
+                false_edge_count = int(np.count_nonzero(side <= float(cost)))
+                return float((false_edge_count + 1.0) / (float(side.size) + 1.0))
+
+    q_lcb_map = getattr(replacement_bundle, "q_lcb", None) or {}
+    q_ucb_map = getattr(replacement_bundle, "q_ucb", None) or {}
+    yes_ucb = float(q_yes)
+    if isinstance(q_ucb_map, Mapping) and bin_id in q_ucb_map:
+        try:
+            yes_ucb = float(q_ucb_map[bin_id])
+        except (TypeError, ValueError):
+            yes_ucb = float(q_yes)
+    yes_lcb_raw = float(yes_lcb)
+    if isinstance(q_lcb_map, Mapping) and bin_id in q_lcb_map:
+        try:
+            yes_lcb_raw = float(q_lcb_map[bin_id])
+        except (TypeError, ValueError):
+            yes_lcb_raw = float(yes_lcb)
+    if direction == "buy_yes":
+        return _bound_implied_edge_p_value(
+            q_point=float(q_yes),
+            q_lcb=float(yes_lcb),
+            q_ucb=yes_ucb,
+            cost=float(cost),
+        )
+    return _bound_implied_edge_p_value(
+        q_point=1.0 - float(q_yes),
+        q_lcb=float(no_lcb),
+        q_ucb=1.0 - yes_lcb_raw,
+        cost=float(cost),
+    )
+
+
 def _replacement_authority_probability_and_fdr_proof(
     *,
     event: OpportunityEvent,
@@ -10580,12 +10842,10 @@ def _replacement_authority_probability_and_fdr_proof(
     # realized-residual cell.
     #
     # PR#400 the_path audit BLOCKER 7 — this function is the LIVE replacement_0_1 authority
-    # builder: it is reached after `_replacement_authority_enabled()` (TRADE_AUTHORITY flag)
-    # ALONE. NOTE (operator directive 2026-06-08): the settlement-evidence promotion gate
-    # `replacement_live_authority_evidence_gate` was REMOVED and NO LONGER gates this path
-    # (zero call-sites; flag-only LIVE_AUTHORITY — see replacement_forecast_runtime_policy).
+    # builder: it is reached only after runtime trade-authority policy AND a row-level
+    # LIVE_AUTHORITY replacement bundle with fused q and certified bounds have both passed.
     # The q_lcb it returns is stamped probability_authority="replacement_0_1" and sizes REAL
-    # capital. So the missing-floor mode here is unconditionally live/authority/capital.
+    # capital. So the missing-floor mode here is live/authority/capital once those gates pass.
     # A missing floor input must therefore BLOCK (never degrade to the raw, overconfident
     # Wilson bound) — both at family-setup time and per-bin. The block raises a ValueError
     # that the caller (_generate_candidate_proofs :1388) converts to a no-submit receipt.
@@ -10632,29 +10892,33 @@ def _replacement_authority_probability_and_fdr_proof(
         yes_price = native_costs.get((condition_id, "buy_yes"), (None, None, 0.0, None, None))[1]
         yes_cost = float(yes_price.value) if yes_price is not None else 1.0
         yes_edge_lcb_positive = yes_price is not None and yes_lcb > yes_cost
-        p_values[(condition_id, "buy_yes")] = 0.0 if yes_edge_lcb_positive else 1.0
+        p_values[(condition_id, "buy_yes")] = _replacement_edge_p_value(
+            replacement_bundle,
+            bin_id=bin_id,
+            direction="buy_yes",
+            cost=yes_cost,
+            q_yes=q_yes,
+            yes_lcb=yes_lcb,
+            no_lcb=0.0,
+        )
         prefilter[(condition_id, "buy_yes")] = bool(yes_edge_lcb_positive)
-        # FIX (2026-06-10 funnel autopsy) — buy_no FDR p-value RECONCILED with the
-        # certified fused NO posterior, symmetric to buy_yes above. PROVENANCE/CURRENCY
-        # bug (Fitz #4: correctness != currency): the former hardcode
-        #   p_values[(condition_id, "buy_no")] = 1.0
-        # was written when the native-NO authority was the disabled placeholder
-        # (q_no == 0, no q_ucb), so a constant non-actionable p-value was correct THEN.
-        # The native-NO authority is now LIVE: ``no_lcb`` above is the real robust NO
-        # lower bound 1 - q_ucb_yes (src q_ucb map present on every live bundle), so a
-        # hardcoded p=1.0 makes EVERY buy_no UNCONDITIONALLY fail BH-FDR (q=0.10 can
-        # never admit p=1.0) — the hypothesis test CONTRADICTS the certified probability.
-        # That suppressed real favorite-longshot NO edges (Wuhan/Ankara 27-29C: honest
-        # no_lcb ~0.86 vs cost ~0.72, +14c, all FDR_REJECTED). The p-value here is the
-        # SAME degenerate edge-positivity indicator the YES leg uses (0.0 = the certified
-        # robust lower bound clears the native cost; 1.0 = it does not) computed from the
-        # native NO cost and the native NO q_lcb — NEVER a YES complement, NEVER weakening
-        # BH (the multiplicity accounting and family denominator are unchanged; a non-edge
-        # NO still gets p=1.0 and is rejected). Reconciliation, not gate-weakening.
+        # 2026-06-17 confidence contract fix: p_value must be a real edge-tail
+        # probability, not the old binary LCB-pass flag. The robust LCB pass/fail
+        # decision remains as ``prefilter`` below; the FDR/selection p-value is
+        # empirical when the posterior carries q_bootstrap_samples_by_bin and a
+        # bound-implied compatibility estimate for legacy rows.
         no_price = native_costs.get((condition_id, "buy_no"), (None, None, 0.0, None, None))[1]
         no_cost = float(no_price.value) if no_price is not None else 1.0
         no_edge_lcb_positive = no_price is not None and no_lcb > no_cost
-        p_values[(condition_id, "buy_no")] = 0.0 if no_edge_lcb_positive else 1.0
+        p_values[(condition_id, "buy_no")] = _replacement_edge_p_value(
+            replacement_bundle,
+            bin_id=bin_id,
+            direction="buy_no",
+            cost=no_cost,
+            q_yes=q_yes,
+            yes_lcb=yes_lcb,
+            no_lcb=no_lcb,
+        )
         prefilter[(condition_id, "buy_no")] = bool(no_edge_lcb_positive)
     # ITEM 2 (FIX-B) — wire the EXISTING K3 settlement-backward-coverage shrink into the
     # LIVE replacement path (its sole prior call site was the canonical/EMOS path). SAME
@@ -10888,6 +11152,16 @@ def _canonical_probability_and_fdr_proof(
         if allow_latest_snapshot:
             raise ValueError("Day0 base forecast snapshot missing for event-bound inference")
         raise ValueError("causal forecast snapshot missing for event-bound inference")
+    # GATE-2 (mx2t3 carrier-decouple): the DAY0 lane (allow_latest_snapshot=True) re-sources its
+    # FORECAST BASE seed pool off the multi-model ``raw_model_forecasts`` fusion instead of the
+    # cold ``ensemble_snapshots.members_json``. None → the day0 seam keeps the legacy ensemble seed
+    # (cycle with <3 multimodel members / table absent). Forecast lane (allow_latest=False) is
+    # unaffected: its q is owned by the replacement authority + spine, not this canonical seam.
+    _day0_seed_members = None
+    if allow_latest_snapshot and decision_time is not None:
+        _day0_seed_members = _day0_seed_members_multimodel(
+            conn, family=family, decision_time=decision_time
+        )
     analysis = _market_analysis_from_event_snapshot(
         calibration_conn=calibration_conn,
         snapshot=snapshot,
@@ -10898,6 +11172,7 @@ def _canonical_probability_and_fdr_proof(
         # the q_source provenance is set on a discarded dict and the proof reads None.
         payload=payload,
         decision_time=decision_time,
+        day0_seed_members=_day0_seed_members,
     )
     from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
     from src.config import edge_n_bootstrap
@@ -11182,6 +11457,52 @@ def _canonical_probability_and_fdr_proof(
     return q_by_condition, lcb_by_direction, p_values, prefilter, probability_evidence
 
 
+# mx2t3 carrier-decouple (GATE-1 C-B1): the neutral causal_snapshot_id prefix the FSR mints under
+# the replacement lane (``rmf-<city>|<target>|<metric>|<cycle_date>``). The spine parses the cycle
+# DATE from this id directly (no ensemble_snapshots pin). MUST equal the FSR's _POSTERIOR_SNAPSHOT_ID_PREFIX.
+_SPINE_RMF_SNAPSHOT_ID_PREFIX = "rmf-"
+
+
+def _latest_raw_model_cycle_for_family(
+    conn: sqlite3.Connection,
+    *,
+    family,
+    decision_time: datetime,
+) -> str | None:
+    """B2 causal-cycle fallback (mx2t3 carrier-decouple): the latest
+    ``raw_model_forecasts.source_cycle_time`` DATE for ``(city, metric, target_date)`` with
+    ``source_available_at <= decision_time``.
+
+    Used only when neither the neutral ``rmf-...`` id nor a legacy ensemble pin yields a
+    cycle (in-flight pre-cutover ids). Queries the SAME ``raw_model_forecasts`` table the
+    member reduction then reduces over, so causal-run == reader-run is preserved by
+    construction (the 2026-06-04 0-receipts invariant). Read-only; returns ``None`` on any
+    fault so the caller fails closed to SPINE_INPUTS_UNAVAILABLE.
+    """
+    table_ref = _authority_table_ref(conn, "raw_model_forecasts")
+    if table_ref is None:
+        return None
+    columns = _table_ref_columns(conn, table_ref)
+    if not {"city", "metric", "target_date", "source_cycle_time"}.issubset(columns):
+        return None
+    predicates = ["city = ?", "metric = ?", "target_date = ?"]
+    params: list[object] = [family.city, family.metric, family.target_date]
+    if "source_available_at" in columns:
+        predicates.append("source_available_at <= ?")
+        params.append(decision_time.astimezone(UTC).isoformat())
+    try:
+        row = conn.execute(
+            f"SELECT MAX(date(source_cycle_time)) FROM {table_ref} WHERE {' AND '.join(predicates)}",
+            tuple(params),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — never fault the hot path; fail closed upstream
+        return None
+    if row is None or row[0] is None:
+        return None
+    cycle_date = str(row[0])[:10]
+    return cycle_date if len(cycle_date) == 10 else None
+
+
 def _spine_multimodel_members_for_event(
     conn: sqlite3.Connection,
     *,
@@ -11221,17 +11542,34 @@ def _spine_multimodel_members_for_event(
     """
     if getattr(event, "event_type", None) not in _FORECAST_DECISION_EVENT_TYPES:
         return None
-    # Establish the CAUSAL cycle from the event's bound ensemble snapshot (same pin the
-    # prior producer used: VERIFIED / causality OK / not boundary-ambiguous /
-    # available_at ≤ decision_time / snapshot_id == causal_snapshot_id). We use only its
-    # source_cycle_time DATE to key the multi-model query; the member VALUES come from
-    # raw_model_forecasts. If no causal snapshot exists, fail closed.
-    bound = _bound_forecast_snapshot_row_for_spine(
-        conn, event=event, family=family, decision_time=decision_time
-    )
-    if bound is None:
-        return None
-    _causal_sct = bound.get("source_cycle_time") or bound.get("issue_time")
+    # Establish the CAUSAL cycle for the multi-model member query. We use only the cycle
+    # DATE to key the query; the member VALUES come from raw_model_forecasts.
+    #
+    # mx2t3 carrier-decouple (GATE-1 C-B1): under the replacement lane the FSR mints a
+    # NEUTRAL causal_snapshot_id ``rmf-<city>|<target>|<metric>|<cycle_date>`` (no
+    # ensemble_snapshots row). Parse the cycle DATE directly from that id — the cycle in
+    # the id is EXACTLY the one the FSR selected, so causal-run == reader-run is preserved
+    # deterministically without binding a cold ensemble row. A legacy-shaped (integer)
+    # causal_snapshot_id keeps the ensemble pin (flag-OFF / in-flight pre-cutover events);
+    # if that pin yields no cycle, fall back to the latest raw_model_forecasts cycle for
+    # the family at decision_time (B2) so a neutral/legacy id still resolves a cycle.
+    _causal_sct: object | None = None
+    _cid = str(getattr(event, "causal_snapshot_id", "") or "")
+    if _cid.startswith(_SPINE_RMF_SNAPSHOT_ID_PREFIX) and "|" in _cid:
+        _cycle_date = _cid.rsplit("|", 1)[-1][:10]
+        if len(_cycle_date) == 10:
+            _causal_sct = _cycle_date
+    if _causal_sct is None:
+        bound = _bound_forecast_snapshot_row_for_spine(
+            conn, event=event, family=family, decision_time=decision_time
+        )
+        if bound is not None:
+            _causal_sct = bound.get("source_cycle_time") or bound.get("issue_time")
+    if not _causal_sct:
+        # B2 fallback: latest raw_model_forecasts cycle for this family ≤ decision_time.
+        _causal_sct = _latest_raw_model_cycle_for_family(
+            conn, family=family, decision_time=decision_time
+        )
     if not _causal_sct:
         return None
     causal_cycle_date = str(_causal_sct)[:10]  # ISO date prefix (YYYY-MM-DD)
@@ -11289,6 +11627,73 @@ def _spine_multimodel_members_for_event(
 
     members_native = [_c_to_native(v) for v in best.values()]
     return members_native, str(_causal_sct)
+
+
+def _day0_seed_members_multimodel(
+    conn: sqlite3.Connection,
+    *,
+    family,
+    decision_time: datetime,
+) -> list[float] | None:
+    """GATE-2 (mx2t3 carrier-decouple): the DAY0 seed member pool sourced from the
+    MULTI-MODEL ``raw_model_forecasts`` table (NOT the cold ``ensemble_snapshots.members_json``).
+
+    Day0 prices a running observed extreme against a FORECAST BASE; that base seed pool was the
+    cold mx2t3 ECMWF-ENS members. This re-sources the seed off the precise multi-model fusion
+    (~7-13 decorrelated NWP providers, latest cycle per model) — the SAME source the forecast
+    spine uses — keyed on the LATEST family cycle ≤ decision_time (day0 uses the latest base, not
+    a fixed causal cycle, mirroring ``allow_latest=True``). Values are NATIVE settlement unit.
+
+    FAIL-CLOSED: returns ``None`` (→ caller keeps the legacy ensemble seed) when the table is
+    absent, the latest cycle cannot be established, or fewer than 3 members survive. Read-only;
+    one indexed query; never widens or fabricates.
+    """
+    cycle_date = _latest_raw_model_cycle_for_family(
+        conn, family=family, decision_time=decision_time
+    )
+    if not cycle_date:
+        return None
+    table_ref = _authority_table_ref(conn, "raw_model_forecasts")
+    if table_ref is None:
+        return None
+    columns = _table_ref_columns(conn, table_ref)
+    required = {"model", "city", "metric", "target_date", "source_cycle_time", "forecast_value_c"}
+    if not required.issubset(columns):
+        return None
+    _city_obj = runtime_cities_by_name().get(str(family.city))
+    unit = str(getattr(_city_obj, "settlement_unit", "C") or "C")
+    predicates = ["city = ?", "metric = ?", "target_date = ?", "date(source_cycle_time) = ?"]
+    params: list[object] = [family.city, family.metric, family.target_date, cycle_date]
+    if "source_available_at" in columns:
+        predicates.append("source_available_at <= ?")
+        params.append(decision_time.astimezone(UTC).isoformat())
+    try:
+        cur = conn.execute(
+            f"""
+            SELECT model, source_cycle_time, forecast_value_c
+            FROM {table_ref}
+            WHERE {' AND '.join(predicates)}
+            ORDER BY model, source_cycle_time
+            """,
+            tuple(params),
+        )
+    except Exception:  # noqa: BLE001 — never fault the hot path; caller keeps legacy seed
+        return None
+    best: dict[str, float] = {}
+    for model, _sct, val_c in cur.fetchall():
+        if model is None or val_c is None:
+            continue
+        try:
+            best[str(model)] = float(val_c)
+        except (TypeError, ValueError):
+            continue
+    if len(best) < 3:
+        return None
+
+    def _c_to_native(v_c: float) -> float:
+        return v_c if unit == "C" else (v_c * 9.0 / 5.0 + 32.0)
+
+    return [_c_to_native(v) for v in best.values()]
 
 
 def _bound_forecast_snapshot_row_for_spine(
@@ -11588,12 +11993,21 @@ def _market_analysis_from_event_snapshot(
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
     payload: dict[str, object],
     decision_time: datetime | None,
+    day0_seed_members: "np.ndarray | None" = None,
 ) -> MarketAnalysis:
     from src.strategy.market_analysis import MarketAnalysis
     from src.config import settings
 
     bins = list(family.bins)
-    raw_members = _snapshot_members(snapshot)
+    # GATE-2 (mx2t3 carrier-decouple): the day0 lane seeds its FORECAST BASE pool from the
+    # multi-model ``raw_model_forecasts`` fusion (threaded as ``day0_seed_members``) instead of the
+    # cold ``ensemble_snapshots.members_json``. None → keep the legacy ensemble seed (non-day0
+    # lanes, or a day0 cycle with <3 multimodel members). The unit identity gate below still runs.
+    if day0_seed_members is not None and np.asarray(day0_seed_members, dtype=float).size >= 3:
+        raw_members = np.asarray(day0_seed_members, dtype=float)
+        payload["_edli_day0_seed_source"] = "raw_model_forecasts.multimodel"
+    else:
+        raw_members = _snapshot_members(snapshot)
     # === Q-KERNEL REBUILD STAGE 0 — receipt-spine producer (2026-06-14) =====================
     # READ-ONLY observability: capture the predictive center/dispersion the calibrated branch
     # already computed so the stash below (just before `return MarketAnalysis`) can write them
@@ -12553,46 +12967,78 @@ _REPRESENTATIVENESS_FALLBACK_MIN_N = 3
 
 
 def _trailing_residual_std_native(*, family, city, scale: float) -> float | None:
-    """Compute per-city residual std (forecast raw_ens_mean − settlement) over the trailing
-    window of settled days, returned in the members' NATIVE unit.
+    """Compute per-city residual std (forecast multi-model member-mean − settlement) over the
+    trailing window of settled days, returned in the members' NATIVE settlement unit.
 
-    Joins settlement_outcomes (settlement_value) to ensemble_snapshots (members_json →
-    raw ensemble mean) for the same city/metric. The residual is computed in the SETTLEMENT
-    unit (settlement_value and the snapshot members are both in the settlement unit at this
-    seam), so no per-source conversion is needed; ``scale`` only carries the degC→native
-    factor for callers whose σ source is degC (the primary path). Here the residual is
-    ALREADY native, so scale is NOT re-applied — the std is returned directly.
+    mx2t3 carrier-decouple (GATE-2): the forecast term is sourced from the MULTI-MODEL
+    ``raw_model_forecasts`` fusion (the SAME decorrelated providers the spine / day0 seed use) at
+    the DECISION lead (``lead_days = 1``), latest cycle per model, member-mean — NOT the cold
+    ``ensemble_snapshots.members_json`` mean. The residual is ``member_mean_native − settlement``
+    per settled ``(city, target_date)``; ``forecast_value_c`` is °C so it is converted to the
+    city's native settlement unit before differencing settlement_value (which is native). The
+    trailing-window (``_REPRESENTATIVENESS_FALLBACK_WINDOW_DAYS``), min-n
+    (``_REPRESENTATIVENESS_FALLBACK_MIN_N``), and native-unit semantics are unchanged; only the
+    data source swaps. ``scale`` is intentionally unused (the residual is already native).
 
     Returns None when fewer than _REPRESENTATIVENESS_FALLBACK_MIN_N settled residuals exist
     (too thin to trust a scale), so the caller falls back to 0.0 (today's behaviour).
     """
     import contextlib
-    import json
     import statistics
     from src.state.db import get_forecasts_connection
 
     _ = scale  # residual is already in native settlement unit; scale intentionally unused
     metric = family.metric
     target_date = str(family.target_date)
+    unit = str(getattr(city, "settlement_unit", "C") or "C")
+
+    def _c_to_native(v_c: float) -> float:
+        return v_c if unit == "C" else (v_c * 9.0 / 5.0 + 32.0)
+
     with contextlib.closing(get_forecasts_connection()) as conn:
         conn.row_factory = sqlite3.Row
+        # Per settled (city, target_date): the latest cycle per model at the decision lead
+        # (lead_days=1) reduced to the multi-model member-mean (in °C), joined to the VERIFIED
+        # settlement. Latest-cycle-per-model is enforced by keeping MAX(source_cycle_time) per
+        # model in the GROUP BY → AVG over the per-model latest values (mirrors the spine's
+        # "latest cycle per model wins" reduction).
         rows = conn.execute(
             """
-            SELECT s.target_date AS td, s.settlement_value AS sv, e.members_json AS mj
+            WITH latest_per_model AS (
+                SELECT r.target_date AS td, r.model AS model,
+                       r.forecast_value_c AS fv,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY r.target_date, r.model
+                           ORDER BY r.source_cycle_time DESC
+                       ) AS _rk
+                FROM raw_model_forecasts r
+                WHERE r.city = ?
+                  AND r.metric = ?
+                  AND r.lead_days = 1
+            )
+            SELECT s.target_date AS td, s.settlement_value AS sv,
+                   AVG(m.fv) AS member_mean_c
             FROM settlement_outcomes s
-            JOIN ensemble_snapshots e
-              ON e.city = s.city
-             AND e.target_date = s.target_date
-             AND e.temperature_metric = s.temperature_metric
+            JOIN latest_per_model m
+              ON m.td = s.target_date
             WHERE s.city = ?
               AND s.temperature_metric = ?
               AND s.authority = 'VERIFIED'
               AND s.settlement_value IS NOT NULL
               AND s.target_date < ?
+              AND m._rk = 1
+            GROUP BY s.target_date, s.settlement_value
             ORDER BY s.target_date DESC
             LIMIT ?
             """,
-            (city.name, metric, target_date, _REPRESENTATIVENESS_FALLBACK_WINDOW_DAYS * 4),
+            (
+                city.name,
+                metric,
+                city.name,
+                metric,
+                target_date,
+                _REPRESENTATIVENESS_FALLBACK_WINDOW_DAYS * 4,
+            ),
         ).fetchall()
     residuals: list[float] = []
     seen_dates: set[str] = set()
@@ -12601,14 +13047,14 @@ def _trailing_residual_std_native(*, family, city, scale: float) -> float | None
         if td in seen_dates:
             continue
         try:
-            members = json.loads(r["mj"]) if r["mj"] else None
-            if not members:
+            member_mean_c = r["member_mean_c"]
+            if member_mean_c is None:
                 continue
-            ens_mean = float(np.mean(np.asarray(members, dtype=float)))
+            member_mean_native = _c_to_native(float(member_mean_c))
             settlement = float(r["sv"])
         except Exception:
             continue
-        residuals.append(ens_mean - settlement)
+        residuals.append(member_mean_native - settlement)
         seen_dates.add(td)
         if len(seen_dates) >= _REPRESENTATIVENESS_FALLBACK_WINDOW_DAYS:
             break

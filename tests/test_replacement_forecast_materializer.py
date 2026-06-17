@@ -1,8 +1,8 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06
-# Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + AIFS sampled-2t replacement shadow posterior.
-# Reuse: Run before changing replacement forecast live shadow write path.
+# Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + AIFS sampled-2t replacement posterior authority.
+# Reuse: Run before changing replacement forecast live/diagnostic write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
 """Replacement forecast materializer tests."""
 
@@ -26,7 +26,11 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
 )
 from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
 from src.data.replacement_forecast_materializer import (
+    REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
     ReplacementForecastMaterializeRequest,
+    _QLCB_BASIS,
+    _ensure_forecast_posteriors_live_authority_check,
+    _replacement_trade_authority_status,
     materialize_replacement_forecast_shadow,
 )
 from src.state.db import _create_readiness_state
@@ -179,7 +183,7 @@ def _request(
     )
 
 
-def test_materializer_writes_posterior_and_readiness_readable_by_switch_reader() -> None:
+def test_materializer_writes_diagnostic_posterior_blocked_by_live_reader() -> None:
     conn = _conn()
 
     result = materialize_replacement_forecast_shadow(conn, _request())
@@ -189,10 +193,10 @@ def test_materializer_writes_posterior_and_readiness_readable_by_switch_reader()
     assert result.anchor_id is not None
     readiness_row = conn.execute("SELECT * FROM readiness_state WHERE readiness_id = ?", (result.readiness_id,)).fetchone()
     assert readiness_row is not None
-    assert readiness_row["status"] == "SHADOW_ONLY"
+    assert readiness_row["status"] == "DIAGNOSTIC_ONLY"
     posterior_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
     assert posterior_row is not None
-    assert posterior_row["trade_authority_status"] == "SHADOW_VETO_ONLY"
+    assert posterior_row["trade_authority_status"] == "DIAGNOSTIC_ONLY"
     assert posterior_row["training_allowed"] == 0
 
     from src.engine.replacement_forecast_hook_factory import _latest_replacement_readiness
@@ -213,10 +217,70 @@ def test_materializer_writes_posterior_and_readiness_readable_by_switch_reader()
         temperature_metric="high",
         decision_time=_dt(4, 30),
     )
-    assert bundle.ok is True
-    assert bundle.bundle is not None
-    assert bundle.bundle.posterior_id == result.posterior_id
-    assert set(bundle.bundle.q) == {"cool", "warm", "hot"}
+    assert bundle.ok is False
+    assert bundle.reason_code == "REPLACEMENT_POSTERIOR_LIVE_AUTHORITY_MISSING"
+    assert bundle.bundle is None
+
+
+def test_live_authority_status_requires_live_flags_and_bootstrap_bounds() -> None:
+    status = _replacement_trade_authority_status(
+        replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
+        q_lcb_map={"cool": 0.1, "warm": 0.6, "hot": 0.05},
+        q_ucb_map={"cool": 0.3, "warm": 0.9, "hot": 0.2},
+        q_lcb_basis=_QLCB_BASIS,
+    )
+
+    assert status == "LIVE_AUTHORITY"
+
+
+def test_live_authority_status_rejects_wilson_or_missing_bounds() -> None:
+    assert _replacement_trade_authority_status(
+        replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
+        q_lcb_map={"cool": 0.1},
+        q_ucb_map={"cool": 0.3},
+        q_lcb_basis="wilson_aifs_member_votes",
+    ) == "DIAGNOSTIC_ONLY"
+
+
+def test_forecast_posteriors_live_authority_check_migration_preserves_rows() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')),
+            q_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors (trade_authority_status, q_json) VALUES (?, ?)",
+        ("SHADOW_ONLY", "{}"),
+    )
+
+    _ensure_forecast_posteriors_live_authority_check(conn)
+
+    rows = conn.execute("SELECT posterior_id, trade_authority_status, q_json FROM forecast_posteriors").fetchall()
+    assert [dict(row) for row in rows] == [
+        {"posterior_id": 1, "trade_authority_status": "DIAGNOSTIC_ONLY", "q_json": "{}"}
+    ]
+    conn.execute(
+        "INSERT INTO forecast_posteriors (trade_authority_status, q_json) VALUES (?, ?)",
+        ("LIVE_AUTHORITY", "{}"),
+    )
+    statuses = [
+        row["trade_authority_status"]
+        for row in conn.execute("SELECT trade_authority_status FROM forecast_posteriors ORDER BY posterior_id")
+    ]
+    assert statuses == ["DIAGNOSTIC_ONLY", "LIVE_AUTHORITY"]
+    assert _replacement_trade_authority_status(
+        replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
+        q_lcb_map={"cool": 0.1},
+        q_ucb_map=None,
+        q_lcb_basis=_QLCB_BASIS,
+    ) == "DIAGNOSTIC_ONLY"
 
 
 def test_materializer_keeps_readiness_separate_by_baseline_source_run() -> None:
@@ -323,7 +387,7 @@ def test_materializer_records_precision_guard_in_anchor_and_posterior_provenance
     posterior_row = conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
     anchor_provenance = json.loads(anchor_row["provenance_json"])
     posterior_provenance = json.loads(posterior_row["provenance_json"])
-    assert anchor_provenance["precision_guard"]["status"] == "SHADOW_ONLY"
+    assert anchor_provenance["precision_guard"]["status"] == "DIAGNOSTIC_ONLY"
     assert anchor_provenance["precision_guard"]["high_risk_bucket"] == "coastal"
     assert posterior_provenance["openmeteo_precision_guard"]["reason_codes"] == ["OM9_LAND_SEA_HIGH_RISK_FOR_CITY_CLASS"]
 

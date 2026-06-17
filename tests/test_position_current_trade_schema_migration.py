@@ -36,6 +36,11 @@ _W2_PNL_COLS = frozenset({
     "exit_reason",
 })
 
+_MONITOR_FRESHNESS_COLS = frozenset({
+    "last_monitor_prob_is_fresh",
+    "last_monitor_market_price_is_fresh",
+})
+
 # All additive columns managed by _ensure_position_current_authority_columns.
 _AUTHORITY_COLS = frozenset({
     "fill_authority",
@@ -50,6 +55,8 @@ _AUTHORITY_COLS = frozenset({
     "settlement_price",
     "settled_at",
     "exit_reason",
+    "last_monitor_prob_is_fresh",
+    "last_monitor_market_price_is_fresh",
 })
 
 _MINIMAL_DDL = """
@@ -127,6 +134,23 @@ class TestInitSchemaTradeOnlyMigratesLegacyPositionCurrent:
         assert not missing, (
             f"init_schema_trade_only must add all authority cols to legacy position_current. "
             f"Missing: {sorted(missing)}."
+        )
+
+    def test_monitor_freshness_cols_present_after_init_schema_trade_only_on_legacy_db(
+        self, tmp_path
+    ):
+        """Monitor probability/market freshness bits must survive restart; a
+        legacy trade DB missing them must be migrated additively."""
+        from src.state.db import init_schema_trade_only
+
+        conn = _fresh_trade_conn_with_legacy_position_current(tmp_path)
+        init_schema_trade_only(conn)
+
+        cols = _get_column_names(conn, "position_current")
+        missing = _MONITOR_FRESHNESS_COLS - cols
+        assert not missing, (
+            "init_schema_trade_only must add monitor freshness columns to "
+            f"legacy position_current. Missing: {sorted(missing)}."
         )
 
     def test_init_schema_trade_only_idempotent_on_db_with_all_cols(

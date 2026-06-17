@@ -11,10 +11,9 @@ PRIMARY AUTHORITY (corrected 2026-06-16): ``monitor_probability_refresh`` reads
 the multi-model fused posterior ``forecast_posteriors`` (via
 ``position_belief.load_replacement_belief``, sourced from ``raw_model_forecasts``)
 — the SAME source family as the entry decision. The legacy ENS member-counting
-and day0 refreshers below it are explicit fallback telemetry: the ENS path reads
-``ensemble_snapshots`` (a single-model ECMWF ensemble) and is NOT the entry
-authority — the "SAME METHOD as entry" parity holds ONLY for the replacement
-posterior primary lane, and is STALE for the legacy ens/day0 refreshers.
+path is retained as diagnostic telemetry only and must not substitute for a
+stale/missing replacement belief on non-day0 positions. The day0 observation
+lane remains a separate settlement-day authority.
 Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_raw).
 """
 
@@ -375,28 +374,12 @@ def _track_belief_staleness(pos: Position) -> None:
             count,
         )
 
-
-def _position_is_replacement_authority(pos: Position) -> bool:
-    """True when the position was ENTERED under the replacement-chain belief
-    authority (``probability_authority='replacement_0_1'``).
-
-    Discriminator: replacement-chain (edli) entries carry an ``edli``-prefixed
-    ``trade_id`` — the established codebase convention (portfolio._is_open_edli_
-    entry_position_row, trade_id.startswith("edli")). Pre-replacement (legacy)
-    inventory has non-edli trade_ids and may still use the legacy refresh path.
-    A position with no trade_id is treated as NON-replacement (fail-open to the
-    legacy path) so this gate never strands a genuinely-legacy holding.
-    """
-    trade_id = str(getattr(pos, "trade_id", "") or "")
-    return trade_id.startswith("edli")
-
-
 def _enqueue_single_family_belief_reseed_failsoft(
     *, city: str, target_date: str, metric: str
 ) -> dict[str, object] | None:
     """Fail-soft single-family replacement-posterior re-materialization trigger.
 
-    Called when a replacement-authority held position finds its belief
+    Called when a non-day0 held position finds its replacement belief
     stale/missing (BELIEF_AUTHORITY_FAULT): re-materialize THAT family's
     posterior onto the freshest materializable cycle so the exit organ regains a
     fresh same-authority belief next cycle, instead of papering over the fault
@@ -2233,11 +2216,9 @@ def monitor_probability_refresh(
     replacement-chain posterior (``forecast_posteriors``) — the SAME authority
     the entry decision used. The legacy ens/day0 refreshers below remain as
     explicit fallback telemetry only; they cannot be the freshness authority
-    while a fresh replacement row exists. This kills the entry-belief vs
-    exit-belief twin-authority that left every held position with
-    ``last_monitor_prob_is_fresh=False`` for its entire lifetime (719/719
-    stale refreshes on the Karachi 2026-06-12 position) while the entry
-    posterior had already re-ranked the held bin to family top.
+    while a fresh replacement row exists. This removes the entry-belief vs
+    exit-belief twin-authority failure mode without encoding any current
+    live-position coverage claim in source comments.
     """
     from src.engine.position_belief import (
         SELECTED_METHOD_REPLACEMENT_POSTERIOR,
@@ -2308,8 +2289,8 @@ def monitor_probability_refresh(
     # PREREQUISITE: all live legacy held positions (Houston aef7968f active;
     # Chengdu ad59da00 / Hong Kong day0_window) have ``forecast_posteriors`` coverage
     # for their family, so widening never strands a held position with NO belief
-    # source — the same-family reseed re-materializes on the SAME authority next
-    # cycle. The ensemble registry below is retained ONLY as applied-list telemetry.
+    # source. The same-family reseed is the only repair lane; the ensemble
+    # registry below is retained ONLY as applied-list telemetry.
     if not _would_use_day0_lane:
         _set_monitor_probability_fresh(pos, False)
         _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")

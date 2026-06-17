@@ -1,4 +1,4 @@
-"""Materialize replacement forecast shadow posterior rows into forecast DB.
+"""Materialize replacement forecast posterior rows into forecast DB.
 
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-13
@@ -11,8 +11,8 @@
 #   fallback that under-certifies below ask and discards every candidate). 2026-06-13 (q_ucb
 #   symmetry): the soft-anchor (CAPTURE_MISSING) fallback now emits a GENUINE Wilson UPPER bound
 #   alongside its lower twin (same inputs/z), so EVERY materialized posterior carries BOTH bounds
-#   and the tradeable-latest reader's both-bounds predicate has a uniform carrier shape; the
-#   distinct wilson_aifs_member_votes basis keeps the row non-live-eligible (no fabricated edge).
+#   when possible. Only fused-Normal rows with certified bootstrap bounds and a live runtime policy
+#   are stamped LIVE_AUTHORITY; Wilson/fallback rows remain diagnostic (no fabricated edge).
 """
 
 from __future__ import annotations
@@ -57,6 +57,12 @@ from src.data.replacement_forecast_readiness import (
     STRATEGY_KEY,
     ReplacementForecastDependency,
     build_replacement_forecast_readiness,
+)
+from src.data.replacement_forecast_runtime_policy import (
+    DIAGNOSTIC_ONLY_STATUS,
+    LIVE_AUTHORITY_STATUS,
+    REQUIRED_FLAGS,
+    resolve_replacement_forecast_runtime_policy,
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.contracts.availability_time import proof_of_possession_available_at
@@ -212,6 +218,39 @@ def _data_version(metric: str) -> str:
     return HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
 
 
+def _replacement_trade_authority_status(
+    *,
+    replacement_q_mode: str,
+    q_lcb_map: Mapping[str, float] | None,
+    q_ucb_map: Mapping[str, float] | None,
+    q_lcb_basis: str | None,
+) -> str:
+    """Return row-level live authority only for the exact live q carrier."""
+    live_q_carrier = (
+        replacement_q_mode in {REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL, REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL}
+        and q_lcb_map is not None
+        and q_ucb_map is not None
+        and q_lcb_basis == _QLCB_BASIS
+    )
+    if not live_q_carrier:
+        return DIAGNOSTIC_ONLY_STATUS
+    try:
+        from src.config import settings  # noqa: PLC0415
+
+        feature_flags = settings["feature_flags"]
+        flags = {key: bool(feature_flags.get(key, False)) for key in REQUIRED_FLAGS}
+        policy = resolve_replacement_forecast_runtime_policy(
+            flags,
+            promotion_evidence=None,
+            capital_objective_evidence=None,
+        )
+    except Exception:
+        return DIAGNOSTIC_ONLY_STATUS
+    if policy.status != LIVE_AUTHORITY_STATUS or not policy.trade_authority_enabled:
+        return DIAGNOSTIC_ONLY_STATUS
+    return LIVE_AUTHORITY_STATUS
+
+
 def _anchor_data_version(metric: str) -> str:
     return ANCHOR_HIGH_DATA_VERSION if metric == "high" else ANCHOR_LOW_DATA_VERSION
 
@@ -232,9 +271,124 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
+def _ensure_forecast_posteriors_live_authority_check(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'forecast_posteriors'"
+    ).fetchone()
+    if row is None:
+        return
+    create_sql = str(row[0] if not isinstance(row, sqlite3.Row) else row["sql"])
+    if "LIVE_AUTHORITY" in create_sql:
+        return
+    new_check = "CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY'))"
+    old_checks = (
+        "CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY'))",
+        "CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'LIVE_AUTHORITY'))",
+    )
+    old_check = next((check for check in old_checks if check in create_sql), None)
+    if old_check is None:
+        raise RuntimeError("forecast_posteriors trade_authority_status CHECK shape is not migratable")
+    legacy_table = "forecast_posteriors__pre_live_authority_check"
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (legacy_table,),
+    ).fetchone():
+        raise RuntimeError(f"legacy migration table already exists: {legacy_table}")
+    column_names = [
+        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+        for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
+    ]
+    if not column_names:
+        return
+    quoted_columns = ", ".join(f'"{name}"' for name in column_names)
+    conn.execute(f"ALTER TABLE forecast_posteriors RENAME TO {legacy_table}")
+    conn.execute(create_sql.replace(old_check, new_check).replace("DEFAULT 'SHADOW_ONLY'", "DEFAULT 'DIAGNOSTIC_ONLY'"))
+    selected_columns = ", ".join(
+        (
+            "CASE WHEN trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY') "
+            "THEN 'DIAGNOSTIC_ONLY' ELSE trade_authority_status END AS trade_authority_status"
+        )
+        if name == "trade_authority_status"
+        else f'"{name}"'
+        for name in column_names
+    )
+    conn.execute(
+        f"INSERT INTO forecast_posteriors ({quoted_columns}) "
+        f"SELECT {selected_columns} FROM {legacy_table}"
+    )
+    conn.execute(f"DROP TABLE {legacy_table}")
+
+
+def _ensure_diagnostic_only_trade_authority_check(conn: sqlite3.Connection, table_name: str) -> None:
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    if row is None:
+        return
+    create_sql = str(row[0] if not isinstance(row, sqlite3.Row) else row["sql"])
+    if "trade_authority_status" not in create_sql or "DIAGNOSTIC_ONLY" in create_sql:
+        return
+    old_checks = (
+        "CHECK (trade_authority_status IN ('SHADOW_ONLY'))",
+        "CHECK (trade_authority_status IN ('SHADOW_VETO_ONLY'))",
+        "CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY'))",
+        "CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'LIVE_AUTHORITY'))",
+    )
+    old_check = next((check for check in old_checks if check in create_sql), None)
+    if old_check is None:
+        raise RuntimeError(f"{table_name} trade_authority_status CHECK shape is not migratable")
+    new_check = "CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY'))"
+    if table_name == "forecast_posteriors" or "LIVE_AUTHORITY" in old_check:
+        new_check = "CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY'))"
+    legacy_table = f"{table_name}__pre_diagnostic_authority_check"
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (legacy_table,),
+    ).fetchone():
+        raise RuntimeError(f"legacy migration table already exists: {legacy_table}")
+    column_names = [
+        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    ]
+    if not column_names:
+        return
+    quoted_columns = ", ".join(f'"{name}"' for name in column_names)
+    selected_columns = ", ".join(
+        (
+            "CASE WHEN trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY') "
+            "THEN 'DIAGNOSTIC_ONLY' ELSE trade_authority_status END AS trade_authority_status"
+        )
+        if name == "trade_authority_status"
+        else f'"{name}"'
+        for name in column_names
+    )
+    conn.execute(f"ALTER TABLE {table_name} RENAME TO {legacy_table}")
+    conn.execute(
+        create_sql.replace(old_check, new_check)
+        .replace("DEFAULT 'SHADOW_ONLY'", "DEFAULT 'DIAGNOSTIC_ONLY'")
+        .replace("DEFAULT 'SHADOW_VETO_ONLY'", "DEFAULT 'DIAGNOSTIC_ONLY'")
+    )
+    conn.execute(
+        f"INSERT INTO {table_name} ({quoted_columns}) "
+        f"SELECT {selected_columns} FROM {legacy_table}"
+    )
+    conn.execute(f"DROP TABLE {legacy_table}")
+
+
 def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
     """Keep old PR399 shadow DBs fail-closed instead of returning stale rows."""
 
+    for table_name in (
+        "raw_forecast_artifacts",
+        "deterministic_forecast_anchors",
+        "forecast_posteriors",
+        "replacement_shadow_decisions",
+        "raw_model_forecasts",
+    ):
+        _ensure_diagnostic_only_trade_authority_check(conn, table_name)
     anchor_columns = _table_columns(conn, "deterministic_forecast_anchors")
     if anchor_columns and "anchor_identity_hash" not in anchor_columns:
         conn.execute("ALTER TABLE deterministic_forecast_anchors ADD COLUMN anchor_identity_hash TEXT")
@@ -249,6 +403,8 @@ def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
     ):
         if posterior_columns and column not in posterior_columns:
             conn.execute(f"ALTER TABLE forecast_posteriors ADD COLUMN {column} TEXT")
+    if posterior_columns:
+        _ensure_forecast_posteriors_live_authority_check(conn)
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_deterministic_forecast_anchors_identity_hash
@@ -527,7 +683,7 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
         "measurement_policy": anchor.measurement_policy,
         "precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
         "role": "soft_spatial_anchor",
-        "trade_authority_status": "SHADOW_ONLY",
+        "trade_authority_status": DIAGNOSTIC_ONLY_STATUS,
         "training_allowed": False,
     }
     # Task #32: honest re-materialization provenance. Recorded ONLY when the trigger set it, so a
@@ -582,7 +738,7 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
             _json(contributing_times),
             anchor_identity_hash,
             _json(provenance),
-            "SHADOW_ONLY",
+            DIAGNOSTIC_ONLY_STATUS,
             0,
         ),
     )
@@ -1429,7 +1585,10 @@ def _build_fused_q_bounds(
     q_point: Mapping[str, float],
     n_draws: int = _QLCB_BOOTSTRAP_DRAWS,
     rounding_rule: str = "wmo_half_up",
-) -> tuple[dict[str, float], dict[str, float]]:
+    return_samples: bool = False,
+) -> tuple[dict[str, float], dict[str, float]] | tuple[
+    dict[str, float], dict[str, float], dict[str, list[float]]
+]:
     """Vectorized fused-center parameter-uncertainty bootstrap for per-bin q_lcb / q_ucb.
 
     Draws ``n_draws`` centers μ_i ~ N(μ*, center_sigma_c) and integrates every settlement bin
@@ -1437,8 +1596,11 @@ def _build_fused_q_bounds(
     over the (draws × bins) grid with scipy.special.ndtr). Returns (q_lcb_map, q_ucb_map) where
     q_lcb[bin] = 5th percentile and q_ucb[bin] = 95th percentile of the per-bin probability across
     draws, clipped so q_lcb ≤ q_point ≤ q_ucb per bin and q_lcb ≥ 0.
+    When ``return_samples`` is true, also return the per-bin draw vectors so the
+    live decision adapter can compute empirical edge p-values directly.
 
-    Raises on any construction failure (caller fail-softs to NULL — Wilson fallback, status quo).
+    Raises on any construction failure. The caller fail-softs the certified bootstrap bounds, then
+    may promote non-certified Wilson member-vote bounds under their own basis.
     """
     import numpy as np  # noqa: PLC0415
     from scipy.special import ndtr  # noqa: PLC0415
@@ -1490,6 +1652,7 @@ def _build_fused_q_bounds(
 
     q_lcb_map: dict[str, float] = {}
     q_ucb_map: dict[str, float] = {}
+    q_samples_map: dict[str, list[float]] = {}
     for idx, bin_id in enumerate(bin_ids):
         q_pt = float(q_point.get(bin_id, 0.0))
         lcb = float(q_lcb_vec[idx])
@@ -1501,6 +1664,10 @@ def _build_fused_q_bounds(
         ucb = max(ucb, q_pt)
         q_lcb_map[bin_id] = lcb
         q_ucb_map[bin_id] = ucb
+        if return_samples:
+            q_samples_map[bin_id] = [float(x) for x in probs[:, idx].tolist()]
+    if return_samples:
+        return q_lcb_map, q_ucb_map, q_samples_map
     return q_lcb_map, q_ucb_map
 
 
@@ -1625,11 +1792,13 @@ def _insert_posterior(
     # so the floor could not inflate the tail. Empty tuple when no cap bit (no floor / no open-ended
     # bin away from center). Defaults defined here so the fail-closed / flag-off paths stay coherent.
     settlement_sigma_floor_catchall_capped: tuple[str, ...] = ()
-    # Q_LCB / Q_UCB bootstrap outputs (NULL unless a fused-q is built AND the bound construction
-    # succeeds). FAIL-SOFT: any failure leaves these None -> q_lcb_json/q_ucb_json written as NULL,
-    # which the live side treats exactly as today (Wilson fallback) -> never WORSE than status quo.
+    # Q_LCB / Q_UCB outputs. The certified bootstrap basis is present only when fused-q is built and
+    # bound construction succeeds. If it fails, the soft-anchor Wilson fallback below may publish
+    # lower/upper carrier bounds under its own non-live-eligible basis; if that fallback also fails,
+    # q_lcb_json/q_ucb_json remain NULL.
     q_lcb_map: dict[str, float] | None = None
     q_ucb_map: dict[str, float] | None = None
+    q_bootstrap_samples_by_bin: dict[str, list[float]] | None = None
     q_lcb_basis: str | None = None
     if bayes_precision_fusion_override is not None:
         # An override exists. Default mode while we attempt the fused-q build below.
@@ -1858,13 +2027,15 @@ def _insert_posterior(
             q_shape = "fused_normal_direct"
             # Q_LCB / Q_UCB (2026-06-09) — fused-center parameter-uncertainty bootstrap. INDEPENDENT
             # fail-soft: a bound-construction error must NOT roll back the fused q point (that would
-            # regress the q_shape gain). On error: q_lcb/q_ucb stay NULL (Wilson fallback, status quo)
-            # + loud WARNING; replacement_q_mode/q_shape unaffected. The bounds use the SAME _sigma_used
-            # the point q integrates at (settlement-floored if the floor applied) so q_lcb ≤ q_point ≤
-            # q_ucb holds per bin; center uncertainty is fused.sd (anchor_sigma_c), NOT σ_resid (already
-            # inside _sigma_used) — no double-count.
+            # regress the q_shape gain). On error the certified bootstrap bounds are absent and a
+            # loud WARNING is emitted; the later soft-anchor Wilson fallback may publish
+            # non-certified carrier bounds under its own basis. replacement_q_mode/q_shape remain
+            # diagnosable. The bounds use the SAME _sigma_used the point q integrates at
+            # (settlement-floored if the floor applied) so q_lcb <= q_point <= q_ucb holds per bin;
+            # center uncertainty is fused.sd (anchor_sigma_c), NOT sigma_resid (already inside
+            # _sigma_used) — no double-count.
             try:
-                _lcb_map, _ucb_map = _build_fused_q_bounds(
+                _lcb_map, _ucb_map, _q_samples = _build_fused_q_bounds(
                     mu_star=float(bayes_precision_fusion_override.anchor_value_c),
                     center_sigma_c=float(bayes_precision_fusion_override.anchor_sigma_c),
                     predictive_sigma_c=_sigma_used,
@@ -1872,19 +2043,22 @@ def _insert_posterior(
                     half_step=_half_step,
                     q_point=q,
                     rounding_rule=_rounding_rule,
+                    return_samples=True,
                 )
                 q_lcb_map = _lcb_map
                 q_ucb_map = _ucb_map
+                q_bootstrap_samples_by_bin = _q_samples
                 q_lcb_basis = _QLCB_BASIS
             except Exception as _qexc:
                 q_lcb_map = None
                 q_ucb_map = None
+                q_bootstrap_samples_by_bin = None
                 q_lcb_basis = None
                 try:
                     import logging  # noqa: PLC0415
                     logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                        "replacement_0_1 q_lcb/q_ucb bootstrap skipped (fail-soft to NULL, "
-                        "Wilson fallback unchanged): %s",
+                        "replacement_0_1 q_lcb/q_ucb bootstrap skipped "
+                        "(fail-soft to non-certified Wilson fallback when available): %s",
                         _qexc,
                     )
                 except Exception:
@@ -2043,6 +2217,12 @@ def _insert_posterior(
     # the live bundle reader can hold intermediate-phase posteriors to shadow-only by default
     # (production stays alive in dead zones; live trading waits for a settlement-graded license).
     cycle_phase = classify_cycle_phase(_to_utc(request.source_cycle_time, field_name="source_cycle_time"))
+    trade_authority_status = _replacement_trade_authority_status(
+        replacement_q_mode=replacement_q_mode,
+        q_lcb_map=q_lcb_map,
+        q_ucb_map=q_ucb_map,
+        q_lcb_basis=q_lcb_basis,
+    )
     provenance_payload = {
         "anchor_weight": request.anchor_weight,
         "anchor_sigma_c": request.anchor_sigma_c,
@@ -2117,14 +2297,22 @@ def _insert_posterior(
         # bootstrap_draws is meaningful ONLY for the bootstrap basis; the Wilson member-vote bound
         # is analytic (no draws) -> None.
         "q_lcb_bootstrap_draws": (_QLCB_BOOTSTRAP_DRAWS if q_lcb_basis == _QLCB_BASIS else None),
+        # Empirical edge-confidence substrate. The live adapter computes
+        # p_value = (1 + count(q_side_draw - native_cost <= 0)) / (1 + draws)
+        # from these exact draws instead of laundering the robust LCB pass/fail
+        # gate as a fake {0,1} FDR p-value. Present only for the fused-center
+        # bootstrap basis.
+        "q_bootstrap_samples_by_bin": (
+            q_bootstrap_samples_by_bin if q_lcb_basis == _QLCB_BASIS else None
+        ),
         "bin_topology": bin_topology_payload,
         "bin_topology_hash": bin_topology_hash,
         "dependency_hash": dependency_hash,
         "posterior_config_hash": posterior_config_hash,
         "family_id": family_id,
-        "posterior_authority_status": "SHADOW_ONLY",
-        "runtime_policy_status": "SHADOW_VETO_ONLY",
-        "trade_authority_status": "SHADOW_ONLY",
+        "posterior_authority_status": trade_authority_status,
+        "runtime_policy_status": trade_authority_status,
+        "trade_authority_status": trade_authority_status,
         "training_allowed": False,
     }
     # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
@@ -2168,7 +2356,7 @@ def _insert_posterior(
                 if bayes_precision_fusion_override.current_value_serving
                 else None
             ),
-            "fusion_authority": "SHADOW_ONLY",
+            "fusion_authority": trade_authority_status,
         }
     posterior_identity_hash = _json_hash(
         {
@@ -2228,7 +2416,7 @@ def _insert_posterior(
             posterior_config_hash,
             posterior_identity_hash,
             _json(provenance_payload),
-            "SHADOW_ONLY",
+            trade_authority_status,
             0,
         ),
     )
@@ -2315,11 +2503,11 @@ def _build_readiness(
     )
 
 
-def materialize_replacement_forecast_shadow(
+def materialize_replacement_forecast_live_or_diagnostic(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
 ) -> ReplacementForecastMaterializeResult:
-    """Write anchor, posterior, and readiness rows for replacement shadow/veto."""
+    """Write anchor, posterior, and readiness rows for replacement live/diagnostic use."""
 
     metric = _metric(request.temperature_metric)
     _ensure_replacement_identity_columns(conn)
@@ -2398,3 +2586,12 @@ def materialize_replacement_forecast_shadow(
         anchor_id=anchor_id,
         readiness_id=readiness.readiness_id,
     )
+
+
+def materialize_replacement_forecast_shadow(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+) -> ReplacementForecastMaterializeResult:
+    """Compatibility wrapper for older callers; writes live/diagnostic rows."""
+
+    return materialize_replacement_forecast_live_or_diagnostic(conn, request)

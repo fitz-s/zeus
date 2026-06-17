@@ -21,6 +21,19 @@ UTC = timezone.utc
 REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
 REPLACEMENT_0_1_TRACK_LABEL = "replacement_0_1_aifs_openmeteo_soft_anchor"
 
+# mx2t3 carrier-decouple (GATE-1, residual_legacy_sources.md C-A): under the replacement
+# trade authority the FSR readiness/selection is sourced from ``forecast_posteriors`` (the
+# mx2t3-independent neutral carrier materialized from raw_model_forecasts) instead of the
+# cold ``source_run_coverage`` → ``source_run`` → ``ensemble_snapshots`` JOIN. A neutral,
+# deterministic snapshot identity is minted per family-cycle as
+# ``rmf-<city>|<target>|<metric>|<cycle_date>`` (no ensemble_snapshots row needed). Rows
+# carrying this data_version short-circuit ``classify_forecast_snapshot`` to COMPLETE: a
+# forecast_posteriors row exists ONLY after the materializer's own decorrelated-model +
+# topology completeness gates pass, so existence IS completeness (a DIFFERENT certified
+# authority, not a relaxed gate). The legacy ensemble path is untouched for flag-OFF.
+POSTERIOR_BACKED_DATA_VERSION = "forecast_posteriors.replacement_0_1_neutral_carrier"
+_POSTERIOR_SNAPSHOT_ID_PREFIX = "rmf-"
+
 
 def _target_local_day_strictly_past(
     *, city_timezone: str, target_local_date: date, decision_time: datetime
@@ -266,6 +279,44 @@ def classify_forecast_snapshot(
                 "PARTIAL_BLOCKED", False, False, False, reason
             )
 
+    # mx2t3 carrier-decouple (GATE-1 C-A3): posterior-backed COMPLETE short-circuit. Under the
+    # replacement lane the row is sourced from forecast_posteriors (NOT ensemble_snapshots), so it
+    # carries NO member array / step coverage (those are ensemble-only). The posterior's own
+    # existence is the completeness authority (its decorrelated-model + topology gates already ran
+    # upstream). When the row is posterior-backed AND certified COMPLETE / LIVE_ELIGIBLE, accept it
+    # as COMPLETE without demanding observed_members >= expected_members (which would be 0 >= 51).
+    # The future-clock guards above STILL applied; only the ensemble member/step floors are bypassed
+    # — and only for this DIFFERENT certified authority. The legacy ensemble path keeps every floor.
+    _posterior_backed = (
+        str(coverage.get("data_version") or snapshot.get("data_version") or "")
+        == POSTERIOR_BACKED_DATA_VERSION
+    )
+    if _posterior_backed:
+        _required_fields_present = all(
+            snapshot.get(field)
+            for field in (
+                "snapshot_id",
+                "snapshot_hash",
+                "city",
+                "target_date",
+                "temperature_metric",
+                "source_run_id",
+                "available_at",
+            )
+        )
+        if (
+            coverage.get("completeness_status") == "COMPLETE"
+            and coverage.get("readiness_status") == "LIVE_ELIGIBLE"
+            and _required_fields_present
+        ):
+            return ForecastSnapshotClassification(
+                "COMPLETE", True, True, True, "COMPLETE_POSTERIOR_BACKED"
+            )
+        return ForecastSnapshotClassification(
+            "PARTIAL_BLOCKED", _required_fields_present, False, False,
+            "POSTERIOR_BACKED_NOT_LIVE_ELIGIBLE",
+        )
+
     expected_steps = _required_expected_steps(source_run=source_run, coverage=coverage)
     if not expected_steps:
         return ForecastSnapshotClassification(
@@ -489,7 +540,17 @@ class ForecastSnapshotReadyTrigger:
         pending queue. Both default-None → the original one-shot catch-up behavior is unchanged.
         """
 
-        if not all(_table_exists(forecasts_conn, table) for table in _FORECAST_TABLES):
+        # mx2t3 carrier-decouple (GATE-1 C-A2): under the replacement lane readiness rides
+        # ``forecast_posteriors`` (mx2t3-independent), so the required-table guard switches to it —
+        # otherwise this scan early-returns ``[]`` once the cold ensemble tables freeze/absent.
+        _posterior_lane = (
+            _replacement_trade_authority_enabled()
+            and _table_exists(forecasts_conn, "forecast_posteriors")
+        )
+        if _posterior_lane:
+            if not _table_exists(forecasts_conn, "forecast_posteriors"):
+                return []
+        elif not all(_table_exists(forecasts_conn, table) for table in _FORECAST_TABLES):
             return []
         # Decision-first emission: a family with no Polymarket market (no market_events row)
         # can never trade, so it must not consume the reactor's bounded decision-proof budget
@@ -507,20 +568,6 @@ class ForecastSnapshotReadyTrigger:
                 " AND m.target_date = c.target_local_date"
                 " AND m.temperature_metric = c.temperature_metric))"
             )
-        replacement_filter = ""
-        if _replacement_trade_authority_enabled():
-            if not _table_exists(forecasts_conn, "forecast_posteriors"):
-                replacement_filter = " AND 0"
-            else:
-                replacement_filter = (
-                    " AND EXISTS (SELECT 1 FROM forecast_posteriors fp"
-                    " WHERE fp.product_id = '" + REPLACEMENT_0_1_PRODUCT_ID + "'"
-                    " AND fp.city = c.city"
-                    " AND fp.target_date = c.target_local_date"
-                    " AND fp.temperature_metric = c.temperature_metric"
-                    " AND fp.source_available_at <= ?"
-                    " AND fp.computed_at <= ?)"
-                )
         # Coverage-fairness contract (Wave-1 2026-06-12: now UNCONDITIONAL).
         # Fetch ALL candidates (no SQL LIMIT) then apply CoverageFairnessRequest
         # .select_rows() which deduplicates to ≤1 row per (city, target_date, metric)
@@ -536,92 +583,193 @@ class ForecastSnapshotReadyTrigger:
             except (ValueError, IndexError):
                 _cycle_index = 0
 
-        _snapshot_latest_join = """
-             AND s.snapshot_id = (
-                SELECT MAX(s2.snapshot_id)
-                  FROM ensemble_snapshots s2
-                 WHERE s2.source_run_id = c.source_run_id
-                   AND s2.city = c.city
-                   AND s2.target_date = c.target_local_date
-                   AND s2.temperature_metric = c.temperature_metric
-             )
-        """
-        # Wave-1 2026-06-12: the legacy (non-fairness) ORDER-BY/LIMIT select is DELETED.
-        # The coverage-fairness CTE (≤1 row per (city,target,metric), round-robined) is
-        # now the SOLE selection path — no city is monopolised/starved.
-        _select_sql_base = f"""
-            WITH ranked_coverage AS (
-                SELECT
-                    c0.*,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY c0.city, c0.target_local_date, c0.temperature_metric
-                        ORDER BY
-                            CASE WHEN c0.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
-                            c0.computed_at DESC,
-                            c0.coverage_id DESC
-                    ) AS _family_rank
-                  FROM source_run_coverage c0
-                 WHERE c0.computed_at IS NULL OR c0.computed_at <= ?
-            )
-            SELECT
-                c.*,
-                sr.source_cycle_time AS sr_source_cycle_time,
-                sr.source_issue_time AS sr_source_issue_time,
-                sr.source_release_time AS sr_source_release_time,
-                sr.source_available_at AS sr_source_available_at,
-                sr.fetch_started_at AS sr_fetch_started_at,
-                sr.fetch_finished_at AS sr_fetch_finished_at,
-                sr.captured_at AS sr_captured_at,
-                sr.status AS sr_status,
-                sr.completeness_status AS sr_completeness_status,
-                sr.expected_steps_json AS sr_expected_steps_json,
-                sr.observed_steps_json AS sr_observed_steps_json,
-                sr.expected_members AS sr_expected_members,
-                sr.observed_members AS sr_observed_members,
-                s.snapshot_id,
-                s.city AS snapshot_city,
-                s.target_date AS snapshot_target_date,
-                s.temperature_metric AS snapshot_temperature_metric,
-                s.available_at AS snapshot_available_at,
-                s.fetch_time AS snapshot_fetch_time,
-                s.manifest_hash AS snapshot_manifest_hash,
-                s.members_json AS snapshot_members_json
-            FROM ranked_coverage c
-            JOIN source_run sr ON sr.source_run_id = c.source_run_id
-            JOIN ensemble_snapshots s
-              ON s.source_run_id = c.source_run_id
-             AND s.city = c.city
-             AND s.target_date = c.target_local_date
-             AND s.temperature_metric = c.temperature_metric
-             {_snapshot_latest_join}
-            WHERE c._family_rank = 1
-              AND COALESCE(s.available_at, sr.source_available_at, c.computed_at) <= ?
-              AND (sr.source_available_at IS NULL OR sr.source_available_at <= ?)
-              AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}{replacement_filter}
-            ORDER BY
-                CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
-                c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
-            """
         _decision_iso = decision_time.astimezone(UTC).isoformat()
-        _replacement_params: tuple[str, ...] = (
-            (_decision_iso, _decision_iso)
-            if _replacement_trade_authority_enabled() and _table_exists(forecasts_conn, "forecast_posteriors")
-            else ()
-        )
-        # Fetch all candidates (no SQL LIMIT); the fairness contract applies the per-cycle
-        # LIMIT and round-robin. The CTE's family-rank predicate needs the extra leading
-        # _decision_iso param (4 total before replacement params).
-        rows = _dict_rows(
-            forecasts_conn,
-            _select_sql_base,
-            (
-                _decision_iso,
-                _decision_iso,
-                _decision_iso,
-                _decision_iso,
-                *_replacement_params,
-            ),
-        )
+
+        if _posterior_lane:
+            # mx2t3 carrier-decouple (GATE-1 C-A1): readiness/selection from forecast_posteriors.
+            # Project the SAME row aliases the legacy ensemble path produced (so _source_run_from_join
+            # / _coverage_from_join / _snapshot_from_join are unchanged) but mint a NEUTRAL synthesized
+            # snapshot identity (rmf-<city>|<target>|<metric>|<cycle_date>) — no ensemble_snapshots row.
+            # completeness_status='COMPLETE' / readiness_status='LIVE_ELIGIBLE' are correct by
+            # construction (a posterior row exists only after the materializer's own decorrelated-model
+            # + topology gates pass). members_json is NULL (the spine re-sources members from
+            # raw_model_forecasts; the FSR members never feed belief on this lane).
+            # The market_filter references c.* columns; re-alias onto the posterior row p.*.
+            _posterior_market_filter = (
+                market_filter.replace("c.city", "p.city")
+                .replace("c.target_local_date", "p.target_date")
+                .replace("c.temperature_metric", "p.temperature_metric")
+            )
+            _select_sql_base = f"""
+                WITH ranked_posterior AS (
+                    SELECT
+                        fp.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY fp.city, fp.target_date, fp.temperature_metric
+                            ORDER BY fp.source_cycle_time DESC, fp.computed_at DESC, fp.posterior_id DESC
+                        ) AS _family_rank
+                      FROM forecast_posteriors fp
+                     WHERE fp.product_id = '{REPLACEMENT_0_1_PRODUCT_ID}'
+                       AND (fp.source_available_at IS NULL OR fp.source_available_at <= ?)
+                       AND (fp.computed_at IS NULL OR fp.computed_at <= ?)
+                )
+                SELECT
+                    p.posterior_id AS coverage_id,
+                    p.posterior_identity_hash AS source_run_id,
+                    p.source_id AS source_id,
+                    NULL AS source_transport,
+                    NULL AS release_calendar_key,
+                    '{REPLACEMENT_0_1_TRACK_LABEL}' AS track,
+                    NULL AS city_id,
+                    p.city AS city,
+                    NULL AS city_timezone,
+                    p.target_date AS target_local_date,
+                    p.temperature_metric AS temperature_metric,
+                    '{POSTERIOR_BACKED_DATA_VERSION}' AS data_version,
+                    NULL AS expected_members,
+                    NULL AS observed_members,
+                    NULL AS expected_steps_json,
+                    NULL AS observed_steps_json,
+                    NULL AS snapshot_ids_json,
+                    NULL AS target_window_start_utc,
+                    NULL AS target_window_end_utc,
+                    'COMPLETE' AS completeness_status,
+                    'LIVE_ELIGIBLE' AS readiness_status,
+                    p.computed_at AS computed_at,
+                    p.source_cycle_time AS sr_source_cycle_time,
+                    p.source_available_at AS sr_source_issue_time,
+                    NULL AS sr_source_release_time,
+                    p.source_available_at AS sr_source_available_at,
+                    NULL AS sr_fetch_started_at,
+                    NULL AS sr_fetch_finished_at,
+                    p.computed_at AS sr_captured_at,
+                    'COMPLETE' AS sr_status,
+                    'COMPLETE' AS sr_completeness_status,
+                    NULL AS sr_expected_steps_json,
+                    NULL AS sr_observed_steps_json,
+                    NULL AS sr_expected_members,
+                    NULL AS sr_observed_members,
+                    ('{_POSTERIOR_SNAPSHOT_ID_PREFIX}' || p.city || '|' || p.target_date || '|'
+                        || p.temperature_metric || '|' || substr(p.source_cycle_time, 1, 10)) AS snapshot_id,
+                    p.city AS snapshot_city,
+                    p.target_date AS snapshot_target_date,
+                    p.temperature_metric AS snapshot_temperature_metric,
+                    p.source_available_at AS snapshot_available_at,
+                    p.computed_at AS snapshot_fetch_time,
+                    p.posterior_identity_hash AS snapshot_manifest_hash,
+                    NULL AS snapshot_members_json
+                FROM ranked_posterior p
+                WHERE p._family_rank = 1
+                  AND (p.source_available_at IS NULL OR p.source_available_at <= ?)
+                  AND (p.computed_at IS NULL OR p.computed_at <= ?){_posterior_market_filter}
+                ORDER BY p.source_cycle_time DESC, p.computed_at DESC
+                """
+            rows = _dict_rows(
+                forecasts_conn,
+                _select_sql_base,
+                (_decision_iso, _decision_iso, _decision_iso, _decision_iso),
+            )
+        else:
+            replacement_filter = ""
+            if _replacement_trade_authority_enabled():
+                if not _table_exists(forecasts_conn, "forecast_posteriors"):
+                    replacement_filter = " AND 0"
+                else:
+                    replacement_filter = (
+                        " AND EXISTS (SELECT 1 FROM forecast_posteriors fp"
+                        " WHERE fp.product_id = '" + REPLACEMENT_0_1_PRODUCT_ID + "'"
+                        " AND fp.city = c.city"
+                        " AND fp.target_date = c.target_local_date"
+                        " AND fp.temperature_metric = c.temperature_metric"
+                        " AND fp.source_available_at <= ?"
+                        " AND fp.computed_at <= ?)"
+                    )
+            _snapshot_latest_join = """
+                 AND s.snapshot_id = (
+                    SELECT MAX(s2.snapshot_id)
+                      FROM ensemble_snapshots s2
+                     WHERE s2.source_run_id = c.source_run_id
+                       AND s2.city = c.city
+                       AND s2.target_date = c.target_local_date
+                       AND s2.temperature_metric = c.temperature_metric
+                 )
+            """
+            # Wave-1 2026-06-12: the legacy (non-fairness) ORDER-BY/LIMIT select is DELETED.
+            # The coverage-fairness CTE (≤1 row per (city,target,metric), round-robined) is
+            # now the SOLE selection path — no city is monopolised/starved.
+            _select_sql_base = f"""
+                WITH ranked_coverage AS (
+                    SELECT
+                        c0.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY c0.city, c0.target_local_date, c0.temperature_metric
+                            ORDER BY
+                                CASE WHEN c0.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
+                                c0.computed_at DESC,
+                                c0.coverage_id DESC
+                        ) AS _family_rank
+                      FROM source_run_coverage c0
+                     WHERE c0.computed_at IS NULL OR c0.computed_at <= ?
+                )
+                SELECT
+                    c.*,
+                    sr.source_cycle_time AS sr_source_cycle_time,
+                    sr.source_issue_time AS sr_source_issue_time,
+                    sr.source_release_time AS sr_source_release_time,
+                    sr.source_available_at AS sr_source_available_at,
+                    sr.fetch_started_at AS sr_fetch_started_at,
+                    sr.fetch_finished_at AS sr_fetch_finished_at,
+                    sr.captured_at AS sr_captured_at,
+                    sr.status AS sr_status,
+                    sr.completeness_status AS sr_completeness_status,
+                    sr.expected_steps_json AS sr_expected_steps_json,
+                    sr.observed_steps_json AS sr_observed_steps_json,
+                    sr.expected_members AS sr_expected_members,
+                    sr.observed_members AS sr_observed_members,
+                    s.snapshot_id,
+                    s.city AS snapshot_city,
+                    s.target_date AS snapshot_target_date,
+                    s.temperature_metric AS snapshot_temperature_metric,
+                    s.available_at AS snapshot_available_at,
+                    s.fetch_time AS snapshot_fetch_time,
+                    s.manifest_hash AS snapshot_manifest_hash,
+                    s.members_json AS snapshot_members_json
+                FROM ranked_coverage c
+                JOIN source_run sr ON sr.source_run_id = c.source_run_id
+                JOIN ensemble_snapshots s
+                  ON s.source_run_id = c.source_run_id
+                 AND s.city = c.city
+                 AND s.target_date = c.target_local_date
+                 AND s.temperature_metric = c.temperature_metric
+                 {_snapshot_latest_join}
+                WHERE c._family_rank = 1
+                  AND COALESCE(s.available_at, sr.source_available_at, c.computed_at) <= ?
+                  AND (sr.source_available_at IS NULL OR sr.source_available_at <= ?)
+                  AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}{replacement_filter}
+                ORDER BY
+                    CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
+                    c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
+                """
+            _replacement_params: tuple[str, ...] = (
+                (_decision_iso, _decision_iso)
+                if _replacement_trade_authority_enabled()
+                and _table_exists(forecasts_conn, "forecast_posteriors")
+                else ()
+            )
+            # Fetch all candidates (no SQL LIMIT); the fairness contract applies the per-cycle
+            # LIMIT and round-robin. The CTE's family-rank predicate needs the extra leading
+            # _decision_iso param (4 total before replacement params).
+            rows = _dict_rows(
+                forecasts_conn,
+                _select_sql_base,
+                (
+                    _decision_iso,
+                    _decision_iso,
+                    _decision_iso,
+                    _decision_iso,
+                    *_replacement_params,
+                ),
+            )
         if rows:
             # ``limit=None`` means no cap on the number of city families, not
             # "emit every historical source_run for each family."  Fairness owns

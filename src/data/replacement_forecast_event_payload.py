@@ -1,4 +1,4 @@
-"""Shadow event payload enrichment for replacement forecast provenance."""
+"""Event payload enrichment for replacement forecast provenance."""
 
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ class ReplacementForecastEventPayload:
                 raise ValueError(f"replacement_forecast.{key} is required")
             if _FORBIDDEN_TRANSCRIPT_ALIAS in value.lower():
                 raise ValueError(f"replacement_forecast.{key} must use full product identity")
-        if replacement.get("trade_authority_status") not in {"SHADOW_ONLY", "SHADOW_VETO_ONLY"}:
-            raise ValueError("replacement forecast event payload must remain shadow/veto only")
+        if replacement.get("trade_authority_status") not in {"DIAGNOSTIC_ONLY", "LIVE_AUTHORITY"}:
+            raise ValueError("replacement forecast event payload has invalid trade authority status")
         if replacement.get("training_allowed") is not False:
             raise ValueError("replacement forecast event payload must not enable training authority")
 
@@ -92,8 +92,8 @@ def build_replacement_forecast_event_payload(
 
     if readiness.status != READY_STATUS:
         raise ValueError("replacement event payload requires READY readiness")
-    if replacement_bundle.trade_authority_status not in {"SHADOW_ONLY", "SHADOW_VETO_ONLY"}:
-        raise ValueError("replacement event payload requires shadow/veto-only bundle authority")
+    if replacement_bundle.trade_authority_status not in {"DIAGNOSTIC_ONLY", "LIVE_AUTHORITY"}:
+        raise ValueError("replacement event payload requires valid bundle authority")
     if replacement_bundle.source_id != readiness.source_id or replacement_bundle.product_id != readiness.product_id:
         raise ValueError("replacement bundle and readiness product identity mismatch")
 
@@ -119,7 +119,7 @@ def build_replacement_forecast_event_payload(
             "can_increase_q_lcb": False,
             "can_increase_kelly": False,
             "can_flip_direction": False,
-            "can_initiate_trade": False,
+            "can_initiate_trade": replacement_bundle.trade_authority_status == "LIVE_AUTHORITY",
         },
     }
     return ReplacementForecastEventPayload(payload)

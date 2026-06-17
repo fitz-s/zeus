@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-20
+# Lifecycle: created=2026-04-27; last_reviewed=2026-06-17; last_reused=2026-06-17
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-20
+# Last reused/audited: 2026-06-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -38,6 +38,7 @@ from src.control.heartbeat_supervisor import (
     install_dedicated_heartbeat_http_timeout,
     run_heartbeat_keeper,
     write_heartbeat_keeper_status,
+    _describe_heartbeat_exception,
 )
 from src.state.db import init_schema
 from src.venue.polymarket_v2_adapter import HeartbeatAck
@@ -170,10 +171,32 @@ def test_default_heartbeat_timeout_derives_below_one_second_cadence(monkeypatch)
     assert 0.0 < timeout < cadence
 
 
+def test_request_exception_status_keeps_transport_cause():
+    """Opaque SDK request exceptions must still leave repairable operator evidence."""
+
+    root = TimeoutError("connect timed out")
+    exc = RuntimeError("PolyApiException[status_code=None, error_message=Request exception!]")
+    exc.__cause__ = root
+
+    got = _describe_heartbeat_exception(exc)
+
+    assert "RuntimeError: PolyApiException" in got
+    assert "cause=TimeoutError: connect timed out" in got
+
+
 def test_heartbeat_timeout_env_cannot_cover_full_cadence(monkeypatch):
     monkeypatch.setenv("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS", "5")
 
-    with pytest.raises(ValueError, match="shorter than heartbeat cadence"):
+    with pytest.raises(ValueError, match="no longer than half"):
+        heartbeat_http_timeout_seconds_from_env(5)
+
+
+def test_heartbeat_timeout_env_cannot_consume_most_of_cadence(monkeypatch):
+    """A 4s timeout on a 5s cadence leaves too little lease recovery margin."""
+
+    monkeypatch.setenv("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS", "4")
+
+    with pytest.raises(ValueError, match="no longer than half"):
         heartbeat_http_timeout_seconds_from_env(5)
 
 
@@ -337,6 +360,35 @@ def test_one_miss_degraded_two_misses_lost():
     assert lost.health is HeartbeatHealth.LOST
     assert lost.consecutive_failures == 2
     assert "miss-2" in (lost.last_error or "")
+
+
+def test_lost_generic_request_failure_attempts_empty_chain_recovery_but_keeps_gtc_blocked():
+    """A long generic request-exception streak can mean the client missed a
+    server-side rotation without receiving an Invalid Heartbeat ID body. Once the
+    lease is already LOST, empty-chain recovery is safer than pinning forever to
+    a stale local id; resting orders still stay blocked through the lease-gap
+    window after recovery."""
+    adapter = FakeHeartbeatAdapter([
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-1"}),
+        RuntimeError("request miss-1"),
+        RuntimeError("request miss-2"),
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-recovered"}),
+    ])
+    supervisor = HeartbeatSupervisor(adapter, cadence_seconds=5)
+
+    assert _run(supervisor.run_once()).health is HeartbeatHealth.HEALTHY
+    degraded = _run(supervisor.run_once())
+    recovered = _run(supervisor.run_once())
+
+    assert degraded.health is HeartbeatHealth.DEGRADED
+    assert recovered.health is HeartbeatHealth.HEALTHY
+    assert recovered.consecutive_failures == 0
+    assert recovered.heartbeat_id == "id-recovered"
+    assert recovered.lease_gap_suspected_until is not None
+    assert recovered.resting_order_safe() is False
+    assert supervisor.gate_for_order_type("GTC") is False
+    assert supervisor.gate_for_order_type("FOK") is True
+    assert adapter.heartbeat_ids == ["", "id-1", "id-1", ""]
 
 
 @pytest.mark.skip(reason="auto-pause tombstone retired 2026-05-04 — _write_failclosed_tombstone is now a no-op")

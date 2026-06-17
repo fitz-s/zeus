@@ -6,7 +6,7 @@
 #   byte-identical reconciliation events vs the legacy long-connection path.
 # Reuse: Run when command_recovery orchestration, venue_sync_contract, or the
 #   scheduled _edli_command_recovery_cycle connection topology changes.
-# Last reused/audited: 2026-06-11
+# Last reused/audited: 2026-06-17
 # Authority basis: operator directive 2026-06-11 ("cleanest STRUCTURAL fix") +
 #   the dependency_db_locked live incident (riskguard DATA_DEGRADED since ~03:36Z).
 """Relationship tests for the three-phase venue/DB sync contract.
@@ -111,6 +111,32 @@ class _RecordingClient:
     def get_clob_market_info(self, condition_id):
         self._recorder.on_client_call("get_clob_market_info")
         return {}
+
+
+def test_capture_snapshot_reads_account_surfaces_from_v2_adapter_when_outer_client_lacks_trades():
+    from src.execution import venue_sync_contract as vsc
+
+    class Adapter:
+        def get_open_orders(self):
+            return [{"id": "adapter-order"}]
+
+        def get_trades(self):
+            return [{"id": "adapter-trade"}]
+
+    class OuterClient:
+        def __init__(self):
+            self.adapter = Adapter()
+
+        def get_open_orders(self):
+            return [{"id": "outer-order"}]
+
+        def _ensure_v2_adapter(self):
+            return self.adapter
+
+    snapshot = vsc.capture_venue_read_snapshot(OuterClient(), order_ids=[])
+
+    assert snapshot.get_open_orders() == [{"id": "outer-order"}]
+    assert snapshot.get_trades() == [{"id": "adapter-trade"}]
 
 
 # ---------------------------------------------------------------------------

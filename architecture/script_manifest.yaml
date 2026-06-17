@@ -782,6 +782,25 @@ scripts:
     required_helpers: [src.contracts.settlement_semantics.SettlementSemantics]
     required_tests: [tests/test_authority_gate.py]
     reason: "Scoped high/low repair helper: rebuild settlements only from observations with authority='VERIFIED'; dry-run by default; source-conversion apply lane must pass city/date/metric filters."
+  repair_replacement_live_authority.py:
+    class: repair
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus-forecasts.db
+    read_targets: [state/zeus-forecasts.db, config/settings.json]
+    write_targets: [state/zeus-forecasts.db]
+    authority_scope: repair_write
+    lifecycle: long_lived
+    status: active
+    delete_policy: retain_until_superseded
+    reuse_when: "Operator-approved repair is needed to remove legacy replacement forecast shadow/veto statuses and restamp live-grade posterior rows as LIVE_AUTHORITY."
+    do_not_use_when: "Runtime policy is not LIVE_AUTHORITY, dry-run is not READY, or the target is not the canonical forecasts DB being repaired."
+    canonical_command: "python3 scripts/repair_replacement_live_authority.py [--db PATH] [--json] [--apply]"
+    external_inputs: []
+    promotion_barrier: "Dry-run default; --apply writes under db_writer_lock(BULK) and only rows with fused-Normal point q plus certified bootstrap q_lcb/q_ucb become LIVE_AUTHORITY."
+    required_helpers: [src.data.replacement_forecast_materializer._ensure_forecast_posteriors_live_authority_check, src.state.db_writer_lock.db_writer_lock]
+    required_tests: [tests/test_replacement_forecast_materializer.py, tests/test_replacement_forecast_bundle_reader_tradeable_latest.py]
   r3_drift_check.py:
     class: validation
     module_owner: scripts

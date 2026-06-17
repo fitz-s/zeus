@@ -412,31 +412,54 @@ def capture_venue_read_snapshot(
     """
     assert_no_open_connection("recovery.capture_venue_read_snapshot")
 
-    def _safe_account(method):
-        fn = getattr(client, method, None)
-        if not callable(fn):
-            return None
+    venue_sources = [client]
+    ensure_v2 = getattr(client, "_ensure_v2_adapter", None)
+    if callable(ensure_v2):
         try:
-            return list(fn() or [])
-        except Exception:  # noqa: BLE001 — surface unavailability as None (pass treats as unknown)
-            logger.warning("venue_sync_contract: account read %s unavailable", method, exc_info=True)
+            adapter = ensure_v2()
+        except Exception:  # noqa: BLE001 — fall back to the outer client surface.
+            logger.warning("venue_sync_contract: v2 adapter unavailable during snapshot", exc_info=True)
+        else:
+            if adapter is not client:
+                venue_sources.append(adapter)
+
+    def _safe_account(method):
+        saw_callable = False
+        for source in venue_sources:
+            fn = getattr(source, method, None)
+            if not callable(fn):
+                continue
+            saw_callable = True
+            try:
+                return list(fn() or [])
+            except Exception:  # noqa: BLE001 — try the next venue source if available.
+                logger.warning("venue_sync_contract: account read %s unavailable", method, exc_info=True)
+        if saw_callable:
             return None
+        return None
 
     open_orders = _safe_account("get_open_orders")
     trades = _safe_account("get_trades")
 
     orders: dict = {}
-    get_order = getattr(client, "get_order", None)
-    if callable(get_order):
+    get_order_source = next((getattr(source, "get_order", None) for source in venue_sources if callable(getattr(source, "get_order", None))), None)
+    if callable(get_order_source):
         for oid in {str(o) for o in order_ids if str(o).strip()}:
             try:
-                orders[oid] = get_order(oid)
+                orders[oid] = get_order_source(oid)
             except Exception:  # noqa: BLE001 — record the miss as None (== venue not found)
                 logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
                 orders[oid] = None
 
     idempotency: dict = {}
-    finder = getattr(client, "find_order_by_idempotency_key", None)
+    finder = next(
+        (
+            getattr(source, "find_order_by_idempotency_key", None)
+            for source in venue_sources
+            if callable(getattr(source, "find_order_by_idempotency_key", None))
+        ),
+        None,
+    )
     if callable(finder):
         for key in {str(k) for k in idempotency_keys if str(k).strip()}:
             try:
@@ -445,7 +468,14 @@ def capture_venue_read_snapshot(
                 idempotency[key] = None
 
     market_info: dict = {}
-    market_getter = getattr(client, "get_clob_market_info", None)
+    market_getter = next(
+        (
+            getattr(source, "get_clob_market_info", None)
+            for source in venue_sources
+            if callable(getattr(source, "get_clob_market_info", None))
+        ),
+        None,
+    )
     if callable(market_getter):
         for cid in {str(c) for c in condition_ids if str(c).strip()}:
             try:

@@ -24,10 +24,11 @@ THE CONTRACT:
 - Held-side conversion happens here, exactly once:
   buy_yes -> q(bin), buy_no -> 1 - q(bin). Position space is always held-side.
 - Freshness is an explicit age budget (settings key
-  ``edli.monitor_belief_max_age_hours``, default 9.0h ≈ fusion cycle
-  cadence + fanout slack). A stale or missing row NEVER silently borrows
-  freshness from another source — callers may still run legacy refreshers for
-  telemetry, but probability-authority freshness stays False.
+  the replacement source-cycle staleness horizon when ``source_cycle_time`` is
+  present, falling back to the legacy explicit age budget only for old schemas.
+  A stale or missing row NEVER silently borrows freshness from another source —
+  callers may still run legacy refreshers for telemetry, but probability-
+  authority freshness stays False.
 - Reads use a private short-lived read-only connection (URI mode=ro), never a
   shared live connection, and are never held across network I/O.
 """
@@ -68,12 +69,26 @@ class ReplacementBelief:
     bin_key: str
     direction: str
     source_table: str = BELIEF_SOURCE_TABLE
+    source_cycle_time: str | None = None
+    source_cycle_age_hours: float | None = None
+    freshness_basis: str = "computed_at"
 
     def freshness_validation(self) -> str:
         state = "fresh" if self.fresh else "stale"
-        return (
-            f"belief_source={self.source_table};age_h={self.age_hours:.2f};{state}"
-        )
+        if self.source_cycle_age_hours is not None:
+            return (
+                f"belief_source={self.source_table};age_h={self.age_hours:.2f};"
+                f"source_cycle_age_h={self.source_cycle_age_hours:.2f};"
+                f"basis={self.freshness_basis};{state}"
+            )
+        return f"belief_source={self.source_table};age_h={self.age_hours:.2f};{state}"
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
 
 
 def _parse_computed_at(raw: object) -> datetime | None:
@@ -142,9 +157,15 @@ def load_replacement_belief(
         return None
     try:
         conn.row_factory = sqlite3.Row
+        columns = _table_columns(conn, "forecast_posteriors")
+        source_cycle_expr = (
+            "source_cycle_time"
+            if "source_cycle_time" in columns
+            else "NULL AS source_cycle_time"
+        )
         row = conn.execute(
-            """
-            SELECT posterior_id, computed_at, q_json
+            f"""
+            SELECT posterior_id, computed_at, q_json, {source_cycle_expr}
             FROM forecast_posteriors
             WHERE city = ? AND target_date = ? AND temperature_metric = ?
             ORDER BY computed_at DESC
@@ -178,6 +199,27 @@ def load_replacement_belief(
         return None
     now_dt = now or datetime.now(timezone.utc)
     age_hours = (now_dt - computed_at).total_seconds() / 3600.0
+    source_cycle_time = _parse_computed_at(row["source_cycle_time"])
+    source_cycle_age_hours: float | None = None
+    freshness_basis = "computed_at"
+    fresh = 0.0 <= age_hours <= float(max_age_hours)
+    if source_cycle_time is not None:
+        try:
+            from src.data.replacement_forecast_cycle_policy import (
+                cycle_age_hours,
+                cycle_age_exceeds_bound,
+            )
+
+            source_cycle_age_hours = cycle_age_hours(now_dt, source_cycle_time)
+            fresh = (
+                0.0 <= age_hours
+                and 0.0 <= source_cycle_age_hours
+                and not cycle_age_exceeds_bound(now_dt, source_cycle_time)
+            )
+            freshness_basis = "source_cycle_time"
+        except Exception:  # noqa: BLE001 - keep the old explicit age gate as fallback
+            source_cycle_age_hours = (now_dt - source_cycle_time).total_seconds() / 3600.0
+            fresh = 0.0 <= age_hours <= float(max_age_hours)
     held = q_yes if direction == "buy_yes" else 1.0 - q_yes
     return ReplacementBelief(
         held_side_prob=held,
@@ -185,9 +227,14 @@ def load_replacement_belief(
         posterior_id=str(row["posterior_id"]),
         computed_at=str(row["computed_at"]),
         age_hours=age_hours,
-        fresh=0.0 <= age_hours <= float(max_age_hours),
+        fresh=fresh,
         bin_key=bin_key,
         direction=direction,
+        source_cycle_time=(
+            source_cycle_time.isoformat() if source_cycle_time is not None else None
+        ),
+        source_cycle_age_hours=source_cycle_age_hours,
+        freshness_basis=freshness_basis,
     )
 
 

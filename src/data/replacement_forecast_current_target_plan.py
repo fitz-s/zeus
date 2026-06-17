@@ -361,7 +361,7 @@ def build_replacement_forecast_current_target_plan(
             # raw inputs once the 3h TTL lapses — the stale-after-first-cycle bug). Only
             # a row whose expires_at is still in the future counts as live coverage.
             readiness_status_clause = """
-                          AND r.status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'READY')
+                          AND r.status = 'READY'
                           AND (r.expires_at IS NULL OR r.expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now'))
             """
         sql_limit = "" if limit is None else f" LIMIT {int(limit)}"
@@ -436,7 +436,7 @@ def build_replacement_forecast_current_target_plan(
                         FROM forecast_posteriors p
                         WHERE p.source_id = ?
                           AND p.training_allowed = 0
-                          AND p.trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                          AND p.trade_authority_status = 'LIVE_AUTHORITY'
                           AND p.city = targets.city
                           AND p.target_date = targets.target_date
                           AND p.temperature_metric = targets.temperature_metric
@@ -484,7 +484,7 @@ def build_replacement_forecast_current_target_plan(
                     FROM forecast_posteriors
                     WHERE source_id = ?
                       AND training_allowed = 0
-                      AND trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                      AND trade_authority_status = 'LIVE_AUTHORITY'
                       {posterior_tradeable_grade_clause.replace("p.q_lcb_json", "q_lcb_json")}
                     GROUP BY city, target_date, temperature_metric
                 ),

@@ -4511,13 +4511,13 @@ def _new_listing_scout_cycle() -> None:
         # the fast-lane latency benefit degrades gracefully to the normal 00Z/12Z wave cadence.
         try:
             from src.data.replacement_forecast_production import (
-                _replacement_forecast_shadow_materialization_queue_config,
+                _replacement_forecast_live_materialization_queue_config,
             )
             from src.data.replacement_forecast_shadow_materialization_queue import _write_request
             from src.contracts.replacement_pipeline_files import validate_scout_intent
             from pathlib import Path
 
-            queue_cfg = _replacement_forecast_shadow_materialization_queue_config()
+            queue_cfg = _replacement_forecast_live_materialization_queue_config()
             request_dir = queue_cfg.get("request_dir")
             if request_dir is not None:
                 # scout_intents/ is a sibling staging dir of requests/ — never the queue's input.
@@ -5591,6 +5591,8 @@ from src.data.replacement_forecast_production import (  # noqa: E402
     _download_replacement_forecast_current_targets_if_needed,
     _download_bayes_precision_fusion_extra_raw_inputs_if_needed,
     _replacement_forecast_download_cycle,
+    _replacement_forecast_live_materialization_queue_config,
+    _replacement_forecast_live_materialize_cycle,
     _replacement_forecast_runtime_flags_from_settings,
     _replacement_forecast_shadow_materialization_queue_config,
     _replacement_forecast_shadow_materialize_cycle,
@@ -5601,8 +5603,10 @@ def _replacement_forecast_refit_decision_from_settings():
     from src.config import PROJECT_ROOT
     from src.data.replacement_forecast_refit_handoff import refit_decision_from_handoff_payload
 
-    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
-    raw_path = cfg.get("refit_handoff_path") or "state/replacement_forecast_shadow/refit_handoff.json"
+    cfg = _settings_section("replacement_forecast_live", {}) or {}
+    if not cfg:
+        cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    raw_path = cfg.get("refit_handoff_path") or "state/replacement_forecast_live/refit_handoff.json"
     path = Path(str(raw_path))
     if not path.is_absolute():
         path = PROJECT_ROOT / path
@@ -5656,7 +5660,7 @@ def _current_live_fact_status(relative_path: str) -> str:
 
 
 # WIRING FIX (operator Point-1 directive 2026-06-08): _replacement_forecast_download_cycle
-# and _replacement_forecast_shadow_materialize_cycle were MOVED VERBATIM to
+# and _replacement_forecast_live_materialize_cycle were MOVED to
 # src/data/replacement_forecast_production.py and are now SCHEDULED on the forecast-live
 # (data) daemon (src/ingest/forecast_live_daemon.py). They are imported back into this
 # module (top of file) for by-name resolution only; the live-trading scheduler no longer
@@ -6563,26 +6567,43 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
     ).fetchall()
     if not rows:
         return []
-    # Resolve token_id → condition_id from the freshest executable_market_snapshots row.
+    # Resolve token_id -> condition_id and held-side direction from the freshest
+    # executable_market_snapshots row. BOOK_MOVED checks are direction-specific:
+    # buy_yes rests compare against YES best bid; buy_no rests compare against
+    # native NO best bid.
     token_ids = {str(r[2] or "") for r in rows if r[2]}
     cond_by_token: dict[str, str] = {}
+    side_by_token: dict[str, str] = {}
     if token_ids:
         try:
             tph = ",".join("?" for _ in token_ids)
             for cr in trade_conn.execute(
                 f"""
-                SELECT selected_outcome_token_id, condition_id,
-                       ROW_NUMBER() OVER (PARTITION BY selected_outcome_token_id
-                                          ORDER BY captured_at DESC) AS rn
+                SELECT selected_outcome_token_id, condition_id, yes_token_id, no_token_id,
+                       captured_at
                 FROM executable_market_snapshots
                 WHERE selected_outcome_token_id IN ({tph})
+                   OR yes_token_id IN ({tph})
+                   OR no_token_id IN ({tph})
+                ORDER BY captured_at DESC
                 """,
-                tuple(token_ids),
+                (*tuple(token_ids), *tuple(token_ids), *tuple(token_ids)),
             ).fetchall():
-                if cr[2] == 1 and cr[0]:
-                    cond_by_token[str(cr[0])] = str(cr[1] or "")
+                selected = str(cr[0] or "")
+                cond = str(cr[1] or "")
+                yes_token = str(cr[2] or "")
+                no_token = str(cr[3] or "")
+                for token, side in (
+                    (selected, "buy_no" if selected and selected == no_token else "buy_yes"),
+                    (yes_token, "buy_yes"),
+                    (no_token, "buy_no"),
+                ):
+                    if token and token in token_ids and token not in cond_by_token:
+                        cond_by_token[token] = cond
+                        side_by_token[token] = side
         except Exception:  # noqa: BLE001 — token→condition resolution is best-effort
             cond_by_token = {}
+            side_by_token = {}
     beliefs = _all_latest_beliefs(world_conn)
     # Index belief bins by condition_id → (belief, bin_label, posterior).
     bin_by_cond: dict[str, tuple] = {}
@@ -6609,10 +6630,10 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
             age_ms = max(0.0, (now - _dt.fromisoformat(created_at)).total_seconds() * 1000.0) if created_at else 0.0
         except Exception:  # noqa: BLE001
             age_ms = 0.0
-        # side is the venue side ('buy'/'sell'); map to the screen's buy_yes/buy_no via outcome.
-        screen_side = "buy_yes"  # rests are entry buys; YES vs NO is encoded in the token. Default
-        # to buy_yes — the belief-decay check is keyed on bin posterior which is YES-space; for a NO
-        # token the moved-book/stale checks still apply (they are side-agnostic on the limit).
+        screen_side = side_by_token.get(token_id, "buy_yes")
+        resting_held_side_posterior = (
+            1.0 - resting_posterior if screen_side == "buy_no" else resting_posterior
+        )
         out.append(
             OpenRest(
                 command_id=command_id,
@@ -6621,7 +6642,7 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
                 bin_label=bin_label,
                 side=screen_side,
                 condition_id=cond,
-                resting_posterior=resting_posterior,
+                resting_posterior=resting_held_side_posterior,
                 resting_snapshot_id=snap_id,
                 limit_price=float(price) if price is not None else 0.0,
                 quote_age_ms=age_ms,
@@ -7664,10 +7685,10 @@ def _edli_reactor_cycle_advance_enqueuer():
     world/trade txn is open — no DB connection is held across this call from the reactor side.
     """
     from src.data.replacement_forecast_production import (
-        _replacement_forecast_shadow_materialization_queue_config,
+        _replacement_forecast_live_materialization_queue_config,
     )
 
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    cfg = _replacement_forecast_live_materialization_queue_config()
     forecast_db = cfg.get("forecast_db")
     seed_dir = cfg.get("seed_dir")
     raw_manifest_dir = cfg.get("raw_manifest_dir")

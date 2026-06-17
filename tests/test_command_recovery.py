@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-06-17
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -408,8 +408,10 @@ def _seed_pending_entry_projection(
         "p_posterior": 0.9,
         "entry_ci_width": 0.0,
         "last_monitor_prob": None,
+        "last_monitor_prob_is_fresh": None,
         "last_monitor_edge": None,
         "last_monitor_market_price": None,
+        "last_monitor_market_price_is_fresh": None,
         "decision_snapshot_id": "snap-pos-001",
         "entry_method": "ens_member_counting",
         "strategy_key": "opening_inertia",
@@ -1009,6 +1011,217 @@ class TestRecoveryResolutionTable:
         assert summary["advanced"] == 0
         # get_order should NOT be called
         mock_client.get_order.assert_not_called()
+
+    def test_review_required_recovery_no_venue_order_id_auto_clears_on_absence_proof(
+        self, conn, mock_client
+    ):
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.venue_command_repo import append_event
+
+        _insert(
+            conn,
+            command_id="cmd-no-order",
+            position_id="pos-no-order",
+            decision_id="dec-no-order",
+            token_id="tok-no-order",
+            size=10.865300810243,
+            price=0.67,
+        )
+        append_event(
+            conn,
+            command_id="cmd-no-order",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={"reason": "recovery_no_venue_order_id"},
+        )
+        mock_client.get_open_orders.return_value = [
+            {"id": "unrelated", "asset_id": "other-token", "status": "LIVE"}
+        ]
+        mock_client.get_trades.return_value = [
+            {"id": "old-trade", "asset_id": "tok-no-order", "match_time": "1"}
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        before_count, _ = count_unknown_side_effects(conn)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert before_count == 1
+        assert _get_state(conn, "cmd-no-order") == "EXPIRED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-no-order")
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["reason"] == "review_cleared_no_venue_exposure"
+        assert payload["proof_class"] == "venue_absence_no_exposure"
+        assert payload["source_proof"]["source_function"] == "command_recovery._reconcile_row"
+        assert payload["venue_absence_proof"]["matching_open_order_count"] == 0
+        assert payload["venue_absence_proof"]["matching_trade_count"] == 0
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 0
+        assert after_markets == ()
+
+    def test_review_required_recovery_no_venue_order_id_confirmed_maker_trade_fills(
+        self, conn, mock_client
+    ):
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.venue_command_repo import append_event
+
+        _insert(
+            conn,
+            command_id="cmd-confirmed-maker",
+            position_id="pos-confirmed-maker",
+            decision_id="dec-confirmed-maker",
+            token_id="tok-confirmed-maker",
+            size=10.865300810243,
+            price=0.67,
+        )
+        append_event(
+            conn,
+            command_id="cmd-confirmed-maker",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={"reason": "recovery_no_venue_order_id"},
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-confirmed-maker",
+                "status": "CONFIRMED",
+                "match_time": "2026-04-26T00:02:00Z",
+                "transaction_hash": "0xtx-confirmed-maker",
+                "maker_orders": [
+                    {
+                        "asset_id": "tok-confirmed-maker",
+                        "order_id": "ord-confirmed-maker",
+                        "side": "BUY",
+                        "price": "0.67",
+                        "matched_amount": "10.86",
+                    }
+                ],
+            }
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-confirmed-maker") == "FILLED"
+        assert summary["advanced"] >= 1
+        cmd = conn.execute(
+            "SELECT venue_order_id FROM venue_commands WHERE command_id = 'cmd-confirmed-maker'"
+        ).fetchone()
+        assert cmd["venue_order_id"] == "ord-confirmed-maker"
+        events = _get_events(conn, "cmd-confirmed-maker")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "recovery_no_venue_order_id_confirmed_trade"
+        assert payload["required_predicates"]["maker_order_token_matches_command"] is True
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-confirmed-maker'
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-confirmed-maker",
+            "venue_order_id": "ord-confirmed-maker",
+            "state": "CONFIRMED",
+            "filled_size": "10.86",
+            "fill_price": "0.67",
+            "tx_hash": "0xtx-confirmed-maker",
+        }
+        unknown_count, unknown_markets = count_unknown_side_effects(conn)
+        assert unknown_count == 0
+        assert unknown_markets == ()
+
+    def test_review_required_recovery_no_venue_order_id_confirmed_trade_stays_when_order_open(
+        self, conn, mock_client
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(
+            conn,
+            command_id="cmd-confirmed-open",
+            position_id="pos-confirmed-open",
+            decision_id="dec-confirmed-open",
+            token_id="tok-confirmed-open",
+            size=10.865300810243,
+            price=0.67,
+        )
+        append_event(
+            conn,
+            command_id="cmd-confirmed-open",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={"reason": "recovery_no_venue_order_id"},
+        )
+        mock_client.get_open_orders.return_value = [{"id": "ord-confirmed-open"}]
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-confirmed-open",
+                "status": "CONFIRMED",
+                "match_time": "2026-04-26T00:02:00Z",
+                "maker_orders": [
+                    {
+                        "asset_id": "tok-confirmed-open",
+                        "order_id": "ord-confirmed-open",
+                        "side": "BUY",
+                        "price": "0.67",
+                        "matched_amount": "10.86",
+                    }
+                ],
+            }
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-confirmed-open") == "REVIEW_REQUIRED"
+        assert summary["advanced"] == 0
+        assert summary["stayed"] == 1
+        events = _get_events(conn, "cmd-confirmed-open")
+        assert events[-1]["event_type"] == "REVIEW_REQUIRED"
+
+    def test_review_required_recovery_no_venue_order_id_stays_on_matching_trade(
+        self, conn, mock_client
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(
+            conn,
+            command_id="cmd-has-trade",
+            position_id="pos-has-trade",
+            decision_id="dec-has-trade",
+            token_id="tok-has-trade",
+        )
+        append_event(
+            conn,
+            command_id="cmd-has-trade",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={"reason": "recovery_no_venue_order_id"},
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "matching-trade",
+                "asset_id": "tok-has-trade",
+                "match_time": "2026-04-26T00:02:00Z",
+            }
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-has-trade") == "REVIEW_REQUIRED"
+        assert summary["advanced"] == 0
+        assert summary["stayed"] == 1
+        events = _get_events(conn, "cmd-has-trade")
+        assert events[-1]["event_type"] == "REVIEW_REQUIRED"
 
     def test_cancel_unknown_review_required_live_order_restores_acked(self, conn, mock_client):
         _insert(conn, intent_kind="EXIT", side="SELL", size=11.62, price=0.02)

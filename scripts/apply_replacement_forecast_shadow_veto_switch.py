@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the replacement forecast shadow/veto switch with a rollback receipt."""
+"""Apply the replacement forecast live-authority switch with a rollback receipt."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.init_replacement_forecast_shadow_schema import initialize_replacement_forecast_shadow_schema  # noqa: E402
-from src.data.replacement_forecast_config_switch import TARGET_SHADOW_MATERIALIZATION_CONFIG, apply_replacement_forecast_config_switch, read_replacement_forecast_config_switch_plan  # noqa: E402
+from src.data.replacement_forecast_config_switch import TARGET_LIVE_MATERIALIZATION_CONFIG, apply_replacement_forecast_config_switch, read_replacement_forecast_config_switch_plan  # noqa: E402
 from src.data.replacement_forecast_current_fact_patch import read_replacement_forecast_current_fact_patch_plan  # noqa: E402
 from src.data.replacement_forecast_live_dry_run import ReplacementForecastLiveDryRunInput, build_replacement_forecast_live_dry_run_report  # noqa: E402
 from src.data.replacement_forecast_live_switch_surface import CURRENT_DATA_FACT_FILE, CURRENT_SOURCE_FACT_FILE, REFIT_HANDOFF_FILE  # noqa: E402
@@ -91,18 +91,18 @@ def _ensure_safe_flags(flags: Mapping[str, object]) -> None:
     missing = [key for key in REQUIRED_FLAGS if key not in flags]
     if missing:
         raise RuntimeError(f"replacement runtime flags missing after apply: {','.join(missing)}")
-    dangerous = {
+    required_live = {
         TRADE_AUTHORITY_FLAG: flags.get(TRADE_AUTHORITY_FLAG),
         KELLY_INCREASE_FLAG: flags.get(KELLY_INCREASE_FLAG),
         DIRECTION_FLIP_FLAG: flags.get(DIRECTION_FLIP_FLAG),
     }
-    if any(value is not False for value in dangerous.values()):
-        raise RuntimeError(f"replacement live authority flags are not all false: {dangerous}")
+    if any(value is not True for value in required_live.values()):
+        raise RuntimeError(f"replacement live authority flags are not all true: {required_live}")
 
 
-def _ensure_shadow_materialization_dirs(root: Path) -> dict[str, str]:
+def _ensure_live_materialization_dirs(root: Path) -> dict[str, str]:
     created_or_existing: dict[str, str] = {}
-    for key, value in TARGET_SHADOW_MATERIALIZATION_CONFIG.items():
+    for key, value in TARGET_LIVE_MATERIALIZATION_CONFIG.items():
         if not key.endswith("_dir"):
             continue
         path = root / str(value)
@@ -111,7 +111,7 @@ def _ensure_shadow_materialization_dirs(root: Path) -> dict[str, str]:
     return created_or_existing
 
 
-def apply_replacement_forecast_shadow_veto_switch(
+def apply_replacement_forecast_live_authority_switch(
     *,
     live_root: Path,
     evidence_json: Path,
@@ -120,11 +120,11 @@ def apply_replacement_forecast_shadow_veto_switch(
     apply: bool = False,
     optional_dependencies: tuple[str, ...] = ("requests",),
 ) -> dict[str, object]:
-    """Plan or apply the chosen replacement strategy as shadow/veto only."""
+    """Plan or apply the chosen replacement strategy as live authority."""
 
     root = Path(live_root)
     generated_at = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    effective_backup_dir = Path(backup_dir) if backup_dir is not None else root / "state" / "replacement_forecast_shadow" / "switch_backups" / generated_at
+    effective_backup_dir = Path(backup_dir) if backup_dir is not None else root / "state" / "replacement_forecast_live" / "switch_backups" / generated_at
     settings_path = root / "config" / "settings.json"
     forecast_db = root / "state" / "zeus-forecasts.db"
 
@@ -142,10 +142,10 @@ def apply_replacement_forecast_shadow_veto_switch(
         reasons.append("REPLACEMENT_SWITCH_CURRENT_FACT_PLAN_BLOCKED")
     if not refit_plan.ready:
         reasons.append("REPLACEMENT_SWITCH_REFIT_HANDOFF_PLAN_BLOCKED")
-    if config_plan.policy_status_after != "SHADOW_VETO_ONLY":
-        reasons.append("REPLACEMENT_SWITCH_TARGET_POLICY_NOT_SHADOW_VETO_ONLY")
-    if any(config_plan.target_flags.get(key) is not False for key in (TRADE_AUTHORITY_FLAG, KELLY_INCREASE_FLAG, DIRECTION_FLIP_FLAG)):
-        reasons.append("REPLACEMENT_SWITCH_DANGEROUS_TARGET_FLAG")
+    if config_plan.policy_status_after != "LIVE_AUTHORITY":
+        reasons.append("REPLACEMENT_SWITCH_TARGET_POLICY_NOT_LIVE_AUTHORITY")
+    if any(config_plan.target_flags.get(key) is not True for key in (TRADE_AUTHORITY_FLAG, KELLY_INCREASE_FLAG, DIRECTION_FLIP_FLAG)):
+        reasons.append("REPLACEMENT_SWITCH_LIVE_TARGET_FLAG_MISSING")
 
     backups: dict[str, str] = {}
     applied_steps: list[str] = []
@@ -158,11 +158,11 @@ def apply_replacement_forecast_shadow_veto_switch(
         backups = _backup_live_files(root, effective_backup_dir)
         config_apply_plan = apply_replacement_forecast_config_switch(settings_path)
         config_apply_report = config_apply_plan.as_dict()
-        applied_steps.append("config_shadow_veto_flags")
-        materialization_dirs = _ensure_shadow_materialization_dirs(root)
-        applied_steps.append("shadow_materialization_dirs")
+        applied_steps.append("config_live_authority_flags")
+        materialization_dirs = _ensure_live_materialization_dirs(root)
+        applied_steps.append("live_materialization_dirs")
         schema_report = initialize_replacement_forecast_shadow_schema(forecast_db, commit=True)
-        applied_steps.append("replacement_shadow_schema")
+        applied_steps.append("replacement_live_schema")
         refit_apply = plan_replacement_forecast_refit_handoff_install(
             live_root=root,
             refit_handoff_json=refit_handoff_json,
@@ -193,12 +193,12 @@ def apply_replacement_forecast_shadow_veto_switch(
     )
     if apply and not dry_run.ok:
         reasons.append("REPLACEMENT_SWITCH_POST_APPLY_DRY_RUN_BLOCKED")
-    status = "SHADOW_VETO_SWITCH_APPLIED" if apply and not reasons else "SHADOW_VETO_SWITCH_READY" if not apply and not reasons else "SHADOW_VETO_SWITCH_BLOCKED"
+    status = "LIVE_AUTHORITY_SWITCH_APPLIED" if apply and not reasons else "LIVE_AUTHORITY_SWITCH_READY" if not apply and not reasons else "LIVE_AUTHORITY_SWITCH_BLOCKED"
     live_root_written = bool(apply and applied_steps)
     return {
-        "schema_version": "replacement_forecast_shadow_veto_switch_receipt_v1",
+        "schema_version": "replacement_forecast_live_authority_switch_receipt_v1",
         "status": status,
-        "reason_codes": list(dict.fromkeys(reasons or ["REPLACEMENT_SHADOW_VETO_SWITCH_READY"])),
+        "reason_codes": list(dict.fromkeys(reasons or ["REPLACEMENT_LIVE_AUTHORITY_SWITCH_READY"])),
         "live_root": str(root),
         "live_root_written": live_root_written,
         "apply_requested": bool(apply),
@@ -209,7 +209,7 @@ def apply_replacement_forecast_shadow_veto_switch(
         "strategy": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
         "fixed_config": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00",
         "config_switch": config_apply_report or config_plan.as_dict(),
-        "shadow_materialization_dirs": materialization_dirs,
+        "live_materialization_dirs": materialization_dirs,
         "schema_commit": schema_report,
         "refit_handoff_install": refit_apply_report or refit_plan.as_dict(),
         "current_fact_patch": {**current_fact_plan.as_dict(), "written": current_fact_written},
@@ -221,7 +221,7 @@ def apply_replacement_forecast_shadow_veto_switch(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Apply replacement forecast shadow/veto simple switch")
+    parser = argparse.ArgumentParser(description="Apply replacement forecast live-authority switch")
     parser.add_argument("--live-root", type=Path, default=ROOT)
     parser.add_argument("--evidence-json", type=Path, required=True)
     parser.add_argument("--refit-handoff-json", type=Path, required=True)
@@ -232,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stdout", action="store_true")
     args = parser.parse_args(argv)
     try:
-        receipt = apply_replacement_forecast_shadow_veto_switch(
+        receipt = apply_replacement_forecast_live_authority_switch(
             live_root=args.live_root,
             evidence_json=args.evidence_json,
             refit_handoff_json=args.refit_handoff_json,
@@ -250,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(receipt, sort_keys=True, default=_json_default))
     else:
         print(f"{receipt['status']}: {','.join(receipt['reason_codes'])}")
-    return 0 if receipt["status"] in {"SHADOW_VETO_SWITCH_READY", "SHADOW_VETO_SWITCH_APPLIED"} else 1
+    return 0 if receipt["status"] in {"LIVE_AUTHORITY_SWITCH_READY", "LIVE_AUTHORITY_SWITCH_APPLIED"} else 1
 
 
 if __name__ == "__main__":

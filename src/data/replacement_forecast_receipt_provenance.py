@@ -1,4 +1,4 @@
-"""Receipt provenance for replacement forecast shadow/veto attribution.
+"""Receipt provenance for replacement forecast attribution.
 
 This module intentionally builds a payload only. It does not write receipts,
 settlements, training rows, or live trading state.
@@ -19,7 +19,7 @@ STRATEGY_KEY = SOURCE_ID
 RECEIPT_ROLE = "forecast_attribution_only"
 SETTLEMENT_AUTHORITY_STATUS = "NO_SETTLEMENT_AUTHORITY"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
-_ALLOWED_TRADE_AUTHORITY_STATUS = {"SHADOW_ONLY", "SHADOW_VETO_ONLY", "LIVE_AUTHORITY"}
+_ALLOWED_TRADE_AUTHORITY_STATUS = {"DIAGNOSTIC_ONLY", "LIVE_AUTHORITY"}
 _REQUIRED_DEPENDENCY_ROLES = ("baseline_b0", "aifs_sampled_2t", "openmeteo_ifs9_anchor", "soft_anchor_posterior")
 _FORBIDDEN_SETTLEMENT_KEYS = {
     "settlement_value",
@@ -124,7 +124,7 @@ class ReplacementForecastReceiptProvenance:
         if self.payload.get("promotion_allowed") is not False:
             raise ValueError("replacement receipt provenance cannot authorize promotion")
         if self.payload.get("trade_authority_status") not in _ALLOWED_TRADE_AUTHORITY_STATUS:
-            raise ValueError("replacement receipt provenance must remain shadow/veto only")
+            raise ValueError("replacement receipt provenance trade authority status is invalid")
         for key in ("source_id", "product_id", "strategy_key"):
             _require_text(self.payload[key], field_name=key)
 
@@ -149,7 +149,7 @@ def build_replacement_forecast_receipt_provenance(
     if not isinstance(readiness, ReplacementForecastReadinessDecision):
         raise TypeError("readiness must be ReplacementForecastReadinessDecision")
     if readiness.status != READY_STATUS:
-        raise ValueError("replacement receipt provenance requires SHADOW_ONLY readiness")
+        raise ValueError("replacement receipt provenance requires READY readiness")
     trade_authority_status = _require_text(_read_attr(veto_decision, "trade_authority_status"), field_name="trade_authority_status")
     if trade_authority_status not in _ALLOWED_TRADE_AUTHORITY_STATUS:
         raise ValueError("replacement receipt provenance trade authority status is invalid")

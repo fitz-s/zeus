@@ -1,4 +1,4 @@
-"""Config switch planner for replacement forecast shadow/veto activation."""
+"""Config switch planner for replacement forecast live-authority activation."""
 
 from __future__ import annotations
 
@@ -13,38 +13,27 @@ from src.data.replacement_forecast_runtime_policy import (
     REQUIRED_FLAGS,
     ReplacementForecastCapitalObjectiveEvidence,
     ReplacementForecastPromotionEvidence,
-    SHADOW_FLAG,
     TRADE_AUTHORITY_FLAG,
-    VETO_FLAG,
     resolve_replacement_forecast_runtime_policy,
 )
 
 
-TARGET_SHADOW_VETO_FLAGS = {
-    SHADOW_FLAG: True,
-    VETO_FLAG: True,
-    TRADE_AUTHORITY_FLAG: False,
-    KELLY_INCREASE_FLAG: False,
-    DIRECTION_FLIP_FLAG: False,
-}
 TARGET_LIVE_AUTHORITY_FLAGS = {
-    SHADOW_FLAG: True,
-    VETO_FLAG: True,
     TRADE_AUTHORITY_FLAG: True,
     KELLY_INCREASE_FLAG: True,
     DIRECTION_FLIP_FLAG: True,
 }
-TARGET_SHADOW_MATERIALIZATION_CONFIG = {
+TARGET_LIVE_MATERIALIZATION_CONFIG = {
     "forecast_db": "state/zeus-forecasts.db",
-    "raw_manifest_dir": "state/replacement_forecast_shadow/raw_manifests",
-    "request_dir": "state/replacement_forecast_shadow/requests",
-    "processed_dir": "state/replacement_forecast_shadow/processed",
-    "failed_dir": "state/replacement_forecast_shadow/failed",
-    "seed_dir": "state/replacement_forecast_shadow/seeds",
-    "seed_processed_dir": "state/replacement_forecast_shadow/seeds_processed",
-    "seed_failed_dir": "state/replacement_forecast_shadow/seeds_failed",
-    "refit_handoff_path": "state/replacement_forecast_shadow/refit_handoff.json",
-    "promotion_evidence_path": "state/replacement_forecast_shadow/promotion_evidence.json",
+    "raw_manifest_dir": "state/replacement_forecast_live/raw_manifests",
+    "request_dir": "state/replacement_forecast_live/requests",
+    "processed_dir": "state/replacement_forecast_live/processed",
+    "failed_dir": "state/replacement_forecast_live/failed",
+    "seed_dir": "state/replacement_forecast_live/seeds",
+    "seed_processed_dir": "state/replacement_forecast_live/seeds_processed",
+    "seed_failed_dir": "state/replacement_forecast_live/seeds_failed",
+    "refit_handoff_path": "state/replacement_forecast_live/refit_handoff.json",
+    "promotion_evidence_path": "state/replacement_forecast_live/promotion_evidence.json",
     "materialization_interval_min": 5,
     "seed_discovery_limit_per_cycle": 10,
     "seed_limit_per_cycle": 10,
@@ -58,8 +47,8 @@ class ReplacementForecastConfigSwitchPlan:
     reason_codes: tuple[str, ...]
     current_flags: Mapping[str, bool]
     target_flags: Mapping[str, bool]
-    current_shadow_config: Mapping[str, Any]
-    target_shadow_config: Mapping[str, Any]
+    current_materialization_config: Mapping[str, Any]
+    target_materialization_config: Mapping[str, Any]
     json_patch: tuple[Mapping[str, Any], ...]
     policy_status_after: str
 
@@ -73,8 +62,8 @@ class ReplacementForecastConfigSwitchPlan:
             "reason_codes": list(self.reason_codes),
             "current_flags": dict(self.current_flags),
             "target_flags": dict(self.target_flags),
-            "current_shadow_config": dict(self.current_shadow_config),
-            "target_shadow_config": dict(self.target_shadow_config),
+            "current_materialization_config": dict(self.current_materialization_config),
+            "target_materialization_config": dict(self.target_materialization_config),
             "json_patch": [dict(item) for item in self.json_patch],
             "policy_status_after": self.policy_status_after,
         }
@@ -89,27 +78,29 @@ def _feature_flags(settings_payload: Mapping[str, Any]) -> Mapping[str, Any]:
     return flags
 
 
-def _shadow_config(settings_payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    raw = settings_payload.get("replacement_forecast_shadow")
+def _materialization_config(settings_payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    raw = settings_payload.get("replacement_forecast_live")
+    if raw is None:
+        raw = settings_payload.get("replacement_forecast_shadow")
     if raw is None:
         return {}
     if not isinstance(raw, Mapping):
-        raise ValueError("settings payload replacement_forecast_shadow must be an object")
+        raise ValueError("settings payload replacement_forecast_live must be an object")
     return raw
 
 
 def build_replacement_forecast_config_switch_plan(
     settings_payload: Mapping[str, Any],
 ) -> ReplacementForecastConfigSwitchPlan:
-    """Plan the exact safe config change for shadow/veto use only."""
+    """Compatibility entry point; plan the live-authority config change."""
 
     return _build_replacement_forecast_config_switch_plan(
         settings_payload,
-        target_flags=TARGET_SHADOW_VETO_FLAGS,
-        target_policy_status="SHADOW_VETO_ONLY",
+        target_flags=TARGET_LIVE_AUTHORITY_FLAGS,
+        target_policy_status="LIVE_AUTHORITY",
         promotion_evidence=None,
         capital_objective_evidence=None,
-        dangerous_flags_allowed=False,
+        dangerous_flags_allowed=True,
     )
 
 
@@ -147,9 +138,9 @@ def _build_replacement_forecast_config_switch_plan(
     patch_notes: list[str] = []
     if any(key not in flags for key in REQUIRED_FLAGS):
         patch_notes.append("REPLACEMENT_CONFIG_FLAGS_WILL_BE_ADDED")
-    shadow_config = _shadow_config(settings_payload)
-    if any(shadow_config.get(key) != value for key, value in TARGET_SHADOW_MATERIALIZATION_CONFIG.items()):
-        patch_notes.append("REPLACEMENT_CONFIG_SHADOW_MATERIALIZATION_WILL_BE_ADDED")
+    materialization_config = _materialization_config(settings_payload)
+    if any(materialization_config.get(key) != value for key, value in TARGET_LIVE_MATERIALIZATION_CONFIG.items()):
+        patch_notes.append("REPLACEMENT_CONFIG_LIVE_MATERIALIZATION_WILL_BE_ADDED")
     current: dict[str, bool] = {}
     for key in REQUIRED_FLAGS:
         if key not in flags:
@@ -191,24 +182,24 @@ def _build_replacement_forecast_config_switch_plan(
             ),
             *(
                 {
-                    "op": "replace" if key in shadow_config else "add",
-                    "path": f"/replacement_forecast_shadow/{key}",
+                    "op": "replace" if key in materialization_config else "add",
+                    "path": f"/replacement_forecast_live/{key}",
                     "value": value,
-                    "current_value": shadow_config.get(key),
+                    "current_value": materialization_config.get(key),
                 }
-                for key, value in TARGET_SHADOW_MATERIALIZATION_CONFIG.items()
-                if shadow_config.get(key) != value
+                for key, value in TARGET_LIVE_MATERIALIZATION_CONFIG.items()
+                if materialization_config.get(key) != value
             ),
         ]
     )
     status = "READY" if not reasons else "BLOCKED"
     return ReplacementForecastConfigSwitchPlan(
         status=status,
-        reason_codes=tuple(dict.fromkeys(reasons or patch_notes or ["REPLACEMENT_CONFIG_SHADOW_VETO_PATCH_READY"])),
+        reason_codes=tuple(dict.fromkeys(reasons or patch_notes or ["REPLACEMENT_CONFIG_LIVE_AUTHORITY_PATCH_READY"])),
         current_flags=current,
         target_flags=target,
-        current_shadow_config=dict(shadow_config),
-        target_shadow_config=dict(TARGET_SHADOW_MATERIALIZATION_CONFIG),
+        current_materialization_config=dict(materialization_config),
+        target_materialization_config=dict(TARGET_LIVE_MATERIALIZATION_CONFIG),
         json_patch=patch,
         policy_status_after=policy.status if policy is not None else "BLOCKED",
     )
@@ -232,11 +223,11 @@ def apply_replacement_forecast_config_switch(settings_path: Path | str) -> Repla
     flags = payload.setdefault("feature_flags", {})
     if not isinstance(flags, dict):
         raise ValueError("feature_flags must be an object")
-    flags.update(TARGET_SHADOW_VETO_FLAGS)
-    shadow_config = payload.setdefault("replacement_forecast_shadow", {})
-    if not isinstance(shadow_config, dict):
-        raise ValueError("replacement_forecast_shadow must be an object")
-    shadow_config.update(TARGET_SHADOW_MATERIALIZATION_CONFIG)
+    flags.update(TARGET_LIVE_AUTHORITY_FLAGS)
+    materialization_config = payload.setdefault("replacement_forecast_live", {})
+    if not isinstance(materialization_config, dict):
+        raise ValueError("replacement_forecast_live must be an object")
+    materialization_config.update(TARGET_LIVE_MATERIALIZATION_CONFIG)
     path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
     return plan
 
@@ -262,9 +253,9 @@ def apply_replacement_forecast_live_authority_config_switch(
     if not isinstance(flags, dict):
         raise ValueError("feature_flags must be an object")
     flags.update(TARGET_LIVE_AUTHORITY_FLAGS)
-    shadow_config = payload.setdefault("replacement_forecast_shadow", {})
-    if not isinstance(shadow_config, dict):
-        raise ValueError("replacement_forecast_shadow must be an object")
-    shadow_config.update(TARGET_SHADOW_MATERIALIZATION_CONFIG)
+    materialization_config = payload.setdefault("replacement_forecast_live", {})
+    if not isinstance(materialization_config, dict):
+        raise ValueError("replacement_forecast_live must be an object")
+    materialization_config.update(TARGET_LIVE_MATERIALIZATION_CONFIG)
     path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
     return plan

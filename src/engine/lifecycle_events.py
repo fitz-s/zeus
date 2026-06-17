@@ -187,6 +187,12 @@ def _settled_economics_value(position: Any, attr: str) -> object | None:
     return float(value)
 
 
+def _nullable_bool_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return 1 if bool(value) else 0
+
+
 def build_position_current_projection(position: Any) -> dict:
     _position_metric = resolve_position_metric(position)
     return {
@@ -212,8 +218,14 @@ def build_position_current_projection(position: Any) -> dict:
         "exit_retry_count": int(getattr(position, "exit_retry_count", 0) or 0),
         "next_exit_retry_at": _nullable(getattr(position, "next_exit_retry_at", None)),
         "last_monitor_prob": _nullable(getattr(position, "last_monitor_prob", None)),
+        "last_monitor_prob_is_fresh": _nullable_bool_int(
+            getattr(position, "last_monitor_prob_is_fresh", None)
+        ),
         "last_monitor_edge": _nullable(getattr(position, "last_monitor_edge", None)),
         "last_monitor_market_price": _nullable(getattr(position, "last_monitor_market_price", None)),
+        "last_monitor_market_price_is_fresh": _nullable_bool_int(
+            getattr(position, "last_monitor_market_price_is_fresh", None)
+        ),
         "decision_snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
         "entry_method": getattr(position, "entry_method", ""),
         "strategy_key": _strategy_key(position),

@@ -4356,8 +4356,14 @@ CREATE TABLE IF NOT EXISTS position_current (
     p_posterior REAL,
     entry_ci_width REAL,
     last_monitor_prob REAL,
+    last_monitor_prob_is_fresh INTEGER CHECK (
+        last_monitor_prob_is_fresh IS NULL OR last_monitor_prob_is_fresh IN (0,1)
+    ),
     last_monitor_edge REAL,
     last_monitor_market_price REAL,
+    last_monitor_market_price_is_fresh INTEGER CHECK (
+        last_monitor_market_price_is_fresh IS NULL OR last_monitor_market_price_is_fresh IN (0,1)
+    ),
     decision_snapshot_id TEXT,
     entry_method TEXT,
     strategy_key TEXT NOT NULL,
@@ -9728,6 +9734,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         "chain_seen_at",
         "chain_absence_at",
         "entry_ci_width",
+        "last_monitor_prob_is_fresh",
+        "last_monitor_market_price_is_fresh",
         "exit_retry_count",
         "next_exit_retry_at",
     )
@@ -9803,8 +9811,12 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "exit_retry_count": row["exit_retry_count"],
                 "next_exit_retry_at": row["next_exit_retry_at"],
                 "last_monitor_prob": _finite_float_or_none(row["last_monitor_prob"]),
+                "last_monitor_prob_is_fresh": bool(row["last_monitor_prob_is_fresh"] or False),
                 "last_monitor_edge": _finite_float_or_none(row["last_monitor_edge"]),
                 "last_monitor_market_price": row["last_monitor_market_price"],
+                "last_monitor_market_price_is_fresh": bool(
+                    row["last_monitor_market_price_is_fresh"] or False
+                ),
                 "decision_snapshot_id": str(row["decision_snapshot_id"] or ""),
                 "entry_method": str(row["entry_method"] or ""),
                 "strategy_key": str(row["strategy_key"] or ""),

@@ -531,6 +531,266 @@ def test_open_order_at_exchange_absent_locally_becomes_finding_not_command(conn)
     assert conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0] == 0
 
 
+def test_live_partial_ghost_sell_against_known_position_rebuilds_exit_journal(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "known-no-token"
+    seed_command(
+        conn,
+        command_id="cmd-entry-known",
+        venue_order_id="ord-entry-known",
+        position_id="pos-known",
+        token_id=token,
+        side="BUY",
+        size=18.682141,
+        price=0.72,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-entry-known",
+        venue_order_id="ord-entry-known",
+        token_id=token,
+        trade_id="trade-entry-known",
+        size="18.682141",
+        fill_price="0.72",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-known", order_id="ord-entry-known")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               token_id = 'opposite-yes-token',
+               no_token_id = ?,
+               condition_id = 'condition-m5',
+               market_id = 'condition-m5',
+               direction = 'buy_no',
+               shares = 18.682141,
+               chain_shares = 18.682141,
+               cost_basis_usd = 13.45114152,
+               entry_price = 0.72,
+               chain_state = 'synced',
+               order_status = 'partial',
+               updated_at = ?
+         WHERE position_id = 'pos-known'
+        """,
+        (token, NOW.isoformat()),
+    )
+    ghost_order_id = "ord-live-ghost-sell"
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            open_orders=[
+                order(
+                    order_id=ghost_order_id,
+                    status="LIVE",
+                    asset_id=token,
+                    side="SELL",
+                    original_size="18.68",
+                    size_matched="5.06",
+                    price="0.048",
+                    market="condition-m5",
+                )
+            ],
+            trades=[
+                trade(
+                    trade_id="trade-live-ghost-sell",
+                    order_id=ghost_order_id,
+                    size="5.06",
+                    price="0.048",
+                    fill_price="0.048",
+                    status="CONFIRMED",
+                    asset_id=token,
+                    side="BUY",
+                    maker_orders=[
+                        {
+                            "order_id": ghost_order_id,
+                            "asset_id": token,
+                            "matched_amount": "5.06",
+                            "price": "0.048",
+                            "side": "SELL",
+                        }
+                    ],
+                )
+            ],
+            positions=[position(token_id=token, size="13.622141")],
+        ),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert not any(f.kind == "exchange_ghost_order" for f in result)
+    recovered = conn.execute(
+        """
+        SELECT command_id, intent_kind, side, state, venue_order_id, token_id
+          FROM venue_commands
+         WHERE venue_order_id = ?
+        """,
+        (ghost_order_id,),
+    ).fetchone()
+    assert recovered is not None
+    assert recovered["command_id"].startswith("recovered_exit:")
+    assert dict(recovered) | {"command_id": recovered["command_id"]} == {
+        "command_id": recovered["command_id"],
+        "intent_kind": "EXIT",
+        "side": "SELL",
+        "state": "PARTIAL",
+        "venue_order_id": ghost_order_id,
+        "token_id": token,
+    }
+    trade_fact = conn.execute(
+        """
+        SELECT state, filled_size, fill_price
+          FROM venue_trade_facts
+         WHERE trade_id = 'trade-live-ghost-sell'
+        """
+    ).fetchone()
+    assert dict(trade_fact) == {
+        "state": "CONFIRMED",
+        "filled_size": "5.06",
+        "fill_price": "0.048",
+    }
+    current = conn.execute(
+        """
+        SELECT phase, shares, chain_shares, order_id, order_status, exit_reason
+          FROM position_current
+         WHERE position_id = 'pos-known'
+        """
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["order_id"] == ghost_order_id
+    assert current["order_status"] == "sell_pending_confirmation"
+    assert current["exit_reason"] == "M5_LIVE_GHOST_SELL_RECOVERY"
+    assert abs(float(current["shares"]) - 13.622141) < 0.0001
+    assert abs(float(current["chain_shares"]) - 13.622141) < 0.0001
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, order_id, command_id
+          FROM position_events
+         WHERE position_id = 'pos-known'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert event["event_type"] == "EXIT_INTENT"
+    assert event["phase_before"] == "voided"
+    assert event["phase_after"] == "pending_exit"
+    assert event["order_id"] == ghost_order_id
+    assert event["command_id"] == recovered["command_id"]
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM exchange_reconcile_findings
+         WHERE subject_id = ?
+           AND kind = 'exchange_ghost_order'
+           AND resolved_at IS NULL
+        """,
+        (ghost_order_id,),
+    ).fetchone()[0] == 0
+
+
+def test_live_partial_ghost_sell_stays_finding_when_position_conservation_fails(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "mismatched-known-token"
+    seed_command(
+        conn,
+        command_id="cmd-entry-mismatched",
+        venue_order_id="ord-entry-mismatched",
+        position_id="pos-mismatched",
+        token_id=token,
+        side="BUY",
+        size=18.682141,
+        price=0.72,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-entry-mismatched",
+        venue_order_id="ord-entry-mismatched",
+        token_id=token,
+        trade_id="trade-entry-mismatched",
+        size="18.682141",
+        fill_price="0.72",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-mismatched", order_id="ord-entry-mismatched")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               token_id = ?,
+               shares = 18.682141,
+               chain_shares = 18.682141,
+               entry_price = 0.72,
+               chain_state = 'synced',
+               updated_at = ?
+         WHERE position_id = 'pos-mismatched'
+        """,
+        (token, NOW.isoformat()),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            open_orders=[
+                order(
+                    order_id="ord-mismatched-ghost-sell",
+                    status="LIVE",
+                    asset_id=token,
+                    side="SELL",
+                    original_size="18.68",
+                    size_matched="5.06",
+                    price="0.048",
+                    market="condition-m5",
+                )
+            ],
+            trades=[],
+            positions=[position(token_id=token, size="7.0")],
+        ),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert any(f.kind == "exchange_ghost_order" for f in result)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE command_id LIKE 'recovered_exit:%'"
+    ).fetchone()[0] == 0
+
+
+def test_ws_gap_ignores_account_wide_unlinked_trade_noise(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    unrelated = trade(
+        trade_id="trade-unrelated-account-wide",
+        order_id="ord-not-local",
+        size="3.0",
+        price="0.42",
+        status="CONFIRMED",
+    )
+
+    ws_gap_result = run_reconcile_sweep(
+        FakeM5Adapter(trades=[unrelated], positions=[]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+    assert ws_gap_result == []
+    assert conn.execute(
+        "SELECT COUNT(*) FROM exchange_reconcile_findings WHERE kind='unrecorded_trade'"
+    ).fetchone()[0] == 0
+
+    periodic_result = run_reconcile_sweep(
+        FakeM5Adapter(trades=[unrelated], positions=[]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+    assert any(f.kind == "unrecorded_trade" for f in periodic_result)
+
+
 def test_local_RESTING_absent_at_exchange_with_no_trade_marks_canceled_or_wiped_or_suspect(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

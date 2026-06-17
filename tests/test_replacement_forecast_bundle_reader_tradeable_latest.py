@@ -3,18 +3,19 @@
 # Authority basis: operator clobber-category directive 2026-06-10 (tradeable-latest read
 #   semantics). Third recurrence of the bounds-less clobber: a NEWER model cycle that has
 #   anchor manifests but no fusion instruments yet writes a bounds-less posterior
-#   (q_lcb_json NULL, replacement_q_mode=BAYES_PRECISION_FUSION_CAPTURE_MISSING — a SHADOW row by design) which
-#   the absolute-latest read semantics serve over the older tradeable-grade FUSED row, so live
-#   eligibility collapses. The fix makes the category impossible at the ONE bundle reader: LIVE
-#   selection prefers the latest row WITH certified bounds + live-eligible q_mode over a newer
-#   bounds-less row; the newer bounds-less row stays visible for shadow/telemetry. The existing
-#   30h cycle-age staleness bound still applies to the served tradeable row (falling back to an
-#   older tradeable row NEVER bypasses staleness).
-"""Relationship tests — tradeable-latest read semantics (the bounds-less clobber category).
+#   (q_lcb_json NULL, replacement_q_mode=BAYES_PRECISION_FUSION_CAPTURE_MISSING — a diagnostic
+#   row by design) which the absolute-latest read semantics serve over the older live-grade FUSED
+#   row, so live eligibility collapses. The fix makes the category impossible at the ONE bundle
+#   reader: LIVE selection prefers the latest row WITH row-level LIVE_AUTHORITY, certified bounds,
+#   and live-eligible q_mode over a newer bounds-less row; the newer row stays visible for
+#   diagnostics/telemetry. The existing
+#   30h cycle-age staleness bound still brands the served live row (falling back to an
+#   older live row NEVER hides staleness).
+"""Relationship tests — live-latest read semantics (the bounds-less clobber category).
 
 These cross the (forecast_posteriors row -> bundle reader -> live eligibility) boundary. The
-property under test: a NEWER bounds-less SHADOW posterior must NOT clobber an OLDER tradeable
-posterior on the LIVE path, AND an older tradeable row that is itself beyond the staleness
+property under test: a NEWER bounds-less diagnostic posterior must NOT clobber an OLDER live-grade
+posterior on the LIVE path, AND an older live row that is itself beyond the staleness
 horizon must NOT be laundered into live authority (fail-closed, no silent staleness bypass).
 """
 
@@ -96,6 +97,7 @@ def _insert_posterior(
     q_mode: str,
     with_bounds: bool,
     with_ucb: bool | None = None,
+    trade_authority_status: str = "LIVE_AUTHORITY",
     dependency_source_run_ids: dict[str, str] | None = None,
 ) -> int:
     # ``with_ucb`` lets a row carry q_lcb_json but NOT q_ucb_json (the freshest-row
@@ -139,7 +141,7 @@ def _insert_posterior(
             "openmeteo_ifs9_aifs_sampled_2t_soft_anchor",
             json.dumps(deps),
             json.dumps(_provenance(q_mode=q_mode)),
-            "SHADOW_VETO_ONLY",
+            trade_authority_status,
             0,
             _TOPO_HASH,
             f"pid-hash-{identity_suffix}",
@@ -210,7 +212,7 @@ def _readiness(
 
 
 def test_reader_live_eligible_q_mode_set_mirrors_live_gate() -> None:
-    """The reader's tradeable-grade q-mode set MUST equal the live gate's eligibility set.
+    """The reader's live-grade q-mode set MUST equal the live gate's eligibility set.
 
     If the live gate (event_reactor_adapter) ever changes which q-modes are admissible, the
     reader's preference predicate must move with it — a drift here would let the reader serve a
@@ -220,6 +222,31 @@ def test_reader_live_eligible_q_mode_set_mirrors_live_gate() -> None:
     from src.engine import event_reactor_adapter as adapter
 
     assert reader._REPLACEMENT_Q_MODE_LIVE_ELIGIBLE == adapter._REPLACEMENT_Q_MODE_LIVE_ELIGIBLE
+
+
+def test_diagnostic_bounded_row_is_not_live_readable() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        trade_authority_status="DIAGNOSTIC_ONLY",
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    result = _read(conn, readiness, decision_time=_dt(6, 12))
+
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_LIVE_AUTHORITY_MISSING"
+    assert result.bundle is None
 
 
 def _read(conn, readiness, *, decision_time):
@@ -236,13 +263,13 @@ def _read(conn, readiness, *, decision_time):
 
 
 # ---------------------------------------------------------------------------
-# Relationship 1: newer NULL-bounds (shadow) row + older FUSED row ->
+# Relationship 1: newer NULL-bounds diagnostic row + older FUSED live row ->
 #   LIVE bundle serves the FUSED row, and records a provenance note that a newer
-#   shadow row exists.
+#   diagnostic row exists.
 # ---------------------------------------------------------------------------
 def test_newer_bounds_less_does_not_clobber_older_fused() -> None:
     conn = _conn()
-    # Older tradeable FUSED row (00Z cycle, ~12h before decision -> within staleness bound).
+    # Older live-authority FUSED row (00Z cycle, ~12h before decision -> within staleness bound).
     fused_id = _insert_posterior(
         conn,
         source_cycle_time=_dt(6, 0),
@@ -251,20 +278,21 @@ def test_newer_bounds_less_does_not_clobber_older_fused() -> None:
         q_mode=_FUSED_FULL,
         with_bounds=True,
     )
-    # NEWER bounds-less SHADOW row (06Z cycle, instruments lag -> BAYES_PRECISION_FUSION_CAPTURE_MISSING).
-    shadow_id = _insert_posterior(
+    # NEWER bounds-less diagnostic row (06Z cycle, instruments lag -> BAYES_PRECISION_FUSION_CAPTURE_MISSING).
+    diagnostic_id = _insert_posterior(
         conn,
         source_cycle_time=_dt(6, 6),
         source_available_at=_dt(6, 11),
         computed_at=_dt(6, 11, 30),
         q_mode=_BAYES_PRECISION_FUSION_MISSING,
+        trade_authority_status="DIAGNOSTIC_ONLY",
         with_bounds=False,
     )
-    assert shadow_id > fused_id
+    assert diagnostic_id > fused_id
     # Readiness is per-scope (upserted): the LIVE path holds ONLY the latest cycle's readiness,
-    # which points at the newer bounds-less shadow posterior.
+    # which points at the newer bounds-less diagnostic posterior.
     readiness = _readiness(
-        posterior_id=shadow_id,
+        posterior_id=diagnostic_id,
         computed_at=_dt(6, 11, 30),
         expires_at=_dt(6, 23),
         decision_time=_dt(6, 11, 30),
@@ -274,10 +302,10 @@ def test_newer_bounds_less_does_not_clobber_older_fused() -> None:
     assert result.bundle is not None
     assert result.bundle.posterior_id == fused_id
     assert result.bundle.q_lcb is not None
-    # Provenance note: the live bundle records that a newer shadow row exists.
+    # Provenance note: the live bundle records that a newer diagnostic row exists.
     note = result.bundle.provenance_json.get("tradeable_latest_selection")
     assert isinstance(note, dict)
-    assert note.get("newer_shadow_posterior_id") == shadow_id
+    assert note.get("newer_diagnostic_posterior_id") == diagnostic_id
     assert note.get("served_posterior_id") == fused_id
 
 
@@ -314,7 +342,7 @@ def test_both_bounded_newest_wins() -> None:
     assert result.ok is True, result.reason_code
     assert result.bundle is not None
     assert result.bundle.posterior_id == new_id
-    # No shadow-fallback note when the newest row is itself tradeable.
+    # No fallback note when the newest row is itself live-grade.
     assert "tradeable_latest_selection" not in dict(result.bundle.provenance_json)
 
 
@@ -333,17 +361,18 @@ def test_older_fused_beyond_staleness_served_with_brand() -> None:
         q_mode=_FUSED_FULL,
         with_bounds=True,
     )
-    # Newer bounds-less shadow row on top (also stale-cycle, irrelevant — it's bounds-less).
-    shadow_id = _insert_posterior(
+    # Newer bounds-less diagnostic row on top (also stale-cycle, irrelevant — it's bounds-less).
+    diagnostic_id = _insert_posterior(
         conn,
         source_cycle_time=_dt(6, 6),
         source_available_at=_dt(6, 11),
         computed_at=_dt(6, 11, 30),
         q_mode=_BAYES_PRECISION_FUSION_MISSING,
+        trade_authority_status="DIAGNOSTIC_ONLY",
         with_bounds=False,
     )
     readiness = _readiness(
-        posterior_id=shadow_id,
+        posterior_id=diagnostic_id,
         computed_at=_dt(6, 11, 30),
         expires_at=_dt(6, 23),
         decision_time=_dt(6, 11, 30),
@@ -351,7 +380,7 @@ def test_older_fused_beyond_staleness_served_with_brand() -> None:
     result = _read(conn, readiness, decision_time=_dt(6, 12))
     # OPERATOR LAW (2026-06-11 "没有新的就用老的"): the fused row is the freshest
     # TRADEABLE row that exists; its over-bound age brands provenance, never blocks.
-    # The newer bounds-less shadow row still cannot clobber it (tradeable-latest).
+    # The newer bounds-less diagnostic row still cannot clobber it (live-latest).
     assert result.ok is True
     assert (result.bundle.provenance_json or {}).get("tradeable_latest_selection") is not None
     violations = (result.bundle.provenance_json or {}).get("staleness_violations") or []
@@ -360,7 +389,7 @@ def test_older_fused_beyond_staleness_served_with_brand() -> None:
 
 # ---------------------------------------------------------------------------
 # Relationship 4 (afternoon scenario end-to-end): writing a NULL-bounds row ON TOP
-#   of a healthy tradeable row must NOT change live eligibility.
+#   of a healthy live row must NOT change live eligibility.
 # ---------------------------------------------------------------------------
 def test_afternoon_clobber_does_not_change_eligibility() -> None:
     conn = _conn()
@@ -383,22 +412,23 @@ def test_afternoon_clobber_does_not_change_eligibility() -> None:
     assert before.bundle.posterior_id == fused_id
 
     # The 06Z bounds-less wave lands on top (and overwrites the scope readiness in place).
-    shadow_id = _insert_posterior(
+    diagnostic_id = _insert_posterior(
         conn,
         source_cycle_time=_dt(6, 6),
         source_available_at=_dt(6, 11),
         computed_at=_dt(6, 11, 30),
         q_mode=_BAYES_PRECISION_FUSION_MISSING,
+        trade_authority_status="DIAGNOSTIC_ONLY",
         with_bounds=False,
     )
     readiness_after = _readiness(
-        posterior_id=shadow_id,
+        posterior_id=diagnostic_id,
         computed_at=_dt(6, 11, 30),
         expires_at=_dt(6, 23),
         decision_time=_dt(6, 11, 30),
     )
     after = _read(conn, readiness_after, decision_time=_dt(6, 12))
-    # Eligibility unchanged: still serves the same tradeable FUSED row with bounds.
+    # Eligibility unchanged: still serves the same live FUSED row with bounds.
     assert after.ok is True, after.reason_code
     assert after.bundle.posterior_id == fused_id
     assert after.bundle.q_lcb == before.bundle.q_lcb
@@ -415,7 +445,7 @@ def test_afternoon_clobber_does_not_change_eligibility() -> None:
 #   family. The reader must serve the freshest row that carries BOTH bounds.
 #
 # RED-ON-REVERT: drop the `if not row_map.get("q_ucb_json"): return False` line from
-# _row_is_tradeable_grade and this test fails (the q_ucb-less newer row is served, and
+# _row_is_live_authority_grade and this test fails (the q_ucb-less newer row is served, and
 # its q_ucb is None).
 def test_newer_q_ucb_missing_does_not_clobber_older_both_bounds() -> None:
     conn = _conn()
@@ -456,5 +486,5 @@ def test_newer_q_ucb_missing_does_not_clobber_older_both_bounds() -> None:
     assert result.bundle.q_ucb is not None and bool(result.bundle.q_ucb)
     note = (result.bundle.provenance_json or {}).get("tradeable_latest_selection")
     assert isinstance(note, dict)
-    assert note.get("newer_shadow_posterior_id") == lcb_only_id
+    assert note.get("newer_diagnostic_posterior_id") == lcb_only_id
     assert note.get("served_posterior_id") == both_id

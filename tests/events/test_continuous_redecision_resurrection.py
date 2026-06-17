@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-06-17
 # Authority basis: operator stagnation root-cause 2026-06-12 ("continuous redecision没有作用中") +
 #   /tmp/continuous_redecision_resurrection.md. RELATIONSHIP antibodies for the P1 deadlock-free
 #   belief write, the P2 cheap screen, §4.5 rest management, and the EDLI_REDECISION_PENDING consume
@@ -30,6 +30,8 @@ def _mem_trade() -> sqlite3.Connection:
         CREATE TABLE executable_market_snapshots (
             snapshot_id TEXT PRIMARY KEY,
             condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
             selected_outcome_token_id TEXT,
             orderbook_top_bid TEXT,
             orderbook_top_ask TEXT,
@@ -51,6 +53,37 @@ def _cache(conn, *, family_id="hyp|live|Wuhan|2026-06-12|high|disc", p_yes=0.99,
         bin_labels=["b29", "b30"], p_posterior_vec=[0.001, p_yes],
         recorded_at=recorded_at, condition_ids=["0xc29", cond],
     )
+
+
+def _snapshot(
+    conn,
+    *,
+    condition_id="0xc30",
+    yes_token_id="yes-c30",
+    no_token_id="no-c30",
+    selected_outcome_token_id="yes-c30",
+    bid="0.70",
+    ask="0.72",
+    snapshot_id="s1",
+):
+    conn.execute(
+        "INSERT INTO executable_market_snapshots "
+        "(snapshot_id, condition_id, yes_token_id, no_token_id, selected_outcome_token_id, "
+        "orderbook_top_bid, orderbook_top_ask, freshness_deadline, captured_at) VALUES "
+        "(?,?,?,?,?,?,?,?,?)",
+        (
+            snapshot_id,
+            condition_id,
+            yes_token_id,
+            no_token_id,
+            selected_outcome_token_id,
+            bid,
+            ask,
+            "2026-06-12T02:00:00+00:00",
+            "2026-06-12T00:30:00+00:00",
+        ),
+    )
+    conn.commit()
 
 
 # ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -130,13 +163,7 @@ def test_entry_screen_fires_on_edge_appeared():
     trade = _mem_trade()
     _cache(world, p_yes=0.99, cond="0xc30")
     # Fresh executable snapshot: YES ask 0.70 → edge = 0.99 - 0.70 - fee ≈ +0.28.
-    trade.execute(
-        "INSERT INTO executable_market_snapshots "
-        "(snapshot_id, condition_id, selected_outcome_token_id, orderbook_top_bid, "
-        "orderbook_top_ask, freshness_deadline, captured_at) VALUES "
-        "('s1','0xc30','tok','0.30','0.70','2026-06-12T02:00:00+00:00','2026-06-12T00:30:00+00:00')"
-    )
-    trade.commit()
+    _snapshot(trade, bid="0.30", ask="0.70", selected_outcome_token_id="yes-c30")
     fired = cr.screen_entry_redecisions(
         world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
     )
@@ -149,13 +176,7 @@ def test_entry_screen_silent_when_no_edge():
     trade = _mem_trade()
     _cache(world, p_yes=0.55, cond="0xc30")
     # YES ask 0.72 → edge = 0.55 - 0.72 - fee < 0 → no enqueue.
-    trade.execute(
-        "INSERT INTO executable_market_snapshots "
-        "(snapshot_id, condition_id, selected_outcome_token_id, orderbook_top_bid, "
-        "orderbook_top_ask, freshness_deadline, captured_at) VALUES "
-        "('s1','0xc30','tok','0.20','0.72','2026-06-12T02:00:00+00:00','2026-06-12T00:30:00+00:00')"
-    )
-    trade.commit()
+    _snapshot(trade, bid="0.20", ask="0.72", selected_outcome_token_id="yes-c30")
     fired = cr.screen_entry_redecisions(
         world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
     )
@@ -197,6 +218,111 @@ def test_rest_pull_holds_on_same_snapshot_price_wiggle():
     )
     pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
     assert pulls == [], "a bare wiggle on the same snapshot must never pull a rest (anti-twitch)"
+
+
+def test_rest_pull_does_not_treat_normal_spread_as_book_moved():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    # YES best bid is below the resting limit, while ask is two ticks above it.
+    # The old bug used ask cost and would pull; maker-rest drift must use best bid.
+    _snapshot(trade, bid="0.69", ask="0.72")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=0.0,
+    )
+
+    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+
+    assert pulls == []
+
+
+def test_rest_pull_fires_when_best_bid_moves_past_limit_tolerance():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.73", ask="0.75")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=0.0,
+    )
+
+    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "BOOK_MOVED"
+
+
+def test_buy_no_rest_uses_native_no_best_bid_for_book_moved():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.10, snapshot_id="snap1", cond="0xc30")
+    # Implied NO bid is 1 - YES ask = 0.80, which is four ticks above the rest.
+    _snapshot(trade, bid="0.18", ask="0.20", selected_outcome_token_id="no-c30")
+    rest = cr.OpenRest(
+        command_id="cmd-no", venue_order_id="vo-no",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_no",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.76, quote_age_ms=0.0,
+    )
+
+    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "BOOK_MOVED"
+
+
+def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
+    import src.main as main
+
+    world = _mem_world()
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT, "
+        "side TEXT, price REAL, snapshot_id TEXT, created_at TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    _cache(world, p_yes=0.20, snapshot_id="snap1", cond="0xc30")
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        yes_token_id="yes-c30",
+        no_token_id="no-c30",
+        selected_outcome_token_id="no-c30",
+        bid="0.18",
+        ask="0.22",
+        snapshot_id="snap1",
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "cmd-no",
+            "order-no",
+            "no-c30",
+            "m1",
+            "BUY",
+            0.75,
+            "snap1",
+            "2026-06-12T00:00:00+00:00",
+            "ENTRY",
+        ),
+    )
+    trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-no", "LIVE", 1))
+    trade.commit()
+
+    rests = main._edli_open_maker_rests_for_screen(trade, world)
+
+    assert len(rests) == 1
+    assert rests[0].side == "buy_no"
+    assert rests[0].resting_posterior == pytest.approx(0.80)
 
 
 # ───────────────────────────────────────────────────────────────────────────────────────────────

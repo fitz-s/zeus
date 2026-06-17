@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-21
+# Last reused or audited: 2026-06-17
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 #
@@ -209,6 +209,141 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
     return {"ok": True, "issue": None, "progress": progress}
 
 
+def _execution_capability_surface(status_summary: Optional[dict]) -> dict:
+    """Surface whether live entry/exit side effects are currently allowed.
+
+    The daemon heartbeat only proves that a process is alive. Live-health must
+    also reflect the same execution-capability gate used by order submission;
+    otherwise a LOST venue heartbeat can be hidden behind fresh cycle pulses.
+    """
+
+    if status_summary is None:
+        return {"ok": False, "issue": "STATUS_SUMMARY_MISSING", "actions": {}}
+    execution_capability = status_summary.get("execution_capability")
+    if not isinstance(execution_capability, dict):
+        return {"ok": False, "issue": "EXECUTION_CAPABILITY_MISSING", "actions": {}}
+
+    actions: dict[str, dict] = {}
+    blocked: list[str] = []
+    for action_name in ("entry", "exit"):
+        action = execution_capability.get(action_name)
+        if not isinstance(action, dict):
+            actions[action_name] = {
+                "status": "missing",
+                "global_allow_submit": None,
+                "blocked_components": [f"{action_name}_capability_missing"],
+                "blocked_reasons": [],
+            }
+            blocked.append(f"{action_name}:missing")
+            continue
+
+        status = str(action.get("status") or "unknown")
+        allow_submit = action.get("global_allow_submit")
+        blocked_components = action.get("blocked_components")
+        if not isinstance(blocked_components, list):
+            blocked_components = []
+        blocked_reasons = []
+        for component in action.get("components") or []:
+            if not isinstance(component, dict):
+                continue
+            if component.get("allowed") is False:
+                blocked_reasons.append(
+                    {
+                        "component": component.get("component"),
+                        "reason": component.get("reason"),
+                    }
+                )
+
+        action_blocked = (
+            status.lower() in {"blocked", "failed", "error"}
+            or allow_submit is False
+            or bool(blocked_components)
+            or bool(blocked_reasons)
+        )
+        actions[action_name] = {
+            "status": status,
+            "global_allow_submit": allow_submit,
+            "blocked_components": blocked_components,
+            "blocked_reasons": blocked_reasons,
+        }
+        if action_blocked:
+            component_label = ",".join(str(c) for c in blocked_components) or status
+            blocked.append(f"{action_name}:{component_label}")
+
+    if blocked:
+        return {
+            "ok": False,
+            "issue": "LIVE_EXECUTION_CAPABILITY_BLOCKED: " + "; ".join(blocked),
+            "actions": actions,
+        }
+    return {"ok": True, "issue": None, "actions": actions}
+
+
+def _venue_heartbeat_surface(state_dir: Path, now: datetime) -> dict:
+    """Surface external CLOB heartbeat state used by resting-order gates."""
+
+    path = state_dir / "venue-heartbeat-keeper.json"
+    payload = _read_json(path)
+    if payload is None:
+        return {"ok": False, "issue": "VENUE_HEARTBEAT_MISSING"}
+
+    ts_str = payload.get("written_at") or payload.get("last_success_at")
+    age = _age_seconds(ts_str, now) if isinstance(ts_str, str) else None
+    cadence = payload.get("cadence_seconds")
+    try:
+        cadence_seconds = float(cadence)
+    except (TypeError, ValueError):
+        cadence_seconds = 5.0
+    max_age = max(8.0, cadence_seconds * 2.0 + 3.0)
+
+    health = str(payload.get("health") or "UNKNOWN").upper()
+    resting_order_safe = payload.get("resting_order_safe")
+    if age is None:
+        return {
+            "ok": False,
+            "issue": "VENUE_HEARTBEAT_UNPARSEABLE_TIMESTAMP",
+            "health": health,
+            "resting_order_safe": resting_order_safe,
+        }
+    if age > max_age:
+        return {
+            "ok": False,
+            "issue": f"VENUE_HEARTBEAT_STALE({age:.0f}s)",
+            "health": health,
+            "resting_order_safe": resting_order_safe,
+            "age_seconds": age,
+            "max_age_seconds": max_age,
+        }
+    if health != "HEALTHY":
+        return {
+            "ok": False,
+            "issue": f"VENUE_HEARTBEAT_{health}",
+            "health": health,
+            "resting_order_safe": resting_order_safe,
+            "last_error": payload.get("last_error"),
+            "age_seconds": age,
+            "max_age_seconds": max_age,
+        }
+    if resting_order_safe is not True:
+        return {
+            "ok": False,
+            "issue": "VENUE_HEARTBEAT_RESTING_ORDER_UNSAFE",
+            "health": health,
+            "resting_order_safe": resting_order_safe,
+            "age_seconds": age,
+            "max_age_seconds": max_age,
+        }
+
+    return {
+        "ok": True,
+        "issue": None,
+        "health": health,
+        "resting_order_safe": resting_order_safe,
+        "age_seconds": age,
+        "max_age_seconds": max_age,
+    }
+
+
 def compute_composite_live_health(
     *,
     state_dir: Optional[Path] = None,
@@ -216,10 +351,12 @@ def compute_composite_live_health(
 ) -> dict:
     """Compute and persist composite live-health status.
 
-    Consults three surfaces:
+    Consults five surfaces:
       1. heartbeat — daemon-heartbeat.json (alive + fresh timestamp)
-      2. run_mode  — scheduler_jobs_health.json entry for "_run_mode" job
-      3. status_summary — status_summary.json top-level timestamp freshness
+      2. venue_heartbeat — external CLOB heartbeat/order-safety keeper
+      3. run_mode  — scheduler_jobs_health.json entry for "_run_mode" job
+      4. status_summary — status_summary.json top-level timestamp freshness
+      5. execution_capability — entry/exit side-effect gate
 
     Writes state/live_health_composite.json atomically.
 
@@ -270,8 +407,18 @@ def compute_composite_live_health(
             hb_issue,
         )
 
+    venue_surface = _venue_heartbeat_surface(sd, now)
+    surfaces["venue_heartbeat"] = venue_surface
+    if not venue_surface["ok"]:
+        failing.append("venue_heartbeat")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "venue_heartbeat",
+            venue_surface["issue"],
+        )
+
     # ------------------------------------------------------------------ #
-    # Surface 2: run_mode (scheduler_jobs_health.json)                    #
+    # Surface 3: run_mode (scheduler_jobs_health.json)                    #
     # ------------------------------------------------------------------ #
     sj_path = sd / "scheduler_jobs_health.json"
     sj_data = _read_json(sj_path)
@@ -318,7 +465,7 @@ def compute_composite_live_health(
         )
 
     # ------------------------------------------------------------------ #
-    # Surface 3: status_summary freshness                                 #
+    # Surface 4: status_summary freshness                                 #
     # ------------------------------------------------------------------ #
     ss_path = sd / "status_summary.json"
     ss_data = _read_json(ss_path)
@@ -359,6 +506,16 @@ def compute_composite_live_health(
             "live_health_composite DEGRADED: failing_surface=%s reason=%s",
             "business_plane",
             business_surface["issue"],
+        )
+
+    execution_surface = _execution_capability_surface(ss_data)
+    surfaces["execution_capability"] = execution_surface
+    if not execution_surface["ok"]:
+        failing.append("execution_capability")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "execution_capability",
+            execution_surface["issue"],
         )
 
     # ------------------------------------------------------------------ #

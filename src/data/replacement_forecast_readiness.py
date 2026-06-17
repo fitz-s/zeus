@@ -19,6 +19,8 @@ SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
 READY_STATUS = "READY"
 LEGACY_READY_STATUS = "SHADOW_ONLY"
 BLOCKED_STATUS = "BLOCKED"
+DIAGNOSTIC_ONLY_STATUS = "DIAGNOSTIC_ONLY"
+LIVE_AUTHORITY_STATUS = "LIVE_AUTHORITY"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
 
@@ -227,9 +229,9 @@ def build_replacement_forecast_readiness(
         "computed_at": computed_utc.isoformat(),
         "role": "soft_anchor_readiness_dependency_builder",
         "readiness_status": final_status,
-        "posterior_authority_status": "SHADOW_ONLY",
-        "runtime_policy_status": "SHADOW_VETO_ONLY",
-        "trade_authority_status": "SHADOW_ONLY",
+        "posterior_authority_status": DIAGNOSTIC_ONLY_STATUS,
+        "runtime_policy_status": LIVE_AUTHORITY_STATUS,
+        "trade_authority_status": DIAGNOSTIC_ONLY_STATUS,
         "training_allowed": False,
     }
     identity_payload = {

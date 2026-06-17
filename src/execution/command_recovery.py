@@ -6208,6 +6208,253 @@ def clear_review_required_confirmed_fill(
     return payload
 
 
+def _review_required_no_venue_exposure_recovery(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+    client,
+) -> str:
+    events = _command_events(conn, cmd.command_id)
+    latest_reason = _latest_review_required_payload(events).get("reason")
+    if latest_reason != "recovery_no_venue_order_id":
+        return "stayed"
+    try:
+        now = _now_iso()
+        proof = build_review_required_no_venue_exposure_proof(
+            conn,
+            cmd.command_id,
+            client,
+            observed_at=now,
+        )
+        clear_review_required_no_venue_exposure(
+            conn,
+            cmd.command_id,
+            venue_absence_proof=proof,
+            source_commit="runtime",
+            source_function="command_recovery._reconcile_row",
+            reviewed_by="command_recovery",
+            occurred_at=now,
+        )
+    except ValueError as exc:
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED no-venue-exposure stayed: %s",
+            cmd.command_id,
+            exc,
+        )
+        return "stayed"
+    except Exception as exc:  # noqa: BLE001 - recovery loops count errors and continue.
+        logger.warning(
+            "recovery: command %s REVIEW_REQUIRED no-venue-exposure proof failed: %s",
+            cmd.command_id,
+            exc,
+        )
+        return "error"
+    logger.info(
+        "recovery: command %s REVIEW_REQUIRED recovery_no_venue_order_id -> EXPIRED",
+        cmd.command_id,
+    )
+    return "advanced"
+
+
+def _review_required_trade_maker_match(command: dict, trade: dict) -> dict | None:
+    token_id = str(command.get("token_id") or "")
+    side = str(command.get("side") or "").upper()
+    command_price = command.get("price")
+    command_size = _decimal_or_none(command.get("size"))
+    if not token_id or command_size is None:
+        return None
+    for maker in trade.get("maker_orders") or []:
+        if not isinstance(maker, dict):
+            continue
+        if str(maker.get("asset_id") or maker.get("token_id") or "") != token_id:
+            continue
+        if side and str(maker.get("side") or "").upper() != side:
+            continue
+        if not _decimal_matches(maker.get("price"), command_price):
+            continue
+        matched = _positive_decimal_or_none(maker.get("matched_amount") or maker.get("size"))
+        if matched is None:
+            continue
+        residual = command_size - matched
+        if residual < 0:
+            residual = Decimal("0")
+        if residual >= Decimal("0.01"):
+            continue
+        order_id = str(maker.get("order_id") or maker.get("id") or "").strip()
+        if not order_id:
+            continue
+        return {
+            "order_id": order_id,
+            "matched_size": _decimal_text(matched),
+            "fill_price": str(maker.get("price") or command_price),
+            "maker_order": maker,
+        }
+    return None
+
+
+def _review_required_confirmed_trade_match(
+    command: dict,
+    client,
+) -> tuple[dict, dict, list[dict]] | None:
+    try:
+        open_orders = [_raw_payload(order) for order in list(client.get_open_orders() or [])]
+        trades = [_raw_payload(trade) for trade in list(client.get_trades() or [])]
+    except Exception:
+        logger.debug("recovery: confirmed-trade review proof venue read failed", exc_info=True)
+        raise
+    open_order_ids = {
+        str(order.get("id") or order.get("order_id") or order.get("orderID") or "")
+        for order in open_orders
+    }
+    created_epoch = _epoch_seconds(command.get("created_at")) or 0.0
+    matches: list[tuple[dict, dict]] = []
+    for trade in trades:
+        trade_epoch = _epoch_seconds(trade.get("match_time") or trade.get("last_update"))
+        if trade_epoch is not None and trade_epoch < created_epoch:
+            continue
+        if str(trade.get("status") or trade.get("state") or "").upper() != "CONFIRMED":
+            continue
+        maker_match = _review_required_trade_maker_match(command, trade)
+        if maker_match is None:
+            continue
+        if maker_match["order_id"] in open_order_ids:
+            continue
+        matches.append((trade, maker_match))
+    if len(matches) != 1:
+        return None
+    trade, maker_match = matches[0]
+    return trade, maker_match, open_orders
+
+
+def _review_required_confirmed_trade_recovery(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+    client,
+) -> str:
+    events = _command_events(conn, cmd.command_id)
+    latest_reason = _latest_review_required_payload(events).get("reason")
+    if latest_reason != "recovery_no_venue_order_id":
+        return "stayed"
+    command = _dict_row(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (cmd.command_id,),
+        ).fetchone()
+    )
+    try:
+        match = _review_required_confirmed_trade_match(command, client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "recovery: command %s REVIEW_REQUIRED confirmed-trade proof failed: %s",
+            cmd.command_id,
+            exc,
+        )
+        return "error"
+    if match is None:
+        return "stayed"
+    trade, maker_match, open_orders = match
+    now = _now_iso()
+    venue_order_id = str(maker_match["order_id"])
+    trade_id = str(trade.get("id") or trade.get("trade_id") or "")
+    filled_size = str(maker_match["matched_size"])
+    fill_price = str(maker_match["fill_price"])
+    tx_hash = str(trade.get("transaction_hash") or trade.get("tx_hash") or "") or None
+    if not trade_id:
+        return "stayed"
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_confirmed_fill",
+        "command_id": cmd.command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "venue_order_id": venue_order_id,
+        "trade_id": trade_id,
+        "filled_size": filled_size,
+        "fill_price": fill_price,
+        "proof_class": "recovery_no_venue_order_id_confirmed_trade",
+        "side_effect_boundary_crossed": True,
+        "sdk_submit_attempted": "unknown",
+        "required_predicates": {
+            "latest_event_is_review_required": True,
+            "review_reason_recovery_no_venue_order_id": True,
+            "positive_trade_fact": True,
+            "maker_order_token_matches_command": True,
+            "maker_order_not_open": True,
+            "venue_size_quantization_residual_lt_0_01": True,
+        },
+        "trade_fact_proof": {
+            "source": "authenticated_clob_user_trades",
+            "observed_at": now,
+            "trade_status": str(trade.get("status") or trade.get("state") or ""),
+            "trade": trade,
+            "maker_order": maker_match["maker_order"],
+            "open_order_ids_checked": [
+                str(order.get("id") or order.get("order_id") or order.get("orderID") or "")
+                for order in open_orders
+            ],
+        },
+        "review_required_proof": {
+            "reason": latest_reason,
+        },
+        "source_proof": {
+            "source_commit": "runtime",
+            "source_function": "command_recovery._reconcile_row",
+            "source_reason": "recovery_no_venue_order_id_confirmed_trade",
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": now,
+    }
+    append_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=cmd.command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size=filled_size,
+        source="REST",
+        observed_at=now,
+        venue_timestamp=now,
+        raw_payload_hash=_canonical_payload_hash({**payload, "fact_type": "order"}),
+        raw_payload_json=payload,
+    )
+    append_trade_fact(
+        conn,
+        trade_id=trade_id,
+        venue_order_id=venue_order_id,
+        command_id=cmd.command_id,
+        state="CONFIRMED",
+        filled_size=filled_size,
+        fill_price=fill_price,
+        source="REST",
+        observed_at=now,
+        venue_timestamp=now,
+        tx_hash=tx_hash,
+        raw_payload_hash=_canonical_payload_hash({**payload, "fact_type": "trade"}),
+        raw_payload_json=payload,
+    )
+    append_event(
+        conn,
+        command_id=cmd.command_id,
+        event_type=CommandEventType.FILL_CONFIRMED.value,
+        occurred_at=now,
+        payload=payload,
+    )
+    _append_matched_order_fill_projection(
+        conn,
+        command={**command, "venue_order_id": venue_order_id},
+        venue_order_id=venue_order_id,
+        matched_size=filled_size,
+        fill_price=fill_price,
+        observed_at=now,
+    )
+    logger.info(
+        "recovery: command %s REVIEW_REQUIRED recovery_no_venue_order_id -> FILLED "
+        "(venue_order_id=%s trade_id=%s)",
+        cmd.command_id,
+        venue_order_id,
+        trade_id,
+    )
+    return "advanced"
+
+
 def clear_submit_unknown_geoblock_403(
     conn: sqlite3.Connection,
     command_id: str,
@@ -6268,7 +6515,13 @@ def _reconcile_row(
         state = cmd.state
 
         if state == CommandState.REVIEW_REQUIRED:
-            return _review_required_cancel_unknown_live_order_recovery(conn, cmd, client)
+            outcome = _review_required_cancel_unknown_live_order_recovery(conn, cmd, client)
+            if outcome != "stayed":
+                return outcome
+            outcome = _review_required_confirmed_trade_recovery(conn, cmd, client)
+            if outcome != "stayed":
+                return outcome
+            return _review_required_no_venue_exposure_recovery(conn, cmd, client)
 
         now = _now_iso()
 

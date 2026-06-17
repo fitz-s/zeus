@@ -295,7 +295,7 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         }
         readiness_status_clause = ""
         if "status" in readiness_columns:
-            readiness_status_clause = "AND status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'READY')"
+            readiness_status_clause = "AND status = 'READY'"
         # Only a readiness row whose expires_at is still in the future counts as
         # live coverage. An expired row must NOT mark the seed already-covered,
         # otherwise the queue skips it forever and fresh readiness can never be

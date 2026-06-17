@@ -18,7 +18,7 @@ per-bin 5th/95th percentile as q_lcb/q_ucb. Pinned here:
   - basis recorded as fused_center_bootstrap_p05
   - deterministic with the seeded rng (stable provenance bounds)
   - a Milan-incident-shaped posterior exposes far-tail fragility (q_lcb << q for an off-mode bin)
-  - construction failure → NULL + warning (fail-soft; never WORSE than the Wilson status quo)
+  - construction failure → non-certified Wilson bounds + warning (fail-soft; not live-eligible)
   - integration: the fused-q path populates q_lcb_json/q_ucb_json columns + provenance role/basis.
 """
 from __future__ import annotations
@@ -204,10 +204,10 @@ def test_fused_path_populates_qlcb_qucb_columns(monkeypatch) -> None:
     assert prov["q_lcb_bootstrap_draws"] == mod._QLCB_BOOTSTRAP_DRAWS
 
 
-def test_bound_construction_failure_fails_soft_to_null(monkeypatch) -> None:
-    # The bootstrap must NOT roll back the fused q point on failure — q_lcb/q_ucb stay NULL (Wilson
-    # fallback, status quo) + a loud WARNING. This guarantees a bound failure can never make the live
-    # path WORSE than today.
+def test_bound_construction_failure_fails_soft_to_wilson_non_certified_bounds(monkeypatch) -> None:
+    # The bootstrap must NOT roll back the fused q point on failure. The certified bootstrap bounds
+    # are absent, a loud WARNING is emitted, and the materializer may publish Wilson member-vote
+    # carrier bounds under their own non-live-eligible basis.
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     _enable_fused_shape(monkeypatch)
@@ -229,12 +229,14 @@ def test_bound_construction_failure_fails_soft_to_null(monkeypatch) -> None:
     assert prov["q_shape"] == "fused_normal_direct"
     q = json.loads(row["q_json"])
     assert sum(q.values()) == pytest.approx(1.0, abs=1e-6)
-    # Bounds fail soft to NULL == Wilson-fallback status quo.
-    assert row["q_lcb_json"] is None
-    assert row["q_ucb_json"] is None
-    assert prov["q_lcb_json_role"] == "absent_no_calibrated_lcb_available"
-    assert prov["q_ucb_json_role"] == "absent_no_calibrated_ucb_available"
-    assert prov["q_lcb_basis"] is None
+    # Bounds fail soft to Wilson carrier bounds, but not the certified bootstrap basis.
+    assert row["q_lcb_json"] is not None
+    assert row["q_ucb_json"] is not None
+    assert prov["q_lcb_json_role"] == "wilson_aifs_member_votes_lcb"
+    assert prov["q_ucb_json_role"] == "wilson_aifs_member_votes_ucb"
+    assert prov["q_lcb_basis"] == "wilson_aifs_member_votes"
+    assert prov["q_lcb_bootstrap_draws"] is None
+    assert prov["q_bootstrap_samples_by_bin"] is None
     assert any("q_lcb/q_ucb bootstrap skipped" in r.getMessage() for r in records), (
         "a bound failure must emit a loud WARNING (anti-silent-sink)"
     )

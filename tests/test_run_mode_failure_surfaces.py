@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-21
+# Last reused or audited: 2026-06-17
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Lifecycle: created=2026-05-19; last_reviewed=2026-06-17; last_reused=2026-06-17
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -53,12 +53,44 @@ def _write(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload))
 
 
+def _healthy_execution_capability() -> dict:
+    return {
+        "entry": {
+            "status": "allowed",
+            "global_allow_submit": True,
+            "components": [
+                {"component": "heartbeat_supervisor", "allowed": True, "reason": "allowed"},
+                {"component": "risk_allocator_global", "allowed": True, "reason": "ok"},
+            ],
+            "blocked_components": [],
+        },
+        "exit": {
+            "status": "allowed",
+            "global_allow_submit": True,
+            "components": [
+                {"component": "heartbeat_supervisor", "allowed": True, "reason": "allowed"},
+                {"component": "risk_allocator_global", "allowed": True, "reason": "ok"},
+            ],
+            "blocked_components": [],
+        },
+    }
+
+
 def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
-    """Write all three surfaces in a healthy / fresh state."""
+    """Write all composite surfaces in a healthy / fresh state."""
     cycle_time = _now_iso(offset_seconds)
     _write(
         sd / "daemon-heartbeat.json",
         {"alive": True, "timestamp": cycle_time, "mode": "live"},
+    )
+    _write(
+        sd / "venue-heartbeat-keeper.json",
+        {
+            "health": "HEALTHY",
+            "resting_order_safe": True,
+            "written_at": _now_iso(-5),
+            "cadence_seconds": 5,
+        },
     )
     _write(
         sd / "scheduler_jobs_health.json",
@@ -81,6 +113,7 @@ def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
                 "command_recovery": {"scanned": 0, "advanced": 0},
                 "chain_sync": {"synced": 0},
             },
+            "execution_capability": _healthy_execution_capability(),
         },
     )
 
@@ -227,7 +260,13 @@ def test_all_healthy_surfaces_yield_healthy(tmp_path: Path) -> None:
     assert result["healthy"] is True, f"all-OK surfaces must yield HEALTHY: {result}"
     assert result["status"] == "HEALTHY"
     assert result["failing_surfaces"] == []
-    for surface in ("heartbeat", "run_mode", "status_summary"):
+    for surface in (
+        "heartbeat",
+        "venue_heartbeat",
+        "run_mode",
+        "status_summary",
+        "execution_capability",
+    ):
         assert result["surfaces"][surface]["ok"] is True, (
             f"surface {surface!r} should be OK: {result['surfaces'][surface]}"
         )
@@ -451,6 +490,7 @@ def test_business_plane_submit_without_ack_allows_deterministic_rejection(tmp_pa
                 "venue_acks": 0,
                 "deterministic_rejections": {"invalid_amount_precision": 1},
             },
+            "execution_capability": _healthy_execution_capability(),
         },
     )
 
@@ -479,6 +519,7 @@ def test_business_plane_exposes_entry_and_reconcile_progress_counters(tmp_path: 
                 "command_recovery": {"scanned": 3, "advanced": 1},
                 "chain_sync": {"synced": 2},
             },
+            "execution_capability": _healthy_execution_capability(),
         },
     )
 
@@ -519,3 +560,80 @@ def test_business_plane_does_not_infer_venue_ack_from_submit_count(tmp_path: Pat
     assert progress["submit_attempted"] is True
     assert progress["venue_acks"] == 0
     assert progress["venue_ack_observed"] is False
+
+
+def test_execution_capability_blocked_yields_degraded(tmp_path: Path) -> None:
+    """Fresh daemon/cycle signals cannot override the live order gate."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    cycle_time = _now_iso(-30)
+    capability = _healthy_execution_capability()
+    capability["entry"] = {
+        "status": "blocked",
+        "global_allow_submit": False,
+        "components": [
+            {
+                "component": "heartbeat_supervisor",
+                "allowed": False,
+                "reason": "PolyApiException[status_code=None, error_message=Request exception!]",
+            },
+            {
+                "component": "risk_allocator_global",
+                "allowed": False,
+                "reason": "heartbeat_lost",
+            },
+        ],
+        "blocked_components": ["heartbeat_supervisor", "risk_allocator_global"],
+    }
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": cycle_time,
+            "cycle": {
+                "mode": "opening_hunt",
+                "completed_at": cycle_time,
+                "candidates": 4,
+                "final_intents_built": 0,
+                "no_trades": 4,
+                "top_no_trade_reasons": {"EDGE_INSUFFICIENT": 4},
+            },
+            "execution_capability": capability,
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert "execution_capability" in result["failing_surfaces"]
+    assert result["surfaces"]["business_plane"]["ok"] is True
+    assert result["surfaces"]["execution_capability"]["ok"] is False
+    assert "entry:heartbeat_supervisor,risk_allocator_global" in (
+        result["surfaces"]["execution_capability"]["issue"] or ""
+    )
+
+
+def test_venue_heartbeat_lost_yields_degraded_even_when_daemon_heartbeat_is_fresh(
+    tmp_path: Path,
+) -> None:
+    """Daemon liveness is not resting-order safety authority."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "venue-heartbeat-keeper.json",
+        {
+            "health": "LOST",
+            "resting_order_safe": False,
+            "written_at": _now_iso(-2),
+            "cadence_seconds": 5,
+            "last_error": "PolyApiException[status_code=None, error_message=Request exception!]",
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["heartbeat"]["ok"] is True
+    assert "venue_heartbeat" in result["failing_surfaces"]
+    assert result["surfaces"]["venue_heartbeat"]["issue"] == "VENUE_HEARTBEAT_LOST"

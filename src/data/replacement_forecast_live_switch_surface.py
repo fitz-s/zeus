@@ -1,9 +1,9 @@
 """Live switch surface report for replacement forecast integration.
 
-This module is intentionally a read-model. It describes what a simple runtime
+This module is intentionally a read-model. It describes what the live runtime
 switch is allowed to read, what it must not write, and which evidence gates must
-be satisfied before the Open-Meteo ECMWF IFS 9km + AIFS sampled-2t path can move
-past shadow/veto use.
+be satisfied before the Open-Meteo ECMWF IFS 9km + AIFS sampled-2t path can
+carry live authority.
 """
 
 from __future__ import annotations
@@ -18,14 +18,13 @@ from src.state.db import list_sqlite_tables_and_views_read_only
 
 CURRENT_SOURCE_FACT_FILE = "docs/operations/current_source_validity.md"
 CURRENT_DATA_FACT_FILE = "docs/operations/current_data_state.md"
-REFIT_HANDOFF_FILE = "state/replacement_forecast_shadow/refit_handoff.json"
+REFIT_HANDOFF_FILE = "state/replacement_forecast_live/refit_handoff.json"
 REQUIRED_LIVE_READ_FILES = (
     "config/settings.json",
     "config/cities.json",
     "config/source_release_calendar.yaml",
     CURRENT_SOURCE_FACT_FILE,
     CURRENT_DATA_FACT_FILE,
-    REFIT_HANDOFF_FILE,
     "state/zeus-forecasts.db",
     "state/zeus-world.db",
     "state/zeus_trades.db",
@@ -62,7 +61,7 @@ PROHIBITED_SIMPLE_SWITCH_WRITES = (
     "venue_commands",
 )
 REQUIRED_EVIDENCE_GATES = (
-    "runtime_policy_allows_shadow_or_veto",
+    "runtime_policy_allows_live_authority",
     "baseline_executable_reader_ready",
     "aifs_sampled_2t_source_run_ready",
     "openmeteo_ecmwf_ifs9_anchor_ready",
@@ -207,7 +206,7 @@ def build_replacement_forecast_live_switch_report(
         table for table in request.proposed_write_tables if table in PROHIBITED_SIMPLE_SWITCH_WRITES
     )
     reasons: list[str] = []
-    if not request.runtime_policy.can_read_shadow_posterior:
+    if not request.runtime_policy.can_initiate_trade:
         reasons.append("REPLACEMENT_SWITCH_POLICY_NOT_READABLE")
     if request.source_fact_status != "CURRENT_FOR_LIVE":
         reasons.append("REPLACEMENT_SWITCH_SOURCE_FACTS_STALE")

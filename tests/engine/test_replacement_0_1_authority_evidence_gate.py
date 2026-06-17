@@ -3,16 +3,18 @@
 # Authority basis: docs/the_path/REAUDIT_0_1.md §1 + REALIGN_0_1_AUTHORITY.md +
 #   PR_SPEC.md §2 FIX-1 (ORIGINAL: settlement-evidence gate load-bearing on the live
 #   0.1 path). SUPERSEDED 2026-06-08: operator directive REMOVED the settlement-
-#   evidence promotion gate from BOTH live-authority sites (commits b646f99339 +
-#   54a53334a9); LIVE_AUTHORITY is now FLAG-ONLY. The 3 tests asserting the gate
+#   evidence promotion gate from BOTH runtime-policy sites (commits b646f99339 +
+#   54a53334a9). Runtime-policy LIVE_AUTHORITY is flag-derived, while row-level
+#   live posterior authority is separately enforced by the bundle reader. The 3 tests asserting the gate
 #   DENIES the live path were DEAD_TEST-removed (the gating they pinned is deleted;
 #   the removal is owned by test_replacement_live_authority_evidence_gate_wiring_
 #   honesty.py). The 2 surviving tests validate the still-shadow-defined gate as a
 #   pure predicate and the live 0.1 path's positive (flag-on) authority stamp.
-"""Tests for the (now shadow-only) replacement_0_1 live-authority evidence gate.
+"""Tests for the replacement_0_1 runtime-policy evidence predicate.
 
 CURRENT LAW: the settlement-evidence gate NO LONGER gates the live 0.1 authority
-path (operator-directed flag-only LIVE_AUTHORITY, 2026-06-08). Retained here:
+path. Runtime-policy LIVE_AUTHORITY is flag-derived, but a live decision also
+requires row-level LIVE_AUTHORITY with fused q and certified bootstrap bounds. Retained here:
   - the gate as a PURE PREDICATE contract (it stays defined for shadow); and
   - the live 0.1 path's POSITIVE authority stamp when the flag/path is armed.
 The deleted "absent/failing evidence -> DEGRADE to None" gating is pinned removed
@@ -158,8 +160,9 @@ def test_evidence_gate_pure_predicate_contract() -> None:
 # evidence_absent_or_failing asserted the evidence gate DEGRADES the LIVE 0.1 authority
 # path to None on absent/failing evidence. That gating was DELETED by operator directive
 # 2026-06-08 (commits b646f99339 "remove promotion/capital-objective evidence gate from
-# BOTH live-authority sites" + 54a53334a9): LIVE_AUTHORITY is now FLAG-ONLY and BAYES_PRECISION_FUSION runs
-# live without the settlement-evidence gate. The removal is pinned by
+# BOTH runtime-policy sites" + 54a53334a9): runtime-policy LIVE_AUTHORITY is
+# flag-derived and BAYES_PRECISION_FUSION runs live only when the row-level bundle
+# authority gate also passes. The removal is pinned by
 # tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py (the superseding
 # owner of this surface). The dead gating invariant has no surviving new form here.
 
@@ -195,6 +198,6 @@ def test_replacement_0_1_authority_granted_when_both_evidence_pass(
 # DENIES/degrades the LIVE 0.1 authority path (one monkeypatched a removed adapter
 # symbol `replacement_live_authority_evidence_gate`, now an AttributeError). That live-
 # path gating was deleted by operator directive 2026-06-08 (b646f99339 + 54a53334a9):
-# LIVE_AUTHORITY is FLAG-ONLY; the gate function remains shadow-defined in runtime_policy
-# but is NO LONGER imported into or called by the reactor. The removal is pinned by
+# runtime-policy LIVE_AUTHORITY is flag-derived; the gate function remains shadow-defined
+# in runtime_policy but is NO LONGER imported into or called by the reactor. The removal is pinned by
 # tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py.

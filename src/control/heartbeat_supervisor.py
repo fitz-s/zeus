@@ -152,9 +152,11 @@ def heartbeat_http_timeout_seconds_from_env(cadence_seconds: int) -> float:
             raise ValueError("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS must be numeric") from exc
     if value <= 0:
         raise ValueError("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS must be positive")
-    if value >= float(cadence_seconds):
+    max_timeout = float(cadence_seconds) / 2.0
+    if value > max_timeout:
         raise ValueError(
-            "ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS must be shorter than heartbeat cadence"
+            "ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS must be no longer than half "
+            "the heartbeat cadence"
         )
     return value
 
@@ -227,6 +229,43 @@ def _parse_utc(value: Any) -> datetime | None:
 
 def _is_invalid_heartbeat_id_error(exc: Exception | str) -> bool:
     return "Invalid Heartbeat ID" in str(exc)
+
+
+def _describe_heartbeat_exception(exc: Exception | str) -> str:
+    """Return a sanitized, cause-aware heartbeat error for operator status.
+
+    The py-clob SDK can collapse transport failures to the opaque string
+    ``PolyApiException[status_code=None, error_message=Request exception!]``.
+    That is fail-closed enough for safety, but not diagnostic enough to repair
+    live heartbeat loss. Include exception class and immediate cause/context
+    class/message while keeping the payload compact and free of credentials.
+    """
+
+    if not isinstance(exc, BaseException):
+        return str(exc)
+
+    def _clean(value: object) -> str:
+        text = str(value)
+        for marker in (
+            "POLYMARKET_API_KEY",
+            "POLYMARKET_API_SECRET",
+            "POLYMARKET_API_PASSPHRASE",
+            "private_key",
+            "api_secret",
+            "api_key",
+            "passphrase",
+        ):
+            text = text.replace(marker, "[redacted-field]")
+        return " ".join(text.split())
+
+    pieces = [f"{type(exc).__name__}: {_clean(exc)}"]
+    cause = getattr(exc, "__cause__", None)
+    context = getattr(exc, "__context__", None)
+    if cause is not None:
+        pieces.append(f"cause={type(cause).__name__}: {_clean(cause)}")
+    elif context is not None:
+        pieces.append(f"context={type(context).__name__}: {_clean(context)}")
+    return "; ".join(piece for piece in pieces if piece and not piece.endswith(": "))
 
 
 def write_heartbeat_keeper_status(
@@ -473,7 +512,18 @@ class HeartbeatSupervisor:
                             f"Invalid Heartbeat ID; empty-chain recovery failed: {retry_exc}"
                         )
                     self._heartbeat_id = ""  # invalid chain cannot protect resting orders
-                self.record_failure(exc)
+                    self.record_failure(exc)
+                else:
+                    self.record_failure(exc)
+                    if self._health is HeartbeatHealth.LOST:
+                        try:
+                            self._heartbeat_id = await self._post_heartbeat_once("")
+                            self.record_success()
+                            return self.status()
+                        except Exception as retry_exc:
+                            self._last_error = (
+                                f"{self._last_error}; empty-chain recovery failed: {retry_exc}"
+                            )
         finally:
             self._run_once_lock.release()
         return self.status()
@@ -508,7 +558,7 @@ class HeartbeatSupervisor:
         now = datetime.now(timezone.utc)
         self._consecutive_failures += 1
         self._consecutive_successes = 0
-        self._last_error = str(exc)
+        self._last_error = _describe_heartbeat_exception(exc)
         self._last_failure_at = now
         self._lease_continuous_since = None
         self._lease_gap_suspected_until = now + timedelta(

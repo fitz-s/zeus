@@ -4138,11 +4138,12 @@ def test_live_exit_collateral_blocked_goes_to_retry():
     outcome = execute_exit(
         portfolio=portfolio,
         position=pos,
-        exit_context=ExitContext(
-            exit_reason="EDGE_REVERSAL",
-            current_market_price=0.45,
-            best_bid=None,
-        ),
+            exit_context=ExitContext(
+                exit_reason="EDGE_REVERSAL",
+                current_market_price=0.45,
+                current_market_price_is_fresh=True,
+                best_bid=None,
+            ),
         clob=clob,
     )
 
@@ -5120,6 +5121,30 @@ def test_live_execute_exit_blocks_incomplete_context():
     assert pos.exit_state == "retry_pending"
     assert pos.exit_retry_count == 1
     assert pos.last_exit_error == "missing_current_market_price"
+    assert pos in portfolio.positions
+
+
+def test_live_execute_exit_blocks_stale_market_price_context():
+    """Direct execute_exit callers must not place exits from stale price evidence."""
+    pos = _make_position(state="holding")
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob()
+
+    outcome = execute_exit(
+        portfolio=portfolio,
+        position=pos,
+        exit_context=ExitContext(
+            exit_reason="EDGE_REVERSAL",
+            current_market_price=0.45,
+            current_market_price_is_fresh=False,
+        ),
+        clob=clob,
+    )
+
+    assert outcome == "exit_blocked: stale_market_price"
+    assert pos.exit_state == "retry_pending"
+    assert pos.exit_retry_count == 1
+    assert pos.last_exit_error == "stale_current_market_price"
     assert pos in portfolio.positions
 
 

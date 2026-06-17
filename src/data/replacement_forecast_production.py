@@ -83,11 +83,13 @@ def _replacement_forecast_runtime_flags_from_settings() -> dict[str, bool]:
     return {key: bool(flags.get(key, False)) for key in REQUIRED_FLAGS}
 
 
-def _replacement_forecast_shadow_materialization_queue_config() -> dict[str, object]:
+def _replacement_forecast_live_materialization_queue_config() -> dict[str, object]:
     from src.config import PROJECT_ROOT
 
-    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
-    base_dir = PROJECT_ROOT / "state" / "replacement_forecast_shadow"
+    cfg = _settings_section("replacement_forecast_live", {}) or {}
+    if not cfg:
+        cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    base_dir = PROJECT_ROOT / "state" / "replacement_forecast_live"
     raw_manifest_dir = cfg.get("raw_manifest_dir")
     forecast_db = cfg.get("forecast_db")
 
@@ -117,6 +119,19 @@ def _replacement_forecast_shadow_materialization_queue_config() -> dict[str, obj
         "download_anchor_sigma_c": float(cfg.get("download_anchor_sigma_c") or 3.0),
         "download_aifs_retries": int(cfg.get("download_aifs_retries") or 4),
     }
+
+
+def _replacement_forecast_shadow_materialization_queue_config() -> dict[str, object]:
+    """Compatibility wrapper for callers not yet renamed; returns live config."""
+
+    return _replacement_forecast_live_materialization_queue_config()
+
+
+def _replacement_forecast_live_materialization_enabled() -> bool:
+    from src.data.replacement_forecast_runtime_policy import TRADE_AUTHORITY_FLAG
+
+    flags = _replacement_forecast_runtime_flags_from_settings()
+    return bool(flags.get(TRADE_AUTHORITY_FLAG, False))
 
 
 # The two raw-artifact sources this downloader owns. The cycle high-water mark is the MIN over
@@ -821,10 +836,9 @@ def _enqueue_cycle_advance_reseeds_if_needed(cfg: dict[str, object]) -> dict[str
 def _anchor_meta_stamp_cross_check() -> None:
     """Hourly: re-verify meta-stamped anchor artifacts against single-runs once the same
     run is served there (K4.0b(f) belt-and-suspenders; MISMATCH ⇒ ERROR + receipt)."""
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+    if not _replacement_forecast_live_materialization_enabled():
         return
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    cfg = _replacement_forecast_live_materialization_queue_config()
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
         return
@@ -850,10 +864,9 @@ def _replacement_cycle_availability_poll() -> None:
     """Interval job: probe provider publication state and fetch fresh raw-input legs the
     moment they exist — BEFORE the engine needs them (operator directive 2026-06-11).
     Runs on the download lane; never blocks the 5-min materialize cycle."""
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+    if not _replacement_forecast_live_materialization_enabled():
         return
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    cfg = _replacement_forecast_live_materialization_queue_config()
     report = _replacement_cycle_availability_poll_if_needed(cfg)
     if report is None:
         return
@@ -879,10 +892,9 @@ def _replacement_forecast_download_cycle() -> None:
     Runs on the default executor (20-worker pool) on its own long interval, so it
     overlaps the fast materialize cycle on a separate thread without blocking it.
     Fail-soft and idempotent (skips already-downloaded manifests)."""
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+    if not _replacement_forecast_live_materialization_enabled():
         return
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    cfg = _replacement_forecast_live_materialization_queue_config()
     download_report = _download_replacement_forecast_current_targets_if_needed(cfg)
     if download_report is not None:
         _dl_status = download_report.get("status")
@@ -904,14 +916,14 @@ def _replacement_forecast_download_cycle() -> None:
             logger.info(
                 "replacement forecast current-target download report: %s", download_report
             )
-    # THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model SHADOW capture/accrual (forward + fixed-lead), gated by the
+    # THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model diagnostic capture/accrual (forward + fixed-lead), gated by the
     # SEPARATE replacement_0_1_bayes_precision_fusion_capture_enabled flag. Pure side-effect on
     # raw_model_forecasts (zeus-forecasts.db); NO posterior/q/order effect. Fail-soft.
     bayes_precision_fusion_capture_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
     if bayes_precision_fusion_capture_report is not None and bayes_precision_fusion_capture_report.get("status") not in {
         "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",
     }:
-        logger.info("BAYES_PRECISION_FUSION extra-model shadow capture report: %s", bayes_precision_fusion_capture_report)
+        logger.info("BAYES_PRECISION_FUSION extra-model diagnostic capture report: %s", bayes_precision_fusion_capture_report)
     # SILENT-DEATH SURFACING (2026-06-09): if the extras sub-step fails or is
     # fail-soft skipped, the parent download job still shows OK in scheduler
     # health (only AIFS/IFS9 success is tracked by the @_scheduler_job wrapper).
@@ -931,10 +943,9 @@ def _replacement_forecast_download_cycle() -> None:
             _wsh("bayes_precision_fusion_capture", failed=False)
 
 
-@_scheduler_job("replacement_forecast_shadow_materialize")
-def _replacement_forecast_shadow_materialize_cycle() -> None:
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+@_scheduler_job("replacement_forecast_live_materialize")
+def _replacement_forecast_live_materialize_cycle() -> None:
+    if not _replacement_forecast_live_materialization_enabled():
         return
     from src.data.replacement_forecast_shadow_materialization_queue import (
         process_replacement_forecast_shadow_materialization_queue,
@@ -942,7 +953,7 @@ def _replacement_forecast_shadow_materialize_cycle() -> None:
 
     # Raw-input download is now a SEPARATE job (_replacement_forecast_download_cycle)
     # so it can never block this seed->materialize cycle (see that function's note).
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    cfg = _replacement_forecast_live_materialization_queue_config()
     report = process_replacement_forecast_shadow_materialization_queue(
         request_dir=cfg["request_dir"],
         processed_dir=cfg["processed_dir"],
@@ -957,6 +968,12 @@ def _replacement_forecast_shadow_materialize_cycle() -> None:
         limit=int(cfg["limit"]),
     )
     if report.failed_count:
-        logger.warning("replacement forecast shadow materialization queue failures: %s", report.as_dict())
+        logger.warning("replacement forecast live materialization queue failures: %s", report.as_dict())
     elif report.processed_count:
-        logger.info("replacement forecast shadow materialization queue processed: %s", report.as_dict())
+        logger.info("replacement forecast live materialization queue processed: %s", report.as_dict())
+
+
+def _replacement_forecast_shadow_materialize_cycle() -> None:
+    """Compatibility wrapper for by-name imports; delegates to the live cycle."""
+
+    _replacement_forecast_live_materialize_cycle()

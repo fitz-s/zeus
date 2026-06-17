@@ -282,7 +282,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
 
 
 def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None:
-    """Create shadow-only replacement forecast provenance tables."""
+    """Create replacement forecast diagnostic/live provenance tables."""
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS raw_forecast_artifacts (
@@ -299,8 +299,8 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             request_url TEXT,
             request_params_json TEXT NOT NULL DEFAULT '{}',
             artifact_metadata_json TEXT NOT NULL DEFAULT '{}',
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
+            trade_authority_status TEXT NOT NULL DEFAULT 'DIAGNOSTIC_ONLY'
+                CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
@@ -333,8 +333,8 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             contributing_times_json TEXT NOT NULL DEFAULT '[]',
             anchor_identity_hash TEXT,
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
+            trade_authority_status TEXT NOT NULL DEFAULT 'DIAGNOSTIC_ONLY'
+                CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
@@ -375,8 +375,8 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             posterior_config_hash TEXT,
             posterior_identity_hash TEXT,
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')),
+            trade_authority_status TEXT NOT NULL DEFAULT 'DIAGNOSTIC_ONLY'
+                CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
@@ -418,8 +418,8 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             veto_reason TEXT,
             dependency_source_run_ids_json TEXT NOT NULL DEFAULT '[]',
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_VETO_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_VETO_ONLY')),
+            trade_authority_status TEXT NOT NULL DEFAULT 'DIAGNOSTIC_ONLY'
+                CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY')),
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(posterior_id, market_snapshot_id, condition_id, token_id, decision_time)
         )
@@ -492,8 +492,8 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             model_domain_hash TEXT,
             coverage_status TEXT,
             artifact_id INTEGER REFERENCES raw_forecast_artifacts(artifact_id),
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
+            trade_authority_status TEXT NOT NULL DEFAULT 'DIAGNOSTIC_ONLY'
+                CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),

@@ -518,43 +518,19 @@ def _assert_collateral_allows_buy(
 
 def _refresh_entry_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> dict:
     """Refresh collateral truth synchronously on the submit path before preflight."""
-    import time as _time
+    from src.execution.collateral import refresh_collateral_snapshot_for_submit
 
-    from src.data.polymarket_client import PolymarketClient
-    from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
+    return refresh_collateral_snapshot_for_submit(conn, action="entry_submit")
 
-    # 2026-06-16 (#122): a TRANSIENT `database is locked` on the collateral WRITE is NOT
-    # CollateralInsufficient — conflating them REJECTED decided harvest orders on transient
-    # zeus_trades.db write-contention (no in-process trade-write mutex; the snapshot-capture
-    # writer thrashes the WAL lock). Retry the brief write a bounded number of times; the
-    # lock clears well under a second. Only a GENUINE CollateralInsufficient, a non-lock
-    # error, or a lock persisting past every retry surfaces (then the order is simply
-    # re-decided next cycle — never a silent loss, never a fabricated insufficiency).
-    _LOCK_RETRIES = 5
-    _LOCK_BACKOFF_SECONDS = 0.4
-    client = PolymarketClient()
-    adapter = client._ensure_v2_adapter()
-    snapshot = None
-    for _attempt in range(_LOCK_RETRIES):
-        try:
-            snapshot = CollateralLedger(conn).refresh(adapter)
-            break
-        except CollateralInsufficient:
-            raise
-        except sqlite3.OperationalError as exc:
-            if "lock" not in str(exc).lower() or _attempt == _LOCK_RETRIES - 1:
-                raise CollateralInsufficient(f"collateral_refresh_failed: {exc}") from exc
-            _time.sleep(_LOCK_BACKOFF_SECONDS)
-        except Exception as exc:
-            raise CollateralInsufficient(f"collateral_refresh_failed: {exc}") from exc
-    if snapshot is None:
-        raise CollateralInsufficient("collateral_refresh_failed: lock_retries_exhausted")
-    if snapshot.authority_tier == "DEGRADED":
-        raise CollateralInsufficient("collateral_snapshot_degraded: refreshed_before_submit")
-    return _capability_component(
-        "collateral_snapshot_refresh",
-        authority_tier=snapshot.authority_tier,
-        captured_at=snapshot.captured_at.isoformat(),
+
+def _refresh_exit_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> dict:
+    """Refresh CTF inventory truth before exit sell preflight."""
+    from src.execution.collateral import refresh_collateral_snapshot_for_submit
+
+    return refresh_collateral_snapshot_for_submit(
+        conn,
+        action="exit_submit",
+        reuse_fresh_snapshot=True,
     )
 
 
@@ -2475,6 +2451,7 @@ def execute_exit_order(
         order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
+        collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(conn)
         collateral_component = _assert_collateral_allows_sell(intent.token_id, shares)
 
         # -------------------------------------------------------------------
@@ -2680,6 +2657,7 @@ def execute_exit_order(
                             _capability_component("order_type_selection", order_type=order_type),
                             heartbeat_component,
                             ws_gap_component,
+                            collateral_refresh_component,
                             collateral_component,
                             _capability_component("replacement_sell_guard"),
                             _exit_decision_source_component(),

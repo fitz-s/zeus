@@ -212,6 +212,13 @@ def _ensure_position_current_authority_columns(conn: sqlite3.Connection) -> None
         # survive daemon restarts so CI-separated exits do not degrade to a
         # point-estimate gate.
         ("entry_ci_width", "REAL"),
+        # Monitor authority bits (2026-06-17): position_current already
+        # persisted last_monitor_prob / last_monitor_market_price, but not
+        # whether those values were fresh. Reload paths then reconstructed
+        # open positions with false missing authority and could manufacture
+        # INCOMPLETE_EXIT_CONTEXT even after a fresh monitor event.
+        ("last_monitor_prob_is_fresh", "INTEGER"),
+        ("last_monitor_market_price_is_fresh", "INTEGER"),
         # Exit-retry persistence (2026-06-12 infinite-loop incident): the
         # chain-truth gate's _mark_exit_retry incremented exit_retry_count
         # ONLY in memory — every load_portfolio() reset it to 0, so the

@@ -222,7 +222,7 @@ def _candidate_targets(
                     AND p.target_date = c.target_local_date
                     AND p.temperature_metric = c.temperature_metric
                     AND p.training_allowed = 0
-                    AND p.trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                    AND p.trade_authority_status = 'LIVE_AUTHORITY'
                     {_tradeable}
                     AND json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = c.source_run_id
               )

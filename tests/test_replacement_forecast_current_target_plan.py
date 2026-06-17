@@ -57,7 +57,7 @@ def _create_db(path) -> None:
             CREATE TABLE readiness_state (
                 readiness_id TEXT PRIMARY KEY,
                 strategy_key TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'SHADOW_ONLY',
+                status TEXT NOT NULL DEFAULT 'READY',
                 dependency_json TEXT NOT NULL DEFAULT '{}',
                 provenance_json TEXT NOT NULL,
                 expires_at TEXT
@@ -134,7 +134,7 @@ def _create_db(path) -> None:
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
                 'Paris', '2026-06-09', 'high',
                 '{"baseline_b0":"baseline-current-Paris"}',
-                'SHADOW_VETO_ONLY', 0
+                'LIVE_AUTHORITY', 0
             )
             """
         )
@@ -150,7 +150,7 @@ def _create_db(path) -> None:
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
                 'Madrid', '2026-06-09', 'high',
                 '{"baseline_b0":"baseline-stale-Madrid"}',
-                'SHADOW_VETO_ONLY', 0
+                'LIVE_AUTHORITY', 0
             )
             """
         )
@@ -158,7 +158,7 @@ def _create_db(path) -> None:
             """
                 INSERT INTO readiness_state (
                     readiness_id, strategy_key, status, dependency_json, provenance_json
-                ) VALUES (?, ?, 'SHADOW_ONLY', ?, ?)
+                ) VALUES (?, ?, 'READY', ?, ?)
             """,
             (
                 "ready-paris",
@@ -171,7 +171,7 @@ def _create_db(path) -> None:
             """
                 INSERT INTO readiness_state (
                     readiness_id, strategy_key, status, dependency_json, provenance_json
-                ) VALUES (?, ?, 'SHADOW_ONLY', ?, ?)
+                ) VALUES (?, ?, 'READY', ?, ?)
             """,
             (
                 "ready-madrid-stale",
@@ -448,7 +448,7 @@ def test_current_target_plan_blocks_when_source_run_dependency_schema_is_missing
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
-                'Madrid', '2026-06-09', 'high', 'SHADOW_VETO_ONLY', 0
+                'Madrid', '2026-06-09', 'high', 'LIVE_AUTHORITY', 0
             )
             """
         )

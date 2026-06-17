@@ -1610,6 +1610,7 @@ def _validate_review_confirmed_fill_payload(
     if proof_class not in {
         "prior_fill_confirmed_event_with_positive_trade_fact",
         "cancel_unknown_confirmed_trade_with_positive_trade_fact",
+        "recovery_no_venue_order_id_confirmed_trade",
     }:
         raise ValueError("review confirmed-fill clearance proof_class is not supported")
     required_predicates = payload.get("required_predicates")
@@ -1621,6 +1622,15 @@ def _validate_review_confirmed_fill_payload(
             "semantic_cancel_status_cancel_unknown",
             "requires_m5_reconcile",
             "positive_trade_fact",
+        )
+    elif proof_class == "recovery_no_venue_order_id_confirmed_trade":
+        required_true = (
+            "latest_event_is_review_required",
+            "review_reason_recovery_no_venue_order_id",
+            "positive_trade_fact",
+            "maker_order_token_matches_command",
+            "maker_order_not_open",
+            "venue_size_quantization_residual_lt_0_01",
         )
     else:
         required_true = (
@@ -1643,6 +1653,7 @@ def _validate_review_confirmed_fill_payload(
         "PolymarketUserChannelIngestor._handle_trade",
         "operator_review",
         "command_recovery._review_required_cancel_unknown_live_order_recovery",
+        "command_recovery._reconcile_row",
     }:
         raise ValueError("review confirmed-fill clearance source_function is not supported")
     if not str(source.get("source_commit") or "").strip():
@@ -1936,6 +1947,9 @@ def _actual_review_confirmed_fill_predicates(
         and _decimal_text_equal(filled_size, trade_fact["filled_size"])
         and _decimal_text_equal(fill_price, trade_fact["fill_price"])
     )
+    required_predicates = payload.get("required_predicates")
+    if not isinstance(required_predicates, dict):
+        required_predicates = {}
     return {
         "latest_event_is_review_required": latest_event_type == "REVIEW_REQUIRED",
         "latest_event_is_cancel_replace_blocked": latest_event_type == "CANCEL_REPLACE_BLOCKED",
@@ -1944,8 +1958,14 @@ def _actual_review_confirmed_fill_predicates(
         ),
         "requires_m5_reconcile": latest_payload.get("requires_m5_reconcile") is True,
         "review_reason_supported": review_reason == "ws_trade_lifecycle_regression_or_economic_drift",
+        "review_reason_recovery_no_venue_order_id": review_reason == "recovery_no_venue_order_id",
         "prior_fill_confirmed_event": prior_fill_confirmed,
         "positive_trade_fact": positive_trade_fact,
+        "maker_order_token_matches_command": required_predicates.get("maker_order_token_matches_command") is True,
+        "maker_order_not_open": required_predicates.get("maker_order_not_open") is True,
+        "venue_size_quantization_residual_lt_0_01": (
+            required_predicates.get("venue_size_quantization_residual_lt_0_01") is True
+        ),
     }
 
 

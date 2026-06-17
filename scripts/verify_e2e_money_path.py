@@ -171,7 +171,7 @@ class Walker:
                    FROM forecast_posteriors
                    WHERE city=? AND target_date=? AND temperature_metric=?
                      AND training_allowed=0
-                     AND trade_authority_status IN ('SHADOW_ONLY','SHADOW_VETO_ONLY')
+                     AND trade_authority_status = 'LIVE_AUTHORITY'
                      AND q_lcb_json IS NOT NULL
                    ORDER BY computed_at DESC LIMIT 1""",
                 (self.city, self.target_date, self.metric),

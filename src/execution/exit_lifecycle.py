@@ -29,8 +29,14 @@ from types import SimpleNamespace
 from typing import Callable, Optional
 
 from src.execution.collateral import check_sell_collateral
+from src.state.collateral_ledger import CollateralInsufficient
 from src.observability.counters import increment as _cnt_inc
-from src.execution.executor import OrderResult, create_exit_order_intent, execute_exit_order
+from src.execution.executor import (
+    OrderResult,
+    create_exit_order_intent,
+    execute_exit_order,
+    _refresh_exit_collateral_snapshot_for_submit,
+)
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     enter_pending_exit_runtime_state,
@@ -1114,6 +1120,10 @@ def execute_exit(
     Live mode: place sell order, check fill, retry on failure.
     NEVER close a live position without confirmed fill.
     """
+    is_red_force_exit = (
+        getattr(position, "exit_reason", "") == "red_force_exit"
+        or str(exit_context.exit_reason or "").upper() == "RED_FORCE_EXIT"
+    )
     # PR-S1 Bug #3: block SELL for tokens with unresolved aggregate violations.
     _eff_token_id = (
         position.token_id if getattr(position, "direction", "") == "buy_yes"
@@ -1135,6 +1145,10 @@ def execute_exit(
         retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
         _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price", conn=conn)
         return "exit_blocked: incomplete_context"
+    if not is_red_force_exit and not exit_context.current_market_price_is_fresh:
+        retry_reason = f"{exit_context.exit_reason or 'EXIT'} [STALE_MARKET_PRICE]"
+        _mark_exit_retry(position, reason=retry_reason, error="stale_current_market_price", conn=conn)
+        return "exit_blocked: stale_market_price"
 
     exit_intent = exit_intent or build_exit_intent(position, exit_context)
     _validate_exit_intent(position, exit_context, exit_intent)
@@ -1212,6 +1226,29 @@ def _execute_live_exit(
             )
             log_exit_retry_event(conn, position, reason=dust_reason, error=dust_error)
         return f"sell_blocked_dust: {dust_error}"
+
+    if conn is not None:
+        try:
+            _refresh_exit_collateral_snapshot_for_submit(conn)
+        except CollateralInsufficient as exc:
+            collateral_reason = str(exc)
+            retry_reason = f"{exit_context.exit_reason} [COLLATERAL_REFRESH: {collateral_reason}]"
+            _mark_exit_retry(
+                position,
+                reason=retry_reason,
+                error=collateral_reason,
+                conn=conn,
+            )
+            if conn is not None:
+                log_pending_exit_recovery_event(
+                    conn,
+                    position,
+                    event_type="EXIT_ORDER_REJECTED",
+                    reason=retry_reason,
+                    error=collateral_reason,
+                )
+                log_exit_retry_event(conn, position, reason=retry_reason, error=collateral_reason)
+            return f"collateral_blocked: {collateral_reason}"
 
     # Pre-sell collateral check (fail-closed)
     can_sell, collateral_reason = check_sell_collateral(

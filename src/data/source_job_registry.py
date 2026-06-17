@@ -221,7 +221,7 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
                   callable_ref="_replacement_forecast_download_job",
                   dispatch_kind="startup", family="forecast", registry_built=False,
                   notes="one-shot date trigger 90s after boot; same download job as cron path"),
-    SourceJobSpec("replacement_forecast_shadow_materialize", "forecast_live_daemon", "shadow", "default", True,
+    SourceJobSpec("replacement_forecast_live_materialize", "forecast_live_daemon", "live", "default", True,
                   callable_ref="_replacement_forecast_materialize_job",
                   misfire_grace_time=120, family="forecast", registry_built=False,
                   notes="interval-driven seed_discovery→seed→materialize on already-downloaded "

@@ -47,9 +47,9 @@ FORECAST_LIVE_SOURCE_HEALTH_JOB_ID = "forecast_live_source_health_probe"
 # job-set (after the registry/cutover/legacy scheduler is built), on their own dedicated
 # executor lane, so they ALWAYS run (they ARE the replacement production — under the OpenData
 # cutover they MUST run, not be filtered out) and never contend with the heartbeat or OpenData
-# lanes. The functions themselves are flag-gated (no-op when the shadow flag is off).
+# lanes. The functions themselves are live-authority gated (no-op when trade authority is off).
 REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID = "replacement_forecast_download"
-REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID = "replacement_forecast_shadow_materialize"
+REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID = "replacement_forecast_live_materialize"
 REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_catch_up"
 REPLACEMENT_AVAILABILITY_POLL_JOB_ID = "replacement_cycle_availability_poll"
 ANCHOR_META_CROSS_CHECK_JOB_ID = "anchor_meta_stamp_cross_check"
@@ -120,7 +120,9 @@ def _opendata_jobs_disabled_by_replacement_cutover() -> bool:
     try:
         from src.config import settings
 
-        cfg = getattr(settings, "_data", {}).get("replacement_forecast_shadow", {})
+        cfg = getattr(settings, "_data", {}).get("replacement_forecast_live", {})
+        if not cfg:
+            cfg = getattr(settings, "_data", {}).get("replacement_forecast_shadow", {})
         if isinstance(cfg, dict):
             return _truthy(cfg.get("disable_legacy_opendata_forecast_live_jobs"))
     except Exception as exc:
@@ -904,19 +906,18 @@ def forecast_live_job_specs(
 # ---------------------------------------------------------------------------
 
 
-def _replacement_forecast_shadow_enabled() -> bool:
-    """The single shadow flag the moved production functions already check. Used here only to
-    log whether the registered jobs will do work; the functions THEMSELVES re-check this flag
-    and no-op when it is off, so registration is always safe."""
+def _replacement_forecast_live_authority_enabled() -> bool:
+    """Whether the registered replacement production jobs will do live-authority work."""
     try:
         from src.data.replacement_forecast_production import (
             _replacement_forecast_runtime_flags_from_settings,
         )
+        from src.data.replacement_forecast_runtime_policy import TRADE_AUTHORITY_FLAG
 
         flags = _replacement_forecast_runtime_flags_from_settings()
-        return bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False))
+        return bool(flags.get(TRADE_AUTHORITY_FLAG, False))
     except Exception as exc:  # noqa: BLE001 - never block boot on a flag read
-        logger.warning("replacement-forecast shadow flag read failed (treating as off): %s", exc)
+        logger.warning("replacement-forecast live-authority flag read failed (treating as off): %s", exc)
         return False
 
 
@@ -962,23 +963,25 @@ def _replacement_cycle_availability_poll_job() -> None:
 def _replacement_forecast_materialize_job() -> None:
     """LIGHT seed_discovery -> seed -> materialize on already-downloaded manifests (no download).
 
-    Interval-driven; delegates to the shared production function, which is flag-gated and
+    Interval-driven; delegates to the shared production function, which is live-authority gated and
     fail-soft."""
     from src.data.replacement_forecast_production import (
-        _replacement_forecast_shadow_materialize_cycle,
+        _replacement_forecast_live_materialize_cycle,
     )
 
-    _replacement_forecast_shadow_materialize_cycle()
+    _replacement_forecast_live_materialize_cycle()
 
 
-def _replacement_forecast_shadow_cfg() -> dict:
-    """The ``replacement_forecast_shadow`` settings section via the shared production module's
+def _replacement_forecast_live_cfg() -> dict:
+    """The ``replacement_forecast_live`` settings section via the shared production module's
     single config reader (one source for ``download_release_lag_hours`` /
     ``materialization_interval_min``, identical to the values the moved production functions
     resolve)."""
     from src.data.replacement_forecast_production import _settings_section
 
-    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    cfg = _settings_section("replacement_forecast_live", {}) or {}
+    if not cfg:
+        cfg = _settings_section("replacement_forecast_shadow", {}) or {}
     return cfg if isinstance(cfg, dict) else {}
 
 
@@ -1003,12 +1006,12 @@ def _replacement_forecast_publish_cron_hours() -> tuple[int, ...]:
     no-ops a fire whose newest-available cycle is already downloaded. A premature fire therefore
     re-resolves to the current cycle and skips cleanly rather than downloading a not-yet-published
     cycle."""
-    release_lag_hours = float(_replacement_forecast_shadow_cfg().get("download_release_lag_hours") or 14.0)
+    release_lag_hours = float(_replacement_forecast_live_cfg().get("download_release_lag_hours") or 14.0)
     return tuple(int((cycle_hour + release_lag_hours) % 24) for cycle_hour in (0, 6, 12, 18))
 
 
 def _replacement_forecast_materialize_interval_minutes() -> int:
-    return int(_replacement_forecast_shadow_cfg().get("materialization_interval_min") or 5)
+    return int(_replacement_forecast_live_cfg().get("materialization_interval_min") or 5)
 
 
 def _register_replacement_forecast_production_jobs(
@@ -1080,9 +1083,9 @@ def _register_replacement_forecast_production_jobs(
     )
     logger.info(
         "replacement-forecast production jobs registered (download cron hour=%s min=10 + boot "
-        "catch-up; materialize interval=%dmin; lane=%s; shadow_enabled=%s)",
+        "catch-up; materialize interval=%dmin; lane=%s; live_authority_enabled=%s)",
         cron_hours, materialize_minutes, REPLACEMENT_FORECAST_EXECUTOR_LANE,
-        _replacement_forecast_shadow_enabled(),
+        _replacement_forecast_live_authority_enabled(),
     )
 
 

@@ -14,6 +14,29 @@ from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.modes import ALLOWED_MODES, is_live_like
 
 FORECAST_LIVE_ELIGIBLE_STATUS = "LIVE_ELIGIBLE"
+# mx2t3 carrier-decouple (GATE-1 C): the members_json_source value a posterior-provenance
+# FORECAST_AUTHORITY carries when belief is sourced from the multi-model raw_model_forecasts
+# fusion (via forecast_posteriors) instead of the cold ensemble_snapshots daily extrema. A cert
+# carrying this value is validated by the EQUALLY-STRICT posterior invariant set below — it is a
+# DIFFERENT certified completeness authority (the materializer's decorrelated-model + topology
+# gates), NOT a relaxation of the ensemble gates.
+ENSEMBLE_MEMBERS_JSON_SOURCE = "ensemble_snapshots.daily_extrema"
+POSTERIOR_MEMBERS_JSON_SOURCE = "raw_model_forecasts.multimodel"
+# Posterior-provenance applied-validations: the posterior-appropriate analogue of
+# REQUIRED_FORECAST_VALIDATIONS. The model-count completeness replaces the ensemble member/step
+# floors; causality + authority + freshness are unchanged.
+REQUIRED_POSTERIOR_FORECAST_VALIDATIONS = frozenset(
+    {
+        "posterior_complete_by_construction",
+        "decorrelated_model_count_floor",
+        "causality_status_ok",
+        "authority_verified",
+        "available_at_not_future",
+    }
+)
+# The minimum decorrelated model count a posterior-provenance forecast authority must carry (the
+# SAME floor the spine member producer enforces: fewer than 3 decorrelated members fails closed).
+POSTERIOR_MIN_DECORRELATED_MODELS = 3
 REQUIRED_FORECAST_VALIDATIONS = frozenset(
     {
         "source_run_completeness_status",
@@ -910,6 +933,15 @@ def _validate_forecast_authority_payload(forecast: dict) -> None:
     reason = forecast.get("reader_reason_code")
     if reason not in (None, "", "OK"):
         raise CertificateVerificationError("forecast.reader_reason_code must be empty for verified forecast")
+    # mx2t3 carrier-decouple (GATE-1 C): a posterior-provenance forecast authority carries
+    # raw_model_forecasts multi-model fusion belief (via forecast_posteriors), NOT ensemble daily
+    # extrema. It has no ensemble member array / step coverage; its completeness is the
+    # materializer's decorrelated-model + topology gates. Validate it with the EQUALLY-STRICT
+    # posterior invariant set and return — the ensemble branch below is UNCHANGED for ensemble
+    # provenance. This reads a DIFFERENT certified authority, it does NOT weaken the ensemble gates.
+    if forecast.get("members_json_source") == POSTERIOR_MEMBERS_JSON_SOURCE:
+        _validate_posterior_forecast_authority_payload(forecast)
+        return
     required_scalars = (
         "coverage_readiness_status",
         "coverage_completeness_status",
@@ -956,8 +988,72 @@ def _validate_forecast_authority_payload(forecast: dict) -> None:
         raise CertificateVerificationError(f"forecast.applied_validations missing required validations: {sorted(missing)}")
     if forecast.get("members_extrema_metric_identity") != forecast.get("temperature_metric"):
         raise CertificateVerificationError("forecast.members_extrema_metric_identity mismatch")
-    if forecast.get("members_json_source") != "ensemble_snapshots.daily_extrema":
+    if forecast.get("members_json_source") != ENSEMBLE_MEMBERS_JSON_SOURCE:
         raise CertificateVerificationError("forecast.members_json_source is not authoritative daily extrema")
+    expected_transform = _expected_members_extrema_transform(forecast.get("temperature_metric"))
+    if forecast.get("members_extrema_transform") != expected_transform:
+        raise CertificateVerificationError("forecast.members_extrema_transform mismatch")
+
+
+def _validate_posterior_forecast_authority_payload(forecast: dict) -> None:
+    """EQUALLY-STRICT validation for a posterior-provenance FORECAST_AUTHORITY (mx2t3 decouple).
+
+    The posterior carries multi-model raw_model_forecasts fusion belief, NOT ensemble daily
+    extrema, so the ensemble-only floors (51-member array, hourly step coverage) do not apply.
+    The posterior's completeness is a DIFFERENT certified authority — the materializer's
+    decorrelated-model + topology gates — and is enforced here with NO LESS rigor:
+      * coverage/readiness COMPLETE + LIVE_ELIGIBLE (same as ensemble);
+      * a stable posterior identity (posterior_identity_hash) AND members_json_hash present;
+      * the decorrelated model count (expected==observed==count) AND count >= the floor the spine
+        member producer itself enforces (>=3 decorrelated members);
+      * the posterior-appropriate applied_validations set (model-count completeness replaces the
+        ensemble member/step floors; causality + authority + freshness unchanged).
+    """
+    for field in (
+        "coverage_readiness_status",
+        "coverage_completeness_status",
+        "temperature_metric",
+        "members_extrema_metric_identity",
+        "members_json_source",
+        "members_json_hash",
+        "members_extrema_transform",
+        "target_local_date",
+        "city_timezone",
+        "local_date_window_hash",
+        "bin_labels_hash",
+        "posterior_identity_hash",
+        "source_cycle_time",
+        "source_run_id",
+        "forecast_source_id",
+    ):
+        if forecast.get(field) in (None, ""):
+            raise CertificateVerificationError(f"forecast.{field} missing (posterior)")
+    if forecast.get("coverage_readiness_status") != "LIVE_ELIGIBLE":
+        raise CertificateVerificationError("forecast.coverage_readiness_status is not LIVE_ELIGIBLE")
+    if forecast.get("coverage_completeness_status") != "COMPLETE":
+        raise CertificateVerificationError("forecast.coverage_completeness_status is not COMPLETE")
+    try:
+        expected_models = int(forecast.get("expected_members"))
+        observed_models = int(forecast.get("observed_members"))
+    except (TypeError, ValueError):
+        raise CertificateVerificationError("forecast.expected/observed decorrelated model count missing")
+    if observed_models < expected_models:
+        raise CertificateVerificationError("forecast.observed_members below expected_members (posterior)")
+    if observed_models < POSTERIOR_MIN_DECORRELATED_MODELS:
+        raise CertificateVerificationError(
+            f"forecast.observed_members below posterior decorrelated-model floor "
+            f"({POSTERIOR_MIN_DECORRELATED_MODELS})"
+        )
+    validations = {str(item) for item in tuple(forecast.get("applied_validations") or ())}
+    if not validations:
+        raise CertificateVerificationError("forecast.applied_validations missing (posterior)")
+    missing = REQUIRED_POSTERIOR_FORECAST_VALIDATIONS - validations
+    if missing:
+        raise CertificateVerificationError(
+            f"forecast.applied_validations missing required posterior validations: {sorted(missing)}"
+        )
+    if forecast.get("members_extrema_metric_identity") != forecast.get("temperature_metric"):
+        raise CertificateVerificationError("forecast.members_extrema_metric_identity mismatch")
     expected_transform = _expected_members_extrema_transform(forecast.get("temperature_metric"))
     if forecast.get("members_extrema_transform") != expected_transform:
         raise CertificateVerificationError("forecast.members_extrema_transform mismatch")
