@@ -453,6 +453,17 @@ class TestDay0TransitionMonotonicity:
         assert "_held_side_probability_from_yes_bin_probability" in source
         assert "buy_no_independent_monitor_probability_missing" not in source
 
+    def test_buy_no_day0_monitor_probability_converts_direction_enum(self):
+        """Position normalizes direction to Direction; enum inputs still need NO space."""
+        from src.contracts.semantic_types import Direction
+        from src.engine.monitor_refresh import _held_side_probability_from_yes_bin_probability
+
+        actual = _held_side_probability_from_yes_bin_probability(
+            0.004831941161402871,
+            Direction.NO,
+        )
+        assert actual == pytest.approx(0.9951680588385971)
+
 
 # ===========================================================================
 # R8 — day0 q_lcb is a REAL lower bound (static-sampler fix, review item D)

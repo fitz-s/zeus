@@ -131,7 +131,8 @@ def _model_only_native_posterior(p_native: float) -> float:
 def _held_side_probability_from_yes_bin_probability(p_yes_bin: float, direction: str) -> float:
     """Convert a YES-bin point probability into the held-side outcome space."""
     p_yes = _model_only_native_posterior(p_yes_bin)
-    if str(direction) == "buy_no":
+    direction_value = getattr(direction, "value", direction)
+    if str(direction_value) == "buy_no":
         return _model_only_native_posterior(one_minus(p_yes))
     return p_yes
 
