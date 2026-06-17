@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-05-31
+# Last reused or audited: 2026-06-17
 # Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, critic-resolved) +
 #   GOAL #36 expanded (continuous entry+exit, evidence-gated). RED-first relationship tests for the
 #   continuous re-decision contract. These pin the cache (P1) + cheap-screen/enqueue (P2) API BEFORE
@@ -205,6 +205,272 @@ def test_entry_screen_backoff_compares_all_in_cost_basis():
         price_lookup=one_tick_raw_improvement,
         min_edge=0.01,
         recent_full_economics_rejections=rejection,
+    ) == []
+
+
+def test_entry_screen_backoff_uses_stable_market_key_when_family_id_changes():
+    conn = _mem_world()
+    label = "Will the lowest temperature in Shanghai be 24°C on June 19?"
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_new_hash",
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="low",
+        snapshot_id="snap-new",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.90],
+        q_lcb_yes_vec=[0.795],
+        q_lcb_no_vec=[0.01],
+        recorded_at="2026-06-17T22:32:00+00:00",
+    )
+    stable_key = ("Shanghai", "2026-06-19", "low", label, "buy_yes")
+    rejection = {
+        stable_key: cr.FullEconomicsReject(
+            execution_price=cr._all_in_cost(0.34),
+            q_lcb_5pct=0.795,
+            trade_score=-0.14,
+            created_at="2026-06-17T22:31:00+00:00",
+        )
+    }
+
+    same_economics = {
+        ("edli_family_new_hash", label, "buy_yes"): cr.PriceQuote(
+            price=0.34,
+            freshness_deadline="2026-06-17T23:00:00+00:00",
+        ),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-17T22:32:30+00:00",
+        price_lookup=same_economics,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejection,
+    ) == []
+
+    improved_economics = {
+        ("edli_family_new_hash", label, "buy_yes"): cr.PriceQuote(
+            price=0.30,
+            freshness_deadline="2026-06-17T23:00:00+00:00",
+        ),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-17T22:32:30+00:00",
+        price_lookup=improved_economics,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejection,
+    )
+
+
+def test_recent_full_economics_rejections_publish_stable_market_key():
+    conn = _mem_world()
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            rejection_stage TEXT,
+            rejection_reason TEXT,
+            c_fee_adjusted REAL,
+            q_lcb_5pct REAL,
+            trade_score REAL,
+            created_at TEXT
+        )
+        """
+    )
+    label = "Will the lowest temperature in Shanghai be 24°C on June 19?"
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            family_id, city, target_date, metric, bin_label, direction,
+            rejection_stage, rejection_reason, c_fee_adjusted, q_lcb_5pct,
+            trade_score, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "edli_family_old_hash",
+            "Shanghai",
+            "2026-06-19",
+            "low",
+            label,
+            "buy_yes",
+            "TRADE_SCORE",
+            "TRADE_SCORE_NON_POSITIVE",
+            0.34,
+            0.795,
+            -0.14,
+            "2026-06-17T22:31:00+00:00",
+        ),
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+
+    stable_key = ("Shanghai", "2026-06-19", "low", label, "buy_yes")
+    legacy_key = ("edli_family_old_hash", label, "buy_yes")
+    assert stable_key in rejections
+    assert legacy_key in rejections
+    assert rejections[stable_key].trade_score == -0.14
+    assert rejections[stable_key].rejection_reason == "TRADE_SCORE_NON_POSITIVE"
+    assert ("family", "Shanghai", "2026-06-19", "low") in rejections
+
+
+def test_entry_screen_blocks_fdr_refuted_candidate_despite_positive_trade_score():
+    conn = _mem_world()
+    label = "Will the lowest temperature in Paris be 22°C on June 19?"
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_paris_hash",
+        city="Paris",
+        target_date="2026-06-19",
+        temperature_metric="low",
+        snapshot_id="snap-paris",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.20],
+        q_lcb_yes_vec=[0.10],
+        q_lcb_no_vec=[0.78],
+        recorded_at="2026-06-17T22:32:00+00:00",
+    )
+    stable_key = ("Paris", "2026-06-19", "low", label, "buy_no")
+    rejection = {
+        stable_key: cr.FullEconomicsReject(
+            execution_price=0.60,
+            q_lcb_5pct=0.78,
+            trade_score=0.018,
+            created_at="2026-06-17T22:31:00+00:00",
+            rejection_reason="FDR_REJECTED",
+        )
+    }
+
+    same_economics = {
+        ("edli_family_paris_hash", label, "buy_no"): cr.PriceQuote(
+            price=0.60,
+            freshness_deadline="2026-06-17T23:30:00+00:00",
+        ),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-17T22:32:30+00:00",
+        price_lookup=same_economics,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejection,
+    ) == []
+
+
+def test_entry_screen_family_refutation_cooldown_blocks_family_then_releases():
+    conn = _mem_world()
+    label = "Will the lowest temperature in Paris be 22°C on June 19?"
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_paris_hash",
+        city="Paris",
+        target_date="2026-06-19",
+        temperature_metric="low",
+        snapshot_id="snap-paris",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.20],
+        q_lcb_yes_vec=[0.10],
+        q_lcb_no_vec=[0.78],
+        recorded_at="2026-06-17T22:32:00+00:00",
+    )
+    family_key = ("family", "Paris", "2026-06-19", "low")
+    rejection = {
+        family_key: cr.FullEconomicsReject(
+            execution_price=None,
+            q_lcb_5pct=None,
+            trade_score=0.0,
+            created_at="2026-06-17T22:31:00+00:00",
+            rejection_reason="EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22",
+        )
+    }
+    price = {
+        ("edli_family_paris_hash", label, "buy_no"): cr.PriceQuote(
+            price=0.60,
+            freshness_deadline="2026-06-17T23:30:00+00:00",
+        ),
+    }
+
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-17T22:32:30+00:00",
+        price_lookup=price,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejection,
+    ) == []
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-17T23:01:01+00:00",
+        price_lookup=price,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejection,
+    )
+
+
+def test_entry_screen_acted_state_uses_stable_market_key_when_family_id_changes():
+    conn = _mem_world()
+    label = "Will the lowest temperature in Shanghai be 24°C on June 19?"
+    acted: dict = {}
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_old_hash",
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="low",
+        snapshot_id="snap-old",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.90],
+        q_lcb_yes_vec=[0.795],
+        q_lcb_no_vec=[0.01],
+        recorded_at="2026-06-17T22:30:00+00:00",
+    )
+    first_price = {
+        ("edli_family_old_hash", label, "buy_yes"): cr.PriceQuote(
+            price=0.34,
+            freshness_deadline="2026-06-17T23:00:00+00:00",
+        ),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-17T22:31:00+00:00",
+        price_lookup=first_price,
+        min_edge=0.01,
+        acted_state=acted,
+    )
+
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_new_hash",
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="low",
+        snapshot_id="snap-new",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.90],
+        q_lcb_yes_vec=[0.795],
+        q_lcb_no_vec=[0.01],
+        recorded_at="2026-06-17T22:32:00+00:00",
+    )
+    same_price = {
+        ("edli_family_new_hash", label, "buy_yes"): cr.PriceQuote(
+            price=0.34,
+            freshness_deadline="2026-06-17T23:00:00+00:00",
+        ),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-17T22:33:00+00:00",
+        price_lookup=same_price,
+        min_edge=0.01,
+        acted_state=acted,
     ) == []
 
 

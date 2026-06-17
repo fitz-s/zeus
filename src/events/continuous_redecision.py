@@ -11,6 +11,8 @@
 #   EDLI_REDECISION_PENDING. §4.5 resting-order management wired (belief-decay / stale-quote / moved-book
 #   pulls reuse the maker_rest_escalation cancel machinery). Flat constants replaced by the canonical
 #   price-dependent fee model + documented economic bases.
+#   2026-06-17: entry admission cooldown keys use stable market identity
+#   (city,target_date,metric,bin_label,direction), not dynamic EDLI family hashes.
 #
 # DAEMON-SAFE BACKING (critical): assert_db_matches_registry (table_registry.py:285) is STRICT
 # set-equality on TABLE NAMES (extra COLUMNS are permitted — subset semantics). So this module adds
@@ -76,6 +78,11 @@ REST_BOOK_DRIFT_TICKS: float = 1.0
 REDECISION_EVENT_TYPE: str = "EDLI_REDECISION_PENDING"
 _BELIEF_PREFIX: str = "edli_belief:"
 _EPS: float = 1e-9
+EntryScreenKey = tuple[str, str, str]
+StableEntryScreenKey = tuple[str, str, str, str, str]
+FamilyRedecisionScreenKey = tuple[str, str, str, str]
+RedecisionScreenKey = EntryScreenKey | StableEntryScreenKey | FamilyRedecisionScreenKey
+FULL_DECISION_FAMILY_REFUTATION_COOLDOWN_SECONDS: float = 30.0 * 60.0
 
 
 @dataclass(frozen=True)
@@ -124,6 +131,7 @@ class FullEconomicsReject:
     q_lcb_5pct: float | None
     trade_score: float | None
     created_at: str
+    rejection_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -386,7 +394,36 @@ def _metric_from_family_id(family_id: str) -> str:
     parts = family_id.split("|")
     if len(parts) > 4 and parts[4] in ("high", "low"):
         return parts[4]
+    if len(parts) == 3 and parts[2] in ("high", "low"):
+        return parts[2]
     return ""
+
+
+def _stable_entry_screen_key(
+    belief: CachedBelief,
+    *,
+    bin_label: str,
+    direction: str,
+) -> StableEntryScreenKey | None:
+    """Stable identity for entry backoff across dynamic EDLI family hashes."""
+
+    city = str(belief.city or "").strip()
+    target_date = str(belief.target_date or "").strip()
+    metric = str(belief.metric or _metric_from_family_id(belief.family_id) or "").strip()
+    label = str(bin_label or "").strip()
+    side = str(direction or "").strip()
+    if not (city and target_date and metric in {"high", "low"} and label and side):
+        return None
+    return (city, target_date, metric, label, side)
+
+
+def _stable_family_screen_key(belief: CachedBelief) -> FamilyRedecisionScreenKey | None:
+    city = str(belief.city or "").strip()
+    target_date = str(belief.target_date or "").strip()
+    metric = str(belief.metric or _metric_from_family_id(belief.family_id) or "").strip()
+    if not (city and target_date and metric in {"high", "low"}):
+        return None
+    return ("family", city, target_date, metric)
 
 
 def _has_temperature_metric_column(conn: sqlite3.Connection) -> bool:
@@ -477,8 +514,8 @@ def enqueue_live_redecisions(
     decision_time: str,
     price_lookup: dict[tuple[str, str, str], PriceQuote],
     min_edge: float,
-    acted_state: dict[tuple[str, str, str], float] | None = None,
-    recent_full_economics_rejections: dict[tuple[str, str, str], FullEconomicsReject] | None = None,
+    acted_state: dict[RedecisionScreenKey, float] | None = None,
+    recent_full_economics_rejections: dict[RedecisionScreenKey, FullEconomicsReject] | None = None,
 ) -> list[EnqueuedRedecision]:
     """Screen live entry pairs against FRESH price and conservative q_lcb evidence.
 
@@ -490,14 +527,20 @@ def enqueue_live_redecisions(
     dt = _parse(decision_time)
     out: list[EnqueuedRedecision] = []
     for belief in _all_latest_beliefs(conn):
+        family_key = _stable_family_screen_key(belief)
         for idx, label in enumerate(belief.bin_labels):
             if idx >= len(belief.p_posterior_vec):
                 continue
             q_lcb_yes = _vec_float_at(belief.q_lcb_yes_vec, idx)
             q_lcb_no = _vec_float_at(belief.q_lcb_no_vec, idx)
             for direction in ("buy_yes", "buy_no"):
-                key = (belief.family_id, label, direction)
-                quote = price_lookup.get(key)
+                legacy_key: EntryScreenKey = (belief.family_id, label, direction)
+                stable_key = _stable_entry_screen_key(
+                    belief,
+                    bin_label=label,
+                    direction=direction,
+                )
+                quote = price_lookup.get(legacy_key)
                 if quote is None:
                     continue
                 if _parse(quote.freshness_deadline) <= dt:
@@ -508,22 +551,44 @@ def enqueue_live_redecisions(
                 edge = float(conservative_q) - float(quote.price) - _fee_at(float(quote.price))
                 if edge < min_edge - _EPS:
                     continue
-                rejection = (
-                    recent_full_economics_rejections.get(key)
-                    if recent_full_economics_rejections is not None
-                    else None
-                )
+                rejection = None
+                if recent_full_economics_rejections is not None:
+                    if stable_key is not None:
+                        rejection = recent_full_economics_rejections.get(stable_key)
+                    if rejection is None:
+                        rejection = recent_full_economics_rejections.get(legacy_key)
+                candidate_refutation_cleared = False
                 if rejection is not None and _full_economics_reject_still_blocks(
                     rejection,
                     current_execution_price=_all_in_cost(float(quote.price)),
                     current_q_lcb=float(conservative_q),
                 ):
                     continue
+                if rejection is not None:
+                    candidate_refutation_cleared = True
+                family_rejection = (
+                    recent_full_economics_rejections.get(family_key)
+                    if family_key is not None and recent_full_economics_rejections is not None
+                    else None
+                )
+                if (
+                    family_rejection is not None
+                    and not (
+                        candidate_refutation_cleared
+                        and _candidate_refutation_is_at_least_as_fresh(rejection, family_rejection)
+                    )
+                    and _full_decision_family_refutation_still_blocks(
+                        family_rejection,
+                        decision_time=decision_time,
+                    )
+                ):
+                    continue
                 if acted_state is not None:
-                    last = acted_state.get(key)
+                    acted_key: RedecisionScreenKey = stable_key or legacy_key
+                    last = acted_state.get(acted_key)
                     if last is not None and edge <= last + IMPROVE_DELTA + _EPS:
                         continue  # not materially improved → do not re-fire (anti price-noise)
-                    acted_state[key] = edge
+                    acted_state[acted_key] = edge
                 out.append(EnqueuedRedecision(belief.family_id, label, direction, edge))
     return out
 
@@ -549,7 +614,12 @@ def _full_economics_reject_still_blocks(
     current_execution_price: float,
     current_q_lcb: float,
 ) -> bool:
-    if rejection.trade_score is not None and rejection.trade_score > 0.0:
+    reason = str(rejection.rejection_reason or "")
+    if (
+        rejection.trade_score is not None
+        and rejection.trade_score > 0.0
+        and not reason.startswith("FDR_REJECTED")
+    ):
         return False
     price_improved = (
         rejection.execution_price is not None
@@ -560,6 +630,39 @@ def _full_economics_reject_still_blocks(
         and current_q_lcb >= float(rejection.q_lcb_5pct) + IMPROVE_DELTA - _EPS
     )
     return not (price_improved or belief_improved)
+
+
+def _full_decision_family_refutation_still_blocks(
+    rejection: FullEconomicsReject,
+    *,
+    decision_time: str,
+) -> bool:
+    try:
+        rejected_at = _parse(str(rejection.created_at))
+        now = _parse(str(decision_time))
+    except (TypeError, ValueError):
+        return True
+    return (now - rejected_at).total_seconds() < FULL_DECISION_FAMILY_REFUTATION_COOLDOWN_SECONDS
+
+
+def _candidate_refutation_is_at_least_as_fresh(
+    candidate_rejection: FullEconomicsReject | None,
+    family_rejection: FullEconomicsReject,
+) -> bool:
+    family_reason = str(family_rejection.rejection_reason or "")
+    if (
+        family_reason.startswith("FDR_REJECTED")
+        or family_reason.startswith("EVENT_BOUND_ALL_CANDIDATES_REJECTED:")
+    ):
+        return False
+    if candidate_rejection is None:
+        return False
+    try:
+        candidate_time = _parse(str(candidate_rejection.created_at))
+        family_time = _parse(str(family_rejection.created_at))
+    except (TypeError, ValueError):
+        return False
+    return candidate_time >= family_time
 
 
 def _all_in_cost(price: float) -> float:
@@ -579,7 +682,7 @@ def read_recent_full_economics_rejections(
     conn: sqlite3.Connection,
     *,
     lookback_hours: float = 24.0,
-) -> dict[tuple[str, str, str], FullEconomicsReject]:
+) -> dict[RedecisionScreenKey, FullEconomicsReject]:
     """Latest terminal full-economics no-value rejection per candidate.
 
     This is live evidence backoff, not a strategy cap. A cheaper fresh price or a
@@ -612,13 +715,17 @@ def read_recent_full_economics_rejections(
     try:
         rows = conn.execute(
             """
-            SELECT family_id, bin_label, direction, c_fee_adjusted, q_lcb_5pct, trade_score, created_at
+            SELECT family_id, city, target_date, metric, bin_label, direction,
+                   c_fee_adjusted, q_lcb_5pct, trade_score, created_at, rejection_reason
              FROM no_trade_regret_events
              WHERE rejection_stage = 'TRADE_SCORE'
                AND (
                     rejection_reason IN ('TRADE_SCORE_NON_POSITIVE', 'TRADE_SCORE_BLOCKED')
                  OR rejection_reason LIKE 'TRADE_SCORE_NON_POSITIVE:%'
                  OR rejection_reason LIKE 'TRADE_SCORE_BLOCKED:%'
+                 OR rejection_reason = 'FDR_REJECTED'
+                 OR rejection_reason LIKE 'FDR_REJECTED:%'
+                 OR rejection_reason LIKE 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:%'
                )
                AND family_id IS NOT NULL AND family_id != ''
                AND bin_label IS NOT NULL AND bin_label != ''
@@ -630,17 +737,38 @@ def read_recent_full_economics_rejections(
         ).fetchall()
     except sqlite3.Error:
         return {}
-    out: dict[tuple[str, str, str], FullEconomicsReject] = {}
+    out: dict[RedecisionScreenKey, FullEconomicsReject] = {}
     for row in rows:
-        key = (str(row[0]), str(row[1]), str(row[2]))
-        if key in out:
-            continue
-        out[key] = FullEconomicsReject(
-            execution_price=_optional_float(row[3]),
-            q_lcb_5pct=_optional_float(row[4]),
-            trade_score=_optional_float(row[5]),
-            created_at=str(row[6] or ""),
+        legacy_key: EntryScreenKey = (str(row[0]), str(row[4]), str(row[5]))
+        stable_key: StableEntryScreenKey | None = None
+        city = str(row[1] or "").strip()
+        target_date = str(row[2] or "").strip()
+        metric = str(row[3] or "").strip()
+        bin_label = str(row[4] or "").strip()
+        direction = str(row[5] or "").strip()
+        if city and target_date and metric in {"high", "low"} and bin_label and direction:
+            stable_key = (city, target_date, metric, bin_label, direction)
+        rejection = FullEconomicsReject(
+            execution_price=_optional_float(row[6]),
+            q_lcb_5pct=_optional_float(row[7]),
+            trade_score=_optional_float(row[8]),
+            created_at=str(row[9] or ""),
+            rejection_reason=str(row[10] or ""),
         )
+        if stable_key is not None and stable_key not in out:
+            out[stable_key] = rejection
+        if legacy_key not in out:
+            out[legacy_key] = rejection
+        reason = rejection.rejection_reason
+        if city and target_date and metric in {"high", "low"} and (
+            reason.startswith("TRADE_SCORE_NON_POSITIVE")
+            or reason.startswith("TRADE_SCORE_BLOCKED")
+            or reason.startswith("FDR_REJECTED")
+            or reason.startswith("EVENT_BOUND_ALL_CANDIDATES_REJECTED:")
+        ):
+            family_key: FamilyRedecisionScreenKey = ("family", city, target_date, metric)
+            if family_key not in out:
+                out[family_key] = rejection
     return out
 
 
