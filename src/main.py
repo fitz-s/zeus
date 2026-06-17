@@ -9042,12 +9042,10 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
     In EDLI event-driven modes this is the ONLY path that fires chain sync and exit
     monitoring — run_cycle() is never called in those modes.
 
-    Submit safety: exit_order_submit_enabled is set to False when
-    real_order_submit_enabled is False, preventing real sell orders from being
-    placed by the monitoring phase while the daemon is not configured for live
-    submission. State transitions (exit_pending_missing resolution, chain_state
-    updates) still run — they are read + DB-state-only operations, not order
-    submissions.
+    Submit safety: exit_order_submit_enabled follows real_order_submit_enabled.
+    When armed, the pre-chain held-position pass may submit exits before the
+    slower chain-sync scan completes; when unarmed, it still evaluates and
+    records state without placing venue orders.
 
     run_chain_sync uses the Polymarket REST Data API
     (data-api.polymarket.com/positions). If funder_address is absent from Keychain,
@@ -9104,8 +9102,8 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
                     pre_chain_artifact,
                     tracker,
                     summary,
-                    exit_order_submit_enabled=False,
-                    run_exit_preflight=False,
+                    exit_order_submit_enabled=real_order_submit_enabled,
+                    run_exit_preflight=True,
                 )
             except Exception as exc:
                 logger.error(
