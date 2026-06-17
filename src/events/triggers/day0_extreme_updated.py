@@ -205,6 +205,7 @@ class Day0ExtremeUpdatedTrigger:
             "target_date",
             "source",
             "timezone_name",
+            "local_timestamp",
             "utc_timestamp",
             "imported_at",
             "running_max",
@@ -245,6 +246,7 @@ class Day0ExtremeUpdatedTrigger:
                   AND target_date >= date(?)
                   AND utc_timestamp <= ?
                   AND imported_at <= ?
+                  AND substr(local_timestamp, 1, 10) = target_date
                   AND (running_max IS NOT NULL OR running_min IS NOT NULL)
                   AND authority IN ('VERIFIED', 'ICAO_STATION_NATIVE')
                   AND COALESCE(training_allowed, 0) = 1
@@ -281,6 +283,8 @@ class Day0ExtremeUpdatedTrigger:
                 try:
                     observation = observation_instant_row_to_day0_observation(row, metric=metric)
                 except ValueError:
+                    continue
+                if observation.get("live_authority_status") != "LIVE_AUTHORITY":
                     continue
                 key = (
                     str(observation.get("city") or ""),

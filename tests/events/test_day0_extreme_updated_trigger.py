@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-06-17
 # Authority basis: EDLI v1 implementation prompt §9 Day0 trigger availability and hard-fact gates.
 from __future__ import annotations
 
@@ -548,6 +548,96 @@ def test_scan_observation_instants_tokyo_low_uses_aggregate_target_day_min():
     assert low_payload["raw_value"] == 20.0
     assert low_payload["low_so_far"] == 20.0
     assert high_payload["high_so_far"] == 21.0
+
+
+def test_scan_observation_instants_london_excludes_tminus1_23_from_target_low_aggregate():
+    """Europe boundary regression: a mis-tagged T-1 23:00 local row must not be
+    aggregated into the target day's LOW just because a later T0 00:00 row makes
+    the grouped observation_time pass the local-date gate."""
+
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    insert_sql = """
+        INSERT INTO observation_instants (
+            city, target_date, source, timezone_name, local_hour, local_timestamp,
+            utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
+            is_missing_local_hour, time_basis, temp_current, running_max, running_min,
+            temp_unit, station_id, observation_count, imported_at, authority,
+            data_version, provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+    base = {
+        "city": "London",
+        "target_date": "2026-06-18",
+        "source": "wu_icao_history",
+        "timezone_name": "Europe/London",
+        "utc_offset_minutes": 60,
+        "temp_unit": "C",
+        "station_id": "EGLC",
+        "authority": "VERIFIED",
+        "data_version": "v1.wu-native",
+        "provenance_json": '{"source_url":"redacted","station_id":"EGLC"}',
+        "training_allowed": 1,
+        "causality_status": "OK",
+        "source_role": "historical_hourly",
+    }
+    rows = (
+        {
+            **base,
+            "local_hour": 23.0,
+            "local_timestamp": "2026-06-17T23:00:00+01:00",
+            "utc_timestamp": "2026-06-17T22:00:00+00:00",
+            "temp_current": 10.0,
+            "running_max": 10.0,
+            "running_min": 10.0,
+            "observation_count": 1,
+            "imported_at": "2026-06-17T22:05:00+00:00",
+        },
+        {
+            **base,
+            "local_hour": 0.0,
+            "local_timestamp": "2026-06-18T00:00:00+01:00",
+            "utc_timestamp": "2026-06-17T23:00:00+00:00",
+            "temp_current": 16.0,
+            "running_max": 16.0,
+            "running_min": 16.0,
+            "observation_count": 1,
+            "imported_at": "2026-06-17T23:05:00+00:00",
+        },
+    )
+    for row in rows:
+        conn.execute(
+            insert_sql,
+            (
+                row["city"], row["target_date"], row["source"], row["timezone_name"],
+                row["local_hour"], row["local_timestamp"], row["utc_timestamp"],
+                row["utc_offset_minutes"], 1, 0, 0, "observed", row["temp_current"],
+                row["running_max"], row["running_min"], row["temp_unit"],
+                row["station_id"], row["observation_count"], row["imported_at"],
+                row["authority"], row["data_version"], row["provenance_json"],
+                row["training_allowed"], row["causality_status"], row["source_role"],
+            ),
+        )
+
+    results = Day0ExtremeUpdatedTrigger(EventWriter(conn)).scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(16),
+        decision_time=datetime(2026, 6, 17, 23, 10, tzinfo=timezone.utc),
+        received_at="2026-06-17T23:10:00+00:00",
+    )
+
+    assert len(results) == 2
+    payloads = [
+        json.loads(row[0])
+        for row in conn.execute("SELECT payload_json FROM opportunity_events").fetchall()
+    ]
+    low_payload = next(payload for payload in payloads if payload["metric"] == "low")
+    assert low_payload["city"] == "London"
+    assert low_payload["target_date"] == "2026-06-18"
+    assert low_payload["local_date_status"] == "MATCH"
+    assert low_payload["raw_value"] == 16.0
+    assert low_payload["low_so_far"] == 16.0
+    assert low_payload["observation_time"] == "2026-06-17T23:00:00+00:00"
 
 
 def _insert_observation_instant(conn, *, running_max, running_min, imported_at, station_id="LFPB", city="Paris", target_date="2026-06-06", source="wu_icao_history"):

@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-17
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -82,6 +82,13 @@ def _tokyo():
     return SimpleNamespace(
         name="Tokyo", timezone="Asia/Tokyo", settlement_unit="C",
         wu_station="RJTT", settlement_source_type="wu_icao",
+    )
+
+
+def _london():
+    return SimpleNamespace(
+        name="London", timezone="Europe/London", settlement_unit="C",
+        wu_station="EGLC", settlement_source_type="wu_icao",
     )
 
 
@@ -180,6 +187,50 @@ class TestRunningExtremes:
         assert ex.high_so_far == pytest.approx(21.0)  # the 28C report belongs to Jun 9 local
         assert ex.low_so_far == pytest.approx(19.0)
         assert ex.current_temp == pytest.approx(19.0)
+
+    def test_europe_low_boundary_excludes_tminus1_23_and_includes_target_00_01_23(self):
+        london = _london()
+        reports = [
+            # 2026-06-17T22:00Z = Jun 17 23:00 BST, previous local day.
+            _report("EGLC", datetime(2026, 6, 17, 22, 0, tzinfo=UTC), 10.0, t_group=False),
+            # Target local day starts at 2026-06-17T23:00Z.
+            _report("EGLC", datetime(2026, 6, 17, 23, 0, tzinfo=UTC), 16.0, t_group=False),
+            _report("EGLC", datetime(2026, 6, 18, 0, 0, tzinfo=UTC), 14.0, t_group=False),
+            _report("EGLC", datetime(2026, 6, 18, 22, 0, tzinfo=UTC), 12.0, t_group=False),
+        ]
+
+        before_midnight = running_extremes_for_local_day(
+            reports,
+            city=london,
+            target_date="2026-06-18",
+            as_of=datetime(2026, 6, 17, 22, 30, tzinfo=UTC),
+        )
+        at_00 = running_extremes_for_local_day(
+            reports,
+            city=london,
+            target_date="2026-06-18",
+            as_of=datetime(2026, 6, 17, 23, 30, tzinfo=UTC),
+        )
+        at_01 = running_extremes_for_local_day(
+            reports,
+            city=london,
+            target_date="2026-06-18",
+            as_of=datetime(2026, 6, 18, 0, 30, tzinfo=UTC),
+        )
+        late_day = running_extremes_for_local_day(
+            reports,
+            city=london,
+            target_date="2026-06-18",
+            as_of=datetime(2026, 6, 18, 22, 30, tzinfo=UTC),
+        )
+
+        assert before_midnight.sample_count == 0
+        assert at_00.sample_count == 1
+        assert at_00.low_so_far == pytest.approx(16.0)
+        assert at_01.sample_count == 2
+        assert at_01.low_so_far == pytest.approx(14.0)
+        assert late_day.sample_count == 3
+        assert late_day.low_so_far == pytest.approx(12.0)
 
     def test_as_of_truncation_excludes_later_reports(self):
         seoul = _seoul()
