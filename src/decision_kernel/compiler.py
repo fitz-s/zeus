@@ -16,9 +16,11 @@ from src.decision_kernel.ledger import CompileFailure
 from src.decision_kernel.verifier import (
     ALT_CREDENTIAL_CALIBRATION_AUTHORITIES,
     APPROVED_CALIBRATION_AUTHORITIES,
+    DAY0_ABSORBING_MEMBERS_JSON_SOURCE,
     ENSEMBLE_MEMBERS_JSON_SOURCE,
     POSTERIOR_MEMBERS_JSON_SOURCE,
     POSTERIOR_MIN_DECORRELATED_MODELS,
+    REQUIRED_DAY0_ABSORBING_FORECAST_VALIDATIONS,
     REQUIRED_POSTERIOR_FORECAST_VALIDATIONS,
     calibration_maturity_too_low,
 )
@@ -584,6 +586,9 @@ def _validate_forecast_authority_payload(forecast: dict[str, Any]) -> None:
     if forecast.get("members_json_source") == POSTERIOR_MEMBERS_JSON_SOURCE:
         _validate_posterior_forecast_authority_payload(forecast)
         return
+    if forecast.get("members_json_source") == DAY0_ABSORBING_MEMBERS_JSON_SOURCE:
+        _validate_day0_absorbing_forecast_authority_payload(forecast)
+        return
     if forecast.get("coverage_readiness_status") != "LIVE_ELIGIBLE":
         raise ValueError("forecast.coverage_readiness_status must be LIVE_ELIGIBLE")
     if forecast.get("coverage_completeness_status") != "COMPLETE":
@@ -632,6 +637,71 @@ def _validate_forecast_authority_payload(forecast: dict[str, Any]) -> None:
             raise ValueError(f"forecast.{field} missing")
     if forecast.get("local_date_window_hash") in (None, ""):
         raise ValueError("forecast.local_date_window_hash missing")
+
+
+def _validate_day0_absorbing_forecast_authority_payload(forecast: dict[str, Any]) -> None:
+    for field in (
+        "city",
+        "target_date",
+        "temperature_metric",
+        "members_extrema_metric_identity",
+        "members_json_source",
+        "members_json_hash",
+        "members_extrema_transform",
+        "target_local_date",
+        "city_timezone",
+        "local_date_window_hash",
+        "bin_labels_hash",
+        "source_run_id",
+        "forecast_source_id",
+        "day0_observation_event_id",
+        "observation_time",
+        "observation_available_at",
+        "station_id",
+        "rounded_value",
+        "effective_extreme",
+        "source_authorized_status",
+        "source_match_status",
+        "live_authority_status",
+        "local_date_status",
+        "station_match_status",
+        "dst_status",
+        "metric_match_status",
+        "rounding_status",
+    ):
+        if forecast.get(field) in (None, ""):
+            raise ValueError(f"forecast.{field} missing (day0_absorbing)")
+    _require_equal(
+        "forecast.members_extrema_metric_identity",
+        forecast.get("members_extrema_metric_identity"),
+        "forecast.temperature_metric",
+        forecast.get("temperature_metric") or forecast.get("metric"),
+    )
+    _require_equal(
+        "forecast.members_extrema_transform",
+        forecast.get("members_extrema_transform"),
+        "expected day0 extrema transform",
+        _expected_members_extrema_transform(forecast.get("temperature_metric")),
+    )
+    applied_validations = {str(item) for item in tuple(forecast.get("applied_validations") or ())}
+    if not applied_validations:
+        raise ValueError("forecast.applied_validations missing (day0_absorbing)")
+    missing = REQUIRED_DAY0_ABSORBING_FORECAST_VALIDATIONS - applied_validations
+    if missing:
+        raise ValueError(
+            f"forecast.applied_validations missing required day0 absorbing validations: {sorted(missing)}"
+        )
+    for field, expected in (
+        ("source_authorized_status", "AUTHORIZED"),
+        ("source_match_status", "MATCH"),
+        ("live_authority_status", "LIVE_AUTHORITY"),
+        ("local_date_status", "MATCH"),
+        ("station_match_status", "MATCH"),
+        ("dst_status", "UNAMBIGUOUS"),
+        ("metric_match_status", "MATCH"),
+        ("rounding_status", "MATCH"),
+    ):
+        _require_equal(f"forecast.{field}", forecast.get(field), expected, expected)
 
 
 def _validate_calibration_payload(

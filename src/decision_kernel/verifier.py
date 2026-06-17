@@ -22,6 +22,7 @@ FORECAST_LIVE_ELIGIBLE_STATUS = "LIVE_ELIGIBLE"
 # gates), NOT a relaxation of the ensemble gates.
 ENSEMBLE_MEMBERS_JSON_SOURCE = "ensemble_snapshots.daily_extrema"
 POSTERIOR_MEMBERS_JSON_SOURCE = "raw_model_forecasts.multimodel"
+DAY0_ABSORBING_MEMBERS_JSON_SOURCE = "day0_absorbing.observed_extreme"
 # Posterior-provenance applied-validations: the posterior-appropriate analogue of
 # REQUIRED_FORECAST_VALIDATIONS. The model-count completeness replaces the ensemble member/step
 # floors; causality + authority + freshness are unchanged.
@@ -31,6 +32,20 @@ REQUIRED_POSTERIOR_FORECAST_VALIDATIONS = frozenset(
         "decorrelated_model_count_floor",
         "causality_status_ok",
         "authority_verified",
+        "available_at_not_future",
+    }
+)
+REQUIRED_DAY0_ABSORBING_FORECAST_VALIDATIONS = frozenset(
+    {
+        "day0_source_authorized",
+        "day0_source_match",
+        "day0_live_authority",
+        "day0_local_date_match",
+        "day0_station_match",
+        "day0_dst_unambiguous",
+        "day0_metric_match",
+        "day0_rounding_match",
+        "rounded_extreme_present",
         "available_at_not_future",
     }
 )
@@ -59,6 +74,7 @@ IDENTITY_FALLBACK_CALIBRATION_AUTHORITY = "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
 # it is evidence-only and the live gate rejects it; it is not minted onto an admitted live
 # certificate, so it is not in the approved set.
 FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
+DAY0_ABSORBING_CALIBRATION_AUTHORITY = "DAY0_ABSORBING_HARD_FACT"
 # K1.3 (consolidated overhaul 2026-06-11): the ALT-credential carve-out is ONE constant +
 # ONE predicate, consumed by BOTH the verifier and the compiler. History: the carve-out
 # existed as two independent tuples (verifier + compiler); when FUSED_BOOTSTRAP was added
@@ -69,6 +85,7 @@ ALT_CREDENTIAL_CALIBRATION_AUTHORITIES = frozenset(
     {
         IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+        DAY0_ABSORBING_CALIBRATION_AUTHORITY,
     }
 )
 
@@ -91,6 +108,7 @@ APPROVED_CALIBRATION_AUTHORITIES = frozenset(
         "APPROVED",
         IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+        DAY0_ABSORBING_CALIBRATION_AUTHORITY,
     }
 )
 ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})
@@ -942,6 +960,9 @@ def _validate_forecast_authority_payload(forecast: dict) -> None:
     if forecast.get("members_json_source") == POSTERIOR_MEMBERS_JSON_SOURCE:
         _validate_posterior_forecast_authority_payload(forecast)
         return
+    if forecast.get("members_json_source") == DAY0_ABSORBING_MEMBERS_JSON_SOURCE:
+        _validate_day0_absorbing_forecast_authority_payload(forecast)
+        return
     required_scalars = (
         "coverage_readiness_status",
         "coverage_completeness_status",
@@ -1057,6 +1078,76 @@ def _validate_posterior_forecast_authority_payload(forecast: dict) -> None:
     expected_transform = _expected_members_extrema_transform(forecast.get("temperature_metric"))
     if forecast.get("members_extrema_transform") != expected_transform:
         raise CertificateVerificationError("forecast.members_extrema_transform mismatch")
+
+
+def _validate_day0_absorbing_forecast_authority_payload(forecast: dict) -> None:
+    """Validate deterministic Day0 observation authority carried in the forecast slot.
+
+    The no-submit proof graph has a historical FORECAST_AUTHORITY parent slot, but
+    a Day0 absorbing belief is not forecast-derived. This branch accepts only a
+    qualified same-day observed extreme and keeps the ensemble/posterior member
+    completeness gates out of this deterministic observation lane.
+    """
+
+    for field in (
+        "city",
+        "target_date",
+        "temperature_metric",
+        "members_extrema_metric_identity",
+        "members_json_source",
+        "members_json_hash",
+        "members_extrema_transform",
+        "target_local_date",
+        "city_timezone",
+        "local_date_window_hash",
+        "bin_labels_hash",
+        "source_run_id",
+        "forecast_source_id",
+        "day0_observation_event_id",
+        "observation_time",
+        "observation_available_at",
+        "station_id",
+        "rounded_value",
+        "effective_extreme",
+        "source_authorized_status",
+        "source_match_status",
+        "live_authority_status",
+        "local_date_status",
+        "station_match_status",
+        "dst_status",
+        "metric_match_status",
+        "rounding_status",
+    ):
+        if forecast.get(field) in (None, ""):
+            raise CertificateVerificationError(f"forecast.{field} missing (day0_absorbing)")
+    if forecast.get("members_json_source") != DAY0_ABSORBING_MEMBERS_JSON_SOURCE:
+        raise CertificateVerificationError("forecast.members_json_source is not day0 absorbing")
+    if forecast.get("members_extrema_metric_identity") != forecast.get("temperature_metric"):
+        raise CertificateVerificationError("forecast.members_extrema_metric_identity mismatch")
+    expected_transform = _expected_members_extrema_transform(forecast.get("temperature_metric"))
+    if forecast.get("members_extrema_transform") != expected_transform:
+        raise CertificateVerificationError("forecast.members_extrema_transform mismatch")
+    validations = {str(item) for item in tuple(forecast.get("applied_validations") or ())}
+    if not validations:
+        raise CertificateVerificationError("forecast.applied_validations missing (day0_absorbing)")
+    missing = REQUIRED_DAY0_ABSORBING_FORECAST_VALIDATIONS - validations
+    if missing:
+        raise CertificateVerificationError(
+            f"forecast.applied_validations missing required day0 absorbing validations: {sorted(missing)}"
+        )
+    expected_statuses = {
+        "source_authorized_status": "AUTHORIZED",
+        "source_match_status": "MATCH",
+        "live_authority_status": "LIVE_AUTHORITY",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+    }
+    for field, expected in expected_statuses.items():
+        if forecast.get(field) != expected:
+            raise CertificateVerificationError(f"forecast.{field} is not {expected}")
 
 
 def _validate_calibration_payload(

@@ -451,7 +451,7 @@ def test_schema_load_rejects_missing_required_field(tmp_path: Path):
     [
         ("settlement_capture", "buy_yes", "point",         "settlement_day",      True),
         ("settlement_capture", "buy_yes", "finite_range",  "settlement_day",      True),
-        ("settlement_capture", "buy_no",  "point",         "settlement_day",      False),  # wrong direction
+        ("settlement_capture", "buy_no",  "point",         "settlement_day",      True),
         ("settlement_capture", "buy_yes", "open_shoulder", "settlement_day",      False),  # wrong topology
         ("settlement_capture", "buy_yes", "point",         "post_trading",        False),  # wrong phase
         ("center_buy",         "buy_yes", "finite_range",  "pre_settlement_day",  True),

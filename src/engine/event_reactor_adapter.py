@@ -287,6 +287,21 @@ _FORECAST_DECISION_EVENT_TYPES: frozenset[str] = frozenset(
 # (the spine reads no day0 observation; consult_review_pr409_round2.md §3). The day0
 # boundary guard inside the live adapter references this same constant.
 _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
+_DAY0_ABSORBING_PROBABILITY_AUTHORITY = "day0_absorbing_hard_fact"
+_DAY0_ABSORBING_MEMBERS_JSON_SOURCE = "day0_absorbing.observed_extreme"
+_DAY0_ABSORBING_CALIBRATION_AUTHORITY = "DAY0_ABSORBING_HARD_FACT"
+_DAY0_ABSORBING_FORECAST_VALIDATIONS: tuple[str, ...] = (
+    "day0_source_authorized",
+    "day0_source_match",
+    "day0_live_authority",
+    "day0_local_date_match",
+    "day0_station_match",
+    "day0_dst_unambiguous",
+    "day0_metric_match",
+    "day0_rounding_match",
+    "rounded_extreme_present",
+    "available_at_not_future",
+)
 
 
 # Decision-triggered targeted snapshot refresh (zero-order wall fix 2026-06-11).
@@ -875,6 +890,8 @@ def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertifica
         n_samples = int(n_samples_raw) if n_samples_raw is not None else None
     except (TypeError, ValueError):
         n_samples = None
+    if authority == _DAY0_ABSORBING_CALIBRATION_AUTHORITY:
+        return
     if authority == "IDENTITY_FALLBACK_NO_PLATT_BUCKET":
         raise ValueError("EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:IDENTITY_FALLBACK_NO_PLATT_BUCKET")
     # CERT BRIDGE (2026-06-10, funnel #1 unlock) — the replacement credential without a
@@ -6439,8 +6456,8 @@ def _source_truth_payload_from_forecast_authority(
         "completeness_status": payload.get("completeness_status"),
         "required_fields_present": payload.get("required_fields_present"),
         "required_steps_present": payload.get("required_steps_present"),
-        "source_id": payload.get("source_id"),
-        "source_run_id": payload.get("source_run_id"),
+        "source_id": payload.get("source_id") or forecast_payload.get("forecast_source_id"),
+        "source_run_id": payload.get("source_run_id") or forecast_payload.get("source_run_id"),
         "snapshot_id": payload.get("snapshot_id") or event.causal_snapshot_id,
         "payload_hash": event.payload_hash,
         "causal_snapshot_id": event.causal_snapshot_id,
@@ -6731,6 +6748,182 @@ def _posterior_horizon_profile(source_cycle_time: str) -> str:
     return "full" if hour in (0, 12) else "short"
 
 
+def _day0_absorbing_probability_authority_active(payload: Mapping[str, object]) -> bool:
+    return (
+        str(payload.get("_edli_q_source") or "") == _DAY0_ABSORBING_PROBABILITY_AUTHORITY
+        or str(payload.get("_edli_day0_q_mode") or "") == "absorbing_only"
+    )
+
+
+def _day0_payload_live_eligible(payload: Mapping[str, object]) -> bool:
+    return (
+        payload.get("source_match_status") == "MATCH"
+        and payload.get("local_date_status") == "MATCH"
+        and payload.get("station_match_status") == "MATCH"
+        and payload.get("dst_status") == "UNAMBIGUOUS"
+        and payload.get("metric_match_status") == "MATCH"
+        and payload.get("rounding_status") == "MATCH"
+        and payload.get("source_authorized_status") == "AUTHORIZED"
+        and payload.get("live_authority_status") == "LIVE_AUTHORITY"
+    )
+
+
+def _day0_absorbing_authority_payload_and_clock(
+    *,
+    event: OpportunityEvent,
+    family,
+    payload: dict[str, object],
+    decision_time: datetime,
+) -> tuple[dict[str, Any], EvidenceClock] | None:
+    if event.event_type != "DAY0_EXTREME_UPDATED":
+        return None
+    if not _day0_absorbing_probability_authority_active(payload):
+        return None
+    if not _day0_payload_live_eligible(payload):
+        raise ValueError("DAY0_ABSORBING_AUTHORITY_EVIDENCE_MISSING:qualification")
+    city_config = runtime_cities_by_name().get(family.city)
+    if city_config is None:
+        raise ValueError(f"DAY0_ABSORBING_AUTHORITY_EVIDENCE_MISSING:city:{family.city}")
+    payload_city = _nonnull(payload.get("city"))
+    payload_target_date = _nonnull(payload.get("target_date") or payload.get("target_local_date"))
+    metric = _nonnull(payload.get("metric") or payload.get("temperature_metric"))
+    if payload_city != family.city:
+        raise ValueError("DAY0_ABSORBING_AUTHORITY_EVIDENCE_MISSING:city_mismatch")
+    if payload_target_date != family.target_date:
+        raise ValueError("DAY0_ABSORBING_AUTHORITY_EVIDENCE_MISSING:target_date_mismatch")
+    if metric != family.metric:
+        raise ValueError("DAY0_ABSORBING_AUTHORITY_EVIDENCE_MISSING:metric_mismatch")
+    rounded = _optional_float(payload.get("rounded_value"))
+    if metric not in {"high", "low"} or rounded is None:
+        raise ValueError("DAY0_ABSORBING_AUTHORITY_EVIDENCE_MISSING:rounded_extreme")
+    station_id = _nonnull(payload.get("station_id"))
+    if not station_id:
+        raise ValueError("DAY0_ABSORBING_AUTHORITY_EVIDENCE_MISSING:station")
+    observation_time_raw = _nonnull(payload.get("observation_time") or event.observed_at)
+    observation_available_raw = _nonnull(payload.get("observation_available_at") or event.available_at)
+    observed_at = _parse_utc(observation_time_raw)
+    available_at = _parse_utc(observation_available_raw)
+    received_at = _parse_utc(event.received_at) or available_at
+    persisted_at = _parse_utc(event.created_at) or received_at
+    if observed_at is None or available_at is None or received_at is None or persisted_at is None:
+        raise ValueError("DAY0_ABSORBING_AUTHORITY_EVIDENCE_MISSING:clock")
+    if available_at > decision_time.astimezone(UTC):
+        raise ValueError("DAY0_ABSORBING_AUTHORITY_EVIDENCE_MISSING:available_after_decision")
+    source_id = _nonnull(payload.get("source_id") or payload.get("settlement_source") or event.source)
+    if not source_id:
+        raise ValueError("DAY0_ABSORBING_AUTHORITY_EVIDENCE_MISSING:source")
+    observation_id = (
+        _nonnull(event.causal_snapshot_id)
+        or f"day0_obs:{event.event_id}"
+    )
+    source_run_id = _nonnull(payload.get("source_run_id")) or observation_id
+    unit = _nonnull(
+        payload.get("settlement_unit")
+        or payload.get("temp_unit")
+        or getattr(city_config, "settlement_unit", None)
+    )
+    if not unit:
+        raise ValueError("DAY0_ABSORBING_AUTHORITY_EVIDENCE_MISSING:unit")
+    source_cycle_time = observed_at.isoformat()
+    members_json_hash = stable_hash(
+        {
+            "authority": _DAY0_ABSORBING_PROBABILITY_AUTHORITY,
+            "event_id": event.event_id,
+            "city": family.city,
+            "target_date": family.target_date,
+            "metric": metric,
+            "station_id": station_id,
+            "observation_time": observed_at.isoformat(),
+            "rounded_value": rounded,
+        }
+    )
+    local_date_window_hash = stable_hash(
+        {
+            "city": family.city,
+            "target_date": family.target_date,
+            "temperature_metric": metric,
+            "station_id": station_id,
+            "observation_time": observed_at.isoformat(),
+            "rounded_value": rounded,
+        }
+    )
+    payload_out = {
+        "identity": observation_id,
+        "snapshot_id": observation_id,
+        "reader_authority": _DAY0_ABSORBING_PROBABILITY_AUTHORITY,
+        "reader_status": FORECAST_LIVE_ELIGIBLE_STATUS,
+        "reader_reason_code": None,
+        "city": family.city,
+        "target_date": family.target_date,
+        "metric": metric,
+        "temperature_metric": metric,
+        "members_extrema_metric_identity": metric,
+        "members_extrema_transform": _members_extrema_transform(metric),
+        "members_json_source": _DAY0_ABSORBING_MEMBERS_JSON_SOURCE,
+        "members_json_hash": members_json_hash,
+        "target_local_date": family.target_date,
+        "city_timezone": city_config.timezone,
+        "settlement_unit": unit,
+        "members_unit": unit,
+        "unit": unit,
+        "unit_authority_source": "city_config.settlement_unit",
+        "local_date_window_hash": local_date_window_hash,
+        "forecast_source_id": source_id,
+        "source_id": source_id,
+        "model": _DAY0_ABSORBING_PROBABILITY_AUTHORITY,
+        "model_family": _DAY0_ABSORBING_PROBABILITY_AUTHORITY,
+        "forecast_issue_time": source_cycle_time,
+        "forecast_valid_time": family.target_date,
+        "forecast_fetch_time": observation_available_raw,
+        "forecast_available_at": observation_available_raw,
+        "degradation_level": "OK",
+        "forecast_source_role": "day0_observation_absorbing",
+        "authority_tier": "OBSERVATION",
+        "decision_time": decision_time.astimezone(UTC).isoformat(),
+        "decision_time_status": "OK",
+        "first_member_observed_time": source_cycle_time,
+        "run_complete_time": observation_available_raw,
+        "forecast_data_version": "day0_absorbing_observation_v1",
+        "source_transport": "opportunity_events.day0_extreme_updated",
+        "source_cycle_time": source_cycle_time,
+        "source_issue_time": source_cycle_time,
+        "horizon_profile": "day0_absorbing",
+        "source_run_id": source_run_id,
+        "coverage_id": observation_id,
+        "raw_payload_hash": event.payload_hash,
+        "manifest_hash": stable_hash({"event_id": event.event_id, "payload_hash": event.payload_hash}),
+        "required_steps": (source_cycle_time,),
+        "observed_steps": (source_cycle_time,),
+        "expected_members": 1,
+        "observed_members": 1,
+        "source_run_status": "COMPLETE",
+        "source_run_completeness_status": "COMPLETE",
+        "coverage_completeness_status": "COMPLETE",
+        "coverage_readiness_status": "LIVE_ELIGIBLE",
+        "applied_validations": _DAY0_ABSORBING_FORECAST_VALIDATIONS,
+        "source_available_at": observation_available_raw,
+        "fetch_started_at": source_cycle_time,
+        "fetch_finished_at": observation_available_raw,
+        "captured_at": observation_available_raw,
+        "day0_observation_event_id": event.event_id,
+        "observation_time": source_cycle_time,
+        "observation_available_at": observation_available_raw,
+        "station_id": station_id,
+        "rounded_value": rounded,
+        "effective_extreme": rounded,
+        "raw_value": payload.get("raw_value"),
+        "source_authorized_status": payload.get("source_authorized_status"),
+        "live_authority_status": payload.get("live_authority_status"),
+        "source_match_status": payload.get("source_match_status"),
+        "local_date_status": payload.get("local_date_status"),
+        "station_match_status": payload.get("station_match_status"),
+        "dst_status": payload.get("dst_status"),
+        "metric_match_status": payload.get("metric_match_status"),
+        "rounding_status": payload.get("rounding_status"),
+    }
+    return payload_out, EvidenceClock(available_at, received_at, persisted_at)
+
+
 def _forecast_authority_payload_and_clock(
     conn: sqlite3.Connection,
     *,
@@ -6739,6 +6932,14 @@ def _forecast_authority_payload_and_clock(
     payload: dict[str, object],
     decision_time: datetime,
 ) -> tuple[dict[str, Any], EvidenceClock]:
+    day0_absorbing = _day0_absorbing_authority_payload_and_clock(
+        event=event,
+        family=family,
+        payload=payload,
+        decision_time=decision_time,
+    )
+    if day0_absorbing is not None:
+        return day0_absorbing
     # mx2t3 carrier-decouple (GATE-1 C): under the replacement lane the no-submit cert's forecast
     # authority is built from forecast_posteriors + raw_model_forecasts (mx2t3-independent) instead
     # of the cold ensemble_snapshots row + read_executable_forecast(members_json). This runs for the
@@ -6907,6 +7108,58 @@ def _forecast_authority_payload_and_clock(
     return payload_out, EvidenceClock(source_time, agent_time, persisted_time)
 
 
+def _day0_absorbing_calibration_payload_and_clock(
+    *,
+    family,
+    payload: dict[str, object],
+    forecast_payload: dict[str, Any],
+    decision_time: datetime,
+) -> tuple[dict[str, Any], EvidenceClock] | None:
+    if not _day0_absorbing_probability_authority_active(payload):
+        return None
+    if forecast_payload.get("members_json_source") != _DAY0_ABSORBING_MEMBERS_JSON_SOURCE:
+        return None
+    source_time = (
+        _parse_utc(forecast_payload.get("observation_available_at"))
+        or _parse_utc(forecast_payload.get("source_available_at"))
+        or decision_time
+    )
+    model_key = (
+        f"day0_absorbing_hard_fact:{family.city}:"
+        f"{family.target_date}:{family.metric}"
+    )
+    source_cycle = _nonnull(forecast_payload.get("source_cycle_time")) or source_time.isoformat()
+    payload_out = {
+        "identity": model_key,
+        "calibrator_model_key": model_key,
+        "calibrator_version": model_key,
+        "calibration_source_id": _DAY0_ABSORBING_PROBABILITY_AUTHORITY,
+        "raw_source_id": forecast_payload.get("forecast_source_id"),
+        "source_cycle": source_cycle,
+        "horizon_profile": forecast_payload.get("horizon_profile"),
+        "training_cutoff": source_time.isoformat(),
+        "model_available_at": source_time.isoformat(),
+        "model_materialized_at": source_time.isoformat(),
+        "model_hash": stable_hash(
+            {
+                "authority": _DAY0_ABSORBING_CALIBRATION_AUTHORITY,
+                "city": family.city,
+                "target_date": family.target_date,
+                "temperature_metric": family.metric,
+                "event_id": forecast_payload.get("day0_observation_event_id"),
+                "rounded_value": forecast_payload.get("rounded_value"),
+                "station_id": forecast_payload.get("station_id"),
+            }
+        ),
+        "maturity_level": 4,
+        "n_samples": 0,
+        "input_space": "deterministic_day0_absorbing_observation",
+        "authority": _DAY0_ABSORBING_CALIBRATION_AUTHORITY,
+        "coverage_status": "DAY0_ABSORBING",
+    }
+    return payload_out, EvidenceClock(source_time, source_time, source_time)
+
+
 def _calibration_authority_payload_and_clock(
     calibration_conn: sqlite3.Connection,
     *,
@@ -6919,6 +7172,14 @@ def _calibration_authority_payload_and_clock(
     city = runtime_cities_by_name().get(family.city)
     if city is None:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:city")
+    day0_absorbing = _day0_absorbing_calibration_payload_and_clock(
+        family=family,
+        payload=payload,
+        forecast_payload=forecast_payload,
+        decision_time=decision_time,
+    )
+    if day0_absorbing is not None:
+        return day0_absorbing
     # CERT BRIDGE (2026-06-10, funnel #1 unlock) — replacement-chain candidates carry their
     # OWN calibration credential (fused-center bootstrap bounds + settlement-backward
     # coverage), stamped onto `payload` by the live replacement builder. When present, mint
@@ -10106,16 +10367,27 @@ def _live_yes_probabilities(
             raise ValueError(
                 f"DAY0_ORACLE_ANOMALY_PAUSED:{family.city}:{family.target_date}"
             )
-        generated = _canonical_probability_and_fdr_proof(
-            event=event,
-            payload=payload,
-            family=family,
-            conn=conn,
-            calibration_conn=calibration_conn,
-            native_costs=native_costs,
-            allow_latest_snapshot=True,
-            decision_time=decision_time,
-        )
+        try:
+            generated = _canonical_probability_and_fdr_proof(
+                event=event,
+                payload=payload,
+                family=family,
+                conn=conn,
+                calibration_conn=calibration_conn,
+                native_costs=native_costs,
+                allow_latest_snapshot=True,
+                decision_time=decision_time,
+            )
+        except ValueError as exc:
+            generated = _day0_absorbing_only_probability_and_fdr_proof(
+                event=event,
+                payload=payload,
+                family=family,
+                native_costs=native_costs,
+                reason=str(exc),
+            )
+            if generated is None:
+                raise
         q_by_condition, lcb_by_condition, p_values, prefilter, evidence = generated
         masked_q, masked_lcb = _apply_day0_mask_to_generated_probabilities(
             payload=payload,
@@ -14335,6 +14607,110 @@ def _day0_remaining_day_members(
         return None
 
 
+def _day0_absorbing_yes_verdict(
+    *, payload: dict[str, object], candidate: object
+) -> str:
+    """Return YES_WON / YES_DEAD / UNRESOLVED from Day0 observed extreme only."""
+
+    rounded = _optional_float(payload.get("rounded_value"))
+    if rounded is None:
+        raise ValueError("Day0 event missing rounded_value")
+    metric = _nonnull(payload.get("metric") or payload.get("temperature_metric"))
+    bin_value = getattr(candidate, "bin", None)
+    if bin_value is None:
+        raise ValueError("Day0 candidate missing bin")
+    low = getattr(bin_value, "low", None)
+    high = getattr(bin_value, "high", None)
+    if metric == "high":
+        if high is not None and rounded > float(high):
+            return "YES_DEAD"
+        if high is None and low is not None and rounded >= float(low):
+            return "YES_WON"
+        return "UNRESOLVED"
+    if metric == "low":
+        if low is not None and rounded < float(low):
+            return "YES_DEAD"
+        if low is None and high is not None and rounded <= float(high):
+            return "YES_WON"
+        return "UNRESOLVED"
+    raise ValueError(f"unsupported Day0 metric: {metric}")
+
+
+def _day0_absorbing_only_probability_and_fdr_proof(
+    *,
+    event: OpportunityEvent,
+    payload: dict[str, object],
+    family,
+    native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
+    reason: str,
+) -> tuple[
+    dict[str, float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], bool],
+    dict[str, object],
+] | None:
+    """Build deterministic Day0 proof rows when forecast q-build is unavailable.
+
+    This fallback is intentionally narrow: it only licenses directions whose
+    outcome is already decided by the observed Day0 extreme. Unresolved finite
+    bins remain untradeable until a probabilistic q source is available.
+    """
+
+    from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
+
+    q_by_condition: dict[str, float] = {}
+    lcb_by_direction: QlcbByDirection = QlcbByDirection()
+    p_values: dict[tuple[str, str], float] = {}
+    prefilter: dict[tuple[str, str], bool] = {}
+    deterministic_count = 0
+
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        verdict = _day0_absorbing_yes_verdict(payload=payload, candidate=candidate)
+        yes_won = verdict == "YES_WON"
+        yes_dead = verdict == "YES_DEAD"
+        if yes_won or yes_dead:
+            deterministic_count += 1
+        yes_q = 1.0 if yes_won else 0.0
+        q_by_condition[condition_id] = yes_q
+        yes_lcb = 1.0 if yes_won else 0.0
+        no_lcb = 1.0 if yes_dead else 0.0
+        _set_qlcb_provenance(
+            lcb_by_direction,
+            (condition_id, "buy_yes"),
+            yes_lcb,
+            source="FORECAST_BOOTSTRAP",
+        )
+        _set_qlcb_provenance(
+            lcb_by_direction,
+            (condition_id, "buy_no"),
+            no_lcb,
+            source="FORECAST_BOOTSTRAP",
+        )
+        for direction, direction_lcb in (("buy_yes", yes_lcb), ("buy_no", no_lcb)):
+            price = native_costs.get((condition_id, direction), (None, None, 0.0, None, None))[1]
+            deterministic_win = direction_lcb >= 1.0
+            p_values[(condition_id, direction)] = 0.0 if deterministic_win else 1.0
+            prefilter[(condition_id, direction)] = bool(deterministic_win and price is not None)
+
+    if deterministic_count <= 0:
+        return None
+
+    vector = [q_by_condition[str(candidate.condition_id or "")] for candidate in family.candidates]
+    payload["_edli_q_source"] = _DAY0_ABSORBING_PROBABILITY_AUTHORITY
+    payload["_edli_day0_q_mode"] = "absorbing_only"
+    return q_by_condition, lcb_by_direction, p_values, prefilter, {
+        "p_cal_vector_hash": _probability_vector_hash(vector),
+        "p_live_vector_hash": _probability_vector_hash(vector),
+        "probability_authority": _DAY0_ABSORBING_PROBABILITY_AUTHORITY,
+        "q_source": _DAY0_ABSORBING_PROBABILITY_AUTHORITY,
+        "day0_absorbing_only_fallback": True,
+        "day0_absorbing_only_fallback_reason": reason,
+        "posterior_id": None,
+    }
+
+
 def _apply_day0_mask_to_generated_probabilities(
     *,
     payload: dict[str, object],
@@ -14464,7 +14840,12 @@ def _apply_day0_mask_to_generated_probabilities(
         _set_qlcb_provenance(
             masked_lcb_by_direction,
             (condition_id, "buy_no"),
-            0.0,
+            # A Day0 absorbing mask value of 0 is not an estimator output; it is
+            # deterministic proof that this YES bin can no longer settle true.
+            # In that exact case the candidate-direction lower bound for buy_no
+            # is 1.0. Unresolved/alive bins still carry no NO submit license here;
+            # the normal native-NO evidence path owns those.
+            1.0 if mask[index] <= 0.0 else 0.0,
             source="FORECAST_BOOTSTRAP",
         )
     # LCB-TRANSFORM AUDIT IDENTITY (PR#404 P1): the staleness guard changes
@@ -14481,7 +14862,10 @@ def _apply_day0_mask_to_generated_probabilities(
             for candidate in family.candidates
         },
         "no_lcb_by_condition": {
-            str(candidate.condition_id or ""): 0.0 for candidate in family.candidates
+            str(candidate.condition_id or ""): (
+                1.0 if float(mask[index]) <= 0.0 else 0.0
+            )
+            for index, candidate in enumerate(family.candidates)
         },
         "mask": [float(value) for value in mask],
         "staleness_suppressed_conditions": [
