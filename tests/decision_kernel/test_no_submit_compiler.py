@@ -579,7 +579,7 @@ def test_source_truth_certificate_not_hardcoded_match():
     bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
 
     assert bundle.source_truth.payload["source_status"] == bundle.forecast_authority.payload["reader_status"]
-    assert bundle.source_truth.payload["source_authority_id"] == "read_executable_forecast"
+    assert bundle.source_truth.payload["source_authority_id"] == bundle.forecast_authority.payload["reader_authority"]
     assert bundle.source_truth.payload["derived_from_certificate_type"] == claims.FORECAST_AUTHORITY
     assert bundle.source_truth.payload["derived_from_snapshot_id"] == bundle.forecast_authority.payload["snapshot_id"]
     assert bundle.source_truth.payload["derived_from_reader_status"] == bundle.forecast_authority.payload["reader_status"]

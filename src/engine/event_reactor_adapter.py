@@ -6106,35 +6106,11 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
             claims.SOURCE_TRUTH,
             "source_truth",
             "source_truth",
-            {
-                "identity": event.source,
-                "event_source": event.source,
-                "event_type": event.event_type,
-                "source_status": forecast_payload.get("reader_status"),
-                "source_authority_id": "read_executable_forecast",
-                "source_reason_code": forecast_payload.get("reader_reason_code"),
-                "derived_from_certificate_type": claims.FORECAST_AUTHORITY,
-                "derived_from_snapshot_id": forecast_payload.get("snapshot_id"),
-                # WAVE-1 W1-T3: the reader-ELECTED executable source_run (may
-                # differ from the causal event run, e.g. 00Z causal → 12Z
-                # elected). Stamped unconditionally so the payload is
-                # self-describing; the cert's dual-chain binding only consults it
-                # when edli.edli_source_run_dual_chain_enabled is ON (default
-                # OFF → legacy single-chain equality, so the merge is inert).
-                "derived_from_source_run_id": forecast_payload.get("source_run_id"),
-                "derived_from_reader_status": forecast_payload.get("reader_status"),
-                "completeness_status": payload.get("completeness_status"),
-                "required_fields_present": payload.get("required_fields_present"),
-                "required_steps_present": payload.get("required_steps_present"),
-                "source_id": payload.get("source_id"),
-                "source_run_id": payload.get("source_run_id"),
-                "snapshot_id": payload.get("snapshot_id") or event.causal_snapshot_id,
-                "payload_hash": event.payload_hash,
-                "causal_snapshot_id": event.causal_snapshot_id,
-                "available_at": event.available_at,
-                "received_at": event.received_at,
-                "event_id": event.event_id,
-            },
+            _source_truth_payload_from_forecast_authority(
+                event=event,
+                payload=payload,
+                forecast_payload=forecast_payload,
+            ),
             event_clock,
             "zeus.events.source_truth_gate",
             algorithm_id="decision_kernel.source_truth.event_bound_adapter",
@@ -6433,6 +6409,45 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
         ),
         no_submit_projection=projection,
     )
+
+
+def _source_truth_payload_from_forecast_authority(
+    *,
+    event: OpportunityEvent,
+    payload: dict[str, object],
+    forecast_payload: dict[str, Any],
+) -> dict[str, Any]:
+    reader_authority = _nonnull(forecast_payload.get("reader_authority"))
+    if not reader_authority:
+        raise ValueError("SOURCE_TRUTH_AUTHORITY_MISSING:forecast.reader_authority")
+    return {
+        "identity": event.source,
+        "event_source": event.source,
+        "event_type": event.event_type,
+        "source_status": forecast_payload.get("reader_status"),
+        "source_authority_id": reader_authority,
+        "source_reason_code": forecast_payload.get("reader_reason_code"),
+        "derived_from_certificate_type": claims.FORECAST_AUTHORITY,
+        "derived_from_snapshot_id": forecast_payload.get("snapshot_id"),
+        # WAVE-1 W1-T3: the reader-ELECTED executable source_run (may differ from
+        # the causal event run, e.g. 00Z causal -> 12Z elected). Stamped
+        # unconditionally so the payload is self-describing; the cert's dual-chain
+        # binding only consults it when edli.edli_source_run_dual_chain_enabled is
+        # ON (default OFF -> legacy single-chain equality, so the merge is inert).
+        "derived_from_source_run_id": forecast_payload.get("source_run_id"),
+        "derived_from_reader_status": forecast_payload.get("reader_status"),
+        "completeness_status": payload.get("completeness_status"),
+        "required_fields_present": payload.get("required_fields_present"),
+        "required_steps_present": payload.get("required_steps_present"),
+        "source_id": payload.get("source_id"),
+        "source_run_id": payload.get("source_run_id"),
+        "snapshot_id": payload.get("snapshot_id") or event.causal_snapshot_id,
+        "payload_hash": event.payload_hash,
+        "causal_snapshot_id": event.causal_snapshot_id,
+        "available_at": event.available_at,
+        "received_at": event.received_at,
+        "event_id": event.event_id,
+    }
 
 
 # mx2t3 carrier-decouple (GATE-1 C): the members_json_source a posterior-provenance forecast

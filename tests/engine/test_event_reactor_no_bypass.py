@@ -38,6 +38,7 @@ from src.engine.event_reactor_adapter import (
     _snapshot_p_raw,
     _snapshot_unit,
     _probability_vector_hash,
+    _source_truth_payload_from_forecast_authority,
 )
 from src.config import runtime_cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -1430,10 +1431,46 @@ def test_adapter_source_truth_status_comes_from_forecast_authority():
     assert receipt.decision_proof_bundle is not None
     assert receipt.decision_proof_bundle.source_truth.payload["source_status"] == "LIVE_ELIGIBLE"
     assert receipt.decision_proof_bundle.source_truth.payload["source_status"] == receipt.decision_proof_bundle.forecast_authority.payload["reader_status"]
-    assert receipt.decision_proof_bundle.source_truth.payload["source_authority_id"] == "read_executable_forecast"
+    assert receipt.decision_proof_bundle.source_truth.payload["source_authority_id"] == receipt.decision_proof_bundle.forecast_authority.payload["reader_authority"]
     assert receipt.decision_proof_bundle.source_truth.payload["derived_from_certificate_type"] == claims.FORECAST_AUTHORITY
     assert receipt.decision_proof_bundle.source_truth.payload["derived_from_snapshot_id"] == receipt.decision_proof_bundle.forecast_authority.payload["snapshot_id"]
     assert receipt.decision_proof_bundle.source_truth.payload["derived_from_reader_status"] == receipt.decision_proof_bundle.forecast_authority.payload["reader_status"]
+
+
+def test_adapter_source_truth_authority_follows_replacement_reader_authority():
+    event = SimpleNamespace(
+        event_id="event-1",
+        event_type="FORECAST_SNAPSHOT_READY",
+        source="forecast_snapshot_ready",
+        causal_snapshot_id="rmf-Tokyo|2026-06-19|high|2026-06-17",
+        payload_hash="payload-hash-1",
+        available_at="2026-06-17T06:00:00+00:00",
+        received_at="2026-06-17T12:00:00+00:00",
+    )
+    payload = {
+        "source_id": "openmeteo",
+        "source_run_id": "pid-hash-xyz",
+        "snapshot_id": event.causal_snapshot_id,
+        "completeness_status": "COMPLETE",
+        "required_fields_present": True,
+        "required_steps_present": True,
+    }
+    forecast_payload = {
+        "reader_authority": "forecast_posteriors.replacement_0_1",
+        "reader_status": "LIVE_ELIGIBLE",
+        "reader_reason_code": None,
+        "snapshot_id": event.causal_snapshot_id,
+        "source_run_id": "pid-hash-xyz",
+    }
+
+    source_truth = _source_truth_payload_from_forecast_authority(
+        event=event,
+        payload=payload,
+        forecast_payload=forecast_payload,
+    )
+
+    assert source_truth["source_authority_id"] == forecast_payload["reader_authority"]
+    assert source_truth["source_authority_id"] != "read_executable_forecast"
 
 
 def test_market_events_authority_rows_have_topology_clock_fields():
