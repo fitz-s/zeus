@@ -5156,13 +5156,8 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
     assert getattr(decision, "final_execution_intent", None) is None
 
 
-def test_executable_snapshot_repricing_upgrades_maker_order_type_when_crossing_ask(tmp_path):
-    """RELATIONSHIP: repriced taker policy -> concrete submit order type.
-
-    The governor may allow a maker order before repricing, but if the executable
-    snapshot proves the best ask is inside edge/slippage/depth budget, the final
-    intent must carry an immediate order type instead of becoming shadow-only.
-    """
+def test_executable_snapshot_repricing_keeps_crossing_entry_maker_only(tmp_path):
+    """RELATIONSHIP: crossing entry reprices to a passive maker order, not FOK."""
     conn = get_connection(tmp_path / "snapshot-reprice-tight-ask-upgrade.db")
     init_schema(conn)
     _insert_executable_snapshot(
@@ -5200,6 +5195,7 @@ def test_executable_snapshot_repricing_upgrades_maker_order_type_when_crossing_a
             "cancel_after": datetime(2026, 4, 3, 1, tzinfo=timezone.utc),
             "resolution_window": "2026-04-03",
             "correlation_key": "NYC:2026-04-03",
+            "passive_fill_probability": "0.40",
         },
     )
     conn.close()
@@ -5208,13 +5204,14 @@ def test_executable_snapshot_repricing_upgrades_maker_order_type_when_crossing_a
     shadow = reprice["corrected_pricing_shadow"]
     assert best_ask == pytest.approx(0.41)
     assert reprice["selected_order_type"] == "GTC"
-    assert reprice["final_order_type"] == "FOK"
-    assert reprice["taker_order_type_upgraded"] is True
+    assert reprice["final_order_type"] == "GTC"
+    assert reprice["taker_order_type_upgraded"] is False
     assert reprice["live_submit_authority"] is True
-    assert shadow["order_policy"] == "marketable_limit_depth_bound"
+    assert shadow["order_policy"] == "post_only_passive_limit"
     assert shadow["live_submit_authority"] is True
-    assert decision.final_execution_intent.order_type == "FOK"
-    assert decision.final_execution_intent.post_only is False
+    assert decision.final_execution_intent.order_type == "GTC"
+    assert decision.final_execution_intent.post_only is True
+    assert float(decision.final_execution_intent.final_limit_price) < 0.41
 
 
 def test_executable_snapshot_repricing_keeps_low_notional_marketable_buy_passive(tmp_path):

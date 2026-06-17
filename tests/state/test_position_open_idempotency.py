@@ -42,8 +42,11 @@ CREATE TABLE position_current (
     trade_id TEXT, market_id TEXT, city TEXT, cluster TEXT,
     target_date TEXT, bin_label TEXT, direction TEXT, unit TEXT,
     size_usd REAL, shares REAL, cost_basis_usd REAL, entry_price REAL,
-    p_posterior REAL, last_monitor_prob REAL, last_monitor_edge REAL,
-    last_monitor_market_price REAL, decision_snapshot_id TEXT,
+    p_posterior REAL, entry_ci_width REAL, exit_retry_count INTEGER,
+    next_exit_retry_at TEXT, last_monitor_prob REAL,
+    last_monitor_prob_is_fresh INTEGER, last_monitor_edge REAL,
+    last_monitor_market_price REAL, last_monitor_market_price_is_fresh INTEGER,
+    decision_snapshot_id TEXT,
     entry_method TEXT, strategy_key TEXT NOT NULL, edge_source TEXT,
     discovery_mode TEXT, chain_state TEXT, token_id TEXT, no_token_id TEXT,
     condition_id TEXT, order_id TEXT, order_status TEXT,
@@ -102,7 +105,14 @@ _KARACHI_TOKEN = (
 )
 
 
-def _make_projection(*, position_id: str, phase: str, token_id: str, shares: float = 6.0) -> dict:
+def _make_projection(
+    *,
+    position_id: str,
+    phase: str,
+    token_id: str,
+    shares: float = 6.0,
+    no_token_id: str = "no-1",
+) -> dict:
     """Build a CANONICAL_POSITION_CURRENT_COLUMNS-shaped projection dict."""
     from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 
@@ -133,7 +143,7 @@ def _make_projection(*, position_id: str, phase: str, token_id: str, shares: flo
         discovery_mode="opening_hunt",
         chain_state="synced",
         token_id=token_id,
-        no_token_id="no-1",
+        no_token_id=no_token_id,
         condition_id="cond-1",
         order_id="0x" + position_id,
         order_status="filled",
@@ -274,6 +284,37 @@ class TestWriterIdempotencyCheck:
         # SAVEPOINT semantics: no row inserted for pos-b
         row_count = conn.execute(
             "SELECT COUNT(*) FROM position_current WHERE position_id = 'pos-b'"
+        ).fetchone()[0]
+        assert row_count == 0
+
+    def test_duplicate_open_raises_for_no_token_identity(self):
+        from src.state.projection import (
+            DuplicatePositionOpenError,
+            upsert_position_current,
+        )
+
+        conn = _fresh_conn()
+        p1 = _make_projection(
+            position_id="pos-no-a",
+            phase="active",
+            token_id="",
+            no_token_id=_LONDON_TOKEN,
+        )
+        upsert_position_current(conn, p1)
+
+        p2 = _make_projection(
+            position_id="pos-no-b",
+            phase="pending_entry",
+            token_id="",
+            no_token_id=_LONDON_TOKEN,
+        )
+        with pytest.raises(DuplicatePositionOpenError) as excinfo:
+            upsert_position_current(conn, p2)
+        assert excinfo.value.existing_position_id == "pos-no-a"
+        assert excinfo.value.attempted_position_id == "pos-no-b"
+        assert excinfo.value.token_id == _LONDON_TOKEN
+        row_count = conn.execute(
+            "SELECT COUNT(*) FROM position_current WHERE position_id = 'pos-no-b'"
         ).fetchone()[0]
         assert row_count == 0
 
@@ -436,6 +477,54 @@ class TestConsolidator:
         ).fetchone()
         assert event[0] == "ADMIN_VOIDED"
         assert event[1] == "voided"
+
+    def test_overbook_voids_oldest_no_token_row(self):
+        """buy_no rows must consolidate by no_token_id, not invisible token_id."""
+        from src.state.position_duplicate_consolidator import consolidate
+        from src.state.projection import (
+            CANONICAL_POSITION_CURRENT_COLUMNS,
+            ordered_values,
+        )
+
+        conn = _fresh_conn()
+        p1 = _make_projection(
+            position_id="pos-no-a",
+            phase="active",
+            token_id="",
+            no_token_id=_LONDON_TOKEN,
+            shares=6.0,
+        )
+        p2 = _make_projection(
+            position_id="pos-no-b",
+            phase="active",
+            token_id="",
+            no_token_id=_LONDON_TOKEN,
+            shares=6.0,
+        )
+        for proj in (p1, p2):
+            conn.execute(
+                f"INSERT INTO position_current ({', '.join(CANONICAL_POSITION_CURRENT_COLUMNS)}) "
+                f"VALUES ({', '.join(['?'] * len(CANONICAL_POSITION_CURRENT_COLUMNS))})",
+                ordered_values(proj, CANONICAL_POSITION_CURRENT_COLUMNS),
+            )
+        _insert_event(conn, position_id="pos-no-a", seq=1, occurred_at="2026-05-17T10:00:00+00:00")
+        _insert_event(conn, position_id="pos-no-b", seq=1, occurred_at="2026-05-17T11:00:00+00:00")
+        conn.execute(
+            "INSERT INTO collateral_ledger_snapshots (captured_at, authority_tier, ctf_token_balances_json) "
+            "VALUES (?, 'CHAIN', ?)",
+            ("2026-05-18T00:01:00+00:00", json.dumps({_LONDON_TOKEN: 6_000_000})),
+        )
+
+        report = consolidate(conn)
+        assert _LONDON_TOKEN in report["overbook_tokens"]
+        assert report["voided_positions"] == ["pos-no-a"]
+        rows = conn.execute(
+            "SELECT position_id, phase FROM position_current "
+            f"WHERE no_token_id = '{_LONDON_TOKEN}' ORDER BY position_id"
+        ).fetchall()
+        rows_dict = {r[0]: r[1] for r in rows}
+        assert rows_dict["pos-no-a"] == "voided"
+        assert rows_dict["pos-no-b"] == "active"
 
     def test_consolidator_idempotent(self):
         """Running consolidator twice must be a no-op on the second pass."""

@@ -173,12 +173,12 @@ def _find_existing_open_row(
     row = conn.execute(
         """
         SELECT position_id FROM position_current
-         WHERE token_id = ?
+         WHERE (token_id = ? OR no_token_id = ?)
            AND position_id != ?
            AND phase IN (?, ?, ?, ?, ?)
          LIMIT 1
         """,
-        (token_id, exclude_position_id, *_F109_OPEN_PHASES),
+        (token_id, token_id, exclude_position_id, *_F109_OPEN_PHASES),
     ).fetchone()
     return str(row[0]) if row is not None else None
 
@@ -221,7 +221,7 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     # sqlite3.IntegrityError from the INDEX will propagate through the
     # caller's SAVEPOINT and roll back the entire entry.
     candidate_phase = str(projection.get("phase") or "")
-    candidate_token = projection.get("token_id")
+    candidate_token = projection.get("token_id") or projection.get("no_token_id")
     candidate_position_id = str(projection.get("position_id") or "")
 
     # Fix B (2026-05-19): fail-closed guard for NULL condition_id on open phases.

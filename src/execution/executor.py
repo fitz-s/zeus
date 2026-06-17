@@ -135,6 +135,291 @@ def _risk_allocator_order_type_allows_intent(
     return False
 
 
+_ENTRY_DUPLICATE_TERMINAL_PHASES = frozenset(
+    {"voided", "economically_closed", "settled", "quarantined", "admin_closed"}
+)
+_ENTRY_DUPLICATE_OPEN_COMMAND_STATES = frozenset(
+    {
+        "INTENT_CREATED",
+        "SNAPSHOT_BOUND",
+        "SIGNED_PERSISTED",
+        "POSTING",
+        "POST_ACKED",
+        "SUBMITTING",
+        "ACKED",
+        "PARTIAL",
+        "UNKNOWN",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "REVIEW_REQUIRED",
+        "CANCEL_PENDING",
+    }
+)
+_ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES = frozenset(
+    {"REJECTED", "SUBMIT_REJECTED", "CANCELLED", "EXPIRED"}
+)
+
+
+def _quote_sql_identifier(identifier: str) -> str:
+    if not identifier or not all(ch.isalnum() or ch == "_" for ch in identifier):
+        raise ValueError(f"unsafe sqlite identifier: {identifier!r}")
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _attached_schema_names(conn: sqlite3.Connection) -> tuple[str, ...]:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return ("main",)
+    names: list[str] = []
+    for row in rows:
+        try:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        except (IndexError, KeyError, TypeError):
+            continue
+        text = str(name or "").strip()
+        if text:
+            names.append(text)
+    return tuple(dict.fromkeys(names)) or ("main",)
+
+
+def _table_exists_in_schema(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    schema_sql = _quote_sql_identifier(schema)
+    row = conn.execute(
+        f"SELECT 1 FROM {schema_sql}.sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _entry_control_pause_component(conn: sqlite3.Connection) -> dict:
+    """Read the durable entries-paused override at the submit boundary."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    checked_schemas: list[str] = []
+    authority_schemas: list[str] = []
+    for schema in _attached_schema_names(conn):
+        if schema == "temp":
+            continue
+        checked_schemas.append(schema)
+        try:
+            if not _table_exists_in_schema(conn, schema, "control_overrides"):
+                continue
+            authority_schemas.append(schema)
+            schema_sql = _quote_sql_identifier(schema)
+            row = conn.execute(
+                f"""
+                SELECT value, issued_by, reason, issued_at, effective_until
+                FROM {schema_sql}.control_overrides
+                WHERE target_type = 'global'
+                  AND target_key = 'entries'
+                  AND action_type = 'gate'
+                  AND issued_at <= ?
+                  AND (effective_until IS NULL OR effective_until > ?)
+                ORDER BY precedence DESC, issued_at DESC, override_id DESC
+                LIMIT 1
+                """,
+                (now, now),
+            ).fetchone()
+        except sqlite3.Error:
+            continue
+        if row is None:
+            continue
+        value = str(row["value"] if isinstance(row, sqlite3.Row) else row[0] or "").strip().lower()
+        if value in {"true", "1", "yes", "on"}:
+            issued_by = row["issued_by"] if isinstance(row, sqlite3.Row) else row[1]
+            reason = row["reason"] if isinstance(row, sqlite3.Row) else row[2]
+            issued_at = row["issued_at"] if isinstance(row, sqlite3.Row) else row[3]
+            effective_until = row["effective_until"] if isinstance(row, sqlite3.Row) else row[4]
+            return {
+                "component": "entries_pause_control_override",
+                "allowed": False,
+                "reason": str(reason or "entries_paused"),
+                "issued_by": str(issued_by or ""),
+                "issued_at": str(issued_at or ""),
+                "effective_until": "" if effective_until is None else str(effective_until),
+                "authority_schema": schema,
+            }
+
+    if authority_schemas:
+        return {
+            "component": "entries_pause_control_override",
+            "allowed": True,
+            "reason": "allowed",
+            "authority_schema": ",".join(authority_schemas),
+        }
+    return {
+        "component": "entries_pause_control_override",
+        "allowed": True,
+        "reason": "missing_control_override_table",
+        "checked_schemas": checked_schemas,
+    }
+
+
+def _entry_maker_only_component(
+    *,
+    effective_order_type: str,
+    post_only: bool,
+    intent_order_type: str | None = None,
+) -> dict:
+    """Final live-entry policy: entries may rest; exits may take."""
+
+    order_type = str(effective_order_type or "").strip().upper()
+    if not post_only:
+        return {
+            "component": "entry_maker_only",
+            "allowed": False,
+            "reason": "entry_post_only_required",
+            "order_type": order_type,
+            "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
+            "post_only": False,
+        }
+    if order_type not in {"GTC", "GTD"}:
+        return {
+            "component": "entry_maker_only",
+            "allowed": False,
+            "reason": "entry_resting_order_type_required",
+            "order_type": order_type,
+            "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
+            "post_only": True,
+        }
+    return {
+        "component": "entry_maker_only",
+        "allowed": True,
+        "reason": "allowed",
+        "order_type": order_type,
+        "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
+        "post_only": True,
+    }
+
+
+def _entry_duplicate_same_token_component(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    candidate_position_id: str,
+) -> dict:
+    """Final pre-submit duplicate-exposure gate for live entry orders.
+
+    Evaluator-level dedup can be bypassed by retries, stale projections, or
+    distinct decision/size idempotency keys. The executor is the last boundary
+    before command persistence and SDK submission, so it must independently
+    reject same-token open exposure.
+    """
+
+    token = str(token_id or "").strip()
+    if not token:
+        return {
+            "component": "entry_duplicate_same_token",
+            "allowed": False,
+            "reason": "missing_token_id",
+        }
+
+    if _table_exists(conn, "position_current"):
+        phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_TERMINAL_PHASES)
+        row = conn.execute(
+            f"""
+            SELECT position_id, phase
+            FROM position_current
+            WHERE (token_id = ? OR no_token_id = ?)
+              AND position_id != ?
+              AND phase NOT IN ({phase_placeholders})
+            LIMIT 1
+            """,
+            (
+                token,
+                token,
+                candidate_position_id,
+                *sorted(_ENTRY_DUPLICATE_TERMINAL_PHASES),
+            ),
+        ).fetchone()
+        if row is not None:
+            return {
+                "component": "entry_duplicate_same_token",
+                "allowed": False,
+                "reason": "open_position_same_token",
+                "existing_position_id": str(row["position_id"] if isinstance(row, sqlite3.Row) else row[0]),
+                "existing_phase": str(row["phase"] if isinstance(row, sqlite3.Row) else row[1]),
+            }
+
+    if _table_exists(conn, "venue_commands"):
+        terminal_phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_TERMINAL_PHASES)
+        open_state_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_OPEN_COMMAND_STATES)
+        terminal_no_exposure_placeholders = ",".join(
+            "?" for _ in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES
+        )
+        row = conn.execute(
+            f"""
+            SELECT vc.command_id, vc.position_id, vc.state, pc.phase
+            FROM venue_commands vc
+            LEFT JOIN position_current pc ON pc.position_id = vc.position_id
+            WHERE vc.intent_kind = 'ENTRY'
+              AND vc.side = 'BUY'
+              AND vc.token_id = ?
+              AND vc.position_id != ?
+              AND (
+                    vc.state IN ({open_state_placeholders})
+                 OR (
+                        vc.state = 'FILLED'
+                    AND (
+                            pc.phase IS NULL
+                         OR pc.phase NOT IN ({terminal_phase_placeholders})
+                    )
+                 )
+                 OR (
+                        vc.state NOT IN ({terminal_no_exposure_placeholders})
+                    AND vc.state != 'FILLED'
+                    AND vc.state NOT IN ({open_state_placeholders})
+                 )
+              )
+            ORDER BY vc.updated_at DESC, vc.created_at DESC
+            LIMIT 1
+            """,
+            (
+                token,
+                candidate_position_id,
+                *sorted(_ENTRY_DUPLICATE_OPEN_COMMAND_STATES),
+                *sorted(_ENTRY_DUPLICATE_TERMINAL_PHASES),
+                *sorted(_ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES),
+                *sorted(_ENTRY_DUPLICATE_OPEN_COMMAND_STATES),
+            ),
+        ).fetchone()
+        if row is not None:
+            if isinstance(row, sqlite3.Row):
+                command_id = str(row["command_id"])
+                position_id = str(row["position_id"])
+                state = str(row["state"])
+                phase = row["phase"]
+            else:
+                command_id = str(row[0])
+                position_id = str(row[1])
+                state = str(row[2])
+                phase = row[3]
+            return {
+                "component": "entry_duplicate_same_token",
+                "allowed": False,
+                "reason": "open_or_filled_entry_command_same_token",
+                "existing_command_id": command_id,
+                "existing_position_id": position_id,
+                "existing_command_state": state,
+                "existing_phase": "" if phase is None else str(phase),
+            }
+
+    return {
+        "component": "entry_duplicate_same_token",
+        "allowed": True,
+        "reason": "allowed",
+        "token_id": token,
+    }
+
+
 def _venue_submit_amount_precision_rejection_reason(
     intent: ExecutionIntent,
     *,
@@ -3419,6 +3704,31 @@ def _live_order(
                 order_role="entry",
                 idempotency_key=idem.value,
             )
+        maker_only_component = _entry_maker_only_component(
+            effective_order_type=effective_order_type,
+            post_only=submit_post_only,
+            intent_order_type=submit_order_type,
+        )
+        if not maker_only_component.get("allowed"):
+            reason = str(maker_only_component.get("reason") or "entry_maker_only")
+            logger.warning(
+                "_live_order: maker-only entry policy blocked before command "
+                "persistence for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                maker_only_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"entry_maker_only:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
         amount_precision_error = _venue_submit_amount_precision_rejection_reason(
             intent,
             shares=shares,
@@ -3529,6 +3839,59 @@ def _live_order(
                 order_role="entry",
             )
 
+        entries_pause_component = _entry_control_pause_component(conn)
+        if not entries_pause_component.get("allowed"):
+            reason = str(entries_pause_component.get("reason") or "entries_paused")
+            logger.warning(
+                "_live_order: entries pause blocked entry before command "
+                "persistence for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                entries_pause_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"entries_paused:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                intent_id=None,
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
+
+        duplicate_same_token_component = _entry_duplicate_same_token_component(
+            conn,
+            token_id=intent.token_id,
+            candidate_position_id=trade_id,
+        )
+        if not duplicate_same_token_component.get("allowed"):
+            reason = str(
+                duplicate_same_token_component.get("reason")
+                or "duplicate_entry_same_token"
+            )
+            logger.warning(
+                "_live_order: duplicate same-token entry blocked before command "
+                "persistence for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                duplicate_same_token_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"duplicate_entry_same_token:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                intent_id=None,
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
+
         decision_source_component = _entry_decision_source_component(intent)
         if not decision_source_component.get("allowed"):
             reason = str(decision_source_component.get("reason") or "invalid_decision_source_context")
@@ -3629,7 +3992,7 @@ def _live_order(
                             cutover_component,
                             _component_from_result(
                                 "risk_allocator",
-                                risk_allocator_decision,
+                            risk_allocator_decision,
                             ),
                             _capability_component(
                                 "order_type_selection",
@@ -3638,10 +4001,13 @@ def _live_order(
                                 intent_order_type=submit_order_type,
                                 post_only=submit_post_only,
                             ),
+                            maker_only_component,
                             heartbeat_component,
                             ws_gap_component,
                             collateral_refresh_component,
                             collateral_component,
+                            entries_pause_component,
+                            duplicate_same_token_component,
                             decision_source_component,
                             corrected_identity_component,
                             _capability_component("executable_snapshot_gate"),

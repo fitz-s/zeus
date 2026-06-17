@@ -1394,7 +1394,7 @@ def _reprice_decision_from_executable_snapshot(
         "passive_fill_probability",
         final_intent_context.get("expected_fill_probability"),
     )
-    if final_best_ask is None and passive_fill_probability in (None, ""):
+    if passive_fill_probability in (None, ""):
         try:
             from src.analysis.market_analysis_vnext import estimate_passive_maker_execution
 
@@ -1445,7 +1445,7 @@ def _reprice_decision_from_executable_snapshot(
                     fill_adjusted_profit_usd
                 )
     passive_maker_context = None
-    if final_best_ask is None and passive_fill_probability not in (None, ""):
+    if passive_fill_probability not in (None, ""):
         from src.contracts.execution_intent import PassiveMakerExecutionContext
 
         captured_at = getattr(snapshot, "captured_at", None)
@@ -1491,13 +1491,35 @@ def _reprice_decision_from_executable_snapshot(
     selected_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
     final_order_type = selected_order_type
     taker_order_type_upgraded = False
-    if (
-        final_best_ask is not None
-        and final_order_type in {"GTC", "GTD"}
-        and bool(final_intent_context.get("allow_taker_upgrade"))
-    ):
-        final_order_type = "FOK"
-        taker_order_type_upgraded = True
+    if final_order_type in {"FOK", "FAK"}:
+        final_order_type = "GTC"
+    if final_order_type in {"GTC", "GTD"} and final_best_ask is not None:
+        tick = Decimal(str(getattr(snapshot, "min_tick_size", "0.01") or "0.01"))
+        direction_text = str(getattr(getattr(decision, "edge", None), "direction", "") or "")
+        if direction_text.startswith("buy_"):
+            passive_ceiling = Decimal(str(final_best_ask)) - tick
+            if passive_ceiling <= Decimal("0"):
+                raise ValueError("MAKER_ONLY_ENTRY_NO_PASSIVE_BID_BELOW_ASK")
+            if Decimal(str(corrected_candidate_price)) >= passive_ceiling:
+                corrected_candidate_price = float(passive_ceiling)
+                corrected_candidate_expected_fill = float(passive_ceiling)
+                final_price = float(passive_ceiling)
+                corrected_candidate_size = max(
+                    float(corrected_candidate_size),
+                    float(passive_ceiling * Decimal(str(snapshot.min_order_size))),
+                )
+        elif direction_text.startswith("sell_"):
+            best_bid = getattr(snapshot, "orderbook_top_bid", None)
+            if best_bid is not None:
+                passive_floor = Decimal(str(best_bid)) + tick
+                if Decimal(str(corrected_candidate_price)) <= passive_floor:
+                    corrected_candidate_price = float(passive_floor)
+                    corrected_candidate_expected_fill = float(passive_floor)
+                    final_price = float(passive_floor)
+                    corrected_candidate_size = max(
+                        float(corrected_candidate_size),
+                        float(passive_floor * Decimal(str(snapshot.min_order_size))),
+                    )
     corrected_pricing_shadow = _attach_corrected_pricing_authority(
         decision=decision,
         snapshot=snapshot,

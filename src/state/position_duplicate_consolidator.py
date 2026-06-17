@@ -89,10 +89,11 @@ def _enumerate_duplicates(
     """
     token_rows = conn.execute(
         """
-        SELECT token_id
+        SELECT COALESCE(NULLIF(token_id, ''), NULLIF(no_token_id, '')) AS exposure_token
           FROM position_current
-         WHERE phase IN (?, ?, ?, ?, ?) AND token_id IS NOT NULL
-         GROUP BY token_id
+         WHERE phase IN (?, ?, ?, ?, ?)
+           AND COALESCE(NULLIF(token_id, ''), NULLIF(no_token_id, '')) IS NOT NULL
+         GROUP BY exposure_token
         HAVING COUNT(*) > 1
         """,
         _OPEN_PHASES,
@@ -105,9 +106,10 @@ def _enumerate_duplicates(
                    (SELECT MIN(occurred_at) FROM position_events pe
                      WHERE pe.position_id = pc.position_id) AS first_at
               FROM position_current pc
-             WHERE pc.token_id = ? AND pc.phase IN (?, ?, ?, ?, ?)
+             WHERE (pc.token_id = ? OR pc.no_token_id = ?)
+               AND pc.phase IN (?, ?, ?, ?, ?)
             """,
-            (str(token_id), *_OPEN_PHASES),
+            (str(token_id), str(token_id), *_OPEN_PHASES),
         ).fetchall()
         triples = [
             (str(r[0]), float(r[1] or 0.0), str(r[2] or "9999"))
