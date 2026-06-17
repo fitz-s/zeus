@@ -119,6 +119,11 @@ OPENMETEO_MODEL_IDS: dict[str, str] = {
     "ncep_nbm_conus": "ncep_nbm_conus",
     "ukmo_global_deterministic_10km": "ukmo_global_deterministic_10km",
     "ukmo_uk_deterministic_2km": "ukmo_uk_deterministic_2km",
+    # 2026-06-17 PRECISION-INPUT FIX: high-res CONUS / N-America regional experts (3km HRRR /
+    # 2.5km HRDPS) — the station-resolving raw products the fusion needs where coarse globals
+    # snap cold. OM serves these single-runs ids directly.
+    "gfs_hrrr": "gfs_hrrr",
+    "gem_hrdps_continental": "gem_hrdps_continental",
 }
 
 # BLOCKER 3: the OM product that actually serves the ANCHOR walk-forward history via the
