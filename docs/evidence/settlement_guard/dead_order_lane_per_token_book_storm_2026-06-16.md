@@ -70,6 +70,37 @@ cross (as the morning's 8 buy_no crosses did), the rest honestly no-trade. NOT a
 NOT a loosened gate; NOT a band-aid (it completes the 2026-06-15 interleave fix by removing the
 latency that makes the budget fit only 1 event).
 
+## POST-DEPLOY (16:03 restart on the book-batch fix): the storm fix is REAL but SECONDARY — the binding order suppressor is the SUBMIT-TIME RECAPTURE (#132)
+
+After deploying the chunk-0 batch fix and restarting (16:03, clean), measured the real
+order suppressor. Two findings:
+
+1. **Book storm: partially fixed.** Boot window (16:04–16:13) GET 52 / POST 17; steady-state
+   (16:13–16:26) GET 1205 / POST 28 (~43:1 again). The warm-batch skip is fixed, but other
+   per-token sources remain (market discovery/scout/partial-`/books` misses). Real but secondary.
+
+2. **THE BINDING ORDER SUPPRESSOR — overturns the morning "no edge" conclusion (RULE-1 vindicated).**
+   The reactor decides 0 forecast families post-boot — every one transient-requeues with:
+   `reason=SUBMIT_ABORTED_PRICE_MOVED:recapture failed: no fresh executable snapshot; fail
+   closed (§13 'Snapshot stale and recapture fails')`. **158 of 174 SUBMIT_ABORTED_PRICE_MOVED
+   today are this recapture failure.** The forecast spine DOES select +edge candidates (the
+   decision lane works); the cross dies at the **submit-time pre-submit revalidation recapture**
+   (event_reactor_adapter.py ~9281-9319 / `build_pre_submit_revalidation_certificate` /
+   cycle_runtime.py:869 `capture_executable_market_snapshot`): it cannot re-establish an
+   executable price for the selected candidate, so it fail-closes. This is **task #132**
+   (JIT-fresh recapture of the spine-selected family at submit — the named cross-rate lever),
+   the #1 evidence-ranked lever in `forecast_lane_restored_and_suppressor_histogram_2026-06-16.md`.
+   It is NOT a q-edge / over-confidence problem — there IS edge; the recapture is the wall.
+   ("database is locked" 30× is in the WARM job, not the recapture — a separate issue.)
+
+   **MUST distinguish (the #132 guardrail):** a recapture abort is CORRECT when the price
+   genuinely moved / the book genuinely has no executable price (fail-closed = settlement-honest
+   safety, never bypass). The DEFECT to fix is the recapture wrongly aborting a GENUINELY
+   PLACEABLE order — e.g. demanding a fresh executable TAKER ask for a MAKER REST (the morning's
+   8 crosses were buy_no maker rests into empty NO books, which need NO taker ask). The fix makes
+   the recapture reliably SUCCEED for placeable orders; it never loosens the freshness window,
+   never forces a submit, never bypasses the gate.
+
 ## What is NOT the cause (ruled out this session, with evidence)
 - NOT `_math` (0 post-restart). NOT forecast over-confidence / q_lcb≤price (1 EVENT_BOUND post-restart).
 - NOT event starvation (169 fresh FSR pending). NOT forecast production (913 fresh 06-17 posteriors).
