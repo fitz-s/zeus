@@ -207,7 +207,8 @@ def test_T5_write_settlement_verified_path(scratch_db):
         pm_bin_lo=17.0, pm_bin_hi=17.0,
         event_slug="test-event",
         obs_row={"id": 42, "source": "wu_icao_history", "high_temp": 17.3,
-                 "unit": "C", "fetched_at": "2026-04-15T12:00:00+00:00"},
+                 "unit": "C", "fetched_at": "2026-04-15T12:00:00+00:00",
+                 "observation_local_time": "2026-04-15T23:59:00Z"},
     )
     scratch_db.commit()  # caller owns commit (T7)
 

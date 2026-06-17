@@ -265,7 +265,18 @@ def main(argv: list[str] | None = None) -> int:
 
         conn = get_forecasts_connection(write_class="live")
         try:
-            conn.execute("BEGIN")
+            # BEGIN IMMEDIATE (not deferred): this is a WRITE transaction (manifests +
+            # posteriors). zeus-forecasts.db runs in rollback-journal (delete) mode, so a
+            # deferred BEGIN takes a SHARED lock on the first SELECT and then tries to
+            # upgrade to EXCLUSIVE on the first INSERT — if any other process wrote in
+            # between, SQLite raises SQLITE_BUSY ("database is locked") IMMEDIATELY and the
+            # 300s busy_timeout cannot retry a deferred-upgrade conflict. Taking the write
+            # lock up front makes busy_timeout effective (it WAITS for the lock at BEGIN),
+            # which was the root of the materialize "database is locked" storm that starved
+            # the precision-fusion captures -> BAYES_PRECISION_FUSION_CAPTURE_MISSING ->
+            # unpriceable live candidates -> no crosses. Readers are unaffected; writers
+            # already serialize via the live writer-flock.
+            conn.execute("BEGIN IMMEDIATE")
             if args.init_schema:
                 ensure_replacement_forecast_shadow_schema(conn)
                 _create_readiness_state(conn)

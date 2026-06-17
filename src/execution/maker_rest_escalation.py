@@ -118,6 +118,7 @@ def run_cancels_for_expired_rests(
     clob: Any,
     *,
     deadline_minutes: float | None = None,
+    collect_cancelled: list[dict[str, Any]] | None = None,
 ) -> dict[str, int]:
     """Cancel each already-snapshotted expired resting maker entry. Returns counters.
 
@@ -126,6 +127,16 @@ def run_cancels_for_expired_rests(
     ``find_expired_resting_entries`` on a now-closed connection. Splitting the
     snapshot from the cancels structurally guarantees no connection is open while
     the venue cancels run.
+
+    ESCALATION RE-DECISION HARVEST (redecide-block fix 2026-06-16): when a caller
+    passes ``collect_cancelled``, every entry whose cancel was CONFIRMED (and only
+    those — a ``cancel_failed`` order is NOT appended) is appended to that list so
+    the caller can emit a family-targeted re-decision opportunity_event for the
+    just-cancelled, ARMED escalation family. The collection is the ONLY mutation
+    added here; the connection-free network contract is preserved (no DB work in
+    this phase — the world-DB event-write happens in the caller that owns DB
+    access). Keeping ``stats`` byte-identical preserves the existing exact-equality
+    callers/tests; the harvest rides a separate out-parameter.
     """
     stats = {"scanned": len(expired), "cancelled": 0, "cancel_failed": 0}
     for entry in expired:
@@ -142,6 +153,11 @@ def run_cancels_for_expired_rests(
             )
             continue
         stats["cancelled"] += 1
+        if collect_cancelled is not None:
+            # CONFIRMED-cancel only (this line is unreachable on the cancel_failed
+            # path above — `continue` skips it): the re-decision lane must fire only
+            # for families whose rest was actually pulled at the venue.
+            collect_cancelled.append(entry)
         logger.info(
             "maker_rest_escalation: cancelled expired rest command=%s order=%s "
             "rested_since=%s fact_state=%s matched=%s (deadline=%.0fmin; the next "

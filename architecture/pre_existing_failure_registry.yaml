@@ -12,7 +12,9 @@ entries:
     status: tracking
     owner: topology-maintenance
     first_observed: "2026-05-21"
-    review_by: "2026-06-17"
+    review_by: "2026-07-17"
+    last_reviewed: "2026-06-17"
+    re_review_note: "Re-reviewed 2026-06-17 at the review_by deadline: topology_doctor --scripts script-manifest debt still reproduces and remains out-of-scope of the active change (qkernel ws-gap submit-latch fix), which registers its own test and adds no script-manifest debt. allowed_only_if still holds; extended one review cycle."
     evidence: "python3 scripts/topology_doctor.py --scripts --json failed on unrelated script-manifest debt while live-release gate script was registered."
     active_task_scope: "docs/operations/task_2026-05-21_live_release_proof_p0p3"
     allowed_only_if: "The active change registers its own scripts and does not add to the unrelated script-manifest debt."
@@ -21,7 +23,9 @@ entries:
     status: tracking
     owner: topology-maintenance
     first_observed: "2026-05-21"
-    review_by: "2026-06-17"
+    review_by: "2026-07-17"
+    last_reviewed: "2026-06-17"
+    re_review_note: "Re-reviewed 2026-06-17 at the review_by deadline: topology_doctor --tests test-topology/law-gate debt still reproduces and remains out-of-scope of the active change (qkernel ws-gap submit-latch fix), which registers its own test and adds no test-topology debt. allowed_only_if still holds; extended one review cycle."
     evidence: "python3 scripts/topology_doctor.py --tests --json failed on unrelated test-topology/law-gate debt while live-release tests were registered."
     active_task_scope: "docs/operations/task_2026-05-21_live_release_proof_p0p3"
     allowed_only_if: "The active change registers its own tests and does not add to the unrelated test-topology debt."
@@ -30,7 +34,9 @@ entries:
     status: tracking
     owner: calibration-learning-path
     first_observed: "2026-05-27"
-    review_by: "2026-06-17"
+    review_by: "2026-07-17"
+    last_reviewed: "2026-06-17"
+    re_review_note: "Re-reviewed 2026-06-17 at the review_by deadline: test_T1_valid_authority_writes_pairs, test_T7_parametrized_authority_matrix[tigge_ens_v3-True-3-None], test_T8_ecmwf_ens_source_writes_pairs re-run 2026-06-17 and still assert n==3 but get n==0 (D2 fixture seeding debt, unchanged). Out-of-scope of the active change (qkernel ws-gap submit-latch fix). Extended one review cycle."
     evidence: |
       test_T1_valid_authority_writes_pairs, test_T7_parametrized_authority_matrix[tigge_ens_v3-True-3-None],
       test_T8_ecmwf_ens_source_writes_pairs all assert n==3 but get n==0.

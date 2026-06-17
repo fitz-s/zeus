@@ -5,7 +5,16 @@
 #   identity-Platt on the exit/monitor p_raw sites so EXIT belief matches ENTRY belief.
 """Monitor refresh: recompute fresh probability for held positions.
 
-Blueprint v2 §7 Layer 1: Recompute probability with SAME METHOD as entry.
+Blueprint v2 §7 Layer 1: recompute the held-side probability.
+
+PRIMARY AUTHORITY (corrected 2026-06-16): ``monitor_probability_refresh`` reads
+the multi-model fused posterior ``forecast_posteriors`` (via
+``position_belief.load_replacement_belief``, sourced from ``raw_model_forecasts``)
+— the SAME source family as the entry decision. The legacy ENS member-counting
+and day0 refreshers below it are explicit fallback telemetry: the ENS path reads
+``ensemble_snapshots`` (a single-model ECMWF ensemble) and is NOT the entry
+authority — the "SAME METHOD as entry" parity holds ONLY for the replacement
+posterior primary lane, and is STALE for the legacy ens/day0 refreshers.
 Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_raw).
 """
 
@@ -562,14 +571,26 @@ def _read_monitor_executable_forecast(
     target_d: date,
     temperature_metric: MetricIdentity,
 ) -> tuple[dict | None, str | None]:
-    """Read monitor probability from the same executable forecast authority as entry.
+    """Legacy/fallback ENSEMBLE executable-forecast read — NOT the live entry authority.
 
-    Live ecmwf_open_data entry uses producer/source-run readiness plus
-    ensemble_snapshots.  A held-position monitor must not fall back to the
-    legacy Open-Meteo ``fetch_ensemble`` adapter for that source, because that
-    path cannot prove the executable forecast reader contract.  Non-real sqlite
-    connections return ``(None, None)`` so legacy unit tests and diagnostic
-    callsites keep their existing fallback behavior.
+    PROVENANCE (corrected 2026-06-16, spine source-divergence fix): the live
+    entry decision authority is the multi-model fused posterior
+    ``forecast_posteriors`` (read via ``position_belief.load_replacement_belief``,
+    sourced from ``raw_model_forecasts`` provider fusion) — NOT this reader. This
+    function reads ``ensemble_snapshots`` (51 ``ecmwf_ens`` members of a single
+    model) through the executable-forecast contract. It is a SUPPRESSED legacy
+    fallback: for replacement-authority (edli) positions the belief-authority-fault
+    guard in ``monitor_probability_refresh`` returns BEFORE the ensemble registry
+    is dispatched (see the ``legacy_belief_substitution_suppressed`` early return),
+    so this path is NOT used as the freshness authority for those positions. It is
+    reached only as ``applied``-list telemetry and, for legacy non-edli positions
+    not covered by a fresh ``forecast_posteriors`` row, as a last-resort center.
+
+    A held-position monitor must not fall back to the legacy Open-Meteo
+    ``fetch_ensemble`` adapter for that source, because that path cannot prove the
+    executable forecast reader contract.  Non-real sqlite connections return
+    ``(None, None)`` so legacy unit tests and diagnostic callsites keep their
+    existing fallback behavior.
     """
 
     if not isinstance(conn, sqlite3.Connection):
@@ -748,6 +769,24 @@ def _resolve_unified_exit_bias_native(
         except Exception:
             pass
         return None
+
+
+def _hours_since_open_or_nan(position) -> float:
+    """Hold age in hours from a REAL ``entered_at``; NaN when ``entered_at`` is
+    missing or malformed. M2b (timing-semantics fix 2026-06-16): never the
+    fabricated 48h — NaN routes the caller to an explicit refuse so a missing
+    hold-age authority is treated as missing, not as "old enough to exit".
+    Shared by both monitor-refresh paths so they grade hold age identically.
+    """
+    if not position.entered_at:
+        return float("nan")
+    try:
+        entered = datetime.fromisoformat(position.entered_at)
+        if entered.tzinfo is None:
+            entered = entered.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - entered).total_seconds() / 3600.0
+    except Exception:
+        return float("nan")
 
 
 def _refresh_ens_member_counting(
@@ -1183,16 +1222,10 @@ def _refresh_ens_member_counting(
         p_cal_full = p_raw_vector if len(all_bins) > 1 else np.array([p_cal_yes], dtype=float)
         applied = [*base_applied]
 
-    # Compute actual hours since position was entered (not hardcoded 48h)
-    hours_since_open = 48.0
-    if position.entered_at:
-        try:
-            entered = datetime.fromisoformat(position.entered_at)
-            if entered.tzinfo is None:
-                entered = entered.replace(tzinfo=timezone.utc)
-            hours_since_open = (datetime.now(timezone.utc) - entered).total_seconds() / 3600.0
-        except Exception:
-            pass  # Malformed timestamp → fall back to 48h
+    # M2b (timing-semantics fix 2026-06-16): hold age from a REAL entered_at;
+    # NaN when missing/malformed -> explicit refuse below (never the fabricated
+    # 48h). Shared helper so both refresh paths grade hold age identically.
+    hours_since_open = _hours_since_open_or_nan(position)
 
     # K1/#68: verify calibration authority before computing alpha.
     # Same gate as evaluator.py — check for UNVERIFIED calibration rows.
@@ -1222,6 +1255,16 @@ def _refresh_ens_member_counting(
             applied.append("authority_gate_blocked")
             return position.p_posterior, applied
         _authority_verified = True
+
+    # M2b: missing/malformed entered_at -> hours_since_open is NaN -> REFUSE.
+    # compute_alpha does not itself reject NaN (NaN < threshold is False, so it
+    # would silently skip the freshness adjustment and return base alpha — the
+    # same fabrication this fix removes). Refuse explicitly so the exit gate
+    # treats missing hold-age authority as missing, not as "old enough to exit".
+    if not np.isfinite(hours_since_open):
+        _set_monitor_probability_fresh(position, False)
+        applied.append("entered_at_missing_alpha_refused")
+        return position.p_posterior, applied
 
     alpha = compute_alpha(
         calibration_level=cal_level,
@@ -1640,15 +1683,9 @@ def _refresh_day0_observation(
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "metric_extrema_missing"]
     ensemble_spread = TemperatureDelta(float(np.std(member_extrema)), city.settlement_unit)
 
-    hours_since_open = 48.0
-    if position.entered_at:
-        try:
-            entered = datetime.fromisoformat(position.entered_at)
-            if entered.tzinfo is None:
-                entered = entered.replace(tzinfo=timezone.utc)
-            hours_since_open = (datetime.now(timezone.utc) - entered).total_seconds() / 3600.0
-        except Exception:
-            pass
+    # M2b: hold age from a REAL entered_at (shared helper; twin of the
+    # ENS-member-counting path). NaN -> explicit refuse below.
+    hours_since_open = _hours_since_open_or_nan(position)
 
     # K1/#68: verify calibration authority before computing alpha.
     # Slice P2-A2 (PR #19 phase 2, 2026-04-26): twin of the gate above —
@@ -1675,6 +1712,14 @@ def _refresh_day0_observation(
             applied.append("authority_gate_blocked")
             return position.p_posterior, applied
         _authority_verified = True
+
+    # M2b: missing/malformed entered_at -> hours_since_open is NaN -> REFUSE
+    # (twin of the ENS-member-counting guard; compute_alpha silently tolerates
+    # NaN, so the refusal must be explicit here).
+    if not np.isfinite(hours_since_open):
+        _set_monitor_probability_fresh(position, False)
+        applied.append("entered_at_missing_alpha_refused")
+        return position.p_posterior, applied
 
     alpha = compute_alpha(
         calibration_level=cal_level,
@@ -2242,17 +2287,30 @@ def monitor_probability_refresh(
         )
     )
 
-    # BELIEF-AUTHORITY FAULT (regime law U1/U2, 2026-06-12): a replacement-chain
-    # position whose replacement belief is stale/missing must NOT have the gap
-    # papered over by the legacy ENS forecast belief (the Denver 2026-06-12
-    # incident: stale 0.79 masked as fresh while the market said 0.22). For these
-    # positions we (a) mark belief NOT-fresh, (b) emit BELIEF_AUTHORITY_FAULT,
-    # (c) fire a fail-soft single-family reseed so the SAME authority refreshes
-    # next cycle — and return WITHOUT the cross-era substitution. The day0
-    # nowcast lane is exempt (it is settlement-day observation, not a forecast-
-    # belief substitution). Legacy-entered (non-edli) positions keep the legacy
-    # path, clearly branded.
-    if _position_is_replacement_authority(pos) and not _would_use_day0_lane:
+    # BELIEF-AUTHORITY FAULT (regime law U1/U2, 2026-06-12): a position whose
+    # replacement belief is stale/missing must NOT have the gap papered over by
+    # the legacy ENS forecast belief (the Denver 2026-06-12 incident: stale 0.79
+    # masked as fresh while the market said 0.22). For these positions we (a) mark
+    # belief NOT-fresh, (b) emit BELIEF_AUTHORITY_FAULT, (c) fire a fail-soft
+    # single-family reseed so the SAME authority refreshes next cycle — and return
+    # WITHOUT the cross-era substitution. The day0 nowcast lane is exempt (it is
+    # settlement-day observation, not a forecast-belief substitution).
+    #
+    # SOURCE-PARITY WIDENING (2026-06-16, spine source-divergence fix, plan Option
+    # A): the guard formerly fired only for replacement-authority (edli) positions,
+    # leaving LEGACY non-edli positions to substitute the cold single-model
+    # ``ensemble_snapshots`` EMOS center — the same cold-center divergence the entry
+    # spine fix removed, re-introduced on the held side. The guard is now widened to
+    # ALL non-day0 positions: a legacy position with a fresh ``forecast_posteriors``
+    # row already returned fresh ABOVE (``load_replacement_belief`` is position-
+    # agnostic); one with a stale/missing posterior is marked belief-unavailable
+    # (fail-closed hold) rather than exiting off a cold ensemble center. VERIFIED
+    # PREREQUISITE: all live legacy held positions (Houston aef7968f active;
+    # Chengdu ad59da00 / Hong Kong day0_window) have ``forecast_posteriors`` coverage
+    # for their family, so widening never strands a held position with NO belief
+    # source — the same-family reseed re-materializes on the SAME authority next
+    # cycle. The ensemble registry below is retained ONLY as applied-list telemetry.
+    if not _would_use_day0_lane:
         _set_monitor_probability_fresh(pos, False)
         _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
         _append_monitor_validation(pos, "legacy_belief_substitution_suppressed")

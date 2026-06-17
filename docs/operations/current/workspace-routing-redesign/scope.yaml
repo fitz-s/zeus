@@ -1,0 +1,48 @@
+# Created: 2026-06-14
+# Last reused or audited: 2026-06-14
+# Authority basis: docs/operations/current/workspace-routing-redesign/PLAN.md (design of record)
+
+work: workspace-routing-redesign
+status: design-approved-implementation-gated
+summary: >
+  Replace advisory file-placement + placement-audit with a single Write-tool
+  router (route_write) that puts new files in their canonical by-work home at
+  write time via updatedInput; collapse 6 advisory/audit mechanisms into 1;
+  restructure docs/operations to by-work folders (current/ = active only,
+  2-stage lifecycle current -> archive); add an independent worktree prune;
+  resolve the .omc leak (Option A).
+
+# What this work MAY touch (when a build step is authorized).
+may_touch:
+  - .claude/hooks/dispatch.py          # the route_write handler (S1-S3)
+  - .claude/hooks/registry.yaml        # register route_write BLOCKING-tier (S1)
+  - architecture/file_arrangement.yaml # by-work canonical paths, enforcement->data (S0,S7)
+  - scripts/zpkt.py                    # by-work shape + zpkt close lifecycle (S0,S4-lifecycle)
+  - scripts/worktree_doctor.py         # --prune mode (S4)
+  - scripts/topology_doctor_docs_checks.py  # demote H5-H8 to CI backstop (S7)
+  - tests/                             # antibody tests (reroute/never-reroute-Edit, schema, work-resolution)
+  - .gitignore                         # .omc Option A untrack (S5)
+  - docs/operations/**                 # by-work migration target (S6, operator-gated)
+  - docs/archive/**                    # archive merge + lifecycle destination (S6)
+
+# What this work MUST NOT touch.
+must_not_touch:
+  - src/execution/**                   # Tier-0 runtime; out of scope
+  - src/venue/**
+  - src/state/**
+  - state/*.sqlite                     # canonical DB truth (K1 split)
+  - workspace_map.md                   # load-bearing root router surface (KEEP, never move)
+
+invariants:
+  - No code until the operator authorizes a specific build step (S0-S7).
+  - Net mechanism count must strictly DECREASE (R6): -6 +1.
+  - Anti-data-loss: ambiguous/unknown writes NUDGE, never silent-buried in .omx.
+  - Routing is Write-only; Edit/MultiEdit are never rerouted (R13).
+  - Committed-file moves are reference-checked + runtime-reader-scanned, operator-gated (R10/R17).
+  - Every decay vector terminates in a RED test or a verified gate (D3).
+
+build_steps_sequence: TBD   # operator decides order; S4/S5 independent, S6 gated last
+decisions_locked:
+  omc_leak: option_A_pure_scratch
+  lifecycle_stages: 2        # current -> archive
+  ask_on_common_path: removed # zero friction; ASK only for ambiguous authority

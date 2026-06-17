@@ -164,6 +164,29 @@ _RD_INSERT = """
     VALUES (?, ?, ?, '2026-05-22T01:00:00Z')
 """
 
+_DC_INSERT = """
+    INSERT INTO decision_certificates (
+        certificate_id, certificate_type, schema_version, canonicalization_version,
+        semantic_key, claim_type, mode, decision_time,
+        authority_id, authority_version, algorithm_id, algorithm_version,
+        payload_json, payload_hash, certificate_hash, verifier_status, created_at
+    ) VALUES (?, 'FinalIntentCertificate', 1, '1.0',
+              ?, 'FINAL_INTENT', 'SHADOW', '2026-05-22T00:00:00Z',
+              'test_authority', '1.0', 'test_algorithm', '1.0',
+              ?, 'hash_' || ?, 'cert_hash_' || ?, 'VERIFIED', '2026-05-22T00:00:00Z')
+"""
+
+
+def _insert_certificate(
+    conn: sqlite3.Connection,
+    cert_id: str,
+    strategy_key: str,
+) -> None:
+    """Insert a FinalIntentCertificate row (C2 fix: n_decisions reads this table)."""
+    import json
+    payload = json.dumps({"strategy_key": strategy_key})
+    conn.execute(_DC_INSERT, (cert_id, cert_id, payload, cert_id, cert_id))
+
 
 def _seed_evidence(
     conn: sqlite3.Connection,
@@ -182,6 +205,8 @@ def _seed_evidence(
     conn.execute(_DE_INSERT, (de_id, 0, strategy_key, source))
     conn.execute(_SE_INSERT, (experiment_id, strategy_id_in_experiment, "cohort-A"))
     conn.execute(_RD_INSERT, (de_id, experiment_id, total_regret))
+    # C2 fix: n_decisions now reads decision_certificates, not decision_events.
+    _insert_certificate(conn, cert_id=f"cert-{de_id}", strategy_key=strategy_key)
     conn.commit()
     return de_id
 
@@ -193,9 +218,14 @@ class TestF2EvidenceReportDenominatorScoping:
         from src.analysis.evidence_report import build_evidence_report
 
         conn = _make_evidence_db()
-        # Insert shadow_decision + live_decision for same strategy
+        # Insert shadow_decision + live_decision for same strategy (decision_events legacy)
         conn.execute(_DE_INSERT, ("de-shadow", 0, "settlement_capture", "shadow_decision"))
         conn.execute(_DE_INSERT, ("de-live", 1, "settlement_capture", "live_decision"))
+        # C2 fix: n_decisions reads decision_certificates. Only the shadow entity reached
+        # the certificate path; the live_decision entity has no corresponding certificate.
+        # source filter is not applied to decision_certificates (unmappable), so the
+        # certificate count (1) is the correct denominator for the shadow experiment.
+        _insert_certificate(conn, "cert-de-shadow", "settlement_capture")
         conn.commit()
 
         report = build_evidence_report(
@@ -213,6 +243,9 @@ class TestF2EvidenceReportDenominatorScoping:
         conn = _make_evidence_db()
         for seq, src in enumerate(("shadow_decision", "live_decision", "phase0_backfill")):
             conn.execute(_DE_INSERT, (f"de-{src}", seq, "settlement_capture", src))
+        # C2 fix: each decision entity has a corresponding certificate in the active lane.
+        for src in ("shadow_decision", "live_decision", "phase0_backfill"):
+            _insert_certificate(conn, f"cert-de-{src}", "settlement_capture")
         conn.commit()
 
         report = build_evidence_report(

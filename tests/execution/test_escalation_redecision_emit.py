@@ -1,0 +1,193 @@
+# Created: 2026-06-16
+# Last audited: 2026-06-16
+# Authority basis: docs/evidence/qkernel_rebuild/redecide_block_2026-06-16.md §FIX —
+#   the caller half: _maker_rest_escalation_cycle harvests confirmed-cancelled rests,
+#   recovers each family from VENUE TRUTH (token_id -> condition_id via
+#   executable_market_snapshots -> (city,target_date,metric) via market_events), and
+#   emits ONE escalation-origin FORECAST_SNAPSHOT_READY per family (Tier-0 lane).
+#   Phase 2: event_type changed from EDLI_REDECISION_PENDING (dormant, hard-blocked at
+#   6+ dispatch sites) to FORECAST_SNAPSHOT_READY with source='escalation_cross-*'.
+#   The Tier-0 tier clause keys on FSR + escalation_cross- source.
+"""Caller-side tests for the escalation re-decision emit.
+
+Covers the two helpers added in src/main.py:
+  - _escalation_families_from_cancelled: the venue-truth family recovery.
+  - _emit_escalation_cross_redecisions: routes the recovered families through the
+    EXISTING FSR re-emit machinery with the escalation source + FORECAST_SNAPSHOT_READY
+    type, under the world-write mutex, WITHOUT already_pending_keys.
+"""
+from __future__ import annotations
+
+import sqlite3
+
+from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
+
+
+def _trade_conn_with_snapshot(token_to_cond: dict[str, str]) -> sqlite3.Connection:
+    """Minimal executable_market_snapshots with only the columns the recovery reads."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT, selected_outcome_token_id TEXT, condition_id TEXT,
+            captured_at TEXT)"""
+    )
+    seq = 0
+    for token, cond in token_to_cond.items():
+        # Two rows per token (older + newer) so the freshest-by-captured_at pick is exercised.
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+            (f"snap-old-{seq}", token, "STALE_COND", "2026-06-16T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+            (f"snap-new-{seq}", token, cond, "2026-06-16T11:00:00+00:00"),
+        )
+        seq += 1
+    return conn
+
+
+def _forecasts_conn_with_market_events(
+    cond_to_family: dict[str, tuple[str, str, str]],
+) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE market_events (
+            condition_id TEXT, city TEXT, target_date TEXT, temperature_metric TEXT)"""
+    )
+    for cond, (city, td, metric) in cond_to_family.items():
+        conn.execute(
+            "INSERT INTO market_events VALUES (?,?,?,?)", (cond, city, td, metric)
+        )
+    return conn
+
+
+def test_family_recovery_resolves_city_date_metric_from_venue_truth():
+    import src.main as m
+
+    trade = _trade_conn_with_snapshot({"tokA": "condA", "tokB": "condB"})
+    forecasts = _forecasts_conn_with_market_events(
+        {"condA": ("Moscow", "2026-06-17", "high"),
+         "condB": ("Singapore", "2026-06-17", "high")}
+    )
+    cancelled = [
+        {"command_id": "c1", "token_id": "tokA", "market_id": "mA"},
+        {"command_id": "c2", "token_id": "tokB", "market_id": "mB"},
+    ]
+    families = m._escalation_families_from_cancelled(cancelled, trade, forecasts)
+    assert families == {
+        ("Moscow", "2026-06-17", "high"),
+        ("Singapore", "2026-06-17", "high"),
+    }
+
+
+def test_family_recovery_skips_unresolvable_entry_without_crashing():
+    import src.main as m
+
+    # tokA resolves; tokZ has no snapshot row -> skipped (fail-soft, not a crash).
+    trade = _trade_conn_with_snapshot({"tokA": "condA"})
+    forecasts = _forecasts_conn_with_market_events(
+        {"condA": ("Moscow", "2026-06-17", "high")}
+    )
+    cancelled = [
+        {"command_id": "c1", "token_id": "tokA", "market_id": "mA"},
+        {"command_id": "cZ", "token_id": "tokZ", "market_id": "mZ"},
+    ]
+    families = m._escalation_families_from_cancelled(cancelled, trade, forecasts)
+    assert families == {("Moscow", "2026-06-17", "high")}
+
+
+def test_family_recovery_empty_when_no_tokens():
+    import src.main as m
+
+    trade = _trade_conn_with_snapshot({})
+    forecasts = _forecasts_conn_with_market_events({})
+    assert m._escalation_families_from_cancelled([], trade, forecasts) == set()
+    assert (
+        m._escalation_families_from_cancelled(
+            [{"command_id": "c1", "token_id": ""}], trade, forecasts
+        )
+        == set()
+    )
+
+
+def test_emit_routes_through_fsr_machinery_with_escalation_source(monkeypatch):
+    """The emit must call scan_committed_snapshots with:
+      - event_type='FORECAST_SNAPSHOT_READY'  (Phase 2: FSR path, not dormant EDLI type)
+      - source prefixed 'escalation_cross-'
+      - restrict_to_families == the recovered set
+      - NO already_pending_keys (the pending FSR is exactly what's stuck; we jump it).
+    """
+    import src.main as m
+
+    captured: dict = {}
+
+    class _FakeTrigger:
+        def __init__(self, *a, **k):
+            pass
+
+        def scan_committed_snapshots(self, **kwargs):
+            captured.update(kwargs)
+            return ["evt-1"]  # one emitted event
+
+    # Stub the heavy collaborators so the test stays in-memory and offline.
+    import src.events.triggers.forecast_snapshot_ready as fsr_mod
+
+    monkeypatch.setattr(fsr_mod, "ForecastSnapshotReadyTrigger", _FakeTrigger)
+    monkeypatch.setattr(
+        fsr_mod, "executable_forecast_live_eligible_reader", lambda conn: (lambda *a, **k: True)
+    )
+
+    class _NoopConn:
+        def execute(self, *a, **k):
+            return self
+
+        def fetchall(self):
+            return []
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    class _NoopMutex:
+        def acquire(self):
+            pass
+
+        def release(self):
+            pass
+
+    import src.state.db as dbmod
+
+    monkeypatch.setattr(dbmod, "get_world_connection", lambda *a, **k: _NoopConn())
+    monkeypatch.setattr(
+        dbmod, "get_forecasts_connection_read_only", lambda *a, **k: _NoopConn()
+    )
+    monkeypatch.setattr(dbmod, "world_write_mutex", lambda: _NoopMutex())
+
+    from datetime import datetime, timezone
+
+    m._set_edli_redecision_boot_token("TOK")
+    m._reset_edli_redecision_cycle_index()
+    families = {("Moscow", "2026-06-17", "high")}
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    n = m._emit_escalation_cross_redecisions(
+        families, decision_time=now, received_at=now.isoformat()
+    )
+    assert n == 1
+    assert captured["event_type"] == "FORECAST_SNAPSHOT_READY"
+    assert captured["source"].startswith(ESCALATION_CROSS_SOURCE_PREFIX)
+    assert captured["restrict_to_families"] == families
+    # CRITICAL: already_pending_keys must NOT be passed (the jump-the-queue contract).
+    assert "already_pending_keys" not in captured or captured["already_pending_keys"] is None
+
+
+def test_emit_noop_on_empty_families(monkeypatch):
+    import src.main as m
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+    # Must short-circuit BEFORE touching any DB/mutex.
+    assert m._emit_escalation_cross_redecisions(
+        set(), decision_time=now, received_at=now.isoformat()
+    ) == 0

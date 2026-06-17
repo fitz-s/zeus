@@ -40,6 +40,17 @@ from src.data.day0_hourly_vectors import (
 
 UTC = timezone.utc
 
+# Pin the retention-prune clock so this suite is HERMETIC. The persisted-vector
+# fixtures use fixed captured_at timestamps on the 2026-06-10 target day; the
+# prune cutoff is `now - retention_days`. Without a pinned `now`, the prune uses
+# live wall-clock time, so once real time advances >3 days past 2026-06-10 every
+# just-inserted fixture row is pruned immediately and the persistence/freshness
+# assertions fail spuriously (the test is non-hermetic, not a code bug). Pinning
+# `now` to the target day reproduces the intended same-day-write semantics; the
+# retention test still pins a target-day `now` so its 9-day-old "ancient" row is
+# correctly pruned and the fresh row is kept.
+PRUNE_NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+
 
 def _paris():
     return SimpleNamespace(
@@ -111,8 +122,8 @@ class TestPersistence:
     def test_roundtrip_and_idempotency(self):
         conn = _conn()
         v = _vector()
-        assert persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn, request_hash="sha256:test") == 1
-        assert persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn, request_hash="sha256:test") == 0  # idempotent
+        assert persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn, request_hash="sha256:test", now=PRUNE_NOW) == 1
+        assert persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn, request_hash="sha256:test", now=PRUNE_NOW) == 0  # idempotent
         out = read_freshest_day0_hourly_vectors(
             city="Paris", target_date="2026-06-10",
             now=datetime(2026, 6, 10, 10, 0, tzinfo=UTC), conn=conn,
@@ -124,7 +135,7 @@ class TestPersistence:
         conn = _conn()
         old = _vector(captured_at=datetime(2026, 6, 10, 7, 0, tzinfo=UTC), temps=[10.0] * 24)
         new = _vector(captured_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC), temps=[20.0] * 24)
-        persist_day0_hourly_vectors([old, new], target_date="2026-06-10", conn=conn, request_hash="sha256:test")
+        persist_day0_hourly_vectors([old, new], target_date="2026-06-10", conn=conn, request_hash="sha256:test", now=PRUNE_NOW)
         out = read_freshest_day0_hourly_vectors(
             city="Paris", target_date="2026-06-10",
             now=datetime(2026, 6, 10, 9, 30, tzinfo=UTC), conn=conn,
@@ -136,7 +147,7 @@ class TestPersistence:
         remaining-day distribution (fail-closed to the legacy path)."""
         conn = _conn()
         v = _vector(captured_at=datetime(2026, 6, 10, 4, 0, tzinfo=UTC))
-        persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn, request_hash="sha256:test")
+        persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn, request_hash="sha256:test", now=PRUNE_NOW)
         out = read_freshest_day0_hourly_vectors(
             city="Paris", target_date="2026-06-10",
             now=datetime(2026, 6, 10, 9, 30, tzinfo=UTC), max_age_hours=3.0, conn=conn,
@@ -146,9 +157,9 @@ class TestPersistence:
     def test_retention_prunes_old_rows(self):
         conn = _conn()
         ancient = _vector(captured_at=datetime(2026, 6, 1, 0, 0, tzinfo=UTC))
-        persist_day0_hourly_vectors([ancient], target_date="2026-06-01", conn=conn, request_hash="sha256:test")
+        persist_day0_hourly_vectors([ancient], target_date="2026-06-01", conn=conn, request_hash="sha256:test", now=PRUNE_NOW)
         fresh = _vector()
-        persist_day0_hourly_vectors([fresh], target_date="2026-06-10", conn=conn, request_hash="sha256:test")
+        persist_day0_hourly_vectors([fresh], target_date="2026-06-10", conn=conn, request_hash="sha256:test", now=PRUNE_NOW)
         n = conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0]
         assert n == 1  # the 9-day-old row was pruned on the second write pass
 
@@ -196,9 +207,35 @@ class TestRemainingDayMembers:
     def _family(self):
         return SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
 
-    def test_flag_default_off(self):
+    def test_flag_default_off(self, monkeypatch):
+        """The CODE default for the remaining-day q flag is OFF: when the
+        `edli.day0_remaining_day_q_enabled` key is absent, the resolver returns
+        False (fail-closed to the legacy full-day path).
+
+        Test updated 2026-06-15: the original read the LIVE config value, which
+        the operator has since flipped ON (config/settings.json, commit b2c052f8
+        "day0 remaining-day q ON (shadow-only, operator-flipped)"). Asserting the
+        live value here is wrong — the flag is operator-controlled, not a fixed
+        default, and this suite must not depend on (nor implicitly police) the
+        operator's flag state. We assert the resolver's CODE default instead, by
+        removing the key from a copy of the edli settings block — the actual
+        invariant this test was written to guard.
+        """
+        import src.engine.event_reactor_adapter as era
         from src.engine.event_reactor_adapter import _day0_remaining_day_q_enabled
 
+        edli_without_flag = {
+            k: v for k, v in dict(era.settings["edli"]).items()
+            if k != "day0_remaining_day_q_enabled"
+        }
+
+        class _ShimSettings:
+            def __getitem__(self, key):
+                if key == "edli":
+                    return edli_without_flag
+                return era.settings[key]
+
+        monkeypatch.setattr(era, "settings", _ShimSettings())
         assert _day0_remaining_day_q_enabled() is False
 
     def test_post_peak_members_clamp_to_running_max_floor(self, monkeypatch):
@@ -279,7 +316,7 @@ class TestRequestHashProvenance:
         conn = _conn()
         v = _vector()
         persist_day0_hourly_vectors(
-            [v], target_date="2026-06-10", conn=conn, request_hash="sha256:abc123"
+            [v], target_date="2026-06-10", conn=conn, request_hash="sha256:abc123", now=PRUNE_NOW
         )
         rows = conn.execute("SELECT request_hash FROM day0_hourly_vectors").fetchall()
         assert rows and all(r[0] == "sha256:abc123" for r in rows)

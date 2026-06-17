@@ -65,6 +65,7 @@ from typing import Any, Optional
 import requests
 
 from src.config import PROJECT_ROOT, runtime_cities_by_name
+from src.contracts.availability_time import proof_of_possession_available_at
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
@@ -80,7 +81,7 @@ from src.data.forecast_target_contract import (
 from src.data.forecast_extrema_authority import POSITIVE_ATTRIBUTION_STATUSES
 from src.data.producer_readiness import build_producer_readiness_for_scope
 from src.data.forecast_source_registry import gate_source, gate_source_role
-from src.data.release_calendar import FetchDecision, select_source_run_for_target_horizon
+from src.data.release_calendar import FetchDecision, get_entry, select_source_run_for_target_horizon
 from src.state.db import (
     ZEUS_FORECASTS_DB_PATH,
     assert_schema_current_forecasts,
@@ -528,6 +529,36 @@ def _stable_id(prefix: str, *parts: object) -> str:
     return f"{prefix}:{digest}"
 
 
+def _source_cycle_expires_at(source_cycle_time: datetime, forecast_track: str) -> datetime:
+    """Coverage/readiness expiry ANCHORED TO THE CYCLE, never to the write wall-clock (M3 fix).
+
+    The prior ``computed_at + 24h`` was a GUESS: re-stamping computed_at on a re-ingest granted a
+    fresh 24h TTL and the expiry clock disagreed with the source's real staleness law (the same
+    twin-clock disease ``replacement_readiness_expires_at`` killed for the replacement path). The
+    lawful lifetime of a forecast cycle's data is ``max_source_lag_seconds`` after the CYCLE time —
+    the calendar's own publication tolerance — not after we happened to write the row. That bound
+    is the single source of truth in the release calendar, keyed by the source's ingest track
+    (``TRACKS`` keys ARE the calendar track keys); we read it and anchor expiry to the CYCLE.
+
+    ``forecast_track`` is the horizon-suffixed label (e.g. "mx2t6_high_full_horizon"); the calendar
+    is keyed by the base ingest track ("mx2t6_high"). A missing calendar entry is a real config
+    error on a Tier-0 money path and raises (fail-loud) rather than substituting a guessed lag.
+    """
+    cycle = source_cycle_time if source_cycle_time.tzinfo else source_cycle_time.replace(tzinfo=timezone.utc)
+    cycle = cycle.astimezone(timezone.utc)
+    base_track = next(
+        (t for t in TRACKS if forecast_track == t or forecast_track.startswith(f"{t}_")),
+        None,
+    )
+    entry = get_entry(SOURCE_ID, base_track) if base_track is not None else None
+    if entry is None:
+        raise ValueError(
+            f"release calendar has no entry for {SOURCE_ID!r} track derived from "
+            f"{forecast_track!r}; cannot derive a cycle-anchored expiry (refusing a guessed TTL)"
+        )
+    return cycle + timedelta(seconds=int(entry.max_source_lag_seconds))
+
+
 def _horizon_profile_for_cycle(
     *,
     cycle_hour: int,
@@ -814,6 +845,9 @@ def _write_source_authority_chain(
     forecast_track: str,
     data_version: str,
     computed_at: datetime,
+    fetch_started_at: datetime | None = None,
+    fetch_finished_at: datetime | None = None,
+    captured_at: datetime | None = None,
     download_observed_steps: list[int] | None = None,
     download_partial_run: bool | None = None,
     download_reason_code: str | None = None,
@@ -909,11 +943,20 @@ def _write_source_authority_chain(
         source_cycle_time=source_cycle_time,
         source_issue_time=source_cycle_time,
         source_release_time=source_release_time,
-        source_available_at=source_release_time,
-        fetch_started_at=computed_at,
-        fetch_finished_at=computed_at,
-        captured_at=computed_at,
-        imported_at=computed_at,
+        # C1-AVAIL-CLOCK (2026-06-16): source_available_at is PROOF OF POSSESSION = the real
+        # authority-write wall-clock (computed_at), routed through the canonical antibody producer.
+        # It is NOT source_release_time, which falls back to the raw model cycle (~8h early) and is
+        # the safe-fetch GATE, not a publish event — never credited as a nominal availability.
+        source_available_at=proof_of_possession_available_at(computed_at),
+        # M5-COLLECTION-CLOCK (2026-06-16): each collection-plane instant is the REAL wall-clock at
+        # its own code point in collect_open_ens_cycle, NOT computed_at (the model run-init, which
+        # fabricated collection latency=0). fetch_started/finished are stamped around the parallel
+        # download loop; captured is snapshot_possession_at (taken right before the snapshot write);
+        # imported is now() at this persist write. None where the caller could not observe the event.
+        fetch_started_at=fetch_started_at,
+        fetch_finished_at=fetch_finished_at,
+        captured_at=captured_at,
+        imported_at=datetime.now(timezone.utc),
         valid_time_start=min((str(row["target_date"]) for row in rows), default=None),
         valid_time_end=max((str(row["target_date"]) for row in rows), default=None),
         data_version=data_version,
@@ -933,7 +976,10 @@ def _write_source_authority_chain(
     cities_by_name = runtime_cities_by_name()
     coverage_written = 0
     readiness_written = 0
-    expires_at = computed_at + timedelta(hours=24)
+    # M3 (2026-06-16): expiry anchors to the CYCLE + the calendar's max source lag, never to the
+    # write wall-clock. The old computed_at+24h was a guess that re-stamped a fresh TTL on every
+    # re-ingest and disagreed with the source's real staleness bound. See _source_cycle_expires_at.
+    expires_at = _source_cycle_expires_at(source_cycle_time, forecast_track)
     for row in rows:
         city = cities_by_name.get(str(row["city"]))
         if city is None:
@@ -1370,6 +1416,12 @@ def collect_open_ens_cycle(
     _partial_cycle: bool = False
     _download_reason_code: str | None = None
 
+    # M5-COLLECTION-CLOCK (2026-06-16): real fetch-plane instants. Stamped at the actual code
+    # points around the parallel download loop below — left None on the skip_download test seam
+    # (no HTTP issued, so no real fetch instant to record).
+    _fetch_started_at: datetime | None = None
+    _fetch_finished_at: datetime | None = None
+
     if not skip_download:
         fetch_fn = _fetch_impl or _fetch_one_step
         output_dir = output_path.parent
@@ -1384,6 +1436,9 @@ def collect_open_ens_cycle(
         # as_completed wait timeout * len(tasks) before live readiness can move.
         tasks = [(s, cfg["open_data_param"]) for s in STEP_HOURS]
         results: dict[int, tuple[str, Any]] = {}
+        # M5-COLLECTION-CLOCK: fetch_started = the real wall-clock immediately before the first
+        # HTTP GET is dispatched (the batch loop below submits fetch_fn → session.get).
+        _fetch_started_at = datetime.now(timezone.utc)
         for offset in range(0, len(tasks), _DOWNLOAD_MAX_WORKERS):
             batch = tasks[offset:offset + _DOWNLOAD_MAX_WORKERS]
             ex = ThreadPoolExecutor(max_workers=len(batch))
@@ -1413,6 +1468,10 @@ def collect_open_ens_cycle(
                     results[step] = ("FAILED", "STEP_TIMEOUT")
             finally:
                 ex.shutdown(wait=False, cancel_futures=True)
+
+        # M5-COLLECTION-CLOCK: fetch_finished = the real wall-clock once every batch future has
+        # resolved (bytes received, timed out, or failed) — the moment the download phase ends.
+        _fetch_finished_at = datetime.now(timezone.utc)
 
         ok_steps       = sorted(s for s, (st, _) in results.items() if st == "OK")
         released_404   = sorted(s for s, (st, _) in results.items() if st == "NOT_RELEASED")
@@ -1457,11 +1516,18 @@ def collect_open_ens_cycle(
                         source_cycle_time=source_cycle_time,
                         source_issue_time=source_cycle_time,
                         source_release_time=source_release_time,
-                        source_available_at=source_release_time,
-                        fetch_started_at=computed_at,
-                        fetch_finished_at=computed_at,
-                        captured_at=computed_at,
-                        imported_at=computed_at,
+                        # C1-AVAIL-CLOCK (2026-06-16): proof of possession = computed_at (the real
+                        # wall-clock), via the canonical producer — never the cycle-fallback
+                        # source_release_time (the safe-fetch gate, not a publish event).
+                        source_available_at=proof_of_possession_available_at(computed_at),
+                        # M5-COLLECTION-CLOCK (2026-06-16): the download WAS attempted on this branch,
+                        # so fetch_started/finished are real (stamped around the loop above). No decode
+                        # ran and no forecast data was persisted (this is a FAILED-status row only), so
+                        # captured_at / imported_at are honestly NULL — never re-stamped with computed_at.
+                        fetch_started_at=_fetch_started_at,
+                        fetch_finished_at=_fetch_finished_at,
+                        captured_at=None,
+                        imported_at=None,
                         data_version=cfg["data_version"],
                         expected_members=51,
                         observed_members=0,
@@ -1519,11 +1585,18 @@ def collect_open_ens_cycle(
                         source_cycle_time=source_cycle_time,
                         source_issue_time=source_cycle_time,
                         source_release_time=source_release_time,
-                        source_available_at=source_release_time,
-                        fetch_started_at=computed_at,
-                        fetch_finished_at=computed_at,
-                        captured_at=computed_at,
-                        imported_at=computed_at,
+                        # C1-AVAIL-CLOCK (2026-06-16): proof of possession = computed_at (the real
+                        # wall-clock), via the canonical producer — never the cycle-fallback
+                        # source_release_time (the safe-fetch gate, not a publish event).
+                        source_available_at=proof_of_possession_available_at(computed_at),
+                        # M5-COLLECTION-CLOCK (2026-06-16): the download WAS attempted, so fetch_started/
+                        # finished are real (stamped around the loop above). Nothing was released, so no
+                        # decode ran and no forecast data was persisted — captured_at / imported_at are
+                        # honestly NULL rather than re-stamped with computed_at.
+                        fetch_started_at=_fetch_started_at,
+                        fetch_finished_at=_fetch_finished_at,
+                        captured_at=None,
+                        imported_at=None,
                         data_version=cfg["data_version"],
                         expected_members=51,
                         observed_members=0,
@@ -1687,7 +1760,17 @@ def collect_open_ens_cycle(
                         cycle_extract_dir,
                         cycle_json_files,
                     )
-                    snapshot_replace_started_at = datetime.now(timezone.utc).isoformat()
+                    # Real possession wall-clock captured immediately before the snapshot write.
+                    # Used both for stale-row cleanup (ISO string below) and as the proof-of-
+                    # possession basis for the snapshots' source_available_at (C1-AVAIL-CLOCK).
+                    # Honors the injected clock: in production now_utc is None so this is a fresh
+                    # now() taken right before the write (true possession); under an injected
+                    # now_utc (tests, deterministic replay) it MUST equal that clock so every
+                    # wall-clock in collect_open_ens_cycle (computed_at / authority_computed_at /
+                    # this) shares one time base — otherwise the snapshot's available_at floats to
+                    # real-now while decision_time is the injected clock.
+                    snapshot_possession_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+                    snapshot_replace_started_at = snapshot_possession_at.isoformat()
                     summary = _ingest_grib_ingest_track(
                         track=cfg["ingest_track"],
                         json_root=scoped_json_root,
@@ -1704,7 +1787,17 @@ def collect_open_ens_cycle(
                             release_calendar_key=release_calendar_key,
                             source_cycle_time=source_cycle_time,
                             source_release_time=source_release_time,
-                            source_available_at=source_release_time,
+                            # C1-AVAIL-CLOCK (2026-06-16): the snapshots' source_available_at /
+                            # available_at must be PROOF OF POSSESSION, not source_release_time
+                            # (the raw cycle, ~8h early — the exact lie that stamped
+                            # ensemble_snapshots.available_at == cycle in 5000/5000 rows). The real
+                            # possession wall-clock is snapshot_possession_at (captured just above,
+                            # immediately before the write); routed through the canonical producer.
+                            # SourceRunContext requires a datetime, so we parse the canonical ISO
+                            # string back. No nominal is credited (no real publish estimate exists).
+                            source_available_at=datetime.fromisoformat(
+                                proof_of_possession_available_at(snapshot_possession_at)
+                            ),
                         ),
                     )
                 logger.info(
@@ -1742,6 +1835,14 @@ def collect_open_ens_cycle(
                 forecast_track=forecast_track,
                 data_version=cfg["data_version"],
                 computed_at=authority_computed_at,
+                # M5-COLLECTION-CLOCK (2026-06-16): real collection-plane instants threaded from their
+                # actual code points. fetch_started/finished bracket the parallel download loop above;
+                # captured = snapshot_possession_at, the now() taken immediately before the snapshot
+                # write (decode-into-memory complete). imported is stamped inside the chain at the
+                # source_run persist. None of these is computed_at (the model run-init).
+                fetch_started_at=_fetch_started_at,
+                fetch_finished_at=_fetch_finished_at,
+                captured_at=snapshot_possession_at,
                 # Pass download ground-truth so source_run.observed_steps_json
                 # reflects actual fetched steps, not an ingest-derived approximation.
                 # evaluate_producer_coverage:184 uses this for per-step MISSING detection.

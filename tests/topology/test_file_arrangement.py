@@ -151,8 +151,10 @@ class TestLoadManifest:
         repo = _make_minimal_repo(tmp_path)
         manifest = fa.load_file_arrangement_manifest(repo)
         assert manifest.get("schema_version") == 1
-        # enforcement lives under metadata
-        assert manifest.get("metadata", {}).get("enforcement") == "advisory"
+        # enforcement lives under metadata; flipped advisory -> data_only
+        # 2026-06-14 (workspace-routing-redesign S7): the manifest is now a pure
+        # data table consumed by route_write, not an advisory-review checklist.
+        assert manifest.get("metadata", {}).get("enforcement") == "data_only"
         assert isinstance(manifest.get("artifact_kinds"), list)
         assert isinstance(manifest.get("rules"), list)
 
@@ -162,11 +164,14 @@ class TestLoadManifest:
         manifest = fa.load_file_arrangement_manifest(tmp_path)
         assert manifest == {}
 
-    def test_enforcement_is_advisory(self, tmp_path):
+    def test_enforcement_is_data_only(self, tmp_path):
+        # Renamed from test_enforcement_is_advisory 2026-06-14
+        # (workspace-routing-redesign S7): enforcement clause retired; the YAML is
+        # a pure data table consumed by route_write at the write boundary.
         fa = _import_module()
         repo = _make_minimal_repo(tmp_path)
         manifest = fa.load_file_arrangement_manifest(repo)
-        assert manifest["metadata"]["enforcement"] == "advisory"
+        assert manifest["metadata"]["enforcement"] == "data_only"
 
     def test_all_rules_are_non_blocking(self, tmp_path):
         fa = _import_module()

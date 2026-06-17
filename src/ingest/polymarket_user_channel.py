@@ -845,6 +845,9 @@ class PolymarketUserChannelIngestor:
                     "venue_order_id": venue_order_id,
                 }
             state = _order_state(message)
+            # C4 telemetry-truth: WS delivery 'timestamp' is Zeus ingest time,
+            # not a venue event time. Order messages carry no matchtime field.
+            # observed_at = delivery timestamp (Zeus receipt); venue_timestamp = None.
             observed = _parse_dt(message.get("timestamp") or message.get("last_update"))
             fact_id = append_order_fact(
                 conn,
@@ -855,7 +858,7 @@ class PolymarketUserChannelIngestor:
                 matched_size=_decimal_str(message.get("size_matched") or message.get("matched_size"), "0"),
                 source="WS_USER",
                 observed_at=observed,
-                venue_timestamp=observed,
+                venue_timestamp=None,
                 raw_payload_hash=_payload_hash(message),
                 raw_payload_json=_redacted_message(message),
             )
@@ -903,7 +906,12 @@ class PolymarketUserChannelIngestor:
                     "order_ids": list(candidates),
                 }
             venue_order_id = str(command.get("venue_order_id") or candidates[0])
-            observed = _parse_dt(message.get("timestamp") or message.get("matchtime") or message.get("last_update"))
+            # C4 telemetry-truth: separate WS delivery time from venue match time.
+            # observed_at = WS delivery 'timestamp' (Zeus ingest wall-clock).
+            # venue_timestamp = matchtime field (real venue event time); None if absent.
+            observed = _parse_dt(message.get("timestamp") or message.get("last_update"))
+            _raw_matchtime = message.get("matchtime") or message.get("matchTime") or message.get("match_time")
+            venue_matchtime = _parse_dt(_raw_matchtime) if _raw_matchtime else None
             size_raw, price_raw = _trade_fill_economics_for_command(message, venue_order_id)
             missing = _missing_trade_fill_economics(status, size=size_raw, price=price_raw)
             if missing:
@@ -1043,7 +1051,7 @@ class PolymarketUserChannelIngestor:
                 fill_price=fill_price,
                 source="WS_USER",
                 observed_at=observed,
-                venue_timestamp=observed,
+                venue_timestamp=venue_matchtime,
                 raw_payload_hash=_payload_hash(message),
                 raw_payload_json=_redacted_message(message),
                 tx_hash=message.get("transaction_hash") or message.get("tx_hash"),

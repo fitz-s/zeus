@@ -69,17 +69,20 @@ def _run(repo: Path, *args: str, expect_rc: int = 0) -> subprocess.CompletedProc
 
 
 def test_zpkt_start_creates_current_package_subtask(synthetic_repo: Path) -> None:
-    """Default zpkt start places work under current/plans/<slug>/, not a top-level task_ dir."""
+    """Default zpkt start places work in a by-work folder current/<slug>/ (PLAN.md
+    + scope.yaml together), not by-kind under plans/ and not a top-level task_ dir.
+    Updated 2026-06-14 (workspace-routing-redesign S0/by-work)."""
     cp = _run(synthetic_repo, "start", "my_feature", "--inplace")
     payload = json.loads(cp.stdout)
 
-    # Response carries new-schema fields.
+    # Response carries by-work fields.
     assert payload["slug"] == "my_feature"
-    assert payload["plan_path"] == "docs/operations/current/plans/my_feature/PLAN.md"
-    assert payload["scope_path"] == "docs/operations/current/plans/my_feature/scope.yaml"
-    assert payload["packet_path"] == "current/plans/my_feature"
+    assert payload["plan_path"] == "docs/operations/current/my_feature/PLAN.md"
+    assert payload["scope_path"] == "docs/operations/current/my_feature/scope.yaml"
+    assert payload["packet_path"] == "current/my_feature"
+    assert payload["work_dir"] == "docs/operations/current/my_feature/"
 
-    plan_file = synthetic_repo / "docs" / "operations" / "current" / "plans" / "my_feature" / "PLAN.md"
+    plan_file = synthetic_repo / "docs" / "operations" / "current" / "my_feature" / "PLAN.md"
     scope_file = plan_file.parent / "scope.yaml"
     assert plan_file.is_file(), f"PLAN.md not found at {plan_file}"
     assert scope_file.is_file(), f"scope.yaml not found at {scope_file}"
@@ -100,7 +103,7 @@ def test_zpkt_start_creates_current_package_subtask(synthetic_repo: Path) -> Non
     # active_packet.txt pointer must point to the new path.
     pointer = synthetic_repo / "state" / "active_packet.txt"
     assert pointer.is_file()
-    assert pointer.read_text(encoding="utf-8").strip() == "current/plans/my_feature"
+    assert pointer.read_text(encoding="utf-8").strip() == "current/my_feature"
 
     # No top-level task_ directory was created.
     ops_dir = synthetic_repo / "docs" / "operations"
@@ -112,7 +115,7 @@ def test_zpkt_new_top_level_package_requires_explicit_flag(synthetic_repo: Path)
     """--new-package creates legacy task_*/ dir and emits advisory WARNING; without flag, no task_ dir."""
     # Without flag: only current/plans/ path is created.
     cp = _run(synthetic_repo, "start", "no_flag_slug", "--inplace")
-    assert json.loads(cp.stdout)["packet_path"] == "current/plans/no_flag_slug"
+    assert json.loads(cp.stdout)["packet_path"] == "current/no_flag_slug"
     ops_dir = synthetic_repo / "docs" / "operations"
     legacy_before = [d for d in ops_dir.iterdir() if d.is_dir() and d.name.startswith("task_")]
     assert not legacy_before, f"Unexpected task_ dir without --new-package: {legacy_before}"

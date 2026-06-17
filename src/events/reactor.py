@@ -90,6 +90,50 @@ def _cycle_budget_seconds() -> float | None:
     return budget if budget > 0 else None
 
 
+DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS = 10.0
+
+
+def _drain_budget_seconds() -> float | None:
+    """Per-cycle wall-clock budget for the END-of-cycle substrate-refresh DRAIN
+    (``_drain_substrate_refreshes``).
+
+    BACKGROUND-I/O TIME BUDGET, not a money-path cap. The drain refreshes the
+    executable-snapshot substrate for EVERY family blocked this cycle; with ~49
+    blocked families that is ~49 /book network fetches per cycle, which is the
+    cycle-overrun root cause (#83 redecide_block_2026-06-16 §3): the reactor is
+    APScheduler-scheduled every 60s but the cycle wall-time blows past 60s, so the
+    schedule COALESCES into 3-13 min real gaps → ~1 family decided per cycle → the
+    49-city harvest crosses far too slowly for continuous fills.
+
+    SCHEDULE MATH (justifies the 10.0s default): the reactor runs on an
+    ``interval, minutes=1`` job (``src/main.py:9486``, 60s). The per-cycle DECISION
+    budget is 30s (``_cycle_budget_seconds`` / ``ZEUS_REACTOR_CYCLE_BUDGET_SECONDS``).
+    A 10s drain budget gives 30s decision + 10s drain = 40s, leaving ~20s headroom
+    for fetch_pending reads, status-pulse writes, scheduler dispatch and connection
+    teardown — so the whole cycle fits inside the 60s schedule with margin and the
+    coalescing stops. This is the SAME kind of bound as the warm-cycle refresher's
+    ``ZEUS_REACTOR_REFRESH_BUDGET_SECONDS`` (default 17.0s inside a 20s interval,
+    ``src/main.py:3504``): a wall-clock budget on background substrate I/O.
+
+    When the budget is spent the drain STOPS after finishing the current family
+    (never mid-network) and leaves the unreached families in ``_pending_*`` for the
+    NEXT cycle; the drain's fair-cursor rotation (held-position families always
+    first, then round-robin) guarantees bounded-cycle coverage with no starvation —
+    exactly the "future per-cycle fan-out cap" the drain ordering comment already
+    anticipates. Default 10.0s; override via ``ZEUS_REACTOR_DRAIN_BUDGET_SECONDS``.
+    A value of 0 or negative disables the budget (unbounded drain, legacy behavior).
+    A malformed env value falls back to the default rather than crashing the reactor.
+    """
+    raw = os.environ.get("ZEUS_REACTOR_DRAIN_BUDGET_SECONDS")
+    if raw is None:
+        return DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS
+    try:
+        budget = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS
+    return budget if budget > 0 else None
+
+
 def _operator_disarm_active() -> bool:
     """Horizon (c): operator env kill-switch for in-flight money-path transients.
 
@@ -122,6 +166,47 @@ EDLI_PROCESSING_REACTOR_MODES = frozenset({"live", "live_no_submit", "submit_dis
 # EDLI_REDECISION_PENDING event carries the same FSR-shaped payload and gets the same structural
 # source-truth dead-letter treatment as a forecast snapshot event.
 _FORECAST_DECISION_EVENT_TYPES = frozenset({"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"})
+
+
+def _fair_lane_interleave(events: list) -> list:
+    """Round-robin the forecast-decision lane against the rest (day0) 1:1.
+
+    fetch_pending returns all Tier-0 DAY0_EXTREME_UPDATED before any Tier-1
+    FORECAST_SNAPSHOT_READY; under a bounded per-cycle decision budget (~3-4 slow
+    decisions, and in the live degenerate case where ONE decision eats the whole 45s
+    budget, effectively ~1) the day0 lane consumes the whole budget and the
+    forecast/spine harvest lane is never processed. This interleaves the two DECISION
+    lanes 1:1 so each gets a fair half of the budget. The forecast lane and the rest
+    each keep their incoming (per-city-fair) order; only the cross-lane alternation is
+    added.
+
+    FORECAST-FIRST (2026-06-16, live zero-fill root cause): the forecast harvest lane
+    (the q-kernel spine — the operator's alpha target) takes the FIRST slot. Live
+    2026-06-16: 176 FORECAST_SNAPSHOT_READY families sat attempt_count=0 (never claimed)
+    while the reactor claimed ~2 day0 families/cycle, because day0 held the first slot
+    and a single slow day0 decision exhausted the 45s budget before the alternation ever
+    reached a forecast family (processed=0 forecast decisions / 12min). When the budget
+    only completes ~1 decision, whichever lane holds the first slot is the ONLY lane that
+    runs — so the harvest lane must hold it. Order-only: each family is decided on its
+    own fresh inputs, so processing order does not affect decision correctness; this only
+    changes which lane is guaranteed budget under starvation.
+    """
+    forecast = [e for e in events if getattr(e, "event_type", None) in _FORECAST_DECISION_EVENT_TYPES]
+    if not forecast:
+        return events  # nothing to protect — keep the cheap fast path unchanged
+    rest = [e for e in events if getattr(e, "event_type", None) not in _FORECAST_DECISION_EVENT_TYPES]
+    if not rest:
+        return events
+    out: list = []
+    i = j = 0
+    while i < len(forecast) or j < len(rest):
+        if i < len(forecast):
+            out.append(forecast[i])
+            i += 1
+        if j < len(rest):
+            out.append(rest[j])
+            j += 1
+    return out
 
 # VENUE-CLOSE HORIZON eligibility (freshness-throughput starvation fix 2026-06-14,
 # #92 / docs/evidence/deadloop_2026-06-14/binding_wall.md). The geometric
@@ -482,6 +567,13 @@ class ReactorResult:
     # pulse (a transient-requeue cycle with snapshot_refreshes==0 would be the regression).
     snapshot_refreshes: int = 0
     cycle_advance_enqueues: int = 0
+    # DRAIN BUDGET (#83, 2026-06-16): how many families the end-of-cycle substrate-refresh
+    # drain did NOT reach this cycle because the per-cycle drain wall-clock budget
+    # (ZEUS_REACTOR_DRAIN_BUDGET_SECONDS) was spent. Visibility only — those families stay in
+    # _pending_* and are refreshed on a later cycle via the fair-cursor rotation (no starvation).
+    # A persistently-nonzero value means the drain budget is too small for the blocked-family
+    # count; it is NOT a money-path cap (decisions and submits are untouched by the drain).
+    drained_truncated: int = 0
 
     @property
     def submitted(self) -> int:
@@ -626,6 +718,20 @@ class OpportunityEventReactor:
             )
             if not events:
                 break
+            # FAIR LANE INTERLEAVE (2026-06-15). The per-cycle wall-clock budget completes
+            # only ~3-4 family decisions (p99=59s each), and fetch_pending returns ALL
+            # Tier-0 DAY0_EXTREME_UPDATED before ANY Tier-1 FORECAST_SNAPSHOT_READY — so the
+            # whole budget is consumed by the day0 lane and the forecast/spine lane is
+            # STARVED of processing budget every cycle (measured 2026-06-15: 0 FSR ever
+            # claimed while day0 monopolized the budget). This is the cross-lane gap in the
+            # event_priority anti-starvation design (which fairly round-robins WITHIN a tier
+            # but lets Tier-0 fully precede Tier-1). Interleave the two DECISION lanes 1:1 so
+            # each gets a fair half of the bounded budget — day0 keeps the first slot (its
+            # realized-observation freshness bias) but no longer starves the spine. Order-only
+            # (each family is decided on its own fresh inputs; processing order is immaterial
+            # to correctness); within-lane fetch order — and thus the per-city fairness — is
+            # preserved. Channel events are already excluded by fetch_pending.
+            events = _fair_lane_interleave(events)
             for event in events:
                 # PRE-EVENT budget check (2026-06-11 cadence guard): if the budget
                 # is ALREADY spent, stop BEFORE claiming another event. The
@@ -638,6 +744,11 @@ class OpportunityEventReactor:
                 # cycle.
                 if budget is not None and (time.monotonic() - cycle_start) >= budget:
                     return result
+                # JIT pre-warm THIS family's executable snapshot fresh, in-cycle, immediately
+                # before deciding it (outside any txn — the prior unit committed). Closes the
+                # end-of-cycle-drain timing bug where a refreshed book goes stale across the ~60s
+                # cycle gap before re-decision (212k EXECUTABLE_SNAPSHOT_BLOCKED requeues/day).
+                self._prewarm_event_family_snapshot(event)
                 self._process_event_unit(event, decision_time=decision_time, result=result)
                 if remaining is not None:
                     remaining -= 1
@@ -1043,6 +1154,53 @@ class OpportunityEventReactor:
             return None
         return (city, target_date, metric)
 
+    def _prewarm_event_family_snapshot(self, event: OpportunityEvent) -> None:
+        """JIT pre-warm THIS event's executable snapshot IMMEDIATELY BEFORE its decision, so it
+        satisfies the freshness gate THIS cycle instead of perpetually requeuing on the
+        end-of-cycle self-heal.
+
+        THE TIMING BUG THIS CLOSES (#122 / GOAL #83 — measured live 2026-06-16: 212,159
+        EXECUTABLE_SNAPSHOT_BLOCKED requeues/day, the dominant cross-suppressor by 40x). The
+        always-decidable drain (:meth:`_drain_substrate_refreshes`) refreshes a blocked family's
+        book at the END of the reactor cycle, but the family is re-decided at the START of the
+        NEXT cycle ~60s later — past the snapshot freshness window (30s) — so the just-captured
+        book is stale again at decision time and the family requeues FOREVER. Capturing the book
+        in the SAME cycle, immediately before the gate, makes the snapshot < the freshness window
+        old when the gate reads it, so it PASSES and the family reaches the decision spine. The
+        49-city pending set vs ~21-city/cycle warm coverage made the tail of cities depend ENTIRELY
+        on this (broken) self-heal; the pre-warm decouples a family's freshness from warm-cycle
+        coverage. NOT a window loosening (settlement-honest 30s gate is untouched): it makes the
+        book genuinely fresh, it does not relax what "fresh" means.
+
+        Runs OUTSIDE any txn: the loop body's prior unit-of-work has committed + released before
+        this call (the no-network-in-txn law — the SAME guarantee the end-of-cycle drain relies
+        on). Debounced via the SHARED ``_family_refresh_last_at`` + ``_FAMILY_REFRESH_DEBOUNCE_SECONDS``
+        (= freshness window / 2): a family refreshed within that window is skipped (its book is
+        still fresh), so a single fetch serves both the pre-warm and the drain and there is no
+        double-fetch. Fail-soft: a refresher failure (or absent refresher, e.g. tests) is swallowed
+        and the gate simply fails closed and requeues as before — byte-identical to pre-invariant
+        behavior when ``_family_snapshot_refresher`` is None.
+        """
+        refresher = self._family_snapshot_refresher
+        if refresher is None:
+            return
+        family = self._family_identity(event)
+        if family is None:
+            return
+        city, target_date, metric = family
+        key = f"{city}|{target_date}|{metric}"
+        now = time.monotonic()
+        prev = self._family_refresh_last_at.get(key)
+        if prev is not None and (now - prev) < _FAMILY_REFRESH_DEBOUNCE_SECONDS:
+            return  # refreshed within the window — the book is still fresh, no re-fetch
+        # Mark BEFORE the call (debounce spaces ATTEMPTS, not successes), so a slow/failing
+        # refresh still debounces the end-of-cycle drain off this family.
+        self._family_refresh_last_at[key] = now
+        try:
+            refresher(city=city, target_date=target_date, metric=metric)
+        except Exception:  # noqa: BLE001 — pre-warm is best-effort; gate fails closed if still stale
+            pass
+
     def _record_substrate_block(
         self, event: OpportunityEvent, *, kind: str
     ) -> None:
@@ -1067,10 +1225,21 @@ class OpportunityEventReactor:
         no per-event txn is open — the structural no-network-in-txn guarantee).
 
         FAIR-CURSOR fan-out: rotate which blocked family is refreshed first across cycles so no one
-        family monopolizes; ALL blocked families are covered across bounded cycles (no drop-cap).
-        Per-family debounce (window derived from the snapshot freshness window) skips a family
-        refreshed too recently. Fail-soft: a refresh failure logs once and never raises — the event
-        already requeued and the horizon bounds it.
+        family monopolizes; ALL families NOT reached this cycle (whether by the wall-clock budget
+        below or skipped by debounce) are covered on later cycles (bounded-cycle coverage, no
+        starvation). Per-family debounce (window derived from the snapshot freshness window) skips a
+        family refreshed too recently. Fail-soft: a refresh failure logs once and never raises — the
+        event already requeued and the horizon bounds it.
+
+        DRAIN BUDGET (#83, 2026-06-16): the drain is bounded by a per-cycle wall-clock budget
+        (ZEUS_REACTOR_DRAIN_BUDGET_SECONDS, default 10.0s) so ~49 blocked-family /book fetches can
+        no longer blow the cycle past its 60s schedule and coalesce it into multi-minute gaps. This
+        is a BACKGROUND-I/O time budget — identical in kind to the warm-cycle
+        ZEUS_REACTOR_REFRESH_BUDGET_SECONDS — NOT a money-path cap/throttle/allowlist/notional
+        limit: decisions, the 30s decision budget, the fair rotation order, and every money-path
+        gate are untouched; only the background refresh fan-out is time-bounded. The budget is
+        SHARED across both buckets and HELD-position families are drained FIRST (money at risk),
+        so a budget can never starve a held family's refresh.
         """
         # HELD-POSITION set, computed ONCE per cycle (fail-soft): families with money at risk now.
         held = self._held_families_failsoft()
@@ -1081,6 +1250,11 @@ class OpportunityEventReactor:
                 "always-decidable drain ordering: held-position-first (%d held), then fair "
                 "rotation; basis=position_current", len(held),
             )
+        # SHARED per-cycle drain deadline (monotonic). None => budget disabled (legacy unbounded
+        # drain). The snapshot bucket (held-first within it) drains BEFORE the cycle-advance bucket,
+        # both against the SAME deadline, so the budget never starves a held family's snapshot.
+        drain_budget = _drain_budget_seconds()
+        drain_deadline = (time.monotonic() + drain_budget) if drain_budget is not None else None
         self._drain_one_bucket(
             self._pending_snapshot_refreshes,
             refresher=self._family_snapshot_refresher,
@@ -1089,6 +1263,7 @@ class OpportunityEventReactor:
             label="snapshot",
             result=result,
             held=held,
+            deadline=drain_deadline,
         )
         self._drain_one_bucket(
             self._pending_cycle_advances,
@@ -1098,9 +1273,11 @@ class OpportunityEventReactor:
             label="cycle-advance",
             result=result,
             held=held,
+            deadline=drain_deadline,
         )
-        self._pending_snapshot_refreshes.clear()
-        self._pending_cycle_advances.clear()
+        # NOTE: _drain_one_bucket clears each bucket on full drain and RETAINS only the
+        # budget-truncated remainder (#83), so a blanket clear here is intentionally absent —
+        # it would discard the unreached families the budget deferred to a later cycle.
 
     def _held_families_failsoft(self) -> frozenset[tuple[str, str, str]]:
         """Current held (city, target_date, metric) families, or empty on absence/error. Read-only,
@@ -1122,6 +1299,7 @@ class OpportunityEventReactor:
         label: str,
         result: ReactorResult,
         held: "frozenset[tuple[str, str, str]]" = frozenset(),
+        deadline: "float | None" = None,
     ) -> None:
         if refresher is None or not families:
             return
@@ -1130,14 +1308,15 @@ class OpportunityEventReactor:
         _log = _logging.getLogger("zeus.events.reactor")
         # ORDERING (operator correction 2026-06-12): held-position families FIRST (money at risk),
         # then FAIR ROTATION over the rest. Rationale for fair rotation as the new-money order:
-        # the per-cycle drain has NO drop-cap — it covers EVERY family it was handed this cycle —
-        # so the only thing the cursor decides is WHICH family is touched first within the cycle,
-        # which matters solely if a future per-cycle fan-out cap is introduced. Fair (round-robin)
-        # rotation gives the best WORST-CASE time-to-full-coverage under any such future cap: every
-        # family advances to the front within n cycles, so no family can be starved past n cycles —
-        # a bounded, liquidity-blind guarantee. Staleness-first was rejected because it has no cap
-        # here (full coverage already happens each cycle) and would re-introduce a per-family
-        # priority signal the operator's RULE-1 (every family decidable) does not want.
+        # under the per-cycle drain wall-clock budget (#83, 2026-06-16) the cursor decides WHICH
+        # family is touched first within the cycle — exactly the "future per-cycle fan-out cap" this
+        # comment already anticipated. Fair (round-robin) rotation gives the best WORST-CASE
+        # time-to-full-coverage under that cap: every family advances to the front within n cycles,
+        # so no family can be starved past n cycles — a bounded, liquidity-blind guarantee.
+        # Staleness-first was rejected because it would re-introduce a per-family priority signal the
+        # operator's RULE-1 (every family decidable) does not want. HELD-position families sort
+        # FIRST in ``ordered`` and the budget is only checked AFTER each refresh completes, so a
+        # held family is never budget-starved.
         held_fams = [f for f in families if f in held]
         rest = [f for f in families if f not in held]
         n = len(rest)
@@ -1147,8 +1326,29 @@ class OpportunityEventReactor:
         # exempt (always first) so they do not consume rotation slots.
         self._family_refresh_cursor = (self._family_refresh_cursor + 1) % n if n else 0
         ordered = held_fams + rotated_rest
+        n_held = len(held_fams)
         now = time.monotonic()
-        for city, target_date, metric in ordered:
+        unreached: list[tuple[str, str, str]] = []
+        budget_truncated = False
+        for idx, (city, target_date, metric) in enumerate(ordered):
+            # DRAIN BUDGET (#83): stop BEFORE invoking the refresher once the shared per-cycle
+            # wall-clock budget is spent — so we always finish the CURRENT family first and never
+            # cut a /book fetch mid-network. The families not reached are retained in the bucket
+            # (below) for a later cycle; the fair-cursor rotation guarantees they reach the front
+            # within bounded cycles. The budget can ONLY truncate the NON-HELD rotation tail:
+            #   * idx < n_held  -> a HELD-position family (money at risk): NEVER truncated, always
+            #     refreshed even if the budget is already spent (the operator's held-first law).
+            #   * idx == n_held -> the FIRST non-held family: always attempted so a budget-exhausted
+            #     cycle still makes one unit of new-money progress (no total stall).
+            #   * idx >  n_held -> truncatable once the budget is spent.
+            if (
+                deadline is not None
+                and idx > n_held  # past all held families AND past the first non-held one
+                and time.monotonic() >= deadline
+            ):
+                unreached = list(ordered[idx:])
+                budget_truncated = True
+                break
             key = f"{city}|{target_date}|{metric}"
             prev = last_at.get(key)
             if prev is not None and (now - prev) < _FAMILY_REFRESH_DEBOUNCE_SECONDS:
@@ -1170,6 +1370,20 @@ class OpportunityEventReactor:
                 continue
             if refreshed:
                 setattr(result, counter_attr, getattr(result, counter_attr) + 1)
+        # BUDGET TRUNCATION (#83): retain the unreached families IN the bucket so they are visible
+        # and carried (the caller drops the blanket clear). Visibility counter records how many were
+        # deferred; the next cycle's fair rotation advances them toward the front (no starvation).
+        if budget_truncated:
+            families[:] = unreached
+            result.drained_truncated += len(unreached)
+            _log.info(
+                "always-decidable %s drain hit per-cycle budget (ZEUS_REACTOR_DRAIN_BUDGET_"
+                "SECONDS); deferred %d famil%s to a later cycle (held-first preserved; "
+                "fair-rotation guarantees bounded coverage; NOT a money-path cap)",
+                label, len(unreached), "y" if len(unreached) == 1 else "ies",
+            )
+        else:
+            families.clear()
 
     def _note_transient_requeue(self, event: OpportunityEvent) -> None:
         """Bump the per-event requeue counter and log with dedup (LOG HYGIENE ONLY).
@@ -2268,6 +2482,24 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # Receipt missing or not bound to this event (submit returned True / a
     # non-matching receipt): a structural expressibility failure, not a race.
     "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND",
+    # --- q-kernel single-spine no-trade (src/engine/qkernel_spine_bridge.py +
+    #     src/engine/event_reactor_adapter.py decision seam) ---
+    # The spine emits one wrapped reason base, "QKERNEL_SPINE_NO_TRADE:<inner>",
+    # for every no-trade it returns (inner ∈ the bridge/engine vocabulary:
+    # SPINE_INPUTS_UNAVAILABLE, SPINE_NO_SELECTION, NO_POSITIVE_EDGE_CANDIDATE,
+    # NO_EXECUTABLE_ROUTE_CANDIDATE, MARKET_INCOHERENT_BLOCK_LIVE,
+    # PREDICTIVE_DISTRIBUTION_NOT_LIVE_ELIGIBLE, NO_DIRECTION_LAW_CANDIDATE,
+    # NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE, QKERNEL_LEAD_BUCKET_NOT_REPLAYED,
+    # QKERNEL_DAY0_NOT_WIRED, SPINE_WIRING_FAULT). EVERY such no-trade is TERMINAL
+    # for THIS event, exactly like the legacy honest-no-edge declines (FDR_REJECTED,
+    # TRADE_SCORE_NON_POSITIVE): the spine re-prices the whole family from a FRESH
+    # book on the NEXT forecast snapshot, which arrives as a NEW event — so the
+    # recovery path is a fresh event, NOT a requeue of this one. Requeueing instead
+    # would double-churn the same event every cycle against an unchanged decision
+    # substrate (the live QKERNEL_DAY0_NOT_WIRED requeue storm, monitor b9w56vec6).
+    # Genuine intra-cycle execution races (PRICE_MOVED / MODE_FLIPPED) are classified
+    # later at the SUBMIT stage under their own transient bases and are unaffected.
+    "QKERNEL_SPINE_NO_TRADE",
 })
 
 

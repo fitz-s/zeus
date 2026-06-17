@@ -21,9 +21,7 @@ by tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -47,12 +45,6 @@ from tests.test_replacement_forecast_runtime_policy import (
     _capital_objective_evidence,
     _passing_evidence,
 )
-
-# The REAL on-disk failing promotion_evidence.json lives in the LIVE tree (an
-# uncommitted runtime-state file). The worktree has no copy; we load the LIVE
-# payload READ-ONLY through the production loaders to prove the gate denies the
-# exact evidence the daemon would load today.
-_LIVE_EVIDENCE_PATH = Path("/Users/leofitz/zeus/state/replacement_forecast_shadow/promotion_evidence.json")
 
 
 def _family() -> SimpleNamespace:
@@ -127,18 +119,6 @@ def _arm_flag_and_stub_forecast_path(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _real_on_disk_failing_promotion_evidence():
-    from src.data.replacement_forecast_go_live_report import (
-        replacement_forecast_promotion_evidence_from_payload,
-        replacement_forecast_capital_objective_evidence_from_payload,
-    )
-
-    payload = json.loads(_LIVE_EVIDENCE_PATH.read_text(encoding="utf-8"))
-    promo = replacement_forecast_promotion_evidence_from_payload(payload)
-    cap = replacement_forecast_capital_objective_evidence_from_payload(payload)
-    return promo, cap
-
-
 # --------------------------------------------------------------------------- #
 # §1.1 — the pure gate function itself (one builder, no IO)
 # --------------------------------------------------------------------------- #
@@ -155,12 +135,11 @@ def test_evidence_gate_pure_predicate_contract() -> None:
     assert permitted is False
     assert codes == ("REPLACEMENT_LIVE_AUTHORITY_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED",)
 
-    # Both present but one fails -> union of blocking codes
-    promo, cap = _real_on_disk_failing_promotion_evidence()
-    permitted, codes = replacement_live_authority_evidence_gate(promo, cap)
-    assert permitted is False
-    expected = tuple(promo.blocking_reason_codes()) + tuple(cap.blocking_reason_codes())
-    assert codes == expected
+    # DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the "both present but one fails ->
+    # union of blocking codes" sub-case was REMOVED. It built its inputs via the deleted
+    # go_live_report parsers (and read an uncommitted LIVE-tree promotion_evidence.json).
+    # The required-code paths above already pin the predicate's failing contract; the
+    # KEEP evidence dataclasses (runtime_policy) still expose blocking_reason_codes().
 
     # Both passing -> permitted, no codes
     permitted, codes = replacement_live_authority_evidence_gate(

@@ -32,8 +32,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/dispatch.py --multi pre_edit_architecture pre_write_capability_gate citation_grep_gate",
-            "description": "[consolidated 2026-06-13] PreToolUse/Edit checks in ONE process (was 4 python spawns). maintenance_worker_dry_run_floor DELETED (advisory-only, false-fired on reads + the global non-Zeus ~/.claude/settings.json)."
+            "command": "python3 .claude/hooks/dispatch.py --multi citation_grep_gate",
+            "description": "[workspace-routing S3] Edit/Write checks. pre_edit_architecture + pre_write_capability_gate DELETED (advisory-only, placement now owned by route_write). citation_grep_gate remains."
           }
         ]
       },
@@ -43,7 +43,17 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py --multi invariant_test secrets_scan pre_merge_contamination cotenant_staging_guard maintree_git_state_guard pre_checkout_uncommitted_overlap pr_create_loc_accumulation pre_merge_comment_check pr_thread_reply_waste pre_branch_create_in_primary monitor_arm_overdue_advisor",
-            "description": "[consolidated 2026-06-13] PreToolUse/Bash checks in ONE process — was 12 python spawns/Bash (~655ms), now 1 (~55ms). BLOCKING (exit 2): maintree_git_state_guard (branch-mutating git in main tree; bypass MAINTREE_GIT_BYPASS=1), cotenant_staging_guard (broad git add in main worktree; bypass COTENANT_GUARD_BYPASS=1), pr_create_loc_accumulation (tiny PR; bypass ZEUS_PR_ALLOW_TINY=1), pre_merge_comment_check (unsafe gh pr merge; bypass ZEUS_PR_MERGE_FORCE=1). maintenance_worker_dry_run_floor DELETED (advisory-only noise)."
+            "description": "[consolidated 2026-06-13] PreToolUse/Bash checks in ONE process \u2014 was 12 python spawns/Bash (~655ms), now 1 (~55ms). BLOCKING (exit 2): maintree_git_state_guard (branch-mutating git in main tree; bypass MAINTREE_GIT_BYPASS=1), cotenant_staging_guard (broad git add in main worktree; bypass COTENANT_GUARD_BYPASS=1), pr_create_loc_accumulation (tiny PR; bypass ZEUS_PR_ALLOW_TINY=1), pre_merge_comment_check (unsafe gh pr merge; bypass ZEUS_PR_MERGE_FORCE=1). maintenance_worker_dry_run_floor DELETED (advisory-only noise)."
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/dispatch.py route_write",
+            "description": "[workspace-routing-redesign S1] write-router: silent-route NEW files to canonical home via updatedInput; HARD-STOP cross-tenant worktree write. Write-only (never Edit). .claude/hooks/route_write.py"
           }
         ]
       }
@@ -67,7 +77,7 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py no_edge_rule1_guard",
-            "description": "RULE 1 guard (operator 2026-06-14): block + redirect when the final message concludes 'no edge'/'market efficient' — no-edge is OUR defect; root-cause the suppression, find other approaches. Bypass ZEUS_NO_EDGE_GUARD_OFF=1."
+            "description": "RULE 1 guard (operator 2026-06-14): block + redirect when the final message concludes 'no edge'/'market efficient' \u2014 no-edge is OUR defect; root-cause the suppression, find other approaches. Bypass ZEUS_NO_EDGE_GUARD_OFF=1."
           }
         ]
       }

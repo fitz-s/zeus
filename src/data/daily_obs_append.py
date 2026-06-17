@@ -1400,7 +1400,7 @@ def catch_up_missing(
     if rebuild_run_id is None:
         rebuild_run_id = f"catch_up_{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
 
-    cutoff = date.today() - timedelta(days=days_back)
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=days_back)
     rows = find_pending_fills(conn, data_table=DataTable.OBSERVATIONS, max_rows=10_000)
 
     wu_by_city: dict[str, list[date]] = {}

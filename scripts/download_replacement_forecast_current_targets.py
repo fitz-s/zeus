@@ -526,7 +526,10 @@ def download_current_target_raw_inputs(
     if write_db:
         conn = _connect(forecast_db, write_class="live")
         ensure_replacement_forecast_shadow_schema(conn)
-        conn.execute("BEGIN")
+        # BEGIN IMMEDIATE: take the write lock up front so busy_timeout WAITS for it,
+        # instead of a deferred BEGIN failing on the SELECT->INSERT upgrade under
+        # rollback-journal (delete) mode contention (the forecast-DB lock storm).
+        conn.execute("BEGIN IMMEDIATE")
     try:
         for manifest in manifests:
             manifest_path = _write_manifest_file(output_dir, manifest)

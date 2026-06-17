@@ -37,9 +37,7 @@ expected to close out.  Keep them under their existing names.
 | `review5_23_findings.md` | active | review5.23 findings catalogue (P0-1, P1-1 through P1-8, P2-1 through P2-3). Authority for PR #326 fix scope. |
 | `review5_23_triage.md` | active | review5.23 triage status — per-finding fix status, PR anchors, open items. Updated by PR #326. |
 | `EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md` | active | Root-cause report: stale executable snapshot at submit (discovery→reprice latency > 30s). Authority for exec-freshness re-capture design. PR #330. |
-| `ZEUS_DOC_GAP_INVENTORY_2026-05-24.md` | active | Codebase doc-gap audit (2026-05-24): README, AGENTS.md, reference docs surveyed for stale/missing citations. Basis for PR #338 fixes. |
 | `ENS_NEWCITY_DATA_PARITY_AUDIT_2026-05-24.md` | active | ENS new-city data parity audit (Jinan/Zhengzhou vs. 52 established cities): per-city artifact coverage on live trade-decision path. |
-| `STRUCTURAL_FIX_PLAN_2026-06-03.md` | active | Zeus no-edge structural-fix program (D1-D7, 7-PR DAG). Synthesis of 9 designs + 2 plan-critiques + hidden-error hunt; settlement-grounded after-cost edge. PR-1 (spine: grade_receipt + capital-weighted ARM + attribution repoint) is the keystone consumed by everything else. GOAL#36. |
 | `LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md` | active | EDLI no-cap regression evidence: current no-cap law, stale authority sources removed, verification targets, and shadow will-trade receipt guardrails. PR #397. |
 
 ## Task directories — closeout status
@@ -227,36 +225,24 @@ operator decision in the next housekeeping pass:
    policy or it'll keep growing.
 
 ## Registered model-layer artifacts (2026-05-24)
-- `ENS_BIAS_HIERARCHICAL_TEST_RESULTS_2026-05-24.md` — PR #334 hierarchical ENS bias foundation test results (model layer; not live-wired).
-- `ENS_PREDICTIVE_ERROR_MINIVAL_2026-05-24.md` — PR #336 predictive-error 3-city proper-score minival (model layer; not live-wired).
-- `ENS_PREDICTIVE_ERROR_GLOBAL_OOS_2026-05-24.md` — PR #336 predictive-error global blocked-OOS proof (48 cities) (model layer; not live-wired).
 - `ENS_REFIT_PLAN_2026-05-24.md` — PR #337 full_transport_v1 calibration REFIT architecture plan: isolated staging DB design, correctness proof, flag-gated rebuild+refit pipeline (model layer; not live-wired).
-- `ENS_REFIT_VALIDATION_2026-05-24.md` — PR #337 full_transport_v1 calibration REFIT validation evidence: Platt refit summary (49/50 VERIFIED), group-blocked OOS table (HIGH 14-city subset; raw LogLoss −50%, OOS LogLoss −9% coastal) (model layer; not live-wired).
 
 ## Session handoff and plan docs (2026-05-29 – 2026-05-31, PR #364)
 
 - `LIVE_SHADOW_SEAMHUNT_HANDOFF_2026-05-29.md` — Seamhunt session handoff 2026-05-29: EDLI shadow investigation, observed_members bug root-cause, FSR PARTIAL veto chain, and unshadow gate checklist.
 - `HANDOFF_2026-05-30_FULL_REMAINING.md` — Full remaining work handoff 2026-05-30: TOPOLOGY_CLOCK_MISSING gate fix, Run #24 bin-bias gate, live-halt recovery steps, and continuous re-decision plan scope.
 - `LIVE_HALT_RECOVERY_HANDOFF_2026-05-30.md` — Live halt recovery handoff 2026-05-30: step-by-step operator recovery sequence for TOPOLOGY_CLOCK_MISSING live halt, backfill and restart checklist.
-- `HANDOFF_2026-05-31_CERT_FIX_FULL_SHADOW.md` — Cert-fix full shadow handoff 2026-05-31: EDLI cert fix (reader-elected snapshot + horizon_profile), purge of 941 PARTIAL FSR events, receipt persistence, and full shadow validation checklist.
 - `PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md` — Continuous re-decision max-alpha plan 2026-05-31: design for per-cycle cheap-screen re-evaluation (cache + screen + enqueue), Platt 49-city OOS scope, and shadow integration plan. Authority for PR #364.
 
 ## Registered full_transport ship artifacts (2026-05-25)
 - `FT_SHIP_EXECUTION_LEDGER_2026-05-25.md` — PR #342 full_transport → live ship execution ledger: task status, key paths, finished phases, open items. Authority: Zeus #64 live-ship program.
 
 ## Registered full_transport refit + ship evidence (2026-05-25, PR #349)
-- `ENS_BEFORE_AFTER_LIVE_ONBOARD_2026-05-25.md` — Before/after live onboard comparison: full_transport_v1 calibration impact on live-onboarded cities.
-- `ENS_REFINEMENT_ROUTES_RESEARCH_2026-05-25.md` — ENS refinement routes research: HIGH markets 14-city proper-score analysis across candidate improvement routes.
-- `ENS_REFIT_FULLDB_HIGH_2026-05-25.md` — ENS refit validation HIGH temperature: full-DB blocked-OOS proper-score results (Brier, LogLoss, RPS, PIT) for HIGH markets.
-- `ENS_REFIT_FULLDB_LOW_2026-05-25.md` — ENS refit validation LOW temperature: full-DB blocked-OOS proper-score results for LOW markets.
-- `ENS_REFIT_MATH_ROI_2026-05-25.md` — ENS refit math/ROI consolidated report: quantified improvement metrics and economic upside estimate.
 - `ENS_REFIT_REFINEMENT_ROADMAP_2026-05-25.md` — Post-refit refinement roadmap: math-first gated improvement routes (Routes 1–6) with ship criteria.
 - `ENS_REFIT_VALIDATION_2026-05-25_results.md` — ENS refit validation results (2026-05-25): post-audit proper-score output from audit_refit_proper_scores.py.
-- `ENS_ROI_AUDIT_INDEX_2026-05-25.md` — ENS refit ROI audit document index: pointers to all evidence artifacts for the full_transport_v1 ship decision.
 - `ENS_ROUTE6_TRANSPORT_BETA_2026-05-25.md` — ENS Route 6 experiment: day-specific Δ transport β analysis and preliminary results.
 - `V1V2_SUFFIX_INVENTORY_2026-05-25.md` — v1/v2 suffix inventory: eradication feasibility analysis; live-DB + grep cross-check against db_table_ownership.yaml.
 
 ## Registered honest-q + settlement-unit artifacts (2026-06-03, PR #380)
 
-- `Q_LCB_HONEST_COVERAGE_2026-06-03.md` — Full predictive sigma (#89) + settlement-unit trigger deployment (W2) evidence: before/after q_lcb widening receipts, EMOS CI degenerate-bin fix, per-city OOS validation, and pre-arm coverage checklist. Authority for PR #380 honest-q consolidation.
 - `com.zeus.d7-bias.plist` — launchd plist for the D-7 rolling EDLI bias producer daemon. Runs `scripts/write_d7_rolling_edli_bias.py --commit` on a daily schedule to keep model_bias_ens current with the trailing 7 settled days. Authority: PR #380.

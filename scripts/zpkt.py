@@ -243,23 +243,19 @@ def cmd_start(args: argparse.Namespace) -> int:
         }, indent=2))
         return 0
 
-    # Default path: create flat plan at docs/operations/current/plans/<slug>.md
-    # Scope sidecar (scope.yaml) lives in current/plans/<slug>/ for zpkt scope/close compat.
+    # Default path (workspace-routing-redesign by-work, PLAN §4): ONE
+    # self-contained work folder docs/operations/current/<slug>/ holding all
+    # artifacts together — PLAN.md + scope.yaml (+ evidence/, report.md,
+    # closeout.md as the work produces them). current/ = active missions only;
+    # finished work leaves via `zpkt close` (2-stage -> docs/archive/<slug>/).
     package = normalize_package_name(getattr(args, "package", None))
     if package:
-        die("--package is not supported with the default (current/plans/) path; use --new-package for multi-phase work inside a legacy top-level package")
+        die("--package is not supported with the default (current/<work>/) path; use --new-package for multi-phase work inside a legacy top-level package")
 
-    # Flat plan file (primary artifact, single-operations-home law)
-    flat_plan_rel = f"current/plans/{slug}.md"
-    flat_plan_path = root / PACKET_ROOT / flat_plan_rel
-    if flat_plan_path.exists():
-        die(f"plan file already exists: {flat_plan_path}")
-
-    # Scope sidecar dir (kept for zpkt scope/close/commit compatibility)
-    current_plan_rel = f"current/plans/{slug}"
-    current_plan_dir = root / PACKET_ROOT / current_plan_rel
-    if current_plan_dir.exists():
-        die(f"plan scope dir already exists: {current_plan_dir}")
+    work_rel = f"current/{slug}"
+    work_dir_check = root / PACKET_ROOT / work_rel
+    if work_dir_check.exists():
+        die(f"work folder already exists: {work_dir_check}")
 
     branch = args.branch or f"p2-{slug}".replace("_", "-")
     if args.inplace:
@@ -281,15 +277,10 @@ def cmd_start(args: argparse.Namespace) -> int:
         info(f"worktree created at {worktree_path} on branch {branch}")
 
     target = worktree_path
-    # Flat plan file at current/plans/<slug>.md (canonical; replaces PLAN.md inside dir)
-    target_flat_plan = target / PACKET_ROOT / flat_plan_rel
-    target_flat_plan.parent.mkdir(parents=True, exist_ok=True)
-    write_flat_plan(path=target_flat_plan, slug=slug, branch=branch)
-
-    # Scope sidecar dir for zpkt scope/close/commit compatibility
-    pkt_dir = target / PACKET_ROOT / current_plan_rel
+    # One self-contained by-work folder: PLAN.md + scope.yaml together.
+    pkt_dir = target / PACKET_ROOT / work_rel
     pkt_dir.mkdir(parents=True, exist_ok=True)
-    write_scope_sidecar(pkt_dir=pkt_dir, slug=slug, branch=branch)
+    write_current_package_skeleton(pkt_dir=pkt_dir, slug=slug, branch=branch)
 
     # Write GOAL.md into current/ if not already present
     goal_path = target / PACKET_ROOT / "current" / "GOAL.md"
@@ -304,14 +295,15 @@ def cmd_start(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
-    set_active_packet(target, current_plan_rel)
+    set_active_packet(target, work_rel)
 
     print(json.dumps({
         "ok": True,
         "slug": slug,
-        "plan_path": f"docs/operations/{flat_plan_rel}",
-        "scope_path": f"docs/operations/{current_plan_rel}/scope.yaml",
-        "packet_path": current_plan_rel,
+        "work_dir": f"docs/operations/{work_rel}/",
+        "plan_path": f"docs/operations/{work_rel}/PLAN.md",
+        "scope_path": f"docs/operations/{work_rel}/scope.yaml",
+        "packet_path": work_rel,
         "goal_path": "docs/operations/current/GOAL.md",
         "branch": branch,
         "worktree": str(target),
@@ -368,10 +360,11 @@ def write_scope_sidecar(*, pkt_dir: Path, slug: str, branch: str) -> None:
 
 
 def write_current_package_skeleton(*, pkt_dir: Path, slug: str, branch: str) -> None:
-    """Write PLAN.md + scope.yaml with the new current/plans/<slug>/ schema.
+    """Write PLAN.md + scope.yaml into the by-work folder docs/operations/current/<slug>/.
 
-    DEPRECATED: use write_flat_plan + write_scope_sidecar for new zpkt start invocations.
-    Kept for backward-compatibility with callers that may pass an existing pkt_dir.
+    CANONICAL (workspace-routing-redesign by-work, PLAN §4): one self-contained
+    folder per mission. scope.yaml is the sibling of PLAN.md; zpkt scope/close
+    resolve it via scope_path_for(root, 'current/<slug>').
     """
     plan = pkt_dir / "PLAN.md"
     if not plan.exists():
@@ -393,7 +386,7 @@ def write_current_package_skeleton(*, pkt_dir: Path, slug: str, branch: str) -> 
             "status": "active",
             "owner": "agent",
             "frontier": [],
-            "allowed_files": [f"docs/operations/current/plans/{slug}/**"],
+            "allowed_files": [f"docs/operations/current/{slug}/**"],
             "forbidden_files": list(DEFAULT_OUT_OF_SCOPE),
             "live_side_effects_allowed": False,
             "supersedes": None,

@@ -621,6 +621,80 @@ def summary() -> dict[str, Any]:
     return payload
 
 
+def data_lane_health_check(
+    *,
+    lane_write_failures: dict | None,
+    decision_lane_writes: dict | None,
+    expected_lanes: "set[str] | list[str] | tuple[str, ...] | None" = None,
+    emit: bool = True,
+) -> dict[str, Any]:
+    """Lane-liveness health check: a dead decision/telemetry lane fails loud.
+
+    AB3 (2026-06-16, timing-semantics fix). BASIS: a swallowed lane-write
+    exception is INDISTINGUISHABLE from no-activity — a decision lane
+    (edli_no_submit_receipts) sat dead from 2026-06-06 and nobody noticed
+    because lane-write failures were swallowed silently and a dead lane looks
+    identical to a quiet one. ``cycle_runtime._record_lane_write_failure`` /
+    ``_record_lane_write_success`` now name + count each lane on the per-cycle
+    summary; this surfaces them on the heartbeat.
+
+    Reads the per-cycle ``lane_write_failures`` (lane -> failure count) and
+    ``decision_lane_writes`` (lane -> success count) maps and flags:
+      - any lane with a NONZERO failure count, and
+      - any lane in ``expected_lanes`` with ZERO writes this window
+        (only checked when ``expected_lanes`` is supplied — without an explicit
+        expectation a quiet lane is not assumed dead).
+
+    OBSERVABILITY ONLY: emits a ``logger.warning`` naming each flagged lane and
+    returns a structured verdict. It MUST NOT gate or block trading (operator
+    law: no caps / no artificial throttles). Pure aside from the warning log;
+    safe to call every heartbeat/cycle.
+    """
+    failures = lane_write_failures if isinstance(lane_write_failures, dict) else {}
+    writes = decision_lane_writes if isinstance(decision_lane_writes, dict) else {}
+
+    failed_lanes = {
+        str(lane): int(count or 0)
+        for lane, count in failures.items()
+        if int(count or 0) > 0
+    }
+
+    zero_write_lanes: list[str] = []
+    if expected_lanes:
+        for lane in expected_lanes:
+            lane_name = str(lane)
+            wrote = int(writes.get(lane_name, 0) or 0)
+            # A lane that failed is already flagged above; only call out an
+            # EXPECTED lane that produced neither a success nor a failure.
+            if wrote == 0 and lane_name not in failed_lanes:
+                zero_write_lanes.append(lane_name)
+
+    healthy = not failed_lanes and not zero_write_lanes
+    verdict: dict[str, Any] = {
+        "ok": healthy,
+        "failed_lanes": failed_lanes,
+        "zero_write_lanes": sorted(zero_write_lanes),
+        "scope": "cycle_pulse",
+    }
+
+    if emit and not healthy:
+        if failed_lanes:
+            logger.warning(
+                "DATA LANE UNHEALTHY: %d lane(s) had write FAILURES this cycle: %s",
+                len(failed_lanes),
+                failed_lanes,
+            )
+        if zero_write_lanes:
+            logger.warning(
+                "DATA LANE UNHEALTHY: %d expected lane(s) wrote ZERO times this "
+                "cycle (possible dead lane): %s",
+                len(zero_write_lanes),
+                sorted(zero_write_lanes),
+            )
+
+    return verdict
+
+
 async def run_global_heartbeat_once() -> HeartbeatStatus:
     supervisor = get_global_supervisor()
     if supervisor is None:

@@ -17,7 +17,7 @@ def build_actionable_trade_certificate(
         claim_type=claims.ACTIONABLE_TRADE,
         mode="LIVE",
         decision_time=decision_time,
-        source_available_at=decision_time,
+        source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (generated AT decision_time, wraps no external source); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, and max_parent_* monotonicity — never a freshness gate or q (quote/orderbook age metrics read the quote_feasibility/executable_snapshot certs' real clocks, not this). decision_time is the only honest anchor.
         agent_received_at=decision_time,
         persisted_at=decision_time,
         payload=payload,

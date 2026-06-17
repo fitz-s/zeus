@@ -1086,7 +1086,22 @@ def _mark_entry_filled(
     )
     pos.order_status = order_status
     pos.chain_state = "local_only"
-    pos.entered_at = now.isoformat()
+    # M2a (timing-semantics fix 2026-06-16; reconcile-safe 2026-06-16): entered_at
+    # feeds hours_since_open -> compute_alpha -> live exits, so grading it against
+    # the bare processing clock when the venue actually reported a match time is
+    # the fabrication this fix removes. Basis precedence:
+    #   (1) venue match time from the fill payload — REAL_SOURCE (live-WS path)
+    #   (2) an entry time the caller already set    — preserve, do not clobber
+    #   (3) the caller's observation `now`          — DERIVED_JUSTIFIED upper
+    #       bound: the fill is CONFIRMED to have occurred by the time we observe
+    #       it, so `now` never OVER-states hold age (conservative for exits).
+    # (3) is the honest reconcile-confirmed entry instant: a reconciled fill
+    # carries no WS match time, and the canonical lifecycle builder requires a
+    # non-empty timestamp, so the prior honest-absent "" terminal was invalid
+    # (it quarantined every reconcile entry). Never the bare clock over a real
+    # venue time.
+    _venue_match_time = _payload_timestamp(payload if isinstance(payload, dict) else {})
+    pos.entered_at = _venue_match_time or pos.entered_at or now.isoformat()
 
     lc_ok = _maybe_update_trade_lifecycle(pos, deps=deps)
     cf_ok = _maybe_emit_canonical_entry_fill(pos, deps=deps)

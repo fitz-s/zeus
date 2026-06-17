@@ -55,7 +55,7 @@ def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
                 CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             outcome_type INTEGER,
             settlement_station TEXT,
             settlement_unit TEXT
@@ -119,7 +119,7 @@ def _create_market_events(conn: sqlite3.Connection) -> None:
             range_high REAL,
             outcome TEXT,
             created_at TEXT,
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(market_slug, condition_id)
         )
     """)
@@ -205,7 +205,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
             provenance_json TEXT NOT NULL DEFAULT '{}',
             authority TEXT NOT NULL DEFAULT 'VERIFIED'
                 CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(city, target_date, temperature_metric, issue_time, dataset_id)
         )
     """)
@@ -303,7 +303,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
                 CHECK (trade_authority_status IN ('SHADOW_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(source_id, product_id, data_version, source_cycle_time, sha256)
         )
     """)
@@ -337,7 +337,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
                 CHECK (trade_authority_status IN ('SHADOW_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
         )
     """)
     conn.execute("""
@@ -379,7 +379,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
                 CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
         )
     """)
     conn.execute("""
@@ -420,7 +420,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             provenance_json TEXT NOT NULL DEFAULT '{}',
             trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_VETO_ONLY'
                 CHECK (trade_authority_status IN ('SHADOW_VETO_ONLY')),
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(posterior_id, market_snapshot_id, condition_id, token_id, decision_time)
         )
     """)
@@ -496,7 +496,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
                 CHECK (trade_authority_status IN ('SHADOW_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             -- BLOCKER 4 (operator-sharpened): the uniqueness MUST include the physical request
             -- identity (product_id, request_url_hash). The pre-fix UNIQUE keyed ONLY on the
             -- logical (model,city,target_date,metric,source_cycle_time,endpoint) tuple, so a Run-2
@@ -579,7 +579,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     conn.execute("""
         CREATE TABLE IF NOT EXISTS raw_model_forecast_request_conflicts (
             conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            detected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            detected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             model TEXT NOT NULL,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -722,7 +722,7 @@ def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
             cycle TEXT NOT NULL DEFAULT '00',
             source_id TEXT NOT NULL DEFAULT 'tigge_mars',
             horizon_profile TEXT NOT NULL DEFAULT 'full',
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(city, target_date, temperature_metric, range_label, lead_days,
                    forecast_available_at, bin_source, dataset_id)
         )
@@ -808,7 +808,7 @@ def _create_settlement_capture_verifications(conn: sqlite3.Connection) -> None:
                 CHECK (coherence_verdict IN ('COHERENT', 'INCOHERENT', 'INCOMPLETE')),
             incoherence_reason TEXT,
             evidence_tier TEXT,
-            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(city, target_date, temperature_metric)
         )
     """)
@@ -1023,7 +1023,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
                 source_id TEXT NOT NULL DEFAULT 'tigge_mars',
                 horizon_profile TEXT NOT NULL DEFAULT 'full',
                 training_cutoff TEXT,
-                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
                 -- 2026-05-05 critic-opus Blocker 1: UNIQUE extended with
                 -- stratification keys so cross-cycle Platt rows do not collide
                 -- on insert. Legacy DBs must be rebuilt via
@@ -1180,7 +1180,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
                 writer TEXT NOT NULL,
                 existing_row_json TEXT NOT NULL,
                 incoming_row_json TEXT NOT NULL,
-                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
             )
         """)
         conn.execute("""
@@ -1249,7 +1249,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             CREATE TABLE IF NOT EXISTS zeus_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
             )
         """)
         conn.execute("""
@@ -1393,7 +1393,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
                 chain_state TEXT NOT NULL,
                 reason TEXT NOT NULL,
                 occurred_at TEXT NOT NULL,
-                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
                 UNIQUE(trade_id, occurred_at)
             )
         """)

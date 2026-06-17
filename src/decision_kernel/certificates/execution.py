@@ -501,7 +501,7 @@ def _build_cert(
         claim_type=certificate_type,
         mode="LIVE",
         decision_time=decision_time,
-        source_available_at=decision_time,
+        source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (final-intent/executor-boundary record generated AT decision_time, wraps no external source); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, and max_parent_* monotonicity — never a freshness gate or q. decision_time is the only honest anchor.
         agent_received_at=decision_time,
         persisted_at=decision_time,
         payload=payload,

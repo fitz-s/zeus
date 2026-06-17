@@ -36,6 +36,18 @@ if TYPE_CHECKING:
 
 from src.architecture.decorators import capability
 from src.config import STATE_DIR, get_mode, state_path
+
+
+def utc_iso_now() -> str:
+    """Return the current UTC instant as an ISO-8601 string with timezone offset.
+
+    Single canonical producer for caller-supplied tz-aware timestamps (ANTIBODY 2).
+    Use this instead of datetime.now() or CURRENT_TIMESTAMP for any persisted timing
+    column that must compare correctly against tz-aware datetimes on the Chicago host.
+
+    Returns strings of the form: '2026-06-16T12:34:56.789012+00:00'
+    """
+    return datetime.now(timezone.utc).isoformat()
 from src.contracts.semantic_types import ExitState
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.state.ledger import (
@@ -579,6 +591,37 @@ def checkpoint_world_wal() -> tuple[int, int, int]:
         conn.close()
 
 
+def checkpoint_trades_wal() -> tuple[int, int, int]:
+    """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` on zeus_trades.db; return its triple.
+
+    THE BACKSTOP (2026-06-16) — the zeus_trades.db twin of ``checkpoint_world_wal``.
+
+    Root (live-evidenced 2026-06-16): ``state/zeus_trades.db-wal`` grew to 810 MB
+    because a long-lived READER connection in the live daemon held a WAL snapshot
+    (read-mark) across cycles, pinning the WAL floor so ``wal_checkpoint`` returned
+    BUSY and never truncated → unbounded growth → ``executable_market_snapshots``
+    writes failed ``database is locked`` (auto-checkpoint contention on every write)
+    → ``fresh_executable_city_count=0`` → the q-kernel spine could not price fresh
+    families → no crosses. zeus-world.db already had this backstop; the trade DB did
+    not. Same lock discipline: a dedicated short-lived connection, NO process-global
+    write mutex (a checkpoint is not a write txn; SQLite serializes checkpoints
+    internally), closed immediately so it never itself becomes a floor-pinning reader.
+
+    Returns the ``(busy, log_frames, checkpointed_frames)`` triple:
+      * ``busy == 0`` → checkpoint completed; the WAL was truncated.
+      * ``busy == 1`` → a reader still pinned the floor (loud signal; not silenced).
+    """
+    conn = _connect(_zeus_trade_db_path(), write_class=None)
+    try:
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        busy = int(row[0]) if row is not None else 1
+        log_frames = int(row[1]) if row is not None else -1
+        ckpt_frames = int(row[2]) if row is not None else -1
+        return (busy, log_frames, ckpt_frames)
+    finally:
+        conn.close()
+
+
 @contextlib.contextmanager
 def get_forecasts_connection_with_world(
     *,
@@ -637,6 +680,77 @@ def get_forecasts_connection_with_world(
                 try:
                     conn.close()
                 except Exception:  # noqa: BLE001
+                    pass
+
+
+@contextlib.contextmanager
+def forecasts_connection_with_trades_flocked(
+    *,
+    write_class: WriteClass | str = "live",
+):
+    """Context manager: forecasts.db as MAIN with zeus_trades.db ATTACHed as 'trades'.
+
+    INV-37 harvester fix (ChatGPT PR#408 review B1, 2026-06-14): the settlement
+    harvester must write BOTH forecasts-class tables (settlements, calibration_pairs,
+    ensemble_snapshots, observations) AND trade-class tables (position_current,
+    position_events, decision_log, chronicle, settlement_commands) in a SINGLE
+    atomic SAVEPOINT.  Opening two independent connections and committing them
+    separately violates INV-37 — a crash / busy / kill between the two commits
+    leaves logically impossible state (settlement truth written but positions not
+    settled, or the reverse).
+
+    This helper opens forecasts.db as MAIN and ATTACHes zeus_trades.db as the
+    'trades' schema, so:
+
+      - forecasts-class bare names (settlements, calibration_pairs, observations,
+        ensemble_snapshots) resolve to MAIN (forecasts.db) ✓
+      - trade-class bare names (position_current, position_events, decision_log,
+        chronicle, settlement_commands, executable_market_snapshots) are NOT present
+        in forecasts.db so SQLite name resolution finds them in the attached
+        'trades' schema (zeus_trades.db) ✓
+
+    Single SAVEPOINT spanning all writes makes the entire settlement cycle
+    all-or-nothing per INV-37 law.
+
+    Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
+    (``zeus-forecasts.db`` before ``zeus_trades.db``) to prevent deadlocks with
+    other cross-DB writers (v4 §3.1.3 invariant).
+
+    Authority: ChatGPT PR#408 review B1 INV-37,
+    docs/evidence/pr408_review/chatgpt_deep_review_2026-06-14.md
+    Created: 2026-06-14
+    Last audited: 2026-06-14
+    """
+    from src.state.db_writer_lock import (
+        canonical_lock_order,
+        db_writer_lock,
+    )
+    resolved = _resolve_write_class(write_class)
+    if resolved is None:
+        from src.state.db_writer_lock import WriteClass as _WC
+        resolved = _WC.LIVE
+    # Canonical alphabetical sort: zeus-forecasts.db < zeus_trades.db
+    ordered_paths = canonical_lock_order(
+        [ZEUS_FORECASTS_DB_PATH, _zeus_trade_db_path()]
+    )
+    with db_writer_lock(ordered_paths[0], resolved):
+        with db_writer_lock(ordered_paths[1], resolved):
+            conn = _connect(ZEUS_FORECASTS_DB_PATH, write_class=resolved)
+            try:
+                attached = {
+                    row[1]
+                    for row in conn.execute("PRAGMA database_list").fetchall()
+                }
+                if "trades" not in attached:
+                    conn.execute(
+                        "ATTACH DATABASE ? AS trades",
+                        (str(_zeus_trade_db_path()),),
+                    )
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001 — best-effort close
                     pass
 
 
@@ -1012,7 +1126,7 @@ def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
           source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
           observed_at TEXT NOT NULL,
           venue_timestamp TEXT,
-          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          ingested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
           local_sequence INTEGER NOT NULL,
           raw_payload_hash TEXT NOT NULL,
           raw_payload_json TEXT,
@@ -1048,7 +1162,7 @@ def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
           source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
           observed_at TEXT NOT NULL,
           venue_timestamp TEXT,
-          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          ingested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
           local_sequence INTEGER NOT NULL,
           raw_payload_hash TEXT NOT NULL,
           raw_payload_json TEXT,
@@ -1087,7 +1201,7 @@ def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
           source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
           observed_at TEXT NOT NULL,
           venue_timestamp TEXT,
-          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          ingested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
           local_sequence INTEGER NOT NULL,
           raw_payload_hash TEXT NOT NULL,
           raw_payload_json TEXT,
@@ -1162,7 +1276,7 @@ def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
           source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
           observed_at TEXT NOT NULL,
           venue_timestamp TEXT,
-          ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          ingested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
           local_sequence INTEGER NOT NULL,
           UNIQUE (subject_type, subject_id, local_sequence)
         );
@@ -1385,7 +1499,7 @@ def init_schema(
             writer TEXT NOT NULL,
             existing_row_json TEXT NOT NULL,
             incoming_row_json TEXT NOT NULL,
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
         );
 
         -- market_events DDL removed in B3cont (PR3): dead v1 shell (0 rows).
@@ -1948,7 +2062,7 @@ def init_schema(
             readiness_impacts_json TEXT NOT NULL DEFAULT '[]',
             readiness_recomputed_at TEXT,
             meta_json TEXT NOT NULL DEFAULT '{}',
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(job_name, scheduled_for, source_id, track, release_calendar_key)
         );
         CREATE INDEX IF NOT EXISTS idx_job_run_job_window
@@ -2002,7 +2116,7 @@ def init_schema(
                 'RUNNING','SUCCESS','FAILED','PARTIAL','SKIPPED_NOT_RELEASED'
             )),
             reason_code TEXT,
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             CHECK (partial_run = 0 OR completeness_status = 'PARTIAL')
         );
         CREATE INDEX IF NOT EXISTS idx_source_run_source_cycle
@@ -2043,7 +2157,7 @@ def init_schema(
             reason_code TEXT,
             computed_at TEXT NOT NULL,
             expires_at TEXT,
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(
                 source_run_id, source_id, source_transport, release_calendar_key,
                 track, city_id, city_timezone, target_local_date,
@@ -2086,7 +2200,7 @@ def init_schema(
             expires_at TEXT,
             dependency_json TEXT NOT NULL DEFAULT '{}',
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(
                 scope_type, city_id, city_timezone, target_local_date,
                 temperature_metric, physical_quantity, observation_field,
@@ -2129,7 +2243,7 @@ def init_schema(
             )),
             expires_at TEXT,
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(market_family, condition_id, city_id, target_local_date, temperature_metric, data_version)
         );
         CREATE INDEX IF NOT EXISTS idx_market_topology_scope
@@ -2164,7 +2278,7 @@ def init_schema(
             resolution_sources_json TEXT NOT NULL DEFAULT '[]',
             source_contract_json TEXT NOT NULL DEFAULT '{}',
             payload_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
         );
         CREATE INDEX IF NOT EXISTS idx_source_contract_audit_city_date
             ON source_contract_audit_events(city, target_date, temperature_metric, checked_at_utc);
@@ -2280,7 +2394,7 @@ def init_schema(
             'periodic','ws_gap','heartbeat_loss','cutover','operator'
           )),
           evidence_json TEXT NOT NULL,
-          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
           resolved_at TEXT,
           resolution TEXT,
           resolved_by TEXT
@@ -2315,7 +2429,7 @@ def init_schema(
           command_id TEXT NOT NULL REFERENCES wrap_unwrap_commands(command_id),
           event_type TEXT NOT NULL,
           payload_json TEXT,
-          recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
         );
     """)
     # T1A: DDL single-source — delegate to schema owner to avoid duplication.
@@ -3223,7 +3337,7 @@ def _create_source_run(conn: sqlite3.Connection) -> None:
                 'RUNNING','SUCCESS','FAILED','PARTIAL','SKIPPED_NOT_RELEASED'
             )),
             reason_code TEXT,
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             CHECK (partial_run = 0 OR completeness_status = 'PARTIAL')
         )
     """)
@@ -3275,7 +3389,7 @@ def _create_job_run(conn: sqlite3.Connection) -> None:
             readiness_impacts_json TEXT NOT NULL DEFAULT '[]',
             readiness_recomputed_at TEXT,
             meta_json TEXT NOT NULL DEFAULT '{}',
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(job_name, scheduled_for, source_id, track, release_calendar_key)
         )
     """)
@@ -3343,7 +3457,7 @@ def _ensure_job_run_release_key_identity(conn: sqlite3.Connection) -> None:
             readiness_impacts_json TEXT NOT NULL DEFAULT '[]',
             readiness_recomputed_at TEXT,
             meta_json TEXT NOT NULL DEFAULT '{}',
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(job_name, scheduled_for, source_id, track, release_calendar_key)
         )
     """)
@@ -3419,7 +3533,7 @@ def _create_source_run_coverage(conn: sqlite3.Connection) -> None:
             reason_code TEXT,
             computed_at TEXT NOT NULL,
             expires_at TEXT,
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(
                 source_run_id, source_id, source_transport, release_calendar_key,
                 track, city_id, city_timezone, target_local_date,
@@ -3473,7 +3587,7 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
             expires_at TEXT,
             dependency_json TEXT NOT NULL DEFAULT '{}',
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(
                 scope_type, city_id, city_timezone, target_local_date,
                 temperature_metric, physical_quantity, observation_field,
@@ -3717,7 +3831,7 @@ def _create_market_microstructure_snapshots(conn: sqlite3.Connection) -> None:
             bin_schema_id              TEXT,
             schema_version                  INTEGER NOT NULL DEFAULT 5
                 CHECK (schema_version IN (5)),
-            recorded_at                     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            recorded_at                     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
         )
     """)
     conn.execute("""
@@ -4429,7 +4543,7 @@ CREATE TABLE IF NOT EXISTS venue_order_facts (
   source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
   observed_at TEXT NOT NULL,
   venue_timestamp TEXT,
-  ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  ingested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
   local_sequence INTEGER NOT NULL,
   raw_payload_hash TEXT NOT NULL,
   raw_payload_json TEXT,
@@ -4464,7 +4578,7 @@ CREATE TABLE IF NOT EXISTS venue_trade_facts (
   source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
   observed_at TEXT NOT NULL,
   venue_timestamp TEXT,
-  ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  ingested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
   local_sequence INTEGER NOT NULL,
   raw_payload_hash TEXT NOT NULL,
   raw_payload_json TEXT,
@@ -4502,7 +4616,7 @@ CREATE TABLE IF NOT EXISTS position_lots (
   source TEXT NOT NULL CHECK (source IN ('REST','WS_USER','WS_MARKET','DATA_API','CHAIN','OPERATOR','FAKE_VENUE')),
   observed_at TEXT NOT NULL,
   venue_timestamp TEXT,
-  ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  ingested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
   local_sequence INTEGER NOT NULL,
   raw_payload_hash TEXT NOT NULL,
   raw_payload_json TEXT,

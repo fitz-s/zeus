@@ -4915,6 +4915,266 @@ class TestRecoveryResolutionTable:
 
 
 # ---------------------------------------------------------------------------
+# #123 / M2: EDLI authenticated-absence -> venue_commands terminalization sync
+# ---------------------------------------------------------------------------
+
+def _seed_edli_reconciled_absence(
+    conn,
+    *,
+    aggregate_id,
+    execution_command_id,
+    token_id,
+    venue_order_exists=False,
+    venue_trade_exists=False,
+    matching_open_order_count=0,
+    matching_trade_count=0,
+    reconcile_reason="AUTHENTICATED_CLOB_ABSENCE_NO_OPEN_ORDER_OR_TRADE",
+    include_proof=True,
+    occurred_at="2026-04-26T00:05:00Z",
+    sequence=None,
+):
+    """Seed an EDLI Reconciled event mirroring edli_absence_resolver output.
+
+    The canonical link is execution_command_id == venue_commands.decision_id.
+    The shared _insert_edli_live_order_event helper keys aggregate_event_id on
+    the sequence, so distinct aggregates must use distinct sequences. Derive a
+    stable per-aggregate sequence when the caller does not pin one.
+    """
+    if sequence is None:
+        sequence = 9 + (int(hashlib.sha256(aggregate_id.encode()).hexdigest(), 16) % 1000)
+    proof = {
+        "schema_version": 1,
+        "source": "authenticated_clob_user_read",
+        "owner_scope": "authenticated_funder",
+        "observed_at": occurred_at,
+        "aggregate_id": aggregate_id,
+        "execution_command_id": execution_command_id,
+        "token_id": token_id,
+        "open_orders_checked": True,
+        "trades_checked": True,
+        "open_orders_query_complete": True,
+        "trades_query_complete": True,
+        "matching_open_order_count": matching_open_order_count,
+        "matching_trade_count": matching_trade_count,
+        "matching_open_orders": [],
+        "matching_trades": [],
+        "proof_hash": "9" * 64,
+    }
+    payload = {
+        "schema_version": 1,
+        "event_id": "edli-event-1",
+        "final_intent_id": "edli-intent-1",
+        "source_authority": "venue_reconcile",
+        "pending_reconcile": False,
+        "execution_command_id": execution_command_id,
+        "venue_order_exists": venue_order_exists,
+        "venue_trade_exists": venue_trade_exists,
+        "cap_transition_recommendation": "RELEASED",
+        "reconcile_reason": reconcile_reason,
+    }
+    if include_proof:
+        payload["authenticated_absence_proof"] = proof
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=sequence,
+        event_type="Reconciled",
+        payload=payload,
+        occurred_at=occurred_at,
+    )
+
+
+def _seed_unknown_side_effect_with_decision(conn, *, command_id, decision_id, token_id):
+    """Seed a SUBMIT_UNKNOWN_SIDE_EFFECT row (no venue_order_id) with a decision_id."""
+    _insert(
+        conn,
+        command_id=command_id,
+        position_id=f"pos-{command_id}",
+        decision_id=decision_id,
+        token_id=token_id,
+        side="BUY",
+        size=10.0,
+        price=0.5,
+    )
+    _advance_to_unknown_side_effect(conn, command_id=command_id)
+
+
+def _venue_read_unavailable_client(mock_client):
+    """Make the in-flight per-row venue lookup UNAVAILABLE.
+
+    This reproduces the real #123 incident condition: the live recovery
+    _reconcile_row cannot resolve the stuck row from the venue (no complete
+    authenticated read surface), so it stays SUBMIT_UNKNOWN_SIDE_EFFECT and the
+    EDLI absence-sync pass is the only thing that can discharge it. The sync
+    pass itself is DB-only and never touches the client.
+    """
+    mock_client.get_open_orders.side_effect = RuntimeError("venue read unavailable")
+    mock_client.get_trades.side_effect = RuntimeError("venue read unavailable")
+    return mock_client
+
+
+class TestEdliAbsenceVenueCommandSync:
+    """#123 / M2: sync EDLI authenticated-absence proof to venue_commands."""
+
+    def test_absence_proven_terminalizes_and_clears_governor_count(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.risk_allocator.governor import count_unknown_side_effects
+
+        decision_id = "edli_exec_cmd:agg-a:intent:tok-absent:tok-absent:buy_no"
+        _seed_unknown_side_effect_with_decision(
+            conn,
+            command_id="cmd-absent",
+            decision_id=decision_id,
+            token_id="tok-absent",
+        )
+        _seed_edli_reconciled_absence(
+            conn,
+            aggregate_id="agg-a",
+            execution_command_id=decision_id,
+            token_id="tok-absent",
+        )
+
+        # Pre-condition: the stuck row latches the governor.
+        before_count, _ = count_unknown_side_effects(conn)
+        assert before_count == 1
+
+        _venue_read_unavailable_client(mock_client)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["venue_command_absence_sync"]["advanced"] == 1
+        assert summary["venue_command_absence_sync"]["errors"] == 0
+        assert _get_state(conn, "cmd-absent") == "SUBMIT_REJECTED"
+        events = _get_events(conn, "cmd-absent")
+        terminal = events[-1]
+        assert terminal["event_type"] == "SUBMIT_REJECTED"
+        payload = json.loads(terminal["payload_json"])
+        assert payload["proof_class"] == "edli_authenticated_clob_absence"
+        assert payload["safe_replay_permitted"] is True
+        assert payload["edli_absence_proof"]["proof_hash"] == "9" * 64
+        assert payload["edli_absence_proof"]["venue_order_exists"] is False
+        assert payload["edli_absence_proof"]["venue_trade_exists"] is False
+
+        # Post-condition: governor count drops to zero -> kill switch can clear.
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 0
+        assert after_markets == ()
+        # The terminal write must not call the venue (proof came from EDLI).
+        mock_client.get_order.assert_not_called()
+
+    def test_no_absence_proof_leaves_row_unchanged(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.risk_allocator.governor import count_unknown_side_effects
+
+        decision_id = "edli_exec_cmd:agg-b:intent:tok-pending:tok-pending:buy_no"
+        _seed_unknown_side_effect_with_decision(
+            conn,
+            command_id="cmd-pending",
+            decision_id=decision_id,
+            token_id="tok-pending",
+        )
+        # No EDLI Reconciled event exists for this decision_id (still pending).
+
+        _venue_read_unavailable_client(mock_client)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        # Fail-closed: the per-row scan finds no proof; the sync pass leaves it.
+        assert summary["venue_command_absence_sync"]["advanced"] == 0
+        assert _get_state(conn, "cmd-pending") == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+        count, _ = count_unknown_side_effects(conn)
+        assert count == 1
+
+    def test_matching_venue_order_exposure_never_released(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.risk_allocator.governor import count_unknown_side_effects
+
+        decision_id = "edli_exec_cmd:agg-c:intent:tok-live:tok-live:buy_no"
+        _seed_unknown_side_effect_with_decision(
+            conn,
+            command_id="cmd-live",
+            decision_id=decision_id,
+            token_id="tok-live",
+        )
+        # EDLI Reconciled reports a live venue order (real exposure) — must NOT
+        # be auto-released even though it links to the command.
+        _seed_edli_reconciled_absence(
+            conn,
+            aggregate_id="agg-c",
+            execution_command_id=decision_id,
+            token_id="tok-live",
+            venue_order_exists=True,
+            matching_open_order_count=1,
+        )
+
+        _venue_read_unavailable_client(mock_client)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["venue_command_absence_sync"]["advanced"] == 0
+        assert summary["venue_command_absence_sync"]["stayed"] == 1
+        assert _get_state(conn, "cmd-live") == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+        count, _ = count_unknown_side_effects(conn)
+        assert count == 1
+
+    def test_ambiguous_edli_link_is_fail_closed(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.risk_allocator.governor import count_unknown_side_effects
+
+        decision_id = "edli_exec_cmd:ambiguous:intent:tok-amb:tok-amb:buy_no"
+        _seed_unknown_side_effect_with_decision(
+            conn,
+            command_id="cmd-amb",
+            decision_id=decision_id,
+            token_id="tok-amb",
+        )
+        # Two distinct EDLI aggregates both link to this decision_id — the link
+        # is not unique, so the row must be left untouched (fail-closed).
+        _seed_edli_reconciled_absence(
+            conn,
+            aggregate_id="agg-amb-1",
+            execution_command_id=decision_id,
+            token_id="tok-amb",
+        )
+        _seed_edli_reconciled_absence(
+            conn,
+            aggregate_id="agg-amb-2",
+            execution_command_id=decision_id,
+            token_id="tok-amb",
+        )
+
+        _venue_read_unavailable_client(mock_client)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["venue_command_absence_sync"]["advanced"] == 0
+        assert summary["venue_command_absence_sync"]["stayed"] == 1
+        assert _get_state(conn, "cmd-amb") == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+        count, _ = count_unknown_side_effects(conn)
+        assert count == 1
+
+    def test_proof_token_mismatch_is_fail_closed(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        decision_id = "edli_exec_cmd:agg-d:intent:tok-cmd:tok-cmd:buy_no"
+        _seed_unknown_side_effect_with_decision(
+            conn,
+            command_id="cmd-token-mismatch",
+            decision_id=decision_id,
+            token_id="tok-cmd",
+        )
+        # Proof links by decision_id but its token_id is a DIFFERENT token.
+        _seed_edli_reconciled_absence(
+            conn,
+            aggregate_id="agg-d",
+            execution_command_id=decision_id,
+            token_id="tok-other",
+        )
+
+        _venue_read_unavailable_client(mock_client)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["venue_command_absence_sync"]["advanced"] == 0
+        assert _get_state(conn, "cmd-token-mismatch") == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+
+
+# ---------------------------------------------------------------------------
 # TestRecoveryCycleIntegration
 # ---------------------------------------------------------------------------
 

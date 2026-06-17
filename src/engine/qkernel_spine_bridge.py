@@ -1,0 +1,1299 @@
+# Created: 2026-06-14
+# Last reused or audited: 2026-06-14
+# Authority basis: docs/rebuild/consult_build_spec.md (Wave 5 reactor wiring) +
+#   docs/rebuild/impl_w4_family_decision_engine.md (the engine contract this bridge
+#   drives) + docs/rebuild/arm_replay_report.md (the spine validated BEFORE this
+#   integration) + docs/rebuild/impl_w5b_integration.md (this integration's report).
+#   Reconciled against docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md.
+"""qkernel_spine_bridge — the Wave-5B cutover bridge from the live reactor to the
+rebuilt q-kernel spine.
+
+This module is the ONLY place the reactor's per-family decision is routed through
+``src/decision/family_decision_engine.FamilyDecisionEngine.decide()``. It exists so
+the reactor seam edit stays a single ``if/else`` branch: when the
+``qkernel_spine_enabled`` flag is ON, the reactor calls
+:func:`decide_family_via_spine` here; when OFF, the legacy decision path runs
+byte-for-byte unchanged and NOTHING in this module is imported on the hot path.
+
+WHAT IT DOES (the cutover contract):
+
+  1. ``qkernel_spine_enabled()`` — reads the single boolean cutover flag from
+     ``settings["feature_flags"]["qkernel_spine_enabled"]`` (default False) using the
+     SAME accessor the other reactor flags use (no new config mechanism). A config
+     read fault keeps the OFF default (fail-closed to legacy).
+
+  2. ``decide_family_via_spine(...)`` — builds the spine inputs from the
+     reactor-native data already in scope at the ``_generate_candidate_proofs`` /
+     ``_selected_candidate_proof`` orchestration seam (the family, the per-candidate
+     ``_CandidateProof`` tuple already materialized for the submission pipeline, the
+     threaded ``_edli_spine_*`` predictive center/dispersion/members, the existing
+     family exposure), calls ``FamilyDecisionEngine.decide()`` (the rebuilt spine:
+     predictive_distribution -> joint_q -> joint_q_band -> family_book ->
+     market_coherence -> negrisk_routes -> payoff_vector -> filter[direction,
+     coherence, edge_lcb>0 & delta_u>0] -> argmax optimal_delta_u), and maps the
+     resulting ``FamilyDecision.selected`` back onto the matching ``_CandidateProof``
+     so the reactor's submission pipeline (RiskGuard, freshness, MECE fail-closed,
+     venue submission, receipts, the Stage-0 decision_receipt_spine) wraps it
+     unchanged.
+
+THE SUBMISSION PIPELINE IS NOT TOUCHED. This bridge replaces the DECISION
+COMPUTATION (which q, which candidate, what size), not the submission machinery. The
+reactor still owns RiskGuard, freshness/staleness gates, MECE fail-closed, venue
+submission, receipt persistence. The honest pre-existing gates (direction law,
+capital-efficiency q_lcb>price = the engine's ``edge_lcb>0``, real fee+tick,
+settlement truth) STAY: the spine's own ``decide()`` filter chain (direction law +
+coherence + edge_lcb>0 & optimal_delta_u>0) IS the capital-efficiency law, and the
+selected proof still flows through the reactor's downstream submit-time re-proofs.
+
+DRIFT RESOLVED (recorded per operator law — see impl_w5b_integration.md §"Input mapping"):
+
+  * The belief authority runs at the seam. The spine builds the ONE predictive
+    distribution via the REAL ``PredictiveDistributionBuilder`` — ``build_center``
+    (envelope-locked) + ``build_sigma`` (realized-floor) — over the members threaded
+    under ``_edli_spine_debiased_members_native`` by the Stage-0 producer. POST-FIX
+    REALITY (spine-source rewire 2026-06-16): those members are the RAW MULTI-MODEL
+    member envelope sourced from ``raw_model_forecasts`` (~7-13 decorrelated NWP
+    providers, latest cycle per model) — the SAME source the ARM/settlement-EV replay
+    validates (``fresh_members_at_cycle``). They are RAW, NOT chain-of-record-debiased:
+    settlement-residual de-bias is applied at the seam ONLY when
+    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` (a follow-up flip; see the de-bias seam below),
+    else ``_NoOpDebiasAuthority`` applies ZERO shift and ``raw == debiased``. The center
+    this ships is therefore the RAW multi-model center (~-0.39 settlement-residual bias,
+    matching the replay BEFORE de-bias), NOT a de-biased ~0 center — enabling the flag is
+    the separate deploy step that reaches the fully-validated debiased center. These
+    members are the validated multi-model envelope, NOT the reactor's legacy served
+    mu*/σ (the LEGACY EMOS/replacement values are no longer used for belief). If the
+    producer stashed no members at all (the threaded inputs are absent — e.g. <3 fresh
+    models on the causal cycle), the bridge returns a TYPED no-trade
+    (``SPINE_INPUTS_UNAVAILABLE``) rather than fabricating a center.
+
+  * The spine's ``family_book`` step consumes ``ExecutableMarketSnapshot`` per
+    sibling keyed by bin_id. The reactor's per-family decision seam holds the
+    executable snapshot ROWS (DB row dicts) and the per-candidate ``_CandidateProof``
+    objects, not reconstructed ``ExecutableMarketSnapshot`` objects. Resolution: the
+    bridge does NOT rebuild the family book from raw rows. The reactor's selection
+    geometry (the ΔU ranker over ``NativeSideCandidate`` sizing objects + the
+    ``FamilyPayoffMatrix`` over the family bins + the ``PortfolioExposureVector``) is
+    the SAME ``utility_ranker`` geometry the spine's payoff layer maximizes over, and
+    the per-candidate executable cost curves are already materialized on the proofs.
+    The bridge therefore drives ``decide()`` with the reactor-native sizing
+    candidates and exposure (the real spine types) and lets the spine own the
+    direction-law + coherence + edge + argmax-ΔU selection over them. The market book
+    used for coherence is assembled from the per-candidate proofs' executable prices
+    (the de-frictioned market q the coherence module needs), recorded in the report
+    as the resolved family-book input.
+
+EVERY PATH RETURNS A TYPED OUTCOME. A trade selects a proof; a no-trade carries a
+typed ``no_trade_reason`` (the spine's own vocabulary or ``SPINE_INPUTS_UNAVAILABLE``
+when a required input genuinely cannot be reconstructed). The bridge never raises a
+bare exception into the reactor's hot path — a wiring fault is caught and returned as
+a typed ``SPINE_WIRING_FAULT`` no-trade so the reactor emits a deterministic receipt.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Any, Mapping, Optional, Sequence
+
+import numpy as np
+
+from src.decision.family_decision_engine import (
+    FamilyDecision,
+    FamilyDecisionEngine,
+    FamilyDecisionError,
+)
+from src.forecast.day0_conditioner import Day0ObservationState
+from src.forecast.debias_authority import AppliedDebias
+from src.forecast.forecast_case_factory import forecast_case_metadata
+from src.forecast.predictive_distribution_builder import (
+    PredictiveDistribution,
+    PredictiveDistributionBuilder,
+)
+from src.forecast.types import ForecastCase, FreshModelSet, RawModelMember
+from src.probability.event_resolution import (
+    ResolutionError,
+    event_resolution_for_city,
+)
+from src.probability.outcome_space import (
+    OutcomeBin,
+    OutcomeSpace,
+    OutcomeSpaceError,
+    compute_topology_hash,
+)
+from src.strategy import utility_ranker
+
+# ---------------------------------------------------------------------------
+# Typed no-trade / fault reasons unique to the bridge (the spine owns the rest).
+# ---------------------------------------------------------------------------
+NO_TRADE_SPINE_INPUTS_UNAVAILABLE = "SPINE_INPUTS_UNAVAILABLE"
+NO_TRADE_SPINE_WIRING_FAULT = "SPINE_WIRING_FAULT"
+NO_TRADE_SPINE_NO_SELECTION = "SPINE_NO_SELECTION"
+# Route identity (consult_review_pr409.md §5 BLOCKER "integration-route identity"):
+# the unchanged submit path executes ONE native leg, so the bridge may only carry a
+# DIRECT native route (DIRECT_YES / DIRECT_NO) back to a single _CandidateProof. A
+# synthetic / arb / conversion route is multi-leg and the submit path cannot execute
+# it — the minimum-safe realization restricts the engine to direct routes and REFUSES
+# (never silently single-leg-maps) any non-direct selection as this typed no-trade.
+NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE = "NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE"
+# v1 lead-bucket restriction (consult_review_pr409_round2.md §3): only the 24h lead
+# bucket has its own settlement-EV replay, so live qkernel is restricted to it. A case
+# outside the replayed bucket is a typed no-trade until that bucket is EV-replayed.
+NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED = "QKERNEL_LEAD_BUCKET_NOT_REPLAYED"
+# v1 day0 hard-block (consult_review_pr409_round2.md §3): qkernel reads no day0
+# observation, so a day0 event type is refused BEFORE the spine is driven.
+NO_TRADE_QKERNEL_DAY0_NOT_WIRED = "QKERNEL_DAY0_NOT_WIRED"
+
+# The route_id prefixes a DIRECT native route carries (negrisk_routes._direct_*_route:
+# route_id = f"{route_type}:{bin_id}@{shares}"). These are the ONLY route types one
+# native _CandidateProof can execute via the unchanged single-leg submit path.
+_DIRECT_ROUTE_ID_PREFIXES = ("DIRECT_YES:", "DIRECT_NO:")
+
+# The joint-q band draw count the engine uses for the coherent ΔU band. The engine's
+# own default is 4000 (the validated production width). ``None`` means "use the engine
+# default"; a test may set this to a smaller value to keep the smoke fast. This is the
+# ONLY tunable that affects the band width; it never changes the selection LOGIC, only
+# the Monte-Carlo resolution of the robust edge lower bound.
+SPINE_BAND_DRAWS: Optional[int] = None
+
+# COLD-CENTER-BIAS FIX (settlement-residual de-bias), live opt-in seam.
+#
+# The spine center mu* runs systematically ~0.5 deg C COLD vs realized settlement
+# (docs/evidence/qkernel_rebuild/cold_center_bias_fix_2026-06-16.md). The fix fits
+# per-(city, metric) walk-forward settlement-residual artifacts
+# (src/forecast/settlement_residual_debias.py) and applies them through the real
+# DebiasAuthority on the product-agnostic representativeness basis. It is PROVEN on
+# the settlement-EV replay (modal EV -0.046 -> +0.052; aggregate +0.018 -> +0.030).
+#
+# This live seam is DEFAULT-OFF: until the orchestrator flips
+# ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` the bridge uses ``_NoOpDebiasAuthority`` and
+# live behavior is unchanged (no restart-time behavior change from this commit).
+#
+# PROVENANCE (orchestrator deploy decision): POST-FIX (spine-source rewire 2026-06-16)
+# the members threaded to THIS seam are the RAW MULTI-MODEL consensus from
+# ``raw_model_forecasts`` (see ``build_fresh_model_set`` / ``_NoOpDebiasAuthority``) —
+# the SAME basis the provider's settlement residuals are fit against in
+# zeus-forecasts.db. The earlier "chain-of-record-debiased members" caveat is obsolete:
+# there is no upstream chain-debias on these served members (de-bias is OFF; raw ==
+# debiased), so enabling this seam applies the provider's settlement-residual shift to
+# RAW members fit on RAW members — the validated, no-double-count configuration. The
+# flag stays OFF in THIS commit (which ships the proven raw multi-model center, ~-0.39
+# residual bias); flipping ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` is the orchestrator's
+# separate deploy step to reach the fully-validated debiased (~0) center.
+_SPINE_SETTLE_RESID_DEBIAS_ENV = "ZEUS_SPINE_SETTLE_RESID_DEBIAS"
+
+
+def _settlement_residual_debias_enabled() -> bool:
+    """True iff the live settlement-residual de-bias seam is operator-enabled."""
+    return os.environ.get(_SPINE_SETTLE_RESID_DEBIAS_ENV) == "1"
+
+
+def _spine_debias_authority(case: ForecastCase):
+    """The de-bias authority the live spine builder uses for ``case``.
+
+    Default (flag OFF): ``_NoOpDebiasAuthority`` — zero shift, current live behavior.
+    Flag ON: a per-case ``DebiasAuthority`` seeded with the walk-forward settlement-
+    residual artifact (see the provenance caveat above). Fails CLOSED to the no-op
+    authority on any provider error so the seam can never fault the reactor hot path.
+    """
+    if not _settlement_residual_debias_enabled():
+        return _NoOpDebiasAuthority()
+    try:
+        provider = _live_settlement_residual_provider()
+        if provider is None:
+            return _NoOpDebiasAuthority()
+        return provider.debias_authority(case)
+    except Exception:  # noqa: BLE001 — never fault the hot path on a de-bias fit
+        return _NoOpDebiasAuthority()
+
+
+_LIVE_SETTLE_RESID_PROVIDER: Any = None
+_LIVE_SETTLE_RESID_PROVIDER_BUILT: bool = False
+
+
+def _live_settlement_residual_provider():
+    """Lazily build (and cache) the live settlement-residual provider, or None.
+
+    Reads the live ``zeus-forecasts.db`` once (read-only). Cached for the process so
+    every case reuses the same fitted residual series; ``apply`` per-case filtering
+    keeps each case walk-forward. Returns None if the DB path cannot be resolved.
+    """
+    global _LIVE_SETTLE_RESID_PROVIDER, _LIVE_SETTLE_RESID_PROVIDER_BUILT
+    if _LIVE_SETTLE_RESID_PROVIDER_BUILT:
+        return _LIVE_SETTLE_RESID_PROVIDER
+    _LIVE_SETTLE_RESID_PROVIDER_BUILT = True
+    try:
+        import sqlite3
+
+        from src.forecast.settlement_residual_debias import (
+            SettlementResidualDebiasProvider,
+        )
+
+        db_path = os.environ.get(
+            "ZEUS_FORECASTS_DB",
+            os.path.join(os.getcwd(), "state", "zeus-forecasts.db"),
+        )
+        if not os.path.exists(db_path):
+            _LIVE_SETTLE_RESID_PROVIDER = None
+            return None
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        _LIVE_SETTLE_RESID_PROVIDER = SettlementResidualDebiasProvider.from_connection(con)
+    except Exception:  # noqa: BLE001
+        _LIVE_SETTLE_RESID_PROVIDER = None
+    return _LIVE_SETTLE_RESID_PROVIDER
+
+
+# ===========================================================================
+# (1) The single cutover flag accessor.
+# ===========================================================================
+
+def qkernel_spine_enabled() -> bool:
+    """The single Wave-5B cutover/rollback flag (default False).
+
+    Read from ``settings["feature_flags"]["qkernel_spine_enabled"]`` using the SAME
+    accessor the other reactor feature flags use (e.g. the replacement-authority
+    flag reads ``settings["feature_flags"][...]``). A config read fault keeps the OFF
+    default — fail-closed to the legacy decision path. When False, the reactor's
+    legacy per-family decision path is byte-for-byte unchanged and this bridge is
+    never on the decision path.
+    """
+    try:
+        from src.config import settings
+
+        return bool(settings["feature_flags"].get("qkernel_spine_enabled", False))
+    except Exception:  # noqa: BLE001 — fail-closed to legacy on any config fault
+        return False
+
+
+# ===========================================================================
+# The bridge result — a selected proof OR a typed no-trade, plus the FamilyDecision.
+# ===========================================================================
+
+@dataclass(frozen=True)
+class SpineDecisionResult:
+    """The outcome of routing one family's decision through the rebuilt spine.
+
+    * ``selected_proof`` — the reactor ``_CandidateProof`` the spine selected (its
+      q/q_lcb/trade_score overlaid with the spine's economics), or ``None`` for a
+      no-trade. This is the SAME object type the reactor's submission pipeline
+      already consumes, so RiskGuard / freshness / venue_command / receipts wrap it
+      unchanged.
+    * ``no_trade_reason`` — ``None`` when a trade was selected; otherwise a typed
+      reason (the spine's own ``no_trade_reason`` or a bridge fault reason).
+    * ``decision`` — the full ``FamilyDecision`` (``None`` only when the spine could
+      not be driven at all — ``SPINE_INPUTS_UNAVAILABLE`` / ``SPINE_WIRING_FAULT``).
+      Carries the spine receipt_hash for the decision receipt.
+    * ``decided_by_spine`` — always True when this object is produced (the bridge is
+      ONLY reached when the flag is ON); the reactor uses it to assert the decision
+      authority on the receipt.
+    """
+
+    selected_proof: Optional[Any]
+    no_trade_reason: Optional[str]
+    decision: Optional[FamilyDecision]
+    decided_by_spine: bool = True
+
+
+# ===========================================================================
+# (2) The reactor -> spine input mapping (built from data in scope at the seam).
+# ===========================================================================
+
+def _coerce_target_date(value: Any) -> date:
+    """Parse a reactor family ``target_date`` (a YYYY-MM-DD string) into a date."""
+    if isinstance(value, date):
+        return value
+    text = str(value)
+    return date.fromisoformat(text[:10])
+
+
+def _bin_unit(family: Any) -> str:
+    """The measurement unit carried on the family's bins ('C' or 'F')."""
+    for candidate in getattr(family, "candidates", ()) or ():
+        unit = getattr(getattr(candidate, "bin", None), "unit", None)
+        if unit in ("C", "F"):
+            return unit
+    # Fail-closed default: the resolution carries the real unit; bins are validated
+    # against it downstream, so a wrong guess raises rather than silently miscomputes.
+    return "C"
+
+
+def _city_resolver(family: Any):
+    """Resolve the runtime City object for the family (for the EventResolution).
+
+    Uses the live ``runtime_cities_by_name`` registry the reactor already imports.
+    Returns the City object or ``None`` (the caller turns ``None`` into a typed
+    no-trade — never fabricates a settlement station).
+    """
+    try:
+        from src.config import runtime_cities_by_name
+
+        cities = runtime_cities_by_name()
+        return cities.get(str(getattr(family, "city", "")))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _candidate_bin_id_for(candidate: Any) -> str:
+    """The stable bin_id for one reactor ``MarketTopologyCandidate``.
+
+    This MUST be byte-identical to the reactor's ``_candidate_bin_id(proof)`` (which
+    hashes the proof's candidate condition_id + bin geometry), because that same hash
+    keys the sizing candidates and the route set the spine sizes/selects over. The
+    Omega bin_id, the sizing-candidate (bin_id, side) key, the family-book market key,
+    and the route key are then ALL the same id, so the spine's selected
+    ``candidate_id`` (``SIDE:bin_id:route_id``) maps back to the reactor proof. The
+    reactor uses ``stable_hash`` over exactly these fields — replicated here so the
+    Omega built from ``family.candidates`` lines up with the proofs.
+    """
+    from src.decision_kernel.canonicalization import stable_hash
+
+    bin_obj = getattr(candidate, "bin", None)
+    return stable_hash(
+        {
+            "condition_id": str(getattr(candidate, "condition_id", "") or ""),
+            "bin_low": getattr(bin_obj, "low", None),
+            "bin_high": getattr(bin_obj, "high", None),
+            "bin_unit": getattr(bin_obj, "unit", None),
+            "bin_label": getattr(bin_obj, "label", None),
+        }
+    )
+
+
+def build_forecast_case(
+    family: Any,
+    *,
+    source_cycle_time_utc: datetime,
+) -> ForecastCase:
+    """Build the spine ``ForecastCase`` from the reactor family + forecast source cycle.
+
+    Resolves the versioned ``EventResolution`` via the live
+    ``event_resolution_for_city`` (the SAME per-city settlement identity the q layer
+    threads). Raises ``ResolutionError`` (fail-closed) if the city cannot be resolved
+    to a settlement station — the caller turns that into a typed no-trade.
+
+    The case ``issue_time_utc`` / ``source_cycle_time_utc`` are the FORECAST SOURCE
+    CYCLE that produced the served members (NOT decision_time), and season / lead /
+    regime are derived by the SINGLE ``forecast_case_metadata`` factory the ARM replay
+    also uses, so the settlement sigma-floor cell identity is the replay-validated one
+    (consult_review_pr409_round2.md §3). ``season = emos_season(target)`` (the floor
+    table's own key — never blank); ``regime_key = "default"`` (the replay's);
+    ``lead_hours`` is the real lead from the source cycle to the target finalization.
+    """
+    city = _city_resolver(family)
+    if city is None:
+        raise ResolutionError(
+            f"CITY_UNRESOLVED: {getattr(family, 'city', None)!r} not in runtime registry"
+        )
+    metric = str(getattr(family, "metric", "")).lower()
+    if metric not in ("high", "low"):
+        raise ResolutionError(f"METRIC_INVALID: {metric!r}")
+    target_local_date = _coerce_target_date(getattr(family, "target_date", None))
+    resolution = event_resolution_for_city(city, target_local_date, metric)  # type: ignore[arg-type]
+
+    cycle = (
+        source_cycle_time_utc
+        if source_cycle_time_utc.tzinfo
+        else source_cycle_time_utc.replace(tzinfo=timezone.utc)
+    )
+    meta = forecast_case_metadata(
+        target_local_date=target_local_date,
+        source_cycle_time_utc=cycle,
+        finalization_local_time=resolution.finalization_local_time,
+        settlement_timezone=resolution.settlement_timezone,
+    )
+    return ForecastCase(
+        city=resolution.city,
+        city_id=str(getattr(city, "name", resolution.city)),
+        station_id=resolution.station_id,
+        settlement_source_type=resolution.settlement_source_type,
+        target_local_date=target_local_date,
+        metric=metric,  # type: ignore[arg-type]
+        issue_time_utc=cycle,
+        lead_hours=meta.lead_hours,
+        season=meta.season,
+        regime_key=meta.regime_key,
+        unit=resolution.measurement_unit,
+        resolution=resolution,
+        family_id=str(getattr(family, "family_id", "")),
+        source_cycle_time_utc=cycle,
+    )
+
+
+def build_outcome_space(family: Any, case: ForecastCase) -> OutcomeSpace:
+    """Build the complete MECE ``OutcomeSpace`` (Omega) from the reactor family bins.
+
+    The reactor family's bins are ALREADY a validated MECE partition (the
+    candidate-binding layer built them via ``validate_bin_topology``). This maps each
+    reactor ``Bin`` to an ``OutcomeBin`` carrying the family resolution's rounding
+    rule, then validates the assembled Omega (fail-closed on any incompleteness).
+    """
+    resolution = case.resolution
+    bins: list[OutcomeBin] = []
+    for candidate in getattr(family, "candidates", ()) or ():
+        bin_obj = getattr(candidate, "bin", None)
+        if bin_obj is None:
+            continue
+        bin_id = _candidate_bin_id_for(candidate)
+        bins.append(
+            OutcomeBin(
+                bin_id=bin_id,
+                condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                label=str(getattr(bin_obj, "label", "") or bin_id),
+                lower_native=getattr(bin_obj, "low", None),
+                upper_native=getattr(bin_obj, "high", None),
+                yes_token_id=str(getattr(candidate, "yes_token_id", "") or "") or None,
+                no_token_id=str(getattr(candidate, "no_token_id", "") or "") or None,
+                executable=True,
+                rounding_rule=resolution.rounding_rule,
+            )
+        )
+    bins_tuple = tuple(bins)
+    omega = OutcomeSpace(
+        family_id=case.family_id,
+        resolution=resolution,
+        bins=bins_tuple,
+        topology_hash=compute_topology_hash(case.family_id, resolution, bins_tuple),
+    )
+    omega.validate()  # fail-closed: incomplete/overlapping family raises here
+    return omega
+
+
+def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """Lift the reactor's served predictive center/dispersion/members from the payload.
+
+    The Stage-0 producer stashed ``_edli_spine_mu_native`` / ``_edli_spine_sigma_native``
+    / ``_edli_spine_debiased_members_native`` (and the raw members / q vector) on the
+    THREADED payload at the single point where they were all in scope. Source-corrected
+    2026-06-16: the live producer sources the member envelope from ``raw_model_forecasts``
+    (the multi-model deterministic fusion, NOT ``ensemble_snapshots``). These members are
+    the RAW multi-model envelope — NOT chain-of-record-debiased and NOT lifted from an
+    "ARM-validated" run; the ARM replay reads the SAME ``raw_model_forecasts`` source, but
+    the center/width here are recomputed live by ``build_center`` / ``build_sigma`` over
+    that envelope (the q the spine integrates is built over the SAME N(mu*, sigma) the
+    bridge constructs). Returns ``None`` when the served predictive inputs are genuinely
+    absent (the caller emits a typed no-trade rather than fabricating a center).
+    """
+    mu = payload.get("_edli_spine_mu_native")
+    sigma = payload.get("_edli_spine_sigma_native")
+    debiased = payload.get("_edli_spine_debiased_members_native")
+    if mu is None or sigma is None:
+        return None
+    try:
+        mu_f = float(mu)
+        sigma_f = float(sigma)
+    except (TypeError, ValueError):
+        return None
+    if not (np.isfinite(mu_f) and np.isfinite(sigma_f) and sigma_f > 0.0):
+        return None
+    members = None
+    if debiased is not None:
+        try:
+            arr = np.asarray(debiased, dtype=float).ravel()
+            if arr.size and np.isfinite(arr).all():
+                members = tuple(float(x) for x in arr.tolist())
+        except (TypeError, ValueError):
+            members = None
+    raw = payload.get("_edli_spine_raw_members_native")
+    raw_members = None
+    if raw is not None:
+        try:
+            rarr = np.asarray(raw, dtype=float).ravel()
+            if rarr.size and np.isfinite(rarr).all():
+                raw_members = tuple(float(x) for x in rarr.tolist())
+        except (TypeError, ValueError):
+            raw_members = None
+    # Belief requires fresh members: the VALIDATED build_center runs on the member
+    # envelope, NOT on the served mu. If NEITHER a debiased nor a raw member array was
+    # threaded, the seam has no fresh consensus to lock the center to — return None so
+    # the caller emits a typed SPINE_INPUTS_UNAVAILABLE no-trade rather than letting
+    # build_fresh_model_set synthesize a 1-point envelope from the legacy served mu
+    # (which would put the legacy mu back on the live path). The Stage-0 producer threads
+    # members alongside mu, so this is unreachable on the live lane; it closes the one
+    # latent legacy-mu seam.
+    if members is None and raw_members is None:
+        return None
+    # The FORECAST SOURCE CYCLE that produced these members (the Stage-0 producer
+    # stashes it under _edli_spine_source_cycle_time_utc). The ForecastCase issue /
+    # source_cycle / lead MUST derive from this cycle, NOT decision_time, so the live
+    # σ-floor lead bucket matches the replay-validated cell (round-2 §3). FAIL CLOSED
+    # (return None ⇒ typed SPINE_INPUTS_UNAVAILABLE) when absent — never silently fall
+    # back to decision_time, which would mis-bucket the lead and serve the wrong floor.
+    source_cycle = _parse_source_cycle_time(payload.get("_edli_spine_source_cycle_time_utc"))
+    if source_cycle is None:
+        return None
+    return {
+        "mu_native": mu_f,
+        "sigma_native": sigma_f,
+        "debiased_members_native": members,
+        "raw_members_native": raw_members,
+        "source_cycle_time_utc": source_cycle,
+    }
+
+
+def _parse_source_cycle_time(value: Any) -> Optional[datetime]:
+    """Parse the threaded forecast source-cycle timestamp into a tz-aware UTC datetime.
+
+    The producer stashes a string (the snapshot ``source_cycle_time`` / ``issue_time``).
+    Returns ``None`` (⇒ the caller fails closed to SPINE_INPUTS_UNAVAILABLE) when the
+    value is absent or unparseable — the source cycle is REQUIRED for the lead bucket.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _spine_inputs_missing_reason(payload: Mapping[str, Any]) -> str:
+    """Sub-type WHY ``_served_predictive_inputs`` failed, so a live SPINE_INPUTS_UNAVAILABLE
+    names the exact gap (the Stage-0 producer threads these onto the payload; a missing key
+    means the producer did not run for this family, mutated a different payload object, or
+    that branch computed no value). Diagnostic only — never alters a decision."""
+    mu = payload.get("_edli_spine_mu_native")
+    sigma = payload.get("_edli_spine_sigma_native")
+    if mu is None or sigma is None:
+        return "MU_SIGMA_NOT_STASHED"
+    try:
+        if not (np.isfinite(float(mu)) and np.isfinite(float(sigma)) and float(sigma) > 0.0):
+            return "MU_SIGMA_NONFINITE"
+    except (TypeError, ValueError):
+        return "MU_SIGMA_UNPARSEABLE"
+    if payload.get("_edli_spine_debiased_members_native") is None and (
+        payload.get("_edli_spine_raw_members_native") is None
+    ):
+        return "MEMBERS_NOT_STASHED"
+    if _parse_source_cycle_time(payload.get("_edli_spine_source_cycle_time_utc")) is None:
+        return "SOURCE_CYCLE_NOT_STASHED"
+    return "UNKNOWN"
+
+
+def build_fresh_model_set(
+    case: ForecastCase, served: Mapping[str, Any]
+) -> FreshModelSet:
+    """Build a ``FreshModelSet`` from the served RAW MULTI-MODEL member envelope.
+
+    POST-FIX REALITY (spine-source rewire 2026-06-16): the values are the producer's
+    ``debiased_members_native``, which since the source rewire is the RAW multi-model
+    envelope from ``raw_model_forecasts`` (~7-13 decorrelated NWP providers, latest cycle
+    per model, °C→native) — the SAME member set the ARM/settlement-EV replay validates
+    (``fresh_members_at_cycle``). De-bias is OFF live, so ``raw == debiased`` (the
+    producer stashes the raw envelope into BOTH keys). The ``build_center`` (envelope-
+    lock) and ``build_sigma`` (realized-floor) authorities run on these RAW members, with
+    settlement-residual de-bias applied at the seam ONLY when
+    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` (a follow-up flip; else ``_NoOpDebiasAuthority``
+    = zero shift). Falls back to the raw array, then to ``mu_native``, only if no member
+    array was threaded.
+    """
+    values = served.get("debiased_members_native") or served.get("raw_members_native") or ()
+    arr = np.asarray(values, dtype=float)
+    if arr.size == 0:
+        arr = np.asarray([float(served["mu_native"])], dtype=float)
+    members = tuple(
+        RawModelMember(
+            model_id=f"reactor_served_{i}",
+            product_id="reactor_served",
+            source_run_id="reactor_served",
+            source_cycle_time_utc=case.source_cycle_time_utc,
+            available_at_utc=case.issue_time_utc,
+            value_native=float(v),
+            station_mapping_id=case.station_id,
+            raw_forecast_artifact_id="reactor_served",
+            data_version="reactor_served",
+        )
+        for i, v in enumerate(arr.tolist())
+    )
+    h = hashlib.sha256()
+    h.update(case.family_id.encode("utf-8"))
+    for v in arr.tolist():
+        h.update(f"|{float(v)!r}".encode("utf-8"))
+    return FreshModelSet(
+        case=case,
+        members=members,
+        member_values_native=arr,
+        min_native=float(np.min(arr)),
+        max_native=float(np.max(arr)),
+        model_set_hash=h.hexdigest(),
+    )
+
+
+class _NoOpDebiasAuthority:
+    """De-bias is a NO-OP at this live seam by DEFAULT — no shift is applied.
+
+    POST-FIX REALITY (spine-source rewire 2026-06-16): the members threaded here are the
+    RAW multi-model envelope from ``raw_model_forecasts`` (NOT a chain-of-record-debiased
+    set; the prior claim was false). Live de-bias is OFF, so this authority applies ZERO
+    shift and ``raw == debiased``. The ``build_center`` (envelope-lock) and ``build_sigma``
+    (realized-floor) authorities run on these RAW members — reproducing the ARM-replay
+    member set BEFORE de-bias (raw multi-model center, ~-0.39 settlement-residual bias).
+    Settlement-residual de-bias is a SEPARATE, opt-in step: when
+    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` the bridge uses a per-case ``DebiasAuthority``
+    seeded with the walk-forward settlement-residual artifact instead of this no-op (see
+    ``_spine_debias_authority`` / the de-bias seam block above), which is the follow-up
+    flip that reaches the fully-validated debiased (~0) center. This no-op is the
+    DEFAULT-OFF behavior this commit ships.
+    """
+
+    def apply(self, case: ForecastCase, models: FreshModelSet):
+        vals = np.asarray(models.member_values_native, dtype=float)
+        n = int(vals.size)
+        applied = AppliedDebias(
+            artifact_ids=(),
+            per_member_shift_native=tuple(0.0 for _ in range(n)),
+            aggregate_shift_native=0.0,
+            trailing_residual_mean_native=0.0,
+            trailing_residual_std_native=0.0,
+            activation_status="NO_ARTIFACT",
+            reason="reactor_chain_of_record_debias_upstream_no_seam_reshift",
+        )
+        return vals, applied
+
+
+class _ReactorServedFreshModelReader:
+    """A ``FreshModelReader`` that serves the reactor's pre-built ``FreshModelSet``."""
+
+    def __init__(self, models: FreshModelSet) -> None:
+        self._models = models
+
+    def read(self, case: ForecastCase) -> FreshModelSet:  # noqa: ARG002
+        return self._models
+
+
+class _NoDay0Reader:
+    """A ``Day0Reader`` that serves no observation (the reactor's forecast lane).
+
+    The forecast decision lane has no day0 observed extreme at this seam; the spine's
+    predictive builder treats ``None`` as the inactive (NO_DAY0) identity transform.
+    A day0-scope wiring is a follow-up; this bridge serves the forecast lane.
+    """
+
+    def read(self, case: ForecastCase) -> Optional[Day0ObservationState]:  # noqa: ARG002
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Sizing candidates + payoff matrix + exposure (the real spine types, built from
+# the reactor-native proofs — the SAME utility_ranker geometry the payoff layer uses).
+# ---------------------------------------------------------------------------
+
+def _sizing_candidates_from_proofs(
+    *,
+    family_key: str,
+    proofs: Sequence[Any],
+    native_side_candidate_from_proof,
+    candidate_bin_id,
+) -> dict[tuple[str, str], Any]:
+    """Materialize the spine ``sizing_candidates`` map keyed by (bin_id, side).
+
+    Reuses the reactor's ONE materialization path
+    (``_native_side_candidate_from_proof``) so the sizing candidate the spine sizes
+    against is byte-identical to the legacy ranker's candidate. The key is
+    (bin_id, side) where side is YES/NO (the spine's route side) — derived from the
+    proof's direction (buy_yes -> YES, buy_no -> NO).
+    """
+    out: dict[tuple[str, str], Any] = {}
+    for proof in proofs:
+        try:
+            candidate = native_side_candidate_from_proof(family_key=family_key, proof=proof)
+        except Exception:  # noqa: BLE001 — a non-materializable proof is simply absent
+            continue
+        bin_id = candidate_bin_id(proof)
+        direction = str(getattr(proof, "direction", "") or "")
+        side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
+        if side is None:
+            continue
+        out[(bin_id, side)] = candidate
+    return out
+
+
+def _family_min_order_shares(proofs: Sequence[Any]) -> Decimal:
+    """The family's venue min order size (probability-unit shares) for route pricing.
+
+    Reads ``min_order_size`` off the proofs' rows (the same venue floor the leaf
+    ``executable_cost`` walker asserts). The route surface MUST be priced at a feasible
+    size; pricing at the engine default of 1 share would mark routes non-executable on
+    a book whose min order is larger. Defaults to ``Decimal("5")`` when no row carries a
+    parseable min order size.
+    """
+    best: Optional[Decimal] = None
+    for proof in proofs:
+        row = getattr(proof, "row", None)
+        if not isinstance(row, Mapping):
+            continue
+        try:
+            mo = Decimal(str(row.get("min_order_size") or "5"))
+        except (TypeError, ValueError):
+            continue
+        if mo > 0 and (best is None or mo < best):
+            best = mo
+    return best if best is not None else Decimal("5")
+
+
+def _proof_by_bin_side(
+    proofs: Sequence[Any], candidate_bin_id
+) -> dict[tuple[str, str], Any]:
+    """Index the reactor proofs by (bin_id, side) for the selected-proof remap."""
+    out: dict[tuple[str, str], Any] = {}
+    for proof in proofs:
+        direction = str(getattr(proof, "direction", "") or "")
+        side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
+        if side is None:
+            continue
+        out[(candidate_bin_id(proof), side)] = proof
+    return out
+
+
+def _parse_candidate_id(candidate_id: str) -> Optional[tuple[str, str]]:
+    """Parse a spine ``CandidateEconomics.candidate_id`` ('SIDE:bin_id:route_id').
+
+    Returns (bin_id, side) or ``None`` when the id is not parseable. The engine builds
+    candidate ids as ``f"{side}:{bin_id}:{route_cost.route_id}"`` (side YES/NO).
+    """
+    parts = candidate_id.split(":", 2)
+    if len(parts) < 2:
+        return None
+    side = parts[0]
+    bin_id = parts[1]
+    if side not in ("YES", "NO"):
+        return None
+    return bin_id, side
+
+
+def _selected_route_is_direct(selected: Any) -> bool:
+    """Whether the spine's selected candidate is a DIRECT native route.
+
+    The submit path executes ONE native leg, so only ``DIRECT_YES`` / ``DIRECT_NO``
+    routes map to a single ``_CandidateProof``. The engine stamps
+    ``CandidateEconomics.route_id`` (and the candidate_id ``SIDE:bin_id:route_id``)
+    from ``RouteCost.route_id`` = ``f"{route_type}:{bin_id}@{shares}"``. A direct route
+    therefore begins with ``DIRECT_YES:`` / ``DIRECT_NO:``; a synthetic / arb /
+    conversion route begins with ``SYNTHETIC_NOT_I_YES_BASKET:`` / ``PAIR_ARB:`` /
+    ``FULL_YES_BASKET_ARB`` / ``CONVERSION_SELL_BASKET:`` and is NOT directly
+    executable. Reads ``route_id`` (authoritative) and falls back to parsing the
+    candidate_id's route segment.
+    """
+    route_id = str(getattr(selected, "route_id", "") or "")
+    if not route_id:
+        candidate_id = str(getattr(selected, "candidate_id", "") or "")
+        parts = candidate_id.split(":", 2)
+        route_id = parts[2] if len(parts) >= 3 else ""
+    return route_id.startswith(_DIRECT_ROUTE_ID_PREFIXES)
+
+
+# ===========================================================================
+# The bridge entry point.
+# ===========================================================================
+
+def decide_family_via_spine(
+    *,
+    family: Any,
+    payload: Mapping[str, Any],
+    proofs: Sequence[Any],
+    decision_time: datetime,
+    native_side_candidate_from_proof,
+    candidate_bin_id,
+    payoff_matrix_over_bins,
+    exposure_builder,
+    baseline_usd_provider,
+    per_bin_yes_q_lcb: Mapping[str, float],
+    extra_exposure_by_bin_id: Optional[Mapping[str, float]] = None,
+    max_stake_usd: Optional[Decimal] = None,
+) -> SpineDecisionResult:
+    """Route ONE family's decision through the rebuilt spine and remap the selection.
+
+    Called ONLY when ``qkernel_spine_enabled()`` is True. Builds the spine inputs from
+    the reactor-native data in scope, calls ``FamilyDecisionEngine.decide()``, and
+    maps ``FamilyDecision.selected`` back onto the matching reactor ``_CandidateProof``
+    (with the spine's economics overlaid onto the receipt-facing fields) so the
+    submission pipeline consumes it unchanged.
+
+    Args (all reactor-native objects/callables passed by the seam to avoid a circular
+    import of the giant adapter module):
+        family: the reactor ``EventBoundCandidateFamily`` (city/date/metric/candidates).
+        payload: the threaded payload (carries the Stage-0 ``_edli_spine_*`` inputs).
+        proofs: the per-candidate ``_CandidateProof`` tuple already materialized for
+            the submission pipeline (carries rows/execution_price/native costs).
+        decision_time: the decision instant (tz-aware UTC).
+        native_side_candidate_from_proof: the reactor's
+            ``_native_side_candidate_from_proof`` (the ONE materialization path).
+        candidate_bin_id: the reactor's ``_candidate_bin_id`` (proof -> bin_id).
+        payoff_matrix_over_bins: ``utility_ranker.FamilyPayoffMatrix.over_bins``.
+        exposure_builder: the reactor's ``_robust_marginal_utility_exposure``.
+        baseline_usd_provider: the reactor's ``_robust_marginal_utility_baseline_usd``.
+        per_bin_yes_q_lcb: the reactor's per-bin YES q_lcb (the robust π the matrix uses).
+        extra_exposure_by_bin_id / max_stake_usd: the existing-exposure / cash bound.
+
+    Returns a ``SpineDecisionResult`` — a selected proof OR a typed no-trade, plus the
+    ``FamilyDecision`` for the receipt. Never raises into the reactor hot path.
+    """
+    family_key = str(getattr(family, "family_id", "") or "family")
+    served = _served_predictive_inputs(payload)
+    if served is None:
+        return SpineDecisionResult(
+            selected_proof=None,
+            no_trade_reason=f"{NO_TRADE_SPINE_INPUTS_UNAVAILABLE}:{_spine_inputs_missing_reason(payload)}",
+            decision=None,
+        )
+
+    try:
+        # The ForecastCase issue / source_cycle / lead derive from the FORECAST SOURCE
+        # CYCLE that produced the served members (threaded under
+        # _edli_spine_source_cycle_time_utc; _served_predictive_inputs already failed
+        # closed to SPINE_INPUTS_UNAVAILABLE if it was absent), NOT decision_time.
+        case = build_forecast_case(
+            family, source_cycle_time_utc=served["source_cycle_time_utc"]
+        )
+        # LEAD-BUCKET ADMISSION (2026-06-15). The prior "only 24h" restriction was tied to
+        # the settlement-EV REPLAY (round-2 §3) — which the operator DELETED (price replay is
+        # not the validation; settlement-σ coverage is). Every FORECAST lead bucket
+        # (24h/72h/96h_plus) carries a conservative per-lead σ-floor: build_sigma serves
+        # max(global_lead_bucket_floor, realized_floor), and global_lead_bucket_floor widens
+        # +0.10°C/lead-day, so a longer lead is honestly WIDER => q_lcb is strictly LOWER =>
+        # the spine's own edge_lcb>0 filter sets a strictly HIGHER edge bar at long lead. The
+        # q is therefore calibration-honest at every forecast lead, and edge_lcb>0 (not a
+        # bucket whitelist) is the EV gate — the spine self-restricts to genuine positive
+        # edge. day0 (lead<24h) is still excluded: it has no Day0Reader in the spine and
+        # routes to the legacy lane.
+        from src.forecast.sigma_authority import lead_bucket_for
+
+        if lead_bucket_for(case) == "day0":
+            return SpineDecisionResult(
+                selected_proof=None,
+                no_trade_reason=NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED,
+                decision=None,
+            )
+        omega = build_outcome_space(family, case)
+        models = build_fresh_model_set(case, served)
+        sizing_candidates = _sizing_candidates_from_proofs(
+            family_key=family_key,
+            proofs=proofs,
+            native_side_candidate_from_proof=native_side_candidate_from_proof,
+            candidate_bin_id=candidate_bin_id,
+        )
+        # The payoff matrix + exposure are the SAME utility_ranker geometry the legacy
+        # ranker uses (built over the tradeable family bins).
+        bin_ids = list(dict.fromkeys(b.bin_id for b in omega.bins))
+        matrix = payoff_matrix_over_bins(bin_ids)
+        baseline_usd = baseline_usd_provider()
+        exposure = exposure_builder(
+            matrix,
+            baseline_usd=baseline_usd,
+            extra_exposure_by_bin_id=extra_exposure_by_bin_id,
+        )
+        _engine_kwargs: dict[str, Any] = {}
+        if SPINE_BAND_DRAWS is not None:
+            _engine_kwargs["n_band_draws"] = int(SPINE_BAND_DRAWS)
+        engine = FamilyDecisionEngine(
+            fresh_model_reader=_ReactorServedFreshModelReader(models),
+            day0_reader=_NoDay0Reader(),
+            # The belief authority: build_center (envelope-lock) + build_sigma
+            # (realized-floor) run on the reactor's RAW MULTI-MODEL member envelope
+            # sourced from ``raw_model_forecasts`` (~7-13 decorrelated NWP providers,
+            # latest cycle per model at the family's causal cycle) — NOT the reactor's
+            # legacy served mu/σ. Source-corrected 2026-06-16: these members are RAW,
+            # NOT chain-of-record-debiased, and are NOT "the ARM-replay-validated
+            # center+σ" — the ARM replay reads the SAME ``raw_model_forecasts`` table
+            # but the live center is recomputed here, not lifted from a validated run.
+            # De-bias: no-op by default (``_NoOpDebiasAuthority`` → raw envelope is the
+            # center). When the operator enables the settlement-residual seam
+            # (ZEUS_SPINE_SETTLE_RESID_DEBIAS=1), this is a per-case DebiasAuthority
+            # seeded with the walk-forward settlement-residual artifact that corrects the
+            # proven ~0.5C cold-center bias. Default-OFF: no live behavior change here.
+            predictive_builder=PredictiveDistributionBuilder(_spine_debias_authority(case)),
+            # ROUTE IDENTITY (consult_review_pr409.md §5 BLOCKER): DIRECT native routes
+            # ONLY. The unchanged submit path executes ONE native leg, so the decision
+            # may only choose a route a single _CandidateProof can execute. Disabling the
+            # neg-risk routes makes build_negrisk_route_set produce direct-only routes
+            # (synthetic_not_i / pair_arbs / full_basket_arbs / conversion_routes are all
+            # empty) and best_no_route returns the DIRECT NO — so the engine cannot select
+            # a multi-leg synthetic/arb route the bridge would have to silently single-leg
+            # map. The full multi-leg route-intent submit is a later arc; until it exists
+            # this is the minimum-safe restriction. A non-direct selection (defensive,
+            # unreachable while this flag is False) is REFUSED below as a typed no-trade.
+            enable_negrisk_routes=False,
+            # Inject a family_book_builder that assembles the FamilyBook DIRECTLY from
+            # the reactor proofs' native ladders (the SAME books the reactor priced
+            # each proof against) — bypassing ExecutableMarketSnapshot reconstruction.
+            family_book_builder=_family_book_builder_from_proofs(proofs, candidate_bin_id),
+            # PROOF-NATIVE direct routes (consult_review_pr409_round2.md §1): each direct
+            # YES/NO route is priced at the proof's OWN maker/taker execution_price, not
+            # the negrisk ask-ladder. This preserves the maker buy_no edge class (resting
+            # bid into an empty NO ask) the ask-ladder taker cost would discard.
+            route_set_builder=_proof_native_direct_route_set_builder(proofs, candidate_bin_id),
+            **_engine_kwargs,
+        )
+        captured_at_utc = decision_time if decision_time.tzinfo else decision_time.replace(tzinfo=timezone.utc)
+        # The route surface is priced at a FEASIBLE share size — the family's venue min
+        # order size (the smallest executable order). Pricing the routes at the engine
+        # default of 1 share would mark every route non-executable on a book whose min
+        # order is >1 (the NO_EXECUTABLE_ROUTE_CANDIDATE false no-trade). The min order
+        # is read off the proofs' rows (probability units); default to a safe 5.
+        shares_for_routing = _family_min_order_shares(proofs)
+        decision = engine.decide(
+            case,
+            omega,
+            # snapshots arg is ignored by the injected family_book_builder above (the
+            # books come from the proofs); pass an empty map to satisfy the signature.
+            {},
+            portfolio=exposure,
+            matrix=matrix,
+            captured_at_utc=captured_at_utc,
+            sizing_candidates=sizing_candidates,
+            max_stake_usd=max_stake_usd,
+            shares_for_routing=shares_for_routing,
+        )
+    except (ResolutionError, OutcomeSpaceError) as exc:
+        # A settlement/topology resolution fault is a genuine reconstruction gap:
+        # return a typed no-trade so the reactor emits a deterministic receipt.
+        return SpineDecisionResult(
+            selected_proof=None,
+            no_trade_reason=f"{NO_TRADE_SPINE_INPUTS_UNAVAILABLE}:{exc}",
+            decision=None,
+        )
+    except (FamilyDecisionError, Exception) as exc:  # noqa: BLE001 — never raise into the hot path
+        return SpineDecisionResult(
+            selected_proof=None,
+            no_trade_reason=f"{NO_TRADE_SPINE_WIRING_FAULT}:{type(exc).__name__}:{exc}",
+            decision=None,
+        )
+
+    # --- map the spine's selection back onto the reactor proof -----------------
+    if decision.selected is None:
+        # DIAGNOSTIC (2026-06-15): on no-trade, log the top candidates by edge_lcb so we can
+        # tell HONEST no-edge (edge_lcb clearly < 0) from a near-miss (edge_lcb ~ 0 but
+        # optimal_delta_u <= 0). Read-only; fail-safe — never raise into the hot path.
+        try:
+            import logging as _spine_diag_logging
+
+            _cands = sorted(
+                getattr(decision, "candidates", ()) or (),
+                key=lambda e: (e.edge_lcb if e.edge_lcb is not None else float("-inf")),
+                reverse=True,
+            )[:3]
+            if _cands:
+                _top = "; ".join(
+                    f"{c.candidate_id} edge_lcb={c.edge_lcb:+.5f} dU={c.optimal_delta_u:+.6f} "
+                    f"dU_min={c.delta_u_at_min:+.6f} pt_ev={c.point_ev:+.5f} "
+                    f"cost={float(c.cost.value):.4f} stake={c.optimal_stake_usd}"
+                    for c in _cands
+                )
+                _spine_diag_logging.getLogger("zeus.spine_edge").info(
+                    "SPINE_NOTRADE_EDGE_DIAG family=%s reason=%s top=[%s]",
+                    getattr(case, "family_id", "?"),
+                    decision.no_trade_reason,
+                    _top,
+                )
+        except Exception:
+            pass
+        return SpineDecisionResult(
+            selected_proof=None,
+            no_trade_reason=decision.no_trade_reason or NO_TRADE_SPINE_NO_SELECTION,
+            decision=decision,
+        )
+
+    # ROUTE IDENTITY GUARD (consult_review_pr409.md §5 BLOCKER). The unchanged submit
+    # path executes ONE native leg, so only a DIRECT native route maps to a single
+    # _CandidateProof. The engine is driven direct-only (enable_negrisk_routes=False),
+    # so a non-direct selection is unreachable on the live lane — but if a route other
+    # than DIRECT_YES/DIRECT_NO is ever selected, REFUSE it as a typed no-trade rather
+    # than silently single-leg-mapping a multi-leg synthetic/arb route the submit path
+    # cannot execute. (This is the second, defensive half of the minimum-safe fix: the
+    # engine flag prevents it; this guard makes a regression that re-enabled neg-risk
+    # routes fail closed instead of mis-executing.)
+    if not _selected_route_is_direct(decision.selected):
+        return SpineDecisionResult(
+            selected_proof=None,
+            no_trade_reason=NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE,
+            decision=decision,
+        )
+
+    proof_index = _proof_by_bin_side(proofs, candidate_bin_id)
+    parsed = _parse_candidate_id(decision.selected.candidate_id)
+    selected_proof = proof_index.get(parsed) if parsed is not None else None
+    if selected_proof is None:
+        # The spine selected a (bin, side) the reactor has no proof for — a wiring
+        # fault (the proofs and the routes disagree about the family). Typed no-trade.
+        return SpineDecisionResult(
+            selected_proof=None,
+            no_trade_reason=(
+                f"{NO_TRADE_SPINE_WIRING_FAULT}:SELECTED_PROOF_NOT_FOUND:"
+                f"{decision.selected.candidate_id}"
+            ),
+            decision=decision,
+        )
+
+    overlaid = _overlay_spine_economics_onto_proof(selected_proof, decision)
+    return SpineDecisionResult(
+        selected_proof=overlaid,
+        no_trade_reason=None,
+        decision=decision,
+    )
+
+
+def _family_book_builder_from_proofs(
+    proofs: Sequence[Any],
+    candidate_bin_id,
+):
+    """Return a ``FamilyBookBuilder`` that assembles the family book from proof rows.
+
+    This is the resolved family-book input (see module docstring). The reactor's
+    per-family decision seam holds the executable snapshot ROWS on the proofs, not
+    reconstructed ``ExecutableMarketSnapshot`` objects. Rebuilding the full snapshot
+    contract from a raw row is schema-coupled and fragile; instead this builder reads
+    each sibling's four native ladders DIRECTLY off the proof's row
+    (``orderbook_depth_json`` / ``orderbook_depth_jsonb``) into a ``MarketBook`` — the
+    SAME native ladders the reactor priced each proof's ``execution_price`` against. So
+    the route set / candidate economics the spine computes walk the SAME books the
+    reactor's q-build saw, with no second capture and no snapshot reconstruction.
+
+    The returned callable matches the engine's injected ``FamilyBookBuilder`` protocol
+    (``__call__(*, omega, snapshots_by_bin_id, captured_at_utc) -> FamilyBook``); the
+    ``snapshots_by_bin_id`` argument is ignored (the books come from the proofs).
+    """
+    from src.execution.family_book import (
+        ExecutableLadder,
+        MarketBook,
+        build_family_book,
+    )
+    from src.strategy.live_inference.executable_cost import QuoteLevel
+
+    # One row per bin_id (the per-sibling executable surface). A bin's row is taken
+    # from whichever proof on that bin carries it (YES and NO proofs share the row).
+    row_by_bin: dict[str, Any] = {}
+    for proof in proofs:
+        bin_id = candidate_bin_id(proof)
+        if bin_id in row_by_bin:
+            continue
+        row = getattr(proof, "row", None)
+        if isinstance(row, Mapping):
+            row_by_bin[bin_id] = row
+
+    def _levels(side_obj: Any, key: str) -> tuple:
+        levels = []
+        for lvl in (side_obj or {}).get(key, []) or []:
+            try:
+                price = Decimal(str(lvl["price"]))
+                size = Decimal(str(lvl["size"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if price > 0 and size > 0:
+                levels.append(QuoteLevel(price=price, size=size))
+        return tuple(levels)
+
+    def _ladder(side_obj: Any, key: str, *, side: str, tick: Decimal, min_order: Decimal, fee: float):
+        return ExecutableLadder(
+            levels=_levels(side_obj, key),
+            side=side,  # type: ignore[arg-type]
+            fee_rate=fee,
+            min_tick_size=tick,
+            min_order_size=min_order,
+        )
+
+    def _build(*, omega: OutcomeSpace, snapshots_by_bin_id=None, captured_at_utc):  # noqa: ARG001
+        import json as _json
+
+        markets: dict[str, MarketBook] = {}
+        omega_bins = {b.bin_id: b for b in omega.bins}
+        for bin_id, row in row_by_bin.items():
+            if bin_id not in omega_bins:
+                continue
+            bin_meta = omega_bins[bin_id]
+            raw_depth = row.get("orderbook_depth_json") or row.get("orderbook_depth_jsonb") or "{}"
+            try:
+                depth = _json.loads(raw_depth) if isinstance(raw_depth, str) else dict(raw_depth)
+            except (TypeError, ValueError):
+                depth = {}
+            yes = depth.get("YES") or {}
+            no = depth.get("NO") or {}
+            try:
+                tick = Decimal(str(row.get("min_tick_size") or "0.01"))
+                min_order = Decimal(str(row.get("min_order_size") or "5"))
+            except (TypeError, ValueError):
+                tick, min_order = Decimal("0.01"), Decimal("5")
+            fee = 0.0
+            try:
+                fee_details = row.get("fee_details_json")
+                if isinstance(fee_details, str) and fee_details:
+                    fee = float(_json.loads(fee_details).get("fee_rate_fraction", 0.0))
+            except (TypeError, ValueError):
+                fee = 0.0
+            try:
+                market = MarketBook(
+                    condition_id=str(row.get("condition_id") or bin_meta.condition_id or ""),
+                    bin_id=bin_id,
+                    yes_token_id=str(row.get("yes_token_id") or bin_meta.yes_token_id or ""),
+                    no_token_id=str(row.get("no_token_id") or bin_meta.no_token_id or ""),
+                    yes_asks=_ladder(yes, "asks", side="ask", tick=tick, min_order=min_order, fee=fee),
+                    yes_bids=_ladder(yes, "bids", side="bid", tick=tick, min_order=min_order, fee=fee),
+                    no_asks=_ladder(no, "asks", side="ask", tick=tick, min_order=min_order, fee=fee),
+                    no_bids=_ladder(no, "bids", side="bid", tick=tick, min_order=min_order, fee=fee),
+                    neg_risk=bool(row.get("neg_risk") or 0),
+                )
+            except Exception:  # noqa: BLE001 — a malformed sibling book is simply absent
+                continue
+            markets[bin_id] = market
+        return build_family_book(
+            omega=omega, markets=markets, captured_at_utc=captured_at_utc
+        )
+
+    return _build
+
+
+def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_id):
+    """Return a ``RouteSetBuilder`` that prices DIRECT routes at each proof's own cost.
+
+    PROOF-NATIVE single-leg routing (consult_review_pr409_round2.md §1/§5 BLOCKER
+    "direct-native route realization"). The v1 live edge class is a maker buy_no into an
+    empty NO ask, priced as the resting bid behind the complementary book — the reactor
+    already submits this. ``negrisk_routes`` direct-NO walks the NO ASK (taker), which
+    DISCARDS that maker edge. So in v1 the route surface is NOT built off the ask ladder:
+    each reactor ``_CandidateProof`` IS one direct-native route, and its cost is the
+    proof's own ``execution_price`` (the exact maker/taker all-in cost, fee-applied, in
+    probability units, that the unchanged submit path will carry). This builder produces a
+    ``NegRiskRouteSet`` whose ``direct_yes`` / ``direct_no`` per bin are priced at those
+    proof execution prices, with EVERY neg-risk surface empty (synthetic / pair / basket /
+    conversion) — synthetic/arb/conversion stay disabled until a real multi-leg
+    route-intent submit exists. Each route is exactly ONE leg whose token/condition is the
+    proof's, so the selected route maps back to that proof unambiguously.
+
+    The returned callable matches the engine's ``RouteSetBuilder`` protocol
+    ``(family_book, *, shares, enable_negrisk_routes) -> NegRiskRouteSet``; the family_book
+    / shares / flag args are accepted for signature parity but the routes come from the
+    proofs (the proof-native cost is the authority, not the book ladder).
+    """
+    from src.execution.negrisk_routes import NegRiskRouteSet, RouteCost, RouteLeg
+    from src.probability.instruments import Instrument
+
+    direct_yes: dict[str, RouteCost] = {}
+    direct_no: dict[str, RouteCost] = {}
+    for proof in proofs:
+        direction = str(getattr(proof, "direction", "") or "")
+        side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
+        if side is None:
+            continue
+        execution_price = getattr(proof, "execution_price", None)
+        if execution_price is None or getattr(execution_price, "currency", None) != "probability_units":
+            # An unpriced / wrong-unit proof is not a routable direct candidate; the
+            # engine simply has no route for that (bin, side) and never sizes it.
+            continue
+        bin_id = candidate_bin_id(proof)
+        candidate = getattr(proof, "candidate", None)
+        token_id = str(getattr(proof, "token_id", "") or "")
+        condition_id = str(getattr(candidate, "condition_id", "") or "")
+        route_type = "DIRECT_YES" if side == "YES" else "DIRECT_NO"
+        instrument = Instrument(
+            instrument_id=f"{side}:{bin_id}",
+            bin_id=bin_id,
+            side=side,
+            direct_token_id=token_id or None,
+        )
+        leg = RouteLeg(
+            condition_id=condition_id,
+            bin_id=bin_id,
+            token_id=token_id,
+            direction=direction,  # type: ignore[arg-type]
+            shares=Decimal("1"),
+            leg_cost=execution_price,
+        )
+        route = RouteCost(
+            route_id=f"{route_type}:{bin_id}@proof",
+            route_type=route_type,  # type: ignore[arg-type]
+            instrument=instrument,
+            shares=Decimal("1"),
+            avg_cost=execution_price,
+            max_shares=Decimal("1000000"),
+            legs=(leg,),
+            executable=True,
+            reason=None,
+        )
+        target = direct_yes if side == "YES" else direct_no
+        # First proof for a (bin, side) wins (YES and NO proofs are distinct sides).
+        target.setdefault(bin_id, route)
+
+    def _build(family_book, *, shares=Decimal("1"), enable_negrisk_routes=False):  # noqa: ARG001
+        return NegRiskRouteSet(
+            direct_yes=dict(direct_yes),
+            direct_no=dict(direct_no),
+            synthetic_not_i={},
+            pair_arbs=(),
+            full_basket_arbs=(),
+            conversion_routes=(),
+        )
+
+    return _build
+
+
+def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) -> Any:
+    """Overlay the spine decision's economics onto the selected reactor proof.
+
+    The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` / ``trade_score`` /
+    ``execution_price`` etc. off the proof. The spine's selection is the authority now,
+    so the receipt-facing q / edge / trade_score are restamped from the spine's
+    selected ``CandidateEconomics`` (point fair value, robust edge_lcb, optimal ΔU).
+    The executable identity (row / token / execution_price / native_quote_available)
+    is LEFT UNCHANGED — the spine selected this exact executable leg, and the submit
+    pipeline re-authorizes it at submit time. Returns a NEW proof (frozen dataclass
+    replace) so the original tuple is untouched.
+    """
+    from dataclasses import replace
+
+    selected = decision.selected
+    if selected is None:
+        return proof
+    # The spine's point fair value (q @ payoff) is the decision's q for this leg; its
+    # edge_lcb is the robust lower bound; optimal_delta_u is the ΔU. Restamp the
+    # receipt-facing fields; keep the executable identity.
+    try:
+        new_q = float(selected.q_dot_payoff)
+    except Exception:  # noqa: BLE001
+        new_q = float(getattr(proof, "q_posterior", 0.0))
+    try:
+        new_trade_score = float(selected.point_ev)
+    except Exception:  # noqa: BLE001
+        new_trade_score = float(getattr(proof, "trade_score", 0.0))
+    overlay: dict[str, Any] = {
+        "q_posterior": new_q,
+        "trade_score": new_trade_score,
+        "q_source": "qkernel_spine",
+    }
+    # q_lcb_5pct: map the spine's GENUINE robust lower bound into q-space so the legacy
+    # submit pipeline's per-side gate (q_lcb <= q_point, event_reactor_adapter
+    # _native_side_candidate_from_proof) and its binary-Kelly sizing
+    # (f* = (q_lcb - cost)/(1 - cost)) both run on the spine's robust economics, not on
+    # a stale probability-space q_lcb that inverts against the payoff-space q_posterior.
+    #
+    # The spine's vector economics (src/decision/payoff_vector.py) are:
+    #   q_dot_payoff = q @ payoff                       (point fair value, pre-cost)
+    #   point_ev     = q_dot_payoff - cost              (point edge)
+    #   edge_lcb     = quantile(samples @ payoff - cost, alpha)
+    #              = quantile(samples @ payoff) - cost  (robust edge lower bound)
+    # The proof's q_posterior is restamped to q_dot_payoff above, so q_point = q_dot_payoff
+    # = point_ev + cost. Setting
+    #   q_lcb = edge_lcb + cost = quantile(samples @ payoff)
+    # recovers the robust LOWER BOUND of the same payoff-space fair value as the q_point.
+    # `cost` (CandidateEconomics.cost, a typed ExecutionPrice in probability_units) is the
+    # SAME all-in per-share cost the legacy edge/Kelly subtract, so the legacy edge
+    # `q_lcb - cost` reproduces the spine's own `edge_lcb` exactly, and binary Kelly sizes
+    # on edge_lcb/(1-cost) — the robust lower bound, never the point and never the raw
+    # probability. This PRESERVES the robustness margin (it is NOT a clamp-to-point):
+    # because edge_lcb <= point_ev, we get q_lcb <= q_point, strict whenever
+    # edge_lcb < point_ev (the real robust gap), so q_lcb < q_point survives.
+    try:
+        cost_value = float(selected.cost.value)
+        edge_lcb_value = float(selected.edge_lcb)
+        new_q_lcb = max(0.0, min(1.0, edge_lcb_value + cost_value))  # clamp01
+        overlay["q_lcb_5pct"] = new_q_lcb
+    except Exception:  # noqa: BLE001 — missing/typeless economics: leave q_lcb_5pct unchanged
+        pass
+    try:
+        return replace(proof, **overlay)
+    except Exception:  # noqa: BLE001 — if the proof is not a replaceable dataclass, return as-is
+        return proof

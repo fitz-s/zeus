@@ -301,13 +301,19 @@ def test_new_hooks_in_registry() -> None:
 
 
 def test_registry_catalog_size_updated() -> None:
-    """registry.yaml catalog_size must be 15 (was 12 + 3 new hooks)."""
+    """registry.yaml catalog_size must equal the actual hook count.
+
+    De-rotted 2026-06-14 (workspace-routing-redesign S1): was hardcoded ==15
+    (stale since the catalog grew past 15), which made it a perpetual red.
+    Asserting against len(hooks) instead so it tracks the registry and never
+    rots again."""
     import yaml
     registry_path = REPO_ROOT / ".claude" / "hooks" / "registry.yaml"
     registry = yaml.safe_load(registry_path.read_text())
     catalog_size = registry.get("metadata", {}).get("catalog_size")
-    assert catalog_size == 15, (
-        f"registry.yaml catalog_size must be 15; got {catalog_size}"
+    actual = len(registry.get("hooks", []))
+    assert catalog_size == actual, (
+        f"registry.yaml catalog_size ({catalog_size}) must equal hook count ({actual})"
     )
 
 

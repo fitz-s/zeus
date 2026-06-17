@@ -175,13 +175,30 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
         )
     metadata_state, capital_source = _load_riskguard_capital_metadata()
     positions = []
+    quarantined: list[dict] = []
     for row in loader_view.get("positions", []):
         try:
             positions.append(_portfolio_position_from_loader_row(row))
         except ValueError as exc:
-            # B052: Quarantine broken rows and escalate to avoid silent masking
-            logger.error("Quarantining invalid canonical portfolio row: %s", exc)
-            raise RuntimeError(f"RiskGuard DB loader fault: {exc}")
+            # B052 (2026-06-16 incident fix): QUARANTINE the un-loadable row and CONTINUE
+            # the tick — do NOT re-raise. The prior `raise` turned ONE un-loadable canonical
+            # row into a failed tick -> RiskGuard STALE -> trader fail-closed RED -> ALL
+            # trading blocked. Disabling the entire risk system because of a single bad row
+            # is strictly WORSE for risk than excluding that row. The trigger here was a
+            # dual-id recovered-fill DUPLICATE (its on-chain exposure already accounted via
+            # the canonical position, so excluding it neither double- nor under-counts), but
+            # the resilience is general. "Avoid silent masking" (the original B052 intent) is
+            # preserved by a LOUD, COUNTED, EXPOSED quarantine (ERROR log + quarantined_count
+            # in the returned truth dict) — not by crashing the whole tick.
+            logger.error(
+                "RiskGuard quarantined un-loadable canonical portfolio row "
+                "(excluded from risk view; tick CONTINUES): trade_id=%s state=%s: %s",
+                row.get("trade_id"), row.get("state"), exc,
+            )
+            quarantined.append(
+                {"trade_id": row.get("trade_id"), "state": row.get("state"), "reason": str(exc)}
+            )
+            continue
 
     # B053 [YELLOW / flag for SD-A authority-separation reviewer]:
     # Dual-source consistency locking. A position-count mismatch between
@@ -191,10 +208,12 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
     # callers can fail-close on `consistency_lock == 'mismatched'` rather
     # than silently blend inconsistent authority sources.
     metadata_positions = getattr(metadata_state, "positions", [])
-    if len(positions) != len(metadata_positions):
+    # Account for quarantined rows: a KNOWN exclusion (see the loader loop) is not drift,
+    # so it must not raise a false B053 mismatch on every tick.
+    if (len(positions) + len(quarantined)) != len(metadata_positions):
         logger.error(
-            "B053 Consistency Mismatch: canonical_db has %d positions vs %d in capital metadata. RiskGuard blending MUST NOT proceed on the blended view without caller-side consistency_lock check.",
-            len(positions), len(metadata_positions)
+            "B053 Consistency Mismatch: canonical_db has %d positions (+%d quarantined) vs %d in capital metadata. RiskGuard blending MUST NOT proceed on the blended view without caller-side consistency_lock check.",
+            len(positions), len(quarantined), len(metadata_positions)
         )
 
     # Bankroll truth comes from on-chain wallet via src.runtime.bankroll_provider.
@@ -214,14 +233,21 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
         recent_exits=list(getattr(metadata_state, "recent_exits", []) or []),
         ignored_tokens=list(getattr(metadata_state, "ignored_tokens", []) or []),
     )
+    # B053 consistency lock accounts for QUARANTINED rows: a row excluded by the loader
+    # above is a KNOWN exclusion, not silent drift, so the canonical/metadata comparison
+    # adds them back. Otherwise every quarantine would falsely read as 'mismatched' and
+    # could fail-close a healthy tick — re-creating the very block this fix removes.
+    canonical_known_count = len(positions) + len(quarantined)
     return portfolio, {
         "source": "position_current",
         "loader_status": str(loader_view.get("status") or "unknown"),
         "fallback_active": False,
         "fallback_reason": "",
         "position_count": len(positions),
+        "quarantined_count": len(quarantined),
+        "quarantined_rows": quarantined,
         "capital_source": "dual_source_blended",
-        "consistency_lock": "pass" if len(positions) == len(metadata_positions) else "mismatched",
+        "consistency_lock": "pass" if canonical_known_count == len(metadata_positions) else "mismatched",
         # B053: expose both source counts so callers can diff explicitly
         # rather than rely on a single boolean lock.
         "metadata_position_count": len(metadata_positions),

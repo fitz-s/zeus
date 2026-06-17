@@ -827,7 +827,11 @@ def _persist_chunk_with_lock_retry(
             ensure_replacement_forecast_shadow_schema(conn)
             if rows:
                 _scan_and_audit_request_conflicts(conn, rows)
-            conn.execute("BEGIN")
+            # BEGIN IMMEDIATE: take the write lock up front so busy_timeout WAITS for it,
+            # instead of a deferred BEGIN failing on the SELECT->INSERT upgrade under
+            # rollback-journal (delete) mode contention with the other forecast-DB writers
+            # (the "database is locked" storm that starved precision-fusion captures).
+            conn.execute("BEGIN IMMEDIATE")
             try:
                 if rows:
                     written = _persist_rows(conn, rows)

@@ -164,7 +164,7 @@ def build_replacement_forecast_readiness(
             product_id="missing_dependency",
             data_version="missing_dependency",
             source_run_id=None,
-            source_available_at=decision_utc,
+            source_available_at=decision_utc,  # AVAIL-POSSESSION-EXEMPTED: synthetic stub for a MISSING role (already status=BLOCKED + REPLACEMENT_DEPENDENCY_MISSING). The role has no source/source_run, so no possession time is threadable; decision_utc is the only anchor and is benign at the :185 `> decision_utc` not-future check (decision_utc>decision_utc is False; the role is already BLOCKED regardless). Real roles set source_available_at from honest values upstream.
             status=BLOCKED_STATUS,
         )
 

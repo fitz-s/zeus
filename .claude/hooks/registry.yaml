@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 22
+  catalog_size: 21
   sunset_default: 90d
 
 hooks:
@@ -197,29 +197,13 @@ hooks:
     telemetry:
       ritual_signal_emitted: true
 
-  - id: pre_edit_architecture
-    event: PreToolUse
-    matcher: "Edit|Write|MultiEdit|NotebookEdit"
-    intent: >
-      Advisory on edits to architecture/** without ARCH_PLAN_EVIDENCE.
-      ADVISORY: emits context; never blocks.
-    blocked_when: []
-    severity: ADVISORY
-    sunset_date: 2026-08-06
-    telemetry:
-      ritual_signal_emitted: true
-
-  - id: pre_write_capability_gate
-    event: PreToolUse
-    matcher: "Edit|Write|MultiEdit|NotebookEdit"
-    intent: >
-      Topology Gate 1 advisory -- writes to blocking-class capability paths.
-      ADVISORY: emits context; never blocks.
-    blocked_when: []
-    severity: ADVISORY
-    sunset_date: 2026-08-04
-    telemetry:
-      ritual_signal_emitted: true
+  # pre_edit_architecture + pre_write_capability_gate DELETED 2026-06-14
+  # (workspace-routing-redesign S3 collapse, PLAN §5). Both were ADVISORY-only
+  # (never blocked = zero enforcement value) placement/capability checks on the
+  # Edit/Write line. Placement is now owned structurally by route_write
+  # (silent-route + nudge + cross-tenant HARD-STOP). Per operator gate-mass law:
+  # collapse decayed advisories, do not re-implement them. Edit-line keeps only
+  # citation_grep_gate.
 
   - id: session_start_visibility
     event: SessionStart
@@ -361,3 +345,28 @@ hooks:
     telemetry:
       ritual_signal_emitted: true
     owner_module: .claude/hooks/dispatch.py
+
+  - id: route_write
+    event: PreToolUse
+    matcher: Write
+    intent: >
+      Write-router (workspace-routing-redesign PLAN §6). On a NEW-file Write, put
+      the file in its canonical home at write time by rewriting file_path via
+      updatedInput (SILENT-ROUTE) — the Write tool result reports the rewritten
+      path, so the agent's own path model is corrected with zero friction. NUDGE
+      when home is ambiguous; ASK for ambiguous authority homes; HARD-STOP (exit
+      2) ONLY on cross-tenant worktree writes or authority-file clobber — never
+      for mere misplacement. WRITE-ONLY: never reroutes Edit/MultiEdit (old_string
+      built against the original file → reroute corrupts). Registered BLOCKING so
+      removal/breakage is a protected change caught by tests/test_route_write.py.
+      S1 scope: high-precision scratch -> .omx/ + cross-tenant block; by-work
+      routing lands with S0. Fail-open on any exception (a crash never blocks a
+      write).
+    blocked_when:
+      - cross_tenant_worktree_write
+      - authority_file_clobber
+    severity: BLOCKING
+    sunset_date: 2026-12-14
+    telemetry:
+      ritual_signal_emitted: true
+    owner_module: .claude/hooks/route_write.py

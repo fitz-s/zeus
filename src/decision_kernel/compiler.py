@@ -192,7 +192,7 @@ class DecisionCompiler:
             algorithm_version="v1",
             parent_edges=(edge("clock_mode", clock),),
             parent_certificates=(clock,),
-            source_available_at=decision_time,
+            source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (NO_SUBMIT_MODE record generated AT decision_time, wraps no external source); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, max_parent_* monotonicity — never a freshness gate or q. decision_time is the only honest anchor.
             agent_received_at=decision_time,
             persisted_at=decision_time,
         )
@@ -227,7 +227,21 @@ class DecisionCompiler:
                 payload={
                     "event_id": event.event_id,
                     "event_type": event.event_type,
-                    "decision_source": "forecast" if event.event_type == "FORECAST_SNAPSHOT_READY" else "day0_or_other",
+                    # FORECAST no-submit scope = BOTH forecast-decision event types. EDLI_REDECISION_PENDING
+                    # (the price-driven re-decision lane introduced 2026-06-12) re-decides a forecast family
+                    # through THIS forecast compile path (forecast/calibration/belief parents above), so its
+                    # no-submit decision_source is "forecast", not "day0_or_other". The prior FSR-only label
+                    # made every EDLI_REDECISION no-submit fail verify_no_submit_decision ("unsupported
+                    # decision_source") -> certificate REJECTED -> receipt NEVER written. That silently killed
+                    # the edli_no_submit_receipts claim stream on 2026-06-12T12:12 (the day the redecision lane
+                    # became the dominant forecast-decision path), starving the q_lcb_settlement_coverage_gate
+                    # of its per-day claimed-q_lcb input -> proven NO over-confidence (78% claimed vs 60%
+                    # realized) ran uncorrected into live sizing. Mirrors reactor._FORECAST_DECISION_EVENT_TYPES.
+                    "decision_source": (
+                        "forecast"
+                        if event.event_type in ("FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING")
+                        else "day0_or_other"
+                    ),
                     "final_intent_id": proof_bundle.final_intent_id,
                     "side_effect_status": "NO_SUBMIT",
                     "proof_accepted": bool(proof_bundle.no_submit_projection.get("proof_accepted")),
@@ -242,7 +256,7 @@ class DecisionCompiler:
                     "header_persisted_at_semantics": "decision_kernel_generated_at_decision_time",
                     "db_created_at_may_follow_header_persisted_at": True,
                 },
-                source_available_at=decision_time,
+                source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (NO_SUBMIT decision generated AT decision_time per generated_at_decision_time payload flag, wraps no external source); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, max_parent_* monotonicity — never a freshness gate or q. decision_time is the only honest anchor.
                 agent_received_at=decision_time,
                 persisted_at=decision_time,
             )
@@ -303,7 +317,7 @@ class DecisionCompiler:
             authority_version=DECISION_KERNEL_AUTHORITY_VERSION,
             algorithm_id="decision_kernel.clock",
             algorithm_version="v1",
-            source_available_at=decision_time,
+            source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (CLOCK_MODE record; clock_source=reactor_decision_time, wraps no external source); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, max_parent_* monotonicity — never a freshness gate or q. decision_time is the only honest anchor.
             agent_received_at=decision_time,
             persisted_at=decision_time,
         )

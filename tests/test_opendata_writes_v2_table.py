@@ -627,8 +627,14 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
             "high_temp",
             "2026-05-01T00:00:00+00:00",
             "2026-05-09T00:00:00+00:00",
-            "2026-05-01T09:00:00+00:00",
-            "2026-05-01T09:00:00+00:00",
+            # available_at / fetch_time of the PRIOR-run rows: a prior ingest possessed this data
+            # EARLIER than the current run's possession clock (now_utc=09:00). Seeding 08:00 (one
+            # hour before) keeps fetch_time strictly < snapshot_possession_at so the stale-row
+            # cleanup deletes them. (Pre-M5 this fixture used 09:00 and passed only because the
+            # cleanup compared against real wall-clock now; M5 threads the injected clock, so the
+            # prior possession must be modelled as genuinely earlier.)
+            "2026-05-01T08:00:00+00:00",
+            "2026-05-01T08:00:00+00:00",
             192.0,
             json.dumps([18.0] * 51),
             "ecmwf_open_data",

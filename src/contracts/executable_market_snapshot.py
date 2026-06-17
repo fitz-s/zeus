@@ -30,7 +30,21 @@ from typing import Any, Literal, Mapping, Optional
 AuthorityTier = Literal["GAMMA", "DATA", "CLOB", "CHAIN"]
 OutcomeLabel = Literal["YES", "NO"]
 
-FRESHNESS_WINDOW_DEFAULT = timedelta(seconds=30)
+# SELECTION freshness window (warm-cycle executable substrate). Widened 30s -> 180s
+# (2026-06-15) to fix the #122 freshness-capture OSCILLATION: the warm capture cycle
+# refreshes families every ~2 min, but a 30s window left fresh_executable_city_count
+# at 0 almost always (briefly ~24 right after a capture burst), starving the reactor's
+# SELECTION lane so the calibrated spine never got a fresh forecast family to price ->
+# the validated favorite-longshot harvest could not fire. 180s covers the warm-capture
+# cadence so families stay continuously fresh-executable for SELECTION/pricing.
+# K=1 LAW (#39) PRESERVED: this widens ONLY the selection/pricing window. The SUBMISSION
+# price is unchanged and tight — the submit path does a JIT /book re-fetch with the
+# SEPARATE _K1_DEFAULT_PRESUBMIT_FRESHNESS_SECONDS=30s window plus
+# build_pre_submit_revalidation_certificate, which ABORTS (SUBMIT_ABORTED_PRICE_MOVED)
+# if the price moved since selection. So the final money-decision price is still the
+# fresh re-fetched+revalidated one; only the pricing snapshot may be up to 180s old, and
+# the venue submission re-validates it. Thin/slow weather books rarely move within 180s.
+FRESHNESS_WINDOW_DEFAULT = timedelta(seconds=180)
 
 # PR 2: Polymarket UI displays last-trade price as midpoint when spread >= this.
 # $0.10 is community-verified behavior (rocknblock.io analysis + Polymarket

@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.execution.maker_rest_escalation import (
     find_expired_resting_entries,
+    run_cancels_for_expired_rests,
     run_maker_rest_escalation_cycle,
 )
 
@@ -100,7 +101,7 @@ class TestScopeGuards:
             conn,
             command_id="c1",
             venue_order_id="o1",
-            created_at=NOW - timedelta(minutes=60),  # < 120-min deadline
+            created_at=NOW - timedelta(minutes=10),  # < 20-min deadline (2026-06-16)
         )
         clob = _FakeClob()
         stats = run_maker_rest_escalation_cycle(conn, clob, now=NOW)
@@ -179,6 +180,51 @@ class TestFailSoft:
         stats = run_maker_rest_escalation_cycle(conn, clob, now=NOW)
         assert clob.cancelled == ["o2"]
         assert stats == {"scanned": 2, "cancelled": 1, "cancel_failed": 1}
+
+
+class TestEscalationRedecisionHarvest:
+    """collect_cancelled out-parameter (redecide-block fix 2026-06-16): the cancel
+    path harvests EXACTLY the CONFIRMED-cancelled entries — the caller emits ONE
+    Tier-0 EDLI_REDECISION_PENDING per harvested family. A cancel_failed entry is
+    NEVER harvested (no re-decision for a family whose rest was not actually pulled).
+    """
+
+    def test_one_harvest_per_confirmed_cancel(self):
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+        _add_order(conn, command_id="c2", venue_order_id="o2")
+        expired = find_expired_resting_entries(conn, now=NOW)
+        collected: list[dict] = []
+        clob = _FakeClob()
+        stats = run_cancels_for_expired_rests(expired, clob, collect_cancelled=collected)
+        assert stats == {"scanned": 2, "cancelled": 2, "cancel_failed": 0}
+        # Exactly one harvested entry per confirmed cancel, each carrying the
+        # family-recovery handles (token_id / market_id / command_id).
+        assert len(collected) == 2
+        assert {e["command_id"] for e in collected} == {"c1", "c2"}
+        assert all(e.get("token_id") for e in collected)
+
+    def test_cancel_failed_is_not_harvested(self):
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+        _add_order(conn, command_id="c2", venue_order_id="o2")
+        expired = find_expired_resting_entries(conn, now=NOW)
+        collected: list[dict] = []
+        clob = _FakeClob(fail_on={"o1"})
+        stats = run_cancels_for_expired_rests(expired, clob, collect_cancelled=collected)
+        assert stats == {"scanned": 2, "cancelled": 1, "cancel_failed": 1}
+        # ONLY the confirmed cancel (c2) is harvested; the failed one (c1) is not.
+        assert [e["command_id"] for e in collected] == ["c2"]
+
+    def test_no_collect_list_preserves_byte_identical_stats(self):
+        """Default (collect_cancelled=None): stats and behavior are byte-identical
+        to the pre-fix contract — the existing exact-equality callers/tests hold."""
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+        expired = find_expired_resting_entries(conn, now=NOW)
+        clob = _FakeClob()
+        stats = run_cancels_for_expired_rests(expired, clob)
+        assert stats == {"scanned": 1, "cancelled": 1, "cancel_failed": 0}
 
 
 class TestDeadlineSource:

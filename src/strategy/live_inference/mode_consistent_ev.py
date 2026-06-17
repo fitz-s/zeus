@@ -113,19 +113,29 @@ PLACEMENT_TAKER = "taker_cross"
 # ~25-minute rests of deep-longshot quotes — the wrong population (Fitz #4).
 # =============================================================================
 
-# Escalation deadline for a resting maker entry. basis=MEASURED: the KM curve
-# reaches 0.39 cumulative fill by 120 min and the at-risk set is still thick
-# there (beyond ~240 min it is too thin to certify). Registry-tracked in
-# src/contracts/time_semantics.py as maker_rest_escalation_deadline (2.0 h).
-MAKER_REST_ESCALATION_DEADLINE_MINUTES = 120.0
+# Escalation deadline for a resting maker entry. 2026-06-16: 120 -> 20 min.
+# RATIONALE (settlement-graded): the KM fill curve is nearly FLAT 15-60 min
+# (0.188@15, 0.214@60, 0.390@120) — waiting to 120 min buys little extra maker
+# fill but forfeits the cross for 2h. A settlement counterfactual on 49 settled
+# day-ahead buy_no picks (NO won 41/49 = 84%, +$88.33 at $10/order vs $0 actually
+# captured because all rested unfilled) proves the ADMISSIBLE cross (ask+fee <=
+# q_lcb) of the unfilled remainder is POSITIVE after cost. The objective is
+# FILLS-fast (maker OR cross), NOT maker-fill-rate. 20 min keeps a real
+# maker-first window (captures the ~0.19 fast-fill cohort, honoring the
+# Denver/Karachi rest-first antibody — this is NOT an immediate cross) then
+# escalates to the settlement-proven +EV cross. basis=SETTLEMENT-EVIDENCE
+# (interim; fit the optimal deadline from the KM curve x settlement EV per #64).
+# Registry-tracked in src/contracts/time_semantics.py as
+# maker_rest_escalation_deadline (now ~0.33 h).
+MAKER_REST_ESCALATION_DEADLINE_MINUTES = 20.0
 
 # Maker fill probability AT the escalation-deadline horizon. basis=MEASURED
 # (KM @120min, all-band). Used for the recorded EV provenance of a REST
 # decision — the EV of the policy's first leg. NOT a one-shot point prior;
 # the policy, not this number, decides the mode.
-MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE = 0.39
+MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE = 0.19
 MAKER_FILL_PROBABILITY_DEADLINE_SOURCE = (
-    "km_2026_06_10_resting_facts_n108@120min:basis=MEASURED"
+    "km_2026_06_10_resting_facts_n108@~20min(0.188@15min):basis=MEASURED"
 )
 
 # Taker-immediate exception lane 1: event end too near for the rest-then-cross
@@ -495,8 +505,29 @@ def select_rest_then_cross_mode(
     )
     from dataclasses import replace as _replace
 
+    # FIX B (#127, 2026-06-15) — SETTLEMENT-HONEST q_lcb CAP on EVERY cross lane.
+    # HARD LAW: a taker cross may NEVER execute above the conservative q_lcb. A
+    # marketable taker is admissible ONLY when the FRESH all-in taker cost (best
+    # ask + fee, or the certified sweep cost passed as taker_all_in_cost) clears
+    # the conservative bound — i.e. <= q_lcb. When the fresh ask sits above q_lcb
+    # (the Chengdu 0.73-ask vs 0.72-q_lcb case) the taker lane is INADMISSIBLE and
+    # the policy stays MAKER / no-trade — a correct outcome, not a forced fill, and
+    # NOT a taker the downstream cert builder would have to reject (that produced a
+    # MODE_FLIPPED / TOUCH_EXCEEDS_RESERVATION churn loop instead of a clean rest).
+    # This gate does not LOOSEN anything: it makes every taker lane STRICTER, fully
+    # consistent with the conservative-entry law and the existing cert-builder cap
+    # (event_reactor_adapter TAKER_BUY_TOUCH_EXCEEDS_RESERVATION). The wide-spread
+    # guard and the REST_DEFAULT doctrine (a favorable all-in alone does NOT license
+    # an immediate cross — the Karachi antibody) remain in force above this.
+    _q = float(q_lcb)
+    _taker_cost = _finite(taker_all_in_cost)
+    taker_clears_conservative_bound = (
+        _taker_cost is not None and _taker_cost <= _q + 1e-9
+    )
     taker_admissible = (
-        mode_ev.ev_taker is not None and mode_ev.taker_forbidden_reason is None
+        mode_ev.ev_taker is not None
+        and mode_ev.taker_forbidden_reason is None
+        and taker_clears_conservative_bound
     )
     maker_admissible = (
         mode_ev.ev_maker is not None and mode_ev.maker_limit_price is not None

@@ -80,7 +80,7 @@ OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 # strictly less than this so a cycle finishes before its next trigger; otherwise
 # max_instances=1 skips every overlapping run ("maximum number of running instances
 # reached"), the executable substrate is never refreshed, and the armed daemon is
-# starved of candidates. The interval also stays within the 30s executable-price
+# starved of candidates. The interval also stays within the 180s executable-price
 # freshness window. The invariant is asserted at job registration.
 _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
 
@@ -91,6 +91,15 @@ _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
 # consecutive cycles cover disjoint families and the whole live set is swept
 # within a bounded number of cycles. See _refresh_pending_family_snapshots.
 _SUBSTRATE_REFRESH_CURSOR = 0
+# FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): family_key -> monotonic
+# deadline until which a NO-topology family whose Gamma slug lookup returned an
+# EMPTY event list (no Polymarket market listed yet for a future target_date) is
+# NOT re-probed. Stops not-yet-listed future families (measured 200/200 such were
+# next-day lows/highs probed the day before listing) from clogging the bounded
+# Gamma time-box every ~20s warm cycle and starving CLOB capture of families that
+# DO have topology — the fresh_executable_city_count 0-oscillation. Module-global
+# (mirrors _SUBSTRATE_REFRESH_CURSOR); resets on restart (cold re-warm is fine).
+_GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 # New-listing scout (FIX 3c): condition_ids discovered by the 60s scout that have
 # not yet been seen at the head of the substrate-warmer rotation.  The warmer
 # reads + clears this set and prepends matching families so new markets are warmed
@@ -2615,6 +2624,27 @@ def _edli_next_redecision_source() -> str:
     return f"cycle-{_edli_redecision_boot_token}-{n}"
 
 
+def _edli_next_escalation_cross_source() -> str:
+    """Return the next ESCALATION-cross re-decision emit source.
+
+    Format ``escalation_cross-{TOKEN}-{N}`` — same restart-/within-process-unique
+    scheme as ``_edli_next_redecision_source`` (shared boot token + monotonic N) so
+    each escalation re-decision gets a distinct idempotency_key and does NOT dedup
+    against the consumed FSR or the continuous ``cycle-*`` re-emit. The
+    ``escalation_cross-`` PREFIX is the discriminator the claim-tier authority
+    (``src.events.event_priority.claim_tier_expr_sql``) keys off to rank these
+    re-decisions at Tier 0 — below the 49-deep per-city round-robin (redecide-block
+    fix 2026-06-16). N has no internal hyphens, so ``split('-')[-1]`` stays an int
+    for the fairness-cursor parse in scan_committed_snapshots.
+    """
+    from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
+
+    global _edli_redecision_cycle_index
+    n = _edli_redecision_cycle_index
+    _edli_redecision_cycle_index = n + 1
+    return f"{ESCALATION_CROSS_SOURCE_PREFIX}{_edli_redecision_boot_token}-{n}"
+
+
 def _reset_edli_redecision_cycle_index() -> None:
     """Test hook: reset the monotonic redecision cycle counter to 0."""
     global _edli_redecision_cycle_index
@@ -3427,7 +3457,7 @@ def _refresh_pending_family_snapshots(
     # of the rotation so they are warmed in the NEXT cycle rather than waiting at
     # the tail of the round-robin.  Translate condition_ids → (city, date, metric)
     # tuples via the topology DB, then prepend to families before cursor rotation.
-    global _SUBSTRATE_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS
+    global _SUBSTRATE_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS, _GAMMA_EMPTY_BACKOFF_UNTIL
     new_priority_families: list[tuple[str, str, str]] = []
     if _NEW_FAMILY_CONDITION_IDS:
         try:
@@ -3458,7 +3488,7 @@ def _refresh_pending_family_snapshots(
 
     # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
     # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
-    # INTERVAL_SECONDS, 20s) and MUST stay within the 30s executable-price freshness
+    # INTERVAL_SECONDS, 20s) and MUST stay within the 180s executable-price freshness
     # window. The prior 29.0 default predated the reactor→warm-cycle split (blame
     # 014408394f, sized for the old 1-min reactor interval) and was never re-aligned:
     # a 29s budget on a 20s interval guarantees the cycle overruns its own trigger,
@@ -3477,6 +3507,12 @@ def _refresh_pending_family_snapshots(
     snapshot_reserve_s = min(
         max(1.0, float(os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0"))),
         max(0.1, refresh_budget_s - 0.1),
+    )
+    # FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): cooldown (seconds) a
+    # no-topology, Gamma-empty family is parked before re-probing. 0 disables.
+    _gamma_empty_backoff_s = max(
+        0.0,
+        float(os.environ.get("ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS", "300.0")),
     )
     topology_deadline = _topology_lookup_deadline_for_snapshot_refresh(
         refresh_deadline=refresh_deadline,
@@ -3504,6 +3540,7 @@ def _refresh_pending_family_snapshots(
     #         Families with ANY stale/missing bin still proceed to Gamma fetch.
     fresh_skipped = 0
     no_topology = 0
+    no_topology_backed_off = 0
     venue_closed_skipped = 0
     gamma_refresh_families: list[tuple[str, str, str]] = []
     cached_topology_markets: list[dict] = []
@@ -3569,6 +3606,27 @@ def _refresh_pending_family_snapshots(
             topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
             if not topology_rows:
                 no_topology += 1
+                # FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): if this
+                # no-topology family's last Gamma slug lookup returned an EMPTY
+                # event list (no Polymarket market listed yet for this future
+                # target_date) and we are still inside its cooldown, do NOT re-add
+                # it to the Gamma probe set this cycle. Re-probing not-yet-listed
+                # future families every ~20s warm tick returns empty every time,
+                # exhausts the bounded Gamma time-box, and starves CLOB capture of
+                # families that DO have topology (the fresh_executable_city_count
+                # 0-oscillation, measured 200/200 backed-off were next-day
+                # lows/highs). The family stays a pending event and is re-probed
+                # the moment the cooldown expires — captured as soon as the market
+                # lists. Symmetric twin of the _family_venue_closed past-skip: a
+                # focus/efficiency skip, never a terminal drop. Env
+                # ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS=0 disables.
+                nb_key = _refresh_family_key(city, target_date, metric)
+                if (
+                    _gamma_empty_backoff_s > 0.0
+                    and _GAMMA_EMPTY_BACKOFF_UNTIL.get(nb_key, 0.0) > time.monotonic()
+                ):
+                    no_topology_backed_off += 1
+                    continue
                 logger.debug(
                     "refresh_pending_family_snapshots: no market topology for %s/%s/%s "
                     "(no Polymarket market for this family — event will be rejected at gate)",
@@ -3726,7 +3784,7 @@ def _refresh_pending_family_snapshots(
             def _fetch_gamma_slug(job: dict) -> dict:
                 remaining = max(0.1, gamma_deadline - time.monotonic())
                 _gamma_timeout = min(
-                    max(1.0, float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "10.0"))),
+                    max(1.0, float(os.environ.get("ZEUS_DISCOVERY_GAMMA_TIMEOUT_SECONDS", "10.0"))),
                     remaining,
                 )
                 slug = str(job["slug"])
@@ -3902,6 +3960,17 @@ def _refresh_pending_family_snapshots(
 
             gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
 
+            # FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): families whose
+            # Gamma slug lookup returned an EMPTY event list this cycle have no
+            # market listed yet; park them for the cooldown so they stop clogging
+            # the Gamma time-box every warm tick. Only genuinely-probed-empty
+            # families are parked — timebox_unattempted (never probed) families
+            # stay immediately retryable next cycle.
+            if _gamma_empty_backoff_s > 0.0 and gamma_empty_family_keys:
+                _eb_deadline = time.monotonic() + _gamma_empty_backoff_s
+                for _eb_key in gamma_empty_family_keys:
+                    _GAMMA_EMPTY_BACKOFF_UNTIL[_eb_key] = _eb_deadline
+
             # 2026-06-06 throughput repair: keep this refresh truly scoped to pending
             # families. The old fallback called the global weather discovery scanner,
             # which performs a tag/slug sweep and routinely exhausts its
@@ -4067,6 +4136,7 @@ def _refresh_pending_family_snapshots(
         "cached_topology_families": cached_topology_families,
         "cached_topology_incomplete": cached_topology_incomplete,
         "no_topology": no_topology,
+        "no_topology_backed_off": no_topology_backed_off,
         "fresh_skipped": fresh_skipped,
         "venue_closed_skipped": venue_closed_skipped,
         "topology_budget_exhausted": int(topology_budget_exhausted),
@@ -5060,6 +5130,31 @@ def _join_boot_wallet_warm(
         )
 
 
+def _warn_if_cadence_uncovered(
+    effective_sweep_period_s: float,
+    freshness_window_s: float,
+) -> None:
+    """Cadence-coverage guard (C5, timing-semantics fix 2026-06-16).
+
+    BASIS: the selection freshness window is only honored when the daemon's
+    effective sweep cadence keeps pace.  If effective_sweep_period_s exceeds
+    freshness_window_s, the snapshot captured in one cycle is already past the
+    freshness deadline by the time the next cycle even starts, so every
+    selection silently reads stale data and falls back — the exact
+    reactor-lane starvation fixed in #122, now guarded explicitly.
+
+    WARNING only — does NOT raise, does NOT exit, does NOT block boot.
+    """
+    if effective_sweep_period_s > freshness_window_s:
+        logger.warning(
+            "CADENCE UNCOVERED: effective sweep period %.1fs exceeds selection "
+            "freshness window %.1fs; selections will read stale data and fall "
+            "back. Shorten sweep or widen freshness.",
+            effective_sweep_period_s,
+            freshness_window_s,
+        )
+
+
 # Sentinel: distinguishes "caller handed a warm record (possibly None)" from
 # "no warm record supplied — gate must self-fetch via current()".
 _WALLET_RECORD_UNSET = object()
@@ -5528,62 +5623,13 @@ def _replacement_forecast_refit_decision_from_settings():
         return None
 
 
-def _replacement_forecast_promotion_evidence_from_settings():
-    from src.config import PROJECT_ROOT
-    from src.data.replacement_forecast_go_live_report import (
-        replacement_forecast_promotion_evidence_from_payload,
-    )
-
-    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
-    raw_path = cfg.get("promotion_evidence_path") or "state/replacement_forecast_shadow/promotion_evidence.json"
-    path = Path(str(raw_path))
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
-        logger.warning("replacement forecast promotion evidence unreadable: %s", exc)
-        return None
-    if not isinstance(payload, dict):
-        logger.warning("replacement forecast promotion evidence must be a JSON object: %s", path)
-        return None
-    try:
-        return replacement_forecast_promotion_evidence_from_payload(payload)
-    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
-        logger.warning("replacement forecast promotion evidence invalid: %s", exc)
-        return None
-
-
-def _replacement_forecast_capital_objective_evidence_from_settings():
-    from src.config import PROJECT_ROOT
-    from src.data.replacement_forecast_go_live_report import (
-        replacement_forecast_capital_objective_evidence_from_payload,
-    )
-
-    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
-    raw_path = cfg.get("promotion_evidence_path") or "state/replacement_forecast_shadow/promotion_evidence.json"
-    path = Path(str(raw_path))
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
-        logger.warning("replacement forecast capital objective evidence unreadable: %s", exc)
-        return None
-    if not isinstance(payload, dict):
-        logger.warning("replacement forecast capital objective evidence must be a JSON object: %s", path)
-        return None
-    try:
-        return replacement_forecast_capital_objective_evidence_from_payload(payload)
-    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
-        logger.warning("replacement forecast capital objective evidence invalid: %s", exc)
-        return None
-
-
+# DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the promotion / capital-objective
+# evidence parsers (_replacement_forecast_{promotion,capital_objective}_evidence_from_
+# settings) were REMOVED. They imported the deleted go_live_report verdict module and
+# fed the runtime-policy resolver / switch-decision evaluator — both of which IGNORE
+# these objects post-operator-severance (commits b646f99339 + 54a53334a9: LIVE_AUTHORITY
+# is FLAG-ONLY). The two live-adapter call sites now pass None (the adapter default),
+# which is behavior-identical. See docs/evidence/timing_audit/.
 def _sqlite_table_names(conn) -> tuple[str, ...]:
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
     names: list[str] = []
@@ -5932,8 +5978,11 @@ def _edli_event_reactor_cycle() -> None:
         process_pending_decision_time = datetime.now(timezone.utc)
         replacement_forecast_runtime_flags = _replacement_forecast_runtime_flags_from_settings()
         replacement_forecast_refit_decision = _replacement_forecast_refit_decision_from_settings()
-        replacement_forecast_promotion_evidence = _replacement_forecast_promotion_evidence_from_settings()
-        replacement_forecast_capital_objective_evidence = _replacement_forecast_capital_objective_evidence_from_settings()
+        # DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the runtime-policy resolver and
+        # switch-decision evaluator IGNORE these evidence objects post-severance
+        # (LIVE_AUTHORITY is FLAG-ONLY). None is behavior-identical to the deleted parsers.
+        replacement_forecast_promotion_evidence = None
+        replacement_forecast_capital_objective_evidence = None
         replacement_forecast_baseline_bundle_provider = replacement_forecast_baseline_bundle_provider_from_forecast_conn(
             forecasts_conn
         )
@@ -6243,6 +6292,141 @@ def _edli_command_recovery_cycle() -> None:
         logger.info("edli_command_recovery: %s", summary)
 
 
+def _escalation_families_from_cancelled(
+    cancelled: list[dict],
+    trade_conn,
+    forecasts_conn,
+) -> set[tuple[str, str, str]]:
+    """Recover the ``(city, target_date, metric)`` family key for each just-cancelled
+    escalation rest, from VENUE TRUTH (no cached-belief dependency).
+
+    Path (both legs are the canonical, already-proven joins):
+      1. ``venue_commands.token_id`` -> ``condition_id`` via the freshest
+         ``executable_market_snapshots.selected_outcome_token_id`` row (the SAME
+         token->condition resolution the continuous-redecision rest screen uses,
+         ``_edli_open_maker_rests_for_screen``).
+      2. ``condition_id`` -> ``(city, target_date, temperature_metric)`` via
+         ``market_events`` (forecasts DB) — the canonical condition->family map the
+         FSR re-emit machinery already trusts (its ``market_filter`` joins the same
+         table on city/target_date/metric).
+
+    Pure reads on read-only connections. Best-effort per entry: a row that cannot be
+    resolved (no snapshot, no market_events) is SKIPPED (the standard round-robin
+    still reaches it eventually) rather than crashing the cancel job.
+    """
+    token_ids = {str(e.get("token_id") or "") for e in cancelled if e.get("token_id")}
+    if not token_ids:
+        return set()
+    cond_by_token: dict[str, str] = {}
+    try:
+        tph = ",".join("?" for _ in token_ids)
+        for cr in trade_conn.execute(
+            f"""
+            SELECT selected_outcome_token_id, condition_id,
+                   ROW_NUMBER() OVER (PARTITION BY selected_outcome_token_id
+                                      ORDER BY captured_at DESC) AS rn
+            FROM executable_market_snapshots
+            WHERE selected_outcome_token_id IN ({tph})
+            """,
+            tuple(token_ids),
+        ).fetchall():
+            if cr[2] == 1 and cr[0] and cr[1]:
+                cond_by_token[str(cr[0])] = str(cr[1])
+    except Exception:  # noqa: BLE001 — token->condition resolution is best-effort
+        cond_by_token = {}
+    cond_ids = {c for c in cond_by_token.values() if c}
+    if not cond_ids:
+        return set()
+    families: set[tuple[str, str, str]] = set()
+    try:
+        cph = ",".join("?" for _ in cond_ids)
+        for fr in forecasts_conn.execute(
+            f"""
+            SELECT DISTINCT city, target_date, temperature_metric
+            FROM market_events
+            WHERE condition_id IN ({cph})
+            """,
+            tuple(cond_ids),
+        ).fetchall():
+            city, target_date, metric = (
+                str(fr[0] or ""), str(fr[1] or ""), str(fr[2] or "")
+            )
+            if city and target_date and metric:
+                families.add((city, target_date, metric))
+    except Exception:  # noqa: BLE001 — condition->family map is best-effort
+        return set()
+    return families
+
+
+def _emit_escalation_cross_redecisions(
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+    received_at: str,
+) -> int:
+    """Emit ONE escalation-origin EDLI_REDECISION_PENDING per just-cancelled, ARMED
+    family so the reactor re-decides it on the NEXT cycle (it jumps the 49-deep
+    per-city round-robin via its Tier-0 claim, redecide-block fix 2026-06-16).
+
+    Routed through the EXISTING FSR re-emit machinery (``scan_committed_snapshots``
+    with ``restrict_to_families``), so the payload is the identical committed-snapshot
+    FSR shape the forecast-decision pipeline already binds — only the trigger label
+    (EDLI_REDECISION_PENDING) and the ``escalation_cross-`` source differ. The world
+    DB event-write runs under the world-write mutex (mirrors ``_edli_emit_*`` and the
+    continuous-redecision screen), so the WAL write lock is released by COMMIT before
+    any other writer interleaves.
+
+    ``already_pending_keys`` is DELIBERATELY NOT passed: a pending FSR for this family
+    is exactly what is stuck behind the round-robin, so the escalation re-decision
+    must be emitted regardless of it (the Tier-0 lane is what un-starves it). The
+    phase/strictly-past floors inside scan_committed_snapshots still apply
+    (fail-closed: a phase-closed family emits zero — the cross cannot happen anyway).
+    """
+    if not families:
+        return 0
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.forecast_snapshot_ready import (
+        ForecastSnapshotReadyTrigger,
+        executable_forecast_live_eligible_reader,
+    )
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_world_connection,
+        world_write_mutex as _world_write_mutex,
+    )
+
+    world = get_world_connection()
+    forecasts_ro = get_forecasts_connection_read_only()
+    emit_mutex = _world_write_mutex()
+    emit_mutex.acquire()
+    try:
+        trig = ForecastSnapshotReadyTrigger(
+            EventWriter(world),
+            live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
+        )
+        emitted = trig.scan_committed_snapshots(
+            forecasts_conn=forecasts_ro,
+            decision_time=decision_time,
+            received_at=received_at,
+            limit=None,
+            source=_edli_next_escalation_cross_source(),
+            event_type="FORECAST_SNAPSHOT_READY",
+            restrict_to_families=families,
+        )
+        world.commit()
+        return len(emitted)
+    finally:
+        emit_mutex.release()
+        try:
+            forecasts_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            world.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @_scheduler_job("maker_rest_escalation")
 def _maker_rest_escalation_cycle() -> None:
     """K4.0 REST-THEN-CROSS deadline owner (consolidated overhaul 2026-06-11).
@@ -6284,9 +6468,61 @@ def _maker_rest_escalation_cycle() -> None:
         conn.close()
 
     clob = PolymarketClient()
-    stats = run_cancels_for_expired_rests(expired, clob)
+    # ESCALATION RE-DECISION (redecide-block fix 2026-06-16): harvest the families
+    # whose rest was CONFIRMED-cancelled so we can emit a Tier-0 re-decision for
+    # each — the just-cancelled, ARMED family crosses as TAKER_ESCALATED_AFTER_REST
+    # on the NEXT cycle instead of waiting ~2-3h for the 49-deep per-city
+    # round-robin. The collect rides an out-parameter so `stats` stays byte-identical.
+    cancelled_entries: list[dict] = []
+    stats = run_cancels_for_expired_rests(
+        expired, clob, collect_cancelled=cancelled_entries
+    )
     if stats["scanned"]:
         logger.info("maker_rest_escalation: %s", stats)
+
+    # FAIL-CLOSED on the re-decision emit: any error here must NOT crash the cancel
+    # job (the cancels already succeeded; the worst case without the re-decision is
+    # the pre-fix behavior — the family waits for the round-robin). Connection-free
+    # in the cancel phase is preserved: the family-recovery reads and the world-DB
+    # event-write both run HERE in the caller (which owns DB access), AFTER the
+    # venue cancels, never during them.
+    if cancelled_entries and edli_cfg.get("event_writer_enabled"):
+        try:
+            from src.state.db import (
+                get_forecasts_connection_read_only,
+                get_trade_connection_read_only as _get_trade_ro,
+            )
+
+            now = datetime.now(timezone.utc)
+            trade_ro = _get_trade_ro()
+            forecasts_ro = get_forecasts_connection_read_only()
+            try:
+                families = _escalation_families_from_cancelled(
+                    cancelled_entries, trade_ro, forecasts_ro
+                )
+            finally:
+                try:
+                    trade_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    forecasts_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            emitted = _emit_escalation_cross_redecisions(
+                families, decision_time=now, received_at=now.isoformat()
+            )
+            logger.info(
+                "maker_rest_escalation: escalation re-decision emit "
+                "cancelled=%d families_resolved=%d events_emitted=%d",
+                len(cancelled_entries), len(families), emitted,
+            )
+        except Exception as _redecide_exc:  # noqa: BLE001 — fail-closed: never crash the cancel job
+            logger.warning(
+                "maker_rest_escalation: escalation re-decision emit failed "
+                "(non-fatal; family will wait for the round-robin): %r",
+                _redecide_exc,
+            )
 
 
 def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
@@ -6760,6 +6996,36 @@ def _world_wal_checkpoint_cycle() -> None:
         )
 
 
+@_scheduler_job("trades_wal_checkpoint")
+def _trades_wal_checkpoint_cycle() -> None:
+    """Periodic zeus_trades.db WAL TRUNCATE backstop (2026-06-16) — trade-DB twin.
+
+    The 810 MB ``state/zeus_trades.db-wal`` incident (2026-06-16, live): a long-lived
+    reader pinned the WAL floor, the -wal never truncated, ``executable_market_
+    snapshots`` writes failed ``database is locked`` (auto-checkpoint contention on
+    every write) → ``fresh_executable_city_count=0`` → the q-kernel spine could not
+    price fresh families → no crosses. zeus-world.db had this backstop; the trade DB
+    did not. Same discipline/observability as ``_world_wal_checkpoint_cycle``: a
+    dedicated short-lived connection, no write mutex, the (busy, log, checkpointed)
+    triple ALWAYS logged; a chronic ``busy == 1`` is the loud signal that a reader is
+    not releasing the trade-DB floor. Fail-soft via the decorator.
+    """
+    from src.state.db import checkpoint_trades_wal
+
+    busy, log_frames, ckpt_frames = checkpoint_trades_wal()
+    if busy == 0:
+        logger.info(
+            "trades WAL checkpoint(TRUNCATE): OK busy=%d log_frames=%d checkpointed=%d",
+            busy, log_frames, ckpt_frames,
+        )
+    else:
+        logger.warning(
+            "trades WAL checkpoint(TRUNCATE): BUSY busy=%d log_frames=%d checkpointed=%d "
+            "— a reader is pinning the trade-DB WAL floor (long-lived reader not releasing)",
+            busy, log_frames, ckpt_frames,
+        )
+
+
 def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
     try:
         value = int(config.get(key, default))
@@ -6971,6 +7237,29 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "(non-fatal): %r",
             _ch_sweep_exc,
         )
+
+    # DAY0 supersession (2026-06-15): keep only the latest DAY0_EXTREME_UPDATED per
+    # (city, target_date, metric). Day0 was in NEITHER drain sweep, so stale duplicates
+    # (measured 1972 pending rows / 152 families) piled up at Tier-0 claim priority and
+    # starved the tradeable FORECAST_SNAPSHOT_READY (spine) lane to zero decisions.
+    # Past-local-day day0 is handled by archive_expired_candidates (now day0-aware).
+    try:
+        _d0_archived = store.archive_superseded_day0_events(batch_limit=batch_limit)
+        if _d0_archived:
+            logger.info(
+                "EDLI reactor: archived %d superseded DAY0_EXTREME_UPDATED events "
+                "(keep-latest per city/target_date/metric) → 'expired'; Tier-0 day0 "
+                "claim backlog drained so tradeable FSR is no longer starved "
+                "(batch_limit=%d)",
+                _d0_archived,
+                batch_limit,
+            )
+    except Exception as _d0_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_superseded_day0_events sweep failed (non-fatal): %r",
+            _d0_sweep_exc,
+        )
+
     try:
         _ch_ignored = store.ignore_channel_cache_events(batch_limit=batch_limit)
         if _ch_ignored:
@@ -9062,6 +9351,18 @@ def main():
     # Phase 3 will promote ABSENT result here to a hard FATAL (currently warn).
     _startup_freshness_check()
 
+    # C5 cadence-coverage guard (timing-semantics fix 2026-06-16): warn if the
+    # effective warm-cycle sweep period exceeds the selection freshness window.
+    # _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS is the APScheduler interval for the
+    # executable-snapshot substrate warmer; FRESHNESS_WINDOW_DEFAULT is the
+    # timedelta used by ExecutableMarketSnapshot to mark a captured snapshot stale.
+    # If the cadence exceeds the window, every selection reads stale data silently.
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    _warn_if_cadence_uncovered(
+        _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS,
+        FRESHNESS_WINDOW_DEFAULT.total_seconds(),
+    )
+
     # G6 antibody (2026-04-26, fixed 2026-04-26 per con-nyx CONDITION C1):
     # Refuse boot if any non-allowlisted strategy is enabled. Must run AFTER
     # init_schema (so control_overrides table exists) and BEFORE wallet check
@@ -9452,6 +9753,17 @@ def main():
     scheduler.add_job(
         _world_wal_checkpoint_cycle, "interval", seconds=90,
         id="world_wal_checkpoint", next_run_time=_utc_run_time_after(120.0),
+        max_instances=1, coalesce=True,
+    )
+    # zeus_trades.db WAL TRUNCATE backstop (2026-06-16, the 810MB -wal incident).
+    # The trade DB had no checkpoint backstop (only zeus-world.db did), so a reader
+    # pinning the floor let zeus_trades.db-wal grow unbounded → snapshot-capture
+    # writes failed `database is locked` → fresh_executable_city_count=0 → the spine
+    # starved of priceable families. Same 90s cadence; offset start so it doesn't
+    # fire in lockstep with the world checkpoint.
+    scheduler.add_job(
+        _trades_wal_checkpoint_cycle, "interval", seconds=90,
+        id="trades_wal_checkpoint", next_run_time=_utc_run_time_after(135.0),
         max_instances=1, coalesce=True,
     )
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env

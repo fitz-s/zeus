@@ -26,7 +26,7 @@ def build_market_channel_certificate(
         claim_type="public_market_channel_evidence",
         mode="NO_SUBMIT",
         decision_time=decision_time,
-        source_available_at=decision_time,
+        source_available_at=decision_time,  # AVAIL-POSSESSION-EXEMPTED: structural decision-time cert (public_market_channel_evidence wraps no external source clock); field consumed only by verifier no-future-leakage check (<=decision_time), cert hash, and max_parent_* monotonicity — never a freshness gate or q. decision_time is the only honest anchor.
         agent_received_at=decision_time,
         persisted_at=decision_time,
         payload=payload,

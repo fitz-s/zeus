@@ -85,7 +85,10 @@ def test_monitor_refresh_ens_passes_with_verified_calibration():
     pos.direction = "buy_yes"
     pos.entry_method = "ens_member_counting"
     pos.p_posterior = 0.42
-    pos.entered_at = None
+    # M2b (2026-06-16): a monitored position carries a REAL entered_at (hold-age authority).
+    # monitor_refresh now refuses (no alpha) when entered_at is missing; this test exercises the
+    # post-authority-gate alpha path, so it needs a finite hold age.
+    pos.entered_at = "2026-07-14T12:00:00+00:00"
     pos.target_date = date(2026, 7, 15)
     pos.condition_id = "cond_test"
     pos.token_id = "tok_test"
@@ -157,7 +160,9 @@ def test_monitor_refresh_emos_regime_skips_legacy_calibrators(monkeypatch):
     pos.direction = "buy_yes"
     pos.entry_method = "ens_member_counting"
     pos.p_posterior = 0.42
-    pos.entered_at = None
+    # M2b (2026-06-16): real entered_at — monitor_refresh refuses (no alpha) on a missing one.
+    # This EMOS-sole-calibrator test exercises the alpha/posterior path, so it needs a finite hold age.
+    pos.entered_at = "2026-07-14T12:00:00+00:00"
     pos.target_date = date(2026, 7, 15)
     pos.condition_id = "cond_test"
     pos.market_id = "market_20c"

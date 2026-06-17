@@ -263,12 +263,40 @@ class Day0ExtremeUpdatedTrigger:
             (decision_iso, decision_iso, decision_iso, max(1, int(limit))),
         )
         results: list[EventWriteResult] = []
+        # CHANGE-GATE (2026-06-15 firehose fix). The GROUP BY recomputes
+        # MAX(imported_at) as observation_available_at on every scan, so an UNCHANGED
+        # running extreme otherwise mints a NEW DAY0_EXTREME_UPDATED each cycle (the
+        # event idempotency keys on available_at). That firehose floods the Tier-0
+        # day0 claim priority and starves tradeable FORECAST_SNAPSHOT_READY — the
+        # rebuilt-spine trigger — to zero claims. Emit ONLY when the family's running
+        # extreme ADVANCES beyond what was already emitted: the same monotonic-advance
+        # rule scan_authority_rows applies in-batch, but CROSS-cycle (the trigger is
+        # re-instantiated per cycle) via the persisted day0 events. An unchanged extreme
+        # carries no new decision; a price-driven re-decision is EDLI_REDECISION_PENDING,
+        # not a day0 re-emit. The in-call watermark is advanced on each emit so two
+        # source rows for one family in the same batch cannot double-emit one extreme.
+        high_water, low_water = self._emitted_extreme_watermarks(decision_iso)
         for row in reversed(rows):
             for metric in ("high", "low"):
                 try:
                     observation = observation_instant_row_to_day0_observation(row, metric=metric)
                 except ValueError:
                     continue
+                key = (
+                    str(observation.get("city") or ""),
+                    str(observation.get("target_date") or ""),
+                    str(observation.get("station_id") or ""),
+                )
+                if metric == "high":
+                    cur = observation.get("high_so_far")
+                    prior = high_water.get(key)
+                    if cur is None or (prior is not None and float(cur) <= prior):
+                        continue
+                else:
+                    cur = observation.get("low_so_far")
+                    prior = low_water.get(key)
+                    if cur is None or (prior is not None and float(cur) >= prior):
+                        continue
                 semantics = settlement_semantics(observation) if callable(settlement_semantics) else settlement_semantics
                 results.append(
                     self.emit_from_observation(
@@ -278,7 +306,56 @@ class Day0ExtremeUpdatedTrigger:
                         received_at=received_at,
                     )
                 )
+                if metric == "high":
+                    high_water[key] = float(cur)
+                else:
+                    low_water[key] = float(cur)
         return results
+
+    def _emitted_extreme_watermarks(
+        self, decision_iso: str
+    ) -> tuple[dict[tuple[str, str, str], float], dict[tuple[str, str, str], float]]:
+        """Per (city, target_date, station_id) high-/low-water marks over ALREADY-emitted
+        DAY0_EXTREME_UPDATED events, scoped to non-past target dates.
+
+        The high-water = MAX(high_so_far) and low-water = MIN(low_so_far) across the
+        family's persisted day0 events. ``scan_observation_instants_rows`` emits a new
+        day0 event only when the candidate extreme strictly passes this mark, suppressing
+        the unchanged-extreme firehose. Fail-soft: any read fault returns empty marks
+        (no suppression) so emission degrades to the prior always-emit behavior rather
+        than going silent.
+        """
+        high_water: dict[tuple[str, str, str], float] = {}
+        low_water: dict[tuple[str, str, str], float] = {}
+        try:
+            conn = self._writer.conn
+            target_floor = decision_iso[:10]
+            rows = conn.execute(
+                """
+                SELECT json_extract(payload_json, '$.city')        AS c,
+                       json_extract(payload_json, '$.target_date') AS td,
+                       json_extract(payload_json, '$.station_id')  AS st,
+                       MAX(CAST(json_extract(payload_json, '$.high_so_far') AS REAL)) AS hi,
+                       MIN(CAST(json_extract(payload_json, '$.low_so_far')  AS REAL)) AS lo
+                FROM opportunity_events INDEXED BY idx_opportunity_events_fsr_target_date
+                WHERE event_type = 'DAY0_EXTREME_UPDATED'
+                  AND json_extract(payload_json, '$.target_date') >= ?
+                GROUP BY c, td, st
+                """,
+                (target_floor,),
+            ).fetchall()
+        except Exception:  # noqa: BLE001 — fail-soft: no marks => prior always-emit behavior
+            return high_water, low_water
+        for r in rows:
+            c, td, st, hi, lo = r[0], r[1], r[2], r[3], r[4]
+            if c is None or td is None:
+                continue
+            key = (str(c), str(td), str(st or ""))
+            if hi is not None:
+                high_water[key] = float(hi)
+            if lo is not None:
+                low_water[key] = float(lo)
+        return high_water, low_water
 
 
 def authority_row_to_observation(row: dict[str, Any]) -> dict[str, Any]:

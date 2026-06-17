@@ -159,7 +159,12 @@ def test_all_gates_aligned_writes_live_eligible_with_expiry() -> None:
         "ENTRY_FORECAST_LIVE_APPROVED",
         "CALIBRATION_TRANSFER_APPROVED",
     )
-    assert result.expires_at == _utc(2026, 5, 3, 15)
+    # M3 (2026-06-16): readiness expiry anchors to the CYCLE + the release calendar's
+    # max_source_lag_seconds, NOT the old guessed `computed_at + 3h` TTL (the twin-clock disease
+    # that expired lawful 26h-old data live). For source_cycle_time=2026-05-03T00:00 and the
+    # ecmwf_open_data/mx2t6_high lag of 30h (108000s), expiry = 2026-05-04T06:00 — independent of
+    # computed_at (2026-05-03T12:00).
+    assert result.expires_at == _utc(2026, 5, 4, 6)
 
     row = conn.execute(
         "SELECT * FROM readiness_state WHERE strategy_key = ?",
@@ -167,7 +172,7 @@ def test_all_gates_aligned_writes_live_eligible_with_expiry() -> None:
     ).fetchone()
     assert row is not None
     assert row["status"] == "LIVE_ELIGIBLE"
-    assert row["expires_at"] == _utc(2026, 5, 3, 15).isoformat()
+    assert row["expires_at"] == _utc(2026, 5, 4, 6).isoformat()
     assert row["target_local_date"] == "2026-05-08"
     assert row["track"] == "mx2t6_high_full_horizon"
 

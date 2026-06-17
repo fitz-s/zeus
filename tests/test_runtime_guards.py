@@ -694,8 +694,14 @@ def test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch(monkeyp
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", _recompute)
 
-    tight_quote_pos = _position(entry_price=0.44, p_posterior=0.58)
-    wide_quote_pos = _position(entry_price=0.44, p_posterior=0.58)
+    # SOURCE-PARITY WIDENING (2026-06-16): the belief-authority-fault suppressor now
+    # fires for ALL non-day0 positions (not just edli), so a non-day0 legacy position
+    # with no fresh forecast_posteriors row no longer reaches the ens registry dispatch
+    # (it is fail-closed instead). This test exercises the quote-vs-posterior dispatch
+    # SEAM (recompute receives entry price, not the live quote) — lane-agnostic — so we
+    # route through the day0-exempt lane (NYC is wu_icao) to reach that seam.
+    tight_quote_pos = _position(entry_price=0.44, p_posterior=0.58, state="day0_window")
+    wide_quote_pos = _position(entry_price=0.44, p_posterior=0.58, state="day0_window")
 
     tight_ctx = monitor_refresh.refresh_position(
         conn,
@@ -724,11 +730,19 @@ def test_monitor_quote_refresh_survives_microstructure_log_failure(monkeypatch):
 
     monkeypatch.setattr("src.state.db.log_microstructure", _raise_log_failure)
     monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
-    def _recompute(position, current_p_market, registry, **context):
-        monitor_refresh._set_monitor_probability_fresh(position, True)
-        return 0.63
 
-    monkeypatch.setattr(monitor_refresh, "recompute_native_probability", _recompute)
+    # This test pins the MID-price quote seam (0.45) survives a microstructure log
+    # failure. Mid quoting is the non-day0 lane (the day0 lane is bid-only), so we keep a
+    # non-day0 position. After the source-parity widening (2026-06-16) a non-day0 legacy
+    # position with no fresh forecast_posteriors row is fail-closed at the belief-authority
+    # suppressor and never reaches recompute_native_probability — so we stub the PRIMARY
+    # belief lane (monitor_probability_refresh) to return a fresh posterior (0.63), exactly
+    # as a fresh forecast_posteriors row would, without standing up a forecasts DB.
+    def _fresh_primary_belief(position, *, conn, city, target_d):
+        monitor_refresh._set_monitor_probability_fresh(position, True)
+        return 0.63, position, True
+
+    monkeypatch.setattr(monitor_refresh, "monitor_probability_refresh", _fresh_primary_belief)
 
     pos = _position(entry_price=0.44, p_posterior=0.58)
     edge_ctx = monitor_refresh.refresh_position(
@@ -4311,47 +4325,14 @@ def test_live_reprice_failure_records_final_intent_frontier_reason(tmp_path, mon
     ]
 
 
-def test_live_decision_source_context_enriched_with_submit_result_timing():
-    """Post-submit timing facts must be joined onto the frozen source context before writing decision_events."""
-    from src.contracts.execution_intent import DecisionSourceContext
-
-    original = DecisionSourceContext(
-        source_id="tigge",
-        model_family="ecmwf_ifs025",
-        forecast_issue_time="2026-05-21T00:00:00+00:00",
-        forecast_valid_time="2026-05-23T00:00:00+00:00",
-        forecast_fetch_time="2026-05-21T11:34:30+00:00",
-        forecast_available_at="2026-05-21T00:00:00+00:00",
-        raw_payload_hash="a" * 64,
-        degradation_level="OK",
-        forecast_source_role="entry_primary",
-        authority_tier="FORECAST",
-        decision_time="2026-05-21T11:37:09+00:00",
-        decision_time_status="OK",
-        observation_time="2026-05-21T10:00:00+00:00",
-        observation_available_at="2026-05-21T10:05:00+00:00",
-        polymarket_end_anchor_source="gamma_explicit",
-        first_member_observed_time="2026-05-21T11:00:00+00:00",
-        run_complete_time="2026-05-21T11:34:00+00:00",
-    )
-    result = OrderResult(
-        status="pending",
-        trade_id="trade-1",
-        order_id="ord-1",
-        submitted_price=0.01,
-        shares=140.0,
-        command_state="ACKED",
-        zeus_submit_intent_time="2026-05-21T11:37:54.943544+00:00",
-        venue_ack_time="2026-05-21T11:38:03.121273+00:00",
-    )
-
-    enriched = cycle_runtime._decision_source_context_with_submit_result(original, result)
-
-    assert enriched is not original
-    assert original.zeus_submit_intent_time == ""
-    assert original.venue_ack_time == ""
-    assert enriched.zeus_submit_intent_time == result.zeus_submit_intent_time
-    assert enriched.venue_ack_time == result.venue_ack_time
+# test_live_decision_source_context_enriched_with_submit_result_timing removed
+# 2026-06-16: it exercised cycle_runtime._decision_source_context_with_submit_result,
+# which enriched the frozen DecisionSourceContext with submit/ack timing SOLELY to
+# feed the decision_events lane. That lane and the helper were removed as dead
+# (C2/C4 dead-lane/dead-instrument cut); `grep -rn _decision_source_context_with_submit_result src/`
+# = 0 live callers. Submit-intent / venue-ack timing is not joined onto any live
+# lane today — wiring it would be a NEW feature, out of scope for the timing-
+# semantics fix (flagged in docs/evidence/timing_audit for operator decision).
 
 
 def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
@@ -6937,7 +6918,9 @@ def test_monitor_ens_refresh_records_forecast_fallback_provenance(monkeypatch):
         market_id="m-monitor",
         direction="buy_yes",
         p_posterior=0.42,
-        entered_at=None,
+        # M2b: real open position carries an entry instant (hold-age authority);
+        # entered_at=None now refuses alpha, so supply the realistic entry time.
+        entered_at="2026-03-30T00:00:00Z",
         target_date="2026-04-01",
         entry_model_agreement="AGREE",
         selected_method="ens_member_counting",
@@ -7041,7 +7024,9 @@ def test_monitor_ens_refresh_uses_executable_forecast_reader_for_ecmwf_open_data
         condition_id="c-monitor",
         direction="buy_yes",
         p_posterior=0.42,
-        entered_at=None,
+        # M2b: real open position carries an entry instant (hold-age authority);
+        # entered_at=None now refuses alpha, so supply the realistic entry time.
+        entered_at="2026-03-30T00:00:00Z",
         target_date="2026-04-01",
         entry_model_agreement="AGREE",
         selected_method="ens_member_counting",
@@ -7473,7 +7458,9 @@ def test_day0_monitor_refresh_records_forecast_fallback_provenance(monkeypatch):
         market_id="m-day0",
         direction="buy_yes",
         p_posterior=0.31,
-        entered_at=None,
+        # M2b: real open position carries an entry instant (hold-age authority);
+        # entered_at=None now refuses alpha, so supply the realistic entry time.
+        entered_at="2026-03-30T00:00:00Z",
         target_date="2026-04-01",
         entry_model_agreement="AGREE",
         selected_method="day0_observation",

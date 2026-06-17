@@ -1,6 +1,6 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-23
-# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): schema_version CHECK extended to 18 + 6 SHOULDER_* NoTradeReason members + live release proof P0-3 schema compatibility marker + Phase 3 T3 (2026-05-21): CHECK extended to 23 + live authority follow-up (2026-05-21): CHECK extended to 25 + evidence governance follow-up (2026-05-21): strategy provenance columns, v26 + P1/P2 architecture review (2026-05-22): evidence lifecycle + day0_nowcast_entry, v27 + opportunity_fact strategy-key widening, v28 + 2026-05-23 review5.23 P0-2: unified schema version authority (import from src.state.db)
+# Last reused or audited: 2026-06-14
+# Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742) + Phase 3 T2 (2026-05-21): schema_version CHECK extended to 18 + 6 SHOULDER_* NoTradeReason members + live release proof P0-3 schema compatibility marker + Phase 3 T3 (2026-05-21): CHECK extended to 23 + live authority follow-up (2026-05-21): CHECK extended to 25 + evidence governance follow-up (2026-05-21): strategy provenance columns, v26 + P1/P2 architecture review (2026-05-22): evidence lifecycle + day0_nowcast_entry, v27 + opportunity_fact strategy-key widening, v28 + 2026-05-23 review5.23 P0-2: unified schema version authority (import from src.state.db) + 2026-06-14 q-kernel rebuild Stage 0 (docs/rebuild/consult_build_spec.md:994-1033): 19 NULLABLE decision-receipt-spine columns appended (additive, observability-only — never gate)
 
 """T2 — schema DDL for the no_trade_events table (world DB).
 
@@ -57,6 +57,66 @@ SCHEMA_VERSION = 55  # B2: frozen row-provenance value at #358 main bump; db.SCH
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)
 
+# === Q-KERNEL REBUILD STAGE 0 — decision-receipt spine (2026-06-14) ==================
+# 19 NULLABLE columns appended to no_trade_events so every CURRENT live candidate is
+# reconstructable forecast -> q -> route -> size from the values the live path used
+# (docs/rebuild/consult_build_spec.md:994-1033, field list :1008-1027). Column names are
+# EXACTLY the spec field names; the dataclass that fills them is
+# src/decision/decision_receipt.py (DecisionReceipt.to_row / RECEIPT_SPINE_COLUMNS — one
+# vocabulary). ADDITIVE + observability-only: every column is NULLABLE with no DEFAULT and
+# no CHECK, so existing writers that omit them are byte-unaffected and these columns can
+# NEVER gate, size, or submit. Stage 0 populates only the fields the current path computes
+# (q_source, mu_native, sigma_native, member/debiased envelope, rounding_rule, q_sum,
+# applied_debias_native, debias_artifact_id, day0_observed_extreme_native, sizing_authority);
+# the spine-only fields (predictive_distribution_id, q_band_basis, market_implied_q, route_id,
+# payoff_vector_hash, edge_lcb, delta_u) stay NULL until each later stage wires its own.
+# REAL = native-unit floats / probabilities; TEXT = ids / labels.
+_RECEIPT_SPINE_COLUMNS_SQL = """    predictive_distribution_id   TEXT,
+    q_source                     TEXT,
+    mu_native                    REAL,
+    sigma_native                 REAL,
+    member_min_native            REAL,
+    member_max_native            REAL,
+    debiased_member_min_native   REAL,
+    debiased_member_max_native   REAL,
+    applied_debias_native        REAL,
+    debias_artifact_id           TEXT,
+    day0_observed_extreme_native REAL,
+    rounding_rule                TEXT,
+    q_sum                        REAL,
+    q_band_basis                 TEXT,
+    market_implied_q             REAL,
+    route_id                     TEXT,
+    payoff_vector_hash           TEXT,
+    edge_lcb                     REAL,
+    delta_u                      REAL,
+    sizing_authority             TEXT"""
+
+# (column_name, sql_type) pairs — the authority for ALTER-ADD migration of pre-Stage-0
+# tables. Order matches _RECEIPT_SPINE_COLUMNS_SQL and the spec field list.
+_RECEIPT_SPINE_COLUMN_DEFS: tuple[tuple[str, str], ...] = (
+    ("predictive_distribution_id", "TEXT"),
+    ("q_source", "TEXT"),
+    ("mu_native", "REAL"),
+    ("sigma_native", "REAL"),
+    ("member_min_native", "REAL"),
+    ("member_max_native", "REAL"),
+    ("debiased_member_min_native", "REAL"),
+    ("debiased_member_max_native", "REAL"),
+    ("applied_debias_native", "REAL"),
+    ("debias_artifact_id", "TEXT"),
+    ("day0_observed_extreme_native", "REAL"),
+    ("rounding_rule", "TEXT"),
+    ("q_sum", "REAL"),
+    ("q_band_basis", "TEXT"),
+    ("market_implied_q", "REAL"),
+    ("route_id", "TEXT"),
+    ("payoff_vector_hash", "TEXT"),
+    ("edge_lcb", "REAL"),
+    ("delta_u", "REAL"),
+    ("sizing_authority", "TEXT"),
+)
+
 CREATE_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS no_trade_events (
     market_slug         TEXT NOT NULL,
@@ -73,6 +133,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
+{_RECEIPT_SPINE_COLUMNS_SQL},
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
 """
@@ -93,6 +154,7 @@ CREATE TABLE no_trade_events_new (
     schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
+{_RECEIPT_SPINE_COLUMNS_SQL},
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
 )
 """
@@ -113,6 +175,27 @@ CREATE INDEX IF NOT EXISTS idx_no_trade_events_strategy
 """
 
 
+def _ensure_receipt_spine_columns(conn: sqlite3.Connection) -> None:
+    """Additively ADD the 19 Stage-0 decision-receipt-spine columns if absent.
+
+    Every spine column is NULLABLE with no DEFAULT and no CHECK, so ALTER TABLE ADD COLUMN
+    is non-destructive and requires no table rebuild — an existing no_trade_events table on
+    a live world DB gains the columns in place, and rows written before Stage 0 simply carry
+    NULL. Idempotent: only columns missing from PRAGMA table_info are added. This never
+    touches data and can never gate (observability-only columns).
+    """
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
+    ).fetchone():
+        return
+    existing = _table_columns(conn)
+    for column_name, sql_type in _RECEIPT_SPINE_COLUMN_DEFS:
+        if column_name not in existing:
+            conn.execute(
+                f"ALTER TABLE no_trade_events ADD COLUMN {column_name} {sql_type}"
+            )
+
+
 def ensure_table(conn: sqlite3.Connection) -> None:
     """Create no_trade_events table + indices without destructive rebuild DDL.
 
@@ -121,6 +204,11 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     ``migrate_no_trade_events_schema`` during boot/operator migration.
     """
     conn.execute(CREATE_TABLE_SQL)
+    # Stage 0 (2026-06-14): additively backfill the receipt-spine columns onto a
+    # pre-Stage-0 table created by an earlier CREATE_TABLE_SQL (IF NOT EXISTS is a no-op
+    # when the table already exists, so the spine columns must be ALTER-added). NULLABLE +
+    # no-default + no-CHECK -> non-destructive, in-place, no hot-path table rebuild.
+    _ensure_receipt_spine_columns(conn)
     conn.execute(CREATE_INDEX_MARKET_TIME_SQL)
     conn.execute(CREATE_INDEX_REASON_SQL)
     if "strategy_key" in _table_columns(conn):
@@ -132,6 +220,11 @@ def migrate_no_trade_events_schema(conn: sqlite3.Connection) -> None:
 
     conn.execute(CREATE_TABLE_SQL)
     _rebuild_stale_no_trade_events_table(conn)
+    # Stage 0 (2026-06-14): if the rebuild path returned early (table already current on the
+    # reason/version axes) but predates Stage 0, the receipt-spine columns are still absent —
+    # add them additively here. After a full rebuild the new table already has them, so this
+    # is a no-op (idempotent on PRAGMA table_info).
+    _ensure_receipt_spine_columns(conn)
     conn.execute(CREATE_INDEX_MARKET_TIME_SQL)
     conn.execute(CREATE_INDEX_REASON_SQL)
     if "strategy_key" in _table_columns(conn):
@@ -210,14 +303,26 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
     # Pre-migration row count: used to detect silent drops from INSERT OR IGNORE.
     _pre_count = conn.execute("SELECT COUNT(*) FROM no_trade_events").fetchone()[0]
 
+    # Stage 0 (2026-06-14): carry any receipt-spine columns that the SOURCE table already
+    # has through the rebuild so a later CHECK-driven rebuild never DROPS spine data that
+    # ensure_table's ALTER-ADD already populated. Columns absent on the source default to
+    # NULL on no_trade_events_new (the rebuild table SQL defines all 19). Both lists stay in
+    # the same order so the INSERT column list and the SELECT expressions line up.
+    _src_columns = _table_columns(conn)
+    _spine_present = [
+        name for name, _type in _RECEIPT_SPINE_COLUMN_DEFS if name in _src_columns
+    ]
+    _spine_insert_cols = ("".join(f",\n            {name}" for name in _spine_present))
+    _spine_select_cols = ("".join(f",\n            {name}" for name in _spine_present))
+
     conn.execute(
-        """
+        f"""
         INSERT OR IGNORE INTO no_trade_events_new (
             market_slug, temperature_metric, target_date,
             observation_time, decision_seq,
             reason, reason_detail,
             strategy_key, event_source, shadow_runtime,
-            observed_at, schema_version, schema_compatibility
+            observed_at, schema_version, schema_compatibility{_spine_insert_cols}
         )
         SELECT
             market_slug, temperature_metric, target_date,
@@ -232,7 +337,7 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
                 WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42) THEN schema_version
                 ELSE 36
             END,
-            schema_compatibility
+            schema_compatibility{_spine_select_cols}
         FROM no_trade_events
         """
     )

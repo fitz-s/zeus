@@ -1090,6 +1090,76 @@ class TestRiskGuardSettlementSource:
         with pytest.raises(ValueError, match="execution_fact_filled_at"):
             riskguard_module._portfolio_position_from_loader_row(loader_row)
 
+    def test_loader_quarantines_unloadable_row_instead_of_failing_whole_tick(
+        self, monkeypatch, tmp_path
+    ):
+        """One un-loadable canonical row must NOT take down the whole RiskGuard loader.
+
+        Regression guard (2026-06-16 incident): a single fill-grade row missing
+        execution_fact provenance (a dual-id recovered-fill duplicate) caused the loader
+        to RAISE -> RiskGuard tick failed -> RiskGuard went STALE -> trader fail-closed
+        RED -> ALL trading blocked. The loader must QUARANTINE the bad row (exclude +
+        log + count) and CONTINUE loading the valid rows. RED-on-revert: restoring the
+        `raise RuntimeError(...)` makes `_load_riskguard_portfolio_truth` raise here.
+        """
+        zeus_db = tmp_path / "zeus.db"
+        conn = get_connection(zeus_db)
+
+        valid_row = {
+            "trade_id": "valid-good-1", "market_id": "m-good", "city": "NYC",
+            "target_date": "2026-06-17", "direction": "buy_yes", "unit": "F",
+            "env": "live", "size_usd": 10.0, "shares": 4.0, "cost_basis_usd": 10.0,
+            "entry_price": 2.5, "entry_economics_authority": "legacy_unknown",
+            "fill_authority": "none",
+            "entry_economics_source": "position_current_projection",
+            "execution_fact_intent_id": "", "execution_fact_filled_at": "",
+            "state": "entered", "chain_state": "unknown",
+        }
+        # Fill-grade (venue_confirmed_full) but NO execution_fact provenance -> raises in
+        # _portfolio_position_from_loader_row exactly like the live incident row.
+        bad_row = {
+            "trade_id": "bad-dup-1", "market_id": "m-bad", "city": "Houston",
+            "target_date": "2026-06-17", "direction": "buy_no", "unit": "F",
+            "env": "live", "size_usd": 3.24, "shares": 5.07, "cost_basis_usd": 3.24,
+            "entry_price": 0.64,
+            "entry_economics_authority": "legacy_unknown",
+            "fill_authority": "venue_confirmed_full",
+            "entry_economics_source": "position_current_projection",
+            "execution_fact_intent_id": "", "execution_fact_filled_at": "",
+            "state": "entered", "chain_state": "unknown",
+        }
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_portfolio_loader_view",
+            lambda _conn, **_kw: {"status": "ok", "table": "position_current",
+                                  "positions": [valid_row, bad_row]},
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(
+                bankroll=100.0,
+                positions=[
+                    Position(trade_id="valid-good-1", market_id="m-good", city="NYC",
+                             cluster="NYC", target_date="2026-06-17", bin_label="b",
+                             direction="buy_yes"),
+                    Position(trade_id="bad-dup-1", market_id="m-bad", city="Houston",
+                             cluster="HOU", target_date="2026-06-17", bin_label="b",
+                             direction="buy_no"),
+                ],
+            ),
+        )
+
+        # MUST NOT raise (pre-fix this raised RuntimeError("RiskGuard DB loader fault")).
+        portfolio, truth = riskguard_module._load_riskguard_portfolio_truth(conn)
+
+        assert truth["quarantined_count"] == 1
+        assert truth["quarantined_rows"][0]["trade_id"] == "bad-dup-1"
+        assert [p.trade_id for p in portfolio.positions] == ["valid-good-1"]
+        # Quarantine is a KNOWN exclusion -> consistency stays 'pass' (1 loaded + 1 quarantined == 2 metadata).
+        assert truth["consistency_lock"] == "pass"
+
     def test_tick_records_explicit_portfolio_fallback_when_projection_unavailable(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"

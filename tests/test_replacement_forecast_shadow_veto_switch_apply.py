@@ -21,7 +21,11 @@ from src.data.replacement_forecast_current_fact_patch import REQUIRED_DATA_EVIDE
 from src.data.replacement_forecast_live_switch_surface import REFIT_HANDOFF_FILE, REQUIRED_FORECAST_TABLES, REQUIRED_TRADE_TABLES, REQUIRED_WORLD_TABLES
 from src.data.replacement_forecast_readiness import PRODUCT_ID, SOURCE_ID
 from src.data.replacement_forecast_runtime_policy import DIRECTION_FLIP_FLAG, KELLY_INCREASE_FLAG, SHADOW_FLAG, TRADE_AUTHORITY_FLAG, VETO_FLAG
-from src.data.replacement_forecast_simple_switch_bundle import REPLACEMENT_SHADOW_TABLES
+# DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): re-pointed from the deleted
+# replacement_forecast_simple_switch_bundle to the canonical LIVE schema-init source
+# (identical 4-tuple; init_replacement_forecast_shadow_schema is the schema authority
+# used by the operator apply tool). Keeps this LIVE apply-path test intact.
+from scripts.init_replacement_forecast_shadow_schema import REPLACEMENT_SHADOW_TABLES
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
