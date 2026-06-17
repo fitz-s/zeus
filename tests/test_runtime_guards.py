@@ -13613,6 +13613,77 @@ def test_monitoring_phase_skips_terminal_positions_before_probability_refresh(mo
     assert artifact.monitor_results == []
 
 
+def test_monitoring_phase_pre_chain_refresh_skips_exit_preflight(monkeypatch):
+    """RELATIONSHIP: live held-position refresh must not wait on exit preflight."""
+
+    pos = _position(trade_id="pre-chain-refresh", state="holding")
+    portfolio = PortfolioState(positions=[pos])
+    artifact = CycleArtifact(mode="held_position_monitor_pre_chain", started_at="2026-04-01T20:00:00Z")
+    summary = {"monitors": 0, "exits": 0}
+    refresh_calls = []
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.check_pending_exits",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pre-chain refresh must not scan pending exits")),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.handle_exit_pending_missing",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pre-chain refresh must not resolve exit residue")),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.check_pending_retries",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pre-chain refresh must not retry exits")),
+    )
+
+    def _refresh_position(conn, clob, refreshed_pos):
+        refresh_calls.append(refreshed_pos.trade_id)
+        refreshed_pos.last_monitor_prob = 0.61
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        refreshed_pos.last_monitor_market_price = 0.44
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = 0.43
+        refreshed_pos.last_monitor_best_ask = 0.45
+        return types.SimpleNamespace(
+            p_market=np.array([0.44]),
+            p_posterior=0.61,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=0.17,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, ctx: ExitDecision(
+            False,
+            "NO_EXIT",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=list(self.applied_validations),
+        ),
+    )
+
+    p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 3, 31, 20, 0, tzinfo=timezone.utc)),
+        exit_order_submit_enabled=False,
+        run_exit_preflight=False,
+    )
+
+    assert p_dirty is True
+    assert t_dirty is False
+    assert refresh_calls == ["pre-chain-refresh"]
+    assert summary["exit_preflight_skipped_for_monitor_refresh"] is True
+    assert summary["monitors"] == 1
+    assert artifact.monitor_results[0].fresh_prob == pytest.approx(0.61)
+    assert artifact.monitor_results[0].fresh_edge == pytest.approx(0.17)
+
+
 def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypatch):
     pos = _position(
         trade_id="orange-favorable",

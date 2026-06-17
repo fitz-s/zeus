@@ -3173,7 +3173,18 @@ def _execution_stub(candidate, decision, result, city, mode, *, deps):
 
 
 
-def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: dict, *, deps, exit_order_submit_enabled: bool = True):
+def execute_monitoring_phase(
+    conn,
+    clob,
+    portfolio,
+    artifact,
+    tracker,
+    summary: dict,
+    *,
+    deps,
+    exit_order_submit_enabled: bool = True,
+    run_exit_preflight: bool = True,
+):
     from src.engine.monitor_refresh import refresh_position
     from src.execution.exit_lifecycle import (
         ExitContext,
@@ -3186,30 +3197,35 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
     )
     from src.state.chain_reconciliation import quarantine_resolution_reason
 
-    portfolio_dirty = _apply_acknowledged_quarantine_clears(
-        portfolio,
-        summary,
-        deps=deps,
-        conn=conn,
-    )
+    portfolio_dirty = False
     tracker_dirty = False
 
-    exit_stats = check_pending_exits(portfolio, clob, conn=conn)
-    if exit_stats["filled"] or exit_stats["retried"]:
-        portfolio_dirty = True
-
-    for filled_pos in exit_stats.get("filled_positions", []):
-        artifact.add_exit(
-            filled_pos.trade_id,
-            filled_pos.exit_reason or "DEFERRED_SELL_FILL",
-            filled_pos.exit_price or 0.0,
-            "sell_filled",
+    if run_exit_preflight:
+        portfolio_dirty = _apply_acknowledged_quarantine_clears(
+            portfolio,
+            summary,
+            deps=deps,
+            conn=conn,
         )
-        tracker.record_exit(filled_pos)
-        tracker_dirty = True
 
-    summary["pending_exits_filled"] = exit_stats["filled"]
-    summary["pending_exits_retried"] = exit_stats["retried"]
+        exit_stats = check_pending_exits(portfolio, clob, conn=conn)
+        if exit_stats["filled"] or exit_stats["retried"]:
+            portfolio_dirty = True
+
+        for filled_pos in exit_stats.get("filled_positions", []):
+            artifact.add_exit(
+                filled_pos.trade_id,
+                filled_pos.exit_reason or "DEFERRED_SELL_FILL",
+                filled_pos.exit_price or 0.0,
+                "sell_filled",
+            )
+            tracker.record_exit(filled_pos)
+            tracker_dirty = True
+
+        summary["pending_exits_filled"] = exit_stats["filled"]
+        summary["pending_exits_retried"] = exit_stats["retried"]
+    else:
+        summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
     for pos in list(portfolio.positions):
         if pos.state == "pending_tracked":
@@ -3224,18 +3240,19 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         if False:
             _ = pos.entry_method
             _ = pos.selected_method
-        pending_exit_resolution = handle_exit_pending_missing(portfolio, pos, conn=conn)
-        if pending_exit_resolution["action"] == "closed":
-            closed = pending_exit_resolution["position"]
-            if closed is not None:
-                tracker.record_exit(closed)
-                tracker_dirty = True
-                portfolio_dirty = True
-                summary["exit_chain_missing_closed"] = summary.get("exit_chain_missing_closed", 0) + 1
-            continue
-        if pending_exit_resolution["action"] == "skip":
-            summary["monitor_skipped_exit_pending_missing"] = summary.get("monitor_skipped_exit_pending_missing", 0) + 1
-            continue
+        if run_exit_preflight:
+            pending_exit_resolution = handle_exit_pending_missing(portfolio, pos, conn=conn)
+            if pending_exit_resolution["action"] == "closed":
+                closed = pending_exit_resolution["position"]
+                if closed is not None:
+                    tracker.record_exit(closed)
+                    tracker_dirty = True
+                    portfolio_dirty = True
+                    summary["exit_chain_missing_closed"] = summary.get("exit_chain_missing_closed", 0) + 1
+                continue
+            if pending_exit_resolution["action"] == "skip":
+                summary["monitor_skipped_exit_pending_missing"] = summary.get("monitor_skipped_exit_pending_missing", 0) + 1
+                continue
         if pos.state == "admin_closed":
             summary["monitor_skipped_admin_close"] = summary.get("monitor_skipped_admin_close", 0) + 1
             continue
@@ -3252,7 +3269,8 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             if is_exit_cooldown_active(pos):
                 summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
                 continue
-            check_pending_retries(pos, conn=conn)
+            if run_exit_preflight:
+                check_pending_retries(pos, conn=conn)
             if pos.state == "pending_exit":
                 pending_exit_monitor_only = True
                 summary["monitor_pending_exit_phase_evaluated"] = (
@@ -3265,7 +3283,8 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         if is_exit_cooldown_active(pos):
             continue
 
-        check_pending_retries(pos, conn=conn)
+        if run_exit_preflight:
+            check_pending_retries(pos, conn=conn)
 
         if (
             _position_state_value(pos) == "quarantined"
@@ -3505,17 +3524,18 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 ExitContext=ExitContext,
                 portfolio=portfolio,
             )
-            exit_context, refreshed_retry_quote = _refresh_pending_exit_retry_quote_from_current_clob(
-                conn=conn,
-                clob=clob,
-                pos=pos,
-                exit_context=exit_context,
-                identity_seed_allowed=pending_exit_retry_identity_seed_allowed,
-            )
-            if refreshed_retry_quote:
-                summary["pending_exit_retry_current_clob_quote_refreshed"] = (
-                    summary.get("pending_exit_retry_current_clob_quote_refreshed", 0) + 1
+            if run_exit_preflight:
+                exit_context, refreshed_retry_quote = _refresh_pending_exit_retry_quote_from_current_clob(
+                    conn=conn,
+                    clob=clob,
+                    pos=pos,
+                    exit_context=exit_context,
+                    identity_seed_allowed=pending_exit_retry_identity_seed_allowed,
                 )
+                if refreshed_retry_quote:
+                    summary["pending_exit_retry_current_clob_quote_refreshed"] = (
+                        summary.get("pending_exit_retry_current_clob_quote_refreshed", 0) + 1
+                    )
             p_market = exit_context.current_market_price
             portfolio_dirty = True
             # === DAY0 HARD-FACT EXIT LANE (adversarial review 2026-06-10 fix 1) ===
@@ -3652,11 +3672,8 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     replace(exit_context, exit_reason=exit_reason),
                 )
                 if not exit_order_submit_enabled:
-                    # Shadow/no-submit mode: record the exit decision in
-                    # summary for observability but do NOT place the sell order.
-                    # chain_sync_and_exit_monitor standalone job runs with this
-                    # flag=False so EDLI shadow mode never submits real orders
-                    # through the monitoring phase.
+                    # Live submit-gate disabled: record the exit decision for
+                    # operator visibility but do not place a venue sell order.
                     summary["exits_suppressed_no_submit"] = summary.get("exits_suppressed_no_submit", 0) + 1
                     summary["exits"] += 1
                     portfolio_dirty = True

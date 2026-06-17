@@ -9067,7 +9067,9 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
         save_tracker,
         save_portfolio,
     )
+    from src.state.canonical_write import commit_then_export
     from src.state.decision_chain import CycleArtifact
+    from src.state.decision_chain import store_artifact
 
     edli_cfg = _settings_section("edli", {})
     real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
@@ -9086,6 +9088,67 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
     try:
         portfolio = load_portfolio()
         with PolymarketClient() as clob:
+            tracker = get_tracker()
+            pre_chain_artifact = CycleArtifact(
+                mode="held_position_monitor_pre_chain",
+                started_at=datetime.now(timezone.utc).isoformat(),
+                summary=summary,
+            )
+            pre_chain_portfolio_dirty = False
+            pre_chain_tracker_dirty = False
+            try:
+                pre_chain_portfolio_dirty, pre_chain_tracker_dirty = _execute_monitoring_phase(
+                    conn,
+                    clob,
+                    portfolio,
+                    pre_chain_artifact,
+                    tracker,
+                    summary,
+                    exit_order_submit_enabled=False,
+                    run_exit_preflight=False,
+                )
+            except Exception as exc:
+                logger.error(
+                    "chain_sync_and_exit_monitor: pre-chain held-position monitor failed (non-fatal): %s",
+                    exc,
+                    exc_info=True,
+                )
+                summary["pre_chain_monitoring_error"] = str(exc)
+
+            try:
+                _pre_chain_aid_box: list = [None]
+
+                def _pre_chain_db_op():
+                    _pre_chain_aid_box[0] = store_artifact(conn, pre_chain_artifact)
+                    return _pre_chain_aid_box[0]
+
+                def _pre_chain_export_portfolio():
+                    if pre_chain_portfolio_dirty:
+                        save_portfolio(
+                            portfolio,
+                            last_committed_artifact_id=_pre_chain_aid_box[0],
+                            source="held_position_monitor_pre_chain",
+                        )
+
+                def _pre_chain_export_tracker():
+                    if pre_chain_tracker_dirty:
+                        save_tracker(tracker)
+
+                commit_then_export(
+                    conn,
+                    db_op=_pre_chain_db_op,
+                    json_exports=[_pre_chain_export_portfolio, _pre_chain_export_tracker],
+                )
+            except Exception as exc:
+                logger.error(
+                    "chain_sync_and_exit_monitor: pre-chain held-position monitor commit failed (non-fatal): %s",
+                    exc,
+                    exc_info=True,
+                )
+                summary["pre_chain_monitoring_commit_error"] = str(exc)
+            finally:
+                _mark_held_position_monitor_complete()
+
             # Phase 1: chain-truth sync — updates chain_shares / chain_avg_price / chain_state.
             # Degrades gracefully if Keychain funder_address is absent (REST call fails → caught).
             try:
@@ -9123,9 +9186,8 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
 
             # Phase 2: exit-lifecycle monitoring — resolves exit_pending_missing,
             # checks pending exit fills, runs monitor refresh for active positions.
-            # exit_order_submit_enabled=False in shadow/no-submit modes: state
+            # exit_order_submit_enabled=False in submit-disabled modes: state
             # transitions run but no real sell orders are placed.
-            tracker = get_tracker()
             artifact = CycleArtifact(
                 mode="chain_sync_monitor",
                 started_at=datetime.now(timezone.utc).isoformat(),
@@ -9150,8 +9212,8 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
             # open resting ENTRY orders whose day0 bin is hard-fact dead for the
             # order's side, or whose family is oracle-anomaly paused. Cancels
             # only REDUCE standing risk; gated to live-submit mode because in
-            # shadow no real resting orders of ours exist (and the venue cancel
-            # is a real API call). Fail-soft.
+            # submit-disabled posture no real resting orders of ours exist (and
+            # the venue cancel is a real API call). Fail-soft.
             if real_order_submit_enabled and bool(
                 edli_cfg.get("day0_dead_bin_order_cancel_enabled", True)
             ):
@@ -9178,8 +9240,6 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
         # then export the derived portfolio/tracker JSON with the committed artifact id —
         # so canonical_write.detect_stale_portfolio's marker stays valid and JSON can
         # never lead the DB. (Chain-sync writes were already committed above.)
-        from src.state.canonical_write import commit_then_export
-        from src.state.decision_chain import store_artifact
         _aid_box: list = [None]
 
         def _db_op():
