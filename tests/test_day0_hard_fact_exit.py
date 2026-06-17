@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-17
 # Authority basis: adversarial review /tmp/day0_adversarial_review.md MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),
 #   #3-wiring (resting-order cancel), #4 (METAR plausibility bound), #5 (day0
@@ -42,6 +42,7 @@ from src.execution.day0_hard_fact_exit import (
     cancel_day0_dead_bin_resting_entries,
     evaluate_hard_fact_exit,
     hard_fact_bin_verdict,
+    hard_fact_monitor_belief,
     settlement_grade_effective_extreme,
 )
 from src.data.day0_oracle_anomaly import (
@@ -159,6 +160,40 @@ class TestVerdictMatrix:
         )
         assert v is not None and v.action == "EXIT_DEAD_BIN"
 
+    def test_tokyo_low_buy_no_dead_bin_is_exact_monitor_structural_win(self):
+        """Tokyo regression: LOW 21C buy_no with effective low 20 is exact q=1."""
+        v = hard_fact_bin_verdict(
+            metric="low", direction="buy_no", bin_low=21.0, bin_high=21.0,
+            effective_extreme=20.0,
+        )
+        assert v is not None and v.action == "HOLD_STRUCTURAL_WIN"
+
+        belief = hard_fact_monitor_belief(verdict=v, direction="buy_no")
+        assert belief is not None
+        assert belief.yes_verdict == "YES_DEAD"
+        assert belief.yes_prob == pytest.approx(0.0)
+        assert belief.held_verdict == "STRUCTURAL_WIN"
+        assert belief.held_side_prob == pytest.approx(1.0)
+
+    def test_low_finite_bin_containing_extreme_is_unresolved_intraday(self):
+        assert hard_fact_bin_verdict(
+            metric="low", direction="buy_yes", bin_low=21.0, bin_high=21.0,
+            effective_extreme=21.0,
+        ) is None
+        assert hard_fact_bin_verdict(
+            metric="low", direction="buy_no", bin_low=21.0, bin_high=21.0,
+            effective_extreme=21.0,
+        ) is None
+
+    def test_direction_enum_is_normalized_before_verdict(self):
+        from src.contracts.semantic_types import Direction
+
+        v = hard_fact_bin_verdict(
+            metric="low", direction=Direction.NO, bin_low=21.0, bin_high=21.0,
+            effective_extreme=20.0,
+        )
+        assert v is not None and v.action == "HOLD_STRUCTURAL_WIN"
+
     def test_alive_bin_above_extreme_is_none(self):
         assert hard_fact_bin_verdict(
             metric="high", direction="buy_yes", bin_low=27.0, bin_high=27.0,
@@ -171,6 +206,29 @@ class TestVerdictMatrix:
 # ===========================================================================
 
 class TestSourceDiscipline:
+    def test_evaluate_hard_fact_exit_normalizes_direction_enum(self, monkeypatch):
+        from src.contracts.semantic_types import Direction
+
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
+            lambda city, target_date, now: (None, 20.0),
+        )
+        verdict = evaluate_hard_fact_exit(
+            position=_position(
+                direction=Direction.NO,
+                temperature_metric="low",
+                bin_label="21°C on June 18?",
+                target_date="2026-06-18",
+            ),
+            city=_tokyo(),
+            now=NOW,
+        )
+        assert verdict is not None
+        assert verdict.action == "HOLD_STRUCTURAL_WIN"
+        belief = hard_fact_monitor_belief(verdict=verdict, direction=Direction.NO)
+        assert belief is not None
+        assert belief.held_side_prob == pytest.approx(1.0)
+
     def test_metar_kill_at_faithful_city_uses_zero_margin(self, monkeypatch):
         _set_metar_memo(monkeypatch, 26)
         effective, source = settlement_grade_effective_extreme(

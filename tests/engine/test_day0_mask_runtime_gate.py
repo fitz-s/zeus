@@ -164,3 +164,60 @@ def test_correct_masker_passes_seam(monkeypatch):
     # Reachable bins (13,14) carry mass; impossible (15,16) are exactly zero.
     assert analysis.p_posterior[2] == 0.0 and analysis.p_posterior[3] == 0.0
     assert analysis.p_posterior[0] > 0.0 and analysis.p_posterior[1] > 0.0
+
+
+def test_tokyo_local_midnight_low_event_updates_probability_before_trade_gates():
+    """Tokyo LOW 00:00 JST observation is a probability input, not just an exit kill.
+
+    The EDLI live-family seam consumes DAY0_EXTREME_UPDATED before FDR, Kelly,
+    risk, and submit selection. For LOW=20, bins above 20 are removed while the
+    reachable lower/equal bins remain as the probability surface that downstream
+    order selection evaluates.
+    """
+    import src.engine.evaluator as ev
+
+    bins = [
+        SimpleNamespace(low=19, high=19, label="19"),
+        SimpleNamespace(low=20, high=20, label="20"),
+        SimpleNamespace(low=21, high=21, label="21"),
+        SimpleNamespace(low=22, high=22, label="22"),
+    ]
+    analysis = SimpleNamespace(
+        bins=bins,
+        p_posterior=np.array([0.10, 0.30, 0.40, 0.20]),
+        _bootstrap_cache={},
+        p_market=np.array([0.20, 0.20, 0.20, 0.20]),
+    )
+    analysis.buy_no_market_price = lambda _idx: 0.5
+    candidate = SimpleNamespace(
+        edli_event_context={
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "event_id": "tokyo-low-2026-06-18-0000",
+            "payload": {
+                "city": "Tokyo",
+                "target_date": "2026-06-18",
+                "metric": "low",
+                "rounded_value": 20.0,
+                "low_so_far": 20.0,
+                "observation_time": "2026-06-17T15:00:00+00:00",
+                "observation_available_at": "2026-06-17T15:07:34.690000+00:00",
+                "station_id": "RJTT",
+                "live_authority_status": "LIVE_AUTHORITY",
+            },
+            "causal_snapshot_id": "",
+        }
+    )
+
+    proof = ev._apply_edli_live_family_before_selection(
+        candidate=candidate, analysis=analysis, decision_snapshot_id=""
+    )
+
+    assert proof is not None
+    assert proof["factor"] == "day0_absorbing_boundary"
+    assert proof["applied_before_fdr"] is True
+    assert proof["applied_before_kelly"] is True
+    assert proof["applied_before_risk"] is True
+    assert np.allclose(analysis.p_posterior, np.array([0.25, 0.75, 0.0, 0.0]))
+    assert proof["family"]["19"] == pytest.approx(0.25)
+    assert proof["family"]["20"] == pytest.approx(0.75)
+    assert proof["family"]["21"] == 0.0

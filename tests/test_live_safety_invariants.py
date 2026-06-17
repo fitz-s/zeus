@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-06-17
 # Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -3749,7 +3749,8 @@ def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     assert observed_methods == [EntryMethod.DAY0_OBSERVATION.value]
     assert pos.entry_method == EntryMethod.ENS_MEMBER_COUNTING.value
     assert pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
-    assert pos.applied_validations == [EntryMethod.DAY0_OBSERVATION.value]
+    assert EntryMethod.DAY0_OBSERVATION.value in pos.applied_validations
+    assert "whale_toxicity_deferred:fresh_probability_authority" in pos.applied_validations
     assert pos.last_monitor_prob == pytest.approx(0.52)
     assert pos.last_monitor_market_price == pytest.approx(0.41)
     assert summary["monitors"] == 1
@@ -3849,6 +3850,74 @@ def test_day0_wu_observation_unavailable_falls_back_to_forecast_origin_monitor(m
     assert pos.selected_method == EntryMethod.ENS_MEMBER_COUNTING.value
     assert "day0_observation_unavailable:forecast_monitor_fallback" in pos.applied_validations
     assert "q_source:emos" in pos.applied_validations
+
+
+def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
+    """Tokyo LOW regression: absorbing hard fact is exact monitor belief."""
+    from src.engine import monitor_refresh
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
+
+    pos = _make_position(
+        state="day0_window",
+        city="Tokyo",
+        cluster="East Asia",
+        target_date="2026-06-18",
+        bin_label="21°C on June 18?",
+        direction="buy_no",
+        temperature_metric="low",
+        unit="C",
+        entry_method="ens_member_counting",
+        selected_method="",
+        applied_validations=[],
+        entry_price=0.58,
+        p_posterior=0.720612963366361,
+        token_id="tok_yes_tokyo_low_21",
+        no_token_id="tok_no_tokyo_low_21",
+    )
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            assert token_id == "tok_no_tokyo_low_21"
+            return 0.99, 1.00, 100.0, 100.0
+
+    monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda *, position, city, now=None, world_conn=None: HardFactVerdict(
+            action="HOLD_STRUCTURAL_WIN",
+            reason="running low extreme 20 killed bin [21.0,21.0]",
+            metric="low",
+            rounded_extreme=20.0,
+            source="metar_fast_lane",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.engine.position_belief.load_replacement_belief",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("replacement posterior must not be read before absorbing hard fact")
+        ),
+    )
+
+    edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)
+
+    assert pos.selected_method == monitor_refresh.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
+    assert pos.last_monitor_prob_is_fresh is True
+    assert pos.last_monitor_prob == pytest.approx(1.0)
+    assert pos.last_monitor_market_price == pytest.approx(0.99)
+    assert pos.last_monitor_edge == pytest.approx(0.01)
+    assert edge_ctx.p_posterior == pytest.approx(1.0)
+    assert edge_ctx.forward_edge == pytest.approx(0.01)
+    assert monitor_refresh.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT in pos.applied_validations
+    belief_tags = [
+        tag for tag in pos.applied_validations
+        if str(tag).startswith("belief_source=day0_absorbing_hard_fact;")
+    ]
+    assert belief_tags
+    assert "yes_verdict=YES_DEAD" in belief_tags[0]
+    assert "held_verdict=STRUCTURAL_WIN" in belief_tags[0]
+    assert "held_prob=1.000000" in belief_tags[0]
+    assert "forecast_posteriors_dominated_by_day0_hard_fact" in pos.applied_validations
+    assert "model_divergence_panic_inapplicable:day0_absorbing_hard_fact" in pos.applied_validations
 
 
 def test_day0_high_morning_observation_is_not_exit_authority():
@@ -3967,9 +4036,10 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
     monkeypatch.setattr(
         monitor_refresh,
         "_day0_observation_quality_rejection_reason",
-        lambda city, obs, metric, decision_time=None: _orig_quality_gate(
+        lambda city, obs, metric, decision_time=None, **kwargs: _orig_quality_gate(
             city, obs, metric,
             decision_time=datetime(2026, 6, 7, 15, 10, tzinfo=timezone.utc),
+            **kwargs,
         ),
     )
     monkeypatch.setattr(

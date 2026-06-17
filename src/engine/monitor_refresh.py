@@ -7,10 +7,11 @@
 
 Blueprint v2 §7 Layer 1: recompute the held-side probability.
 
-PRIMARY AUTHORITY (corrected 2026-06-16): ``monitor_probability_refresh`` reads
-the multi-model fused posterior ``forecast_posteriors`` (via
+PRIMARY AUTHORITY (corrected 2026-06-17): Day0 absorbing hard facts dominate
+model belief when qualified; otherwise ``monitor_probability_refresh`` reads the
+multi-model fused posterior ``forecast_posteriors`` (via
 ``position_belief.load_replacement_belief``, sourced from ``raw_model_forecasts``)
-— the SAME source family as the entry decision. The legacy ENS member-counting
+as the SAME source family as the entry decision. The legacy ENS member-counting
 path is retained as diagnostic telemetry only and must not substitute for a
 stale/missing replacement belief on non-day0 positions. The day0 observation
 lane remains a separate settlement-day authority.
@@ -88,6 +89,7 @@ _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
 _WHALE_TOXICITY_MIN_NOTIONAL_USD = 25.0
 _NOWCAST_PERSISTENT_FAILURE_THRESHOLD = 3
 _DAY0_LOW_EXTREME_AUTHORITY_HOURS = 6.0
+SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT = "day0_absorbing_hard_fact"
 _DAY0_STALE_OBSERVATION_REJECTION_PREFIX = (
     "Day0 observation is stale for executable probability generation:"
 )
@@ -2276,6 +2278,83 @@ def _detect_whale_toxicity_from_orderbook(
     return None
 
 
+def _day0_absorbing_hard_fact_overlay(
+    *,
+    pos: Position,
+    conn,
+    city,
+    target_d,
+) -> tuple[float, Position, bool] | None:
+    """Return exact monitor belief when a qualified Day0 hard fact is absorbing."""
+
+    if _position_state_value(pos) != "day0_window":
+        return None
+    if not _is_position_target_local_day(pos, city, target_d):
+        return None
+    metric = str(getattr(pos, "temperature_metric", "") or "").strip().lower()
+    if metric not in {"high", "low"}:
+        return None
+    try:
+        from src.execution.day0_hard_fact_exit import (
+            evaluate_hard_fact_exit,
+            hard_fact_monitor_belief,
+        )
+
+        verdict = evaluate_hard_fact_exit(
+            position=pos,
+            city=city,
+            now=datetime.now(timezone.utc),
+            world_conn=conn,
+        )
+        if verdict is None:
+            return None
+        belief = hard_fact_monitor_belief(
+            verdict=verdict,
+            direction=getattr(pos, "direction", ""),
+        )
+        if belief is None:
+            return None
+    except Exception as exc:  # noqa: BLE001 - hard-fact overlay must fail soft
+        logger.warning(
+            "monitor_probability_refresh: day0 hard-fact overlay failed for %s: %s",
+            getattr(pos, "trade_id", "?"),
+            exc,
+        )
+        return None
+
+    hard_pos = replace(pos)
+    setattr(hard_pos, "selected_method", SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
+    _append_monitor_validation(hard_pos, SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
+    _append_monitor_validation(
+        hard_pos,
+        (
+            "belief_source=day0_absorbing_hard_fact;"
+            "kind=deterministic_absorbing;"
+            f"metric={verdict.metric};"
+            f"yes_verdict={belief.yes_verdict};"
+            f"held_verdict={belief.held_verdict};"
+            f"yes_prob={belief.yes_prob:.6f};"
+            f"held_prob={belief.held_side_prob:.6f};"
+            f"effective_extreme={verdict.rounded_extreme:g};"
+            f"source={verdict.source or 'unknown'}"
+        ),
+    )
+    if belief.held_verdict == "STRUCTURAL_WIN":
+        _append_monitor_validation(hard_pos, "day0_hard_fact_structural_win_hold")
+    else:
+        _append_monitor_validation(hard_pos, "day0_hard_fact_structural_loss")
+    _append_monitor_validation(
+        hard_pos,
+        "model_divergence_panic_inapplicable:day0_absorbing_hard_fact",
+    )
+    _append_monitor_validation(
+        hard_pos,
+        "forecast_posteriors_dominated_by_day0_hard_fact",
+    )
+    _set_monitor_probability_fresh(hard_pos, True)
+    return float(belief.held_side_prob), hard_pos, True
+
+
 def monitor_probability_refresh(
     pos: Position,
     *,
@@ -2285,14 +2364,24 @@ def monitor_probability_refresh(
 ) -> tuple[float, Position, bool | None]:
     """Refresh held-side posterior without consuming the held-token quote.
 
-    PRIMARY AUTHORITY (K1 single belief authority, 2026-06-12): the
-    replacement-chain posterior (``forecast_posteriors``) — the SAME authority
-    the entry decision used. The legacy ens/day0 refreshers below remain as
-    explicit fallback telemetry only; they cannot be the freshness authority
-    while a fresh replacement row exists. This removes the entry-belief vs
-    exit-belief twin-authority failure mode without encoding any current
-    live-position coverage claim in source comments.
+    PRIMARY AUTHORITY: a qualified Day0 absorbing hard fact is exact and
+    dominates model belief. When no absorbing hard fact exists, the K1 single
+    belief authority is the replacement-chain posterior
+    (``forecast_posteriors``), the SAME authority the entry decision used. The
+    legacy ens/day0 refreshers below remain as explicit fallback telemetry only;
+    they cannot be the freshness authority while a fresh replacement row exists.
+    This removes the entry-belief vs exit-belief twin-authority failure mode
+    without encoding any current live-position coverage claim in source comments.
     """
+    hard_fact_overlay = _day0_absorbing_hard_fact_overlay(
+        pos=pos,
+        conn=conn,
+        city=city,
+        target_d=target_d,
+    )
+    if hard_fact_overlay is not None:
+        return hard_fact_overlay
+
     from src.engine.position_belief import (
         SELECTED_METHOD_REPLACEMENT_POSTERIOR,
         load_replacement_belief,
