@@ -103,11 +103,16 @@ from src.signal.day0_high_nowcast_signal import (
     NotApplicableHorizon as _NowcastNotApplicableHorizon,
 )
 from src.signal.day0_low_distribution import (
-    blend_pre_day0_low_carryover_probabilities,
-    build_pre_day0_low_carryover_conditioning,
+    build_pre_day0_low_empirical_conditioning,
+    load_pre_day0_low_empirical_model,
 )
 from src.signal.day0_window import remaining_member_extrema_for_day0
-from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes, select_hours_for_target_date
+from src.signal.ensemble_signal import (
+    EnsembleSignal,
+    analytic_p_raw_vector_from_maxes,
+    p_raw_vector_from_maxes,
+    select_hours_for_target_date,
+)
 from src.control.control_plane import get_edge_threshold_multiplier
 from src.riskguard.policy import StrategyPolicy, resolve_strategy_policy
 from src.signal.model_agreement import (
@@ -321,22 +326,6 @@ def _evaluator_eqe_enabled() -> bool:
     """
     import os
     return os.environ.get(_ENV_EVALUATOR_EQE_ENABLED, "0") in ("1", "true", "TRUE")
-
-
-def _pre_day0_low_carryover_live_enabled() -> bool:
-    """Whether pre-Day0 LOW carryover may alter live entry q.
-
-    Default is OFF. The current carryover weight is a bounded physical
-    hypothesis, not a historical calibration fit, so it remains shadow-only
-    until a calibrated persistence model or explicit live flag exists.
-    """
-    try:
-        return bool(settings.get("feature_flags", {}).get(
-            "pre_day0_low_carryover_live_enabled",
-            False,
-        ))
-    except Exception:
-        return False
 
 
 def _buy_entry_evidence_from_clob(
@@ -4345,43 +4334,44 @@ def evaluate_candidate(
                             ).total_seconds()
                             / 60.0,
                         )
-                        conditioning = build_pre_day0_low_carryover_conditioning(
+                        empirical_model = load_pre_day0_low_empirical_model()
+                        conditioning = build_pre_day0_low_empirical_conditioning(
                             member_mins=np.asarray(analysis_member_extrema, dtype=float),
                             window_low=low_window.window_low,
-                            current_temp=low_window.current_temp,
                             lead_hours_to_target_start=lead_hours_pre_day0,
-                            observation_age_minutes=obs_age_minutes,
-                            low_age_minutes=low_age_minutes,
                             unit=city.settlement_unit,
+                            city_name=city.name,
+                            model=empirical_model,
                         )
                         if conditioning is not None:
-                            carryover_p_raw = p_raw_vector_from_maxes(
+                            empirical_p_raw = analytic_p_raw_vector_from_maxes(
                                 conditioning.conditioned_member_mins,
                                 city,
                                 settlement_semantics,
                                 bins,
-                                n_mc=ensemble_n_mc(),
                             )
-                            blended_p_raw = blend_pre_day0_low_carryover_probabilities(
-                                base_p_raw=p_raw,
-                                carryover_p_raw=carryover_p_raw,
-                                weight=conditioning.weight,
-                            )
-                            if blended_p_raw is not None:
-                                _carryover_live_enabled = _pre_day0_low_carryover_live_enabled()
+                            if _valid_probability_vector(empirical_p_raw, len(bins)):
+                                p_raw = empirical_p_raw
+                                _pre_day0_low_carryover_applied = True
                                 _pre_day0_low_carryover_context = {
-                                    "belief_source": "pre_day0_low_carryover_nowcast",
-                                    "belief_kind": "soft_probability_conditioning",
-                                    "calibration_status": (
-                                        "OPERATOR_FLAG_LIVE_HEURISTIC"
-                                        if _carryover_live_enabled
-                                        else "UNCALIBRATED_HEURISTIC_SHADOW_ONLY"
-                                    ),
-                                    "live_probability_applied": bool(_carryover_live_enabled),
+                                    "belief_source": "pre_day0_low_empirical_carryover",
+                                    "belief_kind": "empirical_residual_conditioning",
+                                    "calibration_status": "EMPIRICAL_RESIDUAL_MODEL_VERIFIED",
+                                    "live_probability_applied": True,
                                     "hard_fact": False,
                                     "absorbing": False,
                                     "metric": "low",
                                     "target_date": target_d.isoformat(),
+                                    "model_version": conditioning.model_version,
+                                    "residual_scope": conditioning.residual_scope,
+                                    "residual_source": conditioning.residual_source,
+                                    "residual_sample_count": int(
+                                        conditioning.residual_sample_count
+                                    ),
+                                    "residual_quantile_count": int(
+                                        conditioning.residual_quantiles.size
+                                    ),
+                                    "lead_bucket_hours": int(conditioning.lead_bucket_hours),
                                     "source": "aviationweather_metar",
                                     "station_id": low_window.station_id,
                                     "unit": low_window.unit,
@@ -4400,29 +4390,15 @@ def evaluate_candidate(
                                     "lead_hours_to_target_start": float(
                                         conditioning.lead_hours_to_target_start
                                     ),
-                                    "observation_age_minutes": float(
-                                        conditioning.observation_age_minutes
-                                    ),
-                                    "low_age_minutes": float(conditioning.low_age_minutes),
-                                    "anchor_temp": float(conditioning.anchor_temp),
-                                    "effective_ceiling": float(conditioning.effective_ceiling),
-                                    "carryover_weight": float(conditioning.weight),
-                                    "shadow_probability_by_bin_label": {
-                                        str(getattr(b, "label", i)): float(blended_p_raw[i])
+                                    "observation_age_minutes": float(obs_age_minutes),
+                                    "low_age_minutes": float(low_age_minutes),
+                                    "empirical_probability_by_bin_label": {
+                                        str(getattr(b, "label", i)): float(empirical_p_raw[i])
                                         for i, b in enumerate(bins)
                                     },
-                                    "calibration_policy": (
-                                        "identity_platt_when_applied"
-                                        if _carryover_live_enabled
-                                        else "no_live_q_change_without_empirical_calibration"
-                                    ),
+                                    "calibration_policy": "identity_platt_empirical_residual_model",
                                 }
-                                if _carryover_live_enabled:
-                                    p_raw = blended_p_raw
-                                    _pre_day0_low_carryover_applied = True
-                                    entry_validations.append("pre_day0_low_carryover_nowcast")
-                                else:
-                                    entry_validations.append("pre_day0_low_carryover_shadow")
+                                entry_validations.append("pre_day0_low_empirical_carryover")
             except Exception as exc:
                 logger.warning(
                     "PRE_DAY0_LOW_CARRYOVER_SKIPPED city=%s target_date=%s exc=%s: %s",
@@ -4796,7 +4772,7 @@ def evaluate_candidate(
         _arr = np.asarray(p_raw, dtype=float)
         _tot = float(_arr.sum())
         p_cal = (_arr / _tot) if _tot > 0.0 else _arr
-        entry_validations.extend(["identity_platt_pre_day0_low_carryover", "normalization"])
+        entry_validations.extend(["identity_platt_pre_day0_low_empirical", "normalization"])
     elif cal is not None:
         p_cal = calibrate_and_normalize(
             p_raw,

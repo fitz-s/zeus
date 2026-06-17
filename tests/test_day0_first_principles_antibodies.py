@@ -196,7 +196,7 @@ class TestPreDay0LowCarryover:
             settlement_unit="C",
             settlement_source_type="wu_icao",
             wu_station="EGLL",
-            instrument_noise_override=0.0,
+            instrument_noise_override=0.28,
             lat=51.47,
         )
 
@@ -238,10 +238,10 @@ class TestPreDay0LowCarryover:
 
         from src.contracts import SettlementSemantics
         from src.signal.day0_low_distribution import (
-            blend_pre_day0_low_carryover_probabilities,
-            build_pre_day0_low_carryover_conditioning,
+            PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            build_pre_day0_low_empirical_conditioning,
         )
-        from src.signal.ensemble_signal import p_raw_vector_from_maxes
+        from src.signal.ensemble_signal import analytic_p_raw_vector_from_maxes
         from src.types.market import Bin
 
         city = self._london_city()
@@ -253,61 +253,92 @@ class TestPreDay0LowCarryover:
             Bin(14.0, None, "C", "14°C or higher"),
         ]
         member_mins = np.full(51, 15.0)
-        base = p_raw_vector_from_maxes(member_mins, city, sem, bins, n_mc=32)
-        conditioning = build_pre_day0_low_carryover_conditioning(
+        base = analytic_p_raw_vector_from_maxes(member_mins, city, sem, bins)
+        model = {
+            "model_version": PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            "source_table": "test_observation_instants",
+            "by_city": {
+                "London": {
+                    "lead_buckets": {
+                        "1": {
+                            "n": 240,
+                            "residual_quantiles": [-0.2, 0.0, 0.4, 0.8, 1.0],
+                        }
+                    }
+                }
+            },
+            "by_unit": {},
+        }
+        conditioning = build_pre_day0_low_empirical_conditioning(
             member_mins=member_mins,
             window_low=12.0,
-            current_temp=12.0,
             lead_hours_to_target_start=0.25,
-            observation_age_minutes=15.0,
-            low_age_minutes=15.0,
             unit="C",
+            city_name="London",
+            model=model,
         )
         assert conditioning is not None
-        carry = p_raw_vector_from_maxes(
-            conditioning.conditioned_member_mins, city, sem, bins, n_mc=32
+        empirical = analytic_p_raw_vector_from_maxes(
+            conditioning.conditioned_member_mins, city, sem, bins
         )
-        blended = blend_pre_day0_low_carryover_probabilities(
-            base_p_raw=base,
-            carryover_p_raw=carry,
-            weight=conditioning.weight,
-        )
-        assert blended is not None
-        assert base[3] == pytest.approx(1.0)
-        assert blended[2] > 0.50
-        assert blended[2] < 0.999
-        assert 0.0 < conditioning.weight < 0.70
+        assert base[3] > 0.95
+        assert empirical[1] + empirical[2] > 0.50
+        assert empirical[1] + empirical[2] < 0.999
+        assert conditioning.residual_scope == "city:London"
+        assert conditioning.residual_sample_count == 240
 
-    def test_pre_day0_low_carryover_weight_is_shadow_only_by_default(self):
-        from src.engine.evaluator import _pre_day0_low_carryover_live_enabled
+    def test_pre_day0_low_carryover_requires_empirical_model_for_live_q(self):
+        import numpy as np
+        from src.signal.day0_low_distribution import build_pre_day0_low_empirical_conditioning
 
-        assert _pre_day0_low_carryover_live_enabled() is False
+        assert build_pre_day0_low_empirical_conditioning(
+            member_mins=np.full(51, 15.0),
+            window_low=12.0,
+            lead_hours_to_target_start=1.0,
+            unit="C",
+            city_name="London",
+            model=None,
+        ) is None
         source = (ROOT / "src" / "engine" / "evaluator.py").read_text(encoding="utf-8")
-        assert "UNCALIBRATED_HEURISTIC_SHADOW_ONLY" in source
-        assert "no_live_q_change_without_empirical_calibration" in source
+        assert "EMPIRICAL_RESIDUAL_MODEL_VERIFIED" in source
+        assert "UNCALIBRATED_HEURISTIC_SHADOW_ONLY" not in source
 
     def test_pre_day0_low_carryover_not_active_after_start_or_too_early(self):
         import numpy as np
 
-        from src.signal.day0_low_distribution import build_pre_day0_low_carryover_conditioning
+        from src.signal.day0_low_distribution import (
+            PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            build_pre_day0_low_empirical_conditioning,
+        )
+        model = {
+            "model_version": PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            "source_table": "test_observation_instants",
+            "by_city": {
+                "London": {
+                    "lead_buckets": {
+                        "3": {"n": 240, "residual_quantiles": [-1.0, 0.0, 1.0]}
+                    }
+                }
+            },
+            "by_unit": {},
+        }
 
         kwargs = dict(
             member_mins=np.full(51, 15.0),
             window_low=12.0,
-            current_temp=12.0,
-            observation_age_minutes=10.0,
-            low_age_minutes=10.0,
             unit="C",
+            city_name="London",
+            model=model,
         )
-        assert build_pre_day0_low_carryover_conditioning(
+        assert build_pre_day0_low_empirical_conditioning(
             **kwargs,
             lead_hours_to_target_start=-0.10,
         ) is None
-        assert build_pre_day0_low_carryover_conditioning(
+        assert build_pre_day0_low_empirical_conditioning(
             **kwargs,
             lead_hours_to_target_start=3.50,
         ) is None
-        assert build_pre_day0_low_carryover_conditioning(
+        assert build_pre_day0_low_empirical_conditioning(
             **kwargs,
             lead_hours_to_target_start=3.00,
         ) is not None

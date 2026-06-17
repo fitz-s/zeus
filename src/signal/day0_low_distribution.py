@@ -18,8 +18,12 @@ diagnostic / uncertainty context elsewhere, never a daily-min sample.
 """
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Optional
+from functools import lru_cache
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import numpy as np
 
@@ -28,22 +32,32 @@ from src.contracts.settlement_semantics import apply_settlement_rounding
 if TYPE_CHECKING:
     from src.types import Bin
 
+PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION = "pre_day0_low_carryover_residual_v1"
+DEFAULT_PRE_DAY0_LOW_EMPIRICAL_MODEL_PATH = (
+    Path(__file__).resolve().parents[2] / "state" / "pre_day0_low_carryover_empirical.json"
+)
+_MODEL_SENTINEL = object()
+
 
 @dataclass(frozen=True)
-class PreDay0LowCarryoverConditioning:
-    """Soft LOW conditioning from a fresh late T-1 observation window.
+class PreDay0LowEmpiricalConditioning:
+    """LOW conditioning from an empirical T-1-night -> Day0-early residual model.
 
-    ``conditioned_member_mins`` is a probabilistic feature, not a hard fact:
-    evaluator blends it with the unconditioned forecast vector by ``weight``.
+    ``conditioned_member_mins`` is the full sample space:
+    min(forecast_member_low, late_window_low + empirical_residual_quantile).
+    The residuals are fitted from verified historical hourly observations, so
+    no arbitrary blend weight is needed.
     """
 
     conditioned_member_mins: np.ndarray
-    effective_ceiling: float
-    anchor_temp: float
-    weight: float
+    residual_quantiles: np.ndarray
+    lead_bucket_hours: int
     lead_hours_to_target_start: float
-    observation_age_minutes: float
-    low_age_minutes: float
+    window_low: float
+    residual_sample_count: int
+    residual_scope: str
+    residual_source: str
+    model_version: str
     unit: str
 
 
@@ -69,113 +83,133 @@ def build_day0_low_distribution(
     return apply_settlement_rounding(samples, round_fn, precision)
 
 
-def build_pre_day0_low_carryover_conditioning(
+@lru_cache(maxsize=4)
+def _load_pre_day0_low_empirical_model_cached(path_str: str) -> Optional[dict[str, Any]]:
+    try:
+        path = Path(path_str)
+        if not path.exists():
+            return None
+        model = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if model.get("model_version") != PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION:
+        return None
+    return model
+
+
+def load_pre_day0_low_empirical_model(path: str | Path | None = None) -> Optional[dict[str, Any]]:
+    """Load the deployed pre-Day0 LOW empirical residual model, if present."""
+    effective = DEFAULT_PRE_DAY0_LOW_EMPIRICAL_MODEL_PATH if path is None else Path(path)
+    return _load_pre_day0_low_empirical_model_cached(str(effective))
+
+
+def _pre_day0_low_lead_bucket(lead_hours_to_target_start: float) -> Optional[int]:
+    try:
+        lead = float(lead_hours_to_target_start)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(lead) or lead <= 0.0 or lead > 3.0:
+        return None
+    return max(1, min(3, int(math.ceil(lead - 1e-12))))
+
+
+def _residual_entry(
+    model: dict[str, Any],
+    *,
+    city_name: str,
+    unit: str,
+    lead_bucket_hours: int,
+    min_samples: int,
+) -> tuple[str, dict[str, Any]] | None:
+    bucket = str(int(lead_bucket_hours))
+    city_entry = (
+        (model.get("by_city") or {})
+        .get(str(city_name), {})
+        .get("lead_buckets", {})
+        .get(bucket)
+    )
+    if city_entry is not None and int(city_entry.get("n") or 0) >= int(min_samples):
+        return f"city:{city_name}", city_entry
+    unit_entry = (
+        (model.get("by_unit") or {})
+        .get(str(unit).upper(), {})
+        .get("lead_buckets", {})
+        .get(bucket)
+    )
+    if unit_entry is not None and int(unit_entry.get("n") or 0) >= int(min_samples):
+        return f"unit:{str(unit).upper()}", unit_entry
+    return None
+
+
+def build_pre_day0_low_empirical_conditioning(
     *,
     member_mins: np.ndarray,
     window_low: float,
-    current_temp: float,
     lead_hours_to_target_start: float,
-    observation_age_minutes: float,
-    low_age_minutes: float,
     unit: str,
-    max_lead_hours: float = 3.0,
-    max_observation_age_minutes: float = 120.0,
-    max_weight: float = 0.70,
-    min_weight: float = 0.05,
-) -> Optional[PreDay0LowCarryoverConditioning]:
-    """Build a soft carryover transform for tomorrow's LOW market.
+    city_name: str,
+    model: Any = _MODEL_SENTINEL,
+    min_samples: int = 120,
+) -> Optional[PreDay0LowEmpiricalConditioning]:
+    """Build empirical pre-Day0 LOW samples from verified historical residuals.
 
-    This captures the economically important case where the late T-1
-    temperature has already fallen to a level likely to persist through local
-    midnight. It intentionally does not produce deterministic absorption:
-    target-day lows later in the day remain possible, and stale/far-from-midnight
-    observations decay to no signal.
+    The fitted residual is:
+        min(local target-day hours 00..03 low) - min(T-1 observed night window low)
+
+    Runtime sample law:
+        L_sample = min(forecast_member_low, observed_T_minus_1_low + residual_q)
+
+    This preserves same-day LOW causality: a later target-day trough still comes
+    from the forecast member low, while the midnight carryover component comes
+    from historical station behavior rather than a hand-tuned blend weight.
     """
     arr = np.asarray(member_mins, dtype=np.float64)
     if arr.ndim != 1 or arr.size == 0 or not np.all(np.isfinite(arr)):
         return None
     try:
         low = float(window_low)
-        current = float(current_temp)
         lead = float(lead_hours_to_target_start)
-        obs_age = max(0.0, float(observation_age_minutes))
-        low_age = max(0.0, float(low_age_minutes))
     except (TypeError, ValueError):
         return None
-    if not all(np.isfinite(v) for v in (low, current, lead, obs_age, low_age)):
+    if not all(np.isfinite(v) for v in (low, lead)):
         return None
-    if lead <= 0.0 or lead > float(max_lead_hours):
+    bucket = _pre_day0_low_lead_bucket(lead)
+    if bucket is None:
         return None
-    if obs_age > float(max_observation_age_minutes):
+    effective_model = load_pre_day0_low_empirical_model() if model is _MODEL_SENTINEL else model
+    if not effective_model:
         return None
 
     u = str(unit or "").upper()
-    unit_scale = 1.8 if u == "F" else 1.0
-
-    # If the window low was not the latest print, let it decay toward current
-    # temperature before applying the midnight carryover uncertainty buffer.
-    low_recency_buffer = min(low_age / 60.0, 3.0) * 0.50 * unit_scale
-    anchor = min(current, low + low_recency_buffer)
-
-    # Conservative ceiling on target-day early LOW. The buffer grows with the
-    # remaining time to midnight and publication age, but stays finite and soft.
-    carryover_buffer = (
-        0.50 * unit_scale
-        + max(0.0, lead) * 0.60 * unit_scale
-        + min(obs_age / 60.0, 2.0) * 0.20 * unit_scale
+    found = _residual_entry(
+        effective_model,
+        city_name=str(city_name),
+        unit=u,
+        lead_bucket_hours=bucket,
+        min_samples=int(min_samples),
     )
-    effective_ceiling = anchor + carryover_buffer
-
-    lead_factor = max(0.10, min(1.0, 1.0 - lead / float(max_lead_hours)))
-    freshness_factor = max(
-        0.0,
-        min(1.0, 1.0 - obs_age / float(max_observation_age_minutes)),
-    )
-    weight = min(float(max_weight), max(0.0, float(max_weight) * lead_factor * freshness_factor))
-    if weight < float(min_weight):
+    if found is None:
         return None
+    scope, entry = found
 
-    conditioned = np.minimum(arr, effective_ceiling)
-    if np.allclose(conditioned, arr, rtol=0.0, atol=1e-9):
+    residuals = np.asarray(entry.get("residual_quantiles") or (), dtype=np.float64)
+    if residuals.ndim != 1 or residuals.size == 0 or not np.all(np.isfinite(residuals)):
         return None
-    return PreDay0LowCarryoverConditioning(
+    conditioned = np.minimum(arr[:, np.newaxis], low + residuals[np.newaxis, :]).reshape(-1)
+    if conditioned.size == 0 or not np.all(np.isfinite(conditioned)):
+        return None
+    return PreDay0LowEmpiricalConditioning(
         conditioned_member_mins=conditioned,
-        effective_ceiling=float(effective_ceiling),
-        anchor_temp=float(anchor),
-        weight=float(weight),
+        residual_quantiles=residuals,
+        lead_bucket_hours=int(bucket),
         lead_hours_to_target_start=float(lead),
-        observation_age_minutes=float(obs_age),
-        low_age_minutes=float(low_age),
+        window_low=float(low),
+        residual_sample_count=int(entry.get("n") or 0),
+        residual_scope=scope,
+        residual_source=str(effective_model.get("source_table") or "unknown"),
+        model_version=str(effective_model.get("model_version") or ""),
         unit=u or "UNKNOWN",
     )
-
-
-def blend_pre_day0_low_carryover_probabilities(
-    *,
-    base_p_raw: np.ndarray,
-    carryover_p_raw: np.ndarray,
-    weight: float,
-) -> Optional[np.ndarray]:
-    """Blend base forecast probability with the carryover-conditioned vector."""
-    try:
-        base = np.asarray(base_p_raw, dtype=np.float64)
-        carry = np.asarray(carryover_p_raw, dtype=np.float64)
-        w = float(weight)
-    except (TypeError, ValueError):
-        return None
-    if base.shape != carry.shape or base.ndim != 1 or base.size == 0:
-        return None
-    if not (np.all(np.isfinite(base)) and np.all(np.isfinite(carry))):
-        return None
-    if np.any(base < 0.0) or np.any(carry < 0.0):
-        return None
-    if not np.isfinite(w) or w <= 0.0 or w >= 1.0:
-        return None
-    out = (1.0 - w) * base + w * carry
-    total = float(out.sum())
-    if not np.isfinite(total) or total <= 0.0:
-        return None
-    return out / total
 
 
 def p_vector(
