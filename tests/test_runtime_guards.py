@@ -7693,6 +7693,39 @@ def test_day0_monitor_refresh_rejects_stale_observation_before_fetch(monkeypatch
     assert any("stale" in item for item in applied)
 
 
+def test_stale_day0_high_post_peak_bound_can_remain_monitor_authority():
+    from src.engine import monitor_refresh
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
+
+    reason = (
+        "Day0 observation is stale for executable probability generation: "
+        "city=Chengdu age_hours=1.100 max_age_hours=1.000"
+    )
+    post_peak = types.SimpleNamespace(daypart="post_peak", post_peak_confidence=0.98)
+    morning = types.SimpleNamespace(daypart="morning", post_peak_confidence=0.0)
+
+    assert monitor_refresh._stale_day0_observation_can_remain_monitor_authority(
+        quality_rejection=reason,
+        temperature_metric=HIGH_LOCALDAY_MAX,
+        temporal_context=post_peak,
+    )
+    assert not monitor_refresh._stale_day0_observation_can_remain_monitor_authority(
+        quality_rejection=reason,
+        temperature_metric=HIGH_LOCALDAY_MAX,
+        temporal_context=morning,
+    )
+    assert not monitor_refresh._stale_day0_observation_can_remain_monitor_authority(
+        quality_rejection=reason,
+        temperature_metric=LOW_LOCALDAY_MIN,
+        temporal_context=post_peak,
+    )
+    assert not monitor_refresh._stale_day0_observation_can_remain_monitor_authority(
+        quality_rejection="Day0 observation timestamp is unavailable",
+        temperature_metric=HIGH_LOCALDAY_MAX,
+        temporal_context=post_peak,
+    )
+
+
 def test_day0_monitor_refresh_degrades_on_malformed_solar_daily_rootpage(monkeypatch):
     from src.engine import monitor_refresh
 

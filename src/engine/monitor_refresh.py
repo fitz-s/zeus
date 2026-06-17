@@ -88,6 +88,9 @@ _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
 _WHALE_TOXICITY_MIN_NOTIONAL_USD = 25.0
 _NOWCAST_PERSISTENT_FAILURE_THRESHOLD = 3
 _DAY0_LOW_EXTREME_AUTHORITY_HOURS = 6.0
+_DAY0_STALE_OBSERVATION_REJECTION_PREFIX = (
+    "Day0 observation is stale for executable probability generation:"
+)
 _nowcast_consecutive_write_failures = 0
 
 
@@ -1356,6 +1359,33 @@ def _fetch_day0_observation(city: Position | object, target_d: date):
         return get_current_observation(city)
 
 
+def _is_stale_day0_observation_quality_rejection(reason: str | None) -> bool:
+    return str(reason or "").startswith(_DAY0_STALE_OBSERVATION_REJECTION_PREFIX)
+
+
+def _stale_day0_observation_can_remain_monitor_authority(
+    *,
+    quality_rejection: str | None,
+    temperature_metric: MetricIdentity,
+    temporal_context,
+) -> bool:
+    """Allow mature HIGH bounds to keep held-position monitor authority.
+
+    This is deliberately monitor-only. Entry decisions still require a fresh
+    observation tick; held positions after the high peak need the latest known
+    running high plus temporal maturity so the exit/redecision loop does not go
+    blind merely because the station has not emitted another post-peak sample.
+    """
+
+    if not _is_stale_day0_observation_quality_rejection(quality_rejection):
+        return False
+    if not temperature_metric.is_high():
+        return False
+    daypart = str(getattr(temporal_context, "daypart", "") or "")
+    post_peak_confidence = float(getattr(temporal_context, "post_peak_confidence", 0.0) or 0.0)
+    return daypart == "post_peak" and post_peak_confidence >= 0.5
+
+
 def _is_position_day0_quote_eligible(pos: Position) -> bool:
     if _position_state_value(pos) == "day0_window":
         return True
@@ -1537,6 +1567,7 @@ def _refresh_day0_observation(
     if obs_coverage_status == "WINDOW_INCOMPLETE":
         coverage_validations.append("day0_observation_bound_only:coverage_window_incomplete")
 
+    temporal_context = None
     quality_rejection = _day0_observation_quality_rejection_reason(
         city,
         obs,
@@ -1545,13 +1576,32 @@ def _refresh_day0_observation(
         allow_incomplete_window_bound=True,
     )
     if quality_rejection is not None:
-        _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, [
-            "day0_observation",
-            *coverage_validations,
-            "observation_quality_gate",
-            quality_rejection,
-        ]
+        if _is_stale_day0_observation_quality_rejection(quality_rejection):
+            try:
+                from src.signal.diurnal import build_day0_temporal_context
+                temporal_context = build_day0_temporal_context(
+                    city.name,
+                    target_d,
+                    city.timezone,
+                    observation_time=_day0_observation_field(obs, "observation_time"),
+                    observation_source=_day0_observation_field(obs, "source", ""),
+                )
+            except Exception:
+                temporal_context = None
+        if _stale_day0_observation_can_remain_monitor_authority(
+            quality_rejection=quality_rejection,
+            temperature_metric=temperature_metric,
+            temporal_context=temporal_context,
+        ):
+            coverage_validations.append("day0_observation_stale_post_peak_bound")
+        else:
+            _set_monitor_probability_fresh(position, False)
+            return position.p_posterior, [
+                "day0_observation",
+                *coverage_validations,
+                "observation_quality_gate",
+                quality_rejection,
+            ]
 
     ens_result = fetch_ensemble(
         city,
@@ -1570,17 +1620,18 @@ def _refresh_day0_observation(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
 
-    try:
-        from src.signal.diurnal import build_day0_temporal_context
-        temporal_context = build_day0_temporal_context(
-            city.name,
-            target_d,
-            city.timezone,
-            observation_time=_day0_observation_field(obs, "observation_time"),
-            observation_source=_day0_observation_field(obs, "source", ""),
-        )
-    except Exception:
-        temporal_context = None
+    if temporal_context is None:
+        try:
+            from src.signal.diurnal import build_day0_temporal_context
+            temporal_context = build_day0_temporal_context(
+                city.name,
+                target_d,
+                city.timezone,
+                observation_time=_day0_observation_field(obs, "observation_time"),
+                observation_source=_day0_observation_field(obs, "source", ""),
+            )
+        except Exception:
+            temporal_context = None
 
     if temporal_context is None:
         _set_monitor_probability_fresh(position, False)
@@ -2501,18 +2552,26 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     _track_belief_staleness(pos)
 
-    pos.last_monitor_whale_toxicity = _detect_whale_toxicity_from_orderbook(
-        conn,
-        clob,
-        pos,
-        held_best_bid=pos.last_monitor_best_bid,
-        held_best_ask=pos.last_monitor_best_ask,
-    )
-
     probability_authority_available = (
         pos.last_monitor_prob_is_fresh
         and np.isfinite(current_p_posterior)
     )
+
+    if pos.direction != "buy_yes":
+        pos.last_monitor_whale_toxicity = False
+        _append_monitor_validation(pos, "whale_toxicity_not_applicable:buy_no")
+    elif probability_authority_available:
+        pos.last_monitor_whale_toxicity = None
+        _append_monitor_validation(pos, "whale_toxicity_deferred:fresh_probability_authority")
+    else:
+        pos.last_monitor_whale_toxicity = _detect_whale_toxicity_from_orderbook(
+            conn,
+            clob,
+            pos,
+            held_best_bid=pos.last_monitor_best_bid,
+            held_best_ask=pos.last_monitor_best_ask,
+        )
+
     divergence_score = _compute_divergence_score(
         current_p_posterior, current_p_market, available=probability_authority_available
     )
