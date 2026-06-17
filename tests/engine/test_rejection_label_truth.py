@@ -14,8 +14,8 @@ receipt field -> envelope candidate_book -> regret row):
 
   A. A family where every PRICED proof failed an admission gate yields
      EVENT_BOUND_ALL_CANDIDATES_REJECTED carrying the per-class counts + the
-     closest-to-tradeable leg — NOT EXECUTABLE_NATIVE_ASK_MISSING and NOT the bare
-     SELECTED_CANDIDATE_MISSING.
+     closest rejected leg with its rejection reason — NOT EXECUTABLE_NATIVE_ASK_MISSING
+     and NOT the bare SELECTED_CANDIDATE_MISSING.
   B. A family with genuinely ZERO books still yields EXECUTABLE_NATIVE_ASK_MISSING
      (the fallback path); a zero-PROOF family yields SELECTED_CANDIDATE_MISSING
      annotated with the structural precondition that emptied it.
@@ -91,12 +91,41 @@ def test_all_priced_rejected_yields_all_candidates_rejected_with_class_counts():
     assert "n=4" in reason
     assert "capital_efficiency_lcb_ev=3" in reason
     assert "direction_law=1" in reason
-    # best leg = highest conservative EV/$ priced loser, with its numbers
-    assert "best=" in reason and "q_lcb=" in reason and "price=" in reason and "ev_per_dollar=" in reason
+    # best_rejected leg = highest conservative EV/$ priced loser, still labelled as rejected.
+    assert "best_rejected=" in reason
+    assert "reason_class=capital_efficiency_lcb_ev" in reason
+    assert "missing_reason=ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:ev_per_dollar=-0.32" in reason
+    assert "q_lcb=" in reason and "price=" in reason and "rejected_ev_per_dollar=" in reason
     # the base reason must be in the typed registry (no K2.1 unregistered warning)
     from src.contracts.rejection_reasons import is_registered_rejection_reason
 
     assert is_registered_rejection_reason(reason)
+
+
+def test_positive_ev_vetoed_leg_is_labelled_best_rejected_with_gate_reason():
+    """A: positive rejected EV is not confirmed trading value when another gate
+    vetoed it; the family summary must name the veto reason, not imply tradability."""
+    book = _book(
+        [
+            _ev("c1", "buy_yes", "26C", 0.007, 0.0, "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:ev=-1.0"),
+            _ev(
+                "c2",
+                "buy_yes",
+                "27C",
+                0.097,
+                0.2,
+                "DIRECTION_LAW_BIN_FORECAST_MISMATCH:direction=buy_yes:distance=1.0195:threshold=1.0000:mu=28.0195",
+            ),
+        ]
+    )
+
+    reason = era._family_all_candidates_rejected_reason(book)
+
+    assert reason is not None
+    assert "best_rejected=27C buy_yes" in reason
+    assert "reason_class=direction_law" in reason
+    assert "missing_reason=DIRECTION_LAW_BIN_FORECAST_MISMATCH:direction=buy_yes" in reason
+    assert "rejected_ev_per_dollar=1.0619" in reason
 
 
 def test_genuinely_no_books_keeps_native_ask_missing_label():

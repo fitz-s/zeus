@@ -7700,6 +7700,7 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     # (the EV<=0 efficient-market normal state) is the dominant class in the wild.
     ("ADMISSION_CAPITAL_EFFICIENCY_LCB_EV", "capital_efficiency_lcb_ev"),
     ("ADMISSION_CAPITAL_EFFICIENCY", "capital_efficiency"),
+    ("ADMISSION_NEAR_SETTLED_PRICE", "near_settled_price"),
     ("COVERAGE_UNLICENSED_TAIL", "coverage_unlicensed_tail"),
     ("ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE", "buy_no_evidence"),
     ("ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING", "buy_no_evidence"),
@@ -7738,17 +7739,19 @@ def _family_all_candidates_rejected_reason(book: OpportunityBook) -> str | None:
     Returns a reason of the form::
 
         EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=16 capital_efficiency_lcb_ev=12 \
-            native_ask_missing=3 direction_law=1; best=<bin> <dir> q_lcb=.. price=.. \
-            ev_per_dollar=..
+            native_ask_missing=3 direction_law=1; best_rejected=<bin> <dir> \
+            reason_class=.. missing_reason=.. q_lcb=.. price=.. rejected_ev_per_dollar=..
 
     when at least one candidate was PRICED-and-rejected (a real "no edge" family).
     Returns None when EVERY evaluated candidate genuinely lacks a book (no priced
     proof at all) — that case keeps the honest EXECUTABLE_NATIVE_ASK_MISSING label.
 
-    The ``best`` candidate is the highest-conservative-EV-per-dollar PRICED proof
-    (deterministic argmax on ``(q_lcb-price)/price`` then bin/direction tiebreak),
-    so a queried receipt names the closest-to-tradeable leg and its exact numbers.
-    Pure: reads the book's evaluations, decides nothing.
+    The ``best_rejected`` candidate is the highest-conservative-EV-per-dollar
+    PRICED proof (deterministic argmax on ``(q_lcb-price)/price`` then
+    bin/direction tiebreak). It is still explicitly rejected: the summary carries
+    the gate class and raw missing_reason so a vetoed positive-EV leg is not
+    misread as confirmed trading value. Pure: reads the book's evaluations,
+    decides nothing.
     """
     evaluations = tuple(book.evaluations)
     if not evaluations:
@@ -7788,13 +7791,17 @@ def _family_all_candidates_rejected_reason(book: OpportunityBook) -> str | None:
         f"{name}={class_counts[name]}" for name in sorted(class_counts)
     )
     best_price = best.execution_price
+    best_reason = str(best.missing_reason or "").strip() or "UNKNOWN"
+    best_reason_class = _classify_rejection_missing_reason(best_reason)
     return (
         "EVENT_BOUND_ALL_CANDIDATES_REJECTED:"
         f"n={len(evaluations)} {counts_str};"
-        f" best={best.bin_label or '?'} {best.direction or '?'}"
+        f" best_rejected={best.bin_label or '?'} {best.direction or '?'}"
+        f" reason_class={best_reason_class}"
+        f" missing_reason={best_reason}"
         f" q_lcb={float(best.q_lcb_5pct):.4f}"
         f" price={float(best_price):.4f}"
-        f" ev_per_dollar={_ev_per_dollar(best):.4f}"
+        f" rejected_ev_per_dollar={_ev_per_dollar(best):.4f}"
     )
 
 
