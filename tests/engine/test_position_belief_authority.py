@@ -330,7 +330,11 @@ class TestMonitorPrimaryAuthority:
 
         assert observed == [EntryMethod.DAY0_OBSERVATION.value]
         assert prob == pytest.approx(0.64)
-        assert refresh_pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
+        assert (
+            refresh_pos.selected_method
+            == mr.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+        )
+        assert "day0_observation_remaining_window" in refresh_pos.applied_validations
         assert is_fresh is True
 
     def test_hko_day0_window_uses_day0_observation_lane(self, monkeypatch):
@@ -375,7 +379,11 @@ class TestMonitorPrimaryAuthority:
 
         assert observed == [EntryMethod.DAY0_OBSERVATION.value]
         assert prob == pytest.approx(0.71)
-        assert refresh_pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
+        assert (
+            refresh_pos.selected_method
+            == mr.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+        )
+        assert "day0_observation_remaining_window" in refresh_pos.applied_validations
         assert is_fresh is True
 
     def test_day0_monitor_accepts_incomplete_window_only_as_bound(self, monkeypatch):

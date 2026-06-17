@@ -7663,8 +7663,14 @@ def test_day0_monitor_refresh_records_forecast_fallback_provenance(monkeypatch):
     assert "forecast_source_id:openmeteo_ensemble_ecmwf_ifs025" in applied
     assert "forecast_source_role:monitor_fallback" in applied
     assert "forecast_degradation:DEGRADED_FORECAST_FALLBACK" in applied
-    assert "alpha_posterior" in applied
-    assert captured["season_arg"] == "2026-04-01"
+    assert "day0_observation_remaining_window" in applied
+    assert any(
+        item.startswith("belief_source=day0_observation_remaining_window")
+        for item in applied
+    )
+    assert "model_only_posterior" not in applied
+    assert "alpha_posterior" not in applied
+    assert "season_arg" not in captured
 
 
 def test_day0_monitor_refresh_rejects_stale_observation_before_fetch(monkeypatch):

@@ -3748,8 +3748,12 @@ def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     assert pos.state == "day0_window"
     assert observed_methods == [EntryMethod.DAY0_OBSERVATION.value]
     assert pos.entry_method == EntryMethod.ENS_MEMBER_COUNTING.value
-    assert pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
+    assert (
+        pos.selected_method
+        == monitor_refresh.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+    )
     assert EntryMethod.DAY0_OBSERVATION.value in pos.applied_validations
+    assert "day0_observation_remaining_window" in pos.applied_validations
     assert "whale_toxicity_deferred:fresh_probability_authority" in pos.applied_validations
     assert pos.last_monitor_prob == pytest.approx(0.52)
     assert pos.last_monitor_market_price == pytest.approx(0.41)
@@ -3789,8 +3793,12 @@ def test_day0_window_refresh_uses_day0_observation_semantics(monkeypatch):
 
     assert observed_methods == [EntryMethod.DAY0_OBSERVATION.value]
     assert pos.entry_method == "ens_member_counting"
-    assert pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
+    assert (
+        pos.selected_method
+        == monitor_refresh.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+    )
     assert EntryMethod.DAY0_OBSERVATION.value in pos.applied_validations
+    assert "day0_observation_remaining_window" in pos.applied_validations
     assert edge_ctx.p_posterior == pytest.approx(0.52)
     assert edge_ctx.entry_provenance == EntryMethod.ENS_MEMBER_COUNTING
     assert pos.last_monitor_prob == pytest.approx(0.52)
@@ -4103,7 +4111,10 @@ def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
 
     assert observed_markets == [pytest.approx(pos.entry_price)]
     assert pos.entry_method == EntryMethod.ENS_MEMBER_COUNTING.value
-    assert pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
+    assert (
+        pos.selected_method
+        == monitor_refresh.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+    )
     assert pos.last_monitor_market_price == pytest.approx(0.37)
     assert pos.last_monitor_best_bid == pytest.approx(0.37)
     assert pos.last_monitor_best_ask == pytest.approx(0.55)

@@ -12566,8 +12566,8 @@ def _market_analysis_from_event_snapshot(
             )
             p_cal = np.asarray(p_raw, dtype=float)
     else:
-        # === DAY0 REMAINING-DAY MODE (review 2026-06-10 item B, flag-gated OFF) ===
-        # When ON and fresh high-res hourly vectors are persisted for this family
+        # === DAY0 REMAINING-DAY MODE (live under forecast_plus_day0) ===
+        # When enabled and fresh high-res hourly vectors are persisted for this family
         # (day0_hourly_vectors lane), the member array becomes the pooled per-model
         # REMAINING-day extremes (hours >= now, city-local), clamped to the absorbing
         # physical law (HIGH: max(model_remaining, running max)). This prices
@@ -14549,13 +14549,11 @@ def _day0_stale_obs_boundary_guard_enabled() -> bool:
 
 
 def _day0_remaining_day_q_enabled() -> bool:
-    """REMAINING-DAY q mode flag (review 2026-06-10 item B). Default FALSE.
+    """Return whether live Day0 should use remaining-window hourly vectors.
 
-    Unlike the conservative-only guards (boundary suppression, anomaly pause,
-    bootstrap LCB), this CHANGES the day0 point q in both directions (it can
-    RAISE q for the bin containing the running extreme post-peak). It must be
-    operator-flipped only after shadow receipts comparing
-    _edli_day0_q_mode=remaining_day vs the legacy full-day-masked q look sane.
+    This is probabilistic Day0 observation authority, not settlement truth.
+    It changes the point q in both directions when fresh vectors exist, and
+    falls back loudly to the full-day path when they do not.
     """
     try:
         return bool(settings["edli"].get("day0_remaining_day_q_enabled", False))

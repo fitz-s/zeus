@@ -90,6 +90,7 @@ _WHALE_TOXICITY_MIN_NOTIONAL_USD = 25.0
 _NOWCAST_PERSISTENT_FAILURE_THRESHOLD = 3
 _DAY0_LOW_EXTREME_AUTHORITY_HOURS = 6.0
 SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT = "day0_absorbing_hard_fact"
+SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW = "day0_observation_remaining_window"
 _DAY0_STALE_OBSERVATION_REJECTION_PREFIX = (
     "Day0 observation is stale for executable probability generation:"
 )
@@ -137,6 +138,30 @@ def _held_side_probability_from_yes_bin_probability(p_yes_bin: float, direction:
     if str(direction_value) == "buy_no":
         return _model_only_native_posterior(one_minus(p_yes))
     return p_yes
+
+
+def _day0_remaining_window_belief_validations(metric: str | None = None) -> list[str]:
+    metric_part = f";metric={metric}" if metric else ""
+    return [
+        "day0_observation_remaining_window",
+        (
+            "belief_source=day0_observation_remaining_window"
+            f";kind=probabilistic_remaining_window{metric_part}"
+            ";posterior_mode=model_only_v1"
+        ),
+        "market_quote_prior_excluded:day0_observation_remaining_window",
+        "alpha_blend_inapplicable:day0_observation_remaining_window",
+    ]
+
+
+def _stamp_day0_remaining_window_belief(
+    position: Position,
+    *,
+    metric: str | None = None,
+) -> None:
+    setattr(position, "selected_method", SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW)
+    for validation in _day0_remaining_window_belief_validations(metric):
+        _append_monitor_validation(position, validation)
 
 
 @dataclass(frozen=True)
@@ -1727,69 +1752,25 @@ def _refresh_day0_observation(
         ]
     p_cal_full = p_cal_full / p_cal_sum
     p_cal_yes = float(p_cal_full[held_idx])
-    cal = None
-    cal_level = 4
     applied = [
         "day0_observation",
         *coverage_validations,
         "fresh_ens_fetch",
         *forecast_source_validations,
         "mc_instrument_noise",
-        "honest_raw_vector_normalization",
+        "day0_remaining_window_raw_vector_normalization",
     ]
 
     member_extrema = extrema.mins if temperature_metric.is_low() else extrema.maxes
     if member_extrema is None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "metric_extrema_missing"]
-    ensemble_spread = TemperatureDelta(float(np.std(member_extrema)), city.settlement_unit)
 
-    # M2b: hold age from a REAL entered_at (shared helper; twin of the
-    # ENS-member-counting path). NaN -> explicit refuse below.
-    hours_since_open = _hours_since_open_or_nan(position)
-
-    # K1/#68: verify calibration authority before computing alpha.
-    # Slice P2-A2 (PR #19 phase 2, 2026-04-26): twin of the gate above —
-    # scope to active metric for the same false-positive-suppression reason.
-    _authority_verified = False
-    if conn is not None and hasattr(conn, 'execute'):
-        from src.calibration.store import get_pairs_for_bucket as _get_pairs
-        _cal_season = season_from_date(target_d.isoformat(), lat=city.lat)
-        _gate_metric = "high" if _position_metric_str == "high" else None  # hoisted (P2-fix5)
-        try:
-            _unverified_pairs = _get_pairs(
-                conn, city.cluster, _cal_season,
-                authority_filter='UNVERIFIED',
-                metric=_gate_metric,
-            )
-        except Exception:
-            _unverified_pairs = []
-        if _unverified_pairs:
-            logger.warning(
-                "Monitor authority gate: %d UNVERIFIED calibration rows for %s/%s — using stale probability",
-                len(_unverified_pairs), city.name, _cal_season,
-            )
-            _set_monitor_probability_fresh(position, False)
-            applied.append("authority_gate_blocked")
-            return position.p_posterior, applied
-        _authority_verified = True
-
-    # M2b: missing/malformed entered_at -> hours_since_open is NaN -> REFUSE
-    # (twin of the ENS-member-counting guard; compute_alpha silently tolerates
-    # NaN, so the refusal must be explicit here).
-    if not np.isfinite(hours_since_open):
-        _set_monitor_probability_fresh(position, False)
-        applied.append("entered_at_missing_alpha_refused")
-        return position.p_posterior, applied
-
-    alpha = compute_alpha(
-        calibration_level=cal_level,
-        ensemble_spread=ensemble_spread,
-        model_agreement=getattr(position, "entry_model_agreement", "NOT_CHECKED"),
-        lead_days=0.0,
-        hours_since_open=hours_since_open,
-        authority_verified=_authority_verified,
-    ).value_for_consumer("ev")
+    # Day0 observation remaining-window belief is not legacy alpha blending.
+    # The probability authority is the observed-so-far bound plus remaining
+    # hourly extrema, normalized in settlement-bin space. Market quotes and
+    # hold-age alpha are therefore inapplicable to this belief.
+    alpha = 1.0
     p_cal_native = _held_side_probability_from_yes_bin_probability(
         p_cal_yes,
         position.direction,
@@ -1804,11 +1785,16 @@ def _refresh_day0_observation(
         "bins": all_bins,
         "held_idx": held_idx,
         "member_extrema": extrema.maxes if extrema.maxes is not None else extrema.mins,
-        "calibrator": cal,
+        "calibrator": None,
         "lead_days": 0.0,
         "unit": city.settlement_unit,
+        "bootstrap_signal_type": SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW,
     })
 
+    _stamp_day0_remaining_window_belief(
+        position,
+        metric=temperature_metric.temperature_metric,
+    )
     _set_monitor_probability_fresh(position, True)
 
     # T5 nowcast wiring (Phase 2 T5): gate on market_slug + hours_remaining.
@@ -1828,7 +1814,12 @@ def _refresh_day0_observation(
         observation_available_at=_day0_observation_field(obs, "observation_available_at"),
     )
 
-    return current_p_posterior, [*applied, "model_only_posterior", "alpha_posterior"]
+    return current_p_posterior, [
+        *applied,
+        *_day0_remaining_window_belief_validations(
+            temperature_metric.temperature_metric,
+        ),
+    ]
 
 
 def _day0_extreme_authority_rejection_reason(
@@ -2523,6 +2514,18 @@ def monitor_probability_refresh(
             refresh_pos,
             "day0_observation_unsupported:forecast_monitor_fallback",
         )
+    if (
+        _would_use_day0_lane
+        and not day0_observation_unavailable_forecast_fallback
+        and getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None) is True
+    ):
+        try:
+            _day0_metric = MetricIdentity.from_raw(
+                getattr(refresh_pos, "temperature_metric", None)
+            ).temperature_metric
+        except Exception:
+            _day0_metric = None
+        _stamp_day0_remaining_window_belief(refresh_pos, metric=_day0_metric)
     return (
         current_p_posterior,
         refresh_pos,
