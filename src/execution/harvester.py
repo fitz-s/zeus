@@ -2469,6 +2469,8 @@ def _settle_positions(
 
         # P6 iterator-level dedup: skip positions whose DB phase is already
         # terminal even when the in-memory snapshot shows otherwise.
+        _db_phase = None
+        db_phase_allows_settlement = False
         if pc_phase_by_id is not None:
             _db_phase = pc_phase_by_id.get(pos.trade_id)
             if _db_phase in _TERMINAL_PHASES:
@@ -2477,6 +2479,12 @@ def _settle_positions(
                     pos.trade_id, _db_phase,
                 )
                 continue
+            db_phase_allows_settlement = _db_phase in {
+                "active",
+                "day0_window",
+                "pending_exit",
+                "economically_closed",
+            }
 
         state_name = getattr(pos.state, "value", getattr(pos, "state", ""))
         exit_state = getattr(pos, "exit_state", "")
@@ -2491,7 +2499,8 @@ def _settle_positions(
                 and exit_state != "backoff_exhausted"
             )
             or (
-                not pending_exit_at_settlement
+                not db_phase_allows_settlement
+                and not pending_exit_at_settlement
                 and exit_state in {"exit_intent", "sell_placed", "sell_pending", "retry_pending"}
             )
         ):

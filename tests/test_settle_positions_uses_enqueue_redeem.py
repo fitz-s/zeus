@@ -1,7 +1,7 @@
 # Created: 2026-05-05
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-06-17
 # Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2G/phase.json
-# Lifecycle: created=2026-05-05; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Lifecycle: created=2026-05-05; last_reviewed=2026-06-17; last_reused=2026-06-17
 # Purpose: T2G invariant — _settle_positions routes redeem through enqueue_redeem_command
 # Reuse: standalone pytest; no live DB required
 """Tests for T2G: _settle_positions routes redeem through enqueue_redeem_command.
@@ -298,6 +298,83 @@ def test_settle_positions_calls_enqueue_redeem_command(monkeypatch):
     assert call_kwargs["payout_asset"] == "pUSD"
     assert call_kwargs["trade_id"] == pos.trade_id
     assert call_kwargs["pusd_amount_micro"] == int(round(pos.shares * 1_000_000))
+
+
+def test_settle_positions_closes_losing_retry_pending_position_without_redeem(monkeypatch):
+    """A venue-verified settlement outranks stale exit retry state.
+
+    Regression coverage for the live Hong Kong 2026-06-12 failure mode: the
+    position was buy_no, the YES bin won, and a stale retry_pending exit_state
+    kept the harvester from writing SETTLED even though position_current.phase
+    was still an open canonical phase.
+    """
+    import src.execution.harvester as hv
+    import src.execution.exit_lifecycle as el
+
+    conn = _make_in_memory_conn_with_settlement_schema()
+    portfolio, pos = _make_mock_portfolio_with_position(
+        trade_id="trade-hk-retry-loser",
+        city="Hong Kong",
+        target_date="2026-06-12",
+        direction="buy_no",
+        condition_id="0xhk",
+        token_id="",
+        shares=5.0,
+        entry_price=0.72,
+    )
+    pos.no_token_id = "no-token"
+    pos.bin_label = "Will the highest temperature in Hong Kong be 30°C on June 12?"
+    pos.exit_state = "retry_pending"
+    pos.chain_state = "synced"
+
+    conn.execute(
+        "INSERT INTO position_current (trade_id, city, target_date, phase) VALUES (?, ?, ?, ?)",
+        (pos.trade_id, pos.city, pos.target_date, "active"),
+    )
+    conn.commit()
+
+    enqueue_mock = MagicMock(return_value={"status": "queued", "command_id": "unexpected"})
+    monkeypatch.setattr(hv, "enqueue_redeem_command", enqueue_mock)
+    monkeypatch.setattr(hv, "_get_canonical_exit_flag", lambda: True)
+    monkeypatch.setattr(hv, "log_event", lambda *a, **kw: None)
+    monkeypatch.setattr(hv, "log_settlement_event", lambda *a, **kw: None)
+    monkeypatch.setattr(hv, "_dual_write_canonical_settlement_if_available", lambda *a, **kw: False)
+    monkeypatch.setattr(hv, "record_token_suppression", lambda *a, **kw: {"status": "written"})
+    monkeypatch.setattr(hv, "_settlement_economics_for_position", lambda p: (p.shares, p.entry_price * p.shares))
+
+    closed = MagicMock()
+    closed.trade_id = pos.trade_id
+    closed.pnl = -3.6
+    closed.bin_label = pos.bin_label
+    closed.direction = pos.direction
+    closed.p_posterior = pos.p_posterior
+    closed.decision_snapshot_id = ""
+    closed.edge_source = "model"
+    closed.strategy = "default"
+    closed.last_exit_at = "2026-06-17T10:46:18+00:00"
+    closed.exit_price = 0.0
+    mark_settled = MagicMock(return_value=closed)
+    monkeypatch.setattr(el, "mark_settled", mark_settled)
+
+    records = []
+    settled = hv._settle_positions(
+        conn,
+        portfolio,
+        city="Hong Kong",
+        target_date="2026-06-12",
+        winning_label="30°C",
+        settlement_records=records,
+        settlement_authority="VERIFIED",
+        settlement_truth_source="forecasts.settlement_outcomes",
+        settlement_temperature_metric="high",
+    )
+
+    assert settled == 1
+    mark_settled.assert_called_once_with(portfolio, pos.trade_id, 0.0, "SETTLEMENT")
+    enqueue_mock.assert_not_called()
+    assert len(records) == 1
+    assert records[0].outcome == 0
+    assert records[0].pnl == -3.6
 
 
 def test_settle_positions_does_not_call_request_redeem_directly(monkeypatch):
