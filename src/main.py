@@ -74,6 +74,13 @@ _market_discovery_lock = threading.Lock()
 _market_substrate_refresh_lock = threading.Lock()
 _held_position_monitor_active = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
+_HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
+    {
+        "market_discovery",
+        "afternoon_snapshot_capture",
+        "EDLI mainstream warm",
+    }
+)
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
@@ -225,7 +232,18 @@ def _day0_first_delay_seconds(discovery: dict) -> float:
 
 
 def _defer_for_held_position_monitor(job_name: str) -> bool:
-    """Return True when live held-position redecision has priority over data warmers."""
+    """Return True when the held-position monitor should pre-empt discretionary jobs.
+
+    The monitor itself is non-reentrant, but it must not globally stop the live
+    money path. Targeted EDLI jobs (event reactor, continuous redecision, maker
+    rest escalation, command recovery, targeted market-substrate warm, and
+    market-channel refresh) are the continuous decision line and must keep
+    running while held positions are monitored. Only broad/discretionary scans
+    yield to the monitor bootstrap.
+    """
+
+    if job_name not in _HELD_POSITION_MONITOR_DEFER_JOBS:
+        return False
 
     if _held_position_monitor_active.is_set():
         logger.info("%s deferred: held-position monitor active", job_name)

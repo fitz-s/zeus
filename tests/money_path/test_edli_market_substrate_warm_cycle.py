@@ -201,6 +201,52 @@ def test_market_discovery_defers_while_reactor_active():
     assert "market_discovery deferred" in src
 
 
+def test_held_position_monitor_does_not_pause_live_decision_line():
+    """Held-position monitoring is not a global live-money stop-the-world lock.
+
+    The monitor's own job stays non-reentrant, and broad discretionary scans may
+    defer during its bootstrap. Targeted EDLI decision lanes must continue: those
+    lanes are what refresh prices, re-decide resting orders, recover commands,
+    and submit/reject new events while positions are being monitored.
+    """
+
+    was_active = main_module._held_position_monitor_active.is_set()
+    was_bootstrap_complete = main_module._held_position_monitor_bootstrap_complete.is_set()
+    if was_active:
+        main_module._held_position_monitor_active.clear()
+    if was_bootstrap_complete:
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+    try:
+        main_module._held_position_monitor_active.set()
+        live_decision_jobs = {
+            "edli_event_reactor",
+            "edli_command_recovery",
+            "maker_rest_escalation",
+            "edli_redecision_screen",
+            "EDLI market-substrate warm",
+            "EDLI market-channel substrate refresh",
+            "new_listing_scout",
+        }
+        for job_name in live_decision_jobs:
+            assert main_module._defer_for_held_position_monitor(job_name) is False
+
+        discretionary_jobs = {
+            "market_discovery",
+            "afternoon_snapshot_capture",
+            "EDLI mainstream warm",
+        }
+        for job_name in discretionary_jobs:
+            assert main_module._defer_for_held_position_monitor(job_name) is True
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+        if was_active:
+            main_module._held_position_monitor_active.set()
+        if was_bootstrap_complete:
+            main_module._held_position_monitor_bootstrap_complete.set()
+
+
 def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     """GREEN-after-fix: a dedicated warm job exists and, when EDLI is enabled, invokes
     the family-snapshot refresh exactly once per tick."""
