@@ -699,6 +699,33 @@ def test_day0_refresh_keeps_current_market_fresh_with_bid_only_book(monkeypatch)
     assert not np.isfinite(edge_ctx.p_posterior)
 
 
+def test_refresh_position_advances_monitor_time_when_quote_and_probability_are_stale(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr(monitor_refresh, "monitor_quote_refresh", lambda conn, clob, pos: None)
+
+    def _stale_refresh(pos, *, conn, city, target_d):
+        pos.applied_validations = ["day0_observation", "observation_quality_gate"]
+        return pos.p_posterior, pos, False
+
+    monkeypatch.setattr(monitor_refresh, "monitor_probability_refresh", _stale_refresh)
+
+    pos = _position(
+        state="day0_window",
+        last_monitor_at="2026-06-17T13:39:15.897630+00:00",
+        last_monitor_market_price=0.0013894639745823513,
+        last_monitor_prob=0.01029930855520716,
+    )
+
+    edge_ctx = monitor_refresh.refresh_position(None, types.SimpleNamespace(), pos)
+
+    assert pos.last_monitor_at > "2026-06-17T13:39:15.897630+00:00"
+    assert pos.last_monitor_market_price == pytest.approx(0.0013894639745823513)
+    assert pos.last_monitor_market_price_is_fresh is False
+    assert pos.last_monitor_prob_is_fresh is False
+    assert not np.isfinite(edge_ctx.p_posterior)
+
+
 def test_monitor_quote_refresh_changes_exit_price_not_posterior_dispatch(monkeypatch, tmp_path):
     from src.engine import monitor_refresh
 

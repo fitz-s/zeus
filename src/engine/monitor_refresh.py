@@ -2477,6 +2477,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     Returns: EdgeContext wrapping both fresh market and semantic provenance.
     Missing probability authority materializes as non-finite probability fields.
     """
+    monitor_evaluated_at = datetime.now(timezone.utc).isoformat()
+    pos.last_monitor_at = monitor_evaluated_at
     current_p_market = (
         pos.last_monitor_market_price
         if pos.last_monitor_market_price is not None
@@ -2504,7 +2506,6 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         market_refreshed = True
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True
-        pos.last_monitor_at = quote.source_timestamp
 
     # 2. Recompute P_posterior from fresh ENS/Day0 evidence
     city = cities_by_name.get(pos.city)
