@@ -146,6 +146,50 @@ def test_entry_screen_uses_conservative_q_lcb_not_point_posterior():
     assert enqueued == [], "point posterior edge is not confirmed trading value without q_lcb edge"
 
 
+def test_latest_beliefs_dedupe_dynamic_family_hash_by_stable_market_identity():
+    conn = _mem_world()
+    label = "Will the lowest temperature in Shanghai be 24°C on June 19?"
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_old_hash",
+        city="Shanghai",
+        target_date="2026-06-19",
+        snapshot_id="old-snap",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.99],
+        q_lcb_yes_vec=[0.99],
+        q_lcb_no_vec=[0.01],
+        recorded_at="2026-06-17T23:00:00+00:00",
+    )
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_new_hash",
+        city="Shanghai",
+        target_date="2026-06-19",
+        snapshot_id="new-snap",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.10],
+        q_lcb_yes_vec=[0.10],
+        q_lcb_no_vec=[0.05],
+        recorded_at="2026-06-17T23:10:00+00:00",
+    )
+    stale_old_hash_price = {
+        ("edli_family_old_hash", label, "buy_yes"): cr.PriceQuote(
+            price=0.20,
+            freshness_deadline="2026-06-17T23:30:00+00:00",
+        ),
+    }
+
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-17T23:20:00+00:00",
+        price_lookup=stale_old_hash_price,
+        min_edge=0.01,
+    ) == []
+
+
 def test_entry_screen_blocks_after_recent_full_economics_negative_until_price_improves():
     conn = _mem_world()
     _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00")

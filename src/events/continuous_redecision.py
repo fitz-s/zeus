@@ -399,6 +399,16 @@ def _metric_from_family_id(family_id: str) -> str:
     return ""
 
 
+def _metric_from_bin_labels(bin_labels: list[object]) -> str:
+    for label in bin_labels:
+        text = str(label or "").lower()
+        if "highest temperature" in text:
+            return "high"
+        if "lowest temperature" in text:
+            return "low"
+    return ""
+
+
 def _stable_entry_screen_key(
     belief: CachedBelief,
     *,
@@ -459,6 +469,7 @@ def _row_to_belief(row: sqlite3.Row) -> CachedBelief | None:
         q_lcb_no_raw = None
     q_lcb_yes_vec = json.loads(q_lcb_yes_raw) if q_lcb_yes_raw else None
     q_lcb_no_vec = json.loads(q_lcb_no_raw) if q_lcb_no_raw else None
+    metric = row_metric or _metric_from_family_id(family_id) or _metric_from_bin_labels(bin_labels)
     return CachedBelief(
         family_id=family_id,
         city=row["city"] or "",
@@ -471,15 +482,28 @@ def _row_to_belief(row: sqlite3.Row) -> CachedBelief | None:
         condition_ids=list(condition_ids),
         q_lcb_yes_vec=list(q_lcb_yes_vec) if q_lcb_yes_vec is not None else None,
         q_lcb_no_vec=list(q_lcb_no_vec) if q_lcb_no_vec is not None else None,
-        metric=row_metric or _metric_from_family_id(family_id),
+        metric=metric,
     )
 
 
 def latest_cached_belief(conn: sqlite3.Connection, *, family_id: str) -> CachedBelief | None:
-    for belief in _all_latest_beliefs(conn):
-        if belief.family_id == family_id:
-            return belief
-    return None
+    cols = "decision_id, recorded_at, city, target_date, bin_labels_json, p_posterior_json"
+    if _has_condition_ids_column(conn):
+        cols += ", condition_ids_json"
+    if _has_temperature_metric_column(conn):
+        cols += ", temperature_metric"
+    if _has_column(conn, "probability_trace_fact", "q_lcb_yes_json"):
+        cols += ", q_lcb_yes_json"
+    if _has_column(conn, "probability_trace_fact", "q_lcb_no_json"):
+        cols += ", q_lcb_no_json"
+    rows = conn.execute(
+        f"SELECT {cols} FROM probability_trace_fact "
+        "WHERE decision_id LIKE ? ORDER BY recorded_at DESC LIMIT 1",
+        (_BELIEF_PREFIX + str(family_id) + ":%",),
+    ).fetchall()
+    if not rows:
+        return None
+    return _row_to_belief(rows[0])
 
 
 def _all_latest_beliefs(conn: sqlite3.Connection) -> list[CachedBelief]:
@@ -497,13 +521,20 @@ def _all_latest_beliefs(conn: sqlite3.Connection) -> list[CachedBelief]:
         "WHERE decision_id LIKE ? ORDER BY recorded_at DESC",
         (_BELIEF_PREFIX + "%",),
     ).fetchall()
-    seen: set[str] = set()
+    seen: set[RedecisionScreenKey] = set()
     out: list[CachedBelief] = []
     for row in rows:
         belief = _row_to_belief(row)
-        if belief is None or belief.family_id in seen:
+        if belief is None:
             continue
-        seen.add(belief.family_id)
+        dedupe_key: RedecisionScreenKey = _stable_family_screen_key(belief) or (
+            belief.family_id,
+            "",
+            "",
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
         out.append(belief)
     return out
 
