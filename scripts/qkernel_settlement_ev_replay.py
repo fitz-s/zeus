@@ -678,7 +678,11 @@ def main() -> None:
         s for s in arm.load_settlements(fc_con, WINDOW_START)
         if s["target_date"] <= WINDOW_END
     ]
+    # SINGLE TRUTH (bias-maze strip 2026-06-17): the settlement-residual de-bias provider
+    # is REMOVED. The replay runs on the raw precise multi-model fused center with the
+    # IDENTITY (empty-artifact) DebiasAuthority — exactly what the live spine ships.
     debias_auth = DebiasAuthority()
+    print("De-bias: IDENTITY (single-truth raw multi-model center)")
 
     print(f"Settled VERIFIED families in {WINDOW_START}..{WINDOW_END}: {len(settlements)}")
 

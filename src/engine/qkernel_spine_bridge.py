@@ -1,6 +1,8 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
-# Authority basis: docs/rebuild/consult_build_spec.md (Wave 5 reactor wiring) +
+# Last audited: 2026-06-17
+# Authority basis: operator single-truth law + residual_legacy_sources.md (GATE-0
+#   bias-maze strip: _spine_debias_authority unconditional identity, settlement-residual
+#   seam removed) + docs/rebuild/consult_build_spec.md (Wave 5 reactor wiring) +
 #   docs/rebuild/impl_w4_family_decision_engine.md (the engine contract this bridge
 #   drives) + docs/rebuild/arm_replay_report.md (the spine validated BEFORE this
 #   integration) + docs/rebuild/impl_w5b_integration.md (this integration's report).
@@ -54,14 +56,11 @@ DRIFT RESOLVED (recorded per operator law — see impl_w5b_integration.md §"Inp
     REALITY (spine-source rewire 2026-06-16): those members are the RAW MULTI-MODEL
     member envelope sourced from ``raw_model_forecasts`` (~7-13 decorrelated NWP
     providers, latest cycle per model) — the SAME source the ARM/settlement-EV replay
-    validates (``fresh_members_at_cycle``). They are RAW, NOT chain-of-record-debiased:
-    settlement-residual de-bias is applied at the seam ONLY when
-    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` (a follow-up flip; see the de-bias seam below),
-    else ``_NoOpDebiasAuthority`` applies ZERO shift and ``raw == debiased``. The center
-    this ships is therefore the RAW multi-model center (~-0.39 settlement-residual bias,
-    matching the replay BEFORE de-bias), NOT a de-biased ~0 center — enabling the flag is
-    the separate deploy step that reaches the fully-validated debiased center. These
-    members are the validated multi-model envelope, NOT the reactor's legacy served
+    validates (``fresh_members_at_cycle``). SINGLE TRUTH: there is NO settlement-residual
+    de-bias layer — ``_spine_debias_authority`` is unconditionally ``_NoOpDebiasAuthority``
+    (ZERO shift, ``raw == debiased``), so the center this ships IS the raw precise
+    multi-model fused center, untouched. These members are the validated multi-model
+    envelope, NOT the reactor's legacy served
     mu*/σ (the LEGACY EMOS/replacement values are no longer used for belief). If the
     producer stashed no members at all (the threaded inputs are absent — e.g. <3 fresh
     models on the causal cycle), the bridge returns a TYPED no-trade
@@ -92,7 +91,6 @@ a typed ``SPINE_WIRING_FAULT`` no-trade so the reactor emits a deterministic rec
 from __future__ import annotations
 
 import hashlib
-import os
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -158,91 +156,23 @@ _DIRECT_ROUTE_ID_PREFIXES = ("DIRECT_YES:", "DIRECT_NO:")
 # the Monte-Carlo resolution of the robust edge lower bound.
 SPINE_BAND_DRAWS: Optional[int] = None
 
-# COLD-CENTER-BIAS FIX (settlement-residual de-bias), live opt-in seam.
-#
-# The spine center mu* runs systematically ~0.5 deg C COLD vs realized settlement
-# (docs/evidence/qkernel_rebuild/cold_center_bias_fix_2026-06-16.md). The fix fits
-# per-(city, metric) walk-forward settlement-residual artifacts
-# (src/forecast/settlement_residual_debias.py) and applies them through the real
-# DebiasAuthority on the product-agnostic representativeness basis. It is PROVEN on
-# the settlement-EV replay (modal EV -0.046 -> +0.052; aggregate +0.018 -> +0.030).
-#
-# This live seam is DEFAULT-OFF: until the orchestrator flips
-# ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` the bridge uses ``_NoOpDebiasAuthority`` and
-# live behavior is unchanged (no restart-time behavior change from this commit).
-#
-# PROVENANCE (orchestrator deploy decision): POST-FIX (spine-source rewire 2026-06-16)
-# the members threaded to THIS seam are the RAW MULTI-MODEL consensus from
-# ``raw_model_forecasts`` (see ``build_fresh_model_set`` / ``_NoOpDebiasAuthority``) —
-# the SAME basis the provider's settlement residuals are fit against in
-# zeus-forecasts.db. The earlier "chain-of-record-debiased members" caveat is obsolete:
-# there is no upstream chain-debias on these served members (de-bias is OFF; raw ==
-# debiased), so enabling this seam applies the provider's settlement-residual shift to
-# RAW members fit on RAW members — the validated, no-double-count configuration. The
-# flag stays OFF in THIS commit (which ships the proven raw multi-model center, ~-0.39
-# residual bias); flipping ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` is the orchestrator's
-# separate deploy step to reach the fully-validated debiased (~0) center.
-_SPINE_SETTLE_RESID_DEBIAS_ENV = "ZEUS_SPINE_SETTLE_RESID_DEBIAS"
+# SINGLE TRUTH (legacy bias-maze strip 2026-06-17): the spine center IS the raw precise
+# multi-model fused center from ``raw_model_forecasts`` (~7-13 decorrelated NWP providers,
+# latest cycle per model). There is NO settlement-residual de-bias layer and NO bias flag.
+# ``_spine_debias_authority`` is UNCONDITIONALLY the identity ``_NoOpDebiasAuthority``:
+# ``build_center`` / ``build_sigma`` run on the RAW fused members with ZERO shift, so
+# ``raw == debiased``. (The removed seam read ``ZEUS_SPINE_SETTLE_RESID_DEBIAS`` and the
+# deleted ``settlement_residual_debias`` provider; both gone under the single-truth law.)
 
 
-def _settlement_residual_debias_enabled() -> bool:
-    """True iff the live settlement-residual de-bias seam is operator-enabled."""
-    return os.environ.get(_SPINE_SETTLE_RESID_DEBIAS_ENV) == "1"
+def _spine_debias_authority(case: ForecastCase):  # noqa: ARG001 — identity contract
+    """The identity de-bias authority the live spine builder uses (single truth).
 
-
-def _spine_debias_authority(case: ForecastCase):
-    """The de-bias authority the live spine builder uses for ``case``.
-
-    Default (flag OFF): ``_NoOpDebiasAuthority`` — zero shift, current live behavior.
-    Flag ON: a per-case ``DebiasAuthority`` seeded with the walk-forward settlement-
-    residual artifact (see the provenance caveat above). Fails CLOSED to the no-op
-    authority on any provider error so the seam can never fault the reactor hot path.
+    ALWAYS ``_NoOpDebiasAuthority`` — zero shift, ``raw == debiased``. The spine ships
+    the raw precise multi-model fused center untouched; there is no statistical de-bias
+    correction layer (operator single-truth law).
     """
-    if not _settlement_residual_debias_enabled():
-        return _NoOpDebiasAuthority()
-    try:
-        provider = _live_settlement_residual_provider()
-        if provider is None:
-            return _NoOpDebiasAuthority()
-        return provider.debias_authority(case)
-    except Exception:  # noqa: BLE001 — never fault the hot path on a de-bias fit
-        return _NoOpDebiasAuthority()
-
-
-_LIVE_SETTLE_RESID_PROVIDER: Any = None
-_LIVE_SETTLE_RESID_PROVIDER_BUILT: bool = False
-
-
-def _live_settlement_residual_provider():
-    """Lazily build (and cache) the live settlement-residual provider, or None.
-
-    Reads the live ``zeus-forecasts.db`` once (read-only). Cached for the process so
-    every case reuses the same fitted residual series; ``apply`` per-case filtering
-    keeps each case walk-forward. Returns None if the DB path cannot be resolved.
-    """
-    global _LIVE_SETTLE_RESID_PROVIDER, _LIVE_SETTLE_RESID_PROVIDER_BUILT
-    if _LIVE_SETTLE_RESID_PROVIDER_BUILT:
-        return _LIVE_SETTLE_RESID_PROVIDER
-    _LIVE_SETTLE_RESID_PROVIDER_BUILT = True
-    try:
-        import sqlite3
-
-        from src.forecast.settlement_residual_debias import (
-            SettlementResidualDebiasProvider,
-        )
-
-        db_path = os.environ.get(
-            "ZEUS_FORECASTS_DB",
-            os.path.join(os.getcwd(), "state", "zeus-forecasts.db"),
-        )
-        if not os.path.exists(db_path):
-            _LIVE_SETTLE_RESID_PROVIDER = None
-            return None
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        _LIVE_SETTLE_RESID_PROVIDER = SettlementResidualDebiasProvider.from_connection(con)
-    except Exception:  # noqa: BLE001
-        _LIVE_SETTLE_RESID_PROVIDER = None
-    return _LIVE_SETTLE_RESID_PROVIDER
+    return _NoOpDebiasAuthority()
 
 
 # ===========================================================================
@@ -585,13 +515,11 @@ def build_fresh_model_set(
     ``debiased_members_native``, which since the source rewire is the RAW multi-model
     envelope from ``raw_model_forecasts`` (~7-13 decorrelated NWP providers, latest cycle
     per model, °C→native) — the SAME member set the ARM/settlement-EV replay validates
-    (``fresh_members_at_cycle``). De-bias is OFF live, so ``raw == debiased`` (the
-    producer stashes the raw envelope into BOTH keys). The ``build_center`` (envelope-
-    lock) and ``build_sigma`` (realized-floor) authorities run on these RAW members, with
-    settlement-residual de-bias applied at the seam ONLY when
-    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` (a follow-up flip; else ``_NoOpDebiasAuthority``
-    = zero shift). Falls back to the raw array, then to ``mu_native``, only if no member
-    array was threaded.
+    (``fresh_members_at_cycle``). SINGLE TRUTH: there is no de-bias layer, so
+    ``raw == debiased`` (the producer stashes the raw envelope into BOTH keys). The
+    ``build_center`` (envelope-lock) and ``build_sigma`` (realized-floor) authorities run
+    on these RAW members with ZERO shift (``_NoOpDebiasAuthority``). Falls back to the raw
+    array, then to ``mu_native``, only if no member array was threaded.
     """
     values = served.get("debiased_members_native") or served.get("raw_members_native") or ()
     arr = np.asarray(values, dtype=float)
@@ -626,20 +554,14 @@ def build_fresh_model_set(
 
 
 class _NoOpDebiasAuthority:
-    """De-bias is a NO-OP at this live seam by DEFAULT — no shift is applied.
+    """De-bias is the IDENTITY at this live seam — no shift is ever applied (single truth).
 
-    POST-FIX REALITY (spine-source rewire 2026-06-16): the members threaded here are the
-    RAW multi-model envelope from ``raw_model_forecasts`` (NOT a chain-of-record-debiased
-    set; the prior claim was false). Live de-bias is OFF, so this authority applies ZERO
-    shift and ``raw == debiased``. The ``build_center`` (envelope-lock) and ``build_sigma``
-    (realized-floor) authorities run on these RAW members — reproducing the ARM-replay
-    member set BEFORE de-bias (raw multi-model center, ~-0.39 settlement-residual bias).
-    Settlement-residual de-bias is a SEPARATE, opt-in step: when
-    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` the bridge uses a per-case ``DebiasAuthority``
-    seeded with the walk-forward settlement-residual artifact instead of this no-op (see
-    ``_spine_debias_authority`` / the de-bias seam block above), which is the follow-up
-    flip that reaches the fully-validated debiased (~0) center. This no-op is the
-    DEFAULT-OFF behavior this commit ships.
+    The members threaded here are the RAW precise multi-model envelope from
+    ``raw_model_forecasts`` (NOT a chain-of-record-debiased set). Under the operator
+    single-truth law there is NO settlement-residual de-bias layer, so this authority
+    applies ZERO shift and ``raw == debiased``. The ``build_center`` (envelope-lock) and
+    ``build_sigma`` (realized-floor) authorities run on these RAW members untouched — the
+    raw precise multi-model fused center IS what the spine ships.
     """
 
     def apply(self, case: ForecastCase, models: FreshModelSet):
@@ -902,11 +824,9 @@ def decide_family_via_spine(
             # NOT chain-of-record-debiased, and are NOT "the ARM-replay-validated
             # center+σ" — the ARM replay reads the SAME ``raw_model_forecasts`` table
             # but the live center is recomputed here, not lifted from a validated run.
-            # De-bias: no-op by default (``_NoOpDebiasAuthority`` → raw envelope is the
-            # center). When the operator enables the settlement-residual seam
-            # (ZEUS_SPINE_SETTLE_RESID_DEBIAS=1), this is a per-case DebiasAuthority
-            # seeded with the walk-forward settlement-residual artifact that corrects the
-            # proven ~0.5C cold-center bias. Default-OFF: no live behavior change here.
+            # De-bias: IDENTITY always (``_NoOpDebiasAuthority`` → raw envelope is the
+            # center). Single-truth law: there is no settlement-residual de-bias layer and
+            # no bias flag — the raw precise multi-model fused center IS what ships.
             predictive_builder=PredictiveDistributionBuilder(_spine_debias_authority(case)),
             # ROUTE IDENTITY (consult_review_pr409.md §5 BLOCKER): DIRECT native routes
             # ONLY. The unchanged submit path executes ONE native leg, so the decision
@@ -1235,29 +1155,64 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
     """Overlay the spine decision's economics onto the selected reactor proof.
 
     The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` / ``trade_score`` /
-    ``execution_price`` etc. off the proof. The spine's selection controls which proof
-    advances and may update the proof's score, but receipt-facing q fields must remain
-    selected-side probability-space values from the reactor proof. Payoff-space spine
-    values such as ``q_dot_payoff`` / ``edge_lcb`` are not interchangeable with
-    ``q_posterior`` / ``q_lcb_5pct`` for binary YES/NO receipts. Returns a NEW proof
-    (frozen dataclass replace) so the original tuple is untouched.
+    ``execution_price`` etc. off the proof. The spine's selection is the authority now,
+    so the receipt-facing q / edge / trade_score are restamped from the spine's
+    selected ``CandidateEconomics`` (point fair value, robust edge_lcb, optimal ΔU).
+    The executable identity (row / token / execution_price / native_quote_available)
+    is LEFT UNCHANGED — the spine selected this exact executable leg, and the submit
+    pipeline re-authorizes it at submit time. Returns a NEW proof (frozen dataclass
+    replace) so the original tuple is untouched.
     """
     from dataclasses import replace
 
     selected = decision.selected
     if selected is None:
         return proof
-    # Keep q_posterior/q_lcb_5pct/q_source as the selected-side probability authority
-    # already certified on the reactor proof. The q-kernel's q_dot_payoff and edge_lcb
-    # are payoff-vector economics; writing them into probability fields can make a
-    # buy_yes receipt show a NO-like lower bound (observed live: q=0.199, q_lcb=0.796).
+    # The spine's point fair value (q @ payoff) is the decision's q for this leg; its
+    # edge_lcb is the robust lower bound; optimal_delta_u is the ΔU. Restamp the
+    # receipt-facing fields; keep the executable identity.
+    try:
+        new_q = float(selected.q_dot_payoff)
+    except Exception:  # noqa: BLE001
+        new_q = float(getattr(proof, "q_posterior", 0.0))
     try:
         new_trade_score = float(selected.point_ev)
     except Exception:  # noqa: BLE001
         new_trade_score = float(getattr(proof, "trade_score", 0.0))
     overlay: dict[str, Any] = {
+        "q_posterior": new_q,
         "trade_score": new_trade_score,
+        "q_source": "qkernel_spine",
     }
+    # q_lcb_5pct: map the spine's GENUINE robust lower bound into q-space so the legacy
+    # submit pipeline's per-side gate (q_lcb <= q_point, event_reactor_adapter
+    # _native_side_candidate_from_proof) and its binary-Kelly sizing
+    # (f* = (q_lcb - cost)/(1 - cost)) both run on the spine's robust economics, not on
+    # a stale probability-space q_lcb that inverts against the payoff-space q_posterior.
+    #
+    # The spine's vector economics (src/decision/payoff_vector.py) are:
+    #   q_dot_payoff = q @ payoff                       (point fair value, pre-cost)
+    #   point_ev     = q_dot_payoff - cost              (point edge)
+    #   edge_lcb     = quantile(samples @ payoff - cost, alpha)
+    #              = quantile(samples @ payoff) - cost  (robust edge lower bound)
+    # The proof's q_posterior is restamped to q_dot_payoff above, so q_point = q_dot_payoff
+    # = point_ev + cost. Setting
+    #   q_lcb = edge_lcb + cost = quantile(samples @ payoff)
+    # recovers the robust LOWER BOUND of the same payoff-space fair value as the q_point.
+    # `cost` (CandidateEconomics.cost, a typed ExecutionPrice in probability_units) is the
+    # SAME all-in per-share cost the legacy edge/Kelly subtract, so the legacy edge
+    # `q_lcb - cost` reproduces the spine's own `edge_lcb` exactly, and binary Kelly sizes
+    # on edge_lcb/(1-cost) — the robust lower bound, never the point and never the raw
+    # probability. This PRESERVES the robustness margin (it is NOT a clamp-to-point):
+    # because edge_lcb <= point_ev, we get q_lcb <= q_point, strict whenever
+    # edge_lcb < point_ev (the real robust gap), so q_lcb < q_point survives.
+    try:
+        cost_value = float(selected.cost.value)
+        edge_lcb_value = float(selected.edge_lcb)
+        new_q_lcb = max(0.0, min(1.0, edge_lcb_value + cost_value))  # clamp01
+        overlay["q_lcb_5pct"] = new_q_lcb
+    except Exception:  # noqa: BLE001 — missing/typeless economics: leave q_lcb_5pct unchanged
+        pass
     try:
         return replace(proof, **overlay)
     except Exception:  # noqa: BLE001 — if the proof is not a replaceable dataclass, return as-is

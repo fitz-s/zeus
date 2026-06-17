@@ -1045,127 +1045,20 @@ def _build_edli_status_pulse(
     }
 
 
-def _assert_emos_ci_license_seasonal_coverage(edli_cfg: dict) -> None:
-    """Season-pin boot guard for the EMOS-CI live override (#90 pattern).
+def _assert_calibration_coverage_contract(edli_cfg: dict) -> None:  # noqa: ARG001
+    """Legacy bias/Platt calibration-coverage guard — now an unconditional no-op.
 
-    When edli_emos_ci_live_enabled is True, every LICENSED city must have an
-    emos_calibration cell for its CURRENT (city, season) served == "emos".
-    A season rollover (e.g. JJA→SON) can otherwise silently make the override
-    serve an uncalibrated EMOS lcb — the same class of defect as antibody #90.
-
-    Uncovered licensed cities are DROPPED from the effective in-process license
-    (the cache the live override reads), with a WARN. This is FAIL-CLOSED: an
-    uncovered city falls back to the proven MC lcb rather than serving a wrong CI.
-    A WARN (not a fatal raise) keeps every OTHER covered licensed city live and
-    keeps the daemon up across a season boundary — the override is per-city and
-    flag-gated, so a single uncovered city is not a launch blocker.
-
-    Default OFF: when the flag is False the override never fires and this guard
-    is a no-op.
+    SINGLE TRUTH (bias-maze strip 2026-06-17): the live q runs on the raw precise
+    multi-model fused center (qkernel_spine / EMOS / honest-raw substrate); the legacy
+    per-city bias+Platt calibration path is never consumed by a live decision. The legacy
+    coverage contract is therefore permanently NOT APPLICABLE. It is deliberately a logged
+    no-op rather than a raise: forcing the old guard to run would have RAISED in armed mode
+    on missing VERIFIED bias rows (a spurious boot-block under the single-truth law).
     """
-    if not bool(edli_cfg.get("edli_emos_ci_live_enabled", False)):
-        return
-    try:
-        from src.calibration.emos_ci_license import load_emos_ci_license
-        from src.calibration.emos import load_emos_table, emos_season, emos_cell_key
-    except Exception as exc:  # pragma: no cover — import wiring
-        logger.warning("EMOS-CI license boot guard import failed (override left disabled): %s", exc)
-        return
-
-    license_map = load_emos_ci_license()  # cached dict mutated in place to drop uncovered cities
-    if not license_map:
-        logger.warning(
-            "EMOS-CI live override ENABLED but license is empty — override is a no-op "
-            "(no city licensed). Operator must populate state/emos_ci_license.json."
-        )
-        return
-
-    table = load_emos_table()
-    cells = table.get("cells", {}) if isinstance(table, dict) else {}
-    today = datetime.now(timezone.utc).date().isoformat()
-
-    # EMOS-CI license is HIGH-metric (the override replaces the MC q_5pct on the HIGH q_lcb).
-    # Canonical NH-month season + 3-key lookup: a hemisphere-aware season SH-flips and a 2-key
-    # lookup misses the metric-keyed table — both silently drop the whole license (C1/C2 fix).
-    dropped: list[str] = []
-    for city in list(license_map.keys()):
-        season = emos_season(today)
-        cell = cells.get(emos_cell_key(city, season, "high"))
-        served = str(cell.get("served", "")) if isinstance(cell, dict) else ""
-        if served != "emos":
-            dropped.append(f"{city}|{season}|high(served={served or 'missing'})")
-            del license_map[city]
-
-    if dropped:
-        logger.warning(
-            "EMOS-CI live override: %d licensed city(ies) lack an served==emos cell for the "
-            "current season — DROPPED from the effective license (fail-closed, MC lcb stands): %s",
-            len(dropped), ", ".join(dropped),
-        )
-    covered = sorted(license_map.keys())
     logger.info(
-        "EMOS-CI live override ENABLED; effective licensed cities (season-covered): %s",
-        covered if covered else "(none)",
+        "CALIBRATION_COVERAGE_NOT_APPLICABLE: legacy bias/Platt coverage guard removed "
+        "(single-truth raw multi-model center; no live bias/Platt consumer)"
     )
-
-
-def _assert_calibration_coverage_contract(edli_cfg: dict) -> None:
-    """Antibody #90: loud per-city bias+Platt calibration-coverage guard.
-
-    This guard is for the legacy bias/Platt calibration path. When the EDLI
-    reactor is in the EMOS-sole regime, non-day0 decisions do not consume that
-    path: they serve EMOS, honest raw with calibrated sigma, or pure raw analytic
-    with ``members_already_corrected=True``. In that regime, candidate-level
-    EMOS/floor failures remain fail-closed at the q seam, but the legacy
-    bias/Platt boot detector must not block armed boot on unused substrates.
-
-    For EVERY live runtime city × metric, assert the current-season bias row
-    (VERIFIED edli_per_city_v1) AND a non-borrowed/non-identity-by-starvation
-    Platt exist.  Any city that would silently fall to RAW bias / borrow a
-    foreign-cluster Platt / fall to identity is enumerated LOUDLY.
-
-    SEVERITY (gated solely on real_order_submit_enabled):
-      * SHADOW (real_order_submit_enabled=False): WARN-only, never raises, never
-        starves the reactor — today's behaviour is byte-identical except new
-        warning log lines.
-      * ARMED (real_order_submit_enabled=True): raises CalibrationCoverageError
-        (fail-closed — arming with silent partial calibration is forbidden).
-
-    Read-only (SELECT on the world DB).  Wrapped so an UNEXPECTED import/probe
-    error never blocks the SHADOW daemon (fail-open on infra error in shadow);
-    in ARMED mode an unexpected error is re-raised (fail-closed) rather than
-    masking a coverage check.
-    """
-    if bool(edli_cfg.get("edli_emos_sole_calibrator_enabled", False)):
-        logger.info(
-            "CALIBRATION_COVERAGE_SKIPPED_EMOS_SOLE: legacy bias/Platt guard "
-            "not applicable while EDLI q source is EMOS/honest-raw sole calibrator"
-        )
-        return
-
-    armed = bool(edli_cfg.get("real_order_submit_enabled", False))
-    try:
-        from src.observability.calibration_coverage_guard import (
-            assert_calibration_coverage,
-        )
-    except Exception as exc:  # pragma: no cover — import wiring
-        if armed:
-            raise
-        logger.warning(
-            "calibration-coverage guard import failed (shadow, ignored): %s", exc
-        )
-        return
-    try:
-        assert_calibration_coverage(armed=armed)
-    except Exception:
-        # CalibrationCoverageError (armed) and any unexpected probe error must
-        # surface when armed; in shadow only the WARN logging matters and the
-        # guard itself never raises for gaps — re-raise only when armed.
-        if armed:
-            raise
-        logger.warning(
-            "calibration-coverage guard probe error (shadow, ignored)", exc_info=True
-        )
 
 
 def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
@@ -9653,7 +9546,9 @@ def main():
     edli_cfg = _settings_section("edli", {})
     live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
     _assert_edli_stage_readiness(edli_cfg)
-    _assert_emos_ci_license_seasonal_coverage(edli_cfg)
+    # SINGLE TRUTH (bias-maze strip 2026-06-17): the EMOS-CI license boot guard is REMOVED
+    # (the override it guarded is gone). The legacy bias/Platt calibration-coverage contract
+    # is now an unconditional logged no-op (not applicable under single-truth).
     _assert_calibration_coverage_contract(edli_cfg)
     if live_execution_mode == "legacy_cron":
         scheduler.add_job(
