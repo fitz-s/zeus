@@ -678,6 +678,20 @@ def _optional_float(value: object) -> float | None:
         return None
 
 
+def _invalid_probability_bound_reject(q_live: object, q_lcb_5pct: object) -> bool:
+    """Return True when a regret row carries an impossible q_lcb>q_live pair.
+
+    Such rows are provenance/input corruption, not full-economics evidence. They
+    must not become redecision backoff, otherwise one bad receipt can keep
+    tradeable fresh evidence from re-entering the full reactor.
+    """
+    q = _optional_float(q_live)
+    lcb = _optional_float(q_lcb_5pct)
+    if q is None or lcb is None:
+        return False
+    return lcb > q + _EPS
+
+
 def read_recent_full_economics_rejections(
     conn: sqlite3.Connection,
     *,
@@ -712,11 +726,13 @@ def read_recent_full_economics_rejections(
     from datetime import timedelta, timezone as _timezone
 
     cutoff = (datetime.now(_timezone.utc) - timedelta(hours=max(0.0, lookback_hours))).isoformat()
+    q_live_select = ", q_live" if "q_live" in cols else ", NULL AS q_live"
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT family_id, city, target_date, metric, bin_label, direction,
                    c_fee_adjusted, q_lcb_5pct, trade_score, created_at, rejection_reason
+                   {q_live_select}
              FROM no_trade_regret_events
              WHERE rejection_stage = 'TRADE_SCORE'
                AND (
@@ -739,6 +755,8 @@ def read_recent_full_economics_rejections(
         return {}
     out: dict[RedecisionScreenKey, FullEconomicsReject] = {}
     for row in rows:
+        if _invalid_probability_bound_reject(row[11], row[7]):
+            continue
         legacy_key: EntryScreenKey = (str(row[0]), str(row[4]), str(row[5]))
         stable_key: StableEntryScreenKey | None = None
         city = str(row[1] or "").strip()

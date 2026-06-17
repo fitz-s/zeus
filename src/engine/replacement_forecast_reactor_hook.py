@@ -80,6 +80,17 @@ class ReplacementForecastCandidateView:
         for field_name in ("baseline_q_posterior", "baseline_q_lcb", "candidate_q_posterior", "candidate_q_lcb"):
             if not 0.0 <= float(getattr(self, field_name)) <= 1.0:
                 raise ValueError("q values must be in [0, 1]")
+        for q_field, lcb_field in (
+            ("baseline_q_posterior", "baseline_q_lcb"),
+            ("candidate_q_posterior", "candidate_q_lcb"),
+        ):
+            q_value = float(getattr(self, q_field))
+            lcb_value = float(getattr(self, lcb_field))
+            if lcb_value > q_value + 1e-12:
+                raise ValueError(
+                    f"{lcb_field} must not exceed {q_field}: "
+                    f"{lcb_value:.12g} > {q_value:.12g}"
+                )
         if self.baseline_kelly_fraction < 0.0 or self.candidate_kelly_fraction < 0.0:
             raise ValueError("kelly fractions must be non-negative")
         # FIX-3 (§0.5) structural guard: the directional tokens must be WELL-FORMED

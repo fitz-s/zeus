@@ -320,6 +320,58 @@ def test_recent_full_economics_rejections_publish_stable_market_key():
     assert ("family", "Shanghai", "2026-06-19", "low") in rejections
 
 
+def test_recent_full_economics_rejections_skip_impossible_q_lcb_rows():
+    conn = _mem_world()
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            rejection_stage TEXT,
+            rejection_reason TEXT,
+            c_fee_adjusted REAL,
+            q_live REAL,
+            q_lcb_5pct REAL,
+            trade_score REAL,
+            created_at TEXT
+        )
+        """
+    )
+    label = "Will the lowest temperature in Shanghai be 24°C on June 19?"
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            family_id, city, target_date, metric, bin_label, direction,
+            rejection_stage, rejection_reason, c_fee_adjusted, q_live,
+            q_lcb_5pct, trade_score, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "edli_family_old_hash",
+            "Shanghai",
+            "2026-06-19",
+            "low",
+            label,
+            "buy_yes",
+            "TRADE_SCORE",
+            "TRADE_SCORE_NON_POSITIVE",
+            0.34,
+            0.20839375296228654,
+            0.7953671556018411,
+            -0.14,
+            "2026-06-17T22:31:00+00:00",
+        ),
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+
+    assert rejections == {}
+
+
 def test_entry_screen_blocks_fdr_refuted_candidate_despite_positive_trade_score():
     conn = _mem_world()
     label = "Will the lowest temperature in Paris be 22°C on June 19?"

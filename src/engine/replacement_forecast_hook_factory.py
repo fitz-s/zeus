@@ -294,6 +294,40 @@ def _h3_direction_for_candidate_bin(*, candidate_bin_id: str | None, replacement
     return f"{side}:{candidate_bin_id}"
 
 
+def _replacement_direction_for_candidate(
+    proof: Any,
+    *,
+    replacement_bundle: object | None,
+    bin_id: str | None,
+) -> str:
+    replacement_direction = _h3_direction_for_candidate_bin(
+        candidate_bin_id=bin_id,
+        replacement_bundle=replacement_bundle,
+    )
+    if replacement_direction is not None:
+        return replacement_direction
+    return str(getattr(proof, "direction", "") or "")
+
+
+def _replacement_yes_point_for_bin(
+    replacement_bundle: object | None,
+    *,
+    bin_id: str | None,
+) -> float | None:
+    if replacement_bundle is None or not bin_id:
+        return None
+    q = getattr(replacement_bundle, "q", {}) or {}
+    if not isinstance(q, Mapping):
+        return None
+    raw = q.get(bin_id)
+    if raw is None:
+        return None
+    try:
+        return min(max(float(raw), 0.0), 1.0)
+    except (TypeError, ValueError):
+        return None
+
+
 def _replacement_q_lcb_for_candidate(
     proof: Any,
     *,
@@ -313,12 +347,21 @@ def _replacement_q_lcb_for_candidate(
     bin_id = _candidate_bin_id(proof, replacement_bundle=replacement_bundle)
     if not bin_id:
         return baseline_q_lcb
-    direction = str(getattr(proof, "direction", "") or "")
-    q = getattr(replacement_bundle, "q", {}) or {}
+    q_yes = _replacement_yes_point_for_bin(replacement_bundle, bin_id=bin_id)
+    if q_yes is None:
+        return baseline_q_lcb
+    direction = _replacement_direction_for_candidate(
+        proof,
+        replacement_bundle=replacement_bundle,
+        bin_id=bin_id,
+    )
     q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
     q_ucb = getattr(replacement_bundle, "q_ucb", None) or {}
     if direction.startswith("buy_yes"):
         raw = q_lcb.get(bin_id)
+        if raw is None:
+            return baseline_q_lcb
+        return min(max(float(raw), 0.0), q_yes)
     elif direction.startswith("buy_no"):
         raw = None
         for key in (
@@ -330,6 +373,15 @@ def _replacement_q_lcb_for_candidate(
             if key in q_lcb:
                 raw = q_lcb[key]
                 break
+        if raw is not None:
+            return min(max(float(raw), 0.0), 1.0 - q_yes)
+        if isinstance(q_ucb, Mapping) and bin_id in q_ucb:
+            try:
+                q_ucb_yes = min(max(float(q_ucb[bin_id]), 0.0), 1.0)
+            except (TypeError, ValueError):
+                return 0.0
+            return min(max(1.0 - q_ucb_yes, 0.0), 1.0 - q_yes)
+        return 0.0
     else:
         raw = q_lcb.get(bin_id)
     if raw is None:
@@ -348,10 +400,15 @@ def _replacement_q_posterior_for_candidate(
     bin_id = _candidate_bin_id(proof, replacement_bundle=replacement_bundle)
     if not bin_id:
         return min(max(baseline_q, 0.0), 1.0)
+    q_yes = _replacement_yes_point_for_bin(replacement_bundle, bin_id=bin_id)
+    if q_yes is None:
+        return min(max(baseline_q, 0.0), 1.0)
     q = getattr(replacement_bundle, "q", {}) or {}
-    direction = _h3_direction_for_candidate_bin(candidate_bin_id=bin_id, replacement_bundle=replacement_bundle)
-    if direction is None:
-        direction = str(getattr(proof, "direction", "") or "")
+    direction = _replacement_direction_for_candidate(
+        proof,
+        replacement_bundle=replacement_bundle,
+        bin_id=bin_id,
+    )
     if direction.startswith("buy_no"):
         for key in (
             f"buy_no:{bin_id}",
@@ -361,11 +418,8 @@ def _replacement_q_posterior_for_candidate(
         ):
             if key in q:
                 return min(max(float(q[key]), 0.0), 1.0)
-        return min(max(baseline_q, 0.0), 1.0)
-    raw = q.get(bin_id)
-    if raw is None:
-        return min(max(baseline_q, 0.0), 1.0)
-    return min(max(float(raw), 0.0), 1.0)
+        return 1.0 - q_yes
+    return q_yes
 
 
 def _candidate_view_from_proof(

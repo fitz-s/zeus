@@ -196,13 +196,76 @@ def test_item1_baseline_fallback_when_no_replacement_data_is_honest_not_a_cap():
     assert value == pytest.approx(0.50)
 
 
+def test_item1_replacement_hook_uses_final_direction_for_q_lcb():
+    """Regression for live Shanghai 2026-06-19 low: the hook may flip the baseline
+    proof direction to the replacement-selected bin. The q_lcb must be recomputed
+    for that final direction, never inherited from the baseline side."""
+    from datetime import datetime, timezone
+
+    from src.engine.replacement_forecast_hook_factory import _candidate_view_from_proof
+
+    class _Bin:
+        low, high, unit = 24.0, 24.0, "C"
+
+    class _Cand:
+        condition_id = "cond-x"
+        bin = _Bin()
+
+    class _Proof:
+        candidate = _Cand()
+        direction = "buy_no"
+        q_posterior = 0.80
+        q_lcb_5pct = 0.79
+        token_id = "tok"
+        executable_snapshot_id = "snap"
+
+    class _Bundle:
+        q = {"bin-a": 0.20839375296228654}
+        q_lcb = {"bin-a": 0.1556303873131376}
+        q_ucb = {"bin-a": 0.20839375296228654}
+        provenance_json = {
+            "bin_topology": [{"bin_id": "bin-a", "lower_c": 24.0, "upper_c": 24.0}]
+        }
+
+    view = _candidate_view_from_proof(
+        _Proof(),
+        datetime(2026, 6, 17, 23, 7, tzinfo=timezone.utc),
+        replacement_bundle=_Bundle(),
+    )
+
+    assert view.candidate_direction == "buy_yes:bin-a"
+    assert view.candidate_q_posterior == pytest.approx(0.20839375296228654)
+    assert view.candidate_q_lcb == pytest.approx(0.1556303873131376)
+    assert view.candidate_q_lcb <= view.candidate_q_posterior
+
+
+def test_item1_replacement_candidate_view_rejects_impossible_q_lcb():
+    from src.engine.replacement_forecast_reactor_hook import ReplacementForecastCandidateView
+
+    with pytest.raises(ValueError, match="candidate_q_lcb must not exceed candidate_q_posterior"):
+        ReplacementForecastCandidateView(
+            baseline_direction="buy_yes:bin-a",
+            baseline_q_posterior=0.80,
+            baseline_q_lcb=0.70,
+            baseline_kelly_fraction=0.0,
+            candidate_direction="buy_yes:bin-a",
+            candidate_q_posterior=0.20839375296228654,
+            candidate_q_lcb=0.7953671556018411,
+            candidate_kelly_fraction=0.0,
+            market_snapshot_id="snap",
+            condition_id="cond",
+            token_id="tok",
+            decision_time="2026-06-17T23:07:39+00:00",
+        )
+
+
 def test_item1_adapter_records_baseline_diagnostics_not_min_join():
-    """The SHADOW_VETO seam must record baseline_q_lcb_reference and NOT join the deleted
-    min(proof.q_lcb_5pct, ...) against the replacement effective q_lcb."""
+    """The live replacement seam must not min-join the replacement q_lcb with the
+    legacy baseline q_lcb."""
     src = (_SRC / "engine" / "event_reactor_adapter.py").read_text()
     assert "effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)" not in src
-    assert '"baseline_q_lcb_reference": float(proof.q_lcb_5pct)' in src
     assert "effective_q_lcb = replacement_hook_result.effective_q_lcb" in src
+    assert "q_lcb_5pct=effective_q_lcb" in src
 
 
 # ---------------------------------------------------------------------------

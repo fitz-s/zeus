@@ -1,14 +1,10 @@
 # Created: 2026-06-07
-# Last reused or audited: 2026-06-08
-# Authority basis: commit 16c35e7445 ("Make YES and NO probability authority
-#   independent") + FIX-4 (§2). The buy_no q_lcb MUST come from a native NO
-#   calibration source; deriving it from a YES complement (1 - q_yes_ucb) is
-#   BANNED. Current contract: src/engine/replacement_forecast_hook_factory.py
-#   :315-329 (buy_no branch reads ONLY native-NO keys from q_lcb; the
-#   1.0 - q_ucb fallback was DELETED), src/strategy/live_inference/live_admission.py
-#   :22-24 + :123-125 (YES_UCB_DERIVED removed; never infer YES by complement
-#   arithmetic), src/calibration/qlcb_provenance.py:43-46 (closed vocabulary has
-#   no YES_UCB_DERIVED). Original (pre-audit) test asserted the banned complement.
+# Last reused or audited: 2026-06-17
+# Authority basis: replacement_0_1 q_lcb law after bin-selection S2 / Hidden #3:
+#   buy_no q_lcb is the lower tail of (1 - q_yes), represented by 1 - q_ucb_yes
+#   and clamped under the NO point. This file was re-audited after live Shanghai
+#   2026-06-19 low exposed stale hook-factory wiring that carried a baseline
+#   buy_no LCB into a final buy_yes replacement direction.
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -36,12 +32,13 @@ class _Bundle:
 
 def _bundle(**overrides) -> _Bundle:
     payload = {
-        "q": {"bin-a": 0.02},
+        "q": {"bin-a": 0.02, "bin-b": 0.98},
         "q_lcb": None,
         "q_ucb": None,
         "provenance_json": {
             "bin_topology": [
                 {"bin_id": "bin-a", "lower_c": 10.0, "upper_c": 10.0, "center_c": 10.0},
+                {"bin_id": "bin-b", "lower_c": 11.0, "upper_c": 11.0, "center_c": 11.0},
             ],
             "bin_topology_hash": "test",
         },
@@ -59,27 +56,16 @@ def test_buy_no_uses_native_no_lcb_when_present() -> None:
     assert value == 0.61
 
 
-def test_buy_no_never_derives_lcb_from_yes_ucb_complement() -> None:
-    """BAN (16c35e7445 + FIX-4): buy_no must NOT derive its conservative bound
-    from a YES complement (1 - q_yes_ucb). With only q_ucb present and NO native
-    NO-side q_lcb, the function must fall back to the baseline q_lcb_5pct and must
-    NEVER produce the banned complement 1 - q_ucb = 0.88.
-
-    YES and NO probability authority are independent: a NO conservative bound may
-    only come from a native NO calibration source (closed vocabulary in
-    qlcb_provenance.CALIBRATION_SOURCES). YES_UCB_DERIVED is not expressible by the
-    QlcbByDirection carrier and was removed from the allow-list.
-    """
+def test_buy_no_uses_yes_ucb_complement_when_native_no_lcb_absent() -> None:
+    """Replacement posterior stores per-bin YES UCB; the native-NO conservative
+    bound is 1 - q_ucb_yes, clamped under the NO point."""
 
     value = _replacement_q_lcb_for_candidate(
         _Proof(),
         replacement_bundle=_bundle(q_ucb={"bin-a": 0.12}),
     )
 
-    # Must NOT be the banned YES complement.
-    assert value != 0.88
-    # Must fall back to the baseline conservative bound (no native NO source given).
-    assert value == 0.80
+    assert value == 0.88
 
 
 def test_buy_no_ignores_yes_ucb_even_with_native_no_lcb_present() -> None:
