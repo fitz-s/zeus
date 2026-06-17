@@ -522,18 +522,22 @@ def test_held_position_family_provider_excludes_closed_phases():
             target_date TEXT,
             temperature_metric TEXT,
             shares REAL,
+            cost_basis_usd REAL,
+            size_usd REAL,
             phase TEXT
         )
         """
     )
     conn.executemany(
-        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
-            ("Tokyo", "2026-06-18", "low", 19.5, "day0_window"),
-            ("Shenzhen", "2026-06-19", "high", 60.0, "active"),
-            ("Hong Kong", "2026-06-08", "high", 10.0, "economically_closed"),
-            ("Warsaw", "2026-06-08", "high", 15.75, "admin_closed"),
-            ("Seoul", "2026-06-08", "high", 7.0, "quarantined"),
+            ("Tokyo", "2026-06-18", "low", 19.5, 12.0, 12.0, "day0_window"),
+            ("Shenzhen", "2026-06-19", "high", 60.0, 44.4, 44.4, "active"),
+            ("Hong Kong", "2026-06-08", "high", 10.0, 8.0, 8.0, "economically_closed"),
+            ("Warsaw", "2026-06-08", "high", 15.75, 9.0, 9.0, "admin_closed"),
+            ("Seoul", "2026-06-08", "high", 7.0, 5.0, 5.0, "quarantined"),
+            ("Busan", "2026-06-20", "high", 22.0, 15.0, 15.0, "pending_entry"),
+            ("Osaka", "2026-06-21", "high", 12.0, 0.0, 0.0, "active"),
         ],
     )
 
@@ -541,6 +545,34 @@ def test_held_position_family_provider_excludes_closed_phases():
         ("Tokyo", "2026-06-18", "low"),
         ("Shenzhen", "2026-06-19", "high"),
     }
+
+
+def test_held_position_family_provider_accepts_chain_confirmed_quantity():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            shares REAL,
+            chain_shares REAL,
+            cost_basis_usd REAL,
+            size_usd REAL,
+            chain_cost_basis_usd REAL,
+            phase TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("Shenzhen", "2026-06-19", "high", 0.0, 60.0, 0.0, 0.0, 44.4, "active"),
+            ("Busan", "2026-06-20", "high", 0.0, 10.0, 0.0, 0.0, 7.0, "pending_entry"),
+        ],
+    )
+
+    assert _held_position_families(conn) == {("Shenzhen", "2026-06-19", "high")}
 
 
 def test_redecision_cycle_prunes_before_snapshotting_pending_keys():

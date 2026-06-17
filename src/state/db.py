@@ -996,7 +996,9 @@ OPEN_EXPOSURE_PHASES = (
 )
 ENTRY_ECONOMICS_LEGACY_UNKNOWN = "legacy_unknown"
 ENTRY_ECONOMICS_AVG_FILL_PRICE = "avg_fill_price"
+ENTRY_ECONOMICS_CORRECTED_COST_BASIS = "corrected_executable_cost_basis"
 FILL_AUTHORITY_NONE = "none"
+FILL_AUTHORITY_VENUE_POSITION_OBSERVED = "venue_position_observed"
 FILL_AUTHORITY_VENUE_CONFIRMED_FULL = "venue_confirmed_full"
 TERMINAL_TRADE_DECISION_STATUSES = frozenset(
     {
@@ -9542,7 +9544,8 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
                strategy_key, chain_state, order_status,
                decision_snapshot_id, last_monitor_market_price,
                token_id, no_token_id, condition_id,
-               fill_authority
+               fill_authority,
+               chain_shares, chain_avg_price, chain_cost_basis_usd
         FROM position_current
         ORDER BY updated_at DESC, position_id
         """
@@ -10426,16 +10429,57 @@ def _query_entry_execution_fill_hints(
 def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> dict:
     from src.state.portfolio import fill_authority_effective_open_cost_basis
 
+    def _row_optional(key: str, default: object = None) -> object:
+        try:
+            return row[key]
+        except (IndexError, KeyError):
+            return default
+
     submitted_size_usd = _finite_float_or_zero(row["size_usd"])
     projection_shares = _finite_float_or_zero(row["shares"])
     projection_cost_basis_usd = _finite_float_or_zero(row["cost_basis_usd"])
     projection_entry_price = _finite_float_or_zero(row["entry_price"])
+    chain_shares = _finite_float_or_zero(_row_optional("chain_shares"))
+    chain_cost_basis_usd = _finite_float_or_zero(_row_optional("chain_cost_basis_usd"))
+    chain_avg_price = _finite_float_or_zero(_row_optional("chain_avg_price"))
     phase = str(row["phase"] or "")
 
     if fill_hint:
         filled_cost_basis_usd = _finite_float_or_zero(fill_hint.get("filled_cost_basis_usd"))
         filled_shares = _finite_float_or_zero(fill_hint.get("shares_filled"))
         avg_fill_price = _finite_float_or_zero(fill_hint.get("entry_price_avg_fill"))
+        row_fill_authority = str(_row_optional("fill_authority") or "").strip()
+        if (
+            projection_shares > filled_shares + 1e-9
+            and projection_cost_basis_usd > filled_cost_basis_usd + 1e-9
+            and chain_shares >= projection_shares - 1e-9
+            and chain_cost_basis_usd >= projection_cost_basis_usd - 1e-9
+        ):
+            effective_entry_price = chain_avg_price or projection_entry_price
+            if effective_entry_price <= 0.0 and projection_cost_basis_usd > 0.0 and projection_shares > 0.0:
+                effective_entry_price = projection_cost_basis_usd / projection_shares
+            return {
+                "submitted_size_usd": submitted_size_usd,
+                "projection_cost_basis_usd": projection_cost_basis_usd,
+                "effective_cost_basis_usd": projection_cost_basis_usd,
+                "effective_shares": projection_shares,
+                "pnl_cost_basis_usd": projection_cost_basis_usd,
+                "effective_entry_price": effective_entry_price,
+                "entry_price_avg_fill": effective_entry_price,
+                "shares_filled": projection_shares,
+                "filled_cost_basis_usd": projection_cost_basis_usd,
+                "entry_economics_authority": ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+                "fill_authority": (
+                    row_fill_authority
+                    if row_fill_authority and row_fill_authority != FILL_AUTHORITY_NONE
+                    else FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+                ),
+                "entry_economics_source": "position_current_chain_corrected",
+                "entry_fill_verified": True,
+                "execution_fact_intent_id": str(fill_hint.get("execution_fact_intent_id") or ""),
+                "execution_fact_filled_at": str(fill_hint.get("execution_fact_filled_at") or ""),
+                "execution_fact_venue_status": str(fill_hint.get("execution_fact_venue_status") or ""),
+            }
         effective_cost_basis_usd = fill_authority_effective_open_cost_basis(
             current_open_cost=projection_cost_basis_usd,
             current_open_shares=projection_shares,
@@ -10494,7 +10538,7 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
     # FILL_AUTHORITY_NONE.  The Position properties (effective_shares,
     # effective_cost_basis_usd, effective_exposure) already route correctly via
     # has_chain_observed_authority when fill_authority is preserved here.
-    row_fill_authority = str(row["fill_authority"] or "").strip()
+    row_fill_authority = str(_row_optional("fill_authority") or "").strip()
     effective_fill_authority = (
         row_fill_authority
         if row_fill_authority and row_fill_authority != FILL_AUTHORITY_NONE

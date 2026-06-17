@@ -217,20 +217,38 @@ def scope_needs_cycle_advance(
 def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, str, str]]:
     """The (city, target_date, temperature_metric) families with a HELD position right now.
 
-    Read-only from zeus_trades.position_current. A family is HELD when it has an OPEN position with
-    real exposure (shares > 0) that is not in a terminal phase (settled/voided/closed). These are the
-    families whose stale belief most directly risks money (the exit monitor reads their posterior),
-    so they get re-materialization priority. Fail-soft: any read/schema error -> empty set (no
-    prioritization, never a crash).
+    Read-only from zeus_trades.position_current. A family is HELD only when it has a confirmed
+    position phase plus real economic quantity. Pending entries and open-row ghosts are deliberately
+    excluded: new-money redecision admission comes from the positive-edge screen, while held-family
+    admission is reserved for money already at risk. Fail-soft: any read/schema error -> empty set
+    (no prioritization, never a crash).
     """
     try:
+        cols = {
+            str(row[1])
+            for row in conn_trades.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+        if "position_current" not in {
+            str(row[0])
+            for row in conn_trades.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='position_current'"
+            ).fetchall()
+        }:
+            return set()
+        shares_expr = "COALESCE(shares, 0)"
+        if "chain_shares" in cols:
+            shares_expr = "MAX(COALESCE(shares, 0), COALESCE(chain_shares, 0))"
+        cost_terms = ["COALESCE(cost_basis_usd, 0)", "COALESCE(size_usd, 0)"]
+        if "chain_cost_basis_usd" in cols:
+            cost_terms.insert(0, "COALESCE(chain_cost_basis_usd, 0)")
+        cost_expr = "MAX(" + ", ".join(cost_terms) + ")"
         rows = conn_trades.execute(
-            """
+            f"""
             SELECT DISTINCT city, target_date, temperature_metric
             FROM position_current
-            WHERE COALESCE(shares, 0) > 0
-              AND COALESCE(phase, '') NOT IN ('settled', 'voided', 'closed', 'exited')
-              AND COALESCE(phase, '') NOT IN ('economically_closed', 'admin_closed', 'quarantined')
+            WHERE COALESCE(phase, '') IN ('active', 'day0_window', 'pending_exit')
+              AND {shares_expr} > 0
+              AND {cost_expr} > 0
               AND city IS NOT NULL AND target_date IS NOT NULL
               AND temperature_metric IS NOT NULL
             """
