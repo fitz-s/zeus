@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-17
 # Authority basis: day0 first-principles review 2026-06-10
 #   (/tmp/day0_first_principles_review.md); panic-sell incident evidence:
 #   zeus_trades.db position_events b5d966a9-990 (Seoul 2026-06-07T15:08Z,
@@ -164,7 +164,7 @@ class TestAbsorbingBoundary:
         # Renormalization preserves relative forecast mass among alive bins.
         assert masked[2] > masked[3] > masked[4]
 
-    def test_masked_generated_q_zero_and_no_buy_yes_license_on_dead_bins(self):
+    def test_masked_generated_q_zero_and_structural_buy_no_license_on_dead_bins(self):
         fam = _seoul_high_family()
         q, lcb = _apply_day0_mask_to_generated_probabilities(
             payload=_payload("high", 25.0, obs_age_minutes=10.0),
@@ -176,8 +176,10 @@ class TestAbsorbingBoundary:
         assert q["cond0"] < 1e-6 and q["cond1"] < 1e-6
         assert _qlcb_float(lcb[("cond0", "buy_yes")]) == 0.0
         assert _qlcb_float(lcb[("cond1", "buy_yes")]) == 0.0
-        # buy_no on the day0 lane carries no submit license at all (pinned invariant).
-        for i in range(5):
+        # Dead YES bins are deterministic buy-NO wins; unresolved/alive bins are not.
+        assert _qlcb_float(lcb[("cond0", "buy_no")]) == pytest.approx(1.0)
+        assert _qlcb_float(lcb[("cond1", "buy_no")]) == pytest.approx(1.0)
+        for i in range(2, 5):
             assert _qlcb_float(lcb[(f"cond{i}", "buy_no")]) == 0.0
 
 
