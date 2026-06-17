@@ -229,10 +229,22 @@ def resolve_presence(
         aggregates = _pending_aggregates(ro, aggregate_id)
         log(f"BEFORE: unresolved_submit={before[0]} reserved_cap={before[1]}")
         log(f"pending aggregates selected: {len(aggregates)}")
-        proofs = [
-            build_presence_proof(ro, agg, trades=trades, funder_address=funder_address)
-            for agg in aggregates
-        ]
+        # Per-aggregate fault isolation: one aggregate whose presence proof
+        # refuses (e.g. the double-count antibody, or no funder-owned fill) must
+        # NOT abort the resolution of the OTHERS that DO prove a clean fill. Each
+        # proof keeps its full rigor; a refusal only skips THAT aggregate, which
+        # then falls through to the next resolver rung (resting/absorbed) or the
+        # boot fail-closed raise. Pre-fix this was an all-or-nothing list
+        # comprehension: a single refusal poisoned the whole batch and left a
+        # genuinely-resolvable orphan stuck (boot crash-loop, 2026-06-16).
+        proofs = []
+        for agg in aggregates:
+            try:
+                proofs.append(
+                    build_presence_proof(ro, agg, trades=trades, funder_address=funder_address)
+                )
+            except Exception as exc:  # noqa: BLE001 — refusal isolates to this aggregate
+                log(f"PRESENCE_SKIP {agg[:80]}... ({exc})")
         for proof in proofs:
             log(
                 "PRESENCE_PROOF "

@@ -365,7 +365,30 @@ def boot_auto_resolve_stuck_unknowns(blocking_reasons: list[str]) -> bool:
         from src.execution.edli_presence_resolver import resolve_presence
 
         rc2 = resolve_presence(aggregate_id=None, apply=True, log=logger.warning)
-        return rc2 == 0
-    except Exception as exc:  # noqa: BLE001 — neither absence nor presence -> fail-closed
+        if rc2 == 0:
+            return True
+        logger.warning("boot presence resolution did not fully clear (rc=%s); trying resting/absorbed", rc2)
+    except Exception as exc:  # noqa: BLE001 — presence refused -> try resting/absorbed
+        logger.warning(
+            "boot presence resolution refused (%s); attempting resting/absorbed "
+            "(live-resting open order OR already-absorbed fill) resolution",
+            exc,
+        )
+    # Third rung: the two cases neither absence nor presence can clear —
+    # (A) a SUBMITTED-AND-LIVE-RESTING order (funder-owned open order, no fill ->
+    #     cap CONSUMED, order left live) and (B) a CONFIRMED fill that filled more
+    #     than ordered AND is ALREADY a non-EDLI-keyed position_current row
+    #     (presence's double-count antibody correctly refuses; re-materialising
+    #     would duplicate the position) -> ledger-only reconcile + cap CONSUMED.
+    # Both funder-checked and venue-truth-grounded; anything else is left for the
+    # fail-closed raise below.
+    try:
+        from src.execution.edli_resting_absorbed_resolver import (
+            resolve_resting_or_absorbed,
+        )
+
+        rc3 = resolve_resting_or_absorbed(aggregate_id=None, apply=True, log=logger.warning)
+        return rc3 == 0
+    except Exception as exc:  # noqa: BLE001 — none of the three -> fail-closed
         logger.error("boot auto-resolution refused/failed (boot will fail closed): %s", exc)
         return False
