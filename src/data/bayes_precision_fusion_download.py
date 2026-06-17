@@ -557,6 +557,7 @@ def _parse_batched_single_runs_payload(
                 sub_payload,
                 city_timezone=timezone_name,
                 target_local_date=target_local_date,
+                require_full_localday=True,  # 2026-06-17: reject horizon-clipped partial days
             )
             result[model] = (float(anchor.high_c), float(anchor.low_c))
         except Exception as exc:

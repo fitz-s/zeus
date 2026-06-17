@@ -33,6 +33,16 @@ LOW_DATA_VERSION = "openmeteo_ecmwf_ifs9_anchor_localday_low"
 MODEL = "ecmwf_ifs"
 HOURLY_VARIABLES = ("temperature_2m",)
 DEFAULT_FORECAST_HOURS = 120
+
+# Local-day coverage span guard (2026-06-17): the daily extreme is trustworthy ONLY if the
+# hourly samples SPAN the full settlement day, so the diurnal peak/trough is inside the window.
+# A horizon-clipped partial day — e.g. a 2km model whose ~48h horizon ends at 17:00 on a lead-2
+# target, or any model that returns only a morning slice — is OMITTED (the caller is fail-soft)
+# rather than yielding a WRONG clipped extreme (a morning-only "high"). Step-resolution-agnostic:
+# a 3-hourly model spanning 00:00..21:00 passes; a model clipped at 17:00 fails. require_full_localday
+# (the live forward parser) enforces it; the de-bias/anchor callers keep the legacy >=1 behaviour.
+LOCALDAY_SPAN_EARLY_HOUR = 3   # earliest contributing sample must be at/under 03:00 local
+LOCALDAY_SPAN_LATE_HOUR = 20   # latest contributing sample must be at/over 20:00 local
 UTC = timezone.utc
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
@@ -396,8 +406,16 @@ def extract_openmeteo_ecmwf_ifs9_localday_anchor(
     target_local_date: date,
     source_cycle_time: datetime | None = None,
     min_hourly_samples: int = 1,
+    require_full_localday: bool = False,
 ) -> OpenMeteoIfs9LocalDayAnchor:
-    """Extract deterministic local-day high/low from a run-pinned Open-Meteo response."""
+    """Extract deterministic local-day high/low from a run-pinned Open-Meteo response.
+
+    require_full_localday: when True, REJECT a target local day whose hourly samples do not
+    SPAN the full settlement day (earliest <= LOCALDAY_SPAN_EARLY_HOUR and latest >=
+    LOCALDAY_SPAN_LATE_HOUR). A horizon-clipped partial day (a fine model past its ~48h horizon
+    on a far lead) is then omitted by the fail-soft caller instead of producing a wrong clipped
+    extreme. Step-resolution-agnostic — depends on the time SPAN, not the sample count.
+    """
 
     if min_hourly_samples <= 0:
         raise ValueError("min_hourly_samples must be positive")
@@ -435,6 +453,15 @@ def extract_openmeteo_ecmwf_ifs9_localday_anchor(
 
     if len(contributing_temperatures_c) < min_hourly_samples:
         raise ValueError("insufficient Open-Meteo hourly samples inside target local day")
+
+    if require_full_localday:
+        _hours = [t.hour for t in contributing_local_times]
+        if not (min(_hours) <= LOCALDAY_SPAN_EARLY_HOUR and max(_hours) >= LOCALDAY_SPAN_LATE_HOUR):
+            raise ValueError(
+                f"partial local-day coverage: hours span [{min(_hours):02d}..{max(_hours):02d}] "
+                f"does not cover the full settlement day (need earliest<={LOCALDAY_SPAN_EARLY_HOUR:02d}:00 "
+                f"and latest>={LOCALDAY_SPAN_LATE_HOUR:02d}:00) — horizon-clipped, excluded"
+            )
 
     return OpenMeteoIfs9LocalDayAnchor(
         city_timezone=city_timezone,
