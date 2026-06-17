@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.config import runtime_cities_by_name
 from src.events.event_priority import day0_emit_priority
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, OpportunityEvent, make_day0_extreme_updated_event
@@ -414,18 +415,31 @@ def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: 
     raw_value = high_so_far if metric == "high" else low_so_far
     if not city or not target_date or not station_id or raw_value is None:
         raise ValueError("observation_instants row missing required Day0 fields")
+    city_config = runtime_cities_by_name().get(city)
+    expected_timezone = str(getattr(city_config, "timezone", "") or "") if city_config else ""
+    observed_timezone = str(row.get("timezone_name") or "")
     local_date_status, dst_status = _observation_local_date_status(
         observation_time=observation_time,
-        city_timezone=str(row.get("timezone_name") or ""),
+        city_timezone=expected_timezone or observed_timezone,
         target_date=target_date,
     )
+    if city_config and observed_timezone and observed_timezone != expected_timezone:
+        local_date_status = "MISMATCH"
     unit = str(row.get("temp_unit") or "").upper()
+    expected_unit = str(getattr(city_config, "settlement_unit", "") or "").upper() if city_config else ""
     verified = str(row.get("authority") or "").upper() == "VERIFIED"
     trusted_native = str(row.get("authority") or "").upper() == "ICAO_STATION_NATIVE"
     source = str(row.get("source") or "")
-    source_match = "MATCH" if source else "MISMATCH"
-    station_match = "MATCH" if station_id else "MISMATCH"
-    rounding_status = "MATCH" if unit else "MISMATCH"
+    if city_config:
+        source_type = str(getattr(city_config, "settlement_source_type", "") or "")
+        expected_station = _expected_station_for_city(city_config)
+        source_match = "MATCH" if _source_matches_config(source, source_type) else "MISMATCH"
+        station_match = "MATCH" if _station_matches(station_id, expected_station) else "MISMATCH"
+        rounding_status = "MATCH" if unit == expected_unit else "MISMATCH"
+    else:
+        source_match = "MATCH" if source else "MISMATCH"
+        station_match = "MATCH" if station_id else "MISMATCH"
+        rounding_status = "MATCH" if unit else "MISMATCH"
     source_role = str(row.get("source_role") or "")
     training_allowed = int(row.get("training_allowed") or 0) == 1
     causality_ok = str(row.get("causality_status") or "") == "OK"
@@ -575,6 +589,26 @@ def observation_context_to_live_observation(
 
 def _station_matches(station_id: str, expected_station: str) -> bool:
     return station_id == expected_station or station_id.startswith(f"{expected_station}:")
+
+
+def _expected_station_for_city(city: Any) -> str:
+    if city is None:
+        return ""
+    if str(getattr(city, "settlement_source_type", "") or "") == "hko":
+        return "HKO"
+    return str(getattr(city, "wu_station", "") or "").strip().upper()
+
+
+def _source_matches_config(source: str, settlement_source_type: str) -> bool:
+    src = str(source or "").strip().lower()
+    source_type = str(settlement_source_type or "").strip().lower()
+    if source_type == "wu_icao":
+        return src == "wu_icao_history" or src.startswith("wu_icao_history_")
+    if source_type == "noaa":
+        return src.startswith("ogimet_metar_")
+    if source_type == "hko":
+        return src == "hko_daily_api" or src.startswith("hko_daily_api_")
+    return False
 
 
 def _observation_local_date_status(*, observation_time: str, city_timezone: str, target_date: str) -> tuple[str, str]:

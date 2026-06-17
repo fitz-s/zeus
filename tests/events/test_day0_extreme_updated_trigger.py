@@ -640,6 +640,73 @@ def test_scan_observation_instants_london_excludes_tminus1_23_from_target_low_ag
     assert low_payload["observation_time"] == "2026-06-17T23:00:00+00:00"
 
 
+def test_scan_observation_instants_london_rejects_wrong_station_and_source_family():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    insert_sql = """
+        INSERT INTO observation_instants (
+            city, target_date, source, timezone_name, local_hour, local_timestamp,
+            utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
+            is_missing_local_hour, time_basis, temp_current, running_max, running_min,
+            temp_unit, station_id, observation_count, imported_at, authority,
+            data_version, provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+    rows = (
+        {
+            "source": "wu_icao_history",
+            "station_id": "XXXX",
+            "provenance_json": '{"source_url":"redacted","station_id":"XXXX"}',
+        },
+        {
+            "source": "ogimet_metar_EGLC",
+            "station_id": "EGLC",
+            "provenance_json": '{"source_url":"redacted","station_id":"EGLC"}',
+        },
+    )
+    for row in rows:
+        conn.execute(
+            insert_sql,
+            (
+                "London",
+                "2026-06-18",
+                row["source"],
+                "Europe/London",
+                0.0,
+                "2026-06-18T00:00:00+01:00",
+                "2026-06-17T23:00:00+00:00",
+                60,
+                1,
+                0,
+                0,
+                "observed",
+                9.0,
+                16.0,
+                9.0,
+                "C",
+                row["station_id"],
+                1,
+                "2026-06-17T23:05:00+00:00",
+                "VERIFIED",
+                "v1.wu-native",
+                row["provenance_json"],
+                1,
+                "OK",
+                "historical_hourly",
+            ),
+        )
+
+    results = Day0ExtremeUpdatedTrigger(EventWriter(conn)).scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(9),
+        decision_time=datetime(2026, 6, 17, 23, 10, tzinfo=timezone.utc),
+        received_at="2026-06-17T23:10:00+00:00",
+    )
+
+    assert results == []
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+
+
 def _insert_observation_instant(conn, *, running_max, running_min, imported_at, station_id="LFPB", city="Paris", target_date="2026-06-06", source="wu_icao_history"):
     conn.execute(
         """
