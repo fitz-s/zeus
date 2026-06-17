@@ -83,9 +83,9 @@ Canonical DBs:
 
 | DB | Class | Owns |
 |---|---|---|
-| `state/zeus-world.db` | `WORLD_CLASS` | markets, positions, lifecycle |
+| `state/zeus-world.db` | `WORLD_CLASS` | markets and world/provenance records; trade-owned position tables here are legacy ghost shells |
 | `state/zeus-forecasts.db` | `FORECAST_CLASS` | observations, settlements, calibration pairs, ensemble snapshots, source runs, market events |
-| `state/zeus_trades.db` | trade execution | order state and execution records |
+| `state/zeus_trades.db` | trade execution | `position_current`, `position_events`, lifecycle projection, order state, venue commands, and execution records |
 
 Table ownership is machine-checked by `architecture/db_table_ownership.yaml` and loaded through `src/state/table_registry.py`. No write transaction may span DBs through independent connections. Sanctioned cross-DB write paths are `get_forecasts_connection_with_world()` and `trade_connection_with_world_flocked()`.
 
