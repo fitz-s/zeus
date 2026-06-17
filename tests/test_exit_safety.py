@@ -713,6 +713,43 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
     assert facts[0]["command_id"] == "cmd-partial-exit"
 
 
+def test_exit_lifecycle_skips_inactive_position_before_order_status_check(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-terminal-exit-residue",
+        market_id="mkt-terminal-exit-residue",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="settled",
+        exit_state="sell_pending",
+        order_status="sell_pending_confirmation",
+        last_exit_order_id="ord-terminal-exit-residue",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+    )
+    portfolio = PortfolioState(positions=[position])
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"inactive position should not query venue order {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 0
+    assert stats["skipped_inactive"] == 1
+
+
 def test_exit_lifecycle_full_fill_logs_commanded_execution_fact(conn):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position

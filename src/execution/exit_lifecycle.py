@@ -53,6 +53,22 @@ from src.state.portfolio import (
 
 logger = logging.getLogger(__name__)
 
+_PENDING_EXIT_SCAN_INACTIVE_STATES = frozenset(
+    {
+        "settled",
+        "voided",
+        "admin_closed",
+        "quarantined",
+        "economically_closed",
+        "closed",
+    }
+)
+
+
+def _runtime_state_value(position: Position) -> str:
+    raw_state = getattr(position, "state", "")
+    return str(getattr(raw_state, "value", raw_state) or "").strip().lower()
+
 
 def _venue_order_payload(value: object | None) -> dict | None:
     """Normalize CLOB order read models to the dict shape this module stores."""
@@ -2160,6 +2176,9 @@ def check_pending_exits(
     stats = {"filled": 0, "retried": 0, "unchanged": 0, "filled_positions": []}
 
     for pos in list(portfolio.positions):
+        if _runtime_state_value(pos) in _PENDING_EXIT_SCAN_INACTIVE_STATES:
+            stats["skipped_inactive"] = stats.get("skipped_inactive", 0) + 1
+            continue
         if pos.exit_state not in ("sell_placed", "sell_pending", "exit_intent") and str(
             getattr(pos, "order_status", "") or ""
         ) != "sell_pending_confirmation":
