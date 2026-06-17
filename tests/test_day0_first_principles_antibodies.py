@@ -278,6 +278,14 @@ class TestPreDay0LowCarryover:
         assert blended[2] < 0.999
         assert 0.0 < conditioning.weight < 0.70
 
+    def test_pre_day0_low_carryover_weight_is_shadow_only_by_default(self):
+        from src.engine.evaluator import _pre_day0_low_carryover_live_enabled
+
+        assert _pre_day0_low_carryover_live_enabled() is False
+        source = (ROOT / "src" / "engine" / "evaluator.py").read_text(encoding="utf-8")
+        assert "UNCALIBRATED_HEURISTIC_SHADOW_ONLY" in source
+        assert "no_live_q_change_without_empirical_calibration" in source
+
     def test_pre_day0_low_carryover_not_active_after_start_or_too_early(self):
         import numpy as np
 
@@ -297,8 +305,12 @@ class TestPreDay0LowCarryover:
         ) is None
         assert build_pre_day0_low_carryover_conditioning(
             **kwargs,
-            lead_hours_to_target_start=4.50,
+            lead_hours_to_target_start=3.50,
         ) is None
+        assert build_pre_day0_low_carryover_conditioning(
+            **kwargs,
+            lead_hours_to_target_start=3.00,
+        ) is not None
 
 
 # ===========================================================================

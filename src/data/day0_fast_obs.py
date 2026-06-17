@@ -75,11 +75,11 @@ DEFAULT_MIN_FETCH_INTERVAL_S = 90.0
 #: encodes is a valid local-day extreme for entry-probability computation.
 FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
 
-# Soft entry signal for tomorrow's LOW markets: only the late local evening
+# Soft entry signal for tomorrow's LOW markets: only the final three local hours
 # immediately before target day can inform midnight carryover. Earlier lows on
 # T-1 are not target-day facts and must not enter this lane.
 PRE_DAY0_LOW_CARRYOVER_LOOKBACK_HOURS = 3.0
-PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS = 4.0
+PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS = 3.0
 
 
 @dataclass(frozen=True)

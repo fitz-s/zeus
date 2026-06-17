@@ -323,6 +323,22 @@ def _evaluator_eqe_enabled() -> bool:
     return os.environ.get(_ENV_EVALUATOR_EQE_ENABLED, "0") in ("1", "true", "TRUE")
 
 
+def _pre_day0_low_carryover_live_enabled() -> bool:
+    """Whether pre-Day0 LOW carryover may alter live entry q.
+
+    Default is OFF. The current carryover weight is a bounded physical
+    hypothesis, not a historical calibration fit, so it remains shadow-only
+    until a calibrated persistence model or explicit live flag exists.
+    """
+    try:
+        return bool(settings.get("feature_flags", {}).get(
+            "pre_day0_low_carryover_live_enabled",
+            False,
+        ))
+    except Exception:
+        return False
+
+
 def _buy_entry_evidence_from_clob(
     clob,
     token_id: str,
@@ -4300,8 +4316,12 @@ def evaluate_candidate(
                     city.timezone,
                     decision_time_utc,
                 )
-                if 0.0 < lead_hours_pre_day0 <= 4.0:
-                    from src.data.day0_fast_obs import get_fast_obs_emitter
+                from src.data.day0_fast_obs import (
+                    PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS,
+                    get_fast_obs_emitter,
+                )
+
+                if 0.0 < lead_hours_pre_day0 <= PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS:
 
                     low_window = get_fast_obs_emitter().latest_pre_day0_low_window(
                         city,
@@ -4348,11 +4368,16 @@ def evaluate_candidate(
                                 weight=conditioning.weight,
                             )
                             if blended_p_raw is not None:
-                                p_raw = blended_p_raw
-                                _pre_day0_low_carryover_applied = True
+                                _carryover_live_enabled = _pre_day0_low_carryover_live_enabled()
                                 _pre_day0_low_carryover_context = {
                                     "belief_source": "pre_day0_low_carryover_nowcast",
                                     "belief_kind": "soft_probability_conditioning",
+                                    "calibration_status": (
+                                        "OPERATOR_FLAG_LIVE_HEURISTIC"
+                                        if _carryover_live_enabled
+                                        else "UNCALIBRATED_HEURISTIC_SHADOW_ONLY"
+                                    ),
+                                    "live_probability_applied": bool(_carryover_live_enabled),
                                     "hard_fact": False,
                                     "absorbing": False,
                                     "metric": "low",
@@ -4382,9 +4407,22 @@ def evaluate_candidate(
                                     "anchor_temp": float(conditioning.anchor_temp),
                                     "effective_ceiling": float(conditioning.effective_ceiling),
                                     "carryover_weight": float(conditioning.weight),
-                                    "calibration_policy": "identity_platt_when_applied",
+                                    "shadow_probability_by_bin_label": {
+                                        str(getattr(b, "label", i)): float(blended_p_raw[i])
+                                        for i, b in enumerate(bins)
+                                    },
+                                    "calibration_policy": (
+                                        "identity_platt_when_applied"
+                                        if _carryover_live_enabled
+                                        else "no_live_q_change_without_empirical_calibration"
+                                    ),
                                 }
-                                entry_validations.append("pre_day0_low_carryover_nowcast")
+                                if _carryover_live_enabled:
+                                    p_raw = blended_p_raw
+                                    _pre_day0_low_carryover_applied = True
+                                    entry_validations.append("pre_day0_low_carryover_nowcast")
+                                else:
+                                    entry_validations.append("pre_day0_low_carryover_shadow")
             except Exception as exc:
                 logger.warning(
                     "PRE_DAY0_LOW_CARRYOVER_SKIPPED city=%s target_date=%s exc=%s: %s",

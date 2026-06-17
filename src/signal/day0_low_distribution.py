@@ -78,7 +78,7 @@ def build_pre_day0_low_carryover_conditioning(
     observation_age_minutes: float,
     low_age_minutes: float,
     unit: str,
-    max_lead_hours: float = 4.0,
+    max_lead_hours: float = 3.0,
     max_observation_age_minutes: float = 120.0,
     max_weight: float = 0.70,
     min_weight: float = 0.05,
@@ -126,7 +126,7 @@ def build_pre_day0_low_carryover_conditioning(
     )
     effective_ceiling = anchor + carryover_buffer
 
-    lead_factor = max(0.0, min(1.0, 1.0 - lead / float(max_lead_hours)))
+    lead_factor = max(0.10, min(1.0, 1.0 - lead / float(max_lead_hours)))
     freshness_factor = max(
         0.0,
         min(1.0, 1.0 - obs_age / float(max_observation_age_minutes)),
