@@ -497,6 +497,40 @@ def test_fixA_terminal_cancel_releases_lock_for_rebid():
     assert _lock_reason(conn, limit_price=0.70) is None
 
 
+def test_fixA_terminal_venue_command_releases_stale_aggregate_lock():
+    """A venue-command terminal state is canonical closure evidence even if the
+    live-order aggregate missed its terminal release event."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            decision_id TEXT,
+            state TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, decision_id, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-1",
+            "command-1",
+            "EXPIRED",
+            "2026-06-17T20:22:02+00:00",
+            "2026-06-17T20:33:19+00:00",
+        ),
+    )
+
+    assert _lock_reason(conn, limit_price=0.70) is None
+
+
 def test_fixA_unknown_indeterminate_state_fails_closed_suppresses():
     """FIX A (#125) fail-closed: a family order that exists but carries NO terminal
     marker (state UNKNOWN/indeterminate) is treated as ACTIVE — suppress, never risk

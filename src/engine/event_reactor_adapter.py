@@ -4971,6 +4971,65 @@ _TERMINAL_EVENT_SQL = """
     LIMIT 1
 """
 
+_TERMINAL_VENUE_COMMAND_STATES = {
+    "CANCELED",
+    "CANCELLED",
+    "EXPIRED",
+    "FAILED",
+    "FILLED",
+    "REJECTED",
+    "VOIDED",
+}
+
+
+def _aggregate_terminal_venue_command_releases_lock(
+    live_cap_conn: sqlite3.Connection,
+    *,
+    aggregate_id: str,
+) -> bool:
+    """Return True when canonical venue command state proves the aggregate is closed.
+
+    The live-order aggregate can lag terminal venue reconciliation: an order may
+    have reached ``venue_commands.state=EXPIRED`` while the aggregate still ends
+    at ``CapTransitioned(to_status=CONSUMED)``. In that case the duplicate lock
+    must release; otherwise a closed maker rest permanently suppresses future
+    redecision entries for the same token. Absence or unreadable tables remain
+    non-evidence and therefore do not release the fail-closed lock.
+    """
+
+    try:
+        if not _adapter_table_exists(live_cap_conn, "venue_commands"):
+            return False
+        row = live_cap_conn.execute(
+            """
+            SELECT json_extract(payload_json, '$.execution_command_id') AS execution_command_id
+            FROM edli_live_order_events
+            WHERE aggregate_id = ?
+              AND event_type = 'ExecutionCommandCreated'
+            ORDER BY event_sequence DESC
+            LIMIT 1
+            """,
+            (aggregate_id,),
+        ).fetchone()
+        execution_command_id = str(row[0] or "").strip() if row is not None else ""
+        if not execution_command_id:
+            return False
+        command = live_cap_conn.execute(
+            """
+            SELECT state
+            FROM venue_commands
+            WHERE decision_id = ?
+            ORDER BY COALESCE(updated_at, created_at) DESC, rowid DESC
+            LIMIT 1
+            """,
+            (execution_command_id,),
+        ).fetchone()
+    except Exception:
+        return False
+    if command is None:
+        return False
+    return str(command[0] or "").strip().upper() in _TERMINAL_VENUE_COMMAND_STATES
+
 
 def _locked_live_opportunity_active_order_reason(
     live_cap_conn: sqlite3.Connection | None,
@@ -5058,6 +5117,12 @@ def _locked_live_opportunity_active_order_reason(
         # CONSUMED is the cap-commit of a SUBMITTED order resting LIVE (no fill
         # yet), so it is correctly kept as ACTIVE (suppress).  PENDING_RECONCILE
         # likewise does not match — kept ACTIVE (suppress, fail-closed).
+        return None
+
+    if _aggregate_terminal_venue_command_releases_lock(
+        live_cap_conn,
+        aggregate_id=aggregate_id,
+    ):
         return None
 
     # No qualifying terminal event found for the latest aggregate.  This covers:
