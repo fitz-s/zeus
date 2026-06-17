@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-06-04
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-06-04
+# Last reused/audited: 2026-06-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-06-17
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -1036,6 +1036,159 @@ def test_maker_fill_economics_repair_uses_canonical_trade_fact_over_later_weaker
         "terminal_exec_status": "partial",
         "command_id": "cmd-m5",
     }
+
+
+def test_maker_fill_projection_uses_canonical_position_when_old_command_position_voided(conn):
+    """A repaired maker fill must not reopen an old voided command position.
+
+    Regression for the 2026-06-17 Houston repair loop: the command still pointed
+    at a voided short id, while the same order/token had a canonical open EDLI
+    position. The repair must project against the canonical position_current row.
+    """
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.venue_command_repo import append_trade_fact as append
+
+    shared_order = "ord-houston-shared"
+    no_token = "houston-no-token"
+    seed_command(
+        conn,
+        command_id="cmd-old-voided",
+        venue_order_id=shared_order,
+        position_id="pos-old-voided",
+        token_id=no_token,
+        size=5.078125,
+        price=0.64,
+    )
+    seed_position_baseline(conn, position_id="pos-old-voided", order_id=shared_order)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               direction = 'buy_no',
+               token_id = '',
+               no_token_id = ?,
+               order_status = 'partial',
+               shares = 0,
+               entry_price = 0,
+               updated_at = ?
+         WHERE position_id = 'pos-old-voided'
+        """,
+        (no_token, (NOW + timedelta(minutes=1)).isoformat()),
+    )
+    seed_position_baseline(conn, position_id="pos-canonical-open", order_id=shared_order)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'day0_window',
+               direction = 'buy_no',
+               token_id = '',
+               no_token_id = ?,
+               order_status = 'filled',
+               shares = 5.07,
+               entry_price = 0.64,
+               updated_at = ?
+         WHERE position_id = 'pos-canonical-open'
+        """,
+        (no_token, (NOW + timedelta(minutes=2)).isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, caused_by, idempotency_key,
+            venue_status, source_module, payload_json, env
+        )
+        VALUES (?, ?, 1, 3, 'ENTRY_ORDER_FILLED', ?, 'active', 'active',
+                'opening_inertia', 'dec-canonical', 'snap-m5', ?, ?,
+                NULL, ?, 'FILLED', 'tests/test_exchange_reconcile', '{}', 'live')
+        """,
+        (
+            "evt-canonical-entry-filled",
+            "pos-canonical-open",
+            (NOW + timedelta(minutes=3)).isoformat(),
+            shared_order,
+            "cmd-old-voided",
+            "idem-canonical-entry-filled",
+        ),
+    )
+    raw = {
+        "id": "trade-houston-maker",
+        "taker_order_id": "ord-taker",
+        "status": "CONFIRMED",
+        "size": "5.07",
+        "price": "0.36",
+        "transaction_hash": "0xabc",
+        "maker_orders": [
+            {
+                "order_id": shared_order,
+                "matched_amount": "5.07",
+                "price": "0.64",
+                "asset_id": no_token,
+                "side": "BUY",
+            }
+        ],
+    }
+    append(
+        conn,
+        trade_id="trade-houston-maker",
+        venue_order_id=shared_order,
+        command_id="cmd-old-voided",
+        state="CONFIRMED",
+        filled_size="5.07",
+        fill_price="0.36",
+        source="REST",
+        observed_at=NOW + timedelta(minutes=4),
+        raw_payload_hash=hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
+        raw_payload_json=raw,
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=NOW + timedelta(minutes=5),
+    )
+
+    assert summary["errors"] == 0
+    assert summary["projected"] == 1
+    old_row = conn.execute(
+        "SELECT phase, shares FROM position_current WHERE position_id = 'pos-old-voided'"
+    ).fetchone()
+    assert dict(old_row) == {"phase": "voided", "shares": 0.0}
+    canonical = conn.execute(
+        """
+        SELECT phase, order_status, shares, entry_price
+          FROM position_current
+         WHERE position_id = 'pos-canonical-open'
+        """
+    ).fetchone()
+    assert dict(canonical) == {
+        "phase": "day0_window",
+        "order_status": "partial",
+        "shares": 5.07,
+        "entry_price": 0.64,
+    }
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-old-voided'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-canonical-open'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """
+        ).fetchone()[0]
+        == 1
+    )
 
 
 def test_entry_fill_economics_uses_canonical_trade_fact_over_later_weaker_fact(conn):

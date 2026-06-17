@@ -3815,6 +3815,9 @@ def _ensure_entry_fill_position_event(
         return
 
     current = dict(row)
+    projection_position_id = str(current.get("position_id") or position_id).strip()
+    if projection_position_id:
+        position_id = projection_position_id
     phase = str(current.get("phase") or "")
     if phase not in _ENTRY_FILL_PROJECTION_PHASES:
         logger.info(
