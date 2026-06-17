@@ -11,8 +11,8 @@
         "amsterdam"
       ],
       "noaa": null,
-      "lat": 52.3086,
-      "lon": 4.7639,
+      "lat": 52.308601,
+      "lon": 4.76389,
       "wu_station": "EHAM",
       "wu_pws": null,
       "meteostat_station": null,
@@ -35,8 +35,8 @@
         "ankara"
       ],
       "noaa": null,
-      "lat": 40.1281,
-      "lon": 32.9951,
+      "lat": 40.128101,
+      "lon": 32.995098,
       "wu_station": "LTAC",
       "wu_pws": null,
       "meteostat_station": null,
@@ -78,7 +78,7 @@
       "diurnal_amplitude_f": 17.3,
       "weighted_low_calibration_eligible": true,
       "lat": 33.6367,
-      "lon": -84.4281
+      "lon": -84.428101
     },
     {
       "name": "Auckland",
@@ -89,8 +89,8 @@
         "auckland"
       ],
       "noaa": null,
-      "lat": -37.012,
-      "lon": 174.7863,
+      "lat": -37.01199,
+      "lon": 174.786331,
       "wu_station": "NZAA",
       "wu_pws": null,
       "meteostat_station": null,
@@ -131,8 +131,8 @@
       "historical_peak_hour": 17.7,
       "diurnal_amplitude_f": 18.0,
       "weighted_low_calibration_eligible": true,
-      "lat": 30.1975,
-      "lon": -97.662
+      "lat": 30.197535,
+      "lon": -97.662015
     },
     {
       "name": "Beijing",
@@ -144,8 +144,8 @@
         "beijing"
       ],
       "noaa": null,
-      "lat": 40.0773,
-      "lon": 116.5967,
+      "lat": 40.077349,
+      "lon": 116.596702,
       "wu_station": "ZBAA",
       "wu_pws": null,
       "meteostat_station": null,
@@ -195,8 +195,8 @@
         "busan"
       ],
       "noaa": null,
-      "lat": 35.1795,
-      "lon": 128.938,
+      "lat": 35.179501,
+      "lon": 128.938004,
       "wu_station": "RKPK",
       "wu_pws": null,
       "meteostat_station": null,
@@ -219,8 +219,8 @@
         "cape-town"
       ],
       "noaa": null,
-      "lat": -33.974,
-      "lon": 18.6043,
+      "lat": -33.97403,
+      "lon": 18.604333,
       "wu_station": "FACT",
       "wu_pws": null,
       "meteostat_station": null,
@@ -243,8 +243,8 @@
         "chengdu"
       ],
       "noaa": null,
-      "lat": 30.5583,
-      "lon": 103.946,
+      "lat": 30.558257,
+      "lon": 103.945966,
       "wu_station": "ZUUU",
       "wu_pws": null,
       "meteostat_station": null,
@@ -297,8 +297,8 @@
         "chongqing"
       ],
       "noaa": null,
-      "lat": 29.7123,
-      "lon": 106.6519,
+      "lat": 29.712254,
+      "lon": 106.651895,
       "wu_station": "ZUCK",
       "wu_pws": null,
       "meteostat_station": null,
@@ -339,8 +339,8 @@
       "historical_peak_hour": 17.7,
       "diurnal_amplitude_f": 18.6,
       "weighted_low_calibration_eligible": true,
-      "lat": 32.8448,
-      "lon": -96.8477
+      "lat": 32.844776,
+      "lon": -96.847653
     },
     {
       "name": "Denver",
@@ -369,8 +369,8 @@
       "historical_peak_hour": 16.1,
       "diurnal_amplitude_f": 18.4,
       "weighted_low_calibration_eligible": true,
-      "lat": 39.7017,
-      "lon": -104.752
+      "lat": 39.701698,
+      "lon": -104.751999
     },
     {
       "name": "Guangzhou",
@@ -382,8 +382,8 @@
         "guangzhou"
       ],
       "noaa": null,
-      "lat": 23.3924,
-      "lon": 113.299,
+      "lat": 23.392401,
+      "lon": 113.299004,
       "wu_station": "ZGGG",
       "wu_pws": null,
       "meteostat_station": null,
@@ -406,8 +406,8 @@
         "helsinki"
       ],
       "noaa": null,
-      "lat": 60.3184,
-      "lon": 24.9633,
+      "lat": 60.318363,
+      "lon": 24.963341,
       "wu_station": "EFHK",
       "wu_pws": null,
       "meteostat_station": null,
@@ -477,8 +477,8 @@
       "historical_peak_hour": 17.4,
       "diurnal_amplitude_f": 15.2,
       "weighted_low_calibration_eligible": false,
-      "lat": 29.6453,
-      "lon": -95.2768
+      "lat": 29.645336,
+      "lon": -95.276812
     },
     {
       "name": "Istanbul",
@@ -489,8 +489,8 @@
         "istanbul"
       ],
       "noaa": null,
-      "lat": 41.2749,
-      "lon": 28.7321,
+      "lat": 41.274874,
+      "lon": 28.732136,
       "wu_station": "LTFM",
       "wu_pws": null,
       "meteostat_station": null,
@@ -514,8 +514,8 @@
         "jinan"
       ],
       "noaa": null,
-      "lat": 36.8572,
-      "lon": 117.216,
+      "lat": 36.857201,
+      "lon": 117.216003,
       "wu_station": "ZSJN",
       "wu_pws": null,
       "meteostat_station": null,
@@ -538,8 +538,8 @@
         "jakarta"
       ],
       "noaa": null,
-      "lat": -6.267,
-      "lon": 106.8903,
+      "lat": -6.266989,
+      "lon": 106.890318,
       "wu_station": "WIHH",
       "wu_pws": null,
       "meteostat_station": null,
@@ -563,8 +563,8 @@
         "jeddah"
       ],
       "noaa": null,
-      "lat": 21.6802,
-      "lon": 39.1574,
+      "lat": 21.680241,
+      "lon": 39.157436,
       "wu_station": "OEJN",
       "wu_pws": null,
       "meteostat_station": null,
@@ -588,7 +588,7 @@
       ],
       "noaa": null,
       "lat": 24.9065,
-      "lon": 67.1608,
+      "lon": 67.160797,
       "wu_station": "OPKC",
       "wu_pws": null,
       "meteostat_station": null,
@@ -612,8 +612,8 @@
         "kuala-lumpur"
       ],
       "noaa": null,
-      "lat": 2.7456,
-      "lon": 101.71,
+      "lat": 2.74558,
+      "lon": 101.709999,
       "wu_station": "WMKK",
       "wu_pws": null,
       "meteostat_station": null,
@@ -636,8 +636,8 @@
         "lagos"
       ],
       "noaa": null,
-      "lat": 6.5774,
-      "lon": 3.3212,
+      "lat": 6.57737,
+      "lon": 3.32116,
       "wu_station": "DNMM",
       "wu_pws": null,
       "meteostat_station": null,
@@ -660,8 +660,8 @@
         "london"
       ],
       "noaa": null,
-      "lat": 51.5053,
-      "lon": 0.0553,
+      "lat": 51.505299,
+      "lon": 0.055278,
       "wu_station": "EGLC",
       "wu_pws": "ILONDON513",
       "meteostat_station": null,
@@ -704,8 +704,8 @@
       "historical_peak_hour": 18.1,
       "diurnal_amplitude_f": 11.1,
       "weighted_low_calibration_eligible": true,
-      "lat": 33.9425,
-      "lon": -118.408
+      "lat": 33.942501,
+      "lon": -118.407997
     },
     {
       "name": "Lucknow",
@@ -716,8 +716,8 @@
         "lucknow"
       ],
       "noaa": null,
-      "lat": 26.7606,
-      "lon": 80.8893,
+      "lat": 26.760599,
+      "lon": 80.889297,
       "wu_station": "VILK",
       "wu_pws": null,
       "meteostat_station": null,
@@ -740,8 +740,8 @@
         "madrid"
       ],
       "noaa": null,
-      "lat": 40.4934,
-      "lon": -3.5722,
+      "lat": 40.493407,
+      "lon": -3.572249,
       "wu_station": "LEMD",
       "wu_pws": null,
       "meteostat_station": null,
@@ -765,7 +765,7 @@
       ],
       "noaa": null,
       "lat": 14.5086,
-      "lon": 121.02,
+      "lon": 121.019997,
       "wu_station": "RPLL",
       "wu_pws": null,
       "meteostat_station": null,
@@ -790,8 +790,8 @@
         "cdmx"
       ],
       "noaa": null,
-      "lat": 19.4358,
-      "lon": -99.0703,
+      "lat": 19.435822,
+      "lon": -99.07033,
       "wu_station": "MMMX",
       "wu_pws": null,
       "meteostat_station": null,
@@ -832,8 +832,8 @@
       "historical_peak_hour": 17.3,
       "diurnal_amplitude_f": 12.1,
       "weighted_low_calibration_eligible": true,
-      "lat": 25.796,
-      "lon": -80.2898
+      "lat": 25.796011,
+      "lon": -80.289751
     },
     {
       "name": "Milan",
@@ -846,7 +846,7 @@
       ],
       "noaa": null,
       "lat": 45.6306,
-      "lon": 8.7281,
+      "lon": 8.72811,
       "wu_station": "LIMC",
       "wu_pws": null,
       "meteostat_station": null,
@@ -869,8 +869,8 @@
         "moscow"
       ],
       "noaa": null,
-      "lat": 55.5915,
-      "lon": 37.2615,
+      "lat": 55.591499,
+      "lon": 37.261501,
       "wu_station": "UUWW",
       "wu_pws": null,
       "meteostat_station": null,
@@ -895,7 +895,7 @@
         "munich"
       ],
       "noaa": null,
-      "lat": 48.3538,
+      "lat": 48.353802,
       "lon": 11.7861,
       "wu_station": "EDDM",
       "wu_pws": null,
@@ -941,8 +941,8 @@
       "historical_peak_hour": 15.8,
       "diurnal_amplitude_f": 11.0,
       "weighted_low_calibration_eligible": false,
-      "lat": 40.7772,
-      "lon": -73.8726
+      "lat": 40.777199,
+      "lon": -73.872597
     },
     {
       "name": "Panama City",
@@ -954,8 +954,8 @@
         "panama-city"
       ],
       "noaa": null,
-      "lat": 8.9733,
-      "lon": -79.5556,
+      "lat": 8.97334,
+      "lon": -79.555603,
       "wu_station": "MPMG",
       "wu_pws": null,
       "meteostat_station": null,
@@ -978,8 +978,8 @@
         "paris"
       ],
       "noaa": null,
-      "lat": 48.9623,
-      "lon": 2.4365,
+      "lat": 48.962276,
+      "lon": 2.436539,
       "wu_station": "LFPB",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1003,8 +1003,8 @@
         "qingdao"
       ],
       "noaa": null,
-      "lat": 36.362,
-      "lon": 120.0882,
+      "lat": 36.361953,
+      "lon": 120.088171,
       "wu_station": "ZSQD",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1028,8 +1028,8 @@
         "san-francisco",
         "sf"
       ],
-      "lat": 37.6198,
-      "lon": -122.3748,
+      "lat": 37.619806,
+      "lon": -122.374821,
       "noaa": {
         "lat": 37.61961,
         "lon": -122.36561,
@@ -1061,8 +1061,8 @@
         "sp"
       ],
       "noaa": null,
-      "lat": -23.4313,
-      "lon": -46.47,
+      "lat": -23.431274,
+      "lon": -46.469954,
       "wu_station": "SBGR",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1103,8 +1103,8 @@
       "historical_peak_hour": 13.8,
       "diurnal_amplitude_f": 12.2,
       "weighted_low_calibration_eligible": true,
-      "lat": 47.4479,
-      "lon": -122.3103
+      "lat": 47.447943,
+      "lon": -122.310276
     },
     {
       "name": "Seoul",
@@ -1115,8 +1115,8 @@
         "seoul"
       ],
       "noaa": null,
-      "lat": 37.4691,
-      "lon": 126.451,
+      "lat": 37.469101,
+      "lon": 126.450996,
       "wu_station": "RKSI",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1164,8 +1164,8 @@
         "shenzhen"
       ],
       "noaa": null,
-      "lat": 22.6395,
-      "lon": 113.8033,
+      "lat": 22.639474,
+      "lon": 113.803262,
       "wu_station": "ZGSZ",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1189,8 +1189,8 @@
         "singapore"
       ],
       "noaa": null,
-      "lat": 1.3502,
-      "lon": 103.994,
+      "lat": 1.35019,
+      "lon": 103.994003,
       "wu_station": "WSSS",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1213,8 +1213,8 @@
         "taipei"
       ],
       "noaa": null,
-      "lat": 25.0672,
-      "lon": 121.5528,
+      "lat": 25.067244,
+      "lon": 121.552822,
       "wu_station": "RCSS",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1241,7 +1241,7 @@
         "tlv"
       ],
       "noaa": null,
-      "lat": 32.0114,
+      "lat": 32.011398,
       "lon": 34.8867,
       "wu_station": "LLBG",
       "wu_pws": null,
@@ -1266,8 +1266,8 @@
         "tokyo"
       ],
       "noaa": null,
-      "lat": 35.5497,
-      "lon": 139.787,
+      "lat": 35.549678,
+      "lon": 139.786958,
       "wu_station": "RJTT",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1291,8 +1291,8 @@
         "toronto"
       ],
       "noaa": null,
-      "lat": 43.6759,
-      "lon": -79.6294,
+      "lat": 43.675935,
+      "lon": -79.629421,
       "wu_station": "CYYZ",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1316,7 +1316,7 @@
         "warsaw"
       ],
       "noaa": null,
-      "lat": 52.1657,
+      "lat": 52.165699,
       "lon": 20.9671,
       "wu_station": "EPWA",
       "wu_pws": null,
@@ -1340,8 +1340,8 @@
         "wellington"
       ],
       "noaa": null,
-      "lat": -41.3268,
-      "lon": 174.8069,
+      "lat": -41.326839,
+      "lon": 174.806862,
       "wu_station": "NZWN",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1364,8 +1364,8 @@
         "wuhan"
       ],
       "noaa": null,
-      "lat": 30.7748,
-      "lon": 114.2137,
+      "lat": 30.774798,
+      "lon": 114.213723,
       "wu_station": "ZHHH",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1388,8 +1388,8 @@
         "zhengzhou"
       ],
       "noaa": null,
-      "lat": 34.5265,
-      "lon": 113.8492,
+      "lat": 34.526497,
+      "lon": 113.849165,
       "wu_station": "ZHCC",
       "wu_pws": null,
       "meteostat_station": null,
