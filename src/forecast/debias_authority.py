@@ -99,6 +99,20 @@ CORRECTION_BASIS_PRIORITY: tuple[str, ...] = (
     "no_debias",
 )
 
+# Wildcard sentinel for the product-agnostic ``city_station_representativeness``
+# basis. A settlement-residual de-bias is a STATION-truth statement about the cell
+# (city, metric, settlement station): the realized residual band is a property of
+# the cell, not of any one model-set product hash, so a representativeness artifact
+# must match every fresh member set for that station regardless of how the live
+# reactor / the replay happens to hash the member product set (``model_set_hash``
+# differs between the two paths: a content hash live, ``"hist_replay"`` in replay).
+# An artifact whose ``product_set_hash`` / ``station_mapping_id`` is this sentinel
+# matches any member set at the matched station. The HIGHER-priority per-model /
+# model-family bases still require EXACT product + station-mapping identity, so the
+# wildcard never widens those — it is admissible ONLY on the lowest non-fallback
+# representativeness basis, exactly the basis the module docstring already names.
+WILDCARD: str = "*"
+
 
 # ---------------------------------------------------------------------------
 # Artifacts (spec lines 139-184) — EXACT field names, frozen.
@@ -234,7 +248,15 @@ def _product_matches(
     product match) OR the per-model artifact's ``model_id`` is one of the member
     model ids (per-model match). An artifact fitted on a different product set or
     a model absent from the members may not apply.
+
+    The ``WILDCARD`` ``product_set_hash`` (``"*"``) is the product-agnostic
+    representativeness match: a settlement-residual de-bias is a station-truth
+    statement that holds for any member product set at the matched station, so it
+    matches every set. Station identity is still enforced separately
+    (``_station_matches``); only the PRODUCT dimension is widened.
     """
+    if artifact.product_set_hash == WILDCARD:
+        return True
     if artifact.product_set_hash == models.model_set_hash:
         return True
     if artifact.model_id is not None:
@@ -251,9 +273,17 @@ def _source_mapping_matches(
     Spec line 195: no artifact may apply if its product/station/source MAPPING
     differs from the member. ``station_mapping_id`` is the source mapping identity
     carried on both the artifact and each ``RawModelMember``.
+
+    The ``WILDCARD`` ``station_mapping_id`` (``"*"``) is the product-agnostic
+    representativeness match (paired with a ``WILDCARD`` ``product_set_hash``): the
+    settlement station identity is enforced by ``_station_matches``; the per-member
+    source-mapping id is a member-provenance detail the representativeness residual
+    does not depend on, so it is widened for that basis only.
     """
     if not members:
         return False
+    if artifact.station_mapping_id == WILDCARD:
+        return True
     return all(m.station_mapping_id == artifact.station_mapping_id for m in members)
 
 
@@ -261,12 +291,15 @@ def _correction_basis(artifact: BiasArtifact) -> str:
     """Classify an artifact into one of the priority-ordered correction bases.
 
     A per-model artifact (``model_id`` set) is a per-model station walk-forward; a
-    set-level artifact (``model_id is None``) matched on ``product_set_hash`` is a
-    model-family station walk-forward; everything else falls to the
-    city/station representativeness basis.
+    set-level artifact (``model_id is None``) matched on an EXACT ``product_set_hash``
+    is a model-family station walk-forward; a product-agnostic set-level artifact
+    (``model_id is None`` AND ``product_set_hash == WILDCARD``) is the
+    city/station representativeness basis (the lowest non-fallback priority).
     """
     if artifact.model_id is not None:
         return "per_model_station_walk_forward"
+    if artifact.product_set_hash == WILDCARD:
+        return "city_station_representativeness"
     return "model_family_station_walk_forward"
 
 

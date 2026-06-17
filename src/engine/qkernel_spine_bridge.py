@@ -91,6 +91,7 @@ a typed ``SPINE_WIRING_FAULT`` no-trade so the reactor emits a deterministic rec
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -155,6 +156,91 @@ _DIRECT_ROUTE_ID_PREFIXES = ("DIRECT_YES:", "DIRECT_NO:")
 # ONLY tunable that affects the band width; it never changes the selection LOGIC, only
 # the Monte-Carlo resolution of the robust edge lower bound.
 SPINE_BAND_DRAWS: Optional[int] = None
+
+# COLD-CENTER-BIAS FIX (settlement-residual de-bias), live opt-in seam.
+#
+# The spine center mu* runs systematically ~0.5 deg C COLD vs realized settlement
+# (docs/evidence/qkernel_rebuild/cold_center_bias_fix_2026-06-16.md). The fix fits
+# per-(city, metric) walk-forward settlement-residual artifacts
+# (src/forecast/settlement_residual_debias.py) and applies them through the real
+# DebiasAuthority on the product-agnostic representativeness basis. It is PROVEN on
+# the settlement-EV replay (modal EV -0.046 -> +0.052; aggregate +0.018 -> +0.030).
+#
+# This live seam is DEFAULT-OFF: until the orchestrator flips
+# ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` the bridge uses ``_NoOpDebiasAuthority`` and
+# live behavior is unchanged (no restart-time behavior change from this commit).
+#
+# PROVENANCE CAVEAT for the live enable (orchestrator deploy decision): the members
+# threaded to THIS seam are the reactor's CHAIN-OF-RECORD-debiased members (see
+# ``build_fresh_model_set`` / ``_NoOpDebiasAuthority``), whereas the provider's
+# residuals are fit against the RAW-member consensus in zeus-forecasts.db. If the
+# upstream chain-debias already removes part of the cold bias on the live members,
+# enabling this seam unconditionally could over-correct. The validated, no-double-
+# count path is to fit the provider's residuals against the SAME served-member
+# consensus (a follow-up that threads the served members into the residual fit).
+# The flag stays OFF until that reconciliation is done; the replay path (raw members,
+# no chain-debias) is the proven configuration this commit ships.
+_SPINE_SETTLE_RESID_DEBIAS_ENV = "ZEUS_SPINE_SETTLE_RESID_DEBIAS"
+
+
+def _settlement_residual_debias_enabled() -> bool:
+    """True iff the live settlement-residual de-bias seam is operator-enabled."""
+    return os.environ.get(_SPINE_SETTLE_RESID_DEBIAS_ENV) == "1"
+
+
+def _spine_debias_authority(case: ForecastCase):
+    """The de-bias authority the live spine builder uses for ``case``.
+
+    Default (flag OFF): ``_NoOpDebiasAuthority`` — zero shift, current live behavior.
+    Flag ON: a per-case ``DebiasAuthority`` seeded with the walk-forward settlement-
+    residual artifact (see the provenance caveat above). Fails CLOSED to the no-op
+    authority on any provider error so the seam can never fault the reactor hot path.
+    """
+    if not _settlement_residual_debias_enabled():
+        return _NoOpDebiasAuthority()
+    try:
+        provider = _live_settlement_residual_provider()
+        if provider is None:
+            return _NoOpDebiasAuthority()
+        return provider.debias_authority(case)
+    except Exception:  # noqa: BLE001 — never fault the hot path on a de-bias fit
+        return _NoOpDebiasAuthority()
+
+
+_LIVE_SETTLE_RESID_PROVIDER: Any = None
+_LIVE_SETTLE_RESID_PROVIDER_BUILT: bool = False
+
+
+def _live_settlement_residual_provider():
+    """Lazily build (and cache) the live settlement-residual provider, or None.
+
+    Reads the live ``zeus-forecasts.db`` once (read-only). Cached for the process so
+    every case reuses the same fitted residual series; ``apply`` per-case filtering
+    keeps each case walk-forward. Returns None if the DB path cannot be resolved.
+    """
+    global _LIVE_SETTLE_RESID_PROVIDER, _LIVE_SETTLE_RESID_PROVIDER_BUILT
+    if _LIVE_SETTLE_RESID_PROVIDER_BUILT:
+        return _LIVE_SETTLE_RESID_PROVIDER
+    _LIVE_SETTLE_RESID_PROVIDER_BUILT = True
+    try:
+        import sqlite3
+
+        from src.forecast.settlement_residual_debias import (
+            SettlementResidualDebiasProvider,
+        )
+
+        db_path = os.environ.get(
+            "ZEUS_FORECASTS_DB",
+            os.path.join(os.getcwd(), "state", "zeus-forecasts.db"),
+        )
+        if not os.path.exists(db_path):
+            _LIVE_SETTLE_RESID_PROVIDER = None
+            return None
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        _LIVE_SETTLE_RESID_PROVIDER = SettlementResidualDebiasProvider.from_connection(con)
+    except Exception:  # noqa: BLE001
+        _LIVE_SETTLE_RESID_PROVIDER = None
+    return _LIVE_SETTLE_RESID_PROVIDER
 
 
 # ===========================================================================
@@ -802,8 +888,12 @@ def decide_family_via_spine(
             # The VALIDATED belief authority: build_center (envelope-lock) + build_sigma
             # (realized-floor) run on the reactor's chain-of-record-debiased members —
             # the ARM-replay-validated center+σ, NOT the reactor's legacy served mu/σ.
-            # De-bias is a no-op here (already applied upstream; see _NoOpDebiasAuthority).
-            predictive_builder=PredictiveDistributionBuilder(_NoOpDebiasAuthority()),
+            # De-bias: no-op by default (already applied upstream; see
+            # _NoOpDebiasAuthority). When the operator enables the settlement-residual
+            # seam (ZEUS_SPINE_SETTLE_RESID_DEBIAS=1), this is a per-case DebiasAuthority
+            # seeded with the walk-forward settlement-residual artifact that corrects the
+            # proven ~0.5C cold-center bias. Default-OFF: no live behavior change here.
+            predictive_builder=PredictiveDistributionBuilder(_spine_debias_authority(case)),
             # ROUTE IDENTITY (consult_review_pr409.md §5 BLOCKER): DIRECT native routes
             # ONLY. The unchanged submit path executes ONE native leg, so the decision
             # may only choose a route a single _CandidateProof can execute. Disabling the

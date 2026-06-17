@@ -17,32 +17,32 @@ Read-only on live DBs. No venue calls. No daemon restart.
 
 ## Coverage
 
-- Settled VERIFIED families in window: **370**
+- Settled VERIFIED families in window: **376**
 - Strict condition_id→bin_label joins (no ambiguity): **719**
 - Dropped for ambiguous join (multiple bin_labels per condition_id): **0**
 - With decision-time snapshot (executable_snapshot_id resolved): **719**
 - Fallback to latest-in-window (no executable_snapshot_id): **0**
-- Settled families with at least one joined condition_id + book: **275**
-- Spine-evaluated (usable spine + book condition): **275**
-- Spine NO-TRADED (no leg passed edge_lcb>0 ∧ point_ev>0): **61**
-- **Spine-SELECTED graded trades (n): 108**
-- Drop/skip reasons: grade:no_priced_leg=106, no_book_for_settled_family=95
+- Settled families with at least one joined condition_id + book: **280**
+- Spine-evaluated (usable spine + book condition): **280**
+- Spine NO-TRADED (no leg passed edge_lcb>0 ∧ point_ev>0): **67**
+- **Spine-SELECTED graded trades (n): 104**
+- Drop/skip reasons: grade:no_priced_leg=109, no_book_for_settled_family=96
 
 ## Overall Settlement-Realized After-Cost EV
 
-- **n graded trades**: **108**
-- **mean after-cost EV per share**: **+0.0180**
-- **bootstrap 95% CI (5000 resamples)**: **[-0.0530, +0.0854]**
-- median EV: -0.0010; win-rate: 0.472; mean all-in cost: 0.4543
-- decision-time snapshot coverage: 108/108 graded trades (100% from decision-time snapshot)
+- **n graded trades**: **104**
+- **mean after-cost EV per share**: **+0.0297**
+- **bootstrap 95% CI (5000 resamples)**: **[-0.0450, +0.1034]**
+- median EV: +0.2283; win-rate: 0.510; mean all-in cost: 0.4799
+- decision-time snapshot coverage: 104/104 graded trades (100% from decision-time snapshot)
 - **sign: INDETERMINATE (CI spans 0)**
 
 ## By Side
 
 | side | n | mean EV | 95% CI | win-rate |
 |---|---|---|---|---|
-| buy_yes | 38 | -0.0107 | [-0.0439, +0.0446] | 0.026 |
-| buy_no | 70 | +0.0335 | [-0.0717, +0.1317] | 0.714 |
+| buy_yes | 32 | -0.0004 | [-0.0391, +0.0659] | 0.031 |
+| buy_no | 72 | +0.0430 | [-0.0609, +0.1387] | 0.722 |
 
 ## By Class (modal / ring / tail)
 
@@ -50,37 +50,37 @@ Read-only on live DBs. No venue calls. No daemon restart.
 
 | class | n | mean EV | 95% CI | win-rate | sign |
 |---|---|---|---|---|---|
-| modal | 22 | -0.0462 | [-0.2392, +0.1300] | 0.545 | 0-span |
-| ring | 83 | +0.0364 | [-0.0414, +0.1103] | 0.470 | 0-span |
-| tail | 3 | -0.0224 | [-0.0410, -0.0105] | 0.000 | NEG |
+| modal | 32 | +0.0523 | [-0.0981, +0.1858] | 0.688 | 0-span |
+| ring | 67 | +0.0098 | [-0.0778, +0.0928] | 0.448 | 0-span |
+| tail | 5 | +0.1511 | [-0.0546, +0.5393] | 0.200 | 0-span |
 
 ## By Market Class (neg-risk buy_no vs other)
 
 | class | n | mean EV | 95% CI | win-rate | sign |
 |---|---|---|---|---|---|
-| neg_risk_buy_no | 70 | +0.0335 | [-0.0717, +0.1317] | 0.714 | 0-span |
-| neg_risk_buy_yes | 38 | -0.0107 | [-0.0439, +0.0446] | 0.026 | 0-span |
+| neg_risk_buy_no | 72 | +0.0430 | [-0.0609, +0.1387] | 0.722 | 0-span |
+| neg_risk_buy_yes | 32 | -0.0004 | [-0.0391, +0.0659] | 0.031 | 0-span |
 | non_neg_risk | 0 | n/a | n/a | n/a | n/a |
 
 ## By Metric
 
 | metric | n | mean EV | 95% CI | sign |
 |---|---|---|---|---|
-| high | 102 | +0.0299 | [-0.0437, +0.0999] | 0-span |
-| low | 6 | -0.1853 | [-0.4445, +0.0670] | 0-span |
+| high | 98 | +0.0458 | [-0.0310, +0.1175] | 0-span |
+| low | 6 | -0.2329 | [-0.4445, -0.0249] | NEG |
 
 ## By Snapshot Source
 
 | source | n | mean EV | 95% CI | sign |
 |---|---|---|---|---|
-| decision_time_snapshot | 108 | +0.0180 | [-0.0530, +0.0854] | 0-span |
+| decision_time_snapshot | 104 | +0.0297 | [-0.0450, +0.1034] | 0-span |
 
 ## Verdict
 
-**VERDICT: INDETERMINATE** — mean after-cost EV +0.0180/share, 95% CI [-0.0530, +0.0854] SPANS 0, n=108: not statistically distinguishable from zero at this sample size.
+**VERDICT: INDETERMINATE** — mean after-cost EV +0.0297/share, 95% CI [-0.0450, +0.1034] SPANS 0, n=104: not statistically distinguishable from zero at this sample size.
 
-- Best class: **ring** (n=83, mean EV +0.0364, CI [-0.0414, +0.1103], 0-spanning).
-- Worst class: **modal** (n=22, mean EV -0.0462, CI [-0.2392, +0.1300], 0-spanning).
+- Best class: **tail** (n=5, mean EV +0.1511, CI [-0.0546, +0.5393], 0-spanning).
+- Worst class: **ring** (n=67, mean EV +0.0098, CI [-0.0778, +0.0928], 0-spanning).
 
 ### Operator bar
 
