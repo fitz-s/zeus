@@ -2191,14 +2191,19 @@ def _append_filled_entry_projection_repair(
     *,
     candidate: dict,
     client=None,
-) -> None:
+) -> bool:
     from src.engine.lifecycle_events import build_position_current_projection
     from src.state.ledger import append_many_and_project
     from src.state.projection import upsert_position_current
 
     trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate, client=client)
     if not trade_case:
-        raise ValueError("filled entry projection repair requires matching decision_log trade_case")
+        logger.info(
+            "recovery: filled entry projection repair skipped command %s: "
+            "missing decision_log trade_case",
+            candidate.get("command_id"),
+        )
+        return False
     position = _filled_entry_recovery_position(
         candidate,
         trade_case,
@@ -2214,7 +2219,7 @@ def _append_filled_entry_projection_repair(
             existing_order_projection.get("position_id"),
             existing_order_projection.get("phase"),
         )
-        return
+        return False
     projection = build_position_current_projection(position)
     position_id = str(position.trade_id)
     existing_fill = conn.execute(
@@ -2230,7 +2235,7 @@ def _append_filled_entry_projection_repair(
     if existing_fill is not None:
         upsert_position_current(conn, projection)
         _log_filled_entry_execution_fact(conn, position=position, candidate=candidate)
-        return
+        return True
     if _latest_position_sequence(conn, position_id) != 0:
         raise ValueError(
             "filled entry projection repair refuses partial position_events without ENTRY_ORDER_FILLED"
@@ -2268,6 +2273,7 @@ def _append_filled_entry_projection_repair(
     ]
     append_many_and_project(conn, events, projection)
     _log_filled_entry_execution_fact(conn, position=position, candidate=candidate)
+    return True
 
 
 def _append_live_entry_projection_repair(
@@ -2611,9 +2617,16 @@ def reconcile_filled_entry_projection_repairs(conn: sqlite3.Connection, client=N
         sp_name = f"sp_filled_entry_projection_{safe_command_id}"
         conn.execute("SAVEPOINT " + sp_name)
         try:
-            _append_filled_entry_projection_repair(conn, candidate=candidate, client=client)
+            advanced = _append_filled_entry_projection_repair(
+                conn,
+                candidate=candidate,
+                client=client,
+            )
             conn.execute("RELEASE SAVEPOINT " + sp_name)
-            summary["advanced"] += 1
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
         except Exception as exc:
             conn.execute("ROLLBACK TO SAVEPOINT " + sp_name)
             conn.execute("RELEASE SAVEPOINT " + sp_name)

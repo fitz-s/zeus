@@ -2380,6 +2380,44 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_filled_entry_repair_without_trade_case_stays_non_error(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Legacy filled commands without recovery context must not log errors forever."""
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-001", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
+
     def test_filled_entry_repair_does_not_duplicate_existing_order_token_projection(
         self,
         conn,
