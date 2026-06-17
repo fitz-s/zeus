@@ -4998,9 +4998,24 @@ def _aggregate_terminal_venue_command_releases_lock(
     non-evidence and therefore do not release the fail-closed lock.
     """
 
+    def _command_state_on_conn(conn: sqlite3.Connection, execution_command_id: str) -> str | None:
+        if not _adapter_table_exists(conn, "venue_commands"):
+            return None
+        command = conn.execute(
+            """
+            SELECT state
+            FROM venue_commands
+            WHERE decision_id = ?
+            ORDER BY COALESCE(updated_at, created_at) DESC, rowid DESC
+            LIMIT 1
+            """,
+            (execution_command_id,),
+        ).fetchone()
+        if command is None:
+            return None
+        return str(command[0] or "").strip().upper()
+
     try:
-        if not _adapter_table_exists(live_cap_conn, "venue_commands"):
-            return False
         row = live_cap_conn.execute(
             """
             SELECT json_extract(payload_json, '$.execution_command_id') AS execution_command_id
@@ -5015,21 +5030,23 @@ def _aggregate_terminal_venue_command_releases_lock(
         execution_command_id = str(row[0] or "").strip() if row is not None else ""
         if not execution_command_id:
             return False
-        command = live_cap_conn.execute(
-            """
-            SELECT state
-            FROM venue_commands
-            WHERE decision_id = ?
-            ORDER BY COALESCE(updated_at, created_at) DESC, rowid DESC
-            LIMIT 1
-            """,
-            (execution_command_id,),
-        ).fetchone()
+        current_conn_state = _command_state_on_conn(live_cap_conn, execution_command_id)
+        from src.state.db import get_trade_connection_read_only
+
+        trade_conn = get_trade_connection_read_only()
+        try:
+            trade_conn_state = _command_state_on_conn(trade_conn, execution_command_id)
+        finally:
+            try:
+                trade_conn.close()
+            except Exception:
+                pass
     except Exception:
         return False
-    if command is None:
+    canonical_state = trade_conn_state or current_conn_state
+    if canonical_state is None:
         return False
-    return str(command[0] or "").strip().upper() in _TERMINAL_VENUE_COMMAND_STATES
+    return canonical_state in _TERMINAL_VENUE_COMMAND_STATES
 
 
 def _locked_live_opportunity_active_order_reason(
