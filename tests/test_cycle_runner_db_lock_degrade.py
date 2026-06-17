@@ -1,6 +1,7 @@
 # Created: 2026-05-05
-# Last reused or audited: 2026-05-05
+# Last reused or audited: 2026-06-17
 # Authority basis: docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T2G/phase.json
+#   + live EDLI monitor/write-lock recovery 2026-06-17.
 """Tests for T2G: cycle_runner DB-lock graceful degrade.
 
 Invariants asserted:
@@ -99,6 +100,39 @@ def test_cycle_success_export_uses_lightweight_status_pulse():
     source = inspect.getsource(cr.run_cycle)
     assert "write_cycle_pulse(summary)" in source
     assert "write_status(summary)" not in source
+
+
+def test_monitoring_phase_releases_write_lock_between_positions():
+    """Held-position monitoring must not monopolize the trade WAL for the full pass."""
+
+    import src.engine.cycle_runtime as cycle_runtime
+
+    source = inspect.getsource(cycle_runtime.execute_monitoring_phase)
+    assert "_release_monitor_write_lock_boundary(" in source
+    assert 'boundary="exit_preflight"' in source
+    assert 'boundary="day0_window_entered"' in source
+    assert 'boundary="position_monitor"' in source
+
+
+def test_exit_lifecycle_commits_before_live_venue_io():
+    """Exit writes must be durable before live cancel/sell HTTP, not held across it."""
+
+    import src.execution.exit_lifecycle as exit_lifecycle
+
+    source = inspect.getsource(exit_lifecycle._execute_live_exit)
+    assert '_commit_before_exit_venue_io(conn, stage="collateral_refresh")' in source
+    assert '_commit_before_exit_venue_io(conn, stage="exit_intent")' in source
+
+
+def test_heartbeat_refreshes_status_before_live_health():
+    """Status-summary freshness must not depend only on the long chain monitor job."""
+
+    import src.main as main
+
+    source = inspect.getsource(main._write_heartbeat)
+    pulse_index = source.index("write_cycle_pulse")
+    health_index = source.index("compute_composite_live_health")
+    assert pulse_index < health_index
 
 
 # ---------------------------------------------------------------------------

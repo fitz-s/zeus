@@ -2221,6 +2221,13 @@ def _write_heartbeat() -> None:
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))
         tmp.replace(path)
+        # Keep operator status freshness independent of the long chain/monitor job.
+        # The pulse is derived/read-only visibility; failure must not mask heartbeat.
+        try:
+            from src.observability.status_summary import write_cycle_pulse
+            write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
+        except Exception:
+            pass
         # Relationship-F: surface composite live-health on every heartbeat cycle
         try:
             from src.control.live_health import compute_composite_live_health

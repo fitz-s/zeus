@@ -3172,6 +3172,31 @@ def _execution_stub(candidate, decision, result, city, mode, *, deps):
     )
 
 
+def _release_monitor_write_lock_boundary(conn, summary: dict, deps, *, boundary: str) -> None:
+    """Commit monitor writes at bounded points so live price/decision writers can run."""
+
+    if conn is None:
+        return
+    try:
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        summary["monitor_write_lock_release_failed"] = (
+            summary.get("monitor_write_lock_release_failed", 0) + 1
+        )
+        summary.setdefault("monitor_write_lock_release_failures", []).append(
+            {"boundary": boundary, "error": str(exc)[:500]}
+        )
+        deps.logger.warning(
+            "monitor write-lock release failed at %s: %s",
+            boundary,
+            exc,
+        )
+    else:
+        summary["monitor_write_lock_releases"] = (
+            summary.get("monitor_write_lock_releases", 0) + 1
+        )
+
+
 
 def execute_monitoring_phase(
     conn,
@@ -3224,6 +3249,12 @@ def execute_monitoring_phase(
 
         summary["pending_exits_filled"] = exit_stats["filled"]
         summary["pending_exits_retried"] = exit_stats["retried"]
+        _release_monitor_write_lock_boundary(
+            conn,
+            summary,
+            deps,
+            boundary="exit_preflight",
+        )
     else:
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
@@ -3430,6 +3461,12 @@ def execute_monitoring_phase(
                         day0_entered_at=new_day0_entered_at,
                         previous_phase=previous_phase_str,
                         deps=deps,
+                    )
+                    _release_monitor_write_lock_boundary(
+                        conn,
+                        summary,
+                        deps,
+                        boundary="day0_window_entered",
                     )
 
             closed_market_info = None
@@ -3723,8 +3760,21 @@ def execute_monitoring_phase(
                         neg_edge_count=pos.neg_edge_count,
                     )
                 )
+        finally:
+            _release_monitor_write_lock_boundary(
+                conn,
+                summary,
+                deps,
+                boundary="position_monitor",
+            )
 
     _emit_portfolio_rotation_shadow_summary(conn, summary, deps=deps)
+    _release_monitor_write_lock_boundary(
+        conn,
+        summary,
+        deps,
+        boundary="portfolio_rotation_shadow_summary",
+    )
     return portfolio_dirty, tracker_dirty
 
 

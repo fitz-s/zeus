@@ -241,6 +241,21 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _commit_before_exit_venue_io(conn: sqlite3.Connection | None, *, stage: str) -> None:
+    """Release trade DB writes before live cancel/sell HTTP calls."""
+
+    if conn is None:
+        return
+    try:
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "exit lifecycle commit before venue I/O failed at %s: %s",
+            stage,
+            exc,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle promoter — Bug #2 fix (PR-S2)
 # Polls CLOB REST API for MATCHED/MINED rows and writes CONFIRMED facts.
@@ -1266,6 +1281,7 @@ def _execute_live_exit(
                 )
                 log_exit_retry_event(conn, position, reason=retry_reason, error=collateral_reason)
             return f"collateral_blocked: {collateral_reason}"
+        _commit_before_exit_venue_io(conn, stage="collateral_refresh")
 
     # Pre-sell collateral check (fail-closed)
     can_sell, collateral_reason = check_sell_collateral(
@@ -1383,6 +1399,7 @@ def _execute_live_exit(
         error="",
         event_type="EXIT_INTENT",
     )
+    _commit_before_exit_venue_io(conn, stage="exit_intent")
 
     try:
         raw_sell_result = place_sell_order(
