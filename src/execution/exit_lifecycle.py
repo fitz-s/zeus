@@ -1217,6 +1217,7 @@ def _execute_live_exit(
             reason=exit_intent.reason,
             error="",
         )
+        _commit_before_exit_venue_io(conn, stage="exit_intent")
 
     token_id = exit_intent.token_id
     if not token_id:
