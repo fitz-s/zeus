@@ -101,6 +101,31 @@ def _snapshot(
     conn.commit()
 
 
+def _regret_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            regret_event_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            rejection_stage TEXT NOT NULL,
+            rejection_reason TEXT NOT NULL,
+            regret_bucket TEXT NOT NULL,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            family_id TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            q_lcb_5pct REAL,
+            c_fee_adjusted REAL,
+            trade_score REAL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
 # ───────────────────────────────────────────────────────────────────────────────────────────────
 # ANTIBODY 1 — DEADLOCK REGRESSION: the belief write must NOT open a second connection / commit.
 # This pins the 2026-05-31 self-deadlock (persist_belief_live opened get_world_connection() and
@@ -160,6 +185,52 @@ def test_belief_write_uses_given_conn_no_second_connection():
     ).fetchone()
     assert row is not None, "belief row must be present in the open transaction"
     raw.execute("ROLLBACK")
+
+
+def test_screen_entry_uses_live_regret_backoff_from_world_table():
+    from datetime import datetime, timezone
+
+    world = _mem_world()
+    trade = _mem_trade()
+    _regret_table(world)
+    family_id = "hyp|live|Wuhan|2026-06-12|high|disc"
+    _cache(world, family_id=family_id, p_yes=0.90, cond="0xc30")
+    _snapshot(trade, condition_id="0xc30", bid="0.20", ask="0.70")
+    created_at = datetime.now(timezone.utc).isoformat()
+    prior_all_in_cost = cr._all_in_cost(0.70)
+    world.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            city, target_date, metric, family_id, bin_label, direction,
+            q_lcb_5pct, c_fee_adjusted, trade_score, created_at
+        ) VALUES (
+            'r1', 'event-1', 'TRADE_SCORE', 'TRADE_SCORE_NON_POSITIVE:score=-0.01', 'FEE_ERASED_EDGE',
+            'Wuhan', '2026-06-12', 'high', ?, 'b30', 'buy_yes',
+            0.90, ?, -0.01, ?
+        )
+        """,
+        (family_id, prior_all_in_cost, created_at),
+    )
+    world.commit()
+
+    blocked = cr.screen_entry_redecisions(
+        world,
+        trade,
+        decision_time="2026-06-12T00:30:00+00:00",
+        min_edge=0.01,
+    )
+    assert blocked == []
+
+    trade.execute("DELETE FROM executable_market_snapshots")
+    _snapshot(trade, condition_id="0xc30", bid="0.20", ask="0.67", snapshot_id="s2")
+    improved = cr.screen_entry_redecisions(
+        world,
+        trade,
+        decision_time="2026-06-12T00:30:00+00:00",
+        min_edge=0.01,
+    )
+    assert len(improved) == 1
 
 
 def test_persist_belief_live_removed():
@@ -539,6 +610,7 @@ def test_redecision_event_consumed_and_belief_persisted():
                 "target_date": "2026-05-24", "snapshot_id": "snap-1",
                 "calibrator_model_hash": "identity", "bin_labels": ["b73", "b74"],
                 "p_posterior_vec": [0.4, 0.6], "condition_ids": ["0xa", "0xb"],
+                "q_lcb_yes_vec": [0.35, 0.55], "q_lcb_no_vec": [0.60, 0.40],
             },
         )
         return replace(
@@ -565,7 +637,10 @@ def test_redecision_event_consumed_and_belief_persisted():
     assert result.dead_lettered == 0
     # P1: the belief was persisted through the reactor's OWN conn (deadlock-free), now queryable.
     belief_rows = conn.execute(
-        "SELECT decision_id FROM probability_trace_fact WHERE decision_id LIKE 'edli_belief:%'"
+        "SELECT decision_id, q_lcb_yes_json, q_lcb_no_json "
+        "FROM probability_trace_fact WHERE decision_id LIKE 'edli_belief:%'"
     ).fetchall()
     assert len(belief_rows) == 1, "the reactor must persist the receipt belief_payload (P1)"
     assert "hyp|live|Chicago|2026-05-24|high|d" in belief_rows[0][0]
+    assert belief_rows[0][1] == "[0.35, 0.55]"
+    assert belief_rows[0][2] == "[0.6, 0.4]"

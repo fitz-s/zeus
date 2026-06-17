@@ -7859,6 +7859,26 @@ def _generate_candidate_proofs(
             _posterior_vec = [
                 float(q_by_condition.get(str(c.condition_id or ""), 0.0)) for c in family.candidates
             ]
+            from src.calibration.qlcb_provenance import _qlcb_raw_float
+
+            def _capture_lcb(condition_id: str, direction: str) -> float | None:
+                value = q_lcb_by_direction.get((condition_id, direction))
+                if value is None:
+                    return None
+                try:
+                    out = float(_qlcb_raw_float(value))
+                except (TypeError, ValueError):
+                    return None
+                if not math.isfinite(out):
+                    return None
+                return float(min(max(out, 0.0), 1.0))
+
+            _q_lcb_yes_vec = [
+                _capture_lcb(str(c.condition_id or ""), "buy_yes") for c in family.candidates
+            ]
+            _q_lcb_no_vec = [
+                _capture_lcb(str(c.condition_id or ""), "buy_no") for c in family.candidates
+            ]
             _snap_row = provenance_capture.get("snapshot_row") or {}
             _snap_id = (
                 str(probability_evidence.get("posterior_id"))
@@ -7880,6 +7900,8 @@ def _generate_candidate_proofs(
                     "calibrator_model_hash": _calib_hash,
                     "bin_labels": _bin_labels,
                     "p_posterior_vec": _posterior_vec,
+                    "q_lcb_yes_vec": _q_lcb_yes_vec,
+                    "q_lcb_no_vec": _q_lcb_no_vec,
                     "condition_ids": _cond_ids,
                 }
         except Exception:  # noqa: BLE001 — belief capture is non-critical; never break the decision

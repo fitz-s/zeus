@@ -1695,6 +1695,10 @@ def init_schema(
             -- condition_id (parallel to bin_labels_json) for the synthesized 'edli_belief:' rows.
             -- NULL for every non-belief / legacy row.
             condition_ids_json TEXT,
+            -- Continuous re-decision conservative screen: per-bin q_lcb for YES and NO sides,
+            -- parallel to bin_labels_json. NULL means no live entry-admission proof.
+            q_lcb_yes_json TEXT,
+            q_lcb_no_json TEXT,
             recorded_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_probability_trace_city_target
@@ -2531,6 +2535,14 @@ def init_schema(
         pass
     try:
         conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN temperature_metric TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN q_lcb_yes_json TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN q_lcb_no_json TEXT;")
     except sqlite3.OperationalError:
         pass
 

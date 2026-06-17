@@ -1587,6 +1587,8 @@ class OpportunityEventReactor:
                 p_posterior_vec=list(belief.get("p_posterior_vec") or []),
                 recorded_at=decision_time.astimezone(UTC).isoformat(),
                 condition_ids=list(belief.get("condition_ids") or []),
+                q_lcb_yes_vec=list(belief.get("q_lcb_yes_vec") or []),
+                q_lcb_no_vec=list(belief.get("q_lcb_no_vec") or []),
             )
         except Exception:  # noqa: BLE001 — belief cache is non-critical; never break the decision
             import logging as _logging

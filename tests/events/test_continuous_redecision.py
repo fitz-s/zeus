@@ -115,6 +115,128 @@ def test_R2_sub_edge_does_not_enqueue():
     assert enqueued == []
 
 
+def test_entry_screen_uses_conservative_q_lcb_not_point_posterior():
+    conn = _mem_world()
+    cr.cache_belief(
+        conn,
+        family_id="Wuhan|2026-06-01|high",
+        city="Wuhan",
+        target_date="2026-06-01",
+        snapshot_id="snap1",
+        calibrator_model_hash="identity",
+        bin_labels=["b29", "b30"],
+        p_posterior_vec=[0.001, 0.99],
+        q_lcb_yes_vec=[0.001, 0.60],
+        q_lcb_no_vec=[0.999, 0.01],
+        recorded_at="2026-05-31T00:00:00+00:00",
+    )
+    price_lookup = {
+        ("Wuhan|2026-06-01|high", "b30", "buy_yes"): cr.PriceQuote(
+            price=0.70, freshness_deadline="2026-05-31T01:00:00+00:00"
+        ),
+    }
+
+    enqueued = cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-05-31T00:30:00+00:00",
+        price_lookup=price_lookup,
+        min_edge=0.01,
+    )
+
+    assert enqueued == [], "point posterior edge is not confirmed trading value without q_lcb edge"
+
+
+def test_entry_screen_blocks_after_recent_full_economics_negative_until_price_improves():
+    conn = _mem_world()
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00")
+    key = ("Wuhan|2026-06-01|high", "b30", "buy_yes")
+    rejection = {
+        key: cr.FullEconomicsReject(
+            execution_price=cr._all_in_cost(0.70),
+            q_lcb_5pct=0.90,
+            trade_score=-0.01,
+            created_at="2026-05-31T00:20:00+00:00",
+        )
+    }
+
+    same_price = {
+        key: cr.PriceQuote(price=0.70, freshness_deadline="2026-05-31T01:00:00+00:00"),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-05-31T00:30:00+00:00",
+        price_lookup=same_price,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejection,
+    ) == []
+
+    improved_price = {
+        key: cr.PriceQuote(price=0.67, freshness_deadline="2026-05-31T01:00:00+00:00"),
+    }
+    enqueued = cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-05-31T00:30:00+00:00",
+        price_lookup=improved_price,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejection,
+    )
+    assert len(enqueued) == 1
+
+
+def test_entry_screen_backoff_compares_all_in_cost_basis():
+    conn = _mem_world()
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00")
+    key = ("Wuhan|2026-06-01|high", "b30", "buy_yes")
+    rejection = {
+        key: cr.FullEconomicsReject(
+            execution_price=0.7105,
+            q_lcb_5pct=0.90,
+            trade_score=-0.01,
+            created_at="2026-05-31T00:20:00+00:00",
+        )
+    }
+
+    one_tick_raw_improvement = {
+        key: cr.PriceQuote(price=0.69, freshness_deadline="2026-05-31T01:00:00+00:00"),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-05-31T00:30:00+00:00",
+        price_lookup=one_tick_raw_improvement,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejection,
+    ) == []
+
+
+def test_live_writer_belief_without_q_lcb_does_not_confirm_entry_value():
+    conn = _mem_world()
+    cr.write_belief_row(
+        conn,
+        family_id="Wuhan|2026-06-01|high",
+        city="Wuhan",
+        target_date="2026-06-01",
+        snapshot_id="snap1",
+        calibrator_model_hash="identity",
+        bin_labels=["b29", "b30"],
+        p_posterior_vec=[0.001, 0.99],
+        recorded_at="2026-05-31T00:00:00+00:00",
+    )
+    price_lookup = {
+        ("Wuhan|2026-06-01|high", "b30", "buy_yes"): cr.PriceQuote(
+            price=0.70, freshness_deadline="2026-05-31T01:00:00+00:00"
+        ),
+    }
+
+    enqueued = cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-05-31T00:30:00+00:00",
+        price_lookup=price_lookup,
+        min_edge=0.01,
+    )
+
+    assert enqueued == []
+
+
 # ---------------------------------------------------------------------------
 # R6 — continuity (one-shot killer): cycle 2 price improves → second enqueue
 # ---------------------------------------------------------------------------

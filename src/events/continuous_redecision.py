@@ -99,6 +99,10 @@ class CachedBelief:
     # executable_market_snapshots row (keyed by condition_id). Defaulted empty for backward-compat
     # with rows cached before the resurrection.
     condition_ids: list[str] = None  # type: ignore[assignment]
+    # Parallel to bin_labels: conservative lower-bound probability for each side.
+    # Entry redecision must screen on this, not on point posterior optimism.
+    q_lcb_yes_vec: list[float | None] | None = None
+    q_lcb_no_vec: list[float | None] | None = None
     # The family's temperature metric ("high"/"low"). Parsed from the family_id (position 4 of the
     # pipe-separated id) so the P2 job can build the (city, target_date, metric) family key for the
     # FSR re-emit restriction without re-deriving topology. Empty when unparseable.
@@ -112,6 +116,14 @@ class EnqueuedRedecision:
     direction: str
     edge: float
     event_type: str = REDECISION_EVENT_TYPE
+
+
+@dataclass(frozen=True)
+class FullEconomicsReject:
+    execution_price: float | None
+    q_lcb_5pct: float | None
+    trade_score: float | None
+    created_at: str
 
 
 @dataclass(frozen=True)
@@ -164,7 +176,9 @@ def ensure_belief_cache_schema(conn: sqlite3.Connection) -> None:
             decision_snapshot_id TEXT,
             bin_labels_json TEXT,
             p_posterior_json TEXT,
-            condition_ids_json TEXT
+            condition_ids_json TEXT,
+            q_lcb_yes_json TEXT,
+            q_lcb_no_json TEXT
         )
         """
     )
@@ -178,6 +192,14 @@ def ensure_belief_cache_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN temperature_metric TEXT;")
     except sqlite3.OperationalError:
         pass
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN q_lcb_yes_json TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN q_lcb_no_json TEXT;")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
 
 
@@ -187,6 +209,26 @@ def _has_condition_ids_column(conn: sqlite3.Connection) -> bool:
     except sqlite3.Error:
         return False
     return "condition_ids_json" in cols
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    try:
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.Error:
+        return False
+    return column in cols
+
+
+def _json_float_or_none_vec(values: list[object] | None) -> str | None:
+    if values is None:
+        return None
+    out: list[float | None] = []
+    for value in values:
+        try:
+            out.append(None if value is None else float(value))
+        except (TypeError, ValueError):
+            out.append(None)
+    return json.dumps(out)
 
 
 def write_belief_row(
@@ -202,6 +244,8 @@ def write_belief_row(
     recorded_at: str,
     temperature_metric: str = "",
     condition_ids: list[str] | None = None,
+    q_lcb_yes_vec: list[object] | None = None,
+    q_lcb_no_vec: list[object] | None = None,
 ) -> None:
     """Write ONE belief row through the GIVEN connection — NO commit, NO new connection.
 
@@ -218,10 +262,25 @@ def write_belief_row(
     cond_json = json.dumps([str(c or "") for c in (condition_ids or [])])
     metric = str(temperature_metric or _metric_from_family_id(family_id) or "").strip()
     has_metric_col = _has_temperature_metric_column(conn)
+    has_yes_lcb_col = _has_column(conn, "probability_trace_fact", "q_lcb_yes_json")
+    has_no_lcb_col = _has_column(conn, "probability_trace_fact", "q_lcb_no_json")
+    q_lcb_yes_json = _json_float_or_none_vec(q_lcb_yes_vec)
+    q_lcb_no_json = _json_float_or_none_vec(q_lcb_no_vec)
     if _has_condition_ids_column(conn):
         metric_col = ", temperature_metric" if has_metric_col else ""
         metric_placeholder = ", ?" if has_metric_col else ""
         metric_update = ", temperature_metric=excluded.temperature_metric" if has_metric_col else ""
+        q_lcb_cols = ""
+        q_lcb_placeholders = ""
+        q_lcb_update = ""
+        if has_yes_lcb_col:
+            q_lcb_cols += ", q_lcb_yes_json"
+            q_lcb_placeholders += ", ?"
+            q_lcb_update += ", q_lcb_yes_json=excluded.q_lcb_yes_json"
+        if has_no_lcb_col:
+            q_lcb_cols += ", q_lcb_no_json"
+            q_lcb_placeholders += ", ?"
+            q_lcb_update += ", q_lcb_no_json=excluded.q_lcb_no_json"
         values = [
             "trace_" + decision_id, decision_id, recorded_at,
             city, target_date, snapshot_id,
@@ -230,19 +289,24 @@ def write_belief_row(
         ]
         if has_metric_col:
             values.insert(5, metric)
+        if has_yes_lcb_col:
+            values.append(q_lcb_yes_json)
+        if has_no_lcb_col:
+            values.append(q_lcb_no_json)
         conn.execute(
             f"""
             INSERT INTO probability_trace_fact
                 (trace_id, decision_id, trace_status, missing_reason_json, recorded_at,
                  city, target_date{metric_col}, decision_snapshot_id, bin_labels_json, p_posterior_json,
-                 condition_ids_json)
-            VALUES (?, ?, 'complete', '[]', ?, ?, ?{metric_placeholder}, ?, ?, ?, ?)
+                 condition_ids_json{q_lcb_cols})
+            VALUES (?, ?, 'complete', '[]', ?, ?, ?{metric_placeholder}, ?, ?, ?, ?{q_lcb_placeholders})
             ON CONFLICT(decision_id) DO UPDATE SET
                 recorded_at=excluded.recorded_at,
                 bin_labels_json=excluded.bin_labels_json,
                 p_posterior_json=excluded.p_posterior_json,
                 condition_ids_json=excluded.condition_ids_json
                 {metric_update}
+                {q_lcb_update}
             """,
             tuple(values),
         )
@@ -288,12 +352,18 @@ def cache_belief(
     recorded_at: str,
     temperature_metric: str = "",
     condition_ids: list[str] | None = None,
+    q_lcb_yes_vec: list[object] | None = None,
+    q_lcb_no_vec: list[object] | None = None,
 ) -> None:
     """Standalone (test / offline) belief writer: writes the row AND commits on its own connection.
 
     NEVER call this from inside the reactor's write window — it commits, which on a held world lock
     is the exact deadlock the resurrection removed. The reactor path uses ``write_belief_row``
     (no commit). This entry point is for isolated/:memory: connections that own their transaction."""
+    if q_lcb_yes_vec is None:
+        q_lcb_yes_vec = [float(x) for x in p_posterior_vec]
+    if q_lcb_no_vec is None:
+        q_lcb_no_vec = [one_minus(float(x)) for x in p_posterior_vec]
     write_belief_row(
         conn,
         family_id=family_id, city=city, target_date=target_date,
@@ -301,6 +371,8 @@ def cache_belief(
         snapshot_id=snapshot_id, calibrator_model_hash=calibrator_model_hash,
         bin_labels=bin_labels, p_posterior_vec=p_posterior_vec, recorded_at=recorded_at,
         condition_ids=condition_ids,
+        q_lcb_yes_vec=q_lcb_yes_vec,
+        q_lcb_no_vec=q_lcb_no_vec,
     )
     conn.commit()
 
@@ -340,6 +412,16 @@ def _row_to_belief(row: sqlite3.Row) -> CachedBelief | None:
     except (IndexError, KeyError):
         row_metric = ""
     condition_ids = json.loads(cond_raw) if cond_raw else []
+    try:
+        q_lcb_yes_raw = row["q_lcb_yes_json"]
+    except (IndexError, KeyError):
+        q_lcb_yes_raw = None
+    try:
+        q_lcb_no_raw = row["q_lcb_no_json"]
+    except (IndexError, KeyError):
+        q_lcb_no_raw = None
+    q_lcb_yes_vec = json.loads(q_lcb_yes_raw) if q_lcb_yes_raw else None
+    q_lcb_no_vec = json.loads(q_lcb_no_raw) if q_lcb_no_raw else None
     return CachedBelief(
         family_id=family_id,
         city=row["city"] or "",
@@ -350,6 +432,8 @@ def _row_to_belief(row: sqlite3.Row) -> CachedBelief | None:
         p_posterior_vec=json.loads(row["p_posterior_json"]),
         recorded_at=row["recorded_at"],
         condition_ids=list(condition_ids),
+        q_lcb_yes_vec=list(q_lcb_yes_vec) if q_lcb_yes_vec is not None else None,
+        q_lcb_no_vec=list(q_lcb_no_vec) if q_lcb_no_vec is not None else None,
         metric=row_metric or _metric_from_family_id(family_id),
     )
 
@@ -367,6 +451,10 @@ def _all_latest_beliefs(conn: sqlite3.Connection) -> list[CachedBelief]:
         cols += ", condition_ids_json"
     if _has_temperature_metric_column(conn):
         cols += ", temperature_metric"
+    if _has_column(conn, "probability_trace_fact", "q_lcb_yes_json"):
+        cols += ", q_lcb_yes_json"
+    if _has_column(conn, "probability_trace_fact", "q_lcb_no_json"):
+        cols += ", q_lcb_no_json"
     rows = conn.execute(
         f"SELECT {cols} FROM probability_trace_fact "
         "WHERE decision_id LIKE ? ORDER BY recorded_at DESC",
@@ -390,12 +478,14 @@ def enqueue_live_redecisions(
     price_lookup: dict[tuple[str, str, str], PriceQuote],
     min_edge: float,
     acted_state: dict[tuple[str, str, str], float] | None = None,
+    recent_full_economics_rejections: dict[tuple[str, str, str], FullEconomicsReject] | None = None,
 ) -> list[EnqueuedRedecision]:
-    """Cheap-screen every live (family, bin, direction) against a FRESH price; enqueue on edge.
+    """Screen live entry pairs against FRESH price and conservative q_lcb evidence.
 
     Stale price (freshness_deadline <= decision_time) is skipped (no phantom edge). acted_state is an
     optional IN-MEMORY dict (the reactor holds it across cycles): a pair re-fires only when its edge
     improves past IMPROVE_DELTA vs the last acted edge — a short price wiggle does NOT re-fire.
+    Recent full-economics no-value rejects block the same pair until price or q_lcb improves.
     """
     dt = _parse(decision_time)
     out: list[EnqueuedRedecision] = []
@@ -403,19 +493,31 @@ def enqueue_live_redecisions(
         for idx, label in enumerate(belief.bin_labels):
             if idx >= len(belief.p_posterior_vec):
                 continue
-            yes_post = float(belief.p_posterior_vec[idx])
-            for direction, posterior in (
-                ("buy_yes", yes_post),
-                ("buy_no", one_minus(yes_post)),
-            ):
+            q_lcb_yes = _vec_float_at(belief.q_lcb_yes_vec, idx)
+            q_lcb_no = _vec_float_at(belief.q_lcb_no_vec, idx)
+            for direction in ("buy_yes", "buy_no"):
                 key = (belief.family_id, label, direction)
                 quote = price_lookup.get(key)
                 if quote is None:
                     continue
                 if _parse(quote.freshness_deadline) <= dt:
                     continue  # STALE → no phantom edge (R7)
-                edge = posterior - float(quote.price) - _fee_at(float(quote.price))
+                conservative_q = q_lcb_yes if direction == "buy_yes" else q_lcb_no
+                if conservative_q is None:
+                    continue
+                edge = float(conservative_q) - float(quote.price) - _fee_at(float(quote.price))
                 if edge < min_edge - _EPS:
+                    continue
+                rejection = (
+                    recent_full_economics_rejections.get(key)
+                    if recent_full_economics_rejections is not None
+                    else None
+                )
+                if rejection is not None and _full_economics_reject_still_blocks(
+                    rejection,
+                    current_execution_price=_all_in_cost(float(quote.price)),
+                    current_q_lcb=float(conservative_q),
+                ):
                     continue
                 if acted_state is not None:
                     last = acted_state.get(key)
@@ -423,6 +525,122 @@ def enqueue_live_redecisions(
                         continue  # not materially improved → do not re-fire (anti price-noise)
                     acted_state[key] = edge
                 out.append(EnqueuedRedecision(belief.family_id, label, direction, edge))
+    return out
+
+
+def _vec_float_at(values: list[float | None] | None, idx: int) -> float | None:
+    if values is None or idx >= len(values):
+        return None
+    try:
+        value = values[idx]
+        if value is None:
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 <= out <= 1.0):
+        return None
+    return out
+
+
+def _full_economics_reject_still_blocks(
+    rejection: FullEconomicsReject,
+    *,
+    current_execution_price: float,
+    current_q_lcb: float,
+) -> bool:
+    if rejection.trade_score is not None and rejection.trade_score > 0.0:
+        return False
+    price_improved = (
+        rejection.execution_price is not None
+        and current_execution_price <= float(rejection.execution_price) - IMPROVE_DELTA + _EPS
+    )
+    belief_improved = (
+        rejection.q_lcb_5pct is not None
+        and current_q_lcb >= float(rejection.q_lcb_5pct) + IMPROVE_DELTA - _EPS
+    )
+    return not (price_improved or belief_improved)
+
+
+def _all_in_cost(price: float) -> float:
+    return float(price) + _fee_at(float(price))
+
+
+def _optional_float(value: object) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def read_recent_full_economics_rejections(
+    conn: sqlite3.Connection,
+    *,
+    lookback_hours: float = 24.0,
+) -> dict[tuple[str, str, str], FullEconomicsReject]:
+    """Latest terminal full-economics no-value rejection per candidate.
+
+    This is live evidence backoff, not a strategy cap. A cheaper fresh price or a
+    higher q_lcb clears it and sends the pair through the full reactor again.
+    """
+    try:
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='no_trade_regret_events'"
+        ).fetchone()
+    except sqlite3.Error:
+        return {}
+    if not has_table:
+        return {}
+    try:
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(no_trade_regret_events)").fetchall()
+        }
+    except sqlite3.Error:
+        return {}
+    required = {
+        "family_id", "bin_label", "direction", "rejection_stage", "rejection_reason",
+        "c_fee_adjusted", "q_lcb_5pct", "trade_score", "created_at",
+    }
+    if not required.issubset(cols):
+        return {}
+    from datetime import timedelta, timezone as _timezone
+
+    cutoff = (datetime.now(_timezone.utc) - timedelta(hours=max(0.0, lookback_hours))).isoformat()
+    try:
+        rows = conn.execute(
+            """
+            SELECT family_id, bin_label, direction, c_fee_adjusted, q_lcb_5pct, trade_score, created_at
+             FROM no_trade_regret_events
+             WHERE rejection_stage = 'TRADE_SCORE'
+               AND (
+                    rejection_reason IN ('TRADE_SCORE_NON_POSITIVE', 'TRADE_SCORE_BLOCKED')
+                 OR rejection_reason LIKE 'TRADE_SCORE_NON_POSITIVE:%'
+                 OR rejection_reason LIKE 'TRADE_SCORE_BLOCKED:%'
+               )
+               AND family_id IS NOT NULL AND family_id != ''
+               AND bin_label IS NOT NULL AND bin_label != ''
+               AND direction IS NOT NULL AND direction != ''
+               AND created_at >= ?
+             ORDER BY created_at DESC
+            """,
+            (cutoff,),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    out: dict[tuple[str, str, str], FullEconomicsReject] = {}
+    for row in rows:
+        key = (str(row[0]), str(row[1]), str(row[2]))
+        if key in out:
+            continue
+        out[key] = FullEconomicsReject(
+            execution_price=_optional_float(row[3]),
+            q_lcb_5pct=_optional_float(row[4]),
+            trade_score=_optional_float(row[5]),
+            created_at=str(row[6] or ""),
+        )
     return out
 
 
@@ -677,6 +895,7 @@ def screen_entry_redecisions(
     for belief in beliefs:
         all_cids.update(c for c in (belief.condition_ids or []) if c)
     price_by_cid = read_freshest_executable_prices(trade_conn, condition_ids=all_cids)
+    recent_rejections = read_recent_full_economics_rejections(world_conn)
     # Re-key the price map onto (family_id, bin_label, direction) the screen expects.
     price_lookup: dict[tuple[str, str, str], PriceQuote] = {}
     for belief in beliefs:
@@ -697,6 +916,7 @@ def screen_entry_redecisions(
         price_lookup=price_lookup,
         min_edge=min_edge,
         acted_state=acted_state,
+        recent_full_economics_rejections=recent_rejections,
     )
 
 
