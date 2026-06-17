@@ -464,6 +464,15 @@ class TestDay0TransitionMonotonicity:
         )
         assert actual == pytest.approx(0.9951680588385971)
 
+    def test_day0_monitor_does_not_reintroduce_legacy_platt(self):
+        """Day0 monitor evidence must not resurrect the retired ENS+Platt era."""
+        source = (ROOT / "src" / "engine" / "monitor_refresh.py").read_text(encoding="utf-8")
+        start = source.index("def _refresh_day0_observation(")
+        end = source.index("def _day0_extreme_authority_rejection_reason(")
+        body = source[start:end]
+        assert "_monitor_calibrator_for_ens_result" not in body
+        assert "platt_recalibration" not in body
+
 
 # ===========================================================================
 # R8 — day0 q_lcb is a REAL lower bound (static-sampler fix, review item D)

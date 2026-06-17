@@ -1710,61 +1710,31 @@ def _refresh_day0_observation(
 
     p_raw_vector = day0.p_vector(all_bins, n_mc=day0_n_mc())
 
-    # L3 Phase 9C metric-aware Platt read (Day0 exit lane)
-    # Slice P2-C2 + P2-fix5: use hoisted _position_metric_str (resolver
-    # already fired audit log at function entry).
-    # Phase 2.6 (2026-05-04, critic-opus MAJOR 4): same Phase 2 stratification
-    # threading as the ensemble exit lane above.
-    cal, cal_level = _monitor_calibrator_for_ens_result(
-        conn=conn,
-        city=city,
-        target_date=position.target_date,
-        temperature_metric=_position_metric_str,
-        ens_result=ens_result,
-    )
-    if cal is not None and len(all_bins) > 1:
-        p_cal_vector = calibrate_and_normalize(
-            p_raw_vector,
-            cal,
-            0.0,
-            bin_widths=[b.width for b in all_bins],
-        )
-        p_cal_yes = float(p_cal_vector[held_idx])
-        p_cal_full = p_cal_vector
-        applied = [
+    # U1/U2 regime-unification law: Day0 is observation authority plus the
+    # remaining-window raw snapshot. Do not resurrect legacy ENS+Platt monitor
+    # calibration here; normalize the raw vector honestly and mark it as such.
+    p_cal_full = np.asarray(p_raw_vector, dtype=float)
+    p_cal_sum = float(p_cal_full.sum())
+    if p_cal_sum <= 0.0 or not np.isfinite(p_cal_full).all():
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
             "day0_observation",
-            *coverage_validations,
             "fresh_ens_fetch",
             *forecast_source_validations,
-            "mc_instrument_noise",
-            "platt_recalibration",
-            "vector_normalization",
+            "day0_honest_raw_invalid_p_raw",
         ]
-    elif cal is not None:
-        p_cal_yes = cal.predict_for_bin(
-            float(p_raw_vector[0]),
-            0.0,
-            bin_width=all_bins[0].width,
-        )
-        p_cal_full = np.array([p_cal_yes], dtype=float)
-        applied = [
-            "day0_observation",
-            *coverage_validations,
-            "fresh_ens_fetch",
-            *forecast_source_validations,
-            "mc_instrument_noise",
-            "platt_recalibration",
-        ]
-    else:
-        p_cal_yes = float(p_raw_vector[held_idx])
-        p_cal_full = p_raw_vector if len(all_bins) > 1 else np.array([p_cal_yes], dtype=float)
-        applied = [
-            "day0_observation",
-            *coverage_validations,
-            "fresh_ens_fetch",
-            *forecast_source_validations,
-            "mc_instrument_noise",
-        ]
+    p_cal_full = p_cal_full / p_cal_sum
+    p_cal_yes = float(p_cal_full[held_idx])
+    cal = None
+    cal_level = 4
+    applied = [
+        "day0_observation",
+        *coverage_validations,
+        "fresh_ens_fetch",
+        *forecast_source_validations,
+        "mc_instrument_noise",
+        "honest_raw_vector_normalization",
+    ]
 
     member_extrema = extrema.mins if temperature_metric.is_low() else extrema.maxes
     if member_extrema is None:
