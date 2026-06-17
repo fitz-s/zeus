@@ -1,14 +1,15 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-17; last_reused=2026-06-17
 # Reuse: Run with pytest; update if bayes_precision_fusion fusion, materializer wiring, or flag-gate semantics change.
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-06-17
 # Purpose: Protect the replacement_forecast_materializer wiring of the flag-gated BAYES_PRECISION_FUSION-Bayes
 #   multi-model fusion. (a) flag-OFF materialized posterior BYTE-IDENTICAL to today (hash
 #   unchanged); (b) flag-ON: the fused mu*/sigma REPLACE the single-anchor center/spread and the
 #   written q changes + the fused product gets its OWN EMOS cell identity (F6); (c) FAIL-SOFT: a
 #   dropped global -> fusion uses remaining; all extras absent -> anchor fallback (byte-identical),
-#   no crash; (d) regional gate: icon_d2 in-polygon enters, Moscow out-of-polygon ABSENT, dedup
-#   drops icon_seamless. The capture's live fetch + walk-forward history are injected (no network).
+#   no crash; (d) regional gate: icon_d2 in-polygon enters, Moscow out-of-polygon ABSENT;
+#   icon_seamless never appears in used_models (removed from candidate set 2026-06-17).
+#   The capture's live fetch + walk-forward history are injected (no network).
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 integration; BAYES_PRECISION_FUSION_PROOF_RESULT.md; src/forecast/bayes_precision_fusion.py.
 """Replacement_0_1 BAYES_PRECISION_FUSION-Bayes fusion materializer-wiring tests."""
 
@@ -329,7 +330,7 @@ def test_flag_on_capture_exception_is_failsoft(monkeypatch) -> None:
 
 
 # =====================================================================================
-# (d) regional gate: icon_d2 in-polygon enters; Moscow ABSENT; dedup drops icon_seamless
+# (d) regional gate: icon_d2 in-polygon enters; Moscow ABSENT; icon_seamless never present
 # =====================================================================================
 def test_flag_on_icon_d2_enters_in_paris_polygon(monkeypatch) -> None:
     _disable_other_layers(monkeypatch)
@@ -371,21 +372,16 @@ def test_flag_on_icon_d2_absent_in_moscow_zero_leak(monkeypatch) -> None:
     assert "icon_d2" in prov["excluded_regionals"]
 
 
-def test_flag_on_dedup_drops_icon_seamless(monkeypatch) -> None:
+def test_flag_on_icon_seamless_never_in_used_models(monkeypatch) -> None:
+    # RED-ON-REVERT (2026-06-17 removal): icon_seamless must NEVER appear in used_models or
+    # dropped_aliases — it was removed from the candidate set entirely and is no longer fetched.
+    # Even if a stray icon_seamless value reaches the live_fetch mock, select_models ignores it.
     _disable_other_layers(monkeypatch)
     _enable_flag(monkeypatch)
-    # icon_seamless fetched, but bit-identical history to icon_d2 -> deduped.
     monkeypatch.setattr(mod._replacement_bayes_precision_fusion_override, "_live_fetch",
                         _make_live_fetch({"ukmo_global_deterministic_10km": 23.0, "icon_eu": 23.2,
-                                          "icon_d2": 23.1, "icon_seamless": 23.1}), raising=False)
-    hist = _make_history(["ecmwf_ifs", "ukmo_global_deterministic_10km", "icon_eu"])
-    # icon_d2 and icon_seamless share an IDENTICAL forecast series (alias).
-    shared = ModelHistory(model="icon_d2", forecast_values=tuple(20.0 + 0.1 * i for i in range(30)),
-                          settlement_values=tuple(20.0 + 0.0 * i for i in range(30)))
-    hist["icon_d2"] = shared
-    hist["icon_seamless"] = ModelHistory(model="icon_seamless",
-                                         forecast_values=shared.forecast_values,
-                                         settlement_values=shared.settlement_values)
+                                          "icon_d2": 23.1}), raising=False)
+    hist = _make_history(["ecmwf_ifs", "ukmo_global_deterministic_10km", "icon_eu", "icon_d2"])
 
     def _provider(*, city, metric, lead_days, target_date, models):
         return {m: hist[m] for m in models if m in hist}
@@ -393,11 +389,15 @@ def test_flag_on_dedup_drops_icon_seamless(monkeypatch) -> None:
     monkeypatch.setattr(mod._replacement_bayes_precision_fusion_override, "_history_provider", _provider, raising=False)
     conn = _conn()
     _seed_current_single_runs(conn, live_values={"ukmo_global_deterministic_10km": 23.0, "icon_eu": 23.2,
-                                                 "icon_d2": 23.1, "icon_seamless": 23.1})
+                                                 "icon_d2": 23.1})
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
-    assert "icon_seamless" in prov["dropped_aliases"]
-    assert "icon_seamless" not in prov["used_models"]
+    assert "icon_seamless" not in prov["used_models"], (
+        "icon_seamless was removed from candidate set (2026-06-17) — must never appear in used_models"
+    )
+    assert "icon_seamless" not in prov.get("dropped_aliases", []), (
+        "icon_seamless was removed from candidate set — it cannot appear even as a dropped alias"
+    )
     assert "icon_d2" in prov["used_models"]
 
 

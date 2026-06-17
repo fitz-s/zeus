@@ -1,9 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-17
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (fail-soft multi-model live capture), §4 algorithm
 #   step (1) eligible / (4) EB bias-correct; §7 antibodies (source-disagreement, lowN). The
 #   capture reuses the existing Open-Meteo single-runs fetch pattern
 #   (openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload) per model.
+#   2026-06-17: icon_seamless removed from OPENMETEO_MODEL_IDS and candidate_models — it was
+#   the alias-dedup probe (bit-identical to icon_d2). No longer fetched or fused.
 """F1 — fail-soft multi-model live capture for the BAYES_PRECISION_FUSION-Bayes fusion.
 
 Fetches the decorrelated globals (gfs_global, icon_global, gem_global, jma_seamless, icon_eu)
@@ -107,14 +109,14 @@ def _available_after_decision(
 # Open-Meteo model ids for the single-runs forecast endpoint. icon_eu is OM's `icon_eu`;
 # icon_global / icon_d2 are OM model ids; the France AROME-HD model is OM
 # `meteofrance_arome_france_hd`. (2026-06-17: gfs_global/gem_global/jma_seamless were DROPPED from
-# the fusion — their forward entries are removed; `.get(model, model)` covers any stray lookup.)
+# the fusion — their forward entries are removed; `.get(model, model)` covers any stray lookup.
+# icon_seamless was also REMOVED — it was the alias-dedup probe and contributed no decorrelated
+# information; it is no longer fetched or fused.)
 OPENMETEO_MODEL_IDS: dict[str, str] = {
     "icon_global": "icon_global",
     "icon_eu": "icon_eu",
     "icon_d2": "icon_d2",
     "meteofrance_arome_france_hd": "meteofrance_arome_france_hd",
-    # icon_seamless is fetched only to run the alias-dedup test against icon_d2.
-    "icon_seamless": "icon_seamless",
     # 2026-06-09 promotion (universality sweep P5): explicit entries so a future open-meteo id
     # rename can never silently break the identity fallback (`.get(model, model)`).
     "ncep_nbm_conus": "ncep_nbm_conus",
@@ -326,13 +328,13 @@ def capture_bayes_precision_instruments(
     model_available_at: Mapping[str, str | datetime | None] | None = None,
     apply_grid_representativeness: bool = False,
 ) -> BayesPrecisionFusionCaptureResult:
-    """F1 — fetch the extras fail-soft, EB-correct, gate, dedup, and build fusion inputs.
+    """F1 — fetch the extras fail-soft, EB-correct, gate, and build fusion inputs.
 
     ``anchor_z_corrected`` is the already-EB-corrected 0.1 anchor center the materializer already
     has (the soft-anchor anchor_value_c minus its EB shift); the capture pairs it with the
     anchor's walk-forward residual std to form the prior. The decorrelated globals + in-polygon
     regionals are fetched live (fail-soft), EB-corrected from their own histories, gated by the
-    polygon (regionals) and deduped (icon_seamless==icon_d2), then emitted as ModelInstruments.
+    polygon (regionals), then emitted as ModelInstruments.
 
     ARRIVAL GUARD (C1-AVAIL-CLOCK, 2026-06-16): ``decision_utc`` + ``model_available_at`` add a
     pre-fusion honesty gate — an extra whose honest source_available_at is in the FUTURE relative to
@@ -351,7 +353,8 @@ def capture_bayes_precision_instruments(
     fetch_fn = live_fetch or _default_live_fetch
     availability = dict(model_available_at or {})
 
-    candidate_models = list(GLOBAL_LIKELIHOOD_MODELS) + list(REGIONAL_MODELS) + ["icon_seamless"]
+    # 2026-06-17: icon_seamless removed — it was the alias-dedup probe, not a decorrelated source.
+    candidate_models = list(GLOBAL_LIKELIHOOD_MODELS) + list(REGIONAL_MODELS)
 
     # ---- fail-soft per-model live capture ----
     present_values: dict[str, float] = {}
@@ -425,17 +428,9 @@ def capture_bayes_precision_instruments(
             pooled.extend(h.residuals)
     parent_bias = (sum(pooled) / len(pooled)) if pooled else 0.0
 
-    # ---- alias dedup series (recent residual/value series for icon_seamless vs icon_d2) ----
-    alias_series: dict[str, Sequence[float]] = {}
-    for m in ("icon_d2", "icon_seamless"):
-        h = histories.get(m)
-        if h and h.forecast_values:
-            alias_series[m] = list(h.forecast_values)
-
     selection = select_models(
         present_models=present_values,
         lat=latitude, lon=longitude, lead_days=lead_days,
-        alias_series=alias_series or None,
     )
 
     # ---- EB-correct + build instruments for the SELECTED set (globals then regionals) ----

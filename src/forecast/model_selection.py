@@ -1,15 +1,17 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
-# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (source identities, DEDUP icon_seamless==icon_d2),
-#   §4 algorithm steps (1) eligible / (2) provider reps / (3) alias dedup, §7 antibodies
-#   ("regional-outside-domain (polygon)", "icon_seamless==icon_d2 (alias dedup)"); F4.
+# Last reused or audited: 2026-06-17
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (source identities), §4 algorithm steps
+#   (1) eligible / (2) provider reps, §7 antibodies ("regional-outside-domain (polygon)"); F4.
 #   BAYES_PRECISION_FUSION_PROOF_RESULT.md: regional SHADOW-ONLY/DEFER, polygon tightened (open question #3).
-"""F4 model selection — decorrelated provider reps, alias dedup, regional polygon gate.
+#   2026-06-17: icon_seamless REMOVED from candidate set — it was the alias-dedup probe (bit-
+#   identical to icon_d2 inside the EU nest). The probe is no longer needed because icon_seamless
+#   is simply never fetched or fused; dropped_aliases will always be empty.
+"""F4 model selection — decorrelated provider reps, regional polygon gate.
 
 THE STRUCTURAL ANTIBODIES (Fitz #1: K structural decisions, not N if-statements):
 
   1. DECORRELATED PROVIDER REPS — ONE representative per physical provider family
-     (spec §4 step 2): ECMWF anchor + GFS(NOAA) + DWD-ICON + GEM(CMC) + JMA. Each is a
+     (spec §4 step 2): ECMWF anchor + GFS(NOAA) + DWD-ICON + GEM(CMC) + UKMO. Each is a
      structurally-decorrelated error source; the fusion's Sigma down-weights residual
      correlation, but we never feed two reps of the SAME provider as if independent.
      The DWD/ICON family in particular ships THREE instruments — icon_d2 (2km EU nest),
@@ -20,11 +22,7 @@ THE STRUCTURAL ANTIBODIES (Fitz #1: K structural decisions, not N if-statements)
      This makes the DWD-family triple-count CATEGORY impossible (BLOCKER 9), not just the
      one Paris instance.
 
-  2. ALIAS DEDUP — icon_seamless is BIT-IDENTICAL to icon_d2 inside the EU nest (spec §3 /
-     proof _dedup_bit_identity). Feeding both double-counts one instrument. The dedup drops
-     icon_seamless whenever it is an alias of icon_d2 (corr > 0.995 AND mean|delta| < eps).
-
-  3. REGIONAL POLYGON GATE — icon_d2 enters ONLY inside the Central-EU polygon at lead <= 1;
+  2. REGIONAL POLYGON GATE — icon_d2 enters ONLY inside the Central-EU polygon at lead <= 1;
      arome ONLY inside the France polygon. Out-of-polygon -> ABSENT (zero-leak). The gate is
      point-in-polygon over the city settlement coordinate, composed with the runtime
      data-presence gate (a regional that is in-polygon but failed to fetch is simply dropped
@@ -133,10 +131,6 @@ UKMO_FAMILY = (UKMO_UK_MODEL, UKMO_GLOBAL_MODEL)
 #   has NO rep (structurally absent, not expected). In-domain the 2.5km nest carries the family.
 GEM_FAMILY = (GEM_HRDPS_MODEL,)
 PROVIDER_FAMILIES = (ICON_FAMILY, NCEP_FAMILY, UKMO_FAMILY, GEM_FAMILY)
-
-# Alias dedup thresholds (spec §3: corr > 0.995 AND mean|delta| < eps).
-ALIAS_CORR_THRESHOLD = 0.995
-ALIAS_MEAN_ABS_DELTA_EPS = 0.05  # degC
 
 # Which regional model each domain key in the polygon config governs.
 # icon_eu has its OWN ICON-EU 7km-nest polygon (2026-06-09 fix) — it is domain-gated like the
@@ -276,11 +270,12 @@ def is_alias(
     series_a: Sequence[float],
     series_b: Sequence[float],
     *,
-    corr_threshold: float = ALIAS_CORR_THRESHOLD,
-    mean_abs_delta_eps: float = ALIAS_MEAN_ABS_DELTA_EPS,
+    corr_threshold: float = 0.995,
+    mean_abs_delta_eps: float = 0.05,
 ) -> bool:
-    """Spec §3 alias test: two series are the same instrument iff corr > threshold AND
-    mean|delta| < eps. Used to drop icon_seamless when it is bit-identical to icon_d2."""
+    """Alias test: two series are the same instrument iff corr > threshold AND mean|delta| < eps.
+    Retained as a utility but is no longer called by select_models (icon_seamless was removed
+    from the candidate set on 2026-06-17 — the probe is no longer needed)."""
     n = min(len(series_a), len(series_b))
     if n == 0:
         return False
@@ -297,7 +292,9 @@ class SelectedModelSet:
     ``likelihood_globals``: the decorrelated global reps present today (likelihood terms).
     ``regional_experts``: in-domain regional experts that passed the polygon + lead gate.
     ``anchor_present``: whether the ecmwf_ifs 0.1 anchor (prior) is available.
-    ``dropped_aliases``: models removed by alias dedup (e.g. icon_seamless).
+    ``dropped_aliases``: models removed by alias dedup. Always empty since icon_seamless was
+        removed from the candidate set (2026-06-17) — retained so the field is present in
+        provenance JSON for callers that read it.
     ``excluded_regionals``: regionals dropped by the polygon/lead gate (out-of-domain).
     ``dropped_provider_dups``: present+otherwise-eligible models suppressed because another
         instrument of the SAME physical provider family already represents it in the fusion
@@ -330,29 +327,20 @@ def select_models(
     alias_series: Mapping[str, Sequence[float]] | None = None,
     polygons: Mapping[str, DomainPolygon] | None = None,
 ) -> SelectedModelSet:
-    """Apply §4 steps (1)-(3): eligibility, decorrelated provider reps, alias dedup, regional
-    polygon gate. ``present_models`` maps model_name -> today's value for the models that
-    successfully fetched (fail-soft drop already applied upstream). ``alias_series`` maps
-    model_name -> a short recent value series used for the icon_seamless==icon_d2 alias test.
+    """Apply §4 steps (1)-(2): eligibility, decorrelated provider reps, regional polygon gate.
+    ``present_models`` maps model_name -> today's value for the models that successfully fetched
+    (fail-soft drop already applied upstream). ``alias_series`` is accepted for caller
+    compatibility but ignored — the alias-dedup probe (icon_seamless) was removed from the
+    candidate set on 2026-06-17 and is never present.
 
     Selection order is deterministic (spec order) so the EMOS model_set_hash is stable.
     """
     present = set(present_models)
-    series = dict(alias_series or {})
 
     anchor_present = ANCHOR_MODEL in present
 
-    # ---- alias dedup: drop icon_seamless when it is an alias of icon_d2 ----
+    # dropped_aliases is always empty (icon_seamless removed from candidate set 2026-06-17).
     dropped_aliases: list[str] = []
-    if "icon_seamless" in present:
-        d2_series = series.get("icon_d2")
-        seam_series = series.get("icon_seamless")
-        if d2_series is not None and seam_series is not None and is_alias(d2_series, seam_series):
-            dropped_aliases.append("icon_seamless")
-        elif "icon_d2" in present and d2_series is None and seam_series is None:
-            # No series to test, but both present and spec declares them bit-identical in EU
-            # -> conservatively dedup (never double-count the DWD-EU regional rep).
-            dropped_aliases.append("icon_seamless")
 
     # ---- regional polygon + lead gate (run FIRST: an in-domain regional becomes its provider
     #      family's representative, so its eligibility decides which globals it suppresses) ----

@@ -1,14 +1,15 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: F4 regional polygon gate + alias dedup — icon_d2 in-polygon ENTERS; out-of-polygon cities ABSENT; arome France-only; dedup drops icon_seamless; lead>1 excludes regional.
-# Reuse: Run with pytest; update if domain polygons, alias map, or regional eligibility logic in model_selection change.
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-17; last_reused=2026-06-17
+# Purpose: F4 regional polygon gate — icon_d2 in-polygon ENTERS; out-of-polygon cities ABSENT;
+#   arome France-only; lead>1 excludes regional; icon_seamless NEVER in candidate set.
+# Reuse: Run with pytest; update if domain polygons or regional eligibility logic in model_selection change.
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
-# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (DEDUP icon_seamless==icon_d2), §4 selection,
-#   §7 antibodies (regional-outside-domain polygon; alias dedup). BAYES_PRECISION_FUSION_PROOF_RESULT.md:
-#   "icon_d2 used ONLY at in-box cities; Moscow 0/0; icon_seamless in 0/27684 used_models".
+# Last reused or audited: 2026-06-17
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §4 selection, §7 antibodies
+#   (regional-outside-domain polygon). BAYES_PRECISION_FUSION_PROOF_RESULT.md:
+#   "icon_d2 used ONLY at in-box cities; Moscow 0/0; icon_seamless removed from candidate set 2026-06-17".
 # Purpose: REGIONAL GATE proof. icon_d2 in-polygon ENTERS; Moscow out-of-polygon ABSENT
-#   (zero-leak); arome only inside France; dedup drops icon_seamless; lead>1 excludes regional.
-"""F4 regional polygon gate + alias dedup tests."""
+#   (zero-leak); arome only inside France; lead>1 excludes regional.
+"""F4 regional polygon gate tests."""
 
 from __future__ import annotations
 
@@ -163,20 +164,34 @@ def test_select_models_moscow_out_of_domain_no_regional() -> None:
     assert "icon_d2" not in sel.used_models
 
 
-def test_select_models_dedups_icon_seamless_against_icon_d2() -> None:
-    # icon_seamless bit-identical to icon_d2 -> dropped; never enters used_models.
-    d2 = [4.2, 5.1, 3.3, 6.0, 2.8, 4.4, 5.5]
-    seam = list(d2)  # bit-identical
+def test_icon_seamless_never_in_candidate_set() -> None:
+    # RED-ON-REVERT (2026-06-17 icon_seamless removal): icon_seamless must NEVER appear in
+    # used_models, regional_experts, or likelihood_globals regardless of what is passed in
+    # present_models. It is not a member of GLOBAL_LIKELIHOOD_MODELS or REGIONAL_MODELS.
+    # If someone re-adds it, this test goes RED.
+    from src.data.bayes_precision_fusion_download import BAYES_PRECISION_FUSION_EXTRA_MODELS
+    from src.forecast.model_selection import GLOBAL_LIKELIHOOD_MODELS, REGIONAL_MODELS
+
+    assert "icon_seamless" not in GLOBAL_LIKELIHOOD_MODELS, (
+        "icon_seamless was removed from GLOBAL_LIKELIHOOD_MODELS (2026-06-17 alias-dedup removal)"
+    )
+    assert "icon_seamless" not in REGIONAL_MODELS, (
+        "icon_seamless was never in REGIONAL_MODELS and must not be re-added"
+    )
+    assert "icon_seamless" not in BAYES_PRECISION_FUSION_EXTRA_MODELS, (
+        "icon_seamless was removed from BAYES_PRECISION_FUSION_EXTRA_MODELS (2026-06-17)"
+    )
+    # Even if a stray value appears in present_models, select_models must never emit it.
     present = {
-        "ecmwf_ifs": 4.7, "gfs_global": 5.1, "icon_eu": 4.1,
-        "icon_d2": 4.2, "icon_seamless": 4.2,
+        "ecmwf_ifs": 4.7, "icon_eu": 4.1, "icon_global": 3.7,
+        "icon_d2": 4.2, "icon_seamless": 4.2,  # stray — must be ignored
     }
     sel = select_models(
         present_models=present, lat=PARIS[0], lon=PARIS[1], lead_days=1,
-        alias_series={"icon_d2": d2, "icon_seamless": seam},
     )
-    assert "icon_seamless" in sel.dropped_aliases
     assert "icon_seamless" not in sel.used_models
+    assert "icon_seamless" not in sel.likelihood_globals
+    assert "icon_seamless" not in sel.regional_experts
     assert "icon_d2" in sel.regional_experts
 
 

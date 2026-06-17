@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-06-17
 # Authority basis: Task #32 (operator 2026-06-11) — PARTIAL-fusion upgrade trigger. Relationship
 #   pins for the SINGLE instrument-set comparison + the idempotency bound:
 #     - a posterior fused from {A,B} with capture later containing {A,B,C} for the SAME cycle ⇒
@@ -25,12 +25,13 @@ from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
 
 UTC = timezone.utc
 
-# Representative model per provider family used in the fixtures. icon_seamless / ecmwf_ifs are
-# deliberately NOT decorrelated providers (alias-dedup / anchor) — a fixture using them proves the
-# comparison ignores them. 2026-06-17: the NCEP/CMC reps are the high-res nests (gfs_hrrr 3km /
-# gem_hrdps 2.5km) — the coarse globals gfs_global/gem_global AND jma_seamless were dropped and are
-# no longer family members (decorrelated_provider_families_of ignores them). The contract is now
-# the 4 families {NCEP, DWD, CMC, UKMO}.
+# Representative model per provider family used in the fixtures. ecmwf_ifs is deliberately NOT
+# a decorrelated provider (anchor/prior) — a fixture using it proves the comparison ignores it.
+# icon_seamless was the alias-dedup probe and was removed from the candidate set entirely on
+# 2026-06-17 (it also contributed no family). 2026-06-17: the NCEP/CMC reps are the high-res
+# nests (gfs_hrrr 3km / gem_hrdps 2.5km) — the coarse globals gfs_global/gem_global AND
+# jma_seamless were dropped and are no longer family members. The contract is now 4 families
+# {NCEP, DWD, CMC, UKMO}.
 _NCEP = "gfs_hrrr"
 _DWD = "icon_global"
 _CMC = "gem_hrdps_continental"
@@ -97,7 +98,7 @@ def test_smaller_set_with_new_instrument_signals_exactly_one_upgrade() -> None:
     # Posterior fused from {NCEP, DWD} (a 2-family served set).
     _insert_posterior(
         conn, city="Testville", target_date="2026-06-13", metric="high", cycle_iso=cyc,
-        used_models=["ecmwf_ifs", _NCEP, _DWD, "icon_seamless"], computed_at="2026-06-12T10:00:00+00:00",
+        used_models=["ecmwf_ifs", _NCEP, _DWD], computed_at="2026-06-12T10:00:00+00:00",
     )
     # Capture for the SAME cycle now offers {NCEP, DWD, CMC} — CMC (a NEW family) just landed.
     _insert_single_runs(
@@ -331,10 +332,15 @@ def test_marker_unique_bounds_enqueue_to_once_per_superset_transition() -> None:
     assert conn.total_changes - before == 1, "a strictly larger superset is a new transition"
 
 
-def test_provider_family_mapping_excludes_anchor_alias_and_dropped_jma() -> None:
-    """The ECMWF anchor (prior) and icon_seamless (alias-dedup probe) are NOT decorrelated
-    providers — they must contribute no family, or served counts would be inflated. 2026-06-17:
-    jma_seamless was DROPPED, so it too must map to NO family (a stray jma row must never count)."""
+def test_provider_family_mapping_excludes_anchor_and_dropped_models() -> None:
+    """The ECMWF anchor (prior) is NOT a decorrelated provider — it must contribute no family.
+    icon_seamless was removed from the candidate set entirely (2026-06-17 alias-dedup removal),
+    but any stray row in provenance must still map to no family (it was never in DECORRELATED_PROVIDER_FAMILIES).
+    jma_seamless was DROPPED (2026-06-17), so stray jma rows must also map to no family."""
+    assert decorrelated_provider_families_of({"ecmwf_ifs"}) == frozenset()
+    assert decorrelated_provider_families_of({"icon_seamless"}) == frozenset(), (
+        "icon_seamless was removed from the candidate set (2026-06-17) — stray rows must contribute no family"
+    )
     assert decorrelated_provider_families_of({"ecmwf_ifs", "icon_seamless"}) == frozenset()
     assert decorrelated_provider_families_of({"jma_seamless"}) == frozenset(), (
         "jma_seamless was dropped from the fusion — it is no longer a decorrelated provider family"

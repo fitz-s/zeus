@@ -14,9 +14,10 @@
 
 For each current-target (city, metric, target_date, lead) x the extra Open-Meteo models
 (decorrelated globals icon_global/ukmo_global + icon_eu + the domain-gated CONUS/N-America nests
-ncep_nbm/gfs_hrrr/gem_hrdps + in-domain regionals icon_d2/arome/ukmo_uk + icon_seamless for
-alias-dedup), this job: (2026-06-17: the coarse globals gfs_global 25km / gem_global 15km AND the
-settlement-cold jma_seamless were DROPPED from the fusion, so they are no longer fetched here.)
+ncep_nbm/gfs_hrrr/gem_hrdps + in-domain regionals icon_d2/arome/ukmo_uk), this job:
+(2026-06-17: the coarse globals gfs_global 25km / gem_global 15km, the settlement-cold
+jma_seamless, AND the alias-dedup probe icon_seamless were all DROPPED from the fusion; they are
+no longer fetched here.)
 
   (1) FORWARD single_runs fetch  — today's current-target value at the fixed cycle (live capture
       for replay; SPEC §3 single-runs identity). REUSES bayes_precision_fusion_capture._default_live_fetch.
@@ -126,6 +127,9 @@ OPENMETEO_PREVIOUS_RUNS_SOURCE_ID: dict[str, str] = {
     "jma_seamless": "jma_previous_runs",
     "icon_d2": "icon_d2_previous_runs",
     "meteofrance_arome_france_hd": "arome_previous_runs",
+    # icon_seamless was REMOVED 2026-06-17 (alias-dedup probe, no longer fetched). The previous-
+    # runs routing entry is retained so any remaining history rows resolve their product-identity
+    # (they age out under the 180d retention). Not a forward-fetch surface.
     "icon_seamless": "icon_d2_previous_runs",
     # 2026-06-17 PRECISION-INPUT FIX: high-res CONUS / N-America regional experts. The OM
     # previous-runs API serves both under their single-runs id (curl-verified 2026-06-17), so the
@@ -252,15 +256,13 @@ def _bayes_precision_fusion_product_identity(model: str, endpoint: str, target: 
 # the posterior is stuck at EQUAL_WEIGHT forever (the prior is never formed). The anchor is the
 # FIRST element so its row provenance is unambiguous in the candidate ordering.
 #
-# The full capture set: anchor (prior) + globals + icon_eu (likelihood) + in-domain regionals
-# + the alias-dedup probe (icon_seamless). icon_seamless is captured only so the fusion's
-# alias-dedup test has both series; it is dropped from the fused Sigma downstream (never
-# double-counts icon_d2).
+# The full capture set: anchor (prior) + globals + icon_eu (likelihood) + in-domain regionals.
+# 2026-06-17: icon_seamless was REMOVED — it was the alias-dedup probe (bit-identical to icon_d2,
+# contributing no decorrelated information); it is no longer fetched or fused.
 BAYES_PRECISION_FUSION_EXTRA_MODELS: tuple[str, ...] = (
     (ANCHOR_MODEL,)
     + tuple(GLOBAL_LIKELIHOOD_MODELS)
     + tuple(REGIONAL_MODELS)
-    + ("icon_seamless",)
 )
 
 # CANDIDATE-ACCRUAL LANE (2026-06-09 regional survey /tmp/uncovered_cities_regional_report.md,

@@ -47,12 +47,13 @@ UTC = timezone.utc
 SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
 
 # THE single authority mapping model -> decorrelated provider family. Mirrors exactly the
-# materializer's per-provider check (replacement_forecast_materializer lines ~1012-1024): the 5
+# materializer's per-provider check (replacement_forecast_materializer lines ~1012-1024): the
 # physical providers each contribute ONE representative to the fusion, and a family is "served"
-# when ANY of its members is in the fused set. icon_seamless / the ECMWF anchor are intentionally
-# NOT here: the anchor is the PRIOR (not a decorrelated likelihood provider) and icon_seamless is
-# the alias-dedup probe (dropped from the fused Sigma, never a provider). The materializer imports
-# DECORRELATED_PROVIDER_FAMILIES so the two sites can never drift on what counts as a provider.
+# when ANY of its members is in the fused set. The ECMWF anchor is intentionally NOT here: it is
+# the PRIOR (not a decorrelated likelihood provider). icon_seamless was also NOT here and has since
+# been removed from the candidate set entirely (2026-06-17 — it was the alias-dedup probe, not a
+# provider). The materializer imports DECORRELATED_PROVIDER_FAMILIES so the two sites can never
+# drift on what counts as a provider.
 # 2026-06-17 COARSE-GLOBAL REMOVAL: the 0.25°/25km gfs_global and ~15km gem_global are dropped
 # from the fusion (model_selection.DECORR_GLOBALS), so they are no longer family members here.
 # NCEP is now repped ONLY by its CONUS nests (gfs_hrrr 3km / ncep_nbm ~13km) and CMC ONLY by the
@@ -125,8 +126,9 @@ def expected_provider_families_for_city(lat: float, lon: float, lead_days: int) 
 def decorrelated_provider_families_of(models: "set[str] | frozenset[str] | tuple[str, ...]") -> frozenset[str]:
     """Return the set of decorrelated provider families REPRESENTED by ``models``.
 
-    A family is present iff ANY of its member models is in ``models``. The ECMWF anchor and
-    icon_seamless contribute no family (prior / alias-dedup), so they never inflate the count.
+    A family is present iff ANY of its member models is in ``models``. The ECMWF anchor
+    contributes no family (prior), and icon_seamless was removed from the candidate set
+    (2026-06-17 — alias-dedup probe), so stray icon_seamless values never inflate the count.
     """
     present: set[str] = set()
     for family, members in DECORRELATED_PROVIDER_FAMILIES.items():
