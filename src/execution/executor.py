@@ -534,11 +534,19 @@ def _refresh_exit_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> di
     )
 
 
-def _assert_collateral_allows_sell(token_id: str, shares: float) -> dict:
+def _assert_collateral_allows_sell(
+    token_id: str,
+    shares: float,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> dict:
     """Fail before command persistence or SDK contact when CTF inventory is insufficient."""
-    from src.state.collateral_ledger import assert_sell_preflight
+    from src.state.collateral_ledger import CollateralLedger, assert_sell_preflight
 
-    assert_sell_preflight(token_id, shares)
+    if conn is not None:
+        CollateralLedger(conn).sell_preflight(token_id=token_id, size=shares)
+    else:
+        assert_sell_preflight(token_id, shares)
     return _capability_component("collateral_ledger", collateral="CTF", token_id=token_id, shares=shares)
 
 
@@ -2452,7 +2460,7 @@ def execute_exit_order(
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
         collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(conn)
-        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares)
+        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares, conn=conn)
 
         # -------------------------------------------------------------------
         # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).

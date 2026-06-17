@@ -111,6 +111,7 @@ def check_sell_collateral(
     clob,
     *,
     token_id: str = "",
+    conn: sqlite3.Connection | None = None,
 ) -> tuple[bool, Optional[str]]:
     """Verify CTF outcome-token inventory for a sell.
 
@@ -118,7 +119,12 @@ def check_sell_collateral(
     """
     if token_id:
         try:
-            assert_sell_preflight(token_id, shares)
+            if conn is not None:
+                from src.state.collateral_ledger import CollateralLedger
+
+                CollateralLedger(conn).sell_preflight(token_id=token_id, size=shares)
+            else:
+                assert_sell_preflight(token_id, shares)
             return True, None
         except CollateralInsufficient as exc:
             return False, str(exc)

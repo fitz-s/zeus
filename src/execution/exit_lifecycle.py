@@ -1273,6 +1273,7 @@ def _execute_live_exit(
         position.effective_shares,
         clob,
         token_id=token_id,
+        conn=conn,
     )
     if not can_sell:
         retry_reason = f"{exit_context.exit_reason} [COLLATERAL: {collateral_reason}]"

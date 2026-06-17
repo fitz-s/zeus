@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+_CTF_SCALE = 1_000_000
+
 
 def _patch(monkeypatch, refresh_side_effect):
     import src.execution.executor as ex  # noqa: F401  (imported for the function under test)
@@ -117,6 +119,71 @@ def test_exit_refresh_wrapper_retries_transient_lock(monkeypatch):
     assert calls["n"] == 2
     assert out["allowed"] is True
     assert out["details"]["action"] == "exit_submit"
+
+
+def test_exit_sell_preflight_uses_refreshed_submit_connection_snapshot():
+    from src.execution.collateral import check_sell_collateral
+    from src.execution.executor import _assert_collateral_allows_sell
+    from src.state.collateral_ledger import (
+        CollateralLedger,
+        CollateralSnapshot,
+        configure_global_ledger,
+    )
+
+    token_id = "exit-token-001"
+    stale_conn = sqlite3.connect(":memory:")
+    stale_conn.row_factory = sqlite3.Row
+    submit_conn = sqlite3.connect(":memory:")
+    submit_conn.row_factory = sqlite3.Row
+
+    stale_ledger = CollateralLedger(stale_conn)
+    stale_ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=0,
+            pusd_allowance_micro=0,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime(2026, 6, 16, tzinfo=timezone.utc),
+            authority_tier="CHAIN",
+        )
+    )
+    fresh_ledger = CollateralLedger(submit_conn)
+    fresh_ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=0,
+            pusd_allowance_micro=0,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={token_id: 10 * _CTF_SCALE},
+            ctf_token_allowances={token_id: 10 * _CTF_SCALE},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime.now(timezone.utc),
+            authority_tier="CHAIN",
+        )
+    )
+
+    configure_global_ledger(stale_ledger)
+    try:
+        can_sell, reason = check_sell_collateral(
+            entry_price=0.50,
+            shares=5.0,
+            clob=object(),
+            token_id=token_id,
+            conn=submit_conn,
+        )
+        assert can_sell is True
+        assert reason is None
+
+        out = _assert_collateral_allows_sell(token_id, 5.0, conn=submit_conn)
+        assert out["allowed"] is True
+        assert out["details"]["token_id"] == token_id
+    finally:
+        configure_global_ledger(None)
+        stale_conn.close()
+        submit_conn.close()
 
 
 def test_genuine_insufficiency_does_not_retry(monkeypatch):
