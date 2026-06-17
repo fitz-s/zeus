@@ -2465,6 +2465,10 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # --- _receipt_money_path_blocker terminal bases (reactor.py) ---
     "EDLI_REAL_ORDER_SIDE_EFFECT_FORBIDDEN",
     "EDLI_REAL_ORDER_SUBMIT_DISABLED",
+    # Duplicate active live order suppression is a correct final disposition for
+    # this event: the existing live order owns the family until it fills/cancels.
+    # Requeueing the same event only clogs the redecision lane.
+    "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED",
     "TRADE_SCORE_BLOCKED",
     "EDLI_KELLY_PROOF_MISSING",
     "EDLI_KELLY_COST_BASIS_MISSING",
