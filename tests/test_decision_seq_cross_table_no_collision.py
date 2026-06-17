@@ -36,6 +36,7 @@ from src.state.no_trade_events import (
 )
 SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 from src.state.schema.no_trade_events_schema import (
+    _RECEIPT_SPINE_COLUMN_DEFS,
     ensure_table as ensure_no_trade_events_table,
     migrate_no_trade_events_schema,
 )
@@ -434,19 +435,37 @@ class TestCrossTableDecisionSeqNoCollision:
         self,
         tmp_path: Path,
     ) -> None:
-        """Runtime schema ensure must not DROP/ALTER/RENAME a stale table."""
+        """Runtime schema ensure must not DESTRUCTIVELY rebuild a stale table.
+
+        Stage 0 (2026-06-14) made ``ensure_table`` additively ADD the NULLABLE
+        receipt-spine columns to a pre-Stage-0 table (non-destructive ALTER ADD COLUMN —
+        see ``_ensure_receipt_spine_columns``). The hot-path safety property is therefore
+        NO DESTRUCTIVE REBUILD: the table is not dropped/recreated (rootpage stable), no
+        pre-existing column is removed, and the only additions are the known spine columns.
+        Byte-identical schema was the pre-Stage-0 contract and no longer holds.
+        """
 
         _, conn = _make_v20_world_db_with_compatibility_column(tmp_path)
-        before_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
+        before_rootpage = conn.execute(
+            "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
         ).fetchone()[0]
+        before_cols = {r["name"] for r in conn.execute("PRAGMA table_info(no_trade_events)")}
 
         ensure_no_trade_events_table(conn)
 
-        after_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
+        after_rootpage = conn.execute(
+            "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='no_trade_events'"
         ).fetchone()[0]
-        assert after_sql == before_sql
+        after_cols = {r["name"] for r in conn.execute("PRAGMA table_info(no_trade_events)")}
+        spine_cols = {name for name, _ in _RECEIPT_SPINE_COLUMN_DEFS}
+
+        assert after_rootpage == before_rootpage, (
+            "ensure must not rebuild the table on the hot path (rootpage changed)"
+        )
+        assert before_cols <= after_cols, "ensure must not drop a pre-existing column"
+        assert (after_cols - before_cols) <= spine_cols, (
+            f"ensure added non-spine columns: {(after_cols - before_cols) - spine_cols}"
+        )
         with pytest.raises(NoTradeEventsSchemaCompatibilityError):
             assert_no_trade_events_schema_current_for_live(
                 conn,
