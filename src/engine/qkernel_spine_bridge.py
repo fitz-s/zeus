@@ -47,24 +47,25 @@ selected proof still flows through the reactor's downstream submit-time re-proof
 
 DRIFT RESOLVED (recorded per operator law — see impl_w5b_integration.md §"Input mapping"):
 
-  * The VALIDATED belief authority runs at the seam. The spine builds the ONE
-    predictive distribution via the REAL ``PredictiveDistributionBuilder`` —
-    ``build_center`` (envelope-locked) + ``build_sigma`` (realized-floor) — over the
-    reactor's chain-of-record-DEBIASED members (threaded under
-    ``_edli_spine_debiased_members_native`` by the Stage-0 producer). This is the
-    ARM-replay-validated center+σ (center PROVEN, σ honest std(z)=0.93; see
-    docs/rebuild/arm_replay_report.md), NOT the reactor's legacy served mu*/σ. The
-    reactor's served mu*/σ are the LEGACY EMOS/replacement values being replaced — they
-    are no longer used for belief. De-bias is a no-op at the seam (``_NoOpDebiasAuthority``):
-    the chain-of-record per-model de-bias already ran upstream (the single correct
-    de-bias; the contaminating EDLI lane is OFF), and the reactor does not thread the
-    member provenance the real ``DebiasAuthority`` would need to safely re-run here —
-    so the seam applies NO further shift (no double-de-bias). Wiring the full
-    ``DebiasAuthority`` on RAW members with provenance is a follow-up that only changes
-    behavior where a per-city artifact would diverge from the already-validated
-    chain-of-record debias. If the reactor served no debiased members at all (the
-    threaded inputs are absent — a genuine reconstruction gap), the bridge returns a
-    TYPED no-trade (``SPINE_INPUTS_UNAVAILABLE``) rather than fabricating a center.
+  * The belief authority runs at the seam. The spine builds the ONE predictive
+    distribution via the REAL ``PredictiveDistributionBuilder`` — ``build_center``
+    (envelope-locked) + ``build_sigma`` (realized-floor) — over the members threaded
+    under ``_edli_spine_debiased_members_native`` by the Stage-0 producer. POST-FIX
+    REALITY (spine-source rewire 2026-06-16): those members are the RAW MULTI-MODEL
+    member envelope sourced from ``raw_model_forecasts`` (~7-13 decorrelated NWP
+    providers, latest cycle per model) — the SAME source the ARM/settlement-EV replay
+    validates (``fresh_members_at_cycle``). They are RAW, NOT chain-of-record-debiased:
+    settlement-residual de-bias is applied at the seam ONLY when
+    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` (a follow-up flip; see the de-bias seam below),
+    else ``_NoOpDebiasAuthority`` applies ZERO shift and ``raw == debiased``. The center
+    this ships is therefore the RAW multi-model center (~-0.39 settlement-residual bias,
+    matching the replay BEFORE de-bias), NOT a de-biased ~0 center — enabling the flag is
+    the separate deploy step that reaches the fully-validated debiased center. These
+    members are the validated multi-model envelope, NOT the reactor's legacy served
+    mu*/σ (the LEGACY EMOS/replacement values are no longer used for belief). If the
+    producer stashed no members at all (the threaded inputs are absent — e.g. <3 fresh
+    models on the causal cycle), the bridge returns a TYPED no-trade
+    (``SPINE_INPUTS_UNAVAILABLE``) rather than fabricating a center.
 
   * The spine's ``family_book`` step consumes ``ExecutableMarketSnapshot`` per
     sibling keyed by bin_id. The reactor's per-family decision seam holds the
@@ -170,16 +171,17 @@ SPINE_BAND_DRAWS: Optional[int] = None
 # ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` the bridge uses ``_NoOpDebiasAuthority`` and
 # live behavior is unchanged (no restart-time behavior change from this commit).
 #
-# PROVENANCE CAVEAT for the live enable (orchestrator deploy decision): the members
-# threaded to THIS seam are the reactor's CHAIN-OF-RECORD-debiased members (see
-# ``build_fresh_model_set`` / ``_NoOpDebiasAuthority``), whereas the provider's
-# residuals are fit against the RAW-member consensus in zeus-forecasts.db. If the
-# upstream chain-debias already removes part of the cold bias on the live members,
-# enabling this seam unconditionally could over-correct. The validated, no-double-
-# count path is to fit the provider's residuals against the SAME served-member
-# consensus (a follow-up that threads the served members into the residual fit).
-# The flag stays OFF until that reconciliation is done; the replay path (raw members,
-# no chain-debias) is the proven configuration this commit ships.
+# PROVENANCE (orchestrator deploy decision): POST-FIX (spine-source rewire 2026-06-16)
+# the members threaded to THIS seam are the RAW MULTI-MODEL consensus from
+# ``raw_model_forecasts`` (see ``build_fresh_model_set`` / ``_NoOpDebiasAuthority``) —
+# the SAME basis the provider's settlement residuals are fit against in
+# zeus-forecasts.db. The earlier "chain-of-record-debiased members" caveat is obsolete:
+# there is no upstream chain-debias on these served members (de-bias is OFF; raw ==
+# debiased), so enabling this seam applies the provider's settlement-residual shift to
+# RAW members fit on RAW members — the validated, no-double-count configuration. The
+# flag stays OFF in THIS commit (which ships the proven raw multi-model center, ~-0.39
+# residual bias); flipping ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` is the orchestrator's
+# separate deploy step to reach the fully-validated debiased (~0) center.
 _SPINE_SETTLE_RESID_DEBIAS_ENV = "ZEUS_SPINE_SETTLE_RESID_DEBIAS"
 
 
@@ -573,16 +575,19 @@ def _spine_inputs_missing_reason(payload: Mapping[str, Any]) -> str:
 def build_fresh_model_set(
     case: ForecastCase, served: Mapping[str, Any]
 ) -> FreshModelSet:
-    """Build a ``FreshModelSet`` from the reactor's CHAIN-OF-RECORD-DEBIASED members.
+    """Build a ``FreshModelSet`` from the served RAW MULTI-MODEL member envelope.
 
-    The values are the reactor's served ``debiased_members_native`` — the members AFTER
-    the reactor's chain-of-record per-model de-bias (the single correct de-bias;
-    diagnosis: the +1.2 chain-debias is correct, and the contaminating EDLI per-city
-    lane is OFF upstream). The VALIDATED ``build_center`` (envelope-lock) and
-    ``build_sigma`` (realized-floor) authorities then run on THESE debiased members —
-    identical to the ARM-replay-validated path — with a no-op de-bias at the seam (see
-    ``_NoOpDebiasAuthority``: no double-de-bias, no missing de-bias). Falls back to the
-    raw array, then to ``mu_native``, only if no debiased array was threaded.
+    POST-FIX REALITY (spine-source rewire 2026-06-16): the values are the producer's
+    ``debiased_members_native``, which since the source rewire is the RAW multi-model
+    envelope from ``raw_model_forecasts`` (~7-13 decorrelated NWP providers, latest cycle
+    per model, °C→native) — the SAME member set the ARM/settlement-EV replay validates
+    (``fresh_members_at_cycle``). De-bias is OFF live, so ``raw == debiased`` (the
+    producer stashes the raw envelope into BOTH keys). The ``build_center`` (envelope-
+    lock) and ``build_sigma`` (realized-floor) authorities run on these RAW members, with
+    settlement-residual de-bias applied at the seam ONLY when
+    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` (a follow-up flip; else ``_NoOpDebiasAuthority``
+    = zero shift). Falls back to the raw array, then to ``mu_native``, only if no member
+    array was threaded.
     """
     values = served.get("debiased_members_native") or served.get("raw_members_native") or ()
     arr = np.asarray(values, dtype=float)
@@ -617,20 +622,20 @@ def build_fresh_model_set(
 
 
 class _NoOpDebiasAuthority:
-    """De-bias is a NO-OP at this live seam — the SINGLE correct de-bias already ran.
+    """De-bias is a NO-OP at this live seam by DEFAULT — no shift is applied.
 
-    The reactor's chain-of-record per-model de-bias is the one correct de-bias
-    (diagnosis: the +1.2 chain-debias is correct; the contaminating EDLI per-city lane
-    is OFF upstream). The members threaded here (``debiased_members_native``) are ALREADY
-    that debiased set, so the seam applies NO further shift. Re-running the real
-    ``DebiasAuthority`` here would need member provenance the reactor does not thread to
-    the seam (it would either no-op on synthetic provenance or, worse, double-de-bias on
-    a city/metric artifact match). The VALIDATED ``build_center`` (envelope-lock) and
-    ``build_sigma`` (realized-floor) authorities STILL run on these debiased members —
-    identical to the ARM-replay-validated belief — they just do not re-de-bias. (Wiring
-    the full ``DebiasAuthority`` on RAW members with real provenance is a follow-up that
-    only changes behavior where a per-city artifact would diverge from the chain-of-record
-    debias the diagnosis already validated as correct.)
+    POST-FIX REALITY (spine-source rewire 2026-06-16): the members threaded here are the
+    RAW multi-model envelope from ``raw_model_forecasts`` (NOT a chain-of-record-debiased
+    set; the prior claim was false). Live de-bias is OFF, so this authority applies ZERO
+    shift and ``raw == debiased``. The ``build_center`` (envelope-lock) and ``build_sigma``
+    (realized-floor) authorities run on these RAW members — reproducing the ARM-replay
+    member set BEFORE de-bias (raw multi-model center, ~-0.39 settlement-residual bias).
+    Settlement-residual de-bias is a SEPARATE, opt-in step: when
+    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` the bridge uses a per-case ``DebiasAuthority``
+    seeded with the walk-forward settlement-residual artifact instead of this no-op (see
+    ``_spine_debias_authority`` / the de-bias seam block above), which is the follow-up
+    flip that reaches the fully-validated debiased (~0) center. This no-op is the
+    DEFAULT-OFF behavior this commit ships.
     """
 
     def apply(self, case: ForecastCase, models: FreshModelSet):

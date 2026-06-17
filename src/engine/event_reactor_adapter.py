@@ -7732,36 +7732,38 @@ def _generate_candidate_proofs(
             # snapshot is the family's own bound forecast and reliably carries its member
             # envelope.
             #
-            # ROOT-CAUSE FIX (2026-06-16 MU_SIGMA_NOT_STASHED): source the row through
-            # _bound_forecast_snapshot_row_for_spine, NOT _forecast_snapshot_row_for_event.
-            # The latter additionally runs the executable-forecast READER-BLOCK trade-
-            # eligibility gate (_forecast_snapshot_reader_block_reason), which raises
-            # FORECAST_READER_* for live FORECAST_SNAPSHOT_READY families; this fail-soft
-            # except swallowed that raise → the spine got SPINE_INPUTS_UNAVAILABLE:
-            # MU_SIGMA_NOT_STASHED universally even though the bound snapshot carried a valid
-            # 51-member envelope. Trade eligibility is already owned by the live replacement
-            # authority lane; re-deciding it here just to READ members was redundant and the
-            # actual defect. The accessor keeps the same data-INTEGRITY predicates (VERIFIED /
-            # causality OK / not boundary-ambiguous / available_at ≤ decision_time / pinned to
-            # causal_snapshot_id) so this is pure input THREADING — no decision-math change.
-            _spine_snap = _bound_forecast_snapshot_row_for_spine(
+            # ROOT-CAUSE FIX (2026-06-16 COLD-CENTER / 100%-buy_no-losing-book): source the
+            # spine member envelope from the MULTI-MODEL DETERMINISTIC fusion table
+            # (raw_model_forecasts, ~7-13 decorrelated NWP providers) via
+            # _spine_multimodel_members_for_event — NOT from ensemble_snapshots.members_json
+            # (51 ecmwf_ens members). The probability authority (AGENTS.md) mandates μ* = T2
+            # Bayesian precision fusion over DECORRELATED providers, σ_pred = fusion variance —
+            # neither from the ECMWF ensemble. The strategy-of-record, the de-bias provider, AND
+            # the ARM-replay validation all use raw_model_forecasts; a 213-family settlement
+            # audit found 0/213 ensemble-vs-multimodel member sets equal (mean |Δμ*|=1.14°C),
+            # with the ensemble center systematically colder — the cold-center / failed-de-bias-
+            # transfer root cause. The new accessor binds to the event's CAUSAL cycle (the bound
+            # ensemble snapshot's source_cycle_time DATE, available_at ≤ decision_time), keeps
+            # the latest cycle per model, and converts °C→native EXACTLY as build_family_spine —
+            # so the live producer stashes the SAME member set the validated replay produces.
+            #
+            # CHEAP belief stash — ONE indexed SQL query, NO full q-build, NO network. Calling
+            # _market_analysis_from_event_snapshot here (with its ~22 sequential CLOB /book
+            # fetches) per spine family DOUBLED the q-build and HUNG the reactor (a single cycle
+            # ran >12 min). De-bias is OFF live (edli_bias_correction_enabled=False +
+            # emos_sole_calibrator), so the RAW multi-model member envelope IS the debiased
+            # envelope the ARM replay validated; the spine's build_center (NoOpDebiasAuthority)
+            # locks to it. mu/sigma are the empirical mean/std of that envelope (the already-
+            # implied center/width). FAIL-CLOSED: <3 members or no causal cycle => None => stash
+            # NOTHING => honest SPINE_INPUTS_UNAVAILABLE; NEVER falls back to the ensemble.
+            _spine_multimodel = _spine_multimodel_members_for_event(
                 forecast_conn,
                 event=event,
                 family=family,
                 decision_time=decision_time,
             )
-            if _spine_snap is not None:
-                # CHEAP belief stash — read the member envelope directly, NO full q-build.
-                # Calling _market_analysis_from_event_snapshot here (with its ~22 sequential
-                # CLOB /book fetches) per spine family DOUBLED the q-build and HUNG the reactor
-                # (a single cycle ran >12 min, pegging CPU, apscheduler skipping every cycle).
-                # De-bias is OFF live (edli_bias_correction_enabled=False + emos_sole_calibrator),
-                # so the RAW ensemble member envelope IS the debiased envelope the ARM replay
-                # validated; the spine's build_center (NoOpDebiasAuthority) locks to it. mu/sigma
-                # are the empirical mean/std of that envelope (the already-implied center/width,
-                # the producer's own fallback). _snapshot_members raises if members are absent =>
-                # caught => MU_SIGMA (honest: no envelope). No network, no per-candidate work.
-                _spine_raw = _snapshot_members(_spine_snap)
+            if _spine_multimodel is not None:
+                _spine_raw, _spine_source_cycle = _spine_multimodel
                 _spine_arr = np.asarray(_spine_raw, dtype=float).ravel()
                 if _spine_arr.size:
                     _spine_lst = [float(_x) for _x in _spine_arr.tolist()]
@@ -7772,9 +7774,8 @@ def _generate_candidate_proofs(
                     if len(_spine_lst) >= 2:
                         _spine_var = sum((_v - _spine_mean) ** 2 for _v in _spine_lst) / (len(_spine_lst) - 1)
                         payload["_edli_spine_sigma_native"] = float(_spine_var ** 0.5)
-                    _spine_sc = _spine_snap.get("source_cycle_time") or _spine_snap.get("issue_time")
-                    if _spine_sc:
-                        payload["_edli_spine_source_cycle_time_utc"] = str(_spine_sc)
+                    if _spine_source_cycle:
+                        payload["_edli_spine_source_cycle_time_utc"] = str(_spine_source_cycle)
         except Exception:  # noqa: BLE001 — spine-input population is observability-only; never break the decision
             pass
     # === Q-KERNEL REBUILD STAGE 0 — lift the receipt-spine inputs (2026-06-14) ===========
@@ -11170,6 +11171,115 @@ def _canonical_probability_and_fdr_proof(
     return q_by_condition, lcb_by_direction, p_values, prefilter, probability_evidence
 
 
+def _spine_multimodel_members_for_event(
+    conn: sqlite3.Connection,
+    *,
+    event: OpportunityEvent,
+    family,
+    decision_time: datetime,
+) -> tuple[list[float], str] | None:
+    """The Q-KERNEL SPINE member envelope sourced from the MULTI-MODEL DETERMINISTIC
+    fusion table ``raw_model_forecasts`` — the SAME source the strategy-of-record,
+    the de-bias provider, and the ARM-replay validation all use.
+
+    ROOT-CAUSE FIX (2026-06-16): the live spine producer previously lifted its member
+    envelope from ``ensemble_snapshots.members_json`` (51 ``ecmwf_ens`` members). The
+    probability authority (AGENTS.md) mandates ``μ* = T2 Bayesian precision fusion over
+    decorrelated providers`` — NOT the ECMWF ensemble. A 213-family settlement audit
+    found 0/213 member sets equal between the live ensemble path and the validated
+    multi-model replay (mean |Δμ*|=1.14°C), with the ensemble center systematically
+    colder (the cold-center / failed-de-bias-transfer / 100%-buy_no-losing-book root).
+    This accessor makes the LIVE producer stash the SAME member set the validated
+    replay (``scripts/qkernel_arm_replay.fresh_members_at_cycle`` →
+    ``build_family_spine``) produces for the same family + causal cycle.
+
+    CAUSALITY: the causal forecast cycle is taken from the event's BOUND ensemble
+    snapshot (``_bound_forecast_snapshot_row_for_spine`` → ``source_cycle_time`` DATE) —
+    the same causal pin the prior producer used — so far-horizon families that span
+    multiple lead buckets source members from THEIR own causal cycle, NOT a blind
+    ``target_date − 1d``. Members must additionally satisfy
+    ``source_available_at ≤ decision_time``. The latest cycle per model wins (identical
+    to ``fresh_members_at_cycle``). Values are converted °C→native settlement unit
+    exactly as ``build_family_spine`` does.
+
+    FAIL-CLOSED: returns ``None`` (→ honest SPINE_INPUTS_UNAVAILABLE) when the causal
+    cycle cannot be established, the forecasts table is absent, or fewer than 3 members
+    survive (the replay's ``len(members_raw) < 3`` guard). NEVER falls back to the
+    ensemble (that reintroduces the bug). Read-only; one indexed SQL query; never feeds
+    q, sizing, or submit.
+    """
+    if getattr(event, "event_type", None) not in _FORECAST_DECISION_EVENT_TYPES:
+        return None
+    # Establish the CAUSAL cycle from the event's bound ensemble snapshot (same pin the
+    # prior producer used: VERIFIED / causality OK / not boundary-ambiguous /
+    # available_at ≤ decision_time / snapshot_id == causal_snapshot_id). We use only its
+    # source_cycle_time DATE to key the multi-model query; the member VALUES come from
+    # raw_model_forecasts. If no causal snapshot exists, fail closed.
+    bound = _bound_forecast_snapshot_row_for_spine(
+        conn, event=event, family=family, decision_time=decision_time
+    )
+    if bound is None:
+        return None
+    _causal_sct = bound.get("source_cycle_time") or bound.get("issue_time")
+    if not _causal_sct:
+        return None
+    causal_cycle_date = str(_causal_sct)[:10]  # ISO date prefix (YYYY-MM-DD)
+    if len(causal_cycle_date) != 10:
+        return None
+
+    table_ref = _authority_table_ref(conn, "raw_model_forecasts")
+    if table_ref is None:
+        return None
+    columns = _table_ref_columns(conn, table_ref)
+    required = {"model", "city", "metric", "target_date", "source_cycle_time", "forecast_value_c"}
+    if not required.issubset(columns):
+        return None
+
+    # City-native settlement unit (°F for F-settled cities, °C otherwise) — the SAME
+    # authority the replay/build_family_spine keys on (city.settlement_unit). The stashed
+    # members must be NATIVE (the ensemble path was native; keep native).
+    _city_obj = runtime_cities_by_name().get(str(family.city))
+    unit = str(getattr(_city_obj, "settlement_unit", "C") or "C")
+
+    predicates = [
+        "city = ?",
+        "metric = ?",
+        "target_date = ?",
+        "date(source_cycle_time) = ?",
+    ]
+    params: list[object] = [family.city, family.metric, family.target_date, causal_cycle_date]
+    if "source_available_at" in columns:
+        predicates.append("source_available_at <= ?")
+        params.append(decision_time.astimezone(UTC).isoformat())
+    cur = conn.execute(
+        f"""
+        SELECT model, source_cycle_time, forecast_value_c
+        FROM {table_ref}
+        WHERE {' AND '.join(predicates)}
+        ORDER BY model, source_cycle_time
+        """,
+        tuple(params),
+    )
+    # Latest cycle per model wins (rows ordered ascending by source_cycle_time) — the
+    # identical reduction fresh_members_at_cycle performs.
+    best: dict[str, float] = {}
+    for model, _sct, val_c in cur.fetchall():
+        if model is None or val_c is None:
+            continue
+        try:
+            best[str(model)] = float(val_c)
+        except (TypeError, ValueError):
+            continue
+    if len(best) < 3:  # replay's len(members_raw) < 3 fail-closed guard
+        return None
+
+    def _c_to_native(v_c: float) -> float:
+        return v_c if unit == "C" else (v_c * 9.0 / 5.0 + 32.0)
+
+    members_native = [_c_to_native(v) for v in best.values()]
+    return members_native, str(_causal_sct)
+
+
 def _bound_forecast_snapshot_row_for_spine(
     conn: sqlite3.Connection,
     *,
@@ -11177,27 +11287,31 @@ def _bound_forecast_snapshot_row_for_spine(
     family,
     decision_time: datetime,
 ) -> dict[str, Any] | None:
-    """Fetch the family's BOUND causal ensemble_snapshots row for the spine member envelope.
+    """Fetch the family's BOUND causal ensemble_snapshots row (the CAUSAL-CYCLE PIN).
 
-    The Q-KERNEL SPINE INPUTS block (``_generate_candidate_proofs``) needs ONLY the bound
-    forecast's ensemble member envelope (the empirical center/dispersion). It previously
-    sourced that row through ``_forecast_snapshot_row_for_event``, which additionally runs
-    the executable-forecast READER-BLOCK trade-eligibility gate
-    (``_forecast_snapshot_reader_block_reason`` → source_run/coverage/executable-reader
-    revalidation). That gate raises ``FORECAST_READER_*`` for live FORECAST_SNAPSHOT_READY
-    families (e.g. ``scope_incomplete`` when the coverage scope is not matched, or a
-    live-eligibility block) and the spine block's fail-soft ``except`` swallowed it — so the
-    spine got ``MU_SIGMA_NOT_STASHED`` universally even though the bound snapshot carried a
-    valid member envelope. The reader-block gate is a TRADE-eligibility check; the LIVE
-    decision lane (replacement authority) already owns trade eligibility, so re-deciding it
-    here only to read members is both redundant and the actual failure.
+    POST-FIX ROLE (spine-source rewire 2026-06-16): this accessor NO LONGER supplies the
+    spine's member envelope. The live spine producer now sources its members from the
+    MULTI-MODEL deterministic table ``raw_model_forecasts`` via
+    ``_spine_multimodel_members_for_event`` (the validated replay source). This accessor's
+    sole remaining use is to establish the event's CAUSAL forecast cycle: the producer reads
+    this bound ensemble row's ``source_cycle_time`` DATE and keys the multi-model member
+    query on it (so far-horizon families that span multiple lead buckets source members from
+    THEIR own causal cycle, not a blind ``target_date − 1d``). The ensemble ``members_json``
+    is NOT read for belief — the ECMWF-ensemble member envelope was the cold-center root
+    cause (0/213 settlement audit equal vs the validated multi-model set).
+
+    It previously sourced the bound row through ``_forecast_snapshot_row_for_event``, which
+    additionally runs the executable-forecast READER-BLOCK trade-eligibility gate
+    (``_forecast_snapshot_reader_block_reason``). That gate raises ``FORECAST_READER_*`` for
+    live FORECAST_SNAPSHOT_READY families and the spine block's fail-soft ``except`` swallowed
+    it. The reader-block gate is a TRADE-eligibility check; the LIVE decision lane
+    (replacement authority) already owns trade eligibility, so re-deciding it here only to
+    pin the causal cycle is both redundant and was the prior failure.
 
     This accessor applies the SAME data-INTEGRITY predicates the causal fetch uses
     (VERIFIED authority, causality OK, not boundary-ambiguous, available_at ≤ decision_time,
     pinned to the event's ``causal_snapshot_id``) and returns the row dict — WITHOUT the
-    trade-eligibility reader-block gate. Members are still validated downstream by
-    ``_snapshot_members`` (raises ⇒ honest MU_SIGMA). Read-only; never feeds q, sizing, or
-    submit — only the spine's predictive member envelope.
+    trade-eligibility reader-block gate. Read-only; never feeds q, sizing, or submit.
     """
     if event.event_type not in _FORECAST_DECISION_EVENT_TYPES:
         return None
