@@ -349,26 +349,7 @@ def _ensure_diagnostic_only_trade_authority_check(conn: sqlite3.Connection, tabl
     if row is None:
         return
     create_sql = str(row[0] if not isinstance(row, sqlite3.Row) else row["sql"])
-    normalized_create_sql = create_sql
-    for parent_table in (
-        "raw_forecast_artifacts",
-        "deterministic_forecast_anchors",
-        "forecast_posteriors",
-        "replacement_shadow_decisions",
-        "raw_model_forecasts",
-    ):
-        normalized_create_sql = normalized_create_sql.replace(
-            f"{parent_table}__pre_diagnostic_authority_check",
-            parent_table,
-        )
-    needs_fk_normalization = normalized_create_sql != create_sql
-    if "trade_authority_status" not in create_sql:
-        if needs_fk_normalization:
-            _rebuild_table_preserving_rows(conn, table_name, normalized_create_sql)
-        return
-    if "DIAGNOSTIC_ONLY" in create_sql:
-        if needs_fk_normalization:
-            _rebuild_table_preserving_rows(conn, table_name, normalized_create_sql)
+    if "trade_authority_status" not in create_sql or "DIAGNOSTIC_ONLY" in create_sql:
         return
     old_checks = (
         "CHECK (trade_authority_status IN ('SHADOW_ONLY'))",
@@ -406,7 +387,7 @@ def _ensure_diagnostic_only_trade_authority_check(conn: sqlite3.Connection, tabl
     )
     conn.execute(f"ALTER TABLE {table_name} RENAME TO {legacy_table}")
     conn.execute(
-        normalized_create_sql.replace(old_check, new_check)
+        create_sql.replace(old_check, new_check)
         .replace("DEFAULT 'SHADOW_ONLY'", "DEFAULT 'DIAGNOSTIC_ONLY'")
         .replace("DEFAULT 'SHADOW_VETO_ONLY'", "DEFAULT 'DIAGNOSTIC_ONLY'")
     )
@@ -417,45 +398,15 @@ def _ensure_diagnostic_only_trade_authority_check(conn: sqlite3.Connection, tabl
     conn.execute(f"DROP TABLE {legacy_table}")
 
 
-def _rebuild_table_preserving_rows(
-    conn: sqlite3.Connection,
-    table_name: str,
-    create_sql: str,
-) -> None:
-    legacy_table = f"{table_name}__pre_diagnostic_authority_check"
-    if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (legacy_table,),
-    ).fetchone():
-        raise RuntimeError(f"legacy migration table already exists: {legacy_table}")
-    column_names = [
-        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
-        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    ]
-    if not column_names:
-        return
-    quoted_columns = ", ".join(f'"{name}"' for name in column_names)
-    conn.execute(f"ALTER TABLE {table_name} RENAME TO {legacy_table}")
-    conn.execute(create_sql)
-    conn.execute(
-        f"INSERT INTO {table_name} ({quoted_columns}) "
-        f"SELECT {quoted_columns} FROM {legacy_table}"
-    )
-    conn.execute(f"DROP TABLE {legacy_table}")
-
-
 def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
     """Keep old PR399 shadow DBs fail-closed instead of returning stale rows."""
 
-    conn.execute("PRAGMA defer_foreign_keys=ON")
-    # Only replacement-derived tables moved from the legacy shadow vocabulary to
-    # DIAGNOSTIC_ONLY/LIVE_AUTHORITY. Raw artifacts and raw model captures remain
-    # source-input evidence with SHADOW_ONLY semantics; rebuilding those parent
-    # tables here can break child FKs before the current posterior is written.
     for table_name in (
+        "raw_forecast_artifacts",
         "deterministic_forecast_anchors",
         "forecast_posteriors",
         "replacement_shadow_decisions",
+        "raw_model_forecasts",
     ):
         _ensure_diagnostic_only_trade_authority_check(conn, table_name)
     anchor_columns = _table_columns(conn, "deterministic_forecast_anchors")
@@ -481,14 +432,12 @@ def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
             WHERE anchor_identity_hash IS NOT NULL
         """
     )
-    posterior_columns = _table_columns(conn, "forecast_posteriors")
-    if {"city", "target_date", "temperature_metric", "bin_topology_hash", "computed_at"}.issubset(posterior_columns):
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_topology
-                ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
-            """
-        )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_topology
+            ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
+        """
+    )
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash
@@ -1072,18 +1021,16 @@ class _BayesPrecisionFusionFusionOverride:
     # substrate is too thin AND no conservative default applies (caller falls back to the
     # AIFS-shape soft-anchor q).
     predictive_sigma_c: float | None = None
-    # FIX 1 (2026-06-09; 2026-06-17 per-city): the K3 decorrelated-provider completeness verdict
-    # computed INSIDE the fusion. True = every provider family EXPECTED AT THIS CITY is served
-    # (-> FUSED_NORMAL_FULL); False = an expected family is absent (-> FUSED_NORMAL_PARTIAL). The
-    # expected set is per-city domain-aware (3 for non-CONUS/non-NA after the coarse-global
-    # removal, up to 5 in CONUS), NOT a flat 5. The materializer REUSES this; it never re-derives
-    # a parallel provider check (single-builder).
+    # FIX 1 (2026-06-09): the K3 decorrelated-provider completeness verdict computed INSIDE the
+    # fusion (the same "served %d/5" determination the materializer already logs). True =
+    # all 5 declared decorrelated providers served (-> FUSED_NORMAL_FULL); False = INCOMPLETE
+    # (-> FUSED_NORMAL_PARTIAL). The materializer REUSES this; it never re-derives a parallel
+    # provider check (single-builder).
     decorrelated_providers_complete: bool = False
-    # FIX 5 (2026-06-09; 2026-06-17 per-city): capture-status provenance. count of the
-    # EXPECTED-here decorrelated providers whose CURRENT value entered the fused set, and the
-    # per-city expected count. Recording only.
+    # FIX 5 (2026-06-09): capture-status provenance. count of the 5 decorrelated providers whose
+    # CURRENT value entered the fused set for this cell, and the count expected (5). Recording only.
     decorrelated_providers_served: int = 0
-    decorrelated_providers_expected: int = 0
+    decorrelated_providers_expected: int = 5
     # Task #32 follow-up (brand law): per-instrument serving provenance for every model that
     # entered the fused set — which endpoint served its CURRENT value (served_via), the served
     # row id/cycle/capture stamp/age, and its lead bucket. A previous_runs substitution (a
@@ -1299,12 +1246,6 @@ def _replacement_bayes_precision_fusion_override(
                 return injected_live_fetch(model=model, **_kwargs)
             return None
 
-        # v3 rule 5 (grid representativeness) deploy flag: when ON, the capture stamps each
-        # instrument's sigma_repr^2 (native-cell d_eff/delta_z) and the fusion ADDS it to the
-        # Sigma diagonal (down-weighting coarse/offset cells). Default OFF -> byte-identical.
-        grid_repr_enabled = bool(
-            edli_cfg.get("replacement_0_1_grid_representativeness_enabled", False)
-        )
         capture = capture_bayes_precision_instruments(
             city=request.city, metric=metric, latitude=lat, longitude=lon,
             timezone_name=tz_name,
@@ -1314,7 +1255,6 @@ def _replacement_bayes_precision_fusion_override(
             history_provider=history_provider, live_fetch=_persisted_then_injected_fetch,
             decision_utc=computed_at,
             model_available_at=model_available_at,
-            apply_grid_representativeness=grid_repr_enabled,
         )
         if not capture.has_extras:
             # K3 ANTIBODY (2026-06-09): all multi-model extras absent. We only reach here when
@@ -1338,45 +1278,37 @@ def _replacement_bayes_precision_fusion_override(
             anchor_z=capture.anchor_z, anchor_tau0=capture.anchor_tau0,
             likelihood=capture.likelihood, disagree_var=capture.disagree_var,
             use_covariance=True,
-            anchor_sigma_repr_sq=capture.anchor_sigma_repr_sq,
         )
 
         used_models = tuple(fused.used_models)
-        # K3 ANTIBODY (2026-06-09; 2026-06-17 domain-aware): surface a STRUCTURALLY-incomplete
-        # decorrelated set LOUDLY — but ONLY for a family that is EXPECTED at this city. The
-        # declared decorrelated PROVIDERS are NCEP / DWD-ICON / CMC / JMA / UKMO. 2026-06-17
-        # COARSE-GLOBAL REMOVAL: NCEP (gfs_hrrr/ncep_nbm, CONUS) and CMC (gem_hrdps, N-America)
-        # lost their global fallbacks, so OUTSIDE those nest domains they are STRUCTURALLY ABSENT,
-        # not a transient drop — a non-CONUS city legitimately fuses {DWD,JMA,UKMO} and is
-        # COMPLETE. expected_provider_families_for_city(lat,lon) is THE per-city expected set
-        # (domain-gated via the SAME polygon the download + selection use), replacing the old
-        # flat /5 count; missing = expected_for_city − served. The warning now fires only for an
-        # EXPECTED-but-absent family (a genuine transient drop), never a structurally-absent one.
+        # K3 ANTIBODY (2026-06-09): surface a STRUCTURALLY-incomplete decorrelated set LOUDLY. The
+        # 4 declared decorrelated PROVIDERS are NOAA(gfs) / DWD-ICON(one of icon_d2|icon_eu|
+        # icon_global) / CMC(gem) / JMA(jma). gem_global's single_runs is unavailable at 06z/18z
+        # cycles (12h cadence) so the ensemble silently ran as 3 -> a permanently-unservable model
+        # must never masquerade as a transient drop. Log expected-vs-served providers per cell.
         # SINGLE-AUTHORITY provider-family mapping (Task #32): the model->decorrelated-provider
         # family map lives in replacement_fusion_upgrade_trigger.DECORRELATED_PROVIDER_FAMILIES so
         # the fusion's served/missing determination and the upgrade trigger's served/capturable
-        # comparison can never drift on what counts as a provider, NOR on what is expected where.
+        # comparison can never drift on what counts as a provider. 2026-06-09 promotion: families
+        # are rep-based — NBM is the NCEP rep in-CONUS, the UKV 2km nest the UKMO rep in the UK —
+        # so each family is served when ANY of its members is in used_models.
         from src.data.replacement_fusion_upgrade_trigger import (  # noqa: PLC0415
             DECORRELATED_PROVIDER_FAMILIES,
+            EXPECTED_DECORRELATED_PROVIDER_COUNT,
             decorrelated_provider_families_of,
-            expected_provider_families_for_city,
         )
 
         _served_families = decorrelated_provider_families_of(set(used_models))
-        # Per-city AND per-LEAD: the nests are lead-capped, so the expected set must be evaluated
-        # at the SAME city-local lead the fusion serves (lead_days, computed above) — NOT lead 0,
-        # which would over-expect NCEP/CMC at far lead and false-flag PARTIAL (2026-06-17 critic fix).
-        _expected_families = expected_provider_families_for_city(lat, lon, lead_days)
         _missing_providers = [
             f"{fam}/{'|'.join(DECORRELATED_PROVIDER_FAMILIES[fam])}"
-            for fam in sorted(_expected_families)
+            for fam in DECORRELATED_PROVIDER_FAMILIES
             if fam not in _served_families
         ]
-        # FIX 1/FIX 5 (2026-06-09; 2026-06-17 per-city): the SINGLE K3 completeness verdict reused
-        # by the q-mode + capture-status provenance. Expected = the families servable AT THIS CITY;
-        # served = expected − missing. This is the ONLY provider-count determination — the q-mode
-        # FULL/PARTIAL split and the FIX-5 capture_status both read it (no parallel re-derivation).
-        _decorrelated_expected = len(_expected_families)
+        # FIX 1/FIX 5 (2026-06-09): the SINGLE K3 completeness verdict reused by the q-mode +
+        # capture-status provenance. 5 declared decorrelated providers; served = 5 - missing.
+        # This is the ONLY provider-count determination — the q-mode FULL/PARTIAL split and the
+        # FIX-5 capture_status both read it (no parallel re-derivation).
+        _decorrelated_expected = EXPECTED_DECORRELATED_PROVIDER_COUNT
         _decorrelated_served = _decorrelated_expected - len(_missing_providers)
         _decorrelated_complete = not _missing_providers
         if _missing_providers:
@@ -1384,10 +1316,10 @@ def _replacement_bayes_precision_fusion_override(
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
                     "replacement_0_1 BAYES_PRECISION_FUSION fusion decorrelated-provider INCOMPLETE for %s %s: served "
-                    "%d/%d expected-here, missing %s (used=%s). An EXPECTED-but-absent provider (a "
-                    "transient single_runs drop) must be resolved explicitly, not silently dropped.",
-                    request.city, metric, _decorrelated_served, _decorrelated_expected,
-                    _missing_providers, list(used_models),
+                    "%d/5, missing %s (used=%s). A structurally-unservable provider (e.g. gem 12h-"
+                    "cadence single_runs) must be resolved explicitly, not silently dropped.",
+                    request.city, metric, _decorrelated_served, _missing_providers,
+                    list(used_models),
                 )
             except Exception:
                 pass
