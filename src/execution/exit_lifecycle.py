@@ -138,6 +138,7 @@ def _emit_typed_realized_fill(
 
 MAX_EXIT_RETRIES = 10
 DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes between retries
+PENDING_EXIT_REPRICE_MIN_TICKS = 2
 
 EXIT_EVENT_VOCABULARY = (
     "EXIT_INTENT",
@@ -2128,6 +2129,14 @@ def _exit_command_id_for_order(
     return str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0]) or None
 
 
+def _last_exit_order_id(position: Position) -> str:
+    return str(
+        getattr(position, "last_exit_order_id", None)
+        or getattr(position, "order_id", "")
+        or ""
+    )
+
+
 def check_pending_exits(
     portfolio: PortfolioState,
     clob,
@@ -2151,7 +2160,9 @@ def check_pending_exits(
     stats = {"filled": 0, "retried": 0, "unchanged": 0, "filled_positions": []}
 
     for pos in list(portfolio.positions):
-        if pos.exit_state not in ("sell_placed", "sell_pending", "exit_intent"):
+        if pos.exit_state not in ("sell_placed", "sell_pending", "exit_intent") and str(
+            getattr(pos, "order_status", "") or ""
+        ) != "sell_pending_confirmation":
             continue
         _mark_pending_exit(pos)
         # NOTE: no canonical event here — upstream transition sites (execute_exit,
@@ -2181,7 +2192,8 @@ def check_pending_exits(
             stats["retried"] += 1
             continue
 
-        if not pos.last_exit_order_id:
+        exit_order_id = _last_exit_order_id(pos)
+        if not exit_order_id:
             _mark_exit_retry(pos, reason="SELL_NO_ORDER_ID", error="no_order_id", conn=conn)
             if conn is not None:
                 log_pending_exit_recovery_event(
@@ -2195,12 +2207,12 @@ def check_pending_exits(
             stats["retried"] += 1
             continue
 
-        status, status_payload = _check_order_fill(clob, pos.last_exit_order_id)
+        status, status_payload = _check_order_fill(clob, exit_order_id)
         if conn is not None:
             if status:
                 log_pending_exit_status_event(conn, pos, status=status)
             else:
-                log_exit_fill_check_error_event(conn, pos, order_id=pos.last_exit_order_id)
+                log_exit_fill_check_error_event(conn, pos, order_id=exit_order_id)
 
         if status in FILL_STATUSES:
             # Filled! Close the position.
@@ -2209,7 +2221,7 @@ def check_pending_exits(
                 _mark_exit_fill_economics_missing(
                     pos,
                     status=status,
-                    order_id=pos.last_exit_order_id,
+                    order_id=exit_order_id,
                     conn=conn,
                 )
                 stats["unchanged"] += 1
@@ -2230,7 +2242,7 @@ def check_pending_exits(
                     log_exit_fill_event(
                         conn,
                         closed,
-                        order_id=pos.last_exit_order_id,
+                        order_id=exit_order_id,
                         fill_price=actual_price,
                         current_market_price=pos.last_monitor_market_price or pos.entry_price,
                         best_bid=getattr(pos, "last_monitor_best_bid", None),
@@ -2242,7 +2254,7 @@ def check_pending_exits(
                         status=status or "CONFIRMED",
                         fill_price=actual_price,
                         filled_shares=filled_shares,
-                        order_id=pos.last_exit_order_id,
+                        order_id=exit_order_id,
                     )
                     # Slice P5-1 third site: typed RealizedFill at the
                     # async-monitor fill-receipt seam (same construction
@@ -2269,7 +2281,7 @@ def check_pending_exits(
                     _mark_exit_fill_economics_missing(
                         pos,
                         status=status,
-                        order_id=pos.last_exit_order_id,
+                        order_id=exit_order_id,
                         conn=conn,
                     )
                 else:
@@ -2278,14 +2290,14 @@ def check_pending_exits(
                         filled_shares=filled_shares,
                         remaining_shares=remaining_shares,
                         fill_price=actual_price,
-                        order_id=pos.last_exit_order_id,
+                        order_id=exit_order_id,
                         status=status,
                     )
                 if partial_applied and conn is not None:
                     log_exit_attempt_event(
                         conn,
                         pos,
-                        order_id=pos.last_exit_order_id,
+                        order_id=exit_order_id,
                         status=status or "PARTIAL",
                         current_market_price=pos.last_monitor_market_price or pos.entry_price,
                         best_bid=getattr(pos, "last_monitor_best_bid", None),
@@ -2304,7 +2316,7 @@ def check_pending_exits(
                             status=status or "PARTIAL",
                             fill_price=actual_price,
                             filled_shares=filled_shares,
-                            order_id=pos.last_exit_order_id,
+                            order_id=exit_order_id,
                         )
             if status in VOID_STATUSES:
                 _mark_exit_retry(pos, reason=f"SELL_{status}", error=status, conn=conn)
@@ -2324,7 +2336,7 @@ def check_pending_exits(
                             status=status or "PARTIAL",
                             fill_price=actual_price,
                             filled_shares=filled_shares,
-                            order_id=pos.last_exit_order_id,
+                            order_id=exit_order_id,
                         )
                 stats["retried"] += 1
             elif partial_applied:
@@ -2342,7 +2354,20 @@ def check_pending_exits(
                 else:
                     stats["unchanged"] += 1
             else:
-                stats["unchanged"] += 1
+                token_id = _asset_id_for_position(pos)
+                if _cancel_stale_pending_exit_for_reprice(
+                    conn=conn,
+                    position=pos,
+                    clob=clob,
+                    token_id=token_id,
+                    log_pending_exit_recovery_event=(
+                        log_pending_exit_recovery_event if conn is not None else None
+                    ),
+                    log_exit_retry_event=log_exit_retry_event if conn is not None else None,
+                ):
+                    stats["retried"] += 1
+                else:
+                    stats["unchanged"] += 1
 
     return stats
 
@@ -2471,6 +2496,168 @@ def _positive_finite_float(value: object) -> Optional[float]:
     if not math.isfinite(numeric) or numeric <= 0.0 or numeric > 1.0:
         return None
     return numeric
+
+
+def _top_book_for_pending_exit_reprice(clob, token_id: str) -> tuple[float | None, float | None]:
+    """Return current held-token top bid/ask, allowing one-sided books."""
+
+    if clob is None or not token_id:
+        return None, None
+    book_fn = getattr(clob, "get_orderbook", None) or getattr(clob, "get_orderbook_snapshot", None)
+    if not callable(book_fn):
+        return None, None
+    try:
+        from src.data.market_scanner import _optional_top_book_level_decimal
+
+        book = book_fn(token_id)
+        top_bid, _bid_size = _optional_top_book_level_decimal(book, "bids")
+        top_ask, _ask_size = _optional_top_book_level_decimal(book, "asks")
+    except Exception as exc:
+        logger.debug(
+            "Pending-exit reprice book read failed for token=%s: %s",
+            token_id,
+            exc,
+        )
+        return None, None
+
+    def _as_float(value):
+        if value is None:
+            return None
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) and 0.0 < numeric < 1.0 else None
+
+    return _as_float(top_bid), _as_float(top_ask)
+
+
+def _exit_command_row_for_order(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    token_id: str,
+) -> sqlite3.Row | None:
+    exit_order_id = _last_exit_order_id(position)
+    if conn is None or not exit_order_id:
+        return None
+    try:
+        return conn.execute(
+            """
+            SELECT command_id, price, size, venue_order_id
+              FROM venue_commands
+             WHERE venue_order_id = ?
+               AND position_id = ?
+               AND token_id = ?
+               AND intent_kind = 'EXIT'
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 1
+            """,
+            (exit_order_id, position.trade_id, token_id),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+
+
+def _pending_exit_reprice_reason(
+    *,
+    resting_price: float,
+    best_bid: float | None,
+    best_ask: float | None,
+    min_tick: float,
+) -> str:
+    """Classify stale pending-exit sell orders from live book evidence."""
+
+    if not math.isfinite(resting_price) or resting_price <= 0.0:
+        return ""
+    min_move = max(float(min_tick) * PENDING_EXIT_REPRICE_MIN_TICKS, 0.001)
+    if best_bid is not None and resting_price - float(best_bid) >= min_move:
+        return "SELL_REPRICE_BID_MOVED_AWAY"
+    if best_bid is None and best_ask is not None and resting_price - float(best_ask) >= min_move:
+        return "SELL_REPRICE_ONE_SIDED_NO_BID"
+    return ""
+
+
+def _cancel_stale_pending_exit_for_reprice(
+    *,
+    conn: sqlite3.Connection | None,
+    position: Position,
+    clob,
+    token_id: str,
+    log_pending_exit_recovery_event=None,
+    log_exit_retry_event=None,
+) -> bool:
+    """Cancel a live pending-exit order whose price no longer tracks live CLOB.
+
+    This does not close locally and does not submit a replacement directly.  It
+    moves the position to retry_pending with zero cooldown so the normal
+    monitor path can recapture a fresh snapshot/book and issue the next limit
+    sell through existing exit safety.
+    """
+
+    row = _exit_command_row_for_order(conn, position, token_id)
+    if row is None:
+        return False
+    try:
+        resting_price = float(row["price"] if isinstance(row, sqlite3.Row) else row[1])
+    except (TypeError, ValueError):
+        return False
+    best_bid, best_ask = _top_book_for_pending_exit_reprice(clob, token_id)
+    reason = _pending_exit_reprice_reason(
+        resting_price=resting_price,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        min_tick=0.001,
+    )
+    if not reason:
+        return False
+
+    cancel_fn = getattr(clob, "cancel_order", None)
+    if not callable(cancel_fn):
+        _mark_exit_retry(
+            position,
+            reason=f"{reason} [CANCEL_UNAVAILABLE]",
+            error="cancel_order_unavailable",
+            cooldown_seconds=0,
+            conn=conn,
+        )
+        return True
+
+    detail = (
+        f"resting_price={resting_price:.6f};"
+        f"best_bid={best_bid if best_bid is not None else 'none'};"
+        f"best_ask={best_ask if best_ask is not None else 'none'}"
+    )
+    try:
+        from src.execution.exit_safety import request_cancel_for_command
+
+        command_id = str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0])
+        outcome = request_cancel_for_command(
+            conn,
+            command_id,
+            lambda order_id: cancel_fn(order_id),
+        )
+        if outcome.status != "CANCELED":
+            reason = f"{reason} [CANCEL_{outcome.status}]"
+            detail = outcome.reason or detail
+    except Exception as exc:
+        reason = f"{reason} [CANCEL_UNKNOWN]"
+        detail = str(exc)[:500]
+
+    _mark_exit_retry(
+        position,
+        reason=reason,
+        error=detail,
+        cooldown_seconds=0,
+        conn=conn,
+    )
+    if conn is not None and log_pending_exit_recovery_event is not None:
+        log_pending_exit_recovery_event(
+            conn,
+            position,
+            event_type="EXIT_ORDER_REJECTED",
+            reason=reason,
+            error=detail,
+        )
+    if conn is not None and log_exit_retry_event is not None:
+        log_exit_retry_event(conn, position, reason=reason, error=detail)
+    return True
 
 
 def _mark_exit_fill_economics_missing(

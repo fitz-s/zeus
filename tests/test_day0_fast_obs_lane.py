@@ -316,6 +316,45 @@ class TestEmitterMonotone:
         assert all(p["settlement_source"] == "aviationweather_metar" for p in payloads)
         assert all(p["live_authority_status"] == "LIVE_AUTHORITY" for p in payloads)
 
+    def test_restart_short_window_cannot_emit_regressed_high(self):
+        conn = _world_conn()
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)  # Jun 10 01:00 JST
+
+        first_reports = [_report("RJTT", t0, 25.0, t_group=False)]
+        first = Day0FastObsEmitter(
+            fetcher=lambda stations, **kw: first_reports,
+            min_fetch_interval_s=0.0,
+        )
+        assert self._emit(first, conn, first_reports, t0 + timedelta(minutes=10)) == 2
+
+        short_window_reports = [_report("RJTT", t0 + timedelta(hours=1), 24.0, t_group=False)]
+        restarted = Day0FastObsEmitter(
+            fetcher=lambda stations, **kw: short_window_reports,
+            min_fetch_interval_s=0.0,
+        )
+        restarted.emit_events(
+            world_conn=conn,
+            cities=[_tokyo()],
+            decision_time=t0 + timedelta(hours=1, minutes=10),
+            received_at=(t0 + timedelta(hours=1, minutes=10)).isoformat(),
+            limit=20,
+        )
+
+        high_values = [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT CAST(json_extract(payload_json, '$.rounded_value') AS INTEGER)
+                  FROM opportunity_events
+                 WHERE event_type='DAY0_EXTREME_UPDATED'
+                   AND json_extract(payload_json, '$.city') = 'Tokyo'
+                   AND json_extract(payload_json, '$.metric') = 'high'
+                 ORDER BY created_at
+                """
+            ).fetchall()
+        ]
+        assert high_values == [25], "restart recovery must suppress lower later high=24"
+
     def test_emitted_event_passes_reactor_hard_fact_gate(self):
         conn = _world_conn()
         t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)

@@ -3239,6 +3239,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         if pos.state == "admin_closed":
             summary["monitor_skipped_admin_close"] = summary.get("monitor_skipped_admin_close", 0) + 1
             continue
+        pending_exit_monitor_only = False
         pending_exit_retry_identity_seed_allowed = (
             pos.state == "pending_exit"
             and getattr(pos, "exit_state", "") == "retry_pending"
@@ -3253,9 +3254,11 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 continue
             check_pending_retries(pos, conn=conn)
             if pos.state == "pending_exit":
-                summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
-                continue
-        if pos.exit_state in ("sell_placed", "sell_pending"):
+                pending_exit_monitor_only = True
+                summary["monitor_pending_exit_phase_evaluated"] = (
+                    summary.get("monitor_pending_exit_phase_evaluated", 0) + 1
+                )
+        if pos.exit_state in ("sell_placed", "sell_pending") and not pending_exit_monitor_only:
             continue
         if pos.exit_state == "backoff_exhausted":
             continue
@@ -3638,6 +3641,12 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 pos.exit_divergence_score = edge_ctx.divergence_score
                 pos.exit_market_velocity_1h = edge_ctx.market_velocity_1h
                 pos.exit_forward_edge = edge_ctx.forward_edge
+                if pending_exit_monitor_only:
+                    summary["pending_exit_exit_signal_already_in_flight"] = (
+                        summary.get("pending_exit_exit_signal_already_in_flight", 0) + 1
+                    )
+                    portfolio_dirty = True
+                    continue
                 exit_intent = build_exit_intent(
                     pos,
                     replace(exit_context, exit_reason=exit_reason),

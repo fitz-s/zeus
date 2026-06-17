@@ -627,10 +627,13 @@ class EventStore:
 
         Day0 companion to ``archive_superseded_channel_events`` (2026-06-15). A
         ``DAY0_EXTREME_UPDATED`` event is a realized-extreme observation update for a
-        forecast family ``(city, target_date, metric)``. Each newer reading supersedes
-        the older ones for that family (the running max/min only advances; only the
-        latest observation is actionable) — but day0 events were in NEITHER the expiry
-        nor the channel-supersession sweep, so stale duplicates piled up (measured
+        forecast family ``(city, target_date, metric)``. The actionable value is the
+        absorbing running extreme, not the latest publication clock: high keeps the
+        maximum rounded value seen for the local day; low keeps the minimum. A later
+        API window or daemon restart must never make a local-day high/low regress
+        (Chengdu 2026-06-17: 25C crossing followed by a shorter-window 24C event).
+        Day0 events were in NEITHER the expiry nor the channel-supersession sweep, so
+        stale duplicates piled up (measured
         2026-06-15: 1972 pending day0 rows across only 152 families, ~13/family). Under
         scope ``forecast_plus_day0`` day0 claims at Tier 0, so this stale pileup is
         claimed ahead of — and starves — the tradeable FORECAST_SNAPSHOT_READY (spine)
@@ -638,10 +641,11 @@ class EventStore:
 
         INVARIANT (superseded-keep-latest): for each ``(city, target_date, metric)``
         family in the active working set (``pending``/``processing`` only), keep the
-        row(s) with ``MAX(available_at)`` and mark every older row ``'expired'``. Day0
-        carries NO ``token_id``, so the family tuple is the supersession key (the
-        token-keyed channel sweep does not apply). Ties at MAX(available_at) are all
-        kept (never archive on a duplicate-timestamp ambiguity).
+        row(s) carrying the absorbing extreme across the full persisted family:
+        ``MAX(rounded_value)`` for high and ``MIN(rounded_value)`` for low. Day0 carries
+        NO ``token_id``, so the family tuple is the supersession key (the token-keyed
+        channel sweep does not apply). Ties at the absorbing extreme are all kept
+        (never archive on a duplicate-value ambiguity).
 
         Past-LOCAL-DAY day0 events are removed separately by
         ``archive_expired_candidates`` (which now covers day0); this sweep dedups the
@@ -683,8 +687,10 @@ class EventStore:
         if not candidate_rows:
             return 0
 
-        # Step 2: per family key in the candidate batch, find the keeper(s). The keeper
-        # may be outside the batch; preserving it is what makes a small batch safe.
+        # Step 2: per family key in the candidate batch, find the absorbing keeper(s).
+        # The keeper may be outside the batch or already terminal from the older
+        # latest-by-clock rule; in that case active regressed rows are still expired so
+        # the queue cannot keep reprocessing a lower high / higher low as "latest".
         candidate_keys = {
             (str(row[1]), str(row[2]), str(row[3]))
             for row in candidate_rows
@@ -692,9 +698,17 @@ class EventStore:
         }
         keeper_ids: set[str] = set()
         for city, target_date, metric in candidate_keys:
-            max_row = self.conn.execute(
+            agg = "MAX" if metric == "high" else "MIN"
+            value_expr = (
+                "CAST(COALESCE("
+                "json_extract(e.payload_json, '$.rounded_value'), "
+                "json_extract(e.payload_json, '$.high_so_far'), "
+                "json_extract(e.payload_json, '$.low_so_far')"
+                ") AS REAL)"
+            )
+            extreme_row = self.conn.execute(
                 """
-                SELECT MAX(e.available_at)
+                SELECT {agg}({value_expr})
                   FROM opportunity_events e INDEXED BY idx_opportunity_events_fsr_target_date
                   JOIN opportunity_event_processing p
                     ON p.event_id = e.event_id
@@ -703,13 +717,13 @@ class EventStore:
                    AND json_extract(e.payload_json, '$.target_date') = ?
                    AND json_extract(e.payload_json, '$.city') = ?
                    AND json_extract(e.payload_json, '$.metric') = ?
-                   AND p.processing_status IN ('pending', 'processing')
-                """,
+                   AND {value_expr} IS NOT NULL
+                """.format(agg=agg, value_expr=value_expr),
                 (self.consumer_name, target_date, city, metric),
             ).fetchone()
-            if max_row is None or max_row[0] is None:
+            if extreme_row is None or extreme_row[0] is None:
                 continue
-            max_available_at = str(max_row[0])
+            extreme_value = float(extreme_row[0])
             keeper_rows = self.conn.execute(
                 """
                 SELECT e.event_id
@@ -721,10 +735,14 @@ class EventStore:
                    AND json_extract(e.payload_json, '$.target_date') = ?
                    AND json_extract(e.payload_json, '$.city') = ?
                    AND json_extract(e.payload_json, '$.metric') = ?
-                   AND e.available_at = ?
+                   AND CAST(COALESCE(
+                         json_extract(e.payload_json, '$.rounded_value'),
+                         json_extract(e.payload_json, '$.high_so_far'),
+                         json_extract(e.payload_json, '$.low_so_far')
+                       ) AS REAL) = ?
                    AND p.processing_status IN ('pending', 'processing')
                 """,
-                (self.consumer_name, target_date, city, metric, max_available_at),
+                (self.consumer_name, target_date, city, metric, extreme_value),
             ).fetchall()
             keeper_ids.update(str(row[0]) for row in keeper_rows)
 

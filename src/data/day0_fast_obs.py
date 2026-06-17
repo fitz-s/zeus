@@ -860,6 +860,22 @@ class Day0FastObsEmitter:
                         kill_previous = self._last_kill_memo_rounded.get(key)
                         live_previous = self._last_live_emitted_rounded.get(key)
 
+                    if kill_previous is None or live_previous is None:
+                        recovered = _recover_kill_memo_from_events(
+                            city_name=city_name,
+                            target_date=target_date,
+                            metric=metric,
+                            world_conn=world_conn,
+                        )
+                        if recovered is not None:
+                            with self._lock:
+                                if self._last_kill_memo_rounded.get(key) is None:
+                                    self._last_kill_memo_rounded[key] = recovered
+                                if self._last_live_emitted_rounded.get(key) is None:
+                                    self._last_live_emitted_rounded[key] = recovered
+                                kill_previous = self._last_kill_memo_rounded.get(key)
+                                live_previous = self._last_live_emitted_rounded.get(key)
+
                     def _moved(previous: Optional[int]) -> bool:
                         return (
                             previous is None
