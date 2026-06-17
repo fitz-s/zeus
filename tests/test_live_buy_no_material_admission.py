@@ -1,7 +1,9 @@
 # Created: 2026-06-07
-# Last reused/audited: 2026-06-07
-# Authority basis: PR_SPEC.md §2 FIX-4 (close the buy_no escape hatch; allow-list ⊆ carrier vocab).
-"""FIX-4 antibodies for material-YES buy_no live admission.
+# Last reused/audited: 2026-06-17
+# Authority basis: PR_SPEC.md §2 FIX-4 (close the buy_no escape hatch; allow-list ⊆ carrier
+#   vocab) plus operator directive 2026-06-17: near-settled entry prices are not
+#   exploitable Day0 opportunities and must not enter live entry evaluation.
+"""Live admission antibodies for material-YES buy_no and near-settled prices.
 
 The escape hatch: a material-YES-bin buy_no was ADMITTED without an allowed native
 NO LCB source whenever ``conservative_edge > confidence_gap`` — a self-referential
@@ -16,6 +18,7 @@ from src.calibration.qlcb_provenance import CALIBRATION_SOURCES
 from src.strategy.live_inference.live_admission import (
     LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES,
     live_buy_no_conservative_evidence_rejection_reason,
+    live_near_settled_entry_price_rejection_reason,
 )
 
 
@@ -72,3 +75,26 @@ def test_allow_list_is_subset_of_calibration_sources() -> None:
 
     assert LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES <= CALIBRATION_SOURCES
     assert "YES_UCB_DERIVED" not in LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES
+
+
+def test_near_settled_entry_price_rejects_999() -> None:
+    reason = live_near_settled_entry_price_rejection_reason(execution_price=0.999)
+
+    assert reason is not None
+    assert reason.startswith("ADMISSION_NEAR_SETTLED_PRICE:")
+    assert "price=0.999000" in reason
+
+
+def test_near_settled_entry_price_boundary_is_rejected() -> None:
+    reason = live_near_settled_entry_price_rejection_reason(execution_price=0.99)
+
+    assert reason is not None
+    assert reason.startswith("ADMISSION_NEAR_SETTLED_PRICE:")
+
+
+def test_entry_price_below_near_settled_ceiling_stays_admissible_to_other_gates() -> None:
+    assert live_near_settled_entry_price_rejection_reason(execution_price=0.989) is None
+
+
+def test_missing_entry_price_is_not_near_settled() -> None:
+    assert live_near_settled_entry_price_rejection_reason(execution_price=None) is None

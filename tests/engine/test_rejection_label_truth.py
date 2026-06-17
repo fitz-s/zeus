@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-06-17
 # Authority basis: OPERATOR LAW 2026-06-11 (每一个被拒绝的具体原因都要写出来,
 #   每一个做的决策为什么都需要被查阅) + the measured REJECTION-LABEL LIE: Beijing
 #   high 2026-06-12 @14:28 had 7/8 bins with LIVE two-sided NO books yet the family
@@ -138,6 +138,7 @@ def test_classifier_buckets_every_known_gate_and_falls_to_other():
     """The class taxonomy is total: every known gate prefix maps, unknown -> other
     (never silently collapsed into a misleading class)."""
     cases = {
+        "ADMISSION_NEAR_SETTLED_PRICE:price=0.999000:ceiling=0.990000": "near_settled_price",
         "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:x": "capital_efficiency_lcb_ev",
         "ADMISSION_CAPITAL_EFFICIENCY:price=missing": "capital_efficiency",
         "COVERAGE_UNLICENSED_TAIL:x": "coverage_unlicensed_tail",

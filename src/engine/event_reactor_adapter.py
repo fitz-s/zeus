@@ -231,6 +231,7 @@ from src.strategy.live_inference.live_admission import (
     coverage_unlicensed_tail_rejection_reason,
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
+    live_near_settled_entry_price_rejection_reason,
 )
 # pr408 #1 CRITICAL (2026-06-14): the live calibration credential licenses through the K3
 # admission predicates (allows_arm = LICENSED/INSUFFICIENT_DATA license-by-default;
@@ -7982,6 +7983,7 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     # (missing_reason prefix, stable class name). Ordered most-specific first; the
     # first prefix that matches a missing_reason wins. CAPITAL_EFFICIENCY_LCB_EV
     # (the EV<=0 efficient-market normal state) is the dominant class in the wild.
+    ("ADMISSION_NEAR_SETTLED_PRICE", "near_settled_price"),
     ("ADMISSION_CAPITAL_EFFICIENCY_LCB_EV", "capital_efficiency_lcb_ev"),
     ("ADMISSION_CAPITAL_EFFICIENCY", "capital_efficiency"),
     ("COVERAGE_UNLICENSED_TAIL", "coverage_unlicensed_tail"),
@@ -8540,6 +8542,13 @@ def _generate_candidate_proofs(
             # tests/engine/test_s4_subsumed_gates.py::
             # test_cheap_no_overconfidence_loser_is_delta_u_no_trade. Scattered
             # on/off gates ARE the regression disease the directive abolishes.
+            near_settled_price_reason = live_near_settled_entry_price_rejection_reason(
+                execution_price=execution_price.value if execution_price is not None else None,
+            )
+            if near_settled_price_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = near_settled_price_reason
             capital_efficiency_reason = _capital_efficiency_untradeable_reason(
                 execution_price=execution_price,
                 q_lcb_5pct=q_lcb,
@@ -8605,7 +8614,8 @@ def _generate_candidate_proofs(
             # ΔU<=0 gate subsumes the cheap-NO-overconfidence demotion. The unlicensed-tail
             # concern is shadow-only now and is deliberately NOT a prefilter trigger.)
             if (
-                capital_efficiency_reason is not None
+                near_settled_price_reason is not None
+                or capital_efficiency_reason is not None
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
             ):
@@ -10274,6 +10284,11 @@ def _candidate_limit_price_untradeable_reason(proof: _CandidateProof) -> str | N
     limit_price = _optional_float(getattr(execution_price, "value", None))
     if limit_price is None:
         return "EXECUTION_PRICE_MISSING"
+    near_settled_reason = live_near_settled_entry_price_rejection_reason(
+        execution_price=limit_price,
+    )
+    if near_settled_reason is not None:
+        return near_settled_reason
     min_tick = _candidate_min_tick_size(proof)
     if min_tick is None:
         min_tick = 0.01
