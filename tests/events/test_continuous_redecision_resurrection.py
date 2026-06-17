@@ -184,6 +184,19 @@ def test_entry_screen_fires_on_edge_appeared():
     assert ("hyp|live|Wuhan|2026-06-12|high|disc", "b30", "buy_yes") in keys
 
 
+def test_entry_screen_fires_on_buy_no_edge_appeared():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.05, cond="0xc30")
+    # YES bid 0.30 implies NO ask 0.70; NO posterior is 0.95.
+    _snapshot(trade, bid="0.30", ask="0.72", selected_outcome_token_id="yes-c30")
+    fired = cr.screen_entry_redecisions(
+        world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
+    )
+    keys = {(e.family_id, e.bin_label, e.direction) for e in fired}
+    assert ("hyp|live|Wuhan|2026-06-12|high|disc", "b30", "buy_no") in keys
+
+
 def test_entry_screen_silent_when_no_edge():
     world = _mem_world()
     trade = _mem_trade()

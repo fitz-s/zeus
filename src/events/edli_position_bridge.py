@@ -607,6 +607,129 @@ def _open_intent_event_exists(conn: sqlite3.Connection, position_id: str) -> boo
     return row is not None
 
 
+_BRIDGE_OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit", "unknown")
+_BRIDGE_EQUIVALENCE_COLUMNS = (
+    "market_id",
+    "city",
+    "target_date",
+    "bin_label",
+    "direction",
+    "unit",
+    "strategy_key",
+    "condition_id",
+    "temperature_metric",
+    "order_id",
+)
+
+
+def _bridge_projection_token(projection: dict) -> str:
+    return str(projection.get("token_id") or projection.get("no_token_id") or "").strip()
+
+
+def _bridge_norm(value) -> str:
+    return str(getattr(value, "value", value) or "").strip()
+
+
+def _same_bridge_identity(existing: sqlite3.Row, projection: dict) -> bool:
+    for col in _BRIDGE_EQUIVALENCE_COLUMNS:
+        if _bridge_norm(existing[col]) != _bridge_norm(projection.get(col)):
+            return False
+    return True
+
+
+def _absorb_same_order_duplicate_bridge_fill(
+    conn: sqlite3.Connection,
+    projection: dict,
+) -> str | None:
+    """Resolve an EDLI bridge F109 collision when the order is already materialised.
+
+    This is deliberately narrower than same-token averaging. It only absorbs when
+    the existing open row has the same token AND the same order_id/market identity
+    as the bridge projection. Different orders on the same token remain F109
+    failures so duplicate-entry defects stay loud.
+    """
+    token_id = _bridge_projection_token(projection)
+    order_id = str(projection.get("order_id") or "").strip()
+    if not token_id or not order_id:
+        return None
+    rows = conn.execute(
+        """
+        SELECT *
+          FROM position_current
+         WHERE (token_id = ? OR no_token_id = ?)
+           AND order_id = ?
+           AND phase IN (?, ?, ?, ?, ?)
+         ORDER BY updated_at DESC, position_id DESC
+        """,
+        (token_id, token_id, order_id, *_BRIDGE_OPEN_PHASES),
+    ).fetchall()
+    matches = [row for row in rows if _same_bridge_identity(row, projection)]
+    if len(matches) != 1:
+        return None
+
+    existing = matches[0]
+    position_id = str(existing["position_id"])
+    from datetime import datetime, timezone
+
+    iso_now = datetime.now(timezone.utc).isoformat()
+    seq_row = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    next_seq = int(seq_row[0]) + 1 if seq_row else 1
+    payload = json.dumps(
+        {
+            "reason": "edli_bridge_same_order_already_materialized",
+            "attempted_position_id": str(projection.get("position_id") or ""),
+            "shares": float(projection.get("shares") or 0.0),
+            "cost_basis_usd": float(projection.get("cost_basis_usd") or 0.0),
+        },
+        sort_keys=True,
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'MANUAL_OVERRIDE_APPLIED', ?, ?, ?, ?,
+                  'src.events.edli_position_bridge', ?, 'live')
+        """,
+        (
+            f"bridge_absorb_{position_id}_{next_seq}",
+            position_id,
+            next_seq,
+            iso_now,
+            str(existing["phase"] or ""),
+            str(existing["phase"] or ""),
+            str(existing["strategy_key"] or ""),
+            payload,
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET shares = ?,
+               cost_basis_usd = ?,
+               size_usd = ?,
+               entry_price = ?,
+               fill_authority = COALESCE(?, fill_authority),
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (
+            float(projection.get("shares") or 0.0),
+            float(projection.get("cost_basis_usd") or 0.0),
+            float(projection.get("size_usd") or projection.get("cost_basis_usd") or 0.0),
+            float(projection.get("entry_price") or 0.0),
+            projection.get("fill_authority"),
+            iso_now,
+            position_id,
+        ),
+    )
+    return position_id
+
+
 def _posterior_id_for_final_intent(
     conn: sqlite3.Connection, final_intent_id: str | None
 ) -> int | None:
@@ -953,6 +1076,7 @@ def materialize_position_current_from_edli_fill(
     )
     from src.state.db import log_execution_fact
     from src.state.ledger import append_many_and_project, upsert_position_current
+    from src.state.projection import DuplicatePositionOpenError
 
     position_id = pos.trade_id
     already_opened = _open_intent_event_exists(conn, position_id)
@@ -966,8 +1090,15 @@ def materialize_position_current_from_edli_fill(
             source_module="src.events.edli_position_bridge",
             decision_evidence=decision_evidence,
         )
-        append_many_and_project(conn, events_batch, projection)
-        created = True
+        try:
+            append_many_and_project(conn, events_batch, projection)
+            created = True
+        except DuplicatePositionOpenError:
+            absorbed_position_id = _absorb_same_order_duplicate_bridge_fill(conn, projection)
+            if absorbed_position_id is None:
+                raise
+            position_id = absorbed_position_id
+            created = False
     else:
         # Replay: the entry events already exist (append-only, unique key).
         # Re-derive the projection from the freshly-summed economics and UPDATE

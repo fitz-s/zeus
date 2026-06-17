@@ -6833,6 +6833,12 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     rest_pull_families.add(key)
         all_families = set(family_keys) | rest_pull_families
         if not all_families:
+            logger.info(
+                "edli_redecision_screen: entry_fired=%d rest_pulls=%d families_reemitted=0 "
+                "events_emitted=0 rests_cancelled=0 reason=no_screened_families",
+                len(redecisions),
+                len(rest_pulls),
+            )
             return
 
         # 2) EMIT EDLI_REDECISION_PENDING for the screened families (world write, under the mutex,

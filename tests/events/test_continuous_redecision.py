@@ -77,6 +77,26 @@ def test_R1_fresh_price_positive_edge_enqueues_redecision():
     assert all(e.event_type == "EDLI_REDECISION_PENDING" for e in enqueued)
 
 
+def test_R1b_buy_no_positive_edge_enqueues_redecision():
+    conn = _mem_world()
+    _cache_yes_belief(conn, p_posterior_yes=0.05, recorded_at="2026-05-31T00:00:00+00:00")
+    # YES-prob is 0.05, so NO-prob is 0.95. NO cost 0.70 leaves strong edge.
+    price_lookup = {
+        ("Wuhan|2026-06-01|high", "b30", "buy_no"): cr.PriceQuote(
+            price=0.70, freshness_deadline="2026-05-31T01:00:00+00:00"
+        ),
+    }
+    enqueued = cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-05-31T00:30:00+00:00",
+        price_lookup=price_lookup,
+        min_edge=0.01,
+    )
+    keys = {(e.family_id, e.bin_label, e.direction) for e in enqueued}
+    assert ("Wuhan|2026-06-01|high", "b30", "buy_no") in keys
+    assert all(e.event_type == "EDLI_REDECISION_PENDING" for e in enqueued)
+
+
 # ---------------------------------------------------------------------------
 # R2 — sub-edge: price move too small → NO enqueue, NO regret
 # ---------------------------------------------------------------------------
@@ -113,6 +133,20 @@ def test_R6_second_cycle_price_improvement_reenqueues():
     # Cycle 3: price unchanged (same edge) → deduped away (NOT a re-fire on noise).
     e3 = cr.enqueue_live_redecisions(conn, decision_time="2026-05-31T01:40:00+00:00", price_lookup=q2, min_edge=0.01, acted_state=acted)
     assert e3 == [], "unchanged edge must not re-fire (act-once-per-edge)"
+
+
+def test_R6_buy_no_second_cycle_price_improvement_reenqueues():
+    conn = _mem_world()
+    _cache_yes_belief(conn, p_posterior_yes=0.10, recorded_at="2026-05-31T00:00:00+00:00")
+    acted: dict = {}
+    q1 = {("Wuhan|2026-06-01|high", "b30", "buy_no"): cr.PriceQuote(price=0.87, freshness_deadline="2026-05-31T01:00:00+00:00")}
+    e1 = cr.enqueue_live_redecisions(conn, decision_time="2026-05-31T00:30:00+00:00", price_lookup=q1, min_edge=0.01, acted_state=acted)
+    assert len(e1) == 1
+    q2 = {("Wuhan|2026-06-01|high", "b30", "buy_no"): cr.PriceQuote(price=0.78, freshness_deadline="2026-05-31T02:00:00+00:00")}
+    e2 = cr.enqueue_live_redecisions(conn, decision_time="2026-05-31T01:30:00+00:00", price_lookup=q2, min_edge=0.01, acted_state=acted)
+    assert len(e2) == 1
+    e3 = cr.enqueue_live_redecisions(conn, decision_time="2026-05-31T01:40:00+00:00", price_lookup=q2, min_edge=0.01, acted_state=acted)
+    assert e3 == []
 
 
 # ---------------------------------------------------------------------------

@@ -45,7 +45,20 @@ logger = logging.getLogger(__name__)
 
 _OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit", "unknown")
 _VOIDED_REASON = "duplicate_consolidated_2026_05_17_f109"
+_MERGED_REASON = "duplicate_open_rows_merged_same_identity_2026_06_17"
 _MICRO_PER_SHARE = 1_000_000  # ctf_token_balances_json is in micro-units
+_MERGE_IDENTITY_COLUMNS = (
+    "phase",
+    "market_id",
+    "city",
+    "target_date",
+    "bin_label",
+    "direction",
+    "unit",
+    "strategy_key",
+    "condition_id",
+    "temperature_metric",
+)
 
 
 def _load_chain_shares_by_token(conn: sqlite3.Connection) -> dict[str, float]:
@@ -181,6 +194,193 @@ def _void_row(
     )
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _row_dicts_for_token(conn: sqlite3.Connection, token_id: str) -> list[dict]:
+    cur = conn.execute(
+        """
+        SELECT pc.*,
+               (SELECT MIN(occurred_at) FROM position_events pe
+                 WHERE pe.position_id = pc.position_id) AS first_at
+          FROM position_current pc
+         WHERE (pc.token_id = ? OR pc.no_token_id = ?)
+           AND pc.phase IN (?, ?, ?, ?, ?)
+        """,
+        (str(token_id), str(token_id), *_OPEN_PHASES),
+    )
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _norm_identity(value) -> str:
+    return str(value or "").strip()
+
+
+def _merge_identity_key(row: dict) -> tuple[str, ...] | None:
+    values = tuple(_norm_identity(row.get(col)) for col in _MERGE_IDENTITY_COLUMNS)
+    # condition_id, direction, strategy, metric, date, and phase are load-bearing
+    # for CTF operations and strategy attribution. Missing any of them means the
+    # rows are not safely mergeable.
+    required_indexes = (0, 3, 5, 7, 8, 9)
+    if any(not values[i] for i in required_indexes):
+        return None
+    return values
+
+
+def _position_sort_key(row: dict) -> tuple[str, str, str]:
+    return (
+        _norm_identity(row.get("first_at")) or "9999",
+        _norm_identity(row.get("updated_at")) or "",
+        _norm_identity(row.get("position_id")),
+    )
+
+
+def _float_or_none(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_cost_basis(row: dict) -> float:
+    shares = _float_or_none(row.get("shares")) or 0.0
+    entry_price = _float_or_none(row.get("entry_price"))
+    if entry_price is not None and 0.0 < entry_price < 1.0:
+        return shares * entry_price
+    return _float_or_none(row.get("cost_basis_usd")) or 0.0
+
+
+def _chain_observed_cost_basis(rows: list[dict], chain_shares: float) -> float | None:
+    best_cost: float | None = None
+    for row in rows:
+        row_chain_shares = _float_or_none(row.get("chain_shares")) or 0.0
+        if row_chain_shares + 1e-9 < chain_shares:
+            continue
+        row_chain_cost = _float_or_none(row.get("chain_cost_basis_usd"))
+        if row_chain_cost is not None and row_chain_cost > 0.0:
+            best_cost = max(best_cost or 0.0, row_chain_cost)
+    return best_cost
+
+
+def _merge_equivalent_rows(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    rows: list[dict],
+    chain_shares: float,
+) -> tuple[str, list[str]] | None:
+    if len(rows) <= 1:
+        return None
+    identity_keys = {_merge_identity_key(row) for row in rows}
+    if len(identity_keys) != 1 or None in identity_keys:
+        return None
+
+    sorted_rows = sorted(rows, key=_position_sort_key)
+    keeper = sorted_rows[-1]
+    absorbed = sorted_rows[:-1]
+    keeper_id = _norm_identity(keeper.get("position_id"))
+    absorbed_ids = [_norm_identity(row.get("position_id")) for row in absorbed]
+    if not keeper_id or any(not pid for pid in absorbed_ids):
+        return None
+
+    db_total_shares = sum((_float_or_none(row.get("shares")) or 0.0) for row in rows)
+    if db_total_shares <= 0.0 or db_total_shares > float(chain_shares) + 1e-9:
+        return None
+    target_shares = float(chain_shares)
+    db_total_cost = sum(_row_cost_basis(row) for row in rows)
+    chain_cost = _chain_observed_cost_basis(rows, target_shares)
+    if chain_cost is not None:
+        target_cost = chain_cost
+    elif db_total_shares > 0.0:
+        target_cost = (db_total_cost / db_total_shares) * target_shares
+    else:
+        target_cost = db_total_cost
+    avg_entry = target_cost / target_shares if target_shares > 0 else None
+
+    for position_id in absorbed_ids:
+        _void_row(conn, position_id=position_id, reason=_MERGED_REASON)
+
+    now_row = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+        (keeper_id,),
+    ).fetchone()
+    next_seq = int(now_row[0]) + 1 if now_row else 1
+
+    from datetime import datetime, timezone
+
+    iso_now = datetime.now(timezone.utc).isoformat()
+    payload = json.dumps(
+        {
+            "reason": _MERGED_REASON,
+            "absorbed_position_ids": absorbed_ids,
+            "token_id": token_id,
+            "shares_before": [(_norm_identity(r.get("position_id")), _float_or_none(r.get("shares")) or 0.0) for r in rows],
+            "db_total_shares": db_total_shares,
+            "chain_shares": target_shares,
+            "shares_after": target_shares,
+            "db_total_cost_basis_usd": db_total_cost,
+            "cost_basis_usd_after": target_cost,
+        },
+        sort_keys=True,
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'MANUAL_OVERRIDE_APPLIED', ?, ?, ?, ?,
+                  'src.state.position_duplicate_consolidator', ?, 'live')
+        """,
+        (
+            str(uuid.uuid4()),
+            keeper_id,
+            next_seq,
+            iso_now,
+            _norm_identity(keeper.get("phase")),
+            _norm_identity(keeper.get("phase")),
+            _norm_identity(keeper.get("strategy_key")),
+            payload,
+        ),
+    )
+
+    columns = _table_columns(conn, "position_current")
+    updates: dict[str, object] = {
+        "shares": target_shares,
+        "cost_basis_usd": target_cost,
+        "size_usd": target_cost,
+        "chain_shares": target_shares,
+        "updated_at": iso_now,
+    }
+    if avg_entry is not None:
+        updates["entry_price"] = avg_entry
+    assignments = []
+    values: list[object] = []
+    for col, value in updates.items():
+        if col in columns:
+            assignments.append(f"{col} = ?")
+            values.append(value)
+    if assignments:
+        values.append(keeper_id)
+        conn.execute(
+            f"UPDATE position_current SET {', '.join(assignments)} WHERE position_id = ?",
+            values,
+        )
+    logger.warning(
+        "[CONSOLIDATOR_MERGED_EQUIVALENT] token=%s keeper=%s absorbed=%s shares=%.6f chain=%.6f",
+        token_id,
+        keeper_id,
+        absorbed_ids,
+        target_shares,
+        chain_shares,
+    )
+    return keeper_id, absorbed_ids
+
+
 def consolidate(conn: sqlite3.Connection) -> dict:
     """Run one pass of F109 consolidation; idempotent.
 
@@ -204,6 +404,8 @@ def consolidate(conn: sqlite3.Connection) -> dict:
         "overbook_tokens": [],
         "divergent_tokens": [],
         "voided_positions": [],
+        "merged_tokens": [],
+        "merged_positions": [],
         "chain_snapshot_used": chain_snapshot_used,
     }
     if not duplicates:
@@ -242,6 +444,18 @@ def consolidate(conn: sqlite3.Connection) -> dict:
                 )
                 continue
             if db_sum <= chain_shares + 1e-9:
+                merge_result = _merge_equivalent_rows(
+                    conn,
+                    token_id=token_id,
+                    rows=_row_dicts_for_token(conn, token_id),
+                    chain_shares=chain_shares,
+                )
+                if merge_result is not None:
+                    _keeper_id, absorbed_ids = merge_result
+                    report["merged_tokens"].append(token_id)
+                    report["merged_positions"].extend(absorbed_ids)
+                    report["voided_positions"].extend(absorbed_ids)
+                    continue
                 report["divergent_tokens"].append(token_id)
                 logger.warning(
                     "[CONSOLIDATOR_DIVERGENT] token=%s db_sum=%.6f chain=%.6f "
@@ -315,6 +529,8 @@ def consolidate_token(conn: sqlite3.Connection, token_id: str) -> dict:
         "overbook_tokens": [],
         "divergent_tokens": [],
         "voided_positions": [],
+        "merged_tokens": [],
+        "merged_positions": [],
         "chain_snapshot_used": bool(chain_by_token),
     }
     if not duplicates:
@@ -338,7 +554,19 @@ def consolidate_token(conn: sqlite3.Connection, token_id: str) -> dict:
             return report
         chain_shares = float(chain_by_token[str(token_id)])
         if not chain_by_token or db_sum <= chain_shares + 1e-9:
-            report["divergent_tokens"].append(str(token_id))
+            merge_result = _merge_equivalent_rows(
+                conn,
+                token_id=str(token_id),
+                rows=_row_dicts_for_token(conn, str(token_id)),
+                chain_shares=chain_shares,
+            )
+            if merge_result is not None:
+                _keeper_id, absorbed_ids = merge_result
+                report["merged_tokens"].append(str(token_id))
+                report["merged_positions"].extend(absorbed_ids)
+                report["voided_positions"].extend(absorbed_ids)
+            else:
+                report["divergent_tokens"].append(str(token_id))
         else:
             # MAJ-1 fix (2026-05-17 PR critic): asymmetric-share overbook is
             # fail-closed DIVERGENT — see consolidate() for the counter-example

@@ -1075,6 +1075,27 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         for _tid, _positions in _token_to_positions.items():
             _chain_cp = chain_by_token.get(_tid)
             _chain_bal = _chain_cp.size if _chain_cp is not None else 0.0
+            if _chain_bal > 0.0 and len(_positions) > 1 and any(
+                (float(getattr(_p, "chain_shares", 0.0) or 0.0) >= _chain_bal - 0.01)
+                and bool(getattr(_p, "chain_verified_at", "") or "")
+                for _p in _positions
+            ):
+                # The chain balance is token-aggregate truth. If an individual
+                # lot already carries that aggregate observation, LIFO allocation
+                # cannot distinguish lots and would false-void real exposure.
+                for _p in _positions:
+                    aggregate_backed_set.add(_p.trade_id)
+                stats["skipped_aggregate_allocation_existing_chain_observation"] = (
+                    stats.get("skipped_aggregate_allocation_existing_chain_observation", 0) + 1
+                )
+                logger.warning(
+                    "AGGREGATE_ALLOCATION_SKIPPED: token=%s chain=%.4f rows=%d "
+                    "reason=existing_lot_carries_aggregate_chain_observation",
+                    _tid,
+                    _chain_bal,
+                    len(_positions),
+                )
+                continue
             _allocated, _phantoms = allocate_chain_truth(_positions, _chain_bal)
             for _ph in _phantoms:
                 phantom_set.add(_ph.trade_id)

@@ -366,7 +366,10 @@ def enqueue_live_redecisions(
             if idx >= len(belief.p_posterior_vec):
                 continue
             yes_post = float(belief.p_posterior_vec[idx])
-            for direction, posterior in (("buy_yes", yes_post),):
+            for direction, posterior in (
+                ("buy_yes", yes_post),
+                ("buy_no", one_minus(yes_post)),
+            ):
                 key = (belief.family_id, label, direction)
                 quote = price_lookup.get(key)
                 if quote is None:

@@ -603,6 +603,109 @@ class TestConsolidator:
         assert _LONDON_TOKEN in report["divergent_tokens"]
         assert report["voided_positions"] == []
 
+    def test_chain_covers_db_same_identity_open_rows_merge(self):
+        """Same token/same identity rows are one local exposure split and must converge."""
+        from src.state.position_duplicate_consolidator import consolidate
+        from src.state.projection import (
+            CANONICAL_POSITION_CURRENT_COLUMNS,
+            ordered_values,
+        )
+
+        conn = _fresh_conn()
+        p1 = _make_projection(
+            position_id="pos-merge-a",
+            phase="active",
+            token_id="",
+            no_token_id=_LONDON_TOKEN,
+            shares=15.0,
+        )
+        p2 = _make_projection(
+            position_id="pos-merge-b",
+            phase="active",
+            token_id="",
+            no_token_id=_LONDON_TOKEN,
+            shares=13.5,
+        )
+        for proj in (p1, p2):
+            conn.execute(
+                f"INSERT INTO position_current ({', '.join(CANONICAL_POSITION_CURRENT_COLUMNS)}) "
+                f"VALUES ({', '.join(['?'] * len(CANONICAL_POSITION_CURRENT_COLUMNS))})",
+                ordered_values(proj, CANONICAL_POSITION_CURRENT_COLUMNS),
+            )
+        _insert_event(conn, position_id="pos-merge-a", seq=1, occurred_at="2026-05-17T10:00:00+00:00")
+        _insert_event(conn, position_id="pos-merge-b", seq=1, occurred_at="2026-05-17T11:00:00+00:00")
+        conn.execute(
+            "INSERT INTO collateral_ledger_snapshots (captured_at, authority_tier, ctf_token_balances_json) "
+            "VALUES (?, 'CHAIN', ?)",
+            ("2026-05-18T00:01:00+00:00", json.dumps({_LONDON_TOKEN: 60_000_000})),
+        )
+
+        report = consolidate(conn)
+
+        assert report["merged_tokens"] == [_LONDON_TOKEN]
+        assert report["merged_positions"] == ["pos-merge-a"]
+        rows = conn.execute(
+            "SELECT position_id, phase, shares, cost_basis_usd, size_usd FROM position_current "
+            "WHERE no_token_id = ? ORDER BY position_id",
+            (_LONDON_TOKEN,),
+        ).fetchall()
+        by_id = {row[0]: row for row in rows}
+        assert by_id["pos-merge-a"][1] == "voided"
+        assert by_id["pos-merge-b"][1] == "active"
+        assert by_id["pos-merge-b"][2] == pytest.approx(60.0)
+        assert by_id["pos-merge-b"][3] == pytest.approx(60.0 * 0.31)
+        assert by_id["pos-merge-b"][4] == pytest.approx(60.0 * 0.31)
+        event = conn.execute(
+            "SELECT event_type, payload_json FROM position_events "
+            "WHERE position_id='pos-merge-b' ORDER BY sequence_no DESC LIMIT 1"
+        ).fetchone()
+        assert event[0] == "MANUAL_OVERRIDE_APPLIED"
+        assert "pos-merge-a" in event[1]
+
+    def test_chain_covers_db_different_condition_stays_divergent(self):
+        """Different condition_id means different CTF market identity; never merge."""
+        from src.state.position_duplicate_consolidator import consolidate
+        from src.state.projection import (
+            CANONICAL_POSITION_CURRENT_COLUMNS,
+            ordered_values,
+        )
+
+        conn = _fresh_conn()
+        p1 = _make_projection(
+            position_id="pos-div-a",
+            phase="active",
+            token_id="",
+            no_token_id=_LONDON_TOKEN,
+            shares=15.0,
+        )
+        p2 = _make_projection(
+            position_id="pos-div-b",
+            phase="active",
+            token_id="",
+            no_token_id=_LONDON_TOKEN,
+            shares=13.5,
+        )
+        p2["condition_id"] = "cond-other"
+        for proj in (p1, p2):
+            conn.execute(
+                f"INSERT INTO position_current ({', '.join(CANONICAL_POSITION_CURRENT_COLUMNS)}) "
+                f"VALUES ({', '.join(['?'] * len(CANONICAL_POSITION_CURRENT_COLUMNS))})",
+                ordered_values(proj, CANONICAL_POSITION_CURRENT_COLUMNS),
+            )
+        _insert_event(conn, position_id="pos-div-a", seq=1, occurred_at="2026-05-17T10:00:00+00:00")
+        _insert_event(conn, position_id="pos-div-b", seq=1, occurred_at="2026-05-17T11:00:00+00:00")
+        conn.execute(
+            "INSERT INTO collateral_ledger_snapshots (captured_at, authority_tier, ctf_token_balances_json) "
+            "VALUES (?, 'CHAIN', ?)",
+            ("2026-05-18T00:01:00+00:00", json.dumps({_LONDON_TOKEN: 60_000_000})),
+        )
+
+        report = consolidate(conn)
+
+        assert report["merged_positions"] == []
+        assert report["voided_positions"] == []
+        assert _LONDON_TOKEN in report["divergent_tokens"]
+
     def test_karachi_safety_singleton_is_noop(self):
         """Karachi (1 row) MUST pass through unaffected."""
         from src.state.position_duplicate_consolidator import consolidate
