@@ -1873,6 +1873,7 @@ def _record_position_drift_findings(
     )
     settlement_holdings = _settlement_command_token_holdings_by_token(conn)
     closed_position_holdings = _closed_position_token_holdings_by_token(conn)
+    chain_confirmed_active_holdings = _chain_confirmed_active_holdings_by_token(conn)
     open_sell_locked = _live_open_sell_locked_tokens_by_token(conn, open_orders=open_orders)
     tokens = sorted(
         set(exchange)
@@ -1890,6 +1891,25 @@ def _record_position_drift_findings(
                 conn,
                 token,
                 resolution="position_drift_token_suppressed_external",
+                resolved_at=observed_at,
+            )
+            continue
+        # CHAIN-CONFIRMED ACTIVE HOLDING (2026-06-16 ws_gap journal-gap antibody): see
+        # _chain_confirmed_active_holdings_by_token. A ws_gap-era fill confirmed ONLY on-chain
+        # (chain_state='synced') but never journaled leaves the exchange position unexplained
+        # by the confirmed-trade-facts journal, re-recording this drift every sweep and latching
+        # submit closed forever. Both sides are the data-api /positions surface (the persisted
+        # chain-reconciler snapshot vs the FRESH exchange read), not two oracles — but a real
+        # reduction/loss surfaces FIRST in the fresh read, so equality means the position is
+        # still present at its last chain-confirmed size → not a drift (a loss breaks the match).
+        _chain_confirmed_size = chain_confirmed_active_holdings.get(token, Decimal("0"))
+        if _chain_confirmed_size > Decimal("0") and _position_size_matches(
+            exchange.get(token, Decimal("0")), _chain_confirmed_size
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_chain_confirmed_active_holding",
                 resolved_at=observed_at,
             )
             continue
@@ -2493,6 +2513,7 @@ def _resolve_position_drift_tokens_from_current_truth(
     )
     settlement_holdings = _settlement_command_token_holdings_by_token(conn)
     closed_position_holdings = _closed_position_token_holdings_by_token(conn)
+    chain_confirmed_active_holdings = _chain_confirmed_active_holdings_by_token(conn)
     open_sell_locked = _live_open_sell_locked_tokens_by_token(conn, open_orders=open_orders)
     for token in sorted(str(item) for item in token_ids):
         # ONE-TRUTH (rule 4): honor the suppression registry — a chain-only / settled token is
@@ -2502,6 +2523,21 @@ def _resolve_position_drift_tokens_from_current_truth(
                 conn,
                 token,
                 resolution="position_drift_token_suppressed_external",
+                resolved_at=observed_at,
+            )
+            continue
+        # CHAIN-CONFIRMED ACTIVE HOLDING (2026-06-16 ws_gap journal-gap antibody): see
+        # _chain_confirmed_active_holdings_by_token. The persisted chain-reconciler /positions
+        # read (chain_state='synced') matched against the FRESH exchange /positions read: a real
+        # loss surfaces first in the fresh read, so equality → position still present → resolve.
+        _chain_confirmed_size = chain_confirmed_active_holdings.get(token, Decimal("0"))
+        if _chain_confirmed_size > Decimal("0") and _position_size_matches(
+            exchange.get(token, Decimal("0")), _chain_confirmed_size
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_chain_confirmed_active_holding",
                 resolved_at=observed_at,
             )
             continue
@@ -4381,6 +4417,61 @@ def _closed_position_token_holdings_by_token(conn: sqlite3.Connection) -> dict[s
             continue
         order_id = str(row["order_id"] or "").strip()
         # NULL/empty order_id → unique per position row so it is never collapsed.
+        group_key = order_id if order_id else f"__no_order__:{row['position_id']}"
+        token_groups = holdings_by_order.setdefault(token_id, {})
+        token_groups[group_key] = max(token_groups.get(group_key, Decimal("0")), amount)
+    out: dict[str, Decimal] = {}
+    for token_id, groups in holdings_by_order.items():
+        out[token_id] = sum(groups.values(), Decimal("0"))
+    return out
+
+
+def _chain_confirmed_active_holdings_by_token(conn: sqlite3.Connection) -> dict[str, Decimal]:
+    """On-chain-confirmed CTF holdings for ACTIVE positions — VENUE truth, not the journal.
+
+    The position_drift absorbers above use the M5 confirmed-trade-facts journal as their
+    wallet-truth basis. But a fill that arrives during a user-channel ws_gap is confirmed
+    ONLY by the on-chain CTF balance — the chain reconciler (src/state/chain_reconciliation
+    ``reconcile``: "chain is truth") reads balanceOf and sets ``chain_state='synced'`` with
+    the backed ``chain_shares`` — and is NEVER written as a journaled trade. Such a position
+    leaves the exchange position permanently unexplained by the journal (0), so the recorder
+    re-records the same position_drift on every M5 sweep and the submit latch never clears.
+
+    Observed 2026-06-16: Seoul buy_no 10.86 (finding 3c7427cf), ``chain_state=synced`` /
+    ``chain_shares=10.86`` vs ``confirmed_journal=0`` — froze ALL new submits for hours.
+
+    The persisted ``chain_shares`` (the chain reconciler's data-api /positions read,
+    ``chain_state='synced'``) is matched against the FRESH exchange /positions read at sweep
+    time. The two are the same surface (snapshot vs fresh), not independent oracles — but a
+    real reduction/loss surfaces FIRST in the fresh read, so equality means the position is
+    still present at its last chain-confirmed size and there is no unexplained exposure (a
+    loss/theft would LOWER the fresh read, break the equality, and keep the finding). Keyed by
+    the HELD outcome token (no_token_id for buy_no, token_id otherwise) and deduped by
+    (token, order_id) like the terminal helper, so lifecycle rows of one fill never double-count.
+    """
+
+    if not _table_exists(conn, "position_current"):
+        return {}
+    rows = conn.execute(
+        """
+        SELECT position_id, token_id, no_token_id, direction, chain_shares, order_id
+          FROM position_current
+         WHERE phase = 'active'
+           AND chain_state = 'synced'
+           AND COALESCE(chain_shares, 0) > 0
+        """
+    ).fetchall()
+    holdings_by_order: dict[str, dict[str, Decimal]] = {}
+    for row in rows:
+        direction = str(row["direction"] or "").strip().lower()
+        token = row["no_token_id"] if direction == "buy_no" else row["token_id"]
+        token_id = str(token or "").strip()
+        if not token_id:
+            continue
+        amount = _positive_decimal_or_none(row["chain_shares"])
+        if amount is None:
+            continue
+        order_id = str(row["order_id"] or "").strip()
         group_key = order_id if order_id else f"__no_order__:{row['position_id']}"
         token_groups = holdings_by_order.setdefault(token_id, {})
         token_groups[group_key] = max(token_groups.get(group_key, Decimal("0")), amount)
