@@ -330,7 +330,7 @@ _WLA_CACHE_PATH = _WLA_REPO_ROOT / ".pytest_cache" / "writer_lock_antibody.json"
 # connect path). Allowlisting a no-connect file would weaken the gate.
 _WLA_CANONICAL_INFRA_ALLOWLIST = frozenset({
     "src/state/db.py",                              # canonical_shim
-    "src/state/collateral_ledger.py",               # singleton_persistent_conn (2026-05-13 fix): CollateralLedger(db_path=) opens a ledger-owned conn for the process-wide singleton so it survives transient caller-conn lifecycles. Single connect site, no schema mutation outside init_collateral_schema.
+    "src/state/collateral_ledger.py",               # singleton_path_backed (2026-06-17 fix): CollateralLedger(db_path=) stores a durable DB path and opens short-lived conns per operation so the global singleton survives transient caller-conn lifecycles without parking a live trade-DB writer.
 })
 
 # Residual must-not-leak set: daemon src/ sites pending Track A.6 retrofit.

@@ -1,8 +1,9 @@
 # Created: 2026-05-13
 # Last reused/audited: 2026-05-15
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
-#                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
-"""Relationship test for CollateralLedger global singleton conn lifecycle.
+#                  + 2026-05-13 collateral_ledger singleton lifecycle remediation
+#                  + 2026-06-17 path-backed short-connection live repair
+"""Relationship test for CollateralLedger global singleton DB-path lifecycle.
 
 The R3 Z4 contract is that `configure_global_ledger(...)` installs a
 process-wide ledger whose `snapshot()` remains callable for the lifetime
@@ -15,8 +16,9 @@ a closed database`.
 
 This test asserts the cross-module invariant that production-equivalent
 configure-then-close-source-conn does NOT poison the singleton. The fix
-makes `CollateralLedger` own a persistent conn when given a `db_path`,
-so the singleton remains live regardless of the caller's conn lifetime.
+makes `CollateralLedger` own a durable `db_path` and open short-lived
+connections per DB operation, so the singleton remains live regardless of the
+caller conn lifetime without holding the trade DB write lane open.
 """
 
 from __future__ import annotations
@@ -52,8 +54,8 @@ def test_global_ledger_snapshot_survives_caller_conn_close(tmp_path: Path) -> No
     seed_conn.commit()
     seed_conn.close()
 
-    # Production-equivalent setup: build a ledger that owns a persistent
-    # conn against the real DB path, publish it to the global slot.
+    # Production-equivalent setup: build a path-backed ledger against the real
+    # DB path, publish it to the global slot.
     ledger = CollateralLedger(db_path=db_path)
     configure_global_ledger(ledger)
 
@@ -87,9 +89,9 @@ def test_global_ledger_snapshot_survives_after_transient_caller_conn_pattern(
     seed_conn.commit()
     seed_conn.close()
 
-    # The fix-shape: build a persistent-conn ledger and configure globally.
-    persistent_ledger = CollateralLedger(db_path=db_path)
-    configure_global_ledger(persistent_ledger)
+    # The fix-shape: build a path-backed ledger and configure globally.
+    path_backed_ledger = CollateralLedger(db_path=db_path)
+    configure_global_ledger(path_backed_ledger)
 
     # Now perform a transient conn lifecycle in the caller (mimicking the
     # deprecated get_balance() wrapper) — it must not poison the singleton.
@@ -112,15 +114,15 @@ def test_global_ledger_snapshot_survives_after_transient_caller_conn_pattern(
         configure_global_ledger(None)
 
 
-def test_owned_persistent_ledger_refresh_commits_for_fresh_readers(
+def test_path_backed_ledger_refresh_commits_for_fresh_readers(
     tmp_path: Path,
 ) -> None:
     """RELATIONSHIP: global ledger refresh -> fresh DB reader must see it.
 
-    The live daemon keeps a process-wide ledger with a persistent owned
-    connection. Heartbeat refreshes must become canonical DB truth immediately;
-    otherwise the daemon's in-memory collateral view diverges from fresh
-    read-only verifier / executor ledger instances.
+    The live daemon keeps a process-wide ledger with a durable DB path.
+    Heartbeat refreshes must become canonical DB truth immediately; otherwise
+    the daemon's in-memory collateral view diverges from fresh read-only
+    verifier / executor ledger instances.
     """
 
     db_path = tmp_path / "trades.db"
@@ -151,5 +153,39 @@ def test_owned_persistent_ledger_refresh_commits_for_fresh_readers(
             assert fresh.authority_tier == "CHAIN"
         finally:
             fresh_conn.close()
+    finally:
+        ledger.close()
+
+
+def test_path_backed_ledger_does_not_hold_write_lock_between_calls(
+    tmp_path: Path,
+) -> None:
+    """A global collateral ledger must not park a trade-DB writer between calls."""
+
+    db_path = tmp_path / "trades.db"
+    ledger = CollateralLedger(db_path=db_path)
+
+    class Adapter:
+        def get_collateral_payload(self):
+            return {
+                "pusd_balance_micro": 199_396_602,
+                "pusd_allowance_micro": 9_000_000,
+                "usdc_e_legacy_balance_micro": 0,
+                "ctf_token_balances": {},
+                "ctf_token_allowances": {},
+                "authority_tier": "CHAIN",
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+    try:
+        ledger.refresh(Adapter())
+
+        writer = sqlite3.connect(str(db_path), timeout=0.1)
+        try:
+            writer.execute("PRAGMA busy_timeout=100")
+            writer.execute("BEGIN IMMEDIATE")
+            writer.rollback()
+        finally:
+            writer.close()
     finally:
         ledger.close()

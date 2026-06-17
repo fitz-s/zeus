@@ -522,7 +522,7 @@ test_trust_policy:
     tests/test_charter_sunset_required.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_check_pr_identity_collisions.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_city_kelly_multiplier.py: {created: "2026-05-03", last_used: "2026-05-03"}
-    tests/test_collateral_ledger_global_persistent_conn.py: {created: "2026-05-13", last_used: "2026-05-15"}
+    tests/test_collateral_ledger_global_path_backed.py: {created: "2026-05-13", last_used: "2026-06-17"}
     tests/test_companion_loop_break.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_contract_source_fields_baseline.py: {created: "2026-05-01", last_used: "2026-05-01"}
     tests/test_cycle_runner_db_lock_degrade.py: {created: "2026-05-05", last_used: "2026-05-05"}
@@ -1185,7 +1185,7 @@ categories:
     - tests/test_check_live_order_e2e.py
     - tests/test_check_pr_identity_collisions.py
     - tests/test_city_kelly_multiplier.py
-    - tests/test_collateral_ledger_global_persistent_conn.py
+    - tests/test_collateral_ledger_global_path_backed.py
     - tests/test_companion_loop_break.py
     - tests/test_contract_source_fields_baseline.py
     - tests/test_counter_caplog_ledger.py

@@ -1,8 +1,8 @@
 # Created: 2026-04-26
 # Last reused/audited: 2026-05-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
-#                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
-#                  + 2026-05-17 live collateral DB lock remediation
+#                  + 2026-05-13 collateral_ledger singleton lifecycle remediation
+#                  + 2026-05-17 / 2026-06-17 live collateral DB lock remediation
 """R3 Z4 collateral ledger for pUSD, CTF inventory, and reservations.
 
 pUSD is BUY collateral. CTF outcome tokens are SELL inventory. This module
@@ -18,6 +18,7 @@ import math
 import os
 import sqlite3
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -199,16 +200,18 @@ class CollateralLedger:
         - ``conn=<existing>``: caller owns conn lifetime. The ledger is only
           safe to use while the caller's conn is open. Suitable for short
           unit-of-work helpers (e.g. legacy compat wrappers, tests).
-        - ``db_path=<path>``: ledger opens AND owns a persistent connection
-          for its lifetime. Use for process-wide singletons published via
-          ``configure_global_ledger`` — survives transient caller-conn
-          lifecycles. Mutually exclusive with ``conn``.
+        - ``db_path=<path>``: ledger owns a durable DB path and opens short-lived
+          connections per DB operation. Use for process-wide singletons published
+          via ``configure_global_ledger`` — survives transient caller-conn
+          lifecycles without holding a live trade-DB connection between calls.
 
-        Authority basis: 2026-05-13 collateral_ledger singleton conn lifecycle
-        remediation. Previously the singleton wrapped a transient caller conn
-        (PolymarketClient.get_balance compat wrapper), which closed the conn
-        immediately after publishing the ledger globally and caused every
-        downstream preflight to raise sqlite3.ProgrammingError.
+        Authority basis: 2026-06-17 live redecision repair. The 2026-05-13
+        singleton fix correctly stopped transient caller-conn poisoning, but did
+        so with a process-wide persistent sqlite connection. Live evidence showed
+        that background collateral refresh could then wedge the trade DB write
+        lane and starve executable snapshot/redecision/order paths. Path-backed
+        short connections preserve singleton durability while making every DB
+        touch a bounded unit.
         """
         if conn is not None and db_path is not None:
             raise ValueError(
@@ -217,13 +220,20 @@ class CollateralLedger:
         self._snapshot: CollateralSnapshot | None = None
         self._memory_reservations: dict[str, dict[str, Any]] = {}
         self._owns_conn = False
+        self._db_path: Path | None = None
         if db_path is not None:
-            # Persistent ledger-owned connection. check_same_thread=False so
-            # the singleton can be read from riskguard / executor threads
-            # without re-opening on every call.
-            self._conn = _connect_owned_collateral_db(db_path)
+            # Path-backed singleton: no persistent sqlite connection survives
+            # between calls. A short schema touch here validates the DB and keeps
+            # init idempotent without parking a file handle in the daemon.
+            self._db_path = Path(db_path)
             self._owns_conn = True
-            init_collateral_schema(self._conn)
+            init_conn = _connect_owned_collateral_db(self._db_path)
+            try:
+                init_collateral_schema(init_conn)
+                init_conn.commit()
+            finally:
+                init_conn.close()
+            self._conn = None
         else:
             self._conn = conn
             if self._conn is not None:
@@ -240,8 +250,28 @@ class CollateralLedger:
                 self._conn.close()
             except sqlite3.Error:
                 pass
-            self._owns_conn = False
-            self._conn = None
+        self._owns_conn = False
+        self._conn = None
+        self._db_path = None
+
+    @contextmanager
+    def _connection_scope(self):
+        if self._db_path is None:
+            yield self._conn
+            return
+
+        conn = _connect_owned_collateral_db(self._db_path)
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
 
     def refresh(self, adapter: Any) -> CollateralSnapshot:
         """Read pUSD/CTF collateral truth from an adapter-like object.
@@ -277,13 +307,13 @@ class CollateralLedger:
             authority_tier=authority,
             raw_balance_payload_hash=payload_hash,
         )
-        self._snapshot = snapshot
         self._persist_snapshot(snapshot)
+        self._snapshot = snapshot
         return snapshot
 
     def set_snapshot(self, snapshot: CollateralSnapshot) -> None:
-        self._snapshot = snapshot
         self._persist_snapshot(snapshot)
+        self._snapshot = snapshot
 
     def snapshot(self) -> CollateralSnapshot:
         loaded = self._load_latest_snapshot()
@@ -402,7 +432,7 @@ class CollateralLedger:
         if not command_id:
             raise ValueError("command_id is required")
         now = datetime.now(timezone.utc).isoformat()
-        if self._conn is None:
+        if self._conn is None and self._db_path is None:
             existing = self._memory_reservations.get(command_id)
             if existing and existing.get("released_at") is None:
                 raise ValueError(f"reservation already active for command_id={command_id}")
@@ -415,14 +445,17 @@ class CollateralLedger:
                 "release_reason": None,
             }
             return
-        self._conn.execute(
-            """
-            INSERT INTO collateral_reservations (
-              command_id, reservation_type, token_id, amount, created_at
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (command_id, reservation_type, token_id, amount, now),
-        )
+        with self._connection_scope() as conn:
+            if conn is None:
+                return
+            conn.execute(
+                """
+                INSERT INTO collateral_reservations (
+                  command_id, reservation_type, token_id, amount, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (command_id, reservation_type, token_id, amount, now),
+            )
 
     def _release_reservation(
         self,
@@ -433,86 +466,101 @@ class CollateralLedger:
         reason: str,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        if self._conn is None:
+        if self._conn is None and self._db_path is None:
             row = self._memory_reservations.get(command_id)
             if row and row["reservation_type"] == reservation_type and row.get("token_id") == token_id:
                 row["released_at"] = now
                 row["release_reason"] = reason
             return
-        self._conn.execute(
-            """
-            UPDATE collateral_reservations
-               SET released_at = ?, release_reason = ?
-             WHERE command_id = ?
-               AND reservation_type = ?
-               AND (token_id IS ? OR token_id = ?)
-               AND released_at IS NULL
-            """,
-            (now, reason, command_id, reservation_type, token_id, token_id),
-        )
+        with self._connection_scope() as conn:
+            if conn is None:
+                return
+            conn.execute(
+                """
+                UPDATE collateral_reservations
+                   SET released_at = ?, release_reason = ?
+                 WHERE command_id = ?
+                   AND reservation_type = ?
+                   AND (token_id IS ? OR token_id = ?)
+                   AND released_at IS NULL
+                """,
+                (now, reason, command_id, reservation_type, token_id, token_id),
+            )
 
     def _reservation(self, command_id: str) -> dict[str, Any] | None:
-        if self._conn is None:
+        if self._conn is None and self._db_path is None:
             row = self._memory_reservations.get(command_id)
             if row and row.get("released_at") is None:
                 return dict(row)
             return None
-        row = self._conn.execute(
-            """
-            SELECT reservation_type, token_id, amount
-              FROM collateral_reservations
-             WHERE command_id = ? AND released_at IS NULL
-            """,
-            (command_id,),
-        ).fetchone()
+        with self._connection_scope() as conn:
+            if conn is None:
+                return None
+            row = conn.execute(
+                """
+                SELECT reservation_type, token_id, amount
+                  FROM collateral_reservations
+                 WHERE command_id = ? AND released_at IS NULL
+                """,
+                (command_id,),
+            ).fetchone()
         return dict(row) if row else None
 
     def _reserved_pusd(self) -> int:
-        if self._conn is None:
+        if self._conn is None and self._db_path is None:
             return sum(
                 int(row["amount"])
                 for row in self._memory_reservations.values()
                 if row["reservation_type"] == "PUSD_BUY" and row.get("released_at") is None
             )
-        row = self._conn.execute(
-            """
-            SELECT COALESCE(SUM(amount), 0)
-              FROM collateral_reservations
-             WHERE reservation_type = 'PUSD_BUY' AND released_at IS NULL
-            """
-        ).fetchone()
+        with self._connection_scope() as conn:
+            if conn is None:
+                return 0
+            row = conn.execute(
+                """
+                SELECT COALESCE(SUM(amount), 0)
+                  FROM collateral_reservations
+                 WHERE reservation_type = 'PUSD_BUY' AND released_at IS NULL
+                """
+            ).fetchone()
         return int(row[0] or 0)
 
     def _reserved_tokens(self) -> dict[str, int]:
-        if self._conn is None:
+        if self._conn is None and self._db_path is None:
             out: dict[str, int] = {}
             for row in self._memory_reservations.values():
                 if row["reservation_type"] == "CTF_SELL" and row.get("released_at") is None:
                     token_id = str(row["token_id"])
                     out[token_id] = out.get(token_id, 0) + int(row["amount"])
             return out
-        rows = self._conn.execute(
-            """
-            SELECT token_id, COALESCE(SUM(amount), 0) AS amount
-              FROM collateral_reservations
-             WHERE reservation_type = 'CTF_SELL' AND released_at IS NULL
-             GROUP BY token_id
-            """
-        ).fetchall()
+        with self._connection_scope() as conn:
+            if conn is None:
+                return {}
+            rows = conn.execute(
+                """
+                SELECT token_id, COALESCE(SUM(amount), 0) AS amount
+                  FROM collateral_reservations
+                 WHERE reservation_type = 'CTF_SELL' AND released_at IS NULL
+                 GROUP BY token_id
+                """
+            ).fetchall()
         return {str(row["token_id"]): int(row["amount"] or 0) for row in rows}
 
     def _load_latest_snapshot(self) -> CollateralSnapshot | None:
-        if self._conn is None:
+        if self._conn is None and self._db_path is None:
             return None
         try:
-            row = self._conn.execute(
-                """
-                SELECT *
-                  FROM collateral_ledger_snapshots
-                 ORDER BY id DESC
-                 LIMIT 1
-                """
-            ).fetchone()
+            with self._connection_scope() as conn:
+                if conn is None:
+                    return None
+                row = conn.execute(
+                    """
+                    SELECT *
+                      FROM collateral_ledger_snapshots
+                     ORDER BY id DESC
+                     LIMIT 1
+                    """
+                ).fetchone()
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc):
                 return None
@@ -539,38 +587,39 @@ class CollateralLedger:
 
 
     def _persist_snapshot(self, snapshot: CollateralSnapshot) -> None:
-        if self._conn is None:
+        if self._conn is None and self._db_path is None:
             return
-        self._conn.execute(
-            """
-            INSERT INTO collateral_ledger_snapshots (
-              pusd_balance_micro,
-              pusd_allowance_micro,
-              usdc_e_legacy_balance_micro,
-              ctf_token_balances_json,
-              ctf_token_allowances_json,
-              reserved_pusd_for_buys_micro,
-              reserved_tokens_for_sells_json,
-              captured_at,
-              authority_tier,
-              raw_balance_payload_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                _sqlite_micro(snapshot.pusd_balance_micro),
-                _sqlite_micro(snapshot.pusd_allowance_micro),
-                _sqlite_micro(snapshot.usdc_e_legacy_balance_micro),
-                json.dumps(snapshot.ctf_token_balances, sort_keys=True),
-                json.dumps(snapshot.ctf_token_allowances, sort_keys=True),
-                snapshot.reserved_pusd_for_buys_micro,
-                json.dumps(snapshot.reserved_tokens_for_sells, sort_keys=True),
-                snapshot.captured_at.isoformat(),
-                snapshot.authority_tier,
-                snapshot.raw_balance_payload_hash,
-            ),
-        )
-        if self._owns_conn:
-            self._conn.commit()
+        with self._connection_scope() as conn:
+            if conn is None:
+                return
+            conn.execute(
+                """
+                INSERT INTO collateral_ledger_snapshots (
+                  pusd_balance_micro,
+                  pusd_allowance_micro,
+                  usdc_e_legacy_balance_micro,
+                  ctf_token_balances_json,
+                  ctf_token_allowances_json,
+                  reserved_pusd_for_buys_micro,
+                  reserved_tokens_for_sells_json,
+                  captured_at,
+                  authority_tier,
+                  raw_balance_payload_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _sqlite_micro(snapshot.pusd_balance_micro),
+                    _sqlite_micro(snapshot.pusd_allowance_micro),
+                    _sqlite_micro(snapshot.usdc_e_legacy_balance_micro),
+                    json.dumps(snapshot.ctf_token_balances, sort_keys=True),
+                    json.dumps(snapshot.ctf_token_allowances, sort_keys=True),
+                    snapshot.reserved_pusd_for_buys_micro,
+                    json.dumps(snapshot.reserved_tokens_for_sells, sort_keys=True),
+                    snapshot.captured_at.isoformat(),
+                    snapshot.authority_tier,
+                    snapshot.raw_balance_payload_hash,
+                ),
+            )
 
 
 _GLOBAL_LEDGER: CollateralLedger | None = None
