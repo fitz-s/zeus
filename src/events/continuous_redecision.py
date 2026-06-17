@@ -507,7 +507,7 @@ def read_freshest_executable_prices(
     ``1 - orderbook_top_bid`` (buying NO == selling the YES at best bid). Each quote carries the
     snapshot's own ``freshness_deadline`` so the screen's stale-price guard (R7) is exact. Crossed or
     non-finite books are skipped (no phantom edge). Append-only table indexed by
-    (condition_id, captured_at DESC) → the freshest row per condition is one MAX-row scan."""
+    (condition_id, captured_at DESC) → the freshest row per condition is one bounded index seek."""
     if not condition_ids:
         return {}
     try:
@@ -518,22 +518,7 @@ def read_freshest_executable_prices(
     if not {"condition_id", "orderbook_top_bid", "orderbook_top_ask",
             "freshness_deadline", "captured_at"}.issubset(cols):
         return {}
-    placeholders = ",".join("?" for _ in condition_ids)
-    rows = trade_conn.execute(
-        f"""
-        WITH latest AS (
-            SELECT condition_id, orderbook_top_bid, orderbook_top_ask, freshness_deadline,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY condition_id ORDER BY captured_at DESC
-                   ) AS rn
-            FROM executable_market_snapshots
-            WHERE condition_id IN ({placeholders})
-        )
-        SELECT condition_id, orderbook_top_bid, orderbook_top_ask, freshness_deadline
-        FROM latest WHERE rn = 1
-        """,
-        tuple(condition_ids),
-    ).fetchall()
+    rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
     out: dict[tuple[str, str], PriceQuote] = {}
     for row in rows:
         cid = str(row[0] or "")
@@ -575,22 +560,7 @@ def read_freshest_resting_best_bids(
     if not {"condition_id", "orderbook_top_bid", "orderbook_top_ask",
             "freshness_deadline", "captured_at"}.issubset(cols):
         return {}
-    placeholders = ",".join("?" for _ in condition_ids)
-    rows = trade_conn.execute(
-        f"""
-        WITH latest AS (
-            SELECT condition_id, orderbook_top_bid, orderbook_top_ask, freshness_deadline,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY condition_id ORDER BY captured_at DESC
-                   ) AS rn
-            FROM executable_market_snapshots
-            WHERE condition_id IN ({placeholders})
-        )
-        SELECT condition_id, orderbook_top_bid, orderbook_top_ask, freshness_deadline
-        FROM latest WHERE rn = 1
-        """,
-        tuple(condition_ids),
-    ).fetchall()
+    rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
     out: dict[tuple[str, str], PriceQuote] = {}
     for row in rows:
         cid = str(row[0] or "")
@@ -608,6 +578,42 @@ def read_freshest_resting_best_bids(
         if 0.0 < no_bid < 1.0:
             out[(cid, "buy_no")] = PriceQuote(price=no_bid, freshness_deadline=deadline)
     return out
+
+
+def _freshest_executable_price_rows_by_condition(
+    trade_conn: sqlite3.Connection,
+    *,
+    condition_ids: set[str],
+) -> list[sqlite3.Row | tuple]:
+    """Return the newest snapshot price row per condition via bounded index seeks.
+
+    The previous window query sorted every matching snapshot in a growing
+    high-frequency table. Continuous redecision only needs one current row per
+    condition, so use the existing ``(condition_id, captured_at DESC)`` index
+    directly and keep the scheduler cycle bounded by the number of live
+    conditions it is actually screening.
+    """
+
+    rows: list[sqlite3.Row | tuple] = []
+    seen: set[str] = set()
+    for raw_condition_id in sorted(condition_ids):
+        condition_id = str(raw_condition_id or "").strip()
+        if not condition_id or condition_id in seen:
+            continue
+        seen.add(condition_id)
+        row = trade_conn.execute(
+            """
+            SELECT condition_id, orderbook_top_bid, orderbook_top_ask, freshness_deadline
+              FROM executable_market_snapshots
+             WHERE condition_id = ?
+             ORDER BY captured_at DESC, snapshot_id DESC
+             LIMIT 1
+            """,
+            (condition_id,),
+        ).fetchone()
+        if row is not None:
+            rows.append(row)
+    return rows
 
 
 def screen_entry_redecisions(

@@ -70,6 +70,12 @@ def init_snapshot_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_snapshots_condition_captured
           ON executable_market_snapshots (condition_id, captured_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_selected_token_captured
+          ON executable_market_snapshots (selected_outcome_token_id, captured_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_yes_token_captured
+          ON executable_market_snapshots (yes_token_id, captured_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_no_token_captured
+          ON executable_market_snapshots (no_token_id, captured_at DESC);
         CREATE TRIGGER IF NOT EXISTS no_update_executable_market_snapshots
         BEFORE UPDATE ON executable_market_snapshots
         BEGIN SELECT RAISE(ABORT, 'executable_market_snapshots is APPEND-ONLY (NC-NEW-B)'); END;

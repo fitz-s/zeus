@@ -44,6 +44,19 @@ def _mem_trade() -> sqlite3.Connection:
     return conn
 
 
+class _SqlCaptureConn:
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self.statements: list[str] = []
+
+    def execute(self, sql, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        self.statements.append(str(sql))
+        return self._conn.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+
 def _cache(conn, *, family_id="hyp|live|Wuhan|2026-06-12|high|disc", p_yes=0.99,
            snapshot_id="snap1", cond="0xc30", recorded_at="2026-06-12T00:00:00+00:00"):
     cr.cache_belief(
@@ -182,6 +195,46 @@ def test_entry_screen_silent_when_no_edge():
     )
     assert all(e.direction != "buy_yes" or e.family_id != "hyp|live|Wuhan|2026-06-12|high|disc"
                for e in fired)
+
+
+def test_price_reader_uses_bounded_condition_seeks_not_window_sort():
+    trade = _mem_trade()
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        bid="0.10",
+        ask="0.90",
+        snapshot_id="old",
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots
+        (snapshot_id, condition_id, yes_token_id, no_token_id, selected_outcome_token_id,
+         orderbook_top_bid, orderbook_top_ask, freshness_deadline, captured_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "new",
+            "0xc30",
+            "yes-c30",
+            "no-c30",
+            "yes-c30",
+            "0.70",
+            "0.72",
+            "2026-06-12T02:00:00+00:00",
+            "2026-06-12T00:31:00+00:00",
+        ),
+    )
+    trade.commit()
+    captured = _SqlCaptureConn(trade)
+
+    quotes = cr.read_freshest_executable_prices(captured, condition_ids={"0xc30"})
+
+    sql_text = "\n".join(captured.statements).upper()
+    assert "ROW_NUMBER" not in sql_text
+    assert "PARTITION BY" not in sql_text
+    assert quotes[("0xc30", "buy_yes")].price == 0.72
+    assert quotes[("0xc30", "buy_no")].price == pytest.approx(0.30)
 
 
 # ───────────────────────────────────────────────────────────────────────────────────────────────

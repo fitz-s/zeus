@@ -154,6 +154,19 @@ def test_pr2_schema_idempotent(conn):
     init_snapshot_schema(conn)  # no error = pass
 
 
+def test_snapshot_schema_has_token_recency_indexes(conn):
+    indexes = {
+        row[1]
+        for row in conn.execute("PRAGMA index_list(executable_market_snapshots)").fetchall()
+    }
+
+    assert {
+        "idx_snapshots_selected_token_captured",
+        "idx_snapshots_yes_token_captured",
+        "idx_snapshots_no_token_captured",
+    }.issubset(indexes)
+
+
 # ── R-EE.6: one-sided book → depth=0 ─────────────────────────────────────────
 
 def test_one_sided_book_yields_zero_depth():
@@ -322,6 +335,15 @@ def test_pr2_migration_upgrade_path():
     assert "depth_at_best_ask" in post_cols, (
         f"Migration failed: depth_at_best_ask not in schema; cols={post_cols}"
     )
+    post_indexes = {
+        row[1]
+        for row in raw.execute("PRAGMA index_list(executable_market_snapshots)").fetchall()
+    }
+    assert {
+        "idx_snapshots_selected_token_captured",
+        "idx_snapshots_yes_token_captured",
+        "idx_snapshots_no_token_captured",
+    }.issubset(post_indexes)
 
     # Roundtrip: insert a snapshot via the production writer, read it back
     snap = _make_snapshot(
