@@ -230,6 +230,7 @@ def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, s
             FROM position_current
             WHERE COALESCE(shares, 0) > 0
               AND COALESCE(phase, '') NOT IN ('settled', 'voided', 'closed', 'exited')
+              AND COALESCE(phase, '') NOT IN ('economically_closed', 'admin_closed', 'quarantined')
               AND city IS NOT NULL AND target_date IS NOT NULL
               AND temperature_metric IS NOT NULL
             """

@@ -223,6 +223,25 @@ def _row_freshness_key(row: dict[str, Any]) -> tuple[str, str, int]:
     )
 
 
+def _row_family_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(row.get("snapshot_city") or row.get("city") or ""),
+        str(row.get("snapshot_target_date") or row.get("target_local_date") or ""),
+        str(row.get("snapshot_temperature_metric") or row.get("temperature_metric") or ""),
+    )
+
+
+def _filter_rows_to_restricted_families(
+    rows: list[dict[str, Any]],
+    restrict_to_families: set[tuple[str, str, str]] | None,
+) -> list[dict[str, Any]]:
+    """Apply screen/held-family restriction before fairness windowing."""
+
+    if restrict_to_families is None:
+        return rows
+    return [row for row in rows if _row_family_key(row) in restrict_to_families]
+
+
 LiveEligibilityReader = Callable[[dict[str, Any], dict[str, Any], dict[str, Any], datetime], bool]
 
 
@@ -770,6 +789,7 @@ class ForecastSnapshotReadyTrigger:
                     *_replacement_params,
                 ),
             )
+        rows = _filter_rows_to_restricted_families(rows, restrict_to_families)
         if rows:
             # ``limit=None`` means no cap on the number of city families, not
             # "emit every historical source_run for each family."  Fairness owns

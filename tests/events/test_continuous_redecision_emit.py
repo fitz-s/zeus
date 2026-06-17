@@ -19,9 +19,12 @@ from src.events.event_writer import EventWriter
 from src.events.event_store import EventStore
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 from src.events.triggers.forecast_snapshot_ready import (
+    CoverageFairnessRequest,
     ForecastSnapshotReadyTrigger,
+    _filter_rows_to_restricted_families,
     executable_forecast_live_eligible_reader,
 )
+from src.data.replacement_cycle_advance_trigger import _held_position_families
 from src.state.db import init_schema, init_schema_forecasts
 
 ENTITY_KEY = "Chicago|2026-05-24|high|run-1"
@@ -456,6 +459,41 @@ def test_redecision_admission_is_screen_job_only():
     assert "event_type=REDECISION_EVENT_TYPE" in screen_src
 
 
+def test_restricted_redecision_filters_before_fairness_window():
+    """A small screened/held set must not disappear because the all-universe fair window missed it."""
+
+    rows = [
+        {
+            "snapshot_city": "Chicago",
+            "snapshot_target_date": "2026-06-19",
+            "snapshot_temperature_metric": "high",
+            "readiness_status": "LIVE_ELIGIBLE",
+        },
+        {
+            "snapshot_city": "Tokyo",
+            "snapshot_target_date": "2026-06-18",
+            "snapshot_temperature_metric": "low",
+            "readiness_status": "LIVE_ELIGIBLE",
+        },
+    ]
+    restricted = _filter_rows_to_restricted_families(
+        rows,
+        {("Tokyo", "2026-06-18", "low")},
+    )
+    selected = CoverageFairnessRequest(limit=1, cycle_index=0).select_rows(restricted)
+
+    assert [(
+        selected[0]["snapshot_city"],
+        selected[0]["snapshot_target_date"],
+        selected[0]["snapshot_temperature_metric"],
+    )] == [("Tokyo", "2026-06-18", "low")]
+
+    src = inspect.getsource(ForecastSnapshotReadyTrigger.scan_committed_snapshots)
+    assert src.index("rows = _filter_rows_to_restricted_families") < src.index(
+        "rows = CoverageFairnessRequest"
+    )
+
+
 def test_held_position_families_are_admitted_to_redecision(monkeypatch):
     """Held families are admission inputs even when no new-entry screen fires."""
 
@@ -472,6 +510,36 @@ def test_held_position_families_are_admitted_to_redecision(monkeypatch):
 
     assert main._edli_current_held_position_family_keys() == {
         ("Tokyo", "2026-06-04", "high")
+    }
+
+
+def test_held_position_family_provider_excludes_closed_phases():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            shares REAL,
+            phase TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?)",
+        [
+            ("Tokyo", "2026-06-18", "low", 19.5, "day0_window"),
+            ("Shenzhen", "2026-06-19", "high", 60.0, "active"),
+            ("Hong Kong", "2026-06-08", "high", 10.0, "economically_closed"),
+            ("Warsaw", "2026-06-08", "high", 15.75, "admin_closed"),
+            ("Seoul", "2026-06-08", "high", 7.0, "quarantined"),
+        ],
+    )
+
+    assert _held_position_families(conn) == {
+        ("Tokyo", "2026-06-18", "low"),
+        ("Shenzhen", "2026-06-19", "high"),
     }
 
 
