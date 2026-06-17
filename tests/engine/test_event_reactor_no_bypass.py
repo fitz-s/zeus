@@ -38,6 +38,7 @@ from src.engine.event_reactor_adapter import (
     _snapshot_p_raw,
     _snapshot_unit,
     _probability_vector_hash,
+    _forecast_authority_payload_from_posterior,
     _source_truth_payload_from_forecast_authority,
 )
 from src.config import runtime_cities_by_name
@@ -901,6 +902,7 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
     provenance_json = _json.dumps(provenance, separators=(",", ":"))
     q_json = _json.dumps(q_uniform, separators=(",", ":"))
     posterior_id = 9001  # arbitrary fixture ID
+    posterior_identity_hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
     conn.execute(
         """
@@ -935,7 +937,28 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            lead_days INTEGER NOT NULL,
+            forecast_value_c REAL NOT NULL,
+            endpoint TEXT NOT NULL,
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY',
+            training_allowed INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(model, city, target_date, metric, source_cycle_time, endpoint)
+        )
+        """
+    )
     conn.execute("DELETE FROM forecast_posteriors WHERE posterior_id = ?", (posterior_id,))
+    conn.execute("DELETE FROM raw_model_forecasts WHERE city = 'Chicago' AND target_date = '2026-05-25' AND metric = 'high'")
     dep_json = _json.dumps(
         {
             "dependencies": [
@@ -978,7 +1001,8 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             'LIVE_AUTHORITY', 0,
             ?, ?, ?,
             ?,
-            'fixture-identity-hash', 'fixture-dep-hash', 'fixture-config-hash',
+            ?, 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+            'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
             'fused_normal_direct',
             '2026-05-24T00:00:00+00:00', '2026-05-24T08:10:00+00:00', '2026-05-24T08:11:00+00:00',
             ?
@@ -992,7 +1016,24 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             q_json,  # q_lcb_json same as q for test
             q_json,  # q_ucb_json same as q for test
             topo_hash,
+            posterior_identity_hash,
             provenance_json,
+        ),
+    )
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO raw_model_forecasts (
+            model, city, target_date, metric, source_cycle_time,
+            source_available_at, captured_at, lead_days, forecast_value_c,
+            endpoint, trade_authority_status, training_allowed
+        ) VALUES (?, 'Chicago', '2026-05-25', 'high',
+                  '2026-05-24T00:00:00+00:00', '2026-05-24T08:10:00+00:00',
+                  '2026-05-24T08:10:00+00:00', 1, ?, 'single_runs', 'SHADOW_ONLY', 0)
+        """,
+        (
+            ("gfs_global", 24.0),
+            ("ecmwf_ifs025", 25.0),
+            ("gem_global", 26.0),
         ),
     )
     # Insert the replacement readiness row with correct strategy_key/source_id/data_version.
@@ -1471,6 +1512,49 @@ def test_adapter_source_truth_authority_follows_replacement_reader_authority():
 
     assert source_truth["source_authority_id"] == forecast_payload["reader_authority"]
     assert source_truth["source_authority_id"] != "read_executable_forecast"
+
+
+def test_replacement_posterior_forecast_authority_payload_satisfies_pre_submit_source_context():
+    event = replace(
+        _forecast_event(),
+        causal_snapshot_id="rmf-Chicago|2026-05-25|high|2026-05-24",
+    )
+    conn = _trade_conn_with_snapshot()
+    _insert_replacement_forecast_fixture(conn)
+    family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")
+
+    result = _forecast_authority_payload_from_posterior(
+        conn,
+        event=event,
+        family=family,
+        payload={
+            "source_id": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+            "source_run_id": "run-1",
+        },
+        decision_time=DECISION_TIME,
+    )
+
+    assert result is not None
+    forecast_payload, clock = result
+    assert clock.source_available_at.isoformat() == "2026-05-24T08:10:00+00:00"
+    decision_context = DecisionSourceContext.from_forecast_context(forecast_payload)
+    assert decision_context is not None
+    assert decision_context.raw_payload_hash == (
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    )
+    assert decision_context.forecast_source_role == "entry_primary"
+    assert decision_context.degradation_level == "OK"
+    assert decision_context.authority_tier == "FORECAST"
+    assert decision_context.first_member_observed_time == "2026-05-24T07:10:00+00:00"
+    assert decision_context.run_complete_time == "2026-05-24T08:05:00+00:00"
+    errors = set(decision_context.integrity_errors())
+    assert "missing_forecast_valid_time" not in errors
+    assert "missing_raw_payload_hash" not in errors
+    assert "missing_degradation_level" not in errors
+    assert "missing_forecast_source_role" not in errors
+    assert "missing_authority_tier" not in errors
+    assert "missing_first_member_observed_time" not in errors
+    assert "missing_run_complete_time" not in errors
 
 
 def test_market_events_authority_rows_have_topology_clock_fields():

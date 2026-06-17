@@ -6467,6 +6467,78 @@ _POSTERIOR_APPLIED_VALIDATIONS: tuple[str, ...] = (
 )
 
 
+def _posterior_dependency_source_run_ids(raw: object) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return ()
+    run_ids: list[str] = []
+
+    def _append(value: object) -> None:
+        text = _nonnull(value)
+        if text and not text.startswith("posterior:"):
+            run_ids.append(text)
+
+    if isinstance(parsed, Mapping):
+        dependencies = parsed.get("dependencies")
+        if isinstance(dependencies, list):
+            for item in dependencies:
+                if isinstance(item, Mapping):
+                    _append(item.get("source_run_id"))
+        else:
+            for value in parsed.values():
+                if isinstance(value, Mapping):
+                    _append(value.get("source_run_id"))
+                else:
+                    _append(value)
+    return tuple(dict.fromkeys(run_ids))
+
+
+def _posterior_dependency_timing(
+    conn: sqlite3.Connection,
+    *,
+    dependency_source_run_ids_json: object,
+) -> tuple[str | None, str | None]:
+    run_ids = _posterior_dependency_source_run_ids(dependency_source_run_ids_json)
+    if not run_ids:
+        return None, None
+    source_run_table = _authority_table_ref(conn, "source_run")
+    if source_run_table is None:
+        return None, None
+    columns = _table_ref_columns(conn, source_run_table)
+    if "source_run_id" not in columns:
+        return None, None
+
+    start_exprs = [
+        column for column in ("fetch_started_at", "captured_at", "source_available_at", "recorded_at")
+        if column in columns
+    ]
+    finish_exprs = [
+        column for column in ("fetch_finished_at", "imported_at", "captured_at", "source_available_at", "recorded_at")
+        if column in columns
+    ]
+    if not start_exprs or not finish_exprs:
+        return None, None
+    placeholders = ",".join("?" for _ in run_ids)
+    try:
+        row = conn.execute(
+            f"""
+            SELECT MIN(COALESCE({', '.join(start_exprs)})),
+                   MAX(COALESCE({', '.join(finish_exprs)}))
+              FROM {source_run_table}
+             WHERE source_run_id IN ({placeholders})
+            """,
+            run_ids,
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - provenance enrichment must fail closed to row clocks.
+        return None, None
+    if row is None:
+        return None, None
+    return _nonnull(row[0]) or None, _nonnull(row[1]) or None
+
+
 def _forecast_authority_payload_from_posterior(
     conn: sqlite3.Connection,
     *,
@@ -6505,7 +6577,8 @@ def _forecast_authority_payload_from_posterior(
         prow = conn.execute(
             f"""
             SELECT source_id, source_cycle_time, source_available_at, computed_at,
-                   posterior_identity_hash, data_version
+                   posterior_identity_hash, data_version, dependency_source_run_ids_json,
+                   dependency_hash, posterior_config_hash, trade_authority_status
               FROM {posterior_table}
              WHERE product_id = ?
                AND city = ? AND target_date = ? AND temperature_metric = ?
@@ -6534,8 +6607,14 @@ def _forecast_authority_payload_from_posterior(
         p_computed_at,
         p_identity_hash,
         p_data_version,
+        p_dependency_source_run_ids_json,
+        p_dependency_hash,
+        p_posterior_config_hash,
+        p_trade_authority_status,
     ) = prow
     if not p_identity_hash or not p_source_cycle_time:
+        return None
+    if str(p_trade_authority_status or "") != "LIVE_AUTHORITY":
         return None
     # The decorrelated multi-model member set for this family/cycle (the SAME set the spine used).
     members = _spine_multimodel_members_for_event(
@@ -6554,6 +6633,11 @@ def _forecast_authority_payload_from_posterior(
     source_id = _nonnull(payload.get("source_id")) or _nonnull(p_source_id) or "openmeteo"
     source_run_id = _nonnull(payload.get("source_run_id")) or str(p_identity_hash)
     snapshot_id = _nonnull(getattr(event, "causal_snapshot_id", None)) or str(p_identity_hash)
+    first_member_observed_time, run_complete_time = _posterior_dependency_timing(
+        conn,
+        dependency_source_run_ids_json=p_dependency_source_run_ids_json,
+    )
+    posterior_artifact_hash = str(p_identity_hash)
     payload_out = {
         "identity": snapshot_id,
         "snapshot_id": snapshot_id,
@@ -6588,12 +6672,16 @@ def _forecast_authority_payload_from_posterior(
         "model": _POSTERIOR_MEMBERS_JSON_SOURCE,
         "model_family": _POSTERIOR_MEMBERS_JSON_SOURCE,
         "forecast_issue_time": str(p_source_cycle_time),
-        "forecast_valid_time": None,
+        "forecast_valid_time": family.target_date,
         "forecast_fetch_time": _nonnull(p_computed_at),
         "forecast_available_at": _nonnull(p_source_available_at),
-        "degradation_level": None,
+        "degradation_level": "OK",
+        "forecast_source_role": "entry_primary",
+        "authority_tier": "FORECAST",
         "decision_time": _decision_iso,
         "decision_time_status": "OK",
+        "first_member_observed_time": first_member_observed_time or _nonnull(p_source_available_at),
+        "run_complete_time": run_complete_time or _nonnull(p_computed_at),
         "forecast_data_version": _nonnull(p_data_version) or _POSTERIOR_MEMBERS_JSON_SOURCE,
         "source_cycle_time": str(p_source_cycle_time),
         "source_issue_time": _nonnull(p_source_available_at) or str(p_source_cycle_time),
@@ -6601,7 +6689,14 @@ def _forecast_authority_payload_from_posterior(
         "source_run_id": source_run_id,
         "coverage_id": str(p_identity_hash),
         "posterior_identity_hash": str(p_identity_hash),
+        # For the derived-posterior authority, the materialized posterior row is
+        # the submitted forecast artifact. Its persisted identity hash includes
+        # q/q_lcb/q_ucb plus dependency/config hashes and is the stable payload
+        # digest that execution can carry through pre-venue integrity checks.
+        "raw_payload_hash": posterior_artifact_hash,
         "manifest_hash": str(p_identity_hash),
+        "dependency_hash": _nonnull(p_dependency_hash),
+        "posterior_config_hash": _nonnull(p_posterior_config_hash),
         # Posterior completeness-by-construction: model COUNT is the completeness metric (the
         # ensemble member/step floors do not apply). expected==observed==count, count>=3.
         "expected_members": member_count,
