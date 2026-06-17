@@ -20,7 +20,8 @@ RECEIPT_ROLE = "forecast_attribution_only"
 SETTLEMENT_AUTHORITY_STATUS = "NO_SETTLEMENT_AUTHORITY"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 _ALLOWED_TRADE_AUTHORITY_STATUS = {"DIAGNOSTIC_ONLY", "LIVE_AUTHORITY"}
-_REQUIRED_DEPENDENCY_ROLES = ("baseline_b0", "aifs_sampled_2t", "openmeteo_ifs9_anchor", "soft_anchor_posterior")
+_CORE_DEPENDENCY_ROLES = ("baseline_b0", "openmeteo_ifs9_anchor", "soft_anchor_posterior")
+_KNOWN_DEPENDENCY_ROLES = (*_CORE_DEPENDENCY_ROLES, "aifs_sampled_2t")
 _FORBIDDEN_SETTLEMENT_KEYS = {
     "settlement_value",
     "settlement_outcome",
@@ -58,7 +59,27 @@ def _reject_settlement_truth_payload(payload: Mapping[str, Any]) -> None:
             raise ValueError(f"replacement receipt provenance cannot carry settlement truth field: {key}")
 
 
-def _dependencies_by_role(readiness: ReplacementForecastReadinessDecision) -> dict[str, Mapping[str, Any]]:
+def _required_dependency_roles(readiness: ReplacementForecastReadinessDecision) -> tuple[str, ...]:
+    roles = readiness.dependency_json.get("required_roles")
+    if roles is None:
+        roles = [item.get("role") for item in readiness.dependency_json.get("dependencies", []) if isinstance(item, Mapping)]
+    if not isinstance(roles, list) or not all(isinstance(role, str) and role for role in roles):
+        raise ValueError("readiness dependency_json.required_roles must be a list of roles")
+    required = tuple(roles)
+    unknown = [role for role in required if role not in _KNOWN_DEPENDENCY_ROLES]
+    if unknown:
+        raise ValueError("replacement receipt provenance dependency role is unknown")
+    missing_core = [role for role in _CORE_DEPENDENCY_ROLES if role not in required]
+    if missing_core:
+        raise ValueError("replacement receipt provenance requires core dependency roles")
+    return required
+
+
+def _dependencies_by_role(
+    readiness: ReplacementForecastReadinessDecision,
+    *,
+    required_roles: tuple[str, ...],
+) -> dict[str, Mapping[str, Any]]:
     dependencies = readiness.dependency_json.get("dependencies")
     if not isinstance(dependencies, list):
         raise ValueError("readiness dependency_json.dependencies must be a list")
@@ -67,21 +88,29 @@ def _dependencies_by_role(readiness: ReplacementForecastReadinessDecision) -> di
         if not isinstance(item, Mapping) or not item.get("role"):
             continue
         by_role[str(item["role"])] = item
-    missing = [role for role in _REQUIRED_DEPENDENCY_ROLES if role not in by_role]
+    missing = [role for role in required_roles if role not in by_role]
     if missing:
         raise ValueError("replacement receipt provenance requires all dependency roles")
     return by_role
 
 
-def _dependency_source_run_ids(by_role: Mapping[str, Mapping[str, Any]]) -> dict[str, str | None]:
+def _dependency_source_run_ids(
+    by_role: Mapping[str, Mapping[str, Any]],
+    *,
+    required_roles: tuple[str, ...],
+) -> dict[str, str | None]:
     return {
         role: None if by_role[role].get("source_run_id") is None else str(by_role[role].get("source_run_id"))
-        for role in _REQUIRED_DEPENDENCY_ROLES
+        for role in required_roles
     }
 
 
-def _source_available_at_max(by_role: Mapping[str, Mapping[str, Any]]) -> str:
-    values = [str(by_role[role].get("source_available_at") or "") for role in _REQUIRED_DEPENDENCY_ROLES]
+def _source_available_at_max(
+    by_role: Mapping[str, Mapping[str, Any]],
+    *,
+    required_roles: tuple[str, ...],
+) -> str:
+    values = [str(by_role[role].get("source_available_at") or "") for role in required_roles]
     if any(not value for value in values):
         raise ValueError("all replacement dependencies require source_available_at")
     return max(values)
@@ -157,7 +186,8 @@ def build_replacement_forecast_receipt_provenance(
     if product_id != PRODUCT_ID:
         raise ValueError("replacement receipt provenance product identity mismatch")
 
-    by_role = _dependencies_by_role(readiness)
+    required_roles = _required_dependency_roles(readiness)
+    by_role = _dependencies_by_role(readiness, required_roles=required_roles)
     extra_payload = dict(extra_provenance or {})
     _reject_settlement_truth_payload(extra_payload)
     summary = _guardrail_summary(guardrail_report)
@@ -173,8 +203,8 @@ def build_replacement_forecast_receipt_provenance(
         "training_allowed": False,
         "promotion_allowed": False,
         "baseline_source_run_id": str(readiness.dependency_json.get("baseline_source_run_id") or by_role["baseline_b0"].get("source_run_id") or ""),
-        "dependency_source_run_ids": _dependency_source_run_ids(by_role),
-        "source_available_at_max": _source_available_at_max(by_role),
+        "dependency_source_run_ids": _dependency_source_run_ids(by_role, required_roles=required_roles),
+        "source_available_at_max": _source_available_at_max(by_role, required_roles=required_roles),
         "market_snapshot_id": _require_text(_read_attr(veto_decision, "market_snapshot_id"), field_name="market_snapshot_id"),
         "condition_id": _require_text(_read_attr(veto_decision, "condition_id"), field_name="condition_id"),
         "token_id": _require_text(_read_attr(veto_decision, "token_id"), field_name="token_id"),

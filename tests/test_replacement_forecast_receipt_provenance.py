@@ -1,11 +1,9 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-08
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Audit 2026-06-08: STALE_TEST update — _bundle() supplied q_ucb/bin_topology_hash/family_id
-#   (required dataclass fields added in 014408394f); provenance intent unchanged.
 # Purpose: Protect replacement forecast receipt provenance as forecast-only attribution with no settlement authority.
-# Reuse: Run before attaching replacement shadow/veto provenance to no-submit receipts or attribution reports.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
+# Reuse: Run before attaching replacement live/diagnostic provenance to receipts or attribution reports.
+# Authority basis: Replacement forecast live/diagnostic provenance with readiness-declared dependency roles.
 """Replacement forecast receipt provenance tests."""
 
 from __future__ import annotations
@@ -14,7 +12,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from src.data.replacement_forecast_bundle_reader import HIGH_DATA_VERSION, PRODUCT_ID, SOURCE_ID, ReplacementForecastPosteriorBundle
+from src.data.replacement_forecast_bundle_reader import PRODUCT_ID, SOURCE_ID
 from src.data.replacement_forecast_guardrail_report import ReplacementForecastGuardrailReplayRow, build_replacement_forecast_guardrail_report
 from src.data.replacement_forecast_readiness import ReplacementForecastDependency, build_replacement_forecast_readiness
 from src.data.replacement_forecast_receipt_provenance import (
@@ -22,9 +20,6 @@ from src.data.replacement_forecast_receipt_provenance import (
     SETTLEMENT_AUTHORITY_STATUS,
     build_replacement_forecast_receipt_provenance,
 )
-from src.engine.replacement_forecast_veto import ReplacementForecastVetoInput, apply_replacement_forecast_shadow_veto
-
-
 UTC = timezone.utc
 
 
@@ -32,32 +27,7 @@ def _dt(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 6, 6, hour, minute, tzinfo=UTC)
 
 
-def _bundle() -> ReplacementForecastPosteriorBundle:
-    return ReplacementForecastPosteriorBundle(
-        posterior_id=77,
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
-        source_id=SOURCE_ID,
-        product_id=PRODUCT_ID,
-        data_version=HIGH_DATA_VERSION,
-        q={"cool": 0.25, "warm": 0.75},
-        q_lcb={"cool": 0.20, "warm": 0.65},
-        q_ucb={"cool": 0.30, "warm": 0.85},
-        bin_topology_hash="bin-topology-hash",
-        family_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
-        posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
-        source_cycle_time="2026-06-06T00:00:00+00:00",
-        source_available_at="2026-06-06T03:00:00+00:00",
-        computed_at="2026-06-06T03:05:00+00:00",
-        baseline_source_run_id="b0-run",
-        dependency_json={"source_run_ids": ["b0-run", "aifs-run", "om9-run"]},
-        provenance_json={"test": True},
-        trade_authority_status="SHADOW_VETO_ONLY",
-    )
-
-
-def _readiness():
+def _readiness(*, require_aifs: bool = False):
     dependencies = (
         ReplacementForecastDependency(
             role="baseline_b0",
@@ -89,11 +59,21 @@ def _readiness():
             role="soft_anchor_posterior",
             source_id=SOURCE_ID,
             product_id=PRODUCT_ID,
-            data_version=HIGH_DATA_VERSION,
+            data_version="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1",
             source_run_id="posterior-run",
             source_available_at=_dt(3, 5),
             posterior_id=77,
         ),
+    )
+    required_roles = (
+        "baseline_b0",
+        "aifs_sampled_2t",
+        "openmeteo_ifs9_anchor",
+        "soft_anchor_posterior",
+    ) if require_aifs else (
+        "baseline_b0",
+        "openmeteo_ifs9_anchor",
+        "soft_anchor_posterior",
     )
     return build_replacement_forecast_readiness(
         city="Shanghai",
@@ -103,11 +83,14 @@ def _readiness():
         computed_at=_dt(4, 1),
         expires_at=_dt(6),
         dependencies=dependencies,
+        required_roles=required_roles,
     )
 
 
 def _veto_decision(**overrides):
     params = {
+        "posterior_id": 77,
+        "product_id": PRODUCT_ID,
         "baseline_direction": "buy_yes:warm",
         "baseline_q_posterior": 0.70,
         "baseline_q_lcb": 0.62,
@@ -120,12 +103,15 @@ def _veto_decision(**overrides):
         "condition_id": "cond-1",
         "token_id": "token-yes",
         "decision_time": "2026-06-06T04:00:00+00:00",
+        "allowed_direction": "buy_yes:warm",
+        "allowed_q_lcb": 0.55,
+        "allowed_kelly_fraction": 0.02,
+        "veto": True,
+        "reasons": ("SOFT_ANCHOR_LOWER_Q_LCB", "SOFT_ANCHOR_LOWER_KELLY"),
+        "trade_authority_status": "LIVE_AUTHORITY",
     }
     params.update(overrides)
-    return apply_replacement_forecast_shadow_veto(
-        replacement_bundle=_bundle(),
-        veto_input=ReplacementForecastVetoInput(**params),
-    )
+    return params
 
 
 def test_receipt_provenance_is_forecast_attribution_only() -> None:
@@ -142,12 +128,12 @@ def test_receipt_provenance_is_forecast_attribution_only() -> None:
     assert provenance["readiness_id"].startswith("replacement_readiness:")
     assert provenance["training_allowed"] is False
     assert provenance["promotion_allowed"] is False
-    assert provenance["trade_authority_status"] == "SHADOW_VETO_ONLY"
+    assert provenance["trade_authority_status"] == "LIVE_AUTHORITY"
     assert provenance["authority_limits"] == {
         "can_flip_direction": False,
         "can_increase_kelly": False,
         "can_increase_q_lcb": False,
-        "can_initiate_trade": False,
+        "can_initiate_trade": True,
         "can_settle_market": False,
         "can_train_model": False,
     }
@@ -162,7 +148,6 @@ def test_receipt_provenance_carries_dependency_and_veto_identity() -> None:
     assert provenance["baseline_source_run_id"] == "b0-run"
     assert provenance["dependency_source_run_ids"] == {
         "baseline_b0": "b0-run",
-        "aifs_sampled_2t": "aifs-run",
         "openmeteo_ifs9_anchor": "om9-run",
         "soft_anchor_posterior": "posterior-run",
     }
@@ -176,6 +161,20 @@ def test_receipt_provenance_carries_dependency_and_veto_identity() -> None:
     assert provenance["allowed_direction"] == "buy_yes:warm"
     assert provenance["allowed_q_lcb"] == pytest.approx(0.55)
     assert provenance["allowed_kelly_fraction"] == pytest.approx(0.02)
+
+
+def test_receipt_provenance_preserves_aifs_when_readiness_requires_it() -> None:
+    provenance = build_replacement_forecast_receipt_provenance(
+        veto_decision=_veto_decision(),
+        readiness=_readiness(require_aifs=True),
+    ).as_dict()
+
+    assert provenance["dependency_source_run_ids"] == {
+        "baseline_b0": "b0-run",
+        "aifs_sampled_2t": "aifs-run",
+        "openmeteo_ifs9_anchor": "om9-run",
+        "soft_anchor_posterior": "posterior-run",
+    }
 
 
 def test_receipt_provenance_preserves_guardrail_regression_clusters() -> None:
@@ -225,7 +224,7 @@ def test_receipt_provenance_rejects_settlement_truth_and_records_live_trade_auth
             extra_provenance={"settlement_value": 78},
         )
 
-    live_authority = {**_veto_decision().__dict__, "trade_authority_status": "LIVE_AUTHORITY"}
+    live_authority = {**_veto_decision(), "trade_authority_status": "LIVE_AUTHORITY"}
     provenance = build_replacement_forecast_receipt_provenance(
         veto_decision=live_authority,
         readiness=_readiness(),
@@ -236,7 +235,7 @@ def test_receipt_provenance_rejects_settlement_truth_and_records_live_trade_auth
     assert provenance["authority_limits"]["can_train_model"] is False
     assert provenance["promotion_allowed"] is False
 
-    bad_product = {**_veto_decision().__dict__, "product_id": "short_" + "h" + "3_alias"}
+    bad_product = {**_veto_decision(), "product_id": "short_" + "h" + "3_alias"}
     with pytest.raises(ValueError, match="full replacement product identity"):
         build_replacement_forecast_receipt_provenance(
             veto_decision=bad_product,
