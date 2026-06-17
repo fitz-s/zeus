@@ -110,6 +110,11 @@ OPENMETEO_PREVIOUS_RUNS_SOURCE_ID: dict[str, str] = {
     "icon_d2": "icon_d2_previous_runs",
     "meteofrance_arome_france_hd": "arome_previous_runs",
     "icon_seamless": "icon_d2_previous_runs",
+    # 2026-06-17 PRECISION-INPUT FIX: high-res CONUS / N-America regional experts. The OM
+    # previous-runs API serves both under their single-runs id (curl-verified 2026-06-17), so the
+    # source_id is the conventional '<model>_previous_runs' feed identity.
+    "gfs_hrrr": "gfs_hrrr_previous_runs",
+    "gem_hrdps_continental": "gem_hrdps_continental_previous_runs",
 }
 
 

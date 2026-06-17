@@ -53,10 +53,14 @@ SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
 # NOT here: the anchor is the PRIOR (not a decorrelated likelihood provider) and icon_seamless is
 # the alias-dedup probe (dropped from the fused Sigma, never a provider). The materializer imports
 # DECORRELATED_PROVIDER_FAMILIES so the two sites can never drift on what counts as a provider.
+# 2026-06-17 PRECISION-INPUT FIX: the high-res NOAA (gfs_hrrr 3km) and CMC (gem_hrdps 2.5km)
+# nests are the SAME physical providers as gfs_global/ncep_nbm and gem_global — they belong with
+# their family so an in-CONUS city served by the high-res nest still registers NCEP/CMC presence
+# (the family-completeness count must not under-report just because the precise nest won the rep).
 DECORRELATED_PROVIDER_FAMILIES: dict[str, tuple[str, ...]] = {
-    "NCEP": ("gfs_global", "ncep_nbm_conus"),
+    "NCEP": ("gfs_hrrr", "gfs_global", "ncep_nbm_conus"),
     "DWD": ("icon_d2", "icon_eu", "icon_global"),
-    "CMC": ("gem_global",),
+    "CMC": ("gem_hrdps_continental", "gem_global"),
     "JMA": ("jma_seamless",),
     "UKMO": ("ukmo_global_deterministic_10km", "ukmo_uk_deterministic_2km"),
 }

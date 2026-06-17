@@ -59,6 +59,22 @@ ANCHOR_MODEL = "ecmwf_ifs"
 UKMO_GLOBAL_MODEL = "ukmo_global_deterministic_10km"
 NBM_MODEL = "ncep_nbm_conus"
 UKMO_UK_MODEL = "ukmo_uk_deterministic_2km"
+# 2026-06-17 PRECISION-INPUT FIX (operator directive: "the data we use is 9km level and the
+# regional data is even more precise; your 25 and 15 and the not-precise cell is breaking the
+# fusion calculation"). Settlement-graded evidence (state/zeus-forecasts.db, recent settled WU
+# highs, previous-runs raw bias — NO statistical correction): the coarse globals run ~1-2C cold
+# vs settlement (jma_seamless -2.10, the coarse-cell offshore-snap offender; gfs_global -0.86;
+# icon_global -1.08; ukmo_global -1.10) while the high-resolution station-resolving models are
+# near-zero raw bias (gfs_hrrr 3km CONUS +0.004 MAE 1.33; gem_hrdps 2.5km N-America +0.86;
+# the in-EU icon_d2/arome/ukmo_uk already in the set, all ~0 bias). The fix feeds the PRECISE
+# raw data where the city is covered — it does NOT touch the T2 fusion math, only its inputs.
+#   gfs_hrrr — NOAA HRRR 3km CONUS deterministic. NCEP-family HIGH-RES rep: in-CONUS it carries
+#     the NOAA family and SUPPRESSES gfs_global (0.25/25km) + ncep_nbm (the 13km blend), exactly
+#     the most-specific-first single-rep doctrine that already governs icon_d2>icon_eu>icon_global.
+#   gem_hrdps_continental — CMC HRDPS 2.5km North-America deterministic. CMC/GEM-family HIGH-RES
+#     rep: in-domain it carries the CMC family and SUPPRESSES gem_global (the ~15km global).
+GFS_HRRR_MODEL = "gfs_hrrr"
+GEM_HRDPS_MODEL = "gem_hrdps_continental"
 DECORR_GLOBALS = (
     "gfs_global",
     "icon_global",
@@ -68,7 +84,13 @@ DECORR_GLOBALS = (
 )
 ICON_EU_MODEL = "icon_eu"
 GLOBAL_LIKELIHOOD_MODELS = DECORR_GLOBALS + (ICON_EU_MODEL, NBM_MODEL)
-REGIONAL_MODELS = ("icon_d2", "meteofrance_arome_france_hd", UKMO_UK_MODEL)
+REGIONAL_MODELS = (
+    "icon_d2",
+    "meteofrance_arome_france_hd",
+    UKMO_UK_MODEL,
+    GFS_HRRR_MODEL,
+    GEM_HRDPS_MODEL,
+)
 
 # Spec §4(2) provider representatives. Each PHYSICAL provider family contributes exactly ONE
 # instrument to a fusion — the same single-rep doctrine that already governs "icon_d2 in-domain
@@ -81,14 +103,21 @@ REGIONAL_MODELS = ("icon_d2", "meteofrance_arome_france_hd", UKMO_UK_MODEL)
 # tuple is ordered highest-resolution-first; selection walks it and keeps the first eligible.
 ICON_FAMILY = ("icon_d2", ICON_EU_MODEL, "icon_global")
 # 2026-06-09: the SAME single-rep mechanism, two more instances (one mechanism, K<<N):
-#   NCEP family — NBM is an NCEP blend INCLUDING GFS; in-CONUS it is the family rep and
-#   gfs_global is suppressed as a provider duplicate; outside CONUS NBM is ineligible and
-#   gfs_global carries the family. This kills the NBM<->GFS correlation double-count.
-NCEP_FAMILY = (NBM_MODEL, "gfs_global")
+#   NCEP/NOAA family — all three are the SAME NOAA physics at different scopes (gfs_hrrr 3km
+#   CONUS nest > ncep_nbm ~13km CONUS blend > gfs_global 0.25/25km), so feeding two as
+#   independent triple-counts one error source. 2026-06-17: gfs_hrrr (3km, +0.004 raw bias) is
+#   the most-specific NOAA rep — in-CONUS it carries the family and ncep_nbm + gfs_global are
+#   suppressed as provider dups; outside CONUS gfs_hrrr/nbm are ineligible and gfs_global carries
+#   the family. This kills the HRRR<->NBM<->GFS correlation double-count.
+NCEP_FAMILY = (GFS_HRRR_MODEL, NBM_MODEL, "gfs_global")
 #   UKMO family — the UKV 2km nest and the 10km global are the same Met Office physics; in
 #   the UK the 2km nest is the rep (ukmo_global suppressed), elsewhere the global carries it.
 UKMO_FAMILY = (UKMO_UK_MODEL, UKMO_GLOBAL_MODEL)
-PROVIDER_FAMILIES = (ICON_FAMILY, NCEP_FAMILY, UKMO_FAMILY)
+#   CMC/GEM family (2026-06-17) — HRDPS 2.5km North-America nest and the GDPS ~15km global are
+#   the same Environment-Canada physics; in-domain the 2.5km nest is the rep (gem_global
+#   suppressed), elsewhere the global carries it. Adds station-resolving precision for N-America.
+GEM_FAMILY = (GEM_HRDPS_MODEL, "gem_global")
+PROVIDER_FAMILIES = (ICON_FAMILY, NCEP_FAMILY, UKMO_FAMILY, GEM_FAMILY)
 
 # Alias dedup thresholds (spec §3: corr > 0.995 AND mean|delta| < eps).
 ALIAS_CORR_THRESHOLD = 0.995
@@ -106,6 +135,11 @@ _REGIONAL_DOMAIN_KEY = {
     # regional expert (UKMO-family rep in the UK). Both gated by their own config polygons.
     "ncep_nbm_conus": "ncep_nbm_conus",
     "ukmo_uk_deterministic_2km": "ukmo_uk_deterministic_2km",
+    # 2026-06-17 precision-input fix: high-res CONUS / N-America regional experts, each gated by
+    # its own physical-domain polygon (config/model_domain_polygons.yaml). gfs_hrrr is the NOAA
+    # 3km nest; gem_hrdps_continental is the CMC 2.5km nest.
+    GFS_HRRR_MODEL: GFS_HRRR_MODEL,
+    GEM_HRDPS_MODEL: GEM_HRDPS_MODEL,
 }
 
 
