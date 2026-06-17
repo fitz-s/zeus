@@ -3557,6 +3557,93 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
     conn.close()
 
 
+def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
+    """Monitor refresh must not roll a chain-corrected position back to stale fill size."""
+    from src.engine.lifecycle_events import (
+        build_entry_canonical_write,
+        build_monitor_refreshed_canonical_write,
+    )
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    conn = get_connection(tmp_path / "monitor-refresh-preserve-chain.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="monitor-preserve-chain-1",
+        state="holding",
+        city="Shenzhen",
+        target_date="2026-06-19",
+        order_id="o-monitor-preserve-chain",
+        entered_at="2026-06-17T16:33:02+00:00",
+        order_posted_at="2026-06-17T16:32:37+00:00",
+        order_status="filled",
+        strategy_key="opening_inertia",
+        bin_label="32C",
+        condition_id="0xmonitorpreservechain000000000000000000000000000000000000001",
+        size_usd=9.99,
+        shares=13.5,
+        cost_basis_usd=9.99,
+        entry_price=0.74,
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-monitor-preserve-chain-seed",
+        source_module="tests/test_monitor_refresh_preserves_chain_corrected_entry_economics",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET size_usd = 44.4,
+               shares = 60.0,
+               cost_basis_usd = 44.4,
+               entry_price = 0.74,
+               chain_shares = 60.0,
+               chain_avg_price = 0.74,
+               chain_cost_basis_usd = 44.4,
+               chain_seen_at = '2026-06-17T20:51:29+00:00'
+         WHERE position_id = ?
+        """,
+        ("monitor-preserve-chain-1",),
+    )
+
+    pos.last_monitor_prob = 0.869
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_edge = 0.133
+    pos.last_monitor_market_price = 0.735
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_at = "2026-06-17T20:53:17+00:00"
+    monitor_events, monitor_projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=4,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        source_module="tests/test_monitor_refresh_preserves_chain_corrected_entry_economics",
+    )
+    append_many_and_project(conn, monitor_events, monitor_projection)
+
+    current = conn.execute(
+        """
+        SELECT size_usd, shares, cost_basis_usd, chain_shares,
+               chain_cost_basis_usd, last_monitor_prob, last_monitor_edge,
+               last_monitor_market_price, updated_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        ("monitor-preserve-chain-1",),
+    ).fetchone()
+    assert current["size_usd"] == pytest.approx(44.4)
+    assert current["shares"] == pytest.approx(60.0)
+    assert current["cost_basis_usd"] == pytest.approx(44.4)
+    assert current["chain_shares"] == pytest.approx(60.0)
+    assert current["chain_cost_basis_usd"] == pytest.approx(44.4)
+    assert current["last_monitor_prob"] == pytest.approx(0.869)
+    assert current["last_monitor_edge"] == pytest.approx(0.133)
+    assert current["last_monitor_market_price"] == pytest.approx(0.735)
+    assert current["updated_at"] == "2026-06-17T20:53:17+00:00"
+    conn.close()
+
+
 def test_monitoring_phase_persists_monitor_evidence_before_exit_evaluation(tmp_path, monkeypatch):
     """Exit evaluation must not consume monitor evidence that was never projected."""
     from src.contracts import EdgeContext, EntryMethod

@@ -552,7 +552,9 @@ def append_many_and_project(
                 """,
                 ordered_values(event, CANONICAL_POSITION_EVENT_COLUMNS),
             )
-        upsert_position_current(conn, projection)
+        projection_with_event_type = dict(projection)
+        projection_with_event_type["_canonical_event_type"] = prepared_events[-1].get("event_type")
+        upsert_position_current(conn, projection_with_event_type)
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")

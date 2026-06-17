@@ -208,10 +208,63 @@ class NullConditionIdOnOpenPhaseError(ValueError):
 # Phases that require a non-empty condition_id. These are the phases where
 # the position is still active and CTF operations may be needed.
 _CONDITION_ID_REQUIRED_PHASES = frozenset(_F109_OPEN_PHASES)
+_MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
+    {
+        "market_id",
+        "token_id",
+        "no_token_id",
+        "condition_id",
+        "order_id",
+        "order_status",
+        "size_usd",
+        "shares",
+        "cost_basis_usd",
+        "entry_price",
+        "p_posterior",
+        "entry_ci_width",
+        "entry_method",
+        "fill_authority",
+        "recovery_authority",
+        "chain_shares",
+        "chain_avg_price",
+        "chain_cost_basis_usd",
+        "chain_seen_at",
+        "chain_absence_at",
+    }
+)
+
+
+def _preserve_existing_monitor_refresh_authority(
+    conn: sqlite3.Connection, projection: dict
+) -> dict:
+    if projection.get("_canonical_event_type") != "MONITOR_REFRESHED":
+        return projection
+    position_id = str(projection.get("position_id") or "")
+    if not position_id:
+        return projection
+    current_columns = table_columns(conn, "position_current")
+    preserved = tuple(
+        column
+        for column in CANONICAL_POSITION_CURRENT_COLUMNS
+        if column in _MONITOR_REFRESH_PRESERVED_COLUMNS and column in current_columns
+    )
+    if not preserved:
+        return projection
+    row = conn.execute(
+        f"SELECT {', '.join(preserved)} FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return projection
+    merged = dict(projection)
+    for index, column in enumerate(preserved):
+        merged[column] = row[index]
+    return merged
 
 
 @capability("canonical_position_write", lease=True)
 def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
+    projection = _preserve_existing_monitor_refresh_authority(conn, projection)
     # F109 writer-side idempotency check (2026-05-17).
     # Runs before INSERT so the race window with the partial UNIQUE INDEX is
     # tight. If a same-token open-phase row exists with a *different*
