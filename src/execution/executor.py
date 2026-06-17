@@ -158,6 +158,10 @@ _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES = frozenset(
     {"REJECTED", "SUBMIT_REJECTED", "CANCELLED", "EXPIRED"}
 )
 _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
+_ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE = Decimal("0.03")
+_ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD = Decimal("0.05")
+_ENTRY_TAKER_MIN_CONFIDENCE = Decimal("0.60")
+_ENTRY_TAKER_MIN_PROFIT_RATIO = Decimal("1.20")
 
 
 def _quote_sql_identifier(identifier: str) -> str:
@@ -264,40 +268,154 @@ def _entry_control_pause_component(conn: sqlite3.Connection) -> dict:
     }
 
 
-def _entry_maker_only_component(
+def _proof_decimal(proof: Any, key: str) -> Decimal | None:
+    if not isinstance(proof, dict):
+        return None
+    raw = proof.get(key)
+    if raw in (None, ""):
+        return None
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return value if value.is_finite() else None
+
+
+def _proof_bool(proof: Any, key: str) -> bool | None:
+    if not isinstance(proof, dict):
+        return None
+    raw = proof.get(key)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _entry_taker_quality_component(
     *,
     effective_order_type: str,
     post_only: bool,
     intent_order_type: str | None = None,
+    taker_quality_proof: Any = None,
 ) -> dict:
-    """Final live-entry policy: entries may rest; exits may take."""
+    """Final live-entry policy: takers need explicit edge-vs-maker proof."""
 
     order_type = str(effective_order_type or "").strip().upper()
-    if not post_only:
+    if post_only:
+        if order_type not in {"GTC", "GTD"}:
+            return {
+                "component": "entry_taker_quality",
+                "allowed": False,
+                "reason": "entry_resting_order_type_required",
+                "order_type": order_type,
+                "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
+                "post_only": True,
+            }
         return {
-            "component": "entry_maker_only",
-            "allowed": False,
-            "reason": "entry_post_only_required",
-            "order_type": order_type,
-            "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
-            "post_only": False,
-        }
-    if order_type not in {"GTC", "GTD"}:
-        return {
-            "component": "entry_maker_only",
-            "allowed": False,
-            "reason": "entry_resting_order_type_required",
+            "component": "entry_taker_quality",
+            "allowed": True,
+            "reason": "maker_resting_allowed",
             "order_type": order_type,
             "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
             "post_only": True,
         }
+    if order_type not in {"FOK", "FAK"}:
+        return {
+            "component": "entry_taker_quality",
+            "allowed": False,
+            "reason": "entry_taker_requires_fok_or_fak",
+            "order_type": order_type,
+            "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
+            "post_only": False,
+        }
+    if not isinstance(taker_quality_proof, dict):
+        return {
+            "component": "entry_taker_quality",
+            "allowed": False,
+            "reason": "missing_taker_quality_proof",
+            "order_type": order_type,
+            "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
+            "post_only": False,
+        }
+    proof_passed = _proof_bool(taker_quality_proof, "passed")
+    taker_edge = _proof_decimal(taker_quality_proof, "taker_fee_adjusted_edge")
+    taker_profit = _proof_decimal(taker_quality_proof, "taker_expected_profit_usd")
+    maker_profit = _proof_decimal(taker_quality_proof, "maker_expected_profit_usd")
+    incremental_profit = _proof_decimal(taker_quality_proof, "incremental_expected_profit_usd")
+    confidence = _proof_decimal(taker_quality_proof, "model_confidence")
+    missing = [
+        name
+        for name, value in (
+            ("taker_fee_adjusted_edge", taker_edge),
+            ("taker_expected_profit_usd", taker_profit),
+            ("maker_expected_profit_usd", maker_profit),
+            ("incremental_expected_profit_usd", incremental_profit),
+            ("model_confidence", confidence),
+            ("passed", None if proof_passed is None else Decimal("1")),
+        )
+        if value is None
+    ]
+    if missing:
+        return {
+            "component": "entry_taker_quality",
+            "allowed": False,
+            "reason": "invalid_taker_quality_proof",
+            "missing": ",".join(missing),
+            "order_type": order_type,
+            "post_only": False,
+        }
+    if proof_passed is not True:
+        return {
+            "component": "entry_taker_quality",
+            "allowed": False,
+            "reason": "taker_quality_proof_not_passed",
+            "order_type": order_type,
+            "post_only": False,
+        }
+    required_profit = max(
+        maker_profit * _ENTRY_TAKER_MIN_PROFIT_RATIO,
+        maker_profit + _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD,
+    )
+    if taker_edge < _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE:
+        reason = "taker_fee_adjusted_edge_below_floor"
+    elif incremental_profit < _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD:
+        reason = "taker_incremental_profit_below_floor"
+    elif taker_profit < required_profit:
+        reason = "taker_profit_not_significantly_above_maker"
+    elif confidence < _ENTRY_TAKER_MIN_CONFIDENCE:
+        reason = "model_confidence_below_taker_floor"
+    else:
+        reason = ""
+    if reason:
+        return {
+            "component": "entry_taker_quality",
+            "allowed": False,
+            "reason": reason,
+            "order_type": order_type,
+            "post_only": False,
+            "taker_fee_adjusted_edge": str(taker_edge),
+            "taker_expected_profit_usd": str(taker_profit),
+            "maker_expected_profit_usd": str(maker_profit),
+            "incremental_expected_profit_usd": str(incremental_profit),
+            "model_confidence": str(confidence),
+        }
     return {
-        "component": "entry_maker_only",
+        "component": "entry_taker_quality",
         "allowed": True,
-        "reason": "allowed",
+        "reason": "taker_quality_passed",
         "order_type": order_type,
         "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
-        "post_only": True,
+        "post_only": False,
+        "taker_fee_adjusted_edge": str(taker_edge),
+        "taker_expected_profit_usd": str(taker_profit),
+        "maker_expected_profit_usd": str(maker_profit),
+        "incremental_expected_profit_usd": str(incremental_profit),
+        "model_confidence": str(confidence),
     }
 
 
@@ -2375,6 +2493,7 @@ def _legacy_entry_intent_from_final(
         decision_source_context=intent.decision_source_context,
         submit_order_type=intent.order_type,
         post_only=intent.post_only,
+        taker_quality_proof=intent.taker_quality_proof,
     )
 
 
@@ -3813,25 +3932,26 @@ def _live_order(
                 order_role="entry",
                 idempotency_key=idem.value,
             )
-        maker_only_component = _entry_maker_only_component(
+        taker_quality_component = _entry_taker_quality_component(
             effective_order_type=effective_order_type,
             post_only=submit_post_only,
             intent_order_type=submit_order_type,
+            taker_quality_proof=getattr(intent, "taker_quality_proof", None),
         )
-        if not maker_only_component.get("allowed"):
-            reason = str(maker_only_component.get("reason") or "entry_maker_only")
+        if not taker_quality_component.get("allowed"):
+            reason = str(taker_quality_component.get("reason") or "entry_taker_quality")
             logger.warning(
-                "_live_order: maker-only entry policy blocked before command "
+                "_live_order: entry taker-quality policy blocked before command "
                 "persistence for trade_id=%s token=%s reason=%s details=%s",
                 trade_id,
                 intent.token_id,
                 reason,
-                maker_only_component,
+                taker_quality_component,
             )
             return OrderResult(
                 trade_id=trade_id,
                 status="rejected",
-                reason=f"entry_maker_only:{reason}",
+                reason=f"entry_taker_quality:{reason}",
                 submitted_price=intent.limit_price,
                 shares=shares,
                 order_role="entry",
@@ -4139,7 +4259,7 @@ def _live_order(
                                 intent_order_type=submit_order_type,
                                 post_only=submit_post_only,
                             ),
-                            maker_only_component,
+                            taker_quality_component,
                             heartbeat_component,
                             ws_gap_component,
                             collateral_refresh_component,

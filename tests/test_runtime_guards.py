@@ -5156,8 +5156,8 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
     assert getattr(decision, "final_execution_intent", None) is None
 
 
-def test_executable_snapshot_repricing_keeps_crossing_entry_maker_only(tmp_path):
-    """RELATIONSHIP: crossing entry reprices to a passive maker order, not FOK."""
+def test_executable_snapshot_repricing_falls_back_to_maker_when_taker_quality_fails(tmp_path):
+    """RELATIONSHIP: crossing entry falls back to maker when taker proof fails."""
     conn = get_connection(tmp_path / "snapshot-reprice-tight-ask-upgrade.db")
     init_schema(conn)
     _insert_executable_snapshot(
@@ -5196,16 +5196,19 @@ def test_executable_snapshot_repricing_keeps_crossing_entry_maker_only(tmp_path)
             "resolution_window": "2026-04-03",
             "correlation_key": "NYC:2026-04-03",
             "passive_fill_probability": "0.40",
+            "min_taker_incremental_profit_usd": "999",
         },
     )
     conn.close()
 
     reprice = decision.tokens["executable_snapshot_reprice"]
     shadow = reprice["corrected_pricing_shadow"]
-    assert best_ask == pytest.approx(0.41)
+    assert best_ask is None
     assert reprice["selected_order_type"] == "GTC"
     assert reprice["final_order_type"] == "GTC"
     assert reprice["taker_order_type_upgraded"] is False
+    assert reprice["taker_quality_proof"]["passed"] is False
+    assert reprice["final_best_ask"] is None
     assert reprice["live_submit_authority"] is True
     assert shadow["order_policy"] == "post_only_passive_limit"
     assert shadow["live_submit_authority"] is True

@@ -772,7 +772,7 @@ class TestLiveOrderCommandSplit:
         mem_conn,
         monkeypatch,
     ):
-        """Live ENTRY must never submit FOK/FAK taker orders."""
+        """Live ENTRY taker orders require explicit quality proof."""
         import src.execution.executor as executor_module
         from src.execution.executor import _live_order
 
@@ -803,11 +803,69 @@ class TestLiveOrderCommandSplit:
             )
 
         assert result.status == "rejected"
-        assert result.reason == "entry_maker_only:entry_post_only_required"
+        assert result.reason == "entry_taker_quality:missing_taker_quality_proof"
         assert result.command_state == "REJECTED"
         insert_command.assert_not_called()
         MockClient.assert_not_called()
         assert mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+
+    def test_entry_taker_order_with_quality_proof_can_submit(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """A high-confidence, fee-adjusted taker edge may submit."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "FOK")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        intent = _make_entry_intent(
+            mem_conn,
+            limit_price=0.50,
+            token_id="tok-quality-taker-entry",
+            submit_order_type="FOK",
+            post_only=False,
+        )
+        object.__setattr__(
+            intent,
+            "taker_quality_proof",
+            {
+                "passed": True,
+                "taker_fee_adjusted_edge": "0.08",
+                "taker_expected_profit_usd": "0.50",
+                "maker_expected_profit_usd": "0.20",
+                "incremental_expected_profit_usd": "0.30",
+                "model_confidence": "0.72",
+            },
+        )
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-quality-taker")
+            )
+
+            result = _live_order(
+                trade_id="trd-quality-taker",
+                intent=intent,
+                shares=13.5,
+                conn=mem_conn,
+                decision_id="dec-quality-taker",
+            )
+
+        assert result.status == "pending"
+        assert result.order_id == "ord-quality-taker"
+        assert mock_inst.place_limit_order.called
 
     def test_entry_same_token_recent_terminal_command_cools_down_before_persistence(
         self,

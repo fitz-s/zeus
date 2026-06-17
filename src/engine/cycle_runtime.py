@@ -548,6 +548,7 @@ def _attach_corrected_pricing_authority(
     resolution_window: str = "default",
     correlation_key: str = "",
     passive_maker_context=None,
+    taker_quality_proof: dict | None = None,
 ) -> dict:
     """Attach corrected pricing evidence and the frozen final submit intent."""
     # Provenance context required by H3 semantic linter rule (p_posterior access).
@@ -726,6 +727,7 @@ def _attach_corrected_pricing_authority(
                 if isinstance(passive_maker_context, PassiveMakerExecutionContext)
                 else None
             ),
+            taker_quality_proof=taker_quality_proof,
         )
         setattr(decision, "final_execution_intent", final_intent)
     payload = {
@@ -1490,16 +1492,113 @@ def _reprice_decision_from_executable_snapshot(
 
     selected_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
     final_order_type = selected_order_type
+    taker_quality_required = allow_taker_upgrade or selected_order_type in {"FOK", "FAK"}
     taker_order_type_upgraded = False
-    if final_order_type in {"FOK", "FAK"}:
-        final_order_type = "GTC"
-    if final_order_type in {"GTC", "GTD"} and final_best_ask is not None:
+    taker_quality_proof = None
+    taker_quality_passed = False
+    if final_best_ask is not None and taker_quality_required:
+        taker_edge_dec = Decimal(str(best_ask_fee_adjusted_edge))
+        taker_price_dec = Decimal(str(corrected_candidate_expected_fill or final_price))
+        taker_notional_dec = Decimal(str(corrected_candidate_size))
+        taker_expected_profit_usd = (
+            max(Decimal("0"), taker_edge_dec)
+            * taker_notional_dec
+            / max(taker_price_dec, Decimal("0.000001"))
+        )
+        maker_context_source = "passive_maker_context"
+        if passive_maker_context is None:
+            maker_expected_profit_usd = Decimal("0")
+            maker_expected_fill_probability = Decimal("0")
+            maker_context_source = "maker_unavailable_or_unmodeled"
+        else:
+            maker_price_dec = min(
+                Decimal(str(snapshot_limit_price)),
+                Decimal(str(best_ask_float)) - tick_size_decimal,
+                positive_edge_cap_decimal,
+            )
+            if (
+                best_bid is not None
+                and maker_price_dec < best_bid < Decimal(str(best_ask_float))
+                and best_bid <= positive_edge_cap_decimal
+            ):
+                maker_price_dec = best_bid
+            maker_notional_dec = max(
+                Decimal(str(repriced_size_at_snapshot_vwmp)),
+                maker_price_dec * Decimal(str(snapshot.min_order_size)),
+            )
+            maker_edge_dec = max(Decimal("0"), p_posterior_decimal - maker_price_dec)
+            maker_expected_profit_usd = (
+                passive_maker_context.expected_fill_probability
+                * maker_edge_dec
+                * maker_notional_dec
+                / max(maker_price_dec, Decimal("0.000001"))
+            )
+            if passive_maker_context.adverse_selection_score is not None:
+                maker_expected_profit_usd -= (
+                    passive_maker_context.adverse_selection_score * maker_notional_dec
+                )
+            maker_expected_fill_probability = passive_maker_context.expected_fill_probability
+        incremental_expected_profit_usd = (
+            taker_expected_profit_usd - maker_expected_profit_usd
+        )
+        min_taker_edge = Decimal(str(final_intent_context.get("min_taker_fee_adjusted_edge", "0.03")))
+        min_incremental_profit = Decimal(str(final_intent_context.get("min_taker_incremental_profit_usd", "0.05")))
+        min_model_confidence = Decimal(str(final_intent_context.get("min_taker_model_confidence", "0.60")))
+        min_profit_ratio = Decimal(str(final_intent_context.get("min_taker_profit_ratio", "1.20")))
+        required_profit = max(
+            maker_expected_profit_usd * min_profit_ratio,
+            maker_expected_profit_usd + min_incremental_profit,
+        )
+        try:
+            ci_lower = float(getattr(decision.edge, "ci_lower"))
+            ci_upper = float(getattr(decision.edge, "ci_upper"))
+        except (TypeError, ValueError):
+            ci_lower = float("nan")
+            ci_upper = float("nan")
+        if math.isfinite(ci_lower) and math.isfinite(ci_upper) and ci_upper >= ci_lower:
+            model_confidence = max(
+                Decimal("0"),
+                min(Decimal("1"), Decimal("1") - Decimal(str(ci_upper - ci_lower))),
+            )
+            model_confidence_source = "edge_ci_width_confidence"
+        else:
+            model_confidence = Decimal("0")
+            model_confidence_source = "missing_edge_ci_width"
+        taker_quality_passed = (
+            taker_edge_dec >= min_taker_edge
+            and incremental_expected_profit_usd >= min_incremental_profit
+            and taker_expected_profit_usd >= required_profit
+            and model_confidence >= min_model_confidence
+        )
+        taker_quality_proof = {
+            "schema_version": 1,
+            "passed": taker_quality_passed,
+            "taker_fee_adjusted_edge": str(taker_edge_dec),
+            "taker_expected_profit_usd": str(taker_expected_profit_usd),
+            "maker_expected_profit_usd": str(maker_expected_profit_usd),
+            "incremental_expected_profit_usd": str(incremental_expected_profit_usd),
+            "model_confidence": str(model_confidence),
+            "model_confidence_source": model_confidence_source,
+            "min_taker_fee_adjusted_edge": str(min_taker_edge),
+            "min_taker_incremental_profit_usd": str(min_incremental_profit),
+            "min_taker_model_confidence": str(min_model_confidence),
+            "min_taker_profit_ratio": str(min_profit_ratio),
+            "maker_expected_fill_probability": str(maker_expected_fill_probability),
+            "maker_context_source": maker_context_source,
+        }
+    if final_best_ask is not None and taker_quality_passed:
+        final_order_type = "FOK" if final_order_type in {"GTC", "GTD", "FOK"} else "FAK"
+        taker_order_type_upgraded = selected_order_type in {"GTC", "GTD"}
+    elif final_best_ask is not None and taker_quality_required:
+        if final_order_type in {"FOK", "FAK"}:
+            final_order_type = "GTC"
+        final_best_ask = None
         tick = Decimal(str(getattr(snapshot, "min_tick_size", "0.01") or "0.01"))
         direction_text = str(getattr(getattr(decision, "edge", None), "direction", "") or "")
         if direction_text.startswith("buy_"):
-            passive_ceiling = Decimal(str(final_best_ask)) - tick
+            passive_ceiling = Decimal(str(best_ask_float)) - tick
             if passive_ceiling <= Decimal("0"):
-                raise ValueError("MAKER_ONLY_ENTRY_NO_PASSIVE_BID_BELOW_ASK")
+                raise ValueError("ENTRY_TAKER_QUALITY_FALLBACK_NO_PASSIVE_BID_BELOW_ASK")
             if Decimal(str(corrected_candidate_price)) >= passive_ceiling:
                 corrected_candidate_price = float(passive_ceiling)
                 corrected_candidate_expected_fill = float(passive_ceiling)
@@ -1531,6 +1630,7 @@ def _reprice_decision_from_executable_snapshot(
         resolution_window=str(final_intent_context.get("resolution_window") or "default"),
         correlation_key=str(final_intent_context.get("correlation_key") or ""),
         passive_maker_context=passive_maker_context,
+        taker_quality_proof=taker_quality_proof,
     )
     if (
         isinstance(corrected_pricing_shadow, dict)
@@ -1655,6 +1755,7 @@ def _reprice_decision_from_executable_snapshot(
         "selected_order_type": selected_order_type,
         "final_order_type": final_order_type,
         "taker_order_type_upgraded": taker_order_type_upgraded,
+        "taker_quality_proof": taker_quality_proof,
         "passive_maker_expected_fill_probability": (
             None
             if passive_maker_context is None
