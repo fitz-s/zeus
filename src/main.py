@@ -72,8 +72,11 @@ logger = logging.getLogger("zeus")
 _cycle_lock = threading.Lock()
 _market_discovery_lock = threading.Lock()
 _market_substrate_refresh_lock = threading.Lock()
+_held_position_monitor_active = threading.Event()
+_held_position_monitor_bootstrap_complete = threading.Event()
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
+HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 # Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
 # APScheduler interval. The refresh wall-clock budget
 # (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS, _refresh_pending_family_snapshots) MUST be
@@ -219,6 +222,26 @@ def _day0_first_delay_seconds(discovery: dict) -> float:
 
     interval_seconds = float(discovery["day0_interval_min"]) * 60.0
     return OPENING_HUNT_FIRST_DELAY_SECONDS + (interval_seconds / 2.0)
+
+
+def _defer_for_held_position_monitor(job_name: str) -> bool:
+    """Return True when live held-position redecision has priority over data warmers."""
+
+    if _held_position_monitor_active.is_set():
+        logger.info("%s deferred: held-position monitor active", job_name)
+        return True
+    if not _held_position_monitor_bootstrap_complete.is_set():
+        logger.info(
+            "%s deferred: first held-position monitor cycle has not completed",
+            job_name,
+        )
+        return True
+    return False
+
+
+def _mark_held_position_monitor_complete() -> None:
+    _held_position_monitor_active.clear()
+    _held_position_monitor_bootstrap_complete.set()
 
 
 def _live_execution_mode(edli_cfg: dict) -> str:
@@ -4203,6 +4226,8 @@ def _market_discovery_cycle() -> None:
 
     global _market_discovery_last_completed_monotonic
 
+    if _defer_for_held_position_monitor("market_discovery"):
+        return
     if _edli_reactor_active():
         logger.info("market_discovery deferred: EDLI reactor active")
         return
@@ -4327,6 +4352,8 @@ def _afternoon_snapshot_capture_cycle() -> None:
     markets returns [] and the job is a sub-100ms no-op.  NOT a trading or decision
     path — capture only, no belief/flag/order change.
     """
+    if _defer_for_held_position_monitor("afternoon_snapshot_capture"):
+        return
     acquired = _market_substrate_refresh_lock.acquire(blocking=False)
     if not acquired:
         logger.info("afternoon_snapshot_capture: skipped — substrate refresh already running")
@@ -4409,9 +4436,9 @@ def _new_listing_scout_cycle() -> None:
         every 60s — a head-page diff for NEW condition_ids.  Cost: one HTTP GET
         per cycle (<100ms); no full universe scan.
 
-    (b) POSTERIOR FAST-LANE: enqueues a replacement_forecast shadow materialization
-        request for each new family so the daemon processes it in the next 5-min
-        cycle rather than waiting for the next scheduled 00Z/12Z opendata wave.
+    (b) POSTERIOR FAST-LANE: stages a replacement_forecast materialization intent
+        for each new family so the producer can prioritize it rather than waiting
+        for the next scheduled 00Z/12Z opendata wave.
 
     (c) WARMER PRIORITY: inserts new condition_ids into _NEW_FAMILY_CONDITION_IDS so
         _refresh_pending_family_snapshots prepends them to the warmer rotation head
@@ -4422,6 +4449,8 @@ def _new_listing_scout_cycle() -> None:
     """
     global _SCOUT_KNOWN_CONDITION_IDS, _NEW_FAMILY_CONDITION_IDS
 
+    if _defer_for_held_position_monitor("new_listing_scout"):
+        return
     edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
@@ -5679,6 +5708,8 @@ def _edli_event_reactor_cycle() -> None:
     edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return
+    if _defer_for_held_position_monitor("edli_event_reactor"):
+        return
     if _edli_reactor_active():
         logger.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
         return
@@ -6289,6 +6320,8 @@ def _edli_command_recovery_cycle() -> None:
         return
     if get_mode() != "live":
         return
+    if _defer_for_held_position_monitor("edli_command_recovery"):
+        return
     from src.execution.command_recovery import reconcile_unresolved_commands
 
     summary = reconcile_unresolved_commands()
@@ -6450,6 +6483,8 @@ def _maker_rest_escalation_cycle() -> None:
     if not edli_cfg.get("enabled"):
         return
     if get_mode() != "live":
+        return
+    if _defer_for_held_position_monitor("maker_rest_escalation"):
         return
     from src.data.polymarket_client import PolymarketClient
     from src.execution.maker_rest_escalation import (
@@ -6672,8 +6707,10 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return
     # Live-armed condition (replaces the deleted redecision_screen_enabled flag): the reactor
-    # must be in live mode. In submit-disabled / shadow modes the screen organ stays dark.
+    # must be in live mode. When submit is disabled the screen organ stays dark.
     if str(edli_cfg.get("reactor_mode", "live_no_submit")) != "live":
+        return
+    if _defer_for_held_position_monitor("edli_redecision_screen"):
         return
     if not _edli_redecision_screen_lock.acquire(blocking=False):
         logger.info("edli_redecision_screen skipped: previous screen still running")
@@ -6851,6 +6888,8 @@ def _edli_market_substrate_warm_cycle() -> None:
     edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
+    if _defer_for_held_position_monitor("EDLI market-substrate warm"):
+        return
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_world_connection
 
     conn = get_world_connection()
@@ -6937,6 +6976,8 @@ def _edli_mainstream_warm_cycle() -> None:
 
     edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
+        return
+    if _defer_for_held_position_monitor("EDLI mainstream warm"):
         return
     from src.data.mainstream_forecast_source import warm_mainstream_point
     from src.state.db import get_world_connection
@@ -8888,6 +8929,8 @@ def _edli_market_channel_ingestor_cycle() -> None:
                 )
                 from src.state.db import get_trade_connection
 
+                if _defer_for_held_position_monitor("EDLI market-channel substrate refresh"):
+                    return
                 substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
                 if not substrate_acquired:
                     logger.info(
@@ -8996,15 +9039,15 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
     stays populated and exit_pending_missing / settled-but-active positions are
     resolved regardless of which execution mode the daemon is in.
 
-    In EDLI shadow/no-submit modes (edli_shadow_no_submit, edli_submit_disabled_bridge,
-    edli_live) this is the ONLY path that fires chain sync and exit
+    In EDLI event-driven modes this is the ONLY path that fires chain sync and exit
     monitoring — run_cycle() is never called in those modes.
 
-    Shadow-mode safety: exit_order_submit_enabled is set to False when
+    Submit safety: exit_order_submit_enabled is set to False when
     real_order_submit_enabled is False, preventing real sell orders from being
-    placed by the monitoring phase while the daemon is in shadow/no-submit mode.
-    State transitions (exit_pending_missing resolution, chain_state updates) still
-    run — they are read + DB-state-only operations, not order submissions.
+    placed by the monitoring phase while the daemon is not configured for live
+    submission. State transitions (exit_pending_missing resolution, chain_state
+    updates) still run — they are read + DB-state-only operations, not order
+    submissions.
 
     run_chain_sync uses the Polymarket REST Data API
     (data-api.polymarket.com/positions). If funder_address is absent from Keychain,
@@ -9028,10 +9071,15 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
 
     edli_cfg = _settings_section("edli", {})
     real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
+    if _held_position_monitor_active.is_set():
+        logger.warning("chain_sync_and_exit_monitor skipped: previous monitor cycle is still running")
+        return
+    _held_position_monitor_active.set()
 
     conn = get_connection()
     if conn is None:
         logger.warning("chain_sync_and_exit_monitor: DB write-lock degrade — skipping cycle")
+        _mark_held_position_monitor_complete()
         return
 
     summary: dict = {"monitors": 0, "exits": 0}
@@ -9162,6 +9210,7 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
             conn.close()
         except Exception:
             pass
+        _mark_held_position_monitor_complete()
 
     # EDLI status-summary freshness writer (release-gate surface).
     # In EDLI event-driven modes run_cycle() is never called, so the legacy
@@ -9627,7 +9676,7 @@ def main():
         )
         # NEW-LISTING SCOUT (operator 2026-06-09, dimensions a/b/c): lightweight 60s
         # head-page probe for brand-new Polymarket weather listings.  Detects new
-        # condition_ids, enqueues a shadow-materialization fast-lane request, and marks
+        # condition_ids, stages a forecast-materialization fast-lane intent, and marks
         # families for head-of-rotation in the next substrate warm cycle.
         # Fail-open: any exception is caught inside the job.  Data-only; no orders.
         if edli_cfg.get("new_listing_scout_enabled", True):
@@ -9737,15 +9786,15 @@ def main():
     # Blocker #56: chain-truth sync + exit-lifecycle monitoring. Registered in BOTH
     # legacy_cron AND EDLI event-driven modes — in EDLI modes run_cycle() never fires,
     # so this standalone job is the ONLY path that populates chain_shares/chain_avg_price
-    # and resolves exit_pending_missing / settled-but-active positions. Shadow-safe:
+    # and resolves exit_pending_missing / settled-but-active positions. Submit-safe:
     # the job runs the monitoring phase with exit_order_submit_enabled=real_order_submit_enabled
-    # (False in shadow → DB state transitions only, no real sell orders).
+    # (False when live submit is disabled -> DB state transitions only, no real sell orders).
     scheduler.add_job(
         _chain_sync_and_exit_monitor_cycle,
         "interval",
         minutes=2,
         id="chain_sync_and_exit_monitor",
-        next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 60.0),
+        next_run_time=_utc_run_time_after(HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS),
         max_instances=1,
         coalesce=True,
     )
