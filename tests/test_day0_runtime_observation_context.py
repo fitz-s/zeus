@@ -22,6 +22,7 @@ whose decision_time falls inside the SETTLEMENT_DAY window.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
@@ -184,7 +185,7 @@ def _city(**overrides) -> City:
     return City(**base)
 
 
-def test_day0_executable_observation_rejects_non_wu_source_class(monkeypatch):
+def test_day0_executable_observation_rejects_unsupported_source_class(monkeypatch):
     def should_not_fetch_wu(*args, **kwargs):
         raise AssertionError("non-WU settlement sources must not call WU geocode")
 
@@ -192,10 +193,68 @@ def test_day0_executable_observation_rejects_non_wu_source_class(monkeypatch):
 
     with pytest.raises(ObservationUnavailableError, match="unsupported"):
         observation_client.get_current_observation(
-            _city(name="Hong Kong", settlement_source_type="hko", wu_station=""),
+            _city(name="Unsupported", settlement_source_type="noaa", wu_station=""),
             target_date=date(2026, 4, 1),
             reference_time=datetime(2026, 4, 1, 16, tzinfo=timezone.utc),
         )
+
+
+def test_day0_hko_observation_reads_native_accumulator(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE hko_hourly_accumulator (
+            target_date TEXT NOT NULL,
+            hour_utc TEXT NOT NULL,
+            temperature REAL NOT NULL,
+            fetched_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO hko_hourly_accumulator
+        (target_date, hour_utc, temperature, fetched_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        [
+            ("2026-06-17", "2026-06-16T16:00Z", 26.0, "2026-06-16T16:00:03+00:00"),
+            ("2026-06-17", "2026-06-16T17:00Z", 27.0, "2026-06-16T17:00:03+00:00"),
+            ("2026-06-17", "2026-06-17T05:00Z", 28.0, "2026-06-17T05:00:03+00:00"),
+            ("2026-06-17", "2026-06-17T12:00Z", 27.0, "2026-06-17T12:00:03+00:00"),
+            ("2026-06-17", "2026-06-17T14:00Z", 99.0, "2026-06-17T14:00:03+00:00"),
+        ],
+    )
+    conn.commit()
+
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only",
+        lambda: conn,
+    )
+
+    obs = observation_client.get_current_observation(
+        _city(
+            name="Hong Kong",
+            timezone="Asia/Hong_Kong",
+            settlement_source_type="hko",
+            settlement_unit="C",
+            wu_station="",
+        ),
+        target_date=date(2026, 6, 17),
+        reference_time=datetime(2026, 6, 17, 12, 30, tzinfo=timezone.utc),
+    )
+
+    assert obs.source == "hko_hourly_accumulator"
+    assert obs.station_id == "HKO"
+    assert obs.unit == "C"
+    assert obs.current_temp == pytest.approx(27.0)
+    assert obs.high_so_far == pytest.approx(28.0)
+    assert obs.low_so_far == pytest.approx(26.0)
+    assert obs.sample_count == 4
+    assert obs.first_sample_time == "2026-06-16T16:00:00+00:00"
+    assert obs.last_sample_time == "2026-06-17T12:00:00+00:00"
+    assert obs.coverage_status == "OK"
 
 
 def test_day0_wu_observation_rejects_station_mismatch(monkeypatch):

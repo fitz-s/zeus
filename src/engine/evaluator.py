@@ -186,6 +186,9 @@ DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
     # fast_obs_source_for_city + faithfulness gate in day0_fast_obs.py).
     # Only fires when WU result is absent/stale/coverage-incomplete.
     "wu_icao": frozenset({"wu_api", "metar_fast_lane"}),
+    # Hong Kong has no valid WU/VHHH route; the live Day0 monitor source is the
+    # HKO native accumulator only.
+    "hko": frozenset({"hko_hourly_accumulator"}),
 }
 DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
 DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0

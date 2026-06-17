@@ -333,6 +333,51 @@ class TestMonitorPrimaryAuthority:
         assert refresh_pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
         assert is_fresh is True
 
+    def test_hko_day0_window_uses_day0_observation_lane(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        belief = ReplacementBelief(
+            held_side_prob=0.758, q_yes_bin=0.242, posterior_id="p9",
+            computed_at="2026-06-12T00:00:00+00:00", age_hours=99.0,
+            fresh=False, bin_key=BIN, direction="buy_no",
+        )
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: belief)
+        observed = []
+
+        def fake_day0_refresh(**kw):
+            observed.append(kw["position"].entry_method)
+            mr._set_monitor_probability_fresh(kw["position"], True)
+            return 0.71, ["day0_observation"]
+
+        monkeypatch.setattr(mr, "_refresh_day0_observation", fake_day0_refresh)
+        monkeypatch.setattr(
+            mr,
+            "_refresh_ens_member_counting",
+            lambda **kw: (_ for _ in ()).throw(AssertionError("ENS fallback must not run")),
+        )
+        pos = self._pos()
+        pos.city = "Hong Kong"
+        pos.state = "day0_window"
+        pos.target_date = datetime.now(ZoneInfo("Asia/Hong_Kong")).date().isoformat()
+        city = type(
+            "City",
+            (),
+            {"timezone": "Asia/Hong_Kong", "settlement_source_type": "hko"},
+        )()
+
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos,
+            conn=None,
+            city=city,
+            target_d=datetime.now(ZoneInfo("Asia/Hong_Kong")).date(),
+        )
+
+        assert observed == [EntryMethod.DAY0_OBSERVATION.value]
+        assert prob == pytest.approx(0.71)
+        assert refresh_pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
+        assert is_fresh is True
+
     def test_day0_monitor_accepts_incomplete_window_only_as_bound(self, monkeypatch):
         import src.engine.monitor_refresh as mr
 

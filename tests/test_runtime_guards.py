@@ -1254,7 +1254,7 @@ def test_day0_fallback_observation_source_rejected_before_signal_path(observatio
     assert "observation_source_policy" in decisions[0].applied_validations
 
 
-@pytest.mark.parametrize("settlement_source_type", ["hko", "noaa", "cwa_station"])
+@pytest.mark.parametrize("settlement_source_type", ["noaa", "cwa_station"])
 def test_day0_entry_rejects_settlement_types_without_executable_source_policy(settlement_source_type):
     city = City(
         name=f"Test {settlement_source_type}",
@@ -1298,6 +1298,53 @@ def test_day0_entry_rejects_settlement_types_without_executable_source_policy(se
     assert decisions[0].rejection_reasons == ["observation_source_unauthorized"]
     assert decisions[0].rejection_reason_detail is not None
     assert "source role is not authorized" in decisions[0].rejection_reason_detail
+    assert "observation_source_policy" in decisions[0].applied_validations
+
+
+def test_day0_entry_rejects_hko_with_non_hko_observation_source():
+    city = City(
+        name="Hong Kong",
+        lat=22.3027,
+        lon=114.1745,
+        timezone="Asia/Hong_Kong",
+        cluster="TEST",
+        settlement_unit="C",
+        wu_station="",
+        settlement_source_type="hko",
+    )
+    candidate = MarketCandidate(
+        city=city,
+        target_date="2026-04-12",
+        outcomes=[],
+        hours_since_open=2.0,
+        hours_to_resolution=4.0,
+        observation=Day0ObservationContext(
+            high_so_far=28.0,
+            low_so_far=24.0,
+            current_temp=27.0,
+            source="wu_api",
+            observation_time=datetime(2026, 4, 12, 10, 0, tzinfo=timezone.utc).isoformat(),
+            unit="C",
+        ),
+        discovery_mode=DiscoveryMode.DAY0_CAPTURE.value,
+    )
+
+    decisions = evaluator_module.evaluate_candidate(
+        candidate,
+        conn=None,
+        portfolio=PortfolioState(bankroll=211.37),
+        clob=object(),
+        limits=evaluator_module.RiskLimits(),
+        decision_time=datetime(2026, 4, 12, 10, 5, tzinfo=timezone.utc),
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].should_trade is False
+    assert decisions[0].rejection_stage == "OBSERVATION_SOURCE_UNAUTHORIZED"
+    assert decisions[0].rejection_reasons == ["observation_source_unauthorized"]
+    assert decisions[0].rejection_reason_detail is not None
+    assert "observation_source='wu_api'" in decisions[0].rejection_reason_detail
+    assert "hko_hourly_accumulator" in decisions[0].rejection_reason_detail
     assert "observation_source_policy" in decisions[0].applied_validations
 
 

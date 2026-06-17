@@ -15,6 +15,7 @@ Contract:
 """
 
 import logging
+import sqlite3
 import warnings
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -227,6 +228,89 @@ def _parse_wu_valid_time(raw_value, tz: ZoneInfo) -> datetime | None:
 
 def _observation_time_utc_iso(dt_local: datetime) -> str:
     return dt_local.astimezone(timezone.utc).isoformat()
+
+
+def _parse_hko_hour_utc(raw_value: object, tz: ZoneInfo) -> datetime | None:
+    try:
+        raw = str(raw_value).strip()
+        if not raw:
+            return None
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(tz)
+
+
+def _fetch_hko_hourly_accumulator(
+    city: City,
+    *,
+    target_day: date,
+    reference_utc: datetime,
+    reference_local: datetime,
+    tz: ZoneInfo,
+) -> Optional[Day0ObservationContext]:
+    if city.name != "Hong Kong" or city.settlement_source_type != "hko":
+        return None
+
+    from src.state.db import get_forecasts_connection_read_only
+
+    conn = get_forecasts_connection_read_only()
+    try:
+        rows = conn.execute(
+            """
+            SELECT target_date, hour_utc, temperature, fetched_at
+            FROM hko_hourly_accumulator
+            WHERE target_date = ?
+              AND datetime(REPLACE(hour_utc, 'Z', '+00:00')) <= datetime(?)
+            ORDER BY datetime(REPLACE(hour_utc, 'Z', '+00:00')) ASC
+            """,
+            (target_day.isoformat(), reference_utc.isoformat()),
+        ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        logger.warning("HKO accumulator read failed for %s: %s", city.name, exc)
+        return None
+    finally:
+        conn.close()
+
+    samples: list[tuple[float, datetime, str, str]] = []
+    for row in rows:
+        observed_local = _parse_hko_hour_utc(row["hour_utc"], tz)
+        if observed_local is None:
+            continue
+        if observed_local.date() != target_day or observed_local > reference_local:
+            continue
+        samples.append(
+            (
+                float(row["temperature"]),
+                observed_local,
+                str(row["hour_utc"]),
+                str(row["fetched_at"]),
+            )
+        )
+    samples.sort(key=lambda row: row[1])
+    if not samples:
+        return None
+
+    current_temp, observed_local, _raw_time, fetched_at = samples[-1]
+    first_local = samples[0][1]
+    last_local = samples[-1][1]
+    return Day0ObservationContext(
+        high_so_far=float(max(temp for temp, _, _, _ in samples)),
+        low_so_far=float(min(temp for temp, _, _, _ in samples)),
+        current_temp=float(current_temp),
+        source="hko_hourly_accumulator",
+        observation_time=_observation_time_utc_iso(observed_local),
+        unit=city.settlement_unit,
+        station_id="HKO",
+        sample_count=len(samples),
+        first_sample_time=_observation_time_utc_iso(first_local),
+        last_sample_time=_observation_time_utc_iso(last_local),
+        coverage_status=_compute_day0_coverage_status(first_local, len(samples)),
+        observation_available_at=datetime.now(timezone.utc).isoformat(),
+        provider_reported_time=fetched_at,
+    )
 
 
 def _wu_observation_station_id(obs: dict) -> str:
@@ -535,6 +619,16 @@ def get_current_observation(
                     fast_result.provider_reported_time or "none",
                 )
                 return fast_result
+        if result is not None:
+            return result
+    elif city.settlement_source_type == "hko":
+        result = _fetch_hko_hourly_accumulator(
+            city,
+            target_day=target_day,
+            reference_utc=reference_utc,
+            reference_local=reference_local,
+            tz=tz,
+        )
         if result is not None:
             return result
     elif not allow_non_settlement_fallback:

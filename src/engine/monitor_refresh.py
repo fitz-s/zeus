@@ -55,6 +55,7 @@ from src.data.market_scanner import _parse_temp_range, get_last_scan_authority, 
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine.evaluator import (
+    DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE,
     _day0_observation_field,
     _day0_observation_quality_rejection_reason,
     _day0_observation_source_rejection_reason,
@@ -1342,6 +1343,11 @@ def _position_state_value(pos: Position) -> str:
     return str(getattr(getattr(pos, "state", ""), "value", getattr(pos, "state", "")) or "")
 
 
+def _city_supports_executable_day0_observation(city) -> bool:
+    source_type = str(getattr(city, "settlement_source_type", "") or "").strip()
+    return source_type in DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE
+
+
 def _fetch_day0_observation(city: Position | object, target_d: date):
     reference_time = datetime.now(timezone.utc)
     try:
@@ -1356,7 +1362,7 @@ def _is_position_day0_quote_eligible(pos: Position) -> bool:
     city = cities_by_name.get(str(getattr(pos, "city", "") or ""))
     if city is None:
         return False
-    if str(getattr(city, "settlement_source_type", "") or "") != "wu_icao":
+    if not _city_supports_executable_day0_observation(city):
         return False
     try:
         target_d = date.fromisoformat(str(getattr(pos, "target_date", "") or ""))
@@ -2309,11 +2315,11 @@ def monitor_probability_refresh(
         pos.entry_method == EntryMethod.DAY0_OBSERVATION.value
         or (
             _position_state_value(pos) == "day0_window"
-            and str(getattr(city, "settlement_source_type", "") or "") == "wu_icao"
+            and _city_supports_executable_day0_observation(city)
         )
         or (
             _is_position_target_local_day(pos, city, target_d)
-            and str(getattr(city, "settlement_source_type", "") or "") == "wu_icao"
+            and _city_supports_executable_day0_observation(city)
         )
     )
 
@@ -2362,7 +2368,7 @@ def monitor_probability_refresh(
     day0_unsupported_forecast_fallback = False
     day0_observation_unavailable_forecast_fallback = False
     if _would_use_day0_lane and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
-        if str(getattr(city, "settlement_source_type", "") or "") == "wu_icao":
+        if _city_supports_executable_day0_observation(city):
             refresh_pos = copy.copy(pos)
             refresh_pos.entry_method = EntryMethod.DAY0_OBSERVATION.value
         else:
