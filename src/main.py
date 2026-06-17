@@ -6703,13 +6703,33 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     rest_pull_families.add(key)
         held_families = _edli_current_held_position_family_keys()
         all_families = set(family_keys) | rest_pull_families | held_families
+        expired_unadmitted = 0
         if not all_families:
+            from src.state.db import world_write_mutex as _world_write_mutex
+
+            world = get_world_connection()
+            emit_mutex = _world_write_mutex()
+            emit_mutex.acquire()
+            try:
+                expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
+                    world,
+                    set(),
+                    decision_time=received_at,
+                )
+                world.commit()
+            finally:
+                emit_mutex.release()
+                try:
+                    world.close()
+                except Exception:  # noqa: BLE001
+                    pass
             logger.info(
                 "edli_redecision_screen: entry_candidates=%d entry_families=0 rest_pulls=%d "
                 "held_families=0 families_reemitted=0 "
-                "events_emitted=0 rests_cancelled=0 reason=no_screened_families",
+                "events_emitted=0 rests_cancelled=0 expired_unadmitted=%d reason=no_screened_families",
                 len(redecisions),
                 len(rest_pulls),
+                expired_unadmitted,
             )
             return
 
@@ -6733,6 +6753,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         emit_mutex = _world_write_mutex()
         emit_mutex.acquire()
         try:
+            expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
+                world,
+                set(all_families),
+                decision_time=received_at,
+            )
             trig = ForecastSnapshotReadyTrigger(
                 EventWriter(world),
                 live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
@@ -6778,9 +6803,9 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         logger.info(
             "edli_redecision_screen: entry_candidates=%d entry_families=%d rest_pulls=%d "
             "held_families=%d families_reemitted=%d "
-            "events_emitted=%d rests_cancelled=%d",
+            "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d",
             len(redecisions), len(family_keys), len(rest_pulls), len(held_families),
-            len(all_families), len(emitted), cancelled,
+            len(all_families), len(emitted), cancelled, expired_unadmitted,
         )
     finally:
         _edli_redecision_screen_lock.release()
@@ -7122,6 +7147,73 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
         if all(key):
             out.add(key)
     return out
+
+
+def _edli_expire_unadmitted_redecision_pending(
+    world_conn,
+    admitted_families: set[tuple[str, str, str]],
+    *,
+    decision_time: str,
+) -> int:
+    """Expire screen-origin redecision rows no longer backed by edge or held exposure."""
+
+    from src.events.continuous_redecision import REDECISION_EVENT_TYPE as _REDECISION_EVENT_TYPE
+
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city') AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date,
+                   json_extract(e.payload_json, '$.metric') AS metric
+              FROM opportunity_event_processing p
+              JOIN opportunity_events e ON e.event_id = p.event_id
+             WHERE p.consumer_name = 'edli_reactor_v1'
+               AND p.processing_status = 'pending'
+               AND e.event_type = ?
+               AND e.source LIKE 'edli_redecision:%'
+            """,
+            (_REDECISION_EVENT_TYPE,),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return 0
+    expire_ids: list[str] = []
+    for row in rows:
+        try:
+            event_id = str(row[0] or "")
+            family = (
+                str(row[1] or "").strip(),
+                str(row[2] or "").strip(),
+                str(row[3] or "").strip(),
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if not event_id or not all(family):
+            continue
+        if family not in admitted_families:
+            expire_ids.append(event_id)
+    if not expire_ids:
+        return 0
+    now = str(decision_time)
+    changed = 0
+    for start in range(0, len(expire_ids), 250):
+        chunk = expire_ids[start : start + 250]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = world_conn.execute(
+            f"""
+            UPDATE opportunity_event_processing
+               SET processing_status = 'expired',
+                   processed_at = ?,
+                   updated_at = ?,
+                   last_error = 'REDECISION_ADMISSION_EXPIRED:no_current_edge_or_held_exposure'
+             WHERE consumer_name = 'edli_reactor_v1'
+               AND processing_status = 'pending'
+               AND event_id IN ({placeholders})
+            """,
+            (now, now, *chunk),
+        )
+        changed += int(cur.rowcount or 0)
+    return changed
 
 
 def _edli_pending_entity_keys(

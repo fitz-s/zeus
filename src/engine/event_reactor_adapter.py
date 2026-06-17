@@ -6092,6 +6092,9 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     # DecisionCompiler validates kelly.cost_basis_id == cost_model.cost_basis_id; both
     # must use the canonical form.
     raw_receipt["kelly_cost_basis_id"] = _canonical_cost_basis.cost_basis_id
+    forecast_reader_authority = str(
+        forecast_payload.get("reader_authority") or "read_executable_forecast"
+    )
     return NoSubmitProofBundle(
         final_intent_id=str(raw_receipt.get("final_intent_id") or ""),
         source_truth=AuthorityEvidence(
@@ -6103,7 +6106,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "event_source": event.source,
                 "event_type": event.event_type,
                 "source_status": forecast_payload.get("reader_status"),
-                "source_authority_id": "read_executable_forecast",
+                "source_authority_id": forecast_reader_authority,
                 "source_reason_code": forecast_payload.get("reader_reason_code"),
                 "derived_from_certificate_type": claims.FORECAST_AUTHORITY,
                 "derived_from_snapshot_id": forecast_payload.get("snapshot_id"),
@@ -6525,6 +6528,33 @@ def _forecast_authority_payload_from_posterior(
     source_id = _nonnull(payload.get("source_id")) or _nonnull(p_source_id) or "openmeteo"
     source_run_id = _nonnull(payload.get("source_run_id")) or str(p_identity_hash)
     snapshot_id = _nonnull(getattr(event, "causal_snapshot_id", None)) or str(p_identity_hash)
+    try:
+        source_run_row = conn.execute(
+            """
+            SELECT fetch_started_at, fetch_finished_at, valid_time_start
+              FROM source_run
+             WHERE source_run_id = ?
+             LIMIT 1
+            """,
+            (source_run_id,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - source_run evidence is optional for posterior payloads
+        source_run_row = None
+
+    def _source_run_value(index: int, key: str) -> object:
+        if source_run_row is None:
+            return None
+        try:
+            return source_run_row[key]
+        except Exception:  # noqa: BLE001
+            try:
+                return source_run_row[index]
+            except Exception:  # noqa: BLE001
+                return None
+
+    source_fetch_started_at = _nonnull(_source_run_value(0, "fetch_started_at"))
+    source_fetch_finished_at = _nonnull(_source_run_value(1, "fetch_finished_at"))
+    forecast_valid_time = _nonnull(_source_run_value(2, "valid_time_start")) or f"{family.target_date}T00:00:00"
     payload_out = {
         "identity": snapshot_id,
         "snapshot_id": snapshot_id,
@@ -6559,12 +6589,17 @@ def _forecast_authority_payload_from_posterior(
         "model": _POSTERIOR_MEMBERS_JSON_SOURCE,
         "model_family": _POSTERIOR_MEMBERS_JSON_SOURCE,
         "forecast_issue_time": str(p_source_cycle_time),
-        "forecast_valid_time": None,
+        "forecast_valid_time": forecast_valid_time,
         "forecast_fetch_time": _nonnull(p_computed_at),
         "forecast_available_at": _nonnull(p_source_available_at),
-        "degradation_level": None,
+        "raw_payload_hash": str(p_identity_hash),
+        "forecast_source_role": "entry_primary",
+        "degradation_level": "OK",
+        "authority_tier": "FORECAST",
         "decision_time": _decision_iso,
         "decision_time_status": "OK",
+        "first_member_observed_time": source_fetch_started_at or _nonnull(p_source_available_at),
+        "run_complete_time": source_fetch_finished_at or _nonnull(p_computed_at),
         "forecast_data_version": _nonnull(p_data_version) or _POSTERIOR_MEMBERS_JSON_SOURCE,
         "source_cycle_time": str(p_source_cycle_time),
         "source_issue_time": _nonnull(p_source_available_at) or str(p_source_cycle_time),
@@ -6585,8 +6620,8 @@ def _forecast_authority_payload_from_posterior(
         "coverage_readiness_status": "LIVE_ELIGIBLE",
         "applied_validations": _POSTERIOR_APPLIED_VALIDATIONS,
         "source_available_at": _nonnull(p_source_available_at),
-        "fetch_started_at": None,
-        "fetch_finished_at": _nonnull(p_computed_at),
+        "fetch_started_at": source_fetch_started_at or None,
+        "fetch_finished_at": source_fetch_finished_at or _nonnull(p_computed_at),
         "captured_at": _nonnull(p_computed_at),
     }
     source_time = _parse_utc(p_source_available_at)

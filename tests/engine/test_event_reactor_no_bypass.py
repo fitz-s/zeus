@@ -118,6 +118,44 @@ def _forecast_event(completeness: str = "COMPLETE"):
     )
 
 
+def _replacement_forecast_event():
+    payload = ForecastSnapshotReadyPayload(
+        city="Chicago",
+        target_date="2026-05-25",
+        metric="high",
+        source_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        source_run_id="run-1",
+        cycle="2026-05-24T00:00:00+00:00",
+        track="operational",
+        snapshot_id="rmf-Chicago|2026-05-25|high|2026-05-24",
+        snapshot_hash="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        captured_at="2026-05-24T08:10:00+00:00",
+        available_at="2026-05-24T08:10:00+00:00",
+        required_fields_present=True,
+        required_steps_present=True,
+        member_count=3,
+        min_members_floor=3,
+        completeness_status="COMPLETE",
+        required_steps=["2026-05-24"],
+        observed_steps=["2026-05-24"],
+        expected_members=3,
+        source_run_status="COMPLETE",
+        source_run_completeness_status="COMPLETE",
+        coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
+    )
+    return make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Chicago|2026-05-25|high|run-1",
+        source="forecast_snapshot_ready_trigger",
+        observed_at=payload.captured_at,
+        available_at=payload.available_at,
+        received_at="2026-05-24T08:11:00+00:00",
+        causal_snapshot_id=payload.snapshot_id,
+        payload=payload,
+    )
+
+
 def _bound_forecast_event(*, token_id: str = "yes-1", fdr_condition_count: int = 2):
     event = _forecast_event()
     payload = json.loads(event.payload_json)
@@ -897,6 +935,8 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
         "bin_topology_hash": topo_hash,
         "bin_topology": bin_topology,
         "q_shape": "fused_normal_direct",
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+        "q_lcb_bootstrap_draws": 200,
     }
     provenance_json = _json.dumps(provenance, separators=(",", ":"))
     q_json = _json.dumps(q_uniform, separators=(",", ":"))
@@ -1477,11 +1517,33 @@ def test_adapter_source_truth_status_comes_from_forecast_authority():
     assert receipt.decision_proof_bundle.source_truth.payload["derived_from_reader_status"] == receipt.decision_proof_bundle.forecast_authority.payload["reader_status"]
 
 
-def test_replacement_posterior_forecast_authority_payload_satisfies_pre_submit_source_context():
-    event = replace(
-        _forecast_event(),
-        causal_snapshot_id="rmf-Chicago|2026-05-25|high|2026-05-24",
+def test_adapter_source_truth_authority_tracks_replacement_forecast_authority(monkeypatch):
+    import src.engine.event_reactor_adapter as event_reactor_adapter
+    from src.config import settings
+
+    feature_flags = dict(settings._data["feature_flags"])
+    feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = True
+    monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
+    monkeypatch.setattr(
+        event_reactor_adapter,
+        "_family_rank_reversed_at_recapture",
+        lambda **_: False,
     )
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    _insert_replacement_forecast_fixture(conn)
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.decision_proof_bundle is not None
+    forecast_payload = receipt.decision_proof_bundle.forecast_authority.payload
+    source_payload = receipt.decision_proof_bundle.source_truth.payload
+    assert forecast_payload["reader_authority"] == "forecast_posteriors.replacement_0_1"
+    assert source_payload["source_authority_id"] == forecast_payload["reader_authority"]
+
+
+def test_replacement_posterior_forecast_authority_payload_satisfies_pre_submit_source_context():
+    event = _replacement_forecast_event()
     conn = _trade_conn_with_snapshot()
     _insert_replacement_forecast_fixture(conn)
     family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")

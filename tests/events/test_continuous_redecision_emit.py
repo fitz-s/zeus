@@ -449,6 +449,90 @@ def test_redecision_skip_set_is_event_type_scoped():
     ) == {redecision.entity_key}
 
 
+def test_unadmitted_screen_redecision_pending_is_expired():
+    """Pending redecisions must remain backed by current edge/rest/held admission."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    stale = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="San Francisco|2026-06-17|high|run-stale",
+        source="edli_redecision:screen",
+        observed_at="2026-06-17T15:00:00+00:00",
+        available_at="2026-06-17T15:00:00+00:00",
+        received_at="2026-06-17T15:00:00+00:00",
+        causal_snapshot_id="snap-stale",
+        payload=_ready_payload(
+            city="San Francisco",
+            target_date="2026-06-17",
+            metric="high",
+            source_run_id="run-stale",
+            snapshot_id="snap-stale",
+        ),
+        priority=50,
+    )
+    admitted = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Tokyo|2026-06-18|low|run-held",
+        source="edli_redecision:screen",
+        observed_at="2026-06-17T15:00:00+00:00",
+        available_at="2026-06-17T15:00:00+00:00",
+        received_at="2026-06-17T15:00:00+00:00",
+        causal_snapshot_id="snap-held",
+        payload=_ready_payload(
+            city="Tokyo",
+            target_date="2026-06-18",
+            metric="low",
+            source_run_id="run-held",
+            snapshot_id="snap-held",
+        ),
+        priority=50,
+    )
+    fsr = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Seoul|2026-06-19|low|run-fsr",
+        source="forecast",
+        observed_at="2026-06-17T15:00:00+00:00",
+        available_at="2026-06-17T15:00:00+00:00",
+        received_at="2026-06-17T15:00:00+00:00",
+        causal_snapshot_id="snap-fsr",
+        payload=_ready_payload(
+            city="Seoul",
+            target_date="2026-06-19",
+            metric="low",
+            source_run_id="run-fsr",
+            snapshot_id="snap-fsr",
+        ),
+        priority=50,
+    )
+    for event in (stale, admitted, fsr):
+        store.insert_or_ignore(event)
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        {("Tokyo", "2026-06-18", "low")},
+        decision_time="2026-06-17T16:00:00+00:00",
+    )
+
+    assert expired == 1
+    statuses = dict(
+        world.execute(
+            """
+            SELECT e.entity_key, p.processing_status
+              FROM opportunity_events e
+              JOIN opportunity_event_processing p ON p.event_id = e.event_id
+             WHERE p.consumer_name = ?
+            """,
+            (store.consumer_name,),
+        ).fetchall()
+    )
+    assert statuses[stale.entity_key] == "expired"
+    assert statuses[admitted.entity_key] == "pending"
+    assert statuses[fsr.entity_key] == "pending"
+
+
 def test_redecision_admission_is_screen_job_only():
     """The reactor cycle may emit FSR discovery, but EDLI_REDECISION_PENDING belongs to the screen."""
 
