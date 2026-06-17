@@ -5338,9 +5338,10 @@ def _startup_data_health_check(conn):
         if not bias_enabled and bias_data > 0:
             logger.warning(
                 "⚠ DEFERRED ACTION: baseline_bias_correction_enabled=false but %d ECMWF bias "
-                "entries ready. To activate: 1) Recompute calibration_pairs with bias "
-                "correction 2) Refit Platt models 3) Set baseline_bias_correction_enabled=true "
-                "4) Run test_cross_module_invariants.py",
+                "entries ready for the legacy baseline diagnostics chain. This is not the live "
+                "EDLI replacement probability authority. To activate that legacy baseline path: "
+                "1) Recompute calibration_pairs with bias correction 2) Refit legacy Platt models "
+                "3) Set baseline_bias_correction_enabled=true 4) Run test_cross_module_invariants.py",
                 bias_data,
             )
 

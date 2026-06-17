@@ -889,6 +889,33 @@ def test_forecast_certificate_records_unit_authority():
     assert forecast.payload["unit_authority_source"] == "ensemble_snapshots.settlement_unit"
 
 
+def test_replacement_forecast_city_config_unit_authority_is_valid():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    source = "city_config.settlement_unit"
+    forecast = replace(
+        bundle.forecast_authority,
+        payload={**bundle.forecast_authority.payload, "unit_authority_source": source},
+    )
+    belief = replace(
+        bundle.belief,
+        payload={**bundle.belief.payload, "unit_authority_source": source},
+    )
+
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=replace(bundle, forecast_authority=forecast, belief=belief),
+    )
+
+    assert result.status == "VERIFIED"
+    forecast_cert = next(
+        cert for cert in result.certificates if cert.certificate_type == claims.FORECAST_AUTHORITY
+    )
+    assert forecast_cert.payload["unit_authority_source"] == source
+
+
 def test_belief_certificate_unit_matches_family_bins():
     event = _event()
     decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
