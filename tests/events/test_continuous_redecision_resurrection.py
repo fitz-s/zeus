@@ -487,6 +487,77 @@ def test_rest_pull_does_not_cancel_by_order_age_alone():
     assert pulls == [], "resting order age alone is not confirmed trading value or cancel evidence"
 
 
+def test_rest_pull_refreshes_confirmed_value_after_cooldown_with_fresh_book():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.69", ask="0.72")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=6 * 60 * 1000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "CONFIRMED_VALUE_REFRESH"
+    assert pulls[0][1].detail > cr.IMPROVE_DELTA
+
+
+def test_rest_pull_does_not_refresh_confirmed_value_on_stale_book():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.69", ask="0.72")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=6 * 60 * 1000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T02:00:01+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert pulls == []
+
+
+def test_rest_pull_does_not_refresh_confirmed_value_when_taker_edge_not_real():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.73, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.69", ask="0.72")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.73, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=6 * 60 * 1000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert pulls == []
+
+
 def test_rest_pull_does_not_treat_normal_spread_as_book_moved():
     world = _mem_world()
     trade = _mem_trade()
@@ -683,6 +754,53 @@ def test_open_maker_rests_avoids_full_order_fact_window_scan():
     rests = main._edli_open_maker_rests_for_screen(captured, world)
 
     assert len(rests) == 1
+    statements = "\n".join(captured.statements).upper()
+    assert "ROW_NUMBER" not in statements
+    assert "PARTITION BY" not in statements
+    assert "WHERE VENUE_ORDER_ID = ?" in statements
+
+
+def test_open_rest_families_are_priority_warm_inputs_without_fact_window_scan():
+    import src.main as main
+
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, position_id TEXT, venue_order_id TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    trade.execute(
+        "CREATE UNIQUE INDEX idx_test_order_seq "
+        "ON venue_order_facts(venue_order_id, local_sequence)"
+    )
+    trade.execute(
+        "CREATE TABLE position_current ("
+        "position_id TEXT PRIMARY KEY, city TEXT, target_date TEXT, "
+        "temperature_metric TEXT, phase TEXT)"
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?)",
+        ("cmd1", "pos1", "order-live", "ENTRY"),
+    )
+    trade.execute(
+        "INSERT INTO position_current VALUES (?,?,?,?,?)",
+        ("pos1", "Wuhan", "2026-06-12", "high", "pending_entry"),
+    )
+    for seq in range(1, 201):
+        trade.execute(
+            "INSERT INTO venue_order_facts VALUES (?,?,?)",
+            (f"closed-{seq}", "EXPIRED", seq),
+        )
+    trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-live", "LIVE", 1))
+    trade.commit()
+    captured = _SqlCaptureConn(trade)
+
+    families = main._open_rest_family_rows_for_refresh(captured)
+
+    assert families == [("Wuhan", "2026-06-12", "high")]
     statements = "\n".join(captured.statements).upper()
     assert "ROW_NUMBER" not in statements
     assert "PARTITION BY" not in statements

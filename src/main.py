@@ -1632,7 +1632,7 @@ def _redeem_reconciler_cycle() -> None:
         list_commands,
         reconcile_pending_redeems,
     )
-    from src.state.db import get_trade_connection
+    from src.state.db import get_trade_connection, get_trade_connection_read_only
     from src.venue.polymarket_v2_adapter import DEFAULT_POLYGON_RPC_URL
 
     if get_mode() != "live":
@@ -3082,6 +3082,82 @@ def _pending_family_rows_for_refresh(
     ).fetchall()
 
 
+def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]:
+    """Families with live unfilled ENTRY rests that need fresh executable books.
+
+    Pending opportunity events are not the only source of live money-at-risk
+    freshness demand. Once an ENTRY maker rest is live, duplicate suppression can
+    correctly prevent new entry events for that token, leaving no pending event to
+    keep the book warm. Use bounded latest-fact seeks over the small command set
+    so the substrate warmer can keep open rests re-priceable without scanning the
+    full order-fact history.
+    """
+
+    from src.execution.maker_rest_escalation import OPEN_REST_FACT_STATES
+
+    try:
+        commands = trade_conn.execute(
+            """
+            SELECT command_id, position_id, venue_order_id
+              FROM venue_commands
+             WHERE intent_kind = 'ENTRY'
+               AND venue_order_id IS NOT NULL
+               AND venue_order_id != ''
+            """
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    open_states = set(OPEN_REST_FACT_STATES)
+    for row in commands:
+        venue_order_id = str(row[2] or "")
+        if not venue_order_id:
+            continue
+        try:
+            fact = trade_conn.execute(
+                """
+                SELECT state
+                  FROM venue_order_facts
+                 WHERE venue_order_id = ?
+                 ORDER BY local_sequence DESC
+                 LIMIT 1
+                """,
+                (venue_order_id,),
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            continue
+        if fact is None or str(fact[0] or "") not in open_states:
+            continue
+        position_id = str(row[1] or "")
+        if not position_id:
+            continue
+        try:
+            pos = trade_conn.execute(
+                """
+                SELECT city, target_date, temperature_metric
+                  FROM position_current
+                 WHERE position_id = ?
+                   AND phase IN ('pending_entry', 'active', 'day0_window')
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            continue
+        if pos is None:
+            continue
+        family = (
+            str(pos[0] or "").strip(),
+            str(pos[1] or "").strip(),
+            str(pos[2] or "").strip(),
+        )
+        if all(family) and family not in seen:
+            seen.add(family)
+            out.append(family)
+    return out
+
+
 def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str) -> bool:
     rows = write_conn.execute(
         """
@@ -3340,8 +3416,30 @@ def _refresh_pending_family_snapshots(
         if city and target_date and metric:
             families.append((city, target_date, metric))
 
+    open_rest_priority_families: list[tuple[str, str, str]] = []
+    try:
+        trade_ro = get_trade_connection_read_only()
+        try:
+            open_rest_priority_families = _open_rest_family_rows_for_refresh(trade_ro)
+        finally:
+            trade_ro.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "refresh_pending_family_snapshots: open-rest priority read failed (non-fatal): %s",
+            exc,
+        )
+    if open_rest_priority_families:
+        seen_family_keys = {_refresh_family_key(*family) for family in families}
+        prepend: list[tuple[str, str, str]] = []
+        for family in open_rest_priority_families:
+            key = _refresh_family_key(*family)
+            if key and key not in seen_family_keys:
+                prepend.append(family)
+                seen_family_keys.add(key)
+        families = prepend + families
+
     if not families:
-        return {"status": "no_pending_families"}
+        return {"status": "no_pending_or_open_rest_families", "open_rest_priority_families": 0}
 
     # FUNNEL-STARVATION FIX (2026-06-09): rotate the per-cycle starting offset so
     # EVERY live family is refreshed within one SWEEP PERIOD instead of the newest
@@ -3607,6 +3705,7 @@ def _refresh_pending_family_snapshots(
             return {
                 "status": "all_fresh",
                 "families_checked": len(families),
+                "open_rest_priority_families": len(open_rest_priority_families),
                 "fresh_skipped": fresh_skipped,
                 "no_topology": no_topology,
                 "venue_closed_skipped": venue_closed_skipped,
@@ -4004,6 +4103,7 @@ def _refresh_pending_family_snapshots(
             return {
                 "status": "all_fresh",
                 "families_checked": len(families),
+                "open_rest_priority_families": len(open_rest_priority_families),
                 "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
                 "gamma_refresh_families": len(gamma_refresh_families),
                 "cached_topology_families": cached_topology_families,
@@ -4046,6 +4146,7 @@ def _refresh_pending_family_snapshots(
     result = {
         "status": "refreshed",
         "families_checked": len(families),
+        "open_rest_priority_families": len(open_rest_priority_families),
         "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
         "gamma_refresh_families": len(gamma_refresh_families),
         "cached_topology_families": cached_topology_families,

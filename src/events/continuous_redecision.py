@@ -76,6 +76,12 @@ PRE_SUBMIT_MAX_QUOTE_AGE_MS: float = 1000.0
 # One tick of tolerance: a quote exactly at best is fine; a quote a full tick or more off-best is
 # unlikely to fill and bleeds queue-position.
 REST_BOOK_DRIFT_TICKS: float = 1.0
+# Confirmed-value maker rests should not sit inert until the long escalation
+# deadline when the live book still supports crossing after fees. A 5-minute
+# minimum keeps a real maker fill window (multiple screen/venue-heartbeat ticks)
+# while allowing the full cert path to re-price before the 20-minute hard
+# rest-then-cross escalation deadline.
+REST_VALUE_REFRESH_MIN_AGE_SECONDS: float = 5.0 * 60.0
 REDECISION_EVENT_TYPE: str = "EDLI_REDECISION_PENDING"
 _BELIEF_PREFIX: str = "edli_belief:"
 _EPS: float = 1e-9
@@ -1055,6 +1061,18 @@ def screen_reprice(
     return None
 
 
+def _held_side_q_lcb(belief: CachedBelief, *, bin_label: str, side: str) -> float | None:
+    try:
+        idx = belief.bin_labels.index(bin_label)
+    except ValueError:
+        return None
+    if side == "buy_yes":
+        return _vec_float_at(belief.q_lcb_yes_vec, idx)
+    if side == "buy_no":
+        return _vec_float_at(belief.q_lcb_no_vec, idx)
+    return None
+
+
 _OPPOSITE_SIDE: dict[str, str] = {"buy_yes": "buy_no", "buy_no": "buy_yes"}
 
 
@@ -1392,6 +1410,7 @@ def screen_resting_orders(
     *,
     open_rests: list[OpenRest],
     decision_time: str | None = None,
+    value_refresh_min_age_seconds: float = REST_VALUE_REFRESH_MIN_AGE_SECONDS,
 ) -> list[tuple[OpenRest, RepriceDecision]]:
     """§4.5 resting-order management: for each OPEN maker rest, fire a PULL (cancel+re-decide) only
     when its belief decayed past BELIEF_REPRICE_DELTA on NEW evidence (screen_reprice), or the live
@@ -1400,9 +1419,9 @@ def screen_resting_orders(
     owner remains src.execution.maker_rest_escalation. Pure read; returns decisions only — the
     scheduler job enqueues the redecision and performs cancellation through the existing cancel path."""
     screen_time = _parse(decision_time) if decision_time is not None else datetime.now().astimezone()
-    bid_by_cid = read_freshest_resting_best_bids(
-        trade_conn, condition_ids={r.condition_id for r in open_rests if r.condition_id}
-    )
+    condition_ids = {r.condition_id for r in open_rests if r.condition_id}
+    bid_by_cid = read_freshest_resting_best_bids(trade_conn, condition_ids=condition_ids)
+    ask_by_cid = read_freshest_executable_prices(trade_conn, condition_ids=condition_ids)
     out: list[tuple[OpenRest, RepriceDecision]] = []
     for rest in open_rests:
         # 1) Belief-decay pull (evidence-gated, anti-twitch by snapshot identity).
@@ -1430,6 +1449,33 @@ def screen_resting_orders(
                         family_id=rest.family_id, bin_label=rest.bin_label, side=rest.side,
                         action="CANCEL_REPLACE", reason="BOOK_MOVED", detail=drift,
                     )
+        if decision is None and rest.quote_age_ms >= float(value_refresh_min_age_seconds) * 1000.0:
+            # 3) Confirmed-value refresh: the rest has had a real maker window,
+            # the book is fresh, and conservative held-side q_lcb still clears
+            # the live ask after fees. Pull the rest so the existing full cert
+            # path can re-price maker/taker/skip using current evidence. This
+            # is not age-alone cancellation and does not act on stale quotes.
+            ask = ask_by_cid.get((rest.condition_id, rest.side))
+            if ask is not None:
+                try:
+                    if _parse(ask.freshness_deadline) <= screen_time:
+                        ask = None
+                except (TypeError, ValueError):
+                    ask = None
+            if ask is not None:
+                belief = latest_cached_belief(world_conn, family_id=rest.family_id)
+                q_lcb = _held_side_q_lcb(belief, bin_label=rest.bin_label, side=rest.side) if belief else None
+                if q_lcb is not None:
+                    ask_edge = float(q_lcb) - float(ask.price) - _fee_at(float(ask.price))
+                    if ask_edge >= IMPROVE_DELTA - _EPS:
+                        decision = RepriceDecision(
+                            family_id=rest.family_id,
+                            bin_label=rest.bin_label,
+                            side=rest.side,
+                            action="CANCEL_REPLACE",
+                            reason="CONFIRMED_VALUE_REFRESH",
+                            detail=ask_edge,
+                        )
         if decision is not None:
             out.append((rest, decision))
     return out
