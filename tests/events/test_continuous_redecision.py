@@ -3,7 +3,7 @@
 # Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, critic-resolved) +
 #   GOAL #36 expanded (continuous entry+exit, evidence-gated). RED-first relationship tests for the
 #   continuous re-decision contract. These pin the cache (P1) + cheap-screen/enqueue (P2) API BEFORE
-#   any live-core (event_reactor_adapter / reactor) edit. SHADOW semantics; no real orders.
+#   any live-core (event_reactor_adapter / reactor) edit. Submit-safe semantics; no direct orders.
 """Relationship tests R1/R2/R6/R7 for continuous re-decision (src.events.continuous_redecision).
 
 The defect (commit 00b73fbbce): decisions are one-shot per FORECAST_SNAPSHOT_READY; price-move events
@@ -121,6 +121,79 @@ def _cache_yes_belief(conn, *, p_posterior_yes: float, recorded_at: str, snapsho
         p_posterior_vec=[0.001, p_posterior_yes],
         recorded_at=recorded_at,
     )
+
+
+def test_latest_belief_reader_skips_venue_closed_families_at_decision_time():
+    conn = _mem_world()
+    _cache_yes_belief(
+        conn,
+        p_posterior_yes=0.99,
+        recorded_at="2026-06-01T11:30:00+00:00",
+        snapshot_id="closed-snap",
+    )
+    cr.cache_belief(
+        conn,
+        family_id="Wuhan|2026-06-02|high",
+        city="Wuhan",
+        target_date="2026-06-02",
+        temperature_metric="high",
+        snapshot_id="open-snap",
+        calibrator_model_hash="identity",
+        bin_labels=["b29", "b30"],
+        p_posterior_vec=[0.001, 0.99],
+        recorded_at="2026-06-01T11:35:00+00:00",
+    )
+
+    beliefs = cr._all_latest_beliefs(
+        conn,
+        decision_time="2026-06-01T13:00:00+00:00",
+    )
+
+    assert {belief.target_date for belief in beliefs} == {"2026-06-02"}
+
+
+def test_executable_price_reader_ignores_closed_or_non_active_snapshot_rows():
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            orderbook_top_bid REAL,
+            orderbook_top_ask REAL,
+            freshness_deadline TEXT,
+            captured_at TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            outcome_label TEXT,
+            enable_orderbook INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            accepting_orders INTEGER
+        )
+        """
+    )
+    trade.executemany(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, orderbook_top_bid, orderbook_top_ask,
+            freshness_deadline, captured_at, selected_outcome_token_id,
+            yes_token_id, no_token_id, outcome_label, enable_orderbook,
+            active, closed, accepting_orders
+        ) VALUES (?, 'cid-1', ?, ?, '2026-06-01T14:00:00+00:00', ?, 'yes-1',
+                  'yes-1', 'no-1', 'YES', ?, ?, ?, ?)
+        """,
+        [
+            ("closed-latest", 0.39, 0.40, "2026-06-01T13:00:00+00:00", 1, 0, 1, 0),
+            ("open-older", 0.59, 0.60, "2026-06-01T12:59:00+00:00", 1, 1, 0, 1),
+        ],
+    )
+
+    quotes = cr.read_freshest_executable_prices(trade, condition_ids={"cid-1"})
+
+    assert quotes[("cid-1", "buy_yes")].price == 0.60
 
 
 # ---------------------------------------------------------------------------
@@ -1229,7 +1302,7 @@ def test_R7_stale_price_does_not_enqueue_phantom_edge():
         price_lookup=price_lookup,
         min_edge=0.01,
     )
-    assert enqueued == [], "stale price must not produce a phantom-edge re-decision (SHADOW cannot catch it downstream)"
+    assert enqueued == [], "stale price must not produce a phantom-edge re-decision"
 
 
 # ---------------------------------------------------------------------------

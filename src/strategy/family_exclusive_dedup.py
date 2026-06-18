@@ -67,11 +67,8 @@ BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_ENABLED"
 BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_ENABLED"
 
 # Wave 4 (2026-05-27): Stage B family-portfolio optimizer activation.
-# Two-tier env var split so operator can promote multi-leg sizing through
-# shadow first (observability) before live (live capital). Default 1 on both
-# tiers keeps the Stage A single-leg gate behaviour as the fail-safe.
+# Default 1 keeps the Stage A single-leg gate behaviour as the fail-safe.
 ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = "ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS"
-ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW = "ZEUS_SHADOW_FAMILY_PORTFOLIO_MAX_LEGS"
 # Hard cap on a Stage B portfolio's worst-case loss (USD). When set, the
 # optimizer rejects portfolios with ``max_loss_usd > cap`` (returns None) so
 # the caller falls back to Stage A single-leg. Default None = no cap (relies
@@ -80,21 +77,10 @@ ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD = "ZEUS_FAMILY_PORTFOLIO_MAX_LOSS_USD"
 
 
 def _family_portfolio_max_legs() -> int:
-    """Mode-aware max_legs for the Stage B family portfolio optimizer.
+    """Live max_legs for the Stage B family portfolio optimizer.
 
-    Wave 4 (2026-05-27): operator promotes shadow → live by flipping the
-    matching env var. Defaults to 1 on both tiers (Stage A behaviour). Unknown
-    or invalid values fall back to 1 (fail-safe).
-
-    The live tier now honors the live max-leg env after ``optimize_exclusive_outcome_portfolio``
-    moved from an average-edge proxy to candidate-outcome expected log growth.
+    Unknown or invalid values fall back to 1 (fail-safe).
     """
-    mode = get_mode()
-    if mode == "shadow":
-        try:
-            return max(1, int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, "1")))
-        except (TypeError, ValueError):
-            return 1
     try:
         return max(1, int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "1")))
     except (TypeError, ValueError):
@@ -198,6 +184,8 @@ class ExclusiveOutcomePortfolio:
     cost_vector: tuple[float, ...] = ()
     leg_weights: tuple[float, ...] = ()
     expected_log_growth: float = 0.0
+    capital_cost_usd: float = 0.0
+    capital_efficiency: float = 0.0
     max_loss_usd: float = 0.0
     fallback_candidate_legs: tuple[Any, ...] = ()
 
@@ -962,17 +950,17 @@ def _portfolio_payoff_for_leg(
     outcome_support_index: int,
     leg: FamilyPortfolioLeg,
 ) -> float:
-    """Return profit per dollar staked for one leg in one family outcome."""
+    """Return dollar profit for one share of one leg in one family outcome."""
 
     cost = leg.cost
     if cost <= 0.0 or cost >= 1.0:
-        return -1.0
+        return -cost
     direction = leg.direction.lower()
     leg_wins = outcome_support_index == leg.support_index
     if direction == "buy_yes":
-        return ((1.0 - cost) / cost) if leg_wins else -1.0
+        return (1.0 - cost) if leg_wins else -cost
     if direction == "buy_no":
-        return -1.0 if leg_wins else ((1.0 - cost) / cost)
+        return -cost if leg_wins else (1.0 - cost)
     return _edge_family_selection_score(leg.edge)
 
 
@@ -989,15 +977,16 @@ def _score_portfolio_combo(
     selected_indexes: tuple[int, ...],
     *,
     log_growth_fraction: float = 0.01,
-) -> tuple[float, float, float, tuple[tuple[float, ...], ...], tuple[float, ...], tuple[float, ...]]:
-    """Score a candidate portfolio by expected log growth over the family vector."""
+) -> tuple[float, float, float, float, float, tuple[tuple[float, ...], ...], tuple[float, ...], tuple[float, ...]]:
+    """Score a candidate portfolio by capital-aware family payoff."""
 
     selected = [legs[i] for i in selected_indexes]
     posterior_vector = _normalize_posterior_vector(legs)
     if not selected or not posterior_vector:
-        return (-math.inf, 0.0, 0.0, (), (), ())
+        return (-math.inf, 0.0, 0.0, 0.0, 0.0, (), (), ())
 
     leg_weights = tuple(1.0 / len(selected) for _ in selected)
+    capital_cost = sum(max(0.0, leg.cost) for leg in selected)
     payoff_rows: list[tuple[float, ...]] = []
     outcome_returns: list[float] = []
     for outcome_leg in legs:
@@ -1009,15 +998,17 @@ def _score_portfolio_combo(
             for selected_leg in selected
         )
         payoff_rows.append(row)
-        outcome_returns.append(sum(weight * payoff for weight, payoff in zip(leg_weights, row)))
+        outcome_returns.append(sum(row))
 
     expected_net_profit = sum(
         probability * outcome_return
         for probability, outcome_return in zip(posterior_vector, outcome_returns)
     )
+    capital_efficiency = expected_net_profit / capital_cost if capital_cost > 0.0 else -math.inf
     expected_log_growth = 0.0
     for probability, outcome_return in zip(posterior_vector, outcome_returns):
-        growth = 1.0 + log_growth_fraction * outcome_return
+        normalized_return = outcome_return / capital_cost if capital_cost > 0.0 else outcome_return
+        growth = 1.0 + log_growth_fraction * normalized_return
         if growth <= 0.0:
             expected_log_growth = -math.inf
             break
@@ -1025,10 +1016,36 @@ def _score_portfolio_combo(
     return (
         expected_log_growth,
         expected_net_profit,
+        capital_cost,
+        capital_efficiency,
         min(outcome_returns),
         tuple(payoff_rows),
         posterior_vector,
         leg_weights,
+    )
+
+
+def _portfolio_dominated(
+    candidate: tuple[float, tuple[float, ...]],
+    challenger: tuple[float, tuple[float, ...]],
+) -> bool:
+    """Return True when challenger is no-more-costly and pays at least as well in every outcome."""
+
+    candidate_capital, candidate_returns = candidate
+    challenger_capital, challenger_returns = challenger
+    if len(candidate_returns) != len(challenger_returns):
+        return False
+    if challenger_capital > candidate_capital + 1e-9:
+        return False
+    payoff_not_worse = all(
+        challenger_return >= candidate_return - 1e-9
+        for challenger_return, candidate_return in zip(challenger_returns, candidate_returns)
+    )
+    if not payoff_not_worse:
+        return False
+    return challenger_capital < candidate_capital - 1e-9 or any(
+        challenger_return > candidate_return + 1e-9
+        for challenger_return, candidate_return in zip(challenger_returns, candidate_returns)
     )
 
 
@@ -1062,9 +1079,11 @@ def optimize_exclusive_outcome_portfolio(
     )
     max_legs = max(1, min(int(max_legs or 1), len(legs)))
     min_legs = max(1, min(int(min_legs or 1), max_legs))
-    best_key: tuple[float, float, float, float, tuple[int, ...]] | None = None
+    best_key: tuple[float, float, float, float, float, float, tuple[int, ...]] | None = None
     best_payload: tuple[
         tuple[int, ...],
+        float,
+        float,
         float,
         float,
         float,
@@ -1073,37 +1092,118 @@ def optimize_exclusive_outcome_portfolio(
         tuple[float, ...],
         tuple[float, ...],
     ] | None = None
+    payloads: list[
+        tuple[
+            tuple[int, ...],
+            float,
+            float,
+            float,
+            float,
+            float,
+            float,
+            tuple[float, ...],
+            tuple[tuple[float, ...], ...],
+            tuple[float, ...],
+            tuple[float, ...],
+        ]
+    ] = []
     for width in range(min_legs, max_legs + 1):
         for selected_indexes in combinations(range(len(legs)), width):
-            expected_log_growth, expected_net_profit, max_loss, payoff_matrix, posterior_vector, weights = (
+            (
+                expected_log_growth,
+                expected_net_profit,
+                capital_cost,
+                capital_efficiency,
+                max_loss,
+                payoff_matrix,
+                posterior_vector,
+                weights,
+            ) = (
                 _score_portfolio_combo(legs, selected_indexes)
             )
+            if not payoff_matrix:
+                continue
             edge_selection_utility = sum(
                 _edge_family_selection_score(legs[idx].edge) for idx in selected_indexes
             ) / float(width)
-            key = (
-                expected_log_growth,
-                expected_net_profit,
-                edge_selection_utility,
-                -float(width),
-                tuple(-_edge_support_index(legs[idx].edge, idx) for idx in selected_indexes),
-            )
-            if best_key is None or key > best_key:
-                best_key = key
-                best_payload = (
+            outcome_returns = tuple(sum(row) for row in payoff_matrix)
+            payloads.append(
+                (
                     selected_indexes,
                     edge_selection_utility,
                     expected_log_growth,
                     expected_net_profit,
+                    capital_cost,
+                    capital_efficiency,
                     max_loss,
+                    outcome_returns,
                     payoff_matrix,
                     posterior_vector,
                     weights,
                 )
+            )
+    for payload in payloads:
+        (
+            selected_indexes,
+            edge_selection_utility,
+            expected_log_growth,
+            expected_net_profit,
+            capital_cost,
+            capital_efficiency,
+            max_loss,
+            outcome_returns,
+            payoff_matrix,
+            posterior_vector,
+            weights,
+        ) = payload
+        if any(
+            other is not payload
+            and _portfolio_dominated(
+                (capital_cost, outcome_returns),
+                (other[4], other[7]),
+            )
+            for other in payloads
+        ):
+            continue
+        width = len(selected_indexes)
+        key = (
+            expected_log_growth,
+            expected_net_profit,
+            capital_efficiency,
+            -capital_cost,
+            edge_selection_utility,
+            -float(width),
+            tuple(-_edge_support_index(legs[idx].edge, idx) for idx in selected_indexes),
+        )
+        if best_key is None or key > best_key:
+            best_key = key
+            best_payload = (
+                selected_indexes,
+                edge_selection_utility,
+                expected_log_growth,
+                expected_net_profit,
+                capital_cost,
+                capital_efficiency,
+                max_loss,
+                payoff_matrix,
+                posterior_vector,
+                weights,
+            )
 
     if best_payload is None:
         return None
-    selected_indexes, edge_selection_utility, expected_log_growth, expected_net_profit, max_loss, payoff_matrix, posterior_vector, weights = best_payload
+    (
+        selected_indexes,
+        edge_selection_utility,
+        expected_log_growth,
+        expected_net_profit,
+        capital_cost,
+        capital_efficiency,
+        max_loss,
+        payoff_matrix,
+        posterior_vector,
+        weights,
+    ) = best_payload
     selected_legs = tuple(legs[idx].edge for idx in selected_indexes)
     selected_leg = selected_legs[0]
     selected_cost_vector = tuple(legs[idx].cost for idx in selected_indexes)
@@ -1122,6 +1222,8 @@ def optimize_exclusive_outcome_portfolio(
         cost_vector=selected_cost_vector,
         leg_weights=weights,
         expected_log_growth=expected_log_growth,
+        capital_cost_usd=capital_cost,
+        capital_efficiency=capital_efficiency,
         max_loss_usd=abs(min(0.0, max_loss)),
     )
 
@@ -1315,9 +1417,7 @@ def build_weather_family_decision(
         candidate_edges = executable_candidate_edges
         excluded_blocked_edges = blocked_edges
 
-    # Wave 4 (2026-05-27): mode-aware max_legs (shadow tier separate from live)
-    # so operator can observe Stage B multi-leg behaviour in shadow before
-    # promoting to live capital.
+    # Wave 4 (2026-05-27): max_legs controls the live Stage B multi-leg optimizer.
     max_legs = _family_portfolio_max_legs()
     try:
         fallback_candidate_count = int(

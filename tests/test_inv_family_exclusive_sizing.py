@@ -110,6 +110,33 @@ def _bin_edge(spec, *, entry_price: float, forward_edge: float) -> BinEdge:
     )
 
 
+def _celsius_edge(
+    *,
+    label: str,
+    support_index: int,
+    direction: str,
+    entry_price: float,
+    p_posterior: float,
+    forward_edge: float,
+) -> BinEdge:
+    value = int(label.removesuffix("C").removesuffix("°"))
+    return BinEdge(
+        bin=Bin(low=value, high=value, unit="C", label=label),
+        direction=direction,
+        edge=forward_edge,
+        ci_lower=0.02,
+        ci_upper=0.18,
+        p_model=p_posterior,
+        p_market=entry_price,
+        p_posterior=p_posterior,
+        entry_price=entry_price,
+        p_value=0.01,
+        vwmp=entry_price,
+        forward_edge=forward_edge,
+        support_index=support_index,
+    )
+
+
 def _trade_decision(
     spec,
     *,
@@ -938,7 +965,7 @@ def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monke
 
 
 def test_family_decision_all_live_disabled_buy_no_does_not_self_drop(monkeypatch) -> None:
-    """If no executable sibling exists, blocked diagnostics must not mark the selected leg dropped."""
+    """If no executable sibling exists, a blocked sibling must not mark the selected leg dropped."""
 
     flags = dict(evaluator_module.settings["feature_flags"])
     flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = True
@@ -1035,6 +1062,50 @@ def test_family_portfolio_can_select_explicit_multi_leg_payoff_vector() -> None:
     assert len(portfolio.posterior_vector) == 3
     assert len(portfolio.leg_weights) == 2
     assert portfolio.expected_log_growth > 0
+
+
+def test_family_optimizer_rejects_capital_dominated_no_basket_for_center_yes() -> None:
+    """Shanghai-style partition: two sibling NO legs are not valid if center YES dominates."""
+
+    no_29 = _celsius_edge(
+        label="29°C",
+        support_index=0,
+        direction="buy_no",
+        entry_price=0.79,
+        p_posterior=0.10,
+        forward_edge=0.05,
+    )
+    yes_30 = _celsius_edge(
+        label="30°C",
+        support_index=1,
+        direction="buy_yes",
+        entry_price=0.27,
+        p_posterior=0.80,
+        forward_edge=0.10,
+    )
+    no_31 = _celsius_edge(
+        label="31°C",
+        support_index=2,
+        direction="buy_no",
+        entry_price=0.80,
+        p_posterior=0.10,
+        forward_edge=0.05,
+    )
+
+    portfolio = optimize_exclusive_outcome_portfolio(
+        [no_29, yes_30, no_31],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        min_legs=1,
+        max_legs=2,
+    )
+
+    assert portfolio is not None
+    assert portfolio.selected_legs == (yes_30,)
+    assert portfolio.cost_vector == (0.27,)
+    assert portfolio.capital_cost_usd == pytest.approx(0.27)
+    assert portfolio.capital_efficiency > 0.0
 
 
 def test_runtime_family_dedup_ranks_by_expected_net_profit_not_size_usd() -> None:
