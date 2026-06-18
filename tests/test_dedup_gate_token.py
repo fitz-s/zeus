@@ -414,6 +414,42 @@ def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(mem
     assert result["allowed"] is True
 
 
+def test_executor_duplicate_gate_allows_cancelled_pending_entry_with_stale_live_order_fact(mem_db):
+    _insert_position(
+        mem_db,
+        "stale-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
+                   'order-stale-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14', '2026-06-18T09:20:22')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-stale-pending', 'cmd-cancelled', 'LIVE',
+                   '10', '0', 'REST', '2026-06-18T09:15:44', 1)"""
+    )
+    mem_db.commit()
+
+    result = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+    )
+
+    assert result["allowed"] is True
+
+
 def test_executor_duplicate_gate_blocks_cancelled_pending_entry_with_fill(mem_db):
     _insert_position(
         mem_db,

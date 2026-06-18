@@ -278,6 +278,19 @@ def _entry_command_has_terminal_no_fill_order_fact(
         return False
 
 
+def _entry_terminal_command_has_no_fill_exposure(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    state: str,
+) -> bool:
+    if str(state or "").upper() not in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES:
+        return False
+    if _entry_has_positive_trade_fact(conn, command_id=command_id):
+        return False
+    return True
+
+
 def _pending_entry_terminal_no_fill_allows_entry(
     conn: sqlite3.Connection,
     row: sqlite3.Row | tuple,
@@ -307,9 +320,10 @@ def _pending_entry_terminal_no_fill_allows_entry(
         return False
     if _entry_has_positive_trade_fact(conn, position_id=position_id, order_id=order_id):
         return False
-    return (
-        not _entry_has_positive_trade_fact(conn, command_id=command_id)
-        and _entry_command_has_terminal_no_fill_order_fact(conn, command_id)
+    return _entry_terminal_command_has_no_fill_exposure(
+        conn,
+        command_id=command_id,
+        state=state,
     )
 
 
@@ -765,9 +779,11 @@ def _entry_duplicate_same_token_component(
                 state = str(row[2])
                 phase = row[3]
             if (
-                state.upper() in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES
-                and not _entry_has_positive_trade_fact(conn, command_id=command_id)
-                and _entry_command_has_terminal_no_fill_order_fact(conn, command_id)
+                _entry_terminal_command_has_no_fill_exposure(
+                    conn,
+                    command_id=command_id,
+                    state=state,
+                )
             ):
                 continue
             return {
