@@ -37,7 +37,7 @@ class Day0HardFactGate:
             and self.metric_match_status == "MATCH"
             and self.rounding_status == "MATCH"
             and self.source_authorized_status == "AUTHORIZED"
-            and self.live_authority_status == "LIVE_AUTHORITY"
+            and self.live_authority_status == "live"
         )
 
 
@@ -314,7 +314,7 @@ class Day0ExtremeUpdatedTrigger:
                     observation = observation_instant_row_to_day0_observation(row, metric=metric)
                 except ValueError:
                     continue
-                if observation.get("live_authority_status") != "LIVE_AUTHORITY":
+                if observation.get("live_authority_status") != "live":
                     continue
                 key = (
                     str(observation.get("city") or ""),
@@ -419,7 +419,7 @@ def authority_row_to_observation(row: dict[str, Any]) -> dict[str, Any]:
         "source_authorized_status": (
             "AUTHORIZED" if row.get("source_authorized_for_settlement") == 1 else "UNKNOWN"
         ),
-        "live_authority_status": payload.get("live_authority_status", "OBSERVABILITY_ONLY"),
+        "live_authority_status": payload.get("live_authority_status", "blocked"),
         "settlement_unit": payload.get("settlement_unit") or payload.get("measurement_unit"),
         "settlement_precision": payload.get("settlement_precision") or payload.get("precision"),
         "rounding_rule": payload.get("rounding_rule"),
@@ -486,13 +486,13 @@ def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: 
         else "UNAUTHORIZED"
     )
     live_authority = (
-        "LIVE_AUTHORITY"
+            "live"
         if (
             source_authorized == "AUTHORIZED"
             and local_date_status == "MATCH"
             and dst_status == "UNAMBIGUOUS"
         )
-        else "NON_LIVE_AUTHORITY"
+            else "blocked"
     )
     return {
         "city": city,
@@ -531,12 +531,12 @@ def observation_context_to_live_observation(
     observation: Any,
     observation_context_id: str = "",
 ) -> dict[str, Any]:
-    """Convert a Day0ObservationContext into a live-authority EDLI observation.
+    """Convert a Day0ObservationContext into a live EDLI observation.
 
     This is the online source hook: it consumes the actual observation object
     returned by the settlement-bound Day0 provider path. The separate
     settlement_day_observation_authority scanner remains catch-up/evidence and
-    defaults to OBSERVABILITY_ONLY.
+    defaults to blocked.
     """
 
     observation_time = str(getattr(observation, "observation_time", "") or "")
@@ -572,7 +572,7 @@ def observation_context_to_live_observation(
         else "UNAUTHORIZED"
     )
     live_authority_status = (
-        "LIVE_AUTHORITY"
+        "live"
         if (
             available_at
             and source_match_status == "MATCH"
@@ -583,7 +583,7 @@ def observation_context_to_live_observation(
             and rounding_status == "MATCH"
             and source_authorized_status == "AUTHORIZED"
         )
-        else "NON_LIVE_AUTHORITY"
+        else "blocked"
     )
     raw_value = getattr(observation, "high_so_far", None) if str(metric) == "high" else getattr(observation, "low_so_far", None)
     if raw_value is None:

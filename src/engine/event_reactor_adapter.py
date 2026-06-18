@@ -1241,7 +1241,7 @@ def edli_source_truth_gate(event: OpportunityEvent) -> bool:
             and payload.get("metric_match_status") == "MATCH"
             and payload.get("rounding_status") == "MATCH"
             and payload.get("source_authorized_status", "AUTHORIZED") == "AUTHORIZED"
-            and payload.get("live_authority_status") == "LIVE_AUTHORITY"
+            and payload.get("live_authority_status") == "live"
         )
     return False
 

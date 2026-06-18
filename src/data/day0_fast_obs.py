@@ -598,14 +598,14 @@ def fast_obs_to_day0_observation(
         else "UNAUTHORIZED"
     )
     live_authority = (
-        "LIVE_AUTHORITY"
+        "live"
         if (
             source_authorized == "AUTHORIZED"
             and local_date_status == "MATCH"
             and dst_status == "UNAMBIGUOUS"
             and publication_clock_present
         )
-        else "NON_LIVE_AUTHORITY"
+        else "blocked"
     )
     return {
         "city": str(getattr(city, "name", "") or ""),
@@ -1057,7 +1057,7 @@ class Day0FastObsEmitter:
                         and observation["dst_status"] == "UNAMBIGUOUS"
                     )
                     live_ok = (
-                        observation["live_authority_status"] == "LIVE_AUTHORITY"
+                        observation["live_authority_status"] == "live"
                         and not stale_blocked
                     )
                     if memo_safe and kill_moved:
@@ -1066,7 +1066,7 @@ class Day0FastObsEmitter:
                     if not live_ok:
                         if memo_safe and kill_moved:
                             logger.warning(
-                                "DAY0_FAST_OBS_LIVE_AUTHORITY_WITHHELD city=%s date=%s metric=%s "
+                                "DAY0_FAST_OBS_LIVE_WITHHELD city=%s date=%s metric=%s "
                                 "rounded=%s freshness=%s cache_age_s=%s authority=%s "
                                 "(kill memo updated; no live event emitted; live memo untouched)",
                                 city_name, target_date, metric, rounded,

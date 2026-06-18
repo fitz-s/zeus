@@ -34,7 +34,7 @@ class Day0AuthorityEvidence:
 
 def assert_live_day0_authority(evidence: Day0AuthorityEvidence) -> None:
     expected = {
-        "live_authority_status": {"LIVE_AUTHORITY"},
+        "live_authority_status": {"live"},
         "source_match_status": {"MATCH"},
         "station_match_status": {"MATCH"},
         "local_date_status": {"MATCH"},
@@ -52,7 +52,7 @@ def assert_live_day0_authority(evidence: Day0AuthorityEvidence) -> None:
 
 
 def observability_row_to_authority(row: Mapping[str, object]) -> Day0AuthorityEvidence:
-    if row.get("live_authority_status") != "LIVE_AUTHORITY":
+    if row.get("live_authority_status") != "live":
         raise Day0AuthorityError("observability row is not live authority")
     semantics = row.get("settlement_semantics")
     if not isinstance(semantics, SettlementSemantics):

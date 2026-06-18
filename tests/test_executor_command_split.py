@@ -56,13 +56,19 @@ def _cutover_guard_live_enabled(monkeypatch):
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
 
     def _seed_submit_collateral(conn: sqlite3.Connection) -> dict:
+        ctf_units = 1_000_000_000
+        ctf_tokens = {
+            "tok-" + "1" * 36: ctf_units,
+            "tok-" + "7" * 36: ctf_units,
+            "tok-exit-idem" + "0" * 27: ctf_units,
+        }
         CollateralLedger(conn).set_snapshot(
             CollateralSnapshot(
                 pusd_balance_micro=1_000_000_000,
                 pusd_allowance_micro=1_000_000_000,
                 usdc_e_legacy_balance_micro=0,
-                ctf_token_balances={},
-                ctf_token_allowances={},
+                ctf_token_balances=ctf_tokens,
+                ctf_token_allowances=ctf_tokens,
                 reserved_pusd_for_buys_micro=0,
                 reserved_tokens_for_sells={},
                 captured_at=datetime.now(timezone.utc),
@@ -79,6 +85,7 @@ def _cutover_guard_live_enabled(monkeypatch):
         }
 
     monkeypatch.setattr("src.execution.executor._refresh_entry_collateral_snapshot_for_submit", _seed_submit_collateral)
+    monkeypatch.setattr("src.execution.executor._refresh_exit_collateral_snapshot_for_submit", _seed_submit_collateral)
 
 
 def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> str:
@@ -895,8 +902,7 @@ class TestLiveOrderCommandSplit:
                 'cmd-recent-cancelled', ?, ?, 'pos-recent-cancelled',
                 'dec-recent-cancelled', 'idem-recent-cancelled', 'ENTRY',
                 'mkt-test-001', ?, 'BUY', 10.0, 0.40, 'order-cancelled',
-                'CANCELLED', NULL, '2026-06-17T16:30:00+00:00',
-                ?, NULL
+                'CANCELLED', NULL, ?, ?, NULL
             )
             """,
             (
@@ -904,6 +910,26 @@ class TestLiveOrderCommandSplit:
                 envelope_id,
                 token_id,
                 datetime.now(timezone.utc).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        mem_conn.execute(
+            """
+            INSERT INTO venue_trade_facts (
+                trade_id, venue_order_id, command_id, state, filled_size,
+                fill_price, fee_paid_micro, tx_hash, block_number,
+                confirmation_count, source, observed_at, venue_timestamp,
+                local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'fill-recent-cancelled', 'order-cancelled',
+                'cmd-recent-cancelled', 'MATCHED', '1.0', '0.40',
+                0, NULL, NULL, 0, 'FAKE_VENUE', ?, ?, 1, ?, '{}'
+            )
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
+                "d" * 64,
             ),
         )
         mem_conn.commit()

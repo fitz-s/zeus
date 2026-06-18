@@ -43,8 +43,18 @@ def conn(monkeypatch):
                 pusd_balance_micro=1_000_000_000,
                 pusd_allowance_micro=1_000_000_000,
                 usdc_e_legacy_balance_micro=0,
-                ctf_token_balances={},
-                ctf_token_allowances={},
+                ctf_token_balances={
+                    "tok-m2": 1_000_000_000,
+                    "tok-m2-exit-init": 1_000_000_000,
+                    "tok-m2-exit-lazy": 1_000_000_000,
+                    "tok-m2-exit-submit-pre": 1_000_000_000,
+                },
+                ctf_token_allowances={
+                    "tok-m2": 1_000_000_000,
+                    "tok-m2-exit-init": 1_000_000_000,
+                    "tok-m2-exit-lazy": 1_000_000_000,
+                    "tok-m2-exit-submit-pre": 1_000_000_000,
+                },
                 reserved_pusd_for_buys_micro=0,
                 reserved_tokens_for_sells={},
                 captured_at=datetime.now(timezone.utc),
@@ -61,6 +71,7 @@ def conn(monkeypatch):
         }
 
     monkeypatch.setattr("src.execution.executor._refresh_entry_collateral_snapshot_for_submit", _seed_submit_collateral)
+    monkeypatch.setattr("src.execution.executor._refresh_exit_collateral_snapshot_for_submit", _seed_submit_collateral)
     yield c
     c.close()
 
@@ -161,6 +172,16 @@ def _make_entry_intent(conn, *, token_id: str = "tok-m2", price: float = 0.55):
         executable_snapshot_min_order_size=Decimal("0.01"),
         executable_snapshot_neg_risk=False,
         decision_source_context=_decision_source_context(),
+        submit_order_type="FOK",
+        post_only=False,
+        taker_quality_proof={
+            "passed": True,
+            "taker_fee_adjusted_edge": "0.08",
+            "taker_expected_profit_usd": "0.40",
+            "maker_expected_profit_usd": "0.10",
+            "incremental_expected_profit_usd": "0.30",
+            "model_confidence": "0.82",
+        },
     )
 
 
@@ -453,7 +474,7 @@ def test_network_timeout_after_POST_creates_unknown_not_rejected(conn):
     mock_client.place_limit_order.side_effect = TimeoutError("post timed out")
 
     with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
-        result = _live_order("trade-m2-timeout", intent, shares=18.19, conn=conn, decision_id="dec-m2-timeout")
+        result = _live_order("trade-m2-timeout", intent, shares=18.0, conn=conn, decision_id="dec-m2-timeout")
 
     cmd = _command(conn)
     assert result.status == "unknown_side_effect"
@@ -480,7 +501,7 @@ def test_typed_venue_rejection_creates_SUBMIT_REJECTED(conn):
     )
 
     with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
-        result = _live_order("trade-m2-reject", intent, shares=18.19, conn=conn, decision_id="dec-m2-reject")
+        result = _live_order("trade-m2-reject", intent, shares=18.0, conn=conn, decision_id="dec-m2-reject")
 
     cmd = _command(conn)
     assert result.status == "rejected"
@@ -504,7 +525,7 @@ def test_geoblock_polyapi_exception_creates_terminal_rejection(conn):
     )
 
     with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
-        result = _live_order("trade-m2-geoblock", intent, shares=18.19, conn=conn, decision_id="dec-m2-geoblock")
+        result = _live_order("trade-m2-geoblock", intent, shares=18.0, conn=conn, decision_id="dec-m2-geoblock")
 
     cmd = _command(conn)
     assert result.status == "rejected"
@@ -631,7 +652,7 @@ def test_pre_post_signing_exception_safe_to_retry(conn):
     mock_client.v2_preflight.side_effect = V2PreflightError("pre-post gate failed")
 
     with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
-        result = _live_order("trade-m2-prepost", intent, shares=18.19, conn=conn, decision_id="dec-m2-prepost")
+        result = _live_order("trade-m2-prepost", intent, shares=18.0, conn=conn, decision_id="dec-m2-prepost")
 
     cmd = _command(conn)
     assert result.status == "rejected"
@@ -649,7 +670,7 @@ def test_generic_pre_post_preflight_exception_safe_to_retry(conn):
     mock_client.v2_preflight.side_effect = RuntimeError("credential setup failed")
 
     with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
-        result = _live_order("trade-m2-generic-prepost", intent, shares=18.19, conn=conn, decision_id="dec-m2-generic-prepost")
+        result = _live_order("trade-m2-generic-prepost", intent, shares=18.0, conn=conn, decision_id="dec-m2-generic-prepost")
 
     cmd = _command(conn)
     assert result.status == "rejected"
@@ -675,7 +696,7 @@ def test_exit_client_construction_exception_safe_to_retry(conn):
             create_exit_order_intent(
                 trade_id="trade-m2-exit-init",
                 token_id=token_id,
-                shares=18.19,
+                shares=18.0,
                 current_price=0.55,
                 executable_snapshot_id=f"snap-{token_id}",
                 executable_snapshot_min_tick_size=Decimal("0.01"),
@@ -713,7 +734,7 @@ def test_exit_lazy_adapter_preflight_exception_safe_to_retry(conn, monkeypatch):
         create_exit_order_intent(
             trade_id="trade-m2-exit-lazy",
             token_id=token_id,
-            shares=18.19,
+            shares=18.0,
             current_price=0.55,
             executable_snapshot_id=f"snap-{token_id}",
             executable_snapshot_min_tick_size=Decimal("0.01"),
@@ -790,7 +811,7 @@ def test_exit_adapter_submit_pre_snapshot_failure_safe_to_retry(conn, tmp_path):
             create_exit_order_intent(
                 trade_id="trade-m2-exit-submit-pre",
                 token_id=token_id,
-                shares=18.19,
+                shares=18.0,
                 current_price=0.55,
                 executable_snapshot_id=f"snap-{token_id}",
                 executable_snapshot_min_tick_size=Decimal("0.01"),
@@ -818,13 +839,13 @@ def test_duplicate_retry_blocked_during_unknown(conn):
     first_client.v2_preflight.return_value = None
     first_client.place_limit_order.side_effect = TimeoutError("post timed out")
     with patch("src.data.polymarket_client.PolymarketClient", return_value=first_client):
-        first = _live_order("trade-m2-dupe", intent, shares=18.19, conn=conn, decision_id="dec-m2-dupe")
+        first = _live_order("trade-m2-dupe", intent, shares=18.0, conn=conn, decision_id="dec-m2-dupe")
     assert first.status == "unknown_side_effect"
 
     second_client = MagicMock()
     second_client.v2_preflight.return_value = None
     with patch("src.data.polymarket_client.PolymarketClient", return_value=second_client):
-        second = _live_order("trade-m2-dupe", intent, shares=18.19, conn=conn, decision_id="dec-m2-dupe")
+        second = _live_order("trade-m2-dupe", intent, shares=18.0, conn=conn, decision_id="dec-m2-dupe")
 
     assert second.status == "unknown_side_effect"
     assert "idempotency_collision" in (second.reason or "")
@@ -839,13 +860,13 @@ def test_strategy_cannot_submit_replacement_with_different_idempotency_key_for_s
     first_client.v2_preflight.return_value = None
     first_client.place_limit_order.side_effect = TimeoutError("post timed out")
     with patch("src.data.polymarket_client.PolymarketClient", return_value=first_client):
-        first = _live_order("trade-m2-economic", intent, shares=18.19, conn=conn, decision_id="dec-m2-a")
+        first = _live_order("trade-m2-economic", intent, shares=18.0, conn=conn, decision_id="dec-m2-a")
     assert first.status == "unknown_side_effect"
 
     second_client = MagicMock()
     second_client.v2_preflight.return_value = None
     with patch("src.data.polymarket_client.PolymarketClient", return_value=second_client):
-        second = _live_order("trade-m2-economic-replacement", intent, shares=18.19, conn=conn, decision_id="dec-m2-b")
+        second = _live_order("trade-m2-economic-replacement", intent, shares=18.0, conn=conn, decision_id="dec-m2-b")
 
     assert second.status == "unknown_side_effect"
     assert "economic_intent_duplication" in (second.reason or "")
@@ -864,13 +885,13 @@ def test_economic_intent_duplicate_uses_idempotency_precision(conn):
     first_client.v2_preflight.return_value = None
     first_client.place_limit_order.side_effect = TimeoutError("post timed out")
     with patch("src.data.polymarket_client.PolymarketClient", return_value=first_client):
-        first = _live_order("trade-m2-float-a", first_intent, shares=18.19, conn=conn, decision_id="dec-m2-float-a")
+        first = _live_order("trade-m2-float-a", first_intent, shares=18.0, conn=conn, decision_id="dec-m2-float-a")
     assert first.status == "unknown_side_effect"
 
     second_client = MagicMock()
     second_client.v2_preflight.return_value = None
     with patch("src.data.polymarket_client.PolymarketClient", return_value=second_client):
-        second = _live_order("trade-m2-float-b", second_intent, shares=18.19, conn=conn, decision_id="dec-m2-float-b")
+        second = _live_order("trade-m2-float-b", second_intent, shares=18.0, conn=conn, decision_id="dec-m2-float-b")
 
     assert second.status == "unknown_side_effect"
     assert "economic_intent_duplication" in (second.reason or "")
@@ -932,7 +953,7 @@ def test_review_required_side_effect_still_blocks_same_economic_intent(conn):
     from src.state.venue_command_repo import append_event, find_unknown_command_by_economic_intent
 
     token_id = "tok-m2-review-block"
-    _insert_unknown_side_effect(conn, command_id="cmd-m2-review-block", idem="5" * 32, token_id=token_id)
+    _insert_unknown_side_effect(conn, command_id="cmd-m2-review-block", idem="5" * 32, token_id=token_id, size=18.0)
     append_event(
         conn,
         command_id="cmd-m2-review-block",
@@ -948,7 +969,7 @@ def test_review_required_side_effect_still_blocks_same_economic_intent(conn):
         token_id=token_id,
         side="BUY",
         price=0.55,
-        size=18.19,
+        size=18.0,
     )
     assert unresolved is not None
     assert unresolved["state"] == "REVIEW_REQUIRED"
@@ -957,7 +978,7 @@ def test_review_required_side_effect_still_blocks_same_economic_intent(conn):
     second_client = MagicMock()
     second_client.v2_preflight.return_value = None
     with patch("src.data.polymarket_client.PolymarketClient", return_value=second_client):
-        second = _live_order("trade-m2-review-replacement", intent, shares=18.19, conn=conn, decision_id="dec-m2-review-b")
+        second = _live_order("trade-m2-review-replacement", intent, shares=18.0, conn=conn, decision_id="dec-m2-review-b")
 
     assert second.status == "unknown_side_effect"
     assert "economic_intent_duplication" in (second.reason or "")

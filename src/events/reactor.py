@@ -1589,7 +1589,7 @@ class OpportunityEventReactor:
             #
             # The gate now DEFERS to the reader: coverage PARTIAL/BLOCKED passes
             # THROUGH; when nothing eligible exists the adapter rejects honestly
-            # with the full reason chain (REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_
+            # with the full reason chain (REPLACEMENT_0_1_LIVE_BUNDLE_
             # BLOCKED + provenance envelope) — the certificate contract reads its
             # statuses from the SERVED bundle at proof time, never from this event
             # payload. Dead-letter remains ONLY for structurally junk payloads
@@ -1884,7 +1884,7 @@ class OpportunityEventReactor:
     ) -> str | None:
         # ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12): a family blocked because
         # its replacement posterior is STALE or ABSENT (the adapter raises
-        # REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING / ..._BUNDLE_BLOCKED) is a REFRESHABLE
+        # REPLACEMENT_0_1_LIVE_READINESS_MISSING / ..._BUNDLE_BLOCKED) is a REFRESHABLE
         # SUBSTRATE block — the belief substrate needs re-materialization, not an endless requeue
         # against an unchanging posterior. Record it for the end-of-cycle drain, which enqueues a
         # single-family cycle-advance reseed (outside any txn, debounced, fail-soft). The
@@ -2587,8 +2587,8 @@ def _is_transient_money_path_reason(reason: str | None) -> bool:
 # (e.g. wrapped in a stage prefix) still counts — the belief substrate is the root cause.
 _POSTERIOR_STALENESS_REASON_BASES = frozenset(
     {
-        "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
-        "REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED",
+        "REPLACEMENT_0_1_LIVE_READINESS_MISSING",
+        "REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED",
     }
 )
 
@@ -2613,7 +2613,7 @@ def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:
         and payload.get("metric_match_status") == "MATCH"
         and payload.get("rounding_status") == "MATCH"
         and payload.get("source_authorized_status", "AUTHORIZED") == "AUTHORIZED"
-        and payload.get("live_authority_status") == "LIVE_AUTHORITY"
+        and payload.get("live_authority_status") == "live"
     )
 
 

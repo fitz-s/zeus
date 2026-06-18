@@ -49,7 +49,7 @@ def _observation(**overrides):
         "metric_match_status": "MATCH",
         "rounding_status": "MATCH",
         "source_authorized_status": "AUTHORIZED",
-        "live_authority_status": "LIVE_AUTHORITY",
+        "live_authority_status": "live",
         "observation_context_id": "obsctx-1",
     }
     base.update(overrides)
@@ -63,7 +63,7 @@ def test_day0_online_hook_is_trigger_local_not_cycle_runtime_side_effect():
 
     assert "_queue_edli_day0_observation_event" not in cycle_runtime_source
     assert "def observation_context_to_live_observation(" in trigger_source
-    assert "defaults to OBSERVABILITY_ONLY" in trigger_source
+    assert "defaults to blocked" in trigger_source
     assert "day0_authority_catchup_scanner_enabled" in main_source
 
 
@@ -101,7 +101,7 @@ def test_observation_context_live_hook_marks_wu_station_match_live_authority():
     assert observation["dst_status"] == "UNAMBIGUOUS"
     assert observation["rounding_status"] == "MATCH"
     assert observation["source_authorized_status"] == "AUTHORIZED"
-    assert observation["live_authority_status"] == "LIVE_AUTHORITY"
+    assert observation["live_authority_status"] == "live"
     assert observation["observation_available_at"] == "2026-05-24T18:07:00+00:00"
 
 
@@ -134,7 +134,7 @@ def test_observation_context_live_hook_blocks_diagnostic_fallback():
 
     assert observation["source_match_status"] == "MISMATCH"
     assert observation["station_match_status"] == "MISMATCH"
-    assert observation["live_authority_status"] == "NON_LIVE_AUTHORITY"
+    assert observation["live_authority_status"] == "blocked"
 
 
 def test_day0_event_uses_observation_available_at():
@@ -448,7 +448,7 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
     assert '"high_so_far":14.0' in low_payload
     assert '"low_so_far":11.0' in low_payload
     assert all('"event_type":"DAY0_EXTREME_UPDATED"' not in payload for payload in payloads)
-    assert all('"live_authority_status":"LIVE_AUTHORITY"' in payload for payload in payloads)
+    assert all('"live_authority_status":"live"' in payload for payload in payloads)
     assert all('"source_authorized_status":"AUTHORIZED"' in payload for payload in payloads)
 
 
@@ -544,7 +544,7 @@ def test_scan_observation_instants_tokyo_low_uses_aggregate_target_day_min():
     assert low_payload["station_id"] == "RJTT"
     assert low_payload["local_date_status"] == "MATCH"
     assert low_payload["source_authorized_status"] == "AUTHORIZED"
-    assert low_payload["live_authority_status"] == "LIVE_AUTHORITY"
+    assert low_payload["live_authority_status"] == "live"
     assert low_payload["raw_value"] == 20.0
     assert low_payload["low_so_far"] == 20.0
     assert high_payload["high_so_far"] == 21.0
@@ -902,7 +902,7 @@ def test_authority_row_scanner_is_observability_only_not_live_authority():
         }
     )
 
-    assert observation["live_authority_status"] == "OBSERVABILITY_ONLY"
+    assert observation["live_authority_status"] == "blocked"
     assert observation["source_match_status"] == "UNKNOWN"
     assert observation["station_match_status"] == "UNKNOWN"
     assert observation["metric_match_status"] == "UNKNOWN"

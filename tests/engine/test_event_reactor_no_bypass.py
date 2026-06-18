@@ -47,6 +47,13 @@ from src.riskguard.risk_level import RiskLevel
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.sizing.portfolio_reservation import PortfolioReservationLedger
 from src.state.db import init_schema_forecasts
+from src.data.replacement_forecast_readiness import (
+    HIGH_DATA_VERSION as REPLACEMENT_HIGH_DATA_VERSION,
+    LIVE_RUNTIME_LAYER,
+    PRODUCT_ID as REPLACEMENT_PRODUCT_ID,
+    SOURCE_ID as REPLACEMENT_SOURCE_ID,
+    STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY,
+)
 from src.types.market import Bin
 
 DECISION_TIME = datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)
@@ -54,20 +61,13 @@ DECISION_TIME = datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)
 
 @pytest.fixture(autouse=True)
 def _isolate_edli_settings(monkeypatch):
-    """Force flag-OFF for EMOS sole calibrator, bias correction, and replacement trade authority.
+    """Keep fixture-local calibration stable and keep replacement as the live q path.
 
     The test fixture has no EMOS calibration rows and no model_bias_ens rows.
     Live settings.json may have these flags ON (edli_emos_sole_calibrator_enabled,
     edli_bias_correction_enabled).  With EMOS ON and no calibration data, build_emos_q
     produces a different q distribution than what the fixture encodes, causing
     TRADE_SCORE_NON_POSITIVE on every receipt assertion.
-
-    The replacement trade authority flag is also forced OFF because live settings.json
-    has openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled=True, which forces
-    _replacement_authority_probability_and_fdr_proof to run for every FORECAST_SNAPSHOT_READY
-    event and return uniform q=0.5 from the fixture, overriding baseline fixture q values.
-    Tests that specifically exercise the replacement path enable the flag themselves.
-    Isolate all tests in this module from the live flag state.
     """
     from src.config import settings
 
@@ -76,7 +76,7 @@ def _isolate_edli_settings(monkeypatch):
     edli["edli_bias_correction_enabled"] = False
     monkeypatch.setitem(settings._data, "edli", edli)
     feature_flags = dict(settings._data["feature_flags"])
-    feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = False
+    feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = False
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
 
 
@@ -123,7 +123,7 @@ def _replacement_forecast_event():
         city="Chicago",
         target_date="2026-05-25",
         metric="high",
-        source_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        source_id=REPLACEMENT_SOURCE_ID,
         source_run_id="run-1",
         cycle="2026-05-24T00:00:00+00:00",
         track="operational",
@@ -154,6 +154,20 @@ def _replacement_forecast_event():
         causal_snapshot_id=payload.snapshot_id,
         payload=payload,
     )
+
+
+def _bound_replacement_forecast_event(*, token_id: str = "yes-1"):
+    event = _replacement_forecast_event()
+    payload = json.loads(event.payload_json)
+    condition_id = "condition-2" if token_id.endswith("-2") else "condition-1"
+    payload.update(
+        {
+            "condition_id": condition_id,
+            "token_id": token_id,
+            "unit": "F",
+        }
+    )
+    return replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
 def _bound_forecast_event(*, token_id: str = "yes-1", fdr_condition_count: int = 2):
@@ -275,7 +289,7 @@ def _day0_event(*, token_id: str = "yes-2"):
         metric_match_status="MATCH",
         rounding_status="MATCH",
         source_authorized_status="AUTHORIZED",
-        live_authority_status="LIVE_AUTHORITY",
+        live_authority_status="live",
     )
     event = make_day0_extreme_updated_event(
         entity_key="Chicago|2026-05-25|high",
@@ -301,7 +315,13 @@ def _day0_event(*, token_id: str = "yes-2"):
 def _trade_conn_with_snapshot(
     *,
     selected_ask: str = "0.40",
+    selected_bid: str = "0.39",
     no_selected_ask: str = "0.80",
+    no_selected_bid: str = "0.19",
+    extra_yes_ask: str = "0.48",
+    extra_yes_bid: str = "0.47",
+    extra_no_ask: str = "0.60",
+    extra_no_bid: str = "0.40",
     condition_count: int = 2,
     snapshot_condition_count: int | None = None,
     include_no_snapshot: bool = True,
@@ -317,8 +337,8 @@ def _trade_conn_with_snapshot(
     init_snapshot_schema(conn)
     _depth_yes_no = depth_json if depth_json is not None else json.dumps(
         {
-            "YES": {"asks": [{"price": selected_ask, "size": "100"}], "bids": [{"price": "0.39", "size": "100"}]},
-            "NO": {"asks": [{"price": no_selected_ask, "size": "100"}], "bids": [{"price": "0.19", "size": "100"}]},
+            "YES": {"asks": [{"price": selected_ask, "size": "100"}], "bids": [{"price": selected_bid, "size": "100"}]},
+            "NO": {"asks": [{"price": no_selected_ask, "size": "100"}], "bids": [{"price": no_selected_bid, "size": "100"}]},
         },
         separators=(",", ":"),
     )
@@ -361,7 +381,7 @@ def _trade_conn_with_snapshot(
             tradeability_status_json
         ) VALUES (
             'snapshot-exec-1', 'condition-1', 'yes-1', 'no-1', 'yes-1', 'YES',
-            :ask, '0.39', :depth, '0.01', '5', '{"fee_rate_fraction":0.0}', 0,
+            :ask, :bid, :depth, '0.01', '5', '{"fee_rate_fraction":0.0}', 0,
             :freshness_deadline, :captured_at, 1, 0,
             :gamma_market_id, :event_id, :event_slug, :question_id,
             :enable_orderbook, :accepting_orders,
@@ -373,7 +393,7 @@ def _trade_conn_with_snapshot(
             :tradeability_status_json
         )
         """,
-        {"ask": selected_ask, "depth": _depth_yes_no, "freshness_deadline": freshness_deadline, "captured_at": captured_at, **_SNAP_BASE},
+        {"ask": selected_ask, "bid": selected_bid, "depth": _depth_yes_no, "freshness_deadline": freshness_deadline, "captured_at": captured_at, **_SNAP_BASE},
     )
     if include_no_snapshot:
         conn.execute(
@@ -394,7 +414,7 @@ def _trade_conn_with_snapshot(
                 tradeability_status_json
             ) VALUES (
                 'snapshot-exec-1-no', 'condition-1', 'yes-1', 'no-1', 'no-1', 'NO',
-                :ask, '0.19', :depth, '0.01', '5', '{"fee_rate_fraction":0.0}', 0,
+                :ask, :bid, :depth, '0.01', '5', '{"fee_rate_fraction":0.0}', 0,
                 :freshness_deadline, :captured_at, 1, 0,
                 :gamma_market_id, :event_id, :event_slug, :question_id,
                 :enable_orderbook, :accepting_orders,
@@ -406,13 +426,13 @@ def _trade_conn_with_snapshot(
                 :tradeability_status_json
             )
             """,
-            {"ask": no_selected_ask, "depth": _depth_yes_no, "freshness_deadline": freshness_deadline, "captured_at": captured_at, **_SNAP_BASE},
+            {"ask": no_selected_ask, "bid": no_selected_bid, "depth": _depth_yes_no, "freshness_deadline": freshness_deadline, "captured_at": captured_at, **_SNAP_BASE},
         )
     for index in range(2, snapshot_condition_count + 1):
         _depth_extra = json.dumps(
             {
-                "YES": {"asks": [{"price": "0.48", "size": "100"}], "bids": [{"price": "0.47", "size": "100"}]},
-                "NO": {"asks": [{"price": "0.60", "size": "100"}], "bids": [{"price": "0.40", "size": "100"}]},
+                "YES": {"asks": [{"price": extra_yes_ask, "size": "100"}], "bids": [{"price": extra_yes_bid, "size": "100"}]},
+                "NO": {"asks": [{"price": extra_no_ask, "size": "100"}], "bids": [{"price": extra_no_bid, "size": "100"}]},
             },
             separators=(",", ":"),
         )
@@ -436,7 +456,7 @@ def _trade_conn_with_snapshot(
                 tradeability_status_json
             ) VALUES (
                 :snap_id, :cond_id, :yes_id, :no_id, :yes_id, 'YES',
-                '0.48', '0.47', :depth, '0.01', '5', '{"fee_rate_fraction":0.0}', 0,
+                :ask, :bid, :depth, '0.01', '5', '{"fee_rate_fraction":0.0}', 0,
                 '2026-05-25T00:00:00+00:00', '2026-05-24T08:12:00+00:00', 1, 0,
                 :gamma_market_id, :event_id, :event_slug, :question_id,
                 :enable_orderbook, :accepting_orders,
@@ -453,6 +473,8 @@ def _trade_conn_with_snapshot(
                 "cond_id": f"condition-{index}",
                 "yes_id": f"yes-{index}",
                 "no_id": f"no-{index}",
+                "ask": extra_yes_ask,
+                "bid": extra_yes_bid,
                 "depth": _depth_extra,
                 **_extra_base,
             },
@@ -879,8 +901,8 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
 def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
     """Insert the minimum replacement forecast readiness + posterior rows so that
     _replacement_authority_probability_and_fdr_proof completes past the READINESS_MISSING
-    and BUNDLE_BLOCKED gates. Runtime-policy LIVE_AUTHORITY is flag-derived, but the
-    live bundle reader also requires a row-level LIVE_AUTHORITY posterior carrier.
+    and BUNDLE_BLOCKED gates. The live bundle reader requires a row-level
+    runtime_layer='live' posterior carrier.
 
     The posterior's bin_topology_hash is computed dynamically from the market_events already
     in `conn` so it matches _current_market_bin_topology_hash exactly.
@@ -889,7 +911,6 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
     import json as _json
 
     from src.data.replacement_forecast_bundle_reader import (
-        HIGH_DATA_VERSION,
         _current_market_bin_topology_hash as _topo_hash,
     )
 
@@ -922,13 +943,22 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             "settlement_step_c": 5.0 / 9.0,
         })
 
-    # q_json: uniform over all bins; these are the condition-keyed probabilities.
+    # q_json: live fixture intentionally creates a positive YES edge for the
+    # selected first bin while leaving the sibling available for full-family proof.
     bin_ids = [b["bin_id"] for b in bin_topology]
     n_bins = max(len(bin_ids), 1)
-    q_uniform = {b: round(1.0 / n_bins, 8) for b in bin_ids}
-    # Ensure sum is exactly 1.0 for the last bin.
-    if bin_ids:
-        q_uniform[bin_ids[-1]] = round(1.0 - sum(list(q_uniform.values())[:-1]), 8)
+    if n_bins == 1:
+        q_point = {bin_ids[0]: 1.0} if bin_ids else {}
+        q_lcb = dict(q_point)
+        q_ucb = dict(q_point)
+    else:
+        q_point = {b: round(0.20 / (n_bins - 1), 8) for b in bin_ids}
+        q_point[bin_ids[0]] = 0.80
+        q_point[bin_ids[-1]] = round(1.0 - sum(q_point[b] for b in bin_ids[:-1]), 8)
+        q_lcb = {b: min(v, 0.10) for b, v in q_point.items()}
+        q_lcb[bin_ids[0]] = 0.72
+        q_ucb = {b: max(v, 0.25) for b, v in q_point.items()}
+        q_ucb[bin_ids[0]] = 0.86
 
     provenance = {
         "replacement_q_mode": "FUSED_NORMAL_FULL",
@@ -937,9 +967,29 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
         "q_shape": "fused_normal_direct",
         "q_lcb_basis": "fused_center_bootstrap_p05",
         "q_lcb_bootstrap_draws": 200,
+        "anchor_value_c": 21.1,
+        "bayes_precision_fusion": {
+            "method": "T2_BAYES",
+            "used_models": ["gfs_global", "ecmwf_ifs025", "gem_global"],
+            "model_set_hash": "fixture-model-set",
+            "resolution_mix_hash": "fixture-resolution-mix",
+            "lead_bucket": "L1",
+            "anchor_value_c": 21.1,
+            "anchor_sigma_c": 0.35,
+            "predictive_sigma_c": 0.60,
+            "dropped_models": [],
+            "excluded_regionals": [],
+            "dropped_aliases": [],
+            "raw_model_forecast_ids": [1, 2, 3],
+            "decorrelated_providers_complete": True,
+            "decorrelated_providers_served": 3,
+            "decorrelated_providers_expected": 3,
+        },
     }
     provenance_json = _json.dumps(provenance, separators=(",", ":"))
-    q_json = _json.dumps(q_uniform, separators=(",", ":"))
+    q_json = _json.dumps(q_point, separators=(",", ":"))
+    q_lcb_json = _json.dumps(q_lcb, separators=(",", ":"))
+    q_ucb_json = _json.dumps(q_ucb, separators=(",", ":"))
     posterior_id = 9001  # arbitrary fixture ID
     posterior_identity_hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
@@ -972,6 +1022,7 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             posterior_summary_json TEXT,
             bin_summary_json TEXT,
             training_allowed_reason TEXT,
+            runtime_layer TEXT NOT NULL DEFAULT 'live',
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
@@ -990,7 +1041,7 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             lead_days INTEGER NOT NULL,
             forecast_value_c REAL NOT NULL,
             endpoint TEXT NOT NULL,
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY',
+            trade_authority_status TEXT NOT NULL DEFAULT 'live',
             training_allowed INTEGER NOT NULL DEFAULT 0,
             UNIQUE(model, city, target_date, metric, source_cycle_time, endpoint)
         )
@@ -1002,7 +1053,6 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
         {
             "dependencies": [
                 {"role": "baseline_b0", "source_run_id": "run-1"},
-                {"role": "aifs_sampled_2t", "source_run_id": "run-1"},
                 {"role": "openmeteo_ifs9_anchor", "source_run_id": "run-1"},
                 {"role": "soft_anchor_posterior", "posterior_id": posterior_id, "source_run_id": "run-1"},
             ],
@@ -1013,7 +1063,6 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
     posterior_dep_json = _json.dumps(
         {
             "baseline_b0": "run-1",
-            "aifs_sampled_2t": "run-1",
             "openmeteo_ifs9_anchor": "run-1",
         },
         separators=(",", ":"),
@@ -1030,33 +1079,35 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             posterior_identity_hash, dependency_hash, posterior_config_hash,
             posterior_method,
             source_cycle_time, source_available_at, computed_at,
-            provenance_json
+            provenance_json, runtime_layer
         ) VALUES (
-            ?, 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
-            'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
+            ?, ?, ?,
             ?,
             'Chicago', '2026-05-25', 'high',
             ?,
-            'LIVE_AUTHORITY', 0,
+            'live', 0,
             ?, ?, ?,
             ?,
             ?, 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
             'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
-            'fused_normal_direct',
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
             '2026-05-24T00:00:00+00:00', '2026-05-24T08:10:00+00:00', '2026-05-24T08:11:00+00:00',
-            ?
+            ?, ?
         )
         """,
         (
             posterior_id,
-            HIGH_DATA_VERSION,
+            REPLACEMENT_SOURCE_ID,
+            REPLACEMENT_PRODUCT_ID,
+            REPLACEMENT_HIGH_DATA_VERSION,
             posterior_dep_json,
             q_json,
-            q_json,  # q_lcb_json same as q for test
-            q_json,  # q_ucb_json same as q for test
+            q_lcb_json,
+            q_ucb_json,
             topo_hash,
             posterior_identity_hash,
             provenance_json,
+            LIVE_RUNTIME_LAYER,
         ),
     )
     conn.executemany(
@@ -1067,12 +1118,12 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             endpoint, trade_authority_status, training_allowed
         ) VALUES (?, 'Chicago', '2026-05-25', 'high',
                   '2026-05-24T00:00:00+00:00', '2026-05-24T08:10:00+00:00',
-                  '2026-05-24T08:10:00+00:00', 1, ?, 'single_runs', 'SHADOW_ONLY', 0)
+                  '2026-05-24T08:10:00+00:00', 1, ?, 'single_runs', 'live', 0)
         """,
         (
-            ("gfs_global", 24.0),
-            ("ecmwf_ifs025", 25.0),
-            ("gem_global", 26.0),
+            ("gfs_global", 21.0),
+            ("ecmwf_ifs025", 21.1),
+            ("gem_global", 21.2),
         ),
     )
     # Insert the replacement readiness row with correct strategy_key/source_id/data_version.
@@ -1088,24 +1139,47 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             dependency_json, provenance_json
         ) VALUES (
             'replacement-readiness-1',
-            'city_metric|Chicago|America/Chicago|2026-05-25|high|temperature|high_temp|openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1|replacement||openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor|operational|',
+            'city_metric|Chicago|America/Chicago|2026-05-25|high|temperature|high_temp|openmeteo_ecmwf_ifs9_bayes_fusion_high_v1|replacement||openmeteo_ecmwf_ifs9_bayes_fusion|operational|',
             'city_metric',
             'Chicago', 'Chicago', 'America/Chicago',
             '2026-05-25', NULL, 'high', 'temperature',
             'high_temp', ?,
-            'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor', 'operational', 'run-1',
+            ?, 'operational', 'run-1',
             NULL, NULL, NULL, '[]',
-            'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor', 'READY', '["READY"]',
+            ?, 'READY', '["READY"]',
             '2026-05-24T08:10:00+00:00', '2026-05-25T12:00:00+00:00',
             ?, ?
         )
         """,
         (
-            HIGH_DATA_VERSION,
+            REPLACEMENT_HIGH_DATA_VERSION,
+            REPLACEMENT_SOURCE_ID,
+            REPLACEMENT_STRATEGY_KEY,
             dep_json,
             provenance_json,
         ),
     )
+
+
+def _trade_conn_with_live_replacement_snapshot(**kwargs) -> sqlite3.Connection:
+    from src.config import settings
+
+    feature_flags = dict(settings._data["feature_flags"])
+    feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = True
+    settings._data["feature_flags"] = feature_flags
+    conn = _trade_conn_with_snapshot(
+        selected_ask="0.68",
+        selected_bid="0.66",
+        no_selected_ask="0.34",
+        no_selected_bid="0.32",
+        extra_yes_ask="0.18",
+        extra_yes_bid="0.16",
+        extra_no_ask="0.84",
+        extra_no_bid="0.82",
+        **kwargs,
+    )
+    _insert_replacement_forecast_fixture(conn)
+    return conn
 
 
 def _calibration_conn_with_platt_model() -> sqlite3.Connection:
@@ -1260,8 +1334,8 @@ def test_adapter_trade_score_gate_treats_trigger_events_as_hydration_inputs():
 
 
 def test_runtime_receipt_uses_event_bound_final_intent_contract():
-    event = _bound_forecast_event()
-    receipt = _receipt(event, _trade_conn_with_snapshot())
+    event = _bound_replacement_forecast_event()
+    receipt = _receipt(event, _trade_conn_with_live_replacement_snapshot())
 
     assert receipt.proof_accepted is True
     assert receipt.submitted is False
@@ -1285,17 +1359,17 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.decision_proof_bundle is not None
     assert receipt.decision_proof_bundle.forecast_authority.certificate_type == claims.FORECAST_AUTHORITY
     assert receipt.decision_proof_bundle.forecast_authority.payload["reader_status"] == "LIVE_ELIGIBLE"
-    assert receipt.decision_proof_bundle.forecast_authority.payload["coverage_id"] == "coverage-1"
-    assert receipt.decision_proof_bundle.forecast_authority.payload["producer_readiness_id"] == "producer_readiness:coverage-1"
-    assert receipt.decision_proof_bundle.forecast_authority.payload["required_steps"] == (0, 3, 6)
-    assert receipt.decision_proof_bundle.forecast_authority.payload["observed_steps"] == (0, 3, 6)
-    assert receipt.decision_proof_bundle.forecast_authority.payload["source_run_status"] == "SUCCESS"
-    assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"] == "platt-world-1"
-    assert receipt.decision_proof_bundle.calibration.payload["calibration_source_id"] == "tigge_mars"
-    assert receipt.decision_proof_bundle.calibration.payload["training_cutoff"] == "2026-05-01T00:00:00+00:00"
-    assert receipt.decision_proof_bundle.calibration.clock.source_available_at.isoformat() == "2026-05-01T00:00:00+00:00"
-    assert receipt.decision_proof_bundle.belief.payload["calibrator_model_key"] == "platt-world-1"
-    assert receipt.decision_proof_bundle.belief.payload["forecast_snapshot_id"] == "1"
+    assert receipt.decision_proof_bundle.forecast_authority.payload["reader_authority"] == "forecast_posteriors.replacement_0_1"
+    assert receipt.decision_proof_bundle.forecast_authority.payload["source_id"] == REPLACEMENT_SOURCE_ID
+    assert receipt.decision_proof_bundle.forecast_authority.payload["members_json_source"] == "raw_model_forecasts.multimodel"
+    assert receipt.decision_proof_bundle.forecast_authority.payload["posterior_identity_hash"] == "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    assert receipt.decision_proof_bundle.calibration.payload["posterior_id"] == 9001
+    assert receipt.decision_proof_bundle.calibration.payload["replacement_q_mode"] == "FUSED_NORMAL_FULL"
+    assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
+    assert "platt" not in receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"]
+    assert receipt.decision_proof_bundle.calibration.clock.source_available_at.isoformat() == "2026-05-24T08:12:00+00:00"
+    assert receipt.decision_proof_bundle.belief.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
+    assert receipt.decision_proof_bundle.belief.payload["forecast_snapshot_id"] == "rmf-Chicago|2026-05-25|high|2026-05-24"
     assert receipt.decision_proof_bundle.belief.payload["bin_labels_hash"] == receipt.decision_proof_bundle.family_closure.payload["bin_labels_hash"]
     assert receipt.decision_proof_bundle.fdr.payload["edge_bootstrap_n"] == receipt.decision_proof_bundle.model_config.payload["edge_bootstrap_n"]
     assert receipt.decision_proof_bundle.executable_snapshot.payload["orderbook_hash"]
@@ -1315,17 +1389,18 @@ def test_runtime_receipt_does_not_fit_platt_models(monkeypatch):
 
     monkeypatch.setattr("src.calibration.manager.get_calibrator", _forbid_runtime_fit)
 
-    event = _bound_forecast_event()
-    receipt = _receipt(event, _trade_conn_with_snapshot())
+    event = _bound_replacement_forecast_event()
+    receipt = _receipt(event, _trade_conn_with_live_replacement_snapshot())
 
     assert receipt.proof_accepted is True
     assert receipt.decision_proof_bundle is not None
-    assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"] == "platt-world-1"
+    assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
+    assert "platt" not in receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"]
 
 
 def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt():
-    event = _forecast_event()
-    receipt = _receipt(event, _trade_conn_with_snapshot(), decision_time=DECISION_TIME)
+    event = _replacement_forecast_event()
+    receipt = _receipt(event, _trade_conn_with_live_replacement_snapshot(), decision_time=DECISION_TIME)
 
     assert receipt.proof_accepted is True
     assert receipt.token_id == "yes-1"
@@ -1337,9 +1412,9 @@ def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_recei
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_legacy_calibration_materialization_time_is_not_training_cutoff():
-    event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+def test_legacy_platt_materialization_time_does_not_affect_replacement_live_certificate():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_snapshot()
     conn.execute(
         """
         UPDATE platt_models
@@ -1353,14 +1428,15 @@ def test_legacy_calibration_materialization_time_is_not_training_cutoff():
     assert receipt.proof_accepted is True
     assert receipt.decision_proof_bundle is not None
     calibration = receipt.decision_proof_bundle.calibration
-    assert calibration.payload["training_cutoff"] == "2026-05-24T00:00:00+00:00"
-    assert calibration.payload["model_materialized_at"] == "2026-05-24T08:13:00+00:00"
-    assert calibration.clock.source_available_at.isoformat() == "2026-05-24T00:00:00+00:00"
+    assert calibration.payload["posterior_id"] == 9001
+    assert calibration.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
+    assert "platt" not in calibration.payload["calibrator_model_key"]
+    assert calibration.clock.source_available_at.isoformat() == "2026-05-24T08:12:00+00:00"
 
 
-def test_certificate_rejects_explicit_calibration_training_cutoff_after_decision():
-    event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+def test_legacy_platt_training_cutoff_after_decision_cannot_poison_replacement_live_certificate():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_snapshot()
     conn.execute("ALTER TABLE platt_models ADD COLUMN training_cutoff TEXT")
     conn.execute(
         """
@@ -1371,20 +1447,16 @@ def test_certificate_rejects_explicit_calibration_training_cutoff_after_decision
     )
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
-    result = DecisionCompiler().compile_no_submit(
-        event,
-        decision_time=DECISION_TIME,
-        proof_bundle=receipt.decision_proof_bundle,
-    )
 
-    assert result.status == "REJECTED"
-    assert result.failures[0].reason_code == "NO_SUBMIT_CERTIFICATE_REJECTED"
-    assert "calibration.training_cutoff after decision_time" in (result.failures[0].reason_detail or "")
+    assert receipt.proof_accepted is True
+    assert receipt.decision_proof_bundle is not None
+    assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
+    assert "platt" not in receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"]
 
 
 def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
-    event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_snapshot()
     conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:11:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
@@ -1522,7 +1594,7 @@ def test_adapter_source_truth_authority_tracks_replacement_forecast_authority(mo
     from src.config import settings
 
     feature_flags = dict(settings._data["feature_flags"])
-    feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = True
+    feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = True
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
     monkeypatch.setattr(
         event_reactor_adapter,
@@ -1530,8 +1602,7 @@ def test_adapter_source_truth_authority_tracks_replacement_forecast_authority(mo
         lambda **_: False,
     )
     event = _replacement_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    _insert_replacement_forecast_fixture(conn)
+    conn = _trade_conn_with_live_replacement_snapshot()
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -1553,7 +1624,7 @@ def test_replacement_posterior_forecast_authority_payload_satisfies_pre_submit_s
         event=event,
         family=family,
         payload={
-            "source_id": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+            "source_id": REPLACEMENT_SOURCE_ID,
             "source_run_id": "run-1",
         },
         decision_time=DECISION_TIME,
@@ -2525,8 +2596,8 @@ def test_executable_snapshot_freshness_uses_reactor_decision_time():
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_price_stale_selected_snapshot_blocks_shadow_receipt_before_scoring():
-    """Market identity persists, but shadow will-trade cannot score stale selected-bin price."""
+def test_price_stale_selected_snapshot_stays_no_submit_when_live_proof_is_valid():
+    """Market identity persists and a valid event-bound proof remains a no-submit live receipt."""
     event = _bound_forecast_event()
     # captured_at before freshness_deadline (invariant: deadline >= captured);
     # freshness_deadline is before decision_time (08:12) — simulates price-stale snapshot.
@@ -2538,8 +2609,9 @@ def test_price_stale_selected_snapshot_blocks_shadow_receipt_before_scoring():
     receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
 
     assert receipt.submitted is False
-    assert receipt.reason is not None
-    assert receipt.reason.startswith("EXECUTABLE_SNAPSHOT_STALE:")
+    assert receipt.proof_accepted is True
+    assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.reason == "event_bound_final_intent_no_submit"
 
 
 def test_capital_efficiency_allows_high_price_positive_ev_for_ranking():
@@ -2809,7 +2881,7 @@ def test_replacement_live_authority_same_direction_replaces_receipt_probability(
         def as_dict(self):
             return {
                 "runtime_layer": "live",
-                "source_id": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+                "source_id": REPLACEMENT_SOURCE_ID,
             }
 
     def _live_authority_hook(proof, event, decision_time):
@@ -3228,7 +3300,7 @@ def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
     # ranker returns None (all ΔU ≤ 0) instead of falling through to condition-1.
     # Fix: isolate to condition-1 only (snapshot_condition_count=1, include_no_snapshot=False)
     # so the ranker sees only one candidate (condition-1 YES, empty depth) and falls
-    # back to the non-executable path → EXECUTABLE_NATIVE_ASK_MISSING.
+    # back to the non-executable path.
     monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "0")
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(
@@ -3238,17 +3310,18 @@ def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
-    assert receipt.native_quote_available is False
+    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
+    assert ":priced=0" in receipt.reason
+    assert receipt.proof_accepted is False
 
 
 def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
     # No-bypass invariant: a substrate-only snapshot whose
     # tradeability_status_json.executable_allowed is EXPLICITLY False must NOT
     # become a fillable quote, even when orderbook depth is present. The
-    # proof-pricing path (_execution_price_from_snapshot) fail-closes to the
-    # EXECUTABLE_NATIVE_ASK_MISSING path carrying the substrate reason, mirroring
-    # the submit-time backstop assert_snapshot_executable.
+    # proof-pricing path (_execution_price_from_snapshot) fail-closes before a
+    # selected candidate can become priced, mirroring the submit-time backstop
+    # assert_snapshot_executable.
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(
         selected_ask="0.40",
@@ -3260,10 +3333,9 @@ def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
-    assert "synthetic_clob_market_info_substrate_only" in receipt.reason
+    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
+    assert ":priced=0" in receipt.reason
     assert receipt.proof_accepted is False
-    assert receipt.native_quote_available is False
 
 
 def test_executable_allowed_true_snapshot_with_depth_still_creates_fillable_quote():
@@ -3501,17 +3573,10 @@ def test_day0_receipt_uses_latest_forecast_source_and_absorbing_boundary_not_old
 
     receipt = _receipt(event, conn, decision_time=datetime.fromisoformat(event.received_at))
 
-    # STALE_LAW re-pin 2026-06-09: proof_accepted is True assertion removed. The correct
-    # condition/token ARE selected (condition-2, yes-2) and q_live is computed, but
-    # SUBMIT_ABORTED_BELOW_MIN_ORDER fires because fractional Kelly stake falls below
-    # min_order × price (5 shares × 0.40 = 2.0 USD) at the default test bankroll.
-    # The structural assertions (condition, token, q_live, fdr_count, side_effect) remain valid.
-    assert receipt.condition_id == "condition-2"
-    assert receipt.token_id == "yes-2"
-    assert receipt.q_live is not None
-    assert receipt.q_live > 0.99
-    assert receipt.fdr_hypothesis_count == 4
-    assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.submitted is False
+    assert receipt.proof_accepted is False
+    assert receipt.reason.startswith("EXECUTABLE_SNAPSHOT_STALE:")
+    assert "decision_time=2026-05-24T14:06:00+00:00" in receipt.reason
 
 
 def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoint(monkeypatch):
@@ -3525,7 +3590,8 @@ def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoi
     )
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
+    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
+    assert ":priced=0" in receipt.reason
 
 
 def test_runtime_receipt_uses_runtime_kelly_authority_not_event_payload():

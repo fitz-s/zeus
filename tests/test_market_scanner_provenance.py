@@ -496,9 +496,9 @@ def test_snapshot_refresh_db_lock_wait_is_bound_to_capture_budget(monkeypatch):
     # Fitz #5 lock-category kill (2026-06-08): the old min(250ms, remaining)
     # clamp fail-fasted EVERY contended insert (inserted=0 -> coverage NONE ->
     # armed daemon could not trade). The contract is now a DURABLE FLOOR
-    # (default 1000ms) <= wait <= configured cap (default 2000ms), still
-    # tightened by the remaining per-cycle budget — never the whole window.
-    assert all(1000 <= t <= 2000 for t in observed_timeouts), observed_timeouts
+    # (default 4000ms after the live lock-starvation fix) that is still restored
+    # to the caller's original setting afterward.
+    assert all(t == 4000 for t in observed_timeouts), observed_timeouts
     # Remaining-budget tightening: waits never grow as the cycle burns down.
     assert observed_timeouts == sorted(observed_timeouts, reverse=True), observed_timeouts
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000

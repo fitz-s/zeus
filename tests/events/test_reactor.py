@@ -69,7 +69,7 @@ def _day0_event(key_suffix: str = "a"):
         metric_match_status="MATCH",
         rounding_status="MATCH",
         source_authorized_status="AUTHORIZED",
-        live_authority_status="LIVE_AUTHORITY",
+        live_authority_status="live",
     )
     return make_day0_extreme_updated_event(
         entity_key=f"Chicago|2026-05-24|high|{key_suffix}",
@@ -828,7 +828,7 @@ def test_processed_event_terminal_surface_includes_execution_receipt_certificate
         riskguard_gate=lambda _event: True,
         final_intent_submit=_submit,
         reject=lambda *_args: None,
-        config=ReactorConfig(reactor_mode="submit_disabled_live_bridge", real_order_submit_enabled=False),
+        config=ReactorConfig(reactor_mode="live_no_submit", real_order_submit_enabled=False),
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
 

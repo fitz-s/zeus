@@ -276,7 +276,7 @@ class TestObservationStatuses:
         obs = fast_obs_to_day0_observation(
             city=nyc, extremes=self._extremes(nyc), metric="high", source=source
         )
-        assert obs["live_authority_status"] == "LIVE_AUTHORITY"
+        assert obs["live_authority_status"] == "live"
         assert obs["source_authorized_status"] == "AUTHORIZED"
         assert obs["dst_status"] == "UNAMBIGUOUS"
         # available_at is the feed receiptTime, not our wall clock
@@ -292,7 +292,7 @@ class TestObservationStatuses:
                 "metric_match_status": "MATCH",
                 "rounding_status": "MATCH",
                 "source_authorized_status": "AUTHORIZED",
-                "live_authority_status": "LIVE_AUTHORITY",
+                "live_authority_status": "live",
             }.items()
         )
 
@@ -308,7 +308,7 @@ class TestObservationStatuses:
             source=source,
         )
         assert obs["local_date_status"] == "MISMATCH"
-        assert obs["live_authority_status"] == "NON_LIVE_AUTHORITY"
+        assert obs["live_authority_status"] == "blocked"
 
     def test_non_wu_icao_city_has_no_fast_source(self):
         hko = SimpleNamespace(
@@ -365,7 +365,7 @@ class TestEmitterMonotone:
 
         payloads = [_json.loads(r["payload_json"]) for r in rows]
         assert all(p["settlement_source"] == "aviationweather_metar" for p in payloads)
-        assert all(p["live_authority_status"] == "LIVE_AUTHORITY" for p in payloads)
+        assert all(p["live_authority_status"] == "live" for p in payloads)
 
     def test_restart_short_window_cannot_emit_regressed_high(self):
         conn = _world_conn()
@@ -782,7 +782,7 @@ class TestMutexNoHttpSplit:
 
     def test_publication_clock_missing_denies_live_authority(self):
         """PR#404 P2: receiptTime absent -> available_at falls back to the obs
-        valid time (never our wall clock) AND live authority is denied."""
+        valid time (never our wall clock) AND live status is blocked."""
         from src.data.day0_fast_obs import (
             fast_obs_source_for_city,
             fast_obs_to_day0_observation,
@@ -801,7 +801,7 @@ class TestMutexNoHttpSplit:
             city=city, extremes=ex, metric="high", source=fast_obs_source_for_city(city),
         )
         assert obs["observation_available_at"] == obs["observation_time"]
-        assert obs["live_authority_status"] == "NON_LIVE_AUTHORITY"
+        assert obs["live_authority_status"] == "blocked"
 
 
 # ===========================================================================

@@ -225,7 +225,7 @@ def _validate_forecast_event(event: OpportunityEvent, payload: dict, causal_snap
 
 def _validate_day0_event(payload: dict) -> None:
     required_statuses = {
-        "live_authority_status": {"LIVE_AUTHORITY"},
+        "live_authority_status": {"live"},
         "source_match_status": {"MATCH"},
         "station_match_status": {"MATCH"},
         "local_date_status": {"MATCH"},

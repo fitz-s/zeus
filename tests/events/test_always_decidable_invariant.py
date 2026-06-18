@@ -385,7 +385,7 @@ def test_held_provider_failsoft_absent_or_raising_yields_pure_rotation():
 # ---------------------------------------------------------------------------
 def test_posterior_stale_block_enqueues_single_family_cycle_advance():
     """A family blocked because its replacement posterior is STALE/absent (the adapter raises
-    REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED) records a SINGLE-FAMILY cycle-advance enqueue
+    REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED) records a SINGLE-FAMILY cycle-advance enqueue
     for THAT family — the belief substrate gets re-materialized rather than requeueing forever
     against an unchanging posterior."""
     payload = json.loads(_forecast_event().payload_json)
@@ -404,7 +404,7 @@ def test_posterior_stale_block_enqueues_single_family_cycle_advance():
             metric=payload.get("metric"),
             trade_score_positive=False,
             side_effect_status="NO_SUBMIT",
-            reason="REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED:READINESS_STALE",
+            reason="REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED:READINESS_STALE",
         )
 
     def _enqueuer(*, city, target_date, metric):
@@ -441,7 +441,7 @@ def test_posterior_readiness_missing_also_enqueues_cycle_advance():
             metric=payload.get("metric"),
             trade_score_positive=False,
             side_effect_status="NO_SUBMIT",
-            reason="REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
+            reason="REPLACEMENT_0_1_LIVE_READINESS_MISSING",
         )
 
     def _enqueuer(*, city, target_date, metric):
