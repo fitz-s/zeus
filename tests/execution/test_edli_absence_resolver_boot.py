@@ -47,12 +47,30 @@ def test_never_fires_for_empty_reasons(monkeypatch):
     assert boot_auto_resolve_stuck_unknowns([]) is False
 
 
-def test_refusal_or_venue_failure_fails_closed(monkeypatch):
+def test_absence_refusal_can_fall_through_to_later_resolver(monkeypatch):
+    calls = []
+
     def raising_resolve(**kw):
+        calls.append("absence")
         raise RuntimeError("authenticated venue read found matching exposure; do not release cap")
 
     monkeypatch.setattr(resolver_mod, "resolve", raising_resolve)
-    assert boot_auto_resolve_stuck_unknowns(["EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:1"]) is False
+    import src.execution.edli_presence_resolver as presence_mod
+    import src.execution.edli_resting_absorbed_resolver as resting_mod
+
+    monkeypatch.setattr(
+        presence_mod,
+        "resolve_presence",
+        lambda **kw: calls.append("presence") or 1,
+    )
+    monkeypatch.setattr(
+        resting_mod,
+        "resolve_resting_or_absorbed",
+        lambda **kw: calls.append("resting") or 0,
+    )
+
+    assert boot_auto_resolve_stuck_unknowns(["EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN:1"]) is True
+    assert calls == ["absence", "presence", "resting"]
 
 
 def test_incomplete_resolution_fails_closed(monkeypatch):
