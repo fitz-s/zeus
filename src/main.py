@@ -6630,7 +6630,12 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             )
             raw_entry_family_keys = screened_family_keys(world_ro, redecisions)
             open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro)
-            rest_pulls = screen_resting_orders(world_ro, trade_ro, open_rests=open_rests)
+            rest_pulls = screen_resting_orders(
+                world_ro,
+                trade_ro,
+                open_rests=open_rests,
+                decision_time=received_at,
+            )
         finally:
             try:
                 world_ro.close()

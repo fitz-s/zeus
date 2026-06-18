@@ -336,6 +336,34 @@ def test_price_reader_uses_bounded_condition_seeks_not_window_sort():
     assert quotes[("0xc30", "buy_no")].price == pytest.approx(0.30)
 
 
+def test_price_reader_uses_native_selected_outcome_books():
+    trade = _mem_trade()
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        selected_outcome_token_id="yes-c30",
+        bid="0.30",
+        ask="0.32",
+        snapshot_id="yes-native",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        selected_outcome_token_id="no-c30",
+        bid="0.68",
+        ask="0.70",
+        snapshot_id="no-native",
+    )
+
+    quotes = cr.read_freshest_executable_prices(trade, condition_ids={"0xc30"})
+    bids = cr.read_freshest_resting_best_bids(trade, condition_ids={"0xc30"})
+
+    assert quotes[("0xc30", "buy_yes")].price == pytest.approx(0.32)
+    assert quotes[("0xc30", "buy_no")].price == pytest.approx(0.70)
+    assert bids[("0xc30", "buy_yes")].price == pytest.approx(0.30)
+    assert bids[("0xc30", "buy_no")].price == pytest.approx(0.68)
+
+
 # ───────────────────────────────────────────────────────────────────────────────────────────────
 # ANTIBODY 3 — REST PULL fires on belief-decay (NEW evidence), HOLDS on same-snapshot wiggle.
 # ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -351,7 +379,12 @@ def test_rest_pull_fires_on_belief_decay_new_evidence():
         condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
         limit_price=0.70, quote_age_ms=0.0,
     )
-    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
     assert len(pulls) == 1
     _rest, decision = pulls[0]
     assert decision.reason == "BELIEF_WORSENING"
@@ -368,7 +401,12 @@ def test_rest_pull_holds_on_same_snapshot_price_wiggle():
         condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
         limit_price=0.70, quote_age_ms=0.0,  # fresh quote, no stale pull
     )
-    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
     assert pulls == [], "a bare wiggle on the same snapshot must never pull a rest (anti-twitch)"
 
 
@@ -419,18 +457,45 @@ def test_rest_pull_fires_when_best_bid_moves_past_limit_tolerance():
         limit_price=0.70, quote_age_ms=0.0,
     )
 
-    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
 
     assert len(pulls) == 1
     assert pulls[0][1].reason == "BOOK_MOVED"
+
+
+def test_rest_pull_ignores_stale_book_moved_evidence():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.73", ask="0.75")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=0.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T02:00:01+00:00",
+    )
+
+    assert pulls == []
 
 
 def test_buy_no_rest_uses_native_no_best_bid_for_book_moved():
     world = _mem_world()
     trade = _mem_trade()
     _cache(world, p_yes=0.10, snapshot_id="snap1", cond="0xc30")
-    # Implied NO bid is 1 - YES ask = 0.80, which is four ticks above the rest.
-    _snapshot(trade, bid="0.18", ask="0.20", selected_outcome_token_id="no-c30")
+    # NO selected-token rows are native NO books; the top bid is 0.80.
+    _snapshot(trade, bid="0.80", ask="0.82", selected_outcome_token_id="no-c30")
     rest = cr.OpenRest(
         command_id="cmd-no", venue_order_id="vo-no",
         family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_no",
@@ -438,7 +503,12 @@ def test_buy_no_rest_uses_native_no_best_bid_for_book_moved():
         limit_price=0.76, quote_age_ms=0.0,
     )
 
-    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
 
     assert len(pulls) == 1
     assert pulls[0][1].reason == "BOOK_MOVED"

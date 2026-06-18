@@ -990,11 +990,12 @@ def read_freshest_executable_prices(
     """Build a ``(condition_id, direction) → PriceQuote`` map from the freshest already-captured
     ``executable_market_snapshots`` rows. NO new HTTP — reads only what the warm/fast lanes persisted.
 
-    YES side prices off ``orderbook_top_ask`` (the cost to BUY yes); NO side prices off
-    ``1 - orderbook_top_bid`` (buying NO == selling the YES at best bid). Each quote carries the
-    snapshot's own ``freshness_deadline`` so the screen's stale-price guard (R7) is exact. Crossed or
-    non-finite books are skipped (no phantom edge). Append-only table indexed by
-    (condition_id, captured_at DESC) → the freshest row per condition is one bounded index seek."""
+    ``executable_market_snapshots`` is native to the selected outcome token: a NO row's
+    ``orderbook_top_ask`` is the cost to buy NO, not a YES ask. Prefer native
+    selected-token rows for each side and use the complement only as a fallback
+    when the opposite side has not been captured. Each quote carries the source
+    snapshot's ``freshness_deadline`` so the screen's stale-price guard (R7) is
+    exact. Crossed or non-finite books are skipped (no phantom edge)."""
     if not condition_ids:
         return {}
     try:
@@ -1002,27 +1003,26 @@ def read_freshest_executable_prices(
             "PRAGMA table_info(executable_market_snapshots)").fetchall()}
     except sqlite3.Error:
         return {}
-    if not {"condition_id", "orderbook_top_bid", "orderbook_top_ask",
-            "freshness_deadline", "captured_at"}.issubset(cols):
+    if not {
+        "condition_id",
+        "orderbook_top_bid",
+        "orderbook_top_ask",
+        "freshness_deadline",
+        "captured_at",
+        "selected_outcome_token_id",
+        "yes_token_id",
+        "no_token_id",
+    }.issubset(cols):
         return {}
     rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
     out: dict[tuple[str, str], PriceQuote] = {}
-    for row in rows:
-        cid = str(row[0] or "")
-        deadline = str(row[3] or "")
-        if not cid or not deadline:
-            continue
-        try:
-            top_bid = float(row[1])
-            top_ask = float(row[2])
-        except (TypeError, ValueError):
-            continue
-        # YES buy: pay the ask. NO buy: pay 1 - best_bid (the NO ask implied by the YES book).
-        if 0.0 < top_ask < 1.0:
-            out[(cid, "buy_yes")] = PriceQuote(price=top_ask, freshness_deadline=deadline)
-        no_ask = one_minus(top_bid)
-        if 0.0 < no_ask < 1.0:
-            out[(cid, "buy_no")] = PriceQuote(price=no_ask, freshness_deadline=deadline)
+    for cid, side_books in _side_books_by_condition(rows).items():
+        for side, book in side_books.items():
+            if 0.0 < book["ask"] < 1.0:
+                out[(cid, side)] = PriceQuote(
+                    price=book["ask"],
+                    freshness_deadline=str(book["freshness_deadline"]),
+                )
     return out
 
 
@@ -1035,7 +1035,8 @@ def read_freshest_resting_best_bids(
 
     Entry edge screening consumes executable ask cost. Resting maker orders need
     same-side best bid; using ask cost here turns ordinary spread into false
-    ``BOOK_MOVED`` churn.
+    ``BOOK_MOVED`` churn. Snapshot rows are native to the selected outcome token,
+    so a NO row's ``orderbook_top_bid`` is already the NO best bid.
     """
     if not condition_ids:
         return {}
@@ -1044,26 +1045,26 @@ def read_freshest_resting_best_bids(
             "PRAGMA table_info(executable_market_snapshots)").fetchall()}
     except sqlite3.Error:
         return {}
-    if not {"condition_id", "orderbook_top_bid", "orderbook_top_ask",
-            "freshness_deadline", "captured_at"}.issubset(cols):
+    if not {
+        "condition_id",
+        "orderbook_top_bid",
+        "orderbook_top_ask",
+        "freshness_deadline",
+        "captured_at",
+        "selected_outcome_token_id",
+        "yes_token_id",
+        "no_token_id",
+    }.issubset(cols):
         return {}
     rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
     out: dict[tuple[str, str], PriceQuote] = {}
-    for row in rows:
-        cid = str(row[0] or "")
-        deadline = str(row[3] or "")
-        if not cid or not deadline:
-            continue
-        try:
-            yes_bid = float(row[1])
-            yes_ask = float(row[2])
-        except (TypeError, ValueError):
-            continue
-        if 0.0 < yes_bid < 1.0:
-            out[(cid, "buy_yes")] = PriceQuote(price=yes_bid, freshness_deadline=deadline)
-        no_bid = one_minus(yes_ask)
-        if 0.0 < no_bid < 1.0:
-            out[(cid, "buy_no")] = PriceQuote(price=no_bid, freshness_deadline=deadline)
+    for cid, side_books in _side_books_by_condition(rows).items():
+        for side, book in side_books.items():
+            if 0.0 < book["bid"] < 1.0:
+                out[(cid, side)] = PriceQuote(
+                    price=book["bid"],
+                    freshness_deadline=str(book["freshness_deadline"]),
+                )
     return out
 
 
@@ -1072,35 +1073,118 @@ def _freshest_executable_price_rows_by_condition(
     *,
     condition_ids: set[str],
 ) -> list[sqlite3.Row | tuple]:
-    """Return the newest snapshot price row per condition via bounded index seeks.
+    """Return newest native-side snapshot price rows per condition via bounded index seeks.
 
     The previous window query sorted every matching snapshot in a growing
-    high-frequency table. Continuous redecision only needs one current row per
-    condition, so use the existing ``(condition_id, captured_at DESC)`` index
-    directly and keep the scheduler cycle bounded by the number of live
-    conditions it is actually screening.
+    high-frequency table. Continuous redecision only needs the newest YES and
+    newest NO selected-token rows per condition, so use the existing
+    ``(condition_id, captured_at DESC)`` index directly and keep the scheduler
+    cycle bounded by the number of live conditions it is actually screening.
     """
 
     rows: list[sqlite3.Row | tuple] = []
+    try:
+        cols = {row[1] for row in trade_conn.execute(
+            "PRAGMA table_info(executable_market_snapshots)").fetchall()}
+    except sqlite3.Error:
+        return rows
+    outcome_select = "outcome_label" if "outcome_label" in cols else "NULL AS outcome_label"
     seen: set[str] = set()
     for raw_condition_id in sorted(condition_ids):
         condition_id = str(raw_condition_id or "").strip()
         if not condition_id or condition_id in seen:
             continue
         seen.add(condition_id)
-        row = trade_conn.execute(
+        condition_rows = trade_conn.execute(
             """
-            SELECT condition_id, orderbook_top_bid, orderbook_top_ask, freshness_deadline
+            SELECT condition_id,
+                   orderbook_top_bid,
+                   orderbook_top_ask,
+                   freshness_deadline,
+                   selected_outcome_token_id,
+                   yes_token_id,
+                   no_token_id,
+                   {outcome_select}
               FROM executable_market_snapshots
              WHERE condition_id = ?
              ORDER BY captured_at DESC, snapshot_id DESC
-             LIMIT 1
-            """,
+             LIMIT 12
+            """.format(outcome_select=outcome_select),
             (condition_id,),
-        ).fetchone()
-        if row is not None:
-            rows.append(row)
+        ).fetchall()
+        rows.extend(condition_rows)
     return rows
+
+
+def _row_cell(row: sqlite3.Row | tuple, index: int, key: str) -> object:
+    try:
+        return row[key] if hasattr(row, "keys") else row[index]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _selected_side(row: sqlite3.Row | tuple) -> str | None:
+    outcome = str(_row_cell(row, 7, "outcome_label") or "").strip().upper()
+    if outcome == "YES":
+        return "buy_yes"
+    if outcome == "NO":
+        return "buy_no"
+    selected = str(_row_cell(row, 4, "selected_outcome_token_id") or "").strip()
+    yes_token = str(_row_cell(row, 5, "yes_token_id") or "").strip()
+    no_token = str(_row_cell(row, 6, "no_token_id") or "").strip()
+    if selected and yes_token and selected == yes_token:
+        return "buy_yes"
+    if selected and no_token and selected == no_token:
+        return "buy_no"
+    return None
+
+
+def _valid_book(bid: float, ask: float) -> bool:
+    return 0.0 < bid < ask < 1.0
+
+
+def _side_books_by_condition(
+    rows: list[sqlite3.Row | tuple],
+) -> dict[str, dict[str, dict[str, float | str]]]:
+    """Return side-native books with complement fallback, keyed by condition and buy side."""
+
+    native: dict[tuple[str, str], dict[str, float | str]] = {}
+    inferred: dict[tuple[str, str], dict[str, float | str]] = {}
+    for row in rows:
+        cid = str(_row_cell(row, 0, "condition_id") or "").strip()
+        deadline = str(_row_cell(row, 3, "freshness_deadline") or "").strip()
+        side = _selected_side(row)
+        if not cid or not deadline or side not in {"buy_yes", "buy_no"}:
+            continue
+        try:
+            bid = float(_row_cell(row, 1, "orderbook_top_bid"))
+            ask = float(_row_cell(row, 2, "orderbook_top_ask"))
+        except (TypeError, ValueError):
+            continue
+        if not _valid_book(bid, ask):
+            continue
+        native.setdefault((cid, side), {"bid": bid, "ask": ask, "freshness_deadline": deadline})
+        opposite = _OPPOSITE_SIDE[side]
+        inferred_bid = one_minus(ask)
+        inferred_ask = one_minus(bid)
+        if _valid_book(inferred_bid, inferred_ask):
+            inferred.setdefault(
+                (cid, opposite),
+                {
+                    "bid": inferred_bid,
+                    "ask": inferred_ask,
+                    "freshness_deadline": deadline,
+                },
+            )
+
+    out: dict[str, dict[str, dict[str, float | str]]] = {}
+    condition_ids = {cid for cid, _side in set(native) | set(inferred)}
+    for cid in condition_ids:
+        for side in ("buy_yes", "buy_no"):
+            book = native.get((cid, side)) or inferred.get((cid, side))
+            if book is not None:
+                out.setdefault(cid, {})[side] = book
+    return out
 
 
 def screen_entry_redecisions(
@@ -1190,6 +1274,7 @@ def screen_resting_orders(
     trade_conn: sqlite3.Connection,
     *,
     open_rests: list[OpenRest],
+    decision_time: str | None = None,
 ) -> list[tuple[OpenRest, RepriceDecision]]:
     """§4.5 resting-order management: for each OPEN maker rest, fire a PULL (cancel+re-decide) only
     when its belief decayed past BELIEF_REPRICE_DELTA on NEW evidence (screen_reprice), or the live
@@ -1197,6 +1282,7 @@ def screen_resting_orders(
     trading value and not dead-book proof for an already-resting GTC order; the maker-rest deadline
     owner remains src.execution.maker_rest_escalation. Pure read; returns decisions only — the
     scheduler job enqueues the redecision and performs cancellation through the existing cancel path."""
+    screen_time = _parse(decision_time) if decision_time is not None else datetime.now().astimezone()
     bid_by_cid = read_freshest_resting_best_bids(
         trade_conn, condition_ids={r.condition_id for r in open_rests if r.condition_id}
     )
@@ -1214,6 +1300,12 @@ def screen_resting_orders(
         if decision is None:
             # 2) Moved-book pull: our limit has fallen >1 tick behind the live best bid for our side.
             bid = bid_by_cid.get((rest.condition_id, rest.side))
+            if bid is not None:
+                try:
+                    if _parse(bid.freshness_deadline) <= screen_time:
+                        bid = None
+                except (TypeError, ValueError):
+                    bid = None
             if bid is not None:
                 drift = float(bid.price) - float(rest.limit_price)
                 if drift > REST_BOOK_DRIFT_TICKS * TICK_SIZE + _EPS:
