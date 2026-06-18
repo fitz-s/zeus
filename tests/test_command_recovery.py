@@ -1297,6 +1297,127 @@ class TestRecoveryResolutionTable:
         assert after_count == 0
         assert after_markets == ()
 
+    def test_post_ack_review_required_live_order_restores_acked(self, conn, mock_client):
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, command_id="cmd-post-ack-live", position_id="pos-post-ack-live")
+        _advance_to_acked(
+            conn,
+            command_id="cmd-post-ack-live",
+            venue_order_id="ord-post-ack-live",
+        )
+        append_event(
+            conn,
+            command_id="cmd-post-ack-live",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "reason": "entry_ack_persistence_failed_after_side_effect",
+                "venue_order_id": "ord-post-ack-live",
+                "side_effect_boundary_crossed": True,
+                "sdk_submit_returned_order_id": True,
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-post-ack-live",
+            order_id="ord-post-ack-live",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10",
+            source="WS_USER",
+        )
+        mock_client.get_open_orders.return_value = [
+            {
+                "id": "ord-post-ack-live",
+                "asset_id": "tok-001",
+                "side": "BUY",
+                "price": "0.50",
+                "original_size": "10",
+                "size_matched": "0",
+                "status": "LIVE",
+            }
+        ]
+        mock_client.get_trades.return_value = []
+        mock_client.get_order.return_value = {
+            "orderID": "ord-post-ack-live",
+            "status": "LIVE",
+            "size_matched": "0",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        before_count, _ = count_unknown_side_effects(conn)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert before_count == 1
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-post-ack-live") == "ACKED"
+        events = _get_events(conn, "cmd-post-ack-live")
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_VENUE_ORDER_LIVE"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "acked_submit_venue_order_live"
+        assert payload["required_predicates"]["authenticated_live_order_seen"] is True
+        assert payload["required_predicates"]["latest_order_fact_live"] is True
+        assert payload["required_predicates"]["no_trade_facts"] is True
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 0
+        assert after_markets == ()
+
+    def test_post_ack_review_required_live_order_restores_from_local_fact_when_account_read_fails(
+        self, conn, mock_client
+    ):
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, command_id="cmd-post-ack-local-live", position_id="pos-post-ack-local-live")
+        _advance_to_acked(
+            conn,
+            command_id="cmd-post-ack-local-live",
+            venue_order_id="ord-post-ack-local-live",
+        )
+        append_event(
+            conn,
+            command_id="cmd-post-ack-local-live",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "reason": "entry_ack_persistence_failed_after_side_effect",
+                "venue_order_id": "ord-post-ack-local-live",
+                "side_effect_boundary_crossed": True,
+                "sdk_submit_returned_order_id": True,
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-post-ack-local-live",
+            order_id="ord-post-ack-local-live",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10",
+            source="WS_USER",
+        )
+        mock_client.get_open_orders.side_effect = RuntimeError("account read unavailable")
+        mock_client.get_trades.side_effect = RuntimeError("account read unavailable")
+        mock_client.get_order.side_effect = RuntimeError("point read unavailable")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        before_count, _ = count_unknown_side_effects(conn)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert before_count == 1
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-post-ack-local-live") == "ACKED"
+        events = _get_events(conn, "cmd-post-ack-local-live")
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "acked_submit_venue_order_live"
+        assert payload["required_predicates"]["latest_order_fact_live"] is True
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 0
+        assert after_markets == ()
+
     def test_post_ack_review_required_terminal_no_fill_stays_with_trade_fact(
         self, conn, mock_client
     ):

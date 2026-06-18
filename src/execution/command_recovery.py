@@ -5107,16 +5107,33 @@ def _review_required_post_ack_terminal_no_fill_recovery(
             (cmd.command_id,),
         ).fetchone()
     )
+    latest_fact = _latest_order_fact_for_command(conn, cmd.command_id)
     try:
         open_orders = [_raw_payload(order) for order in _client_open_orders(client)]
         trades = [_raw_payload(trade) for trade in _client_trades(client)]
     except Exception as exc:  # noqa: BLE001 - recovery should retry later on venue read failures.
-        logger.warning(
-            "recovery: command %s REVIEW_REQUIRED post-ACK no-fill proof read failed: %s",
-            cmd.command_id,
-            exc,
-        )
-        return "error"
+        if (
+            latest_fact is not None
+            and str(latest_fact.get("venue_order_id") or "") == venue_order_id
+            and str(latest_fact.get("state") or "").upper() in _LIVE_ORDER_STATUSES
+            and _decimal_is_zero(latest_fact.get("matched_size"))
+            and _trade_fact_count(conn, cmd.command_id) == 0
+        ):
+            logger.info(
+                "recovery: command %s REVIEW_REQUIRED post-ACK account read failed; "
+                "continuing with authenticated local live order fact: %s",
+                cmd.command_id,
+                exc,
+            )
+            open_orders = []
+            trades = []
+        else:
+            logger.warning(
+                "recovery: command %s REVIEW_REQUIRED post-ACK no-fill proof read failed: %s",
+                cmd.command_id,
+                exc,
+            )
+            return "error"
 
     matching_open_orders = _matching_open_orders_for_command(
         client,
@@ -5128,7 +5145,7 @@ def _review_required_post_ack_terminal_no_fill_recovery(
         command,
         trades=trades,
     )
-    if matching_open_orders or matching_trades:
+    if matching_trades:
         logger.info(
             "recovery: command %s REVIEW_REQUIRED post-ACK stayed "
             "(matching_open=%s matching_trades=%s)",
@@ -5150,6 +5167,82 @@ def _review_required_post_ack_terminal_no_fill_recovery(
     if point_order:
         point_order_status = _order_status(point_order)
         point_order_matched = _point_order_matched_size(point_order)
+
+    latest_fact_is_live = (
+        latest_fact is not None
+        and str(latest_fact.get("venue_order_id") or "") == venue_order_id
+        and str(latest_fact.get("state") or "").upper() in _LIVE_ORDER_STATUSES
+        and _decimal_is_zero(latest_fact.get("matched_size"))
+    )
+    order_is_live = (
+        bool(matching_open_orders)
+        or latest_fact_is_live
+        or str(point_order_status or "").upper() in _LIVE_ORDER_STATUSES
+    )
+    if (
+        order_is_live
+        and _decimal_is_zero(point_order_matched)
+        and _trade_fact_count(conn, cmd.command_id) == 0
+    ):
+        payload = {
+            "schema_version": 1,
+            "reason": "review_cleared_venue_order_live",
+            "command_id": cmd.command_id,
+            "venue_order_id": venue_order_id,
+            "proof_class": "acked_submit_venue_order_live",
+            "side_effect_boundary_crossed": True,
+            "sdk_submit_attempted": True,
+            "required_predicates": {
+                "latest_event_is_review_required": True,
+                "review_reason_post_ack_persistence_failure": True,
+                "venue_order_id_present": True,
+                "venue_order_id_matches_live_proof": True,
+                "authenticated_live_order_seen": True,
+                "latest_order_fact_live": bool(latest_fact_is_live),
+                "point_order_status_live": str(point_order_status or "").upper() in _LIVE_ORDER_STATUSES,
+                "matching_open_order_seen": bool(matching_open_orders),
+                "point_order_matched_size_not_positive": True,
+                "no_trade_facts": True,
+            },
+            "venue_order_live_proof": {
+                "source": "authenticated_clob_user_or_point_order_read",
+                "owner_scope": "authenticated_funder",
+                "observed_at": now,
+                "venue_order_id": venue_order_id,
+                "latest_order_fact": latest_fact,
+                "matching_open_order_count": len(matching_open_orders),
+                "matching_open_orders": matching_open_orders,
+                "point_order_status": point_order_status,
+                "point_order_matched_size": point_order_matched,
+                "point_order": point_order,
+            },
+            "source_proof": {
+                "source_commit": "runtime",
+                "source_function": "command_recovery._reconcile_row",
+                "source_reason": "acked_submit_venue_order_live",
+            },
+            "review_required_proof": {
+                "reason": latest_reason,
+            },
+            "reviewed_by": "command_recovery",
+            "cleared_at": now,
+        }
+        append_event(
+            conn,
+            command_id=cmd.command_id,
+            event_type=CommandEventType.REVIEW_CLEARED_VENUE_ORDER_LIVE.value,
+            occurred_at=now,
+            payload=payload,
+        )
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED post-ACK -> ACKED "
+            "(venue_order_id=%s live order still present)",
+            cmd.command_id,
+            venue_order_id,
+        )
+        return "advanced"
+
+    if point_order:
         fact_state = _terminal_fact_state_for_venue_status(
             point_order_status,
             venue_resp_present=True,
