@@ -341,6 +341,31 @@ def test_same_order_duplicate_aggregate_absorbs_existing_open_row(conn):
     assert audit["event_type"] == "MANUAL_OVERRIDE_APPLIED"
     assert "agg-edli-same-order-b" not in audit["payload_json"]
 
+    before_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MANUAL_OVERRIDE_APPLIED'
+           AND source_module = 'src.events.edli_position_bridge'
+        """,
+        (first["position_id"],),
+    ).fetchone()[0]
+
+    replay = materialize_position_current_from_edli_fill(conn, second_aggregate)
+    after_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MANUAL_OVERRIDE_APPLIED'
+           AND source_module = 'src.events.edli_position_bridge'
+        """,
+        (first["position_id"],),
+    ).fetchone()[0]
+
+    assert replay["created"] is False
+    assert replay["position_id"] == first["position_id"]
+    assert after_count == before_count
+
 
 # --------------------------------------------------------------------------- #
 # 4. No confirmed fill → nothing to bridge (None)

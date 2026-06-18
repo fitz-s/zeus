@@ -241,6 +241,14 @@ def _decimal_text_is_zero(value: Any) -> bool:
     return parsed.is_finite() and parsed == 0
 
 
+def _decimal_or_none(value: Any) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
 def _finite_decimal_text(value: Any) -> str:
     try:
         parsed = Decimal(str(value))
@@ -1828,6 +1836,7 @@ def _validate_review_confirmed_fill_payload(
         "prior_fill_confirmed_event_with_positive_trade_fact",
         "cancel_unknown_confirmed_trade_with_positive_trade_fact",
         "recovery_no_venue_order_id_confirmed_trade",
+        "matched_cancel_with_confirmed_held_projection",
     }:
         raise ValueError("review confirmed-fill clearance proof_class is not supported")
     required_predicates = payload.get("required_predicates")
@@ -1848,6 +1857,14 @@ def _validate_review_confirmed_fill_payload(
             "maker_order_token_matches_command",
             "maker_order_not_open",
             "venue_size_quantization_residual_lt_0_01",
+        )
+    elif proof_class == "matched_cancel_with_confirmed_held_projection":
+        required_true = (
+            "latest_event_is_cancel_replace_blocked",
+            "cancel_response_not_canceled_because_matched",
+            "positive_trade_facts",
+            "residual_size_is_dust",
+            "active_projection_matches_confirmed_fill",
         )
     else:
         required_true = (
@@ -1871,6 +1888,7 @@ def _validate_review_confirmed_fill_payload(
         "operator_review",
         "command_recovery._review_required_cancel_unknown_live_order_recovery",
         "command_recovery._reconcile_row",
+        "command_recovery.reconcile_matched_cancel_review_required_entries",
     }:
         raise ValueError("review confirmed-fill clearance source_function is not supported")
     if not str(source.get("source_commit") or "").strip():
@@ -2144,6 +2162,87 @@ def _actual_review_confirmed_fill_predicates(
             """,
             (command_id, trade_id, venue_order_id),
         ).fetchone()
+        aggregate_trade_rows = conn.execute(
+            """
+            WITH canonical_trade_fact AS (
+                SELECT ranked.*
+                  FROM (
+                        SELECT scored.*,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY command_id, trade_id
+                                   ORDER BY proof_rank DESC, local_sequence DESC
+                               ) AS canonical_rank
+                          FROM (
+                                SELECT fact.*,
+                                       CASE
+                                           WHEN UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
+                                                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 500
+                                           WHEN UPPER(COALESCE(fact.state, '')) = 'MINED'
+                                                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 450
+                                           WHEN UPPER(COALESCE(fact.state, '')) = 'MATCHED'
+                                                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 400
+                                           WHEN CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 300
+                                           ELSE 100
+                                       END AS proof_rank
+                                  FROM venue_trade_facts fact
+                               ) scored
+                       ) ranked
+                 WHERE ranked.canonical_rank = 1
+            )
+            SELECT filled_size
+              FROM canonical_trade_fact
+             WHERE command_id = ?
+               AND venue_order_id = ?
+               AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+            """,
+            (command_id, venue_order_id),
+        ).fetchall()
+        order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+               AND venue_order_id = ?
+             ORDER BY
+               CASE
+                 WHEN UPPER(COALESCE(state, '')) IN ('MATCHED', 'FILLED')
+                      AND CAST(COALESCE(matched_size, '0') AS REAL) > 0
+                      AND CAST(COALESCE(remaining_size, '0') AS REAL) = 0
+                 THEN 600
+                 WHEN UPPER(COALESCE(state, '')) IN ('PARTIALLY_MATCHED', 'PARTIAL')
+                      AND CAST(COALESCE(matched_size, '0') AS REAL) > 0
+                 THEN 400
+                 WHEN UPPER(COALESCE(state, '')) IN ('LIVE', 'OPEN', 'RESTING')
+                 THEN 200
+                 ELSE 100
+               END DESC,
+               local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id, venue_order_id),
+        ).fetchone()
+        command = conn.execute(
+            "SELECT position_id FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        position_rows = conn.execute(
+            """
+            SELECT phase, chain_state, shares, chain_shares
+              FROM position_current
+             WHERE order_id = ?
+                OR position_id = ?
+             ORDER BY updated_at DESC
+            """,
+            (
+                venue_order_id,
+                str(command["position_id"] or "") if command is not None else "",
+            ),
+        ).fetchall()
     latest_event_type = str(events[-1]["event_type"] or "") if events else ""
     prior_fill_confirmed = False
     for event in events[:-1]:
@@ -2164,6 +2263,53 @@ def _actual_review_confirmed_fill_predicates(
         and _decimal_text_equal(filled_size, trade_fact["filled_size"])
         and _decimal_text_equal(fill_price, trade_fact["fill_price"])
     )
+    aggregate_filled = Decimal("0")
+    aggregate_count = 0
+    for row in aggregate_trade_rows:
+        size = _decimal_or_none(row["filled_size"])
+        if size is None or size <= 0:
+            continue
+        aggregate_filled += size
+        aggregate_count += 1
+    payload_filled = _decimal_or_none(filled_size)
+    order_residual = _decimal_or_none(order_fact["remaining_size"]) if order_fact is not None else None
+    residual_is_dust = (
+        order_residual is not None
+        and Decimal("0") <= order_residual <= Decimal("0.011")
+    )
+    active_projection_matches = False
+    if payload_filled is not None:
+        for row in position_rows:
+            if str(row["phase"] or "") not in {"active", "day0_window", "pending_exit"}:
+                continue
+            if str(row["chain_state"] or "") not in {"synced", "chain_present", "exit_pending_missing"}:
+                continue
+            shares = _decimal_or_none(row["shares"])
+            if shares is None or abs(shares - payload_filled) > Decimal("0.01"):
+                continue
+            chain_shares = _decimal_or_none(row["chain_shares"])
+            if chain_shares is not None and abs(chain_shares - payload_filled) > Decimal("0.02"):
+                continue
+            active_projection_matches = True
+            break
+    cancel_outcome = latest_payload.get("cancel_outcome")
+    cancel_outcome = cancel_outcome if isinstance(cancel_outcome, dict) else {}
+    cancel_text = " ".join(
+        str(value or "")
+        for value in (
+            latest_payload.get("reason"),
+            latest_payload.get("semantic_cancel_status"),
+            cancel_outcome.get("status"),
+            cancel_outcome.get("errorMsg"),
+            cancel_outcome.get("errorMessage"),
+            cancel_outcome.get("message"),
+        )
+    ).lower()
+    aggregate_positive_trade_facts = (
+        aggregate_count > 0
+        and payload_filled is not None
+        and abs(aggregate_filled - payload_filled) <= Decimal("0.000001")
+    )
     required_predicates = payload.get("required_predicates")
     if not isinstance(required_predicates, dict):
         required_predicates = {}
@@ -2178,6 +2324,12 @@ def _actual_review_confirmed_fill_predicates(
         "review_reason_recovery_no_venue_order_id": review_reason == "recovery_no_venue_order_id",
         "prior_fill_confirmed_event": prior_fill_confirmed,
         "positive_trade_fact": positive_trade_fact,
+        "positive_trade_facts": aggregate_positive_trade_facts,
+        "cancel_response_not_canceled_because_matched": (
+            "not_canceled" in cancel_text and "matched" in cancel_text
+        ),
+        "residual_size_is_dust": residual_is_dust,
+        "active_projection_matches_confirmed_fill": active_projection_matches,
         "maker_order_token_matches_command": required_predicates.get("maker_order_token_matches_command") is True,
         "maker_order_not_open": required_predicates.get("maker_order_not_open") is True,
         "venue_size_quantization_residual_lt_0_01": (

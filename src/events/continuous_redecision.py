@@ -1414,8 +1414,11 @@ def _latest_posterior_source_cycle_for_family(
     required = {"city", "target_date", "temperature_metric", "source_cycle_time"}
     if not required.issubset(columns):
         return None
+    if "trade_authority_status" not in columns:
+        return None
     predicates = ["city = ?", "target_date = ?", "temperature_metric = ?"]
     params: list[object] = [city, target_date, metric]
+    predicates.append("trade_authority_status = 'LIVE_AUTHORITY'")
     if "source_available_at" in columns:
         predicates.append("source_available_at <= ?")
         params.append(decision_time)

@@ -890,7 +890,8 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
             temperature_metric TEXT,
             source_cycle_time TEXT,
             source_available_at TEXT,
-            computed_at TEXT
+            computed_at TEXT,
+            trade_authority_status TEXT NOT NULL DEFAULT 'LIVE_AUTHORITY'
         )
         """
     )
@@ -917,7 +918,8 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
             'high',
             '2026-06-18T00:00:00+00:00',
             '2026-06-18T06:39:00+00:00',
-            '2026-06-18T07:58:00+00:00'
+            '2026-06-18T07:58:00+00:00',
+            'LIVE_AUTHORITY'
         )
         """
     )

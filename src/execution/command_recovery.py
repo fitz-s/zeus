@@ -1367,6 +1367,110 @@ def _positive_fill_trade_fact_summary(conn: sqlite3.Connection, command_id: str)
     return {"count": count, "filled_size": _decimal_text(filled)}
 
 
+def _latest_review_cancel_blocked_payload(conn: sqlite3.Connection, command_id: str) -> dict:
+    if not _table_exists(conn, "venue_command_events"):
+        return {}
+    row = conn.execute(
+        """
+        SELECT event_type, payload_json
+          FROM venue_command_events
+         WHERE command_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    event = _dict_row(row) if row is not None else {}
+    if str(event.get("event_type") or "") != CommandEventType.CANCEL_REPLACE_BLOCKED.value:
+        return {}
+    return _json_mapping(event.get("payload_json"))
+
+
+def _cancel_blocked_by_matched_order(payload: Mapping[str, object]) -> bool:
+    cancel_outcome = payload.get("cancel_outcome")
+    cancel_outcome = cancel_outcome if isinstance(cancel_outcome, Mapping) else {}
+    text = " ".join(
+        str(value or "")
+        for value in (
+            payload.get("reason"),
+            payload.get("semantic_cancel_status"),
+            cancel_outcome.get("status"),
+            cancel_outcome.get("errorMsg"),
+            cancel_outcome.get("errorMessage"),
+            cancel_outcome.get("message"),
+        )
+    ).lower()
+    return "not_canceled" in text and "matched" in text
+
+
+def _latest_order_fact_for_command_order(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+) -> dict:
+    if not _table_exists(conn, "venue_order_facts"):
+        return {}
+    sql = "WITH " + _canonical_order_truth_cte() + """
+        SELECT *
+          FROM canonical_order_truth
+         WHERE command_id = ?
+           AND venue_order_id = ?
+         LIMIT 1
+    """
+    row = conn.execute(sql, (command_id, venue_order_id)).fetchone()
+    return _dict_row(row) if row is not None else {}
+
+
+def _matched_cancel_residual_is_dust(command: Mapping[str, object], order_fact: Mapping[str, object], filled_size: str) -> bool:
+    residual = _decimal_or_none(order_fact.get("remaining_size"))
+    if residual is None:
+        command_size = _decimal_or_none(command.get("size"))
+        filled = _decimal_or_none(filled_size)
+        if command_size is None or filled is None:
+            return False
+        residual = max(command_size - filled, Decimal("0"))
+    return Decimal("0") <= residual <= Decimal("0.011")
+
+
+def _active_projection_matches_confirmed_fill(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    venue_order_id: str,
+    filled_size: str,
+) -> bool:
+    if not _table_exists(conn, "position_current"):
+        return False
+    rows = conn.execute(
+        """
+        SELECT phase, chain_state, shares, chain_shares, order_id
+          FROM position_current
+         WHERE order_id = ?
+            OR position_id = ?
+         ORDER BY updated_at DESC
+        """,
+        (venue_order_id, str(command.get("position_id") or "")),
+    ).fetchall()
+    filled = _positive_decimal_or_none(filled_size)
+    if filled is None:
+        return False
+    for row in rows:
+        current = _dict_row(row)
+        if str(current.get("phase") or "") not in {"active", "day0_window", "pending_exit"}:
+            continue
+        if str(current.get("chain_state") or "") not in {"synced", "chain_present", "exit_pending_missing"}:
+            continue
+        shares = _positive_decimal_or_none(current.get("shares"))
+        if shares is None or abs(shares - filled) > Decimal("0.01"):
+            continue
+        chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
+        if chain_shares is not None and abs(chain_shares - filled) > Decimal("0.02"):
+            continue
+        return True
+    return False
+
+
 def _json_mapping(raw: object) -> dict:
     if isinstance(raw, dict):
         return raw
@@ -3755,6 +3859,124 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
         except Exception as exc:
             logger.error(
                 "recovery: completed partial order fact reconciliation failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def _matched_cancel_review_required_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not _table_exists(conn, "venue_commands"):
+        return []
+    rows = conn.execute(
+        """
+        SELECT *
+          FROM venue_commands
+         WHERE state = 'REVIEW_REQUIRED'
+           AND intent_kind = 'ENTRY'
+           AND venue_order_id IS NOT NULL
+           AND venue_order_id != ''
+         ORDER BY updated_at, command_id
+        """
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -> dict:
+    """Clear REVIEW_REQUIRED entries when matched-cancel facts prove held exposure.
+
+    This handles the live shape where a maker rest partially/near-fully fills,
+    cancel-replace receives a venue NOT_CANCELED / matched-order response, and
+    the command is left in REVIEW_REQUIRED even though canonical trade facts and
+    position_current already show a held, chain-synced position. The pass is
+    intentionally DB-only and proof-gated; REVIEW_REQUIRED rows without held
+    exposure evidence stay operator-visible.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for command in _matched_cancel_review_required_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(command.get("command_id") or "")
+        venue_order_id = str(command.get("venue_order_id") or "")
+        try:
+            latest_payload = _latest_review_cancel_blocked_payload(conn, command_id)
+            if not _cancel_blocked_by_matched_order(latest_payload):
+                summary["stayed"] += 1
+                continue
+            trade_summary = _positive_fill_trade_fact_summary(conn, command_id)
+            if int(trade_summary.get("count") or 0) <= 0:
+                summary["stayed"] += 1
+                continue
+            filled_size = str(trade_summary.get("filled_size") or "0")
+            order_fact = _latest_order_fact_for_command_order(
+                conn,
+                command_id=command_id,
+                venue_order_id=venue_order_id,
+            )
+            if not order_fact:
+                summary["stayed"] += 1
+                continue
+            if not _matched_cancel_residual_is_dust(command, order_fact, filled_size):
+                summary["stayed"] += 1
+                continue
+            if not _active_projection_matches_confirmed_fill(
+                conn,
+                command=command,
+                venue_order_id=venue_order_id,
+                filled_size=filled_size,
+            ):
+                summary["stayed"] += 1
+                continue
+
+            observed_at = str(order_fact.get("observed_at") or _now_iso())
+            payload = {
+                "reason": "review_cleared_confirmed_fill",
+                "proof_class": "matched_cancel_with_confirmed_held_projection",
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "filled_size": filled_size,
+                "latest_order_fact_id": order_fact.get("fact_id"),
+                "latest_order_fact_state": order_fact.get("state"),
+                "latest_order_fact_remaining_size": order_fact.get("remaining_size"),
+                "latest_order_fact_matched_size": order_fact.get("matched_size"),
+                "latest_cancel_payload": latest_payload,
+                "required_predicates": {
+                    "latest_event_is_cancel_replace_blocked": True,
+                    "cancel_response_not_canceled_because_matched": True,
+                    "positive_trade_facts": True,
+                    "residual_size_is_dust": True,
+                    "active_projection_matches_confirmed_fill": True,
+                },
+                "source_proof": {
+                    "source_commit": "runtime",
+                    "source_function": (
+                        "command_recovery."
+                        "reconcile_matched_cancel_review_required_entries"
+                    ),
+                    "source_reason": "matched_cancel_review_required_clearance",
+                },
+            }
+            safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+            sp_name = f"sp_matched_cancel_review_{safe_command_id}"
+            conn.execute(f"SAVEPOINT {sp_name}")
+            try:
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type=CommandEventType.FILL_CONFIRMED.value,
+                    occurred_at=observed_at,
+                    payload=payload,
+                )
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                raise
+            summary["advanced"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: matched-cancel REVIEW_REQUIRED recovery failed for command %s: %s",
                 command_id,
                 exc,
             )
@@ -7585,6 +7807,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += completed_partial_summary["stayed"]
         summary["errors"] += completed_partial_summary["errors"]
 
+        matched_cancel_review_summary = reconcile_matched_cancel_review_required_entries(conn)
+        summary["matched_cancel_review_required_entries"] = matched_cancel_review_summary
+        summary["advanced"] += matched_cancel_review_summary["advanced"]
+        summary["stayed"] += matched_cancel_review_summary["stayed"]
+        summary["errors"] += matched_cancel_review_summary["errors"]
+
         edli_pre_venue_summary = _reconcile_edli_pre_venue_unknown_thresholds(conn)
         summary["edli_pre_venue_unknown_thresholds"] = edli_pre_venue_summary
         summary["advanced"] += edli_pre_venue_summary["advanced"]
@@ -7873,6 +8101,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
     _client_pass("matched_order_facts", reconcile_matched_order_facts, "matched_order_facts")
     _db_pass("completed_partial_order_facts",
              reconcile_completed_partial_order_facts, "completed_partial_order_facts")
+    _db_pass("matched_cancel_review_required_entries",
+             reconcile_matched_cancel_review_required_entries,
+             "matched_cancel_review_required_entries")
     _db_pass("edli_pre_venue_unknown_thresholds",
              _reconcile_edli_pre_venue_unknown_thresholds, "edli_pre_venue_unknown_thresholds")
     _db_pass("venue_command_absence_sync",

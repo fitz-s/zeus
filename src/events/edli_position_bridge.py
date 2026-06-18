@@ -637,6 +637,46 @@ def _same_bridge_identity(existing: sqlite3.Row, projection: dict) -> bool:
     return True
 
 
+def _bridge_numeric_equal(left: object, right: object, *, tol: float = 1e-9) -> bool:
+    try:
+        return abs(float(left or 0.0) - float(right or 0.0)) <= tol
+    except (TypeError, ValueError):
+        return False
+
+
+def _same_order_absorb_already_recorded(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    attempted_position_id: str,
+) -> bool:
+    if not attempted_position_id:
+        return False
+    rows = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MANUAL_OVERRIDE_APPLIED'
+           AND source_module = 'src.events.edli_position_bridge'
+         ORDER BY sequence_no DESC
+        """,
+        (position_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(payload, dict)
+            and payload.get("reason") == "edli_bridge_same_order_already_materialized"
+            and str(payload.get("attempted_position_id") or "") == attempted_position_id
+        ):
+            return True
+    return False
+
+
 def _absorb_same_order_duplicate_bridge_fill(
     conn: sqlite3.Connection,
     projection: dict,
@@ -669,6 +709,17 @@ def _absorb_same_order_duplicate_bridge_fill(
 
     existing = matches[0]
     position_id = str(existing["position_id"])
+    attempted_position_id = str(projection.get("position_id") or "")
+    if (
+        _same_order_absorb_already_recorded(
+            conn,
+            position_id=position_id,
+            attempted_position_id=attempted_position_id,
+        )
+        and _bridge_numeric_equal(existing["shares"], projection.get("shares"))
+        and _bridge_numeric_equal(existing["cost_basis_usd"], projection.get("cost_basis_usd"))
+    ):
+        return position_id
     from datetime import datetime, timezone
 
     iso_now = datetime.now(timezone.utc).isoformat()
@@ -680,7 +731,7 @@ def _absorb_same_order_duplicate_bridge_fill(
     payload = json.dumps(
         {
             "reason": "edli_bridge_same_order_already_materialized",
-            "attempted_position_id": str(projection.get("position_id") or ""),
+            "attempted_position_id": attempted_position_id,
             "shares": float(projection.get("shares") or 0.0),
             "cost_basis_usd": float(projection.get("cost_basis_usd") or 0.0),
         },

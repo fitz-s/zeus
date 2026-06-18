@@ -1056,6 +1056,42 @@ def _is_below_min_order_sell_error(error: str) -> bool:
     return "below" in text and "min_order_size" in text
 
 
+def _dust_hold_event_already_recorded(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    reason: str,
+) -> bool:
+    if conn is None:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_REJECTED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position.trade_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    try:
+        payload = json.loads(str(row["payload_json"] or "{}"))
+    except (TypeError, ValueError, IndexError, KeyError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return (
+        str(payload.get("status") or "") == "backoff_exhausted"
+        and str(payload.get("exit_reason") or "") == str(reason or "")
+    )
+
+
 def _mark_exit_dust_hold(
     position: Position,
     reason: str,
@@ -1073,7 +1109,7 @@ def _mark_exit_dust_hold(
     position.next_exit_retry_at = ""
     position.exit_reason = reason
     position.last_exit_error = normalized_error
-    if already_held:
+    if already_held or _dust_hold_event_already_recorded(conn, position, reason=reason):
         return
     _dual_write_canonical_pending_exit_if_available(
         conn,

@@ -297,6 +297,70 @@ class TestChainTruthRetryOnPositiveBalance:
         assert pos.next_exit_retry_at == ""
         assert pos.last_exit_error.startswith("chain_balance_units=10000;")
 
+    def test_raw_ctf_dust_balance_is_idempotent_from_prior_db_event(self, monkeypatch):
+        from src.state.db import init_schema
+
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        try:
+            first = _make_position(
+                trade_id="london-dust-db-repeat-test",
+                token_id=_ASSET_ID_LONDON,
+                condition_id=_CONDITION_ID_LONDON,
+                city="London",
+                shares=5.06,
+                exit_retry_count=0,
+            )
+            portfolio = _make_portfolio(first)
+
+            handle_exit_pending_missing(
+                portfolio,
+                first,
+                conn=conn,
+                rpc_call=_rpc_returning(10_000),
+            )
+            before = conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_REJECTED'
+                """,
+                (first.trade_id,),
+            ).fetchone()[0]
+
+            hydrated_without_exit_state = _make_position(
+                trade_id=first.trade_id,
+                token_id=_ASSET_ID_LONDON,
+                condition_id=_CONDITION_ID_LONDON,
+                city="London",
+                shares=5.06,
+                exit_state="",
+                exit_reason="",
+                exit_retry_count=0,
+            )
+            handle_exit_pending_missing(
+                portfolio,
+                hydrated_without_exit_state,
+                conn=conn,
+                rpc_call=_rpc_returning(10_000),
+            )
+            after = conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_REJECTED'
+                """,
+                (first.trade_id,),
+            ).fetchone()[0]
+
+            assert before == 1
+            assert after == before
+            assert hydrated_without_exit_state.exit_state == "backoff_exhausted"
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Antibody 3: RPC failure → action == ignore (fail-open, no destructive action)

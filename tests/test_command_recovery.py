@@ -2547,6 +2547,81 @@ class TestRecoveryResolutionTable:
         assert payload["proof_class"] == "completed_partial_order_fact"
         assert payload["remaining_size"] == "0"
 
+    def test_review_required_matched_cancel_clears_when_held_projection_matches_fill(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A matched-order cancel response must not strand an already held entry."""
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.34)
+        _seed_pending_entry_projection(conn)
+        _advance_to_partial(conn, venue_order_id="ord-001")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-001",
+            state="CONFIRMED",
+            filled_size="4.995",
+            fill_price="0.34",
+        )
+        _append_order_fact(conn, state="PARTIALLY_MATCHED", matched_size="4.995", remaining_size="0.005")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   chain_state = 'synced',
+                   shares = 4.995,
+                   chain_shares = 4.995,
+                   cost_basis_usd = 1.6983,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-001", "source": "maker_rest_escalation"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REPLACE_BLOCKED",
+            occurred_at="2026-04-26T00:08:02Z",
+            payload={
+                "venue_order_id": "ord-001",
+                "reason": "post_cancel_unknown_possible_side_effect",
+                "cancel_outcome": {
+                    "orderID": "ord-001",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": "matched orders can't be canceled",
+                },
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_cancel_review_required_entries"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "matched_cancel_with_confirmed_held_projection"
+        assert payload["required_predicates"]["active_projection_matches_confirmed_fill"] is True
+
     def test_partial_entry_does_not_finalize_when_trade_facts_do_not_cover_order_fact(
         self,
         conn,

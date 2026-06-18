@@ -56,7 +56,8 @@ def forecasts_db(tmp_path):
         CREATE TABLE forecast_posteriors (
             posterior_id TEXT, city TEXT, target_date TEXT,
             temperature_metric TEXT, computed_at TEXT, q_json TEXT,
-            source_cycle_time TEXT
+            source_cycle_time TEXT,
+            trade_authority_status TEXT NOT NULL DEFAULT 'LIVE_AUTHORITY'
         )
         """
     )
@@ -66,11 +67,21 @@ def forecasts_db(tmp_path):
 
 
 def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
-            target_date="2026-06-12", metric="high", source_cycle_time=None):
+            target_date="2026-06-12", metric="high", source_cycle_time=None,
+            trade_authority_status="LIVE_AUTHORITY"):
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?)",
-        (posterior_id, city, target_date, metric, computed_at, json.dumps(q), source_cycle_time),
+        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?)",
+        (
+            posterior_id,
+            city,
+            target_date,
+            metric,
+            computed_at,
+            json.dumps(q),
+            source_cycle_time,
+            trade_authority_status,
+        ),
     )
     conn.commit()
     conn.close()
@@ -116,6 +127,40 @@ class TestLoadReplacementBelief:
         belief = _load(forecasts_db)
         assert belief.posterior_id == "new"
         assert belief.q_yes_bin == pytest.approx(0.30)
+        assert belief.trade_authority_status == "LIVE_AUTHORITY"
+
+    def test_newer_diagnostic_row_cannot_override_live_authority(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="live",
+            computed_at=(NOW - timedelta(hours=2)).isoformat(),
+            q={BIN: 0.20},
+            trade_authority_status="LIVE_AUTHORITY",
+        )
+        _insert(
+            forecasts_db,
+            posterior_id="diagnostic",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.80},
+            trade_authority_status="DIAGNOSTIC_ONLY",
+        )
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.posterior_id == "live"
+        assert belief.q_yes_bin == pytest.approx(0.20)
+
+    def test_only_diagnostic_rows_fail_closed(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="diagnostic",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.80},
+            trade_authority_status="DIAGNOSTIC_ONLY",
+        )
+
+        assert _load(forecasts_db) is None
 
     def test_stale_row_returned_with_fresh_false(self, forecasts_db):
         """Staleness is information, absence is not — the caller annotates and
