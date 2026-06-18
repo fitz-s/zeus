@@ -1,7 +1,10 @@
 # Created: 2026-05-18
-# Last reused or audited: 2026-05-19
-# Authority basis: G4_CLEANUP_DESIGN.md §2 L (Cluster L), src/data/AGENTS.md
-# Lifecycle: created=2026-05-18; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Last reused or audited: 2026-06-08 (system_decomposition_plan §8 Step 4: WU daily dedup —
+#   updated test_main_wu_daily_job_uses_scheduler_not_fixed_cron for the post-dedup topology,
+#   where data-ingest is the SOLE WU-daily owner and src.main registers no wu_daily job)
+# Authority basis: G4_CLEANUP_DESIGN.md §2 L (Cluster L), src/data/AGENTS.md;
+#   docs/architecture/system_decomposition_plan.md §8 Step 4
+# Lifecycle: created=2026-05-18; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: Verify WU scheduler eligibility logic and dispatch routing (K2 cluster L)
 # Reuse: standalone pytest; no shared fixtures beyond conftest.py
 """K2 physical-clock WU scheduler tests."""
@@ -136,22 +139,55 @@ def test_run_wu_daily_dispatch_imports_resolve(monkeypatch):
 
 
 def test_main_wu_daily_job_uses_scheduler_not_fixed_cron():
-    """src/main.py WU daily job must NOT be registered as fixed hour=12 cron."""
-    main_path = Path(__file__).parent.parent / "src" / "main.py"
-    if not main_path.exists():
-        pytest.skip("src/main.py not present in this worktree")
-    content = main_path.read_text()
-    # The job registration must NOT contain hour=12, minute=0 together
+    """WU daily collection must use the per-city WuDailyScheduler gate, NOT a fixed hour=12 cron.
+
+    UPDATED 2026-06-08 (system_decomposition_plan §8 Step 4): the WU daily job was a verified
+    duplicate and was REMOVED from src/main (the order daemon). Ownership now lives SOLELY in
+    data-ingest (ingest_main.py: ingest_k2_daily_obs -> daily_obs_append.daily_tick), which gates
+    per-city via WuDailyScheduler.should_collect_now on an hourly (minute=0) cron — never a fixed
+    noon cron. So the invariant moves with the job:
+      - src/main must NO LONGER register a wu_daily job (the dedup removed it), and
+      - the surviving data-ingest owner must NOT use a fixed hour=12 cron and MUST route through
+        the WuDailyScheduler / daily_tick path.
+    """
+    import ast
+
+    repo_root = Path(__file__).parent.parent
+    main_path = repo_root / "src" / "main.py"
+    ingest_path = repo_root / "src" / "ingest_main.py"
+    if not main_path.exists() or not ingest_path.exists():
+        pytest.skip("src/main.py or src/ingest_main.py not present in this worktree")
+
+    ingest_content = ingest_path.read_text()
+
+    # POST-DEDUP: src/main no longer registers the WU daily job at all. Detect REAL add_job id=
+    # registrations via AST (not a substring scan — provenance comments mention "wu_daily" in prose).
+    def _add_job_id_literals(path: Path) -> set[str]:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        ids: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and node.func.attr == "add_job":
+                for kw in node.keywords:
+                    if kw.arg == "id" and isinstance(kw.value, ast.Constant) \
+                            and isinstance(kw.value.value, str):
+                        ids.add(kw.value.value)
+        return ids
+
+    assert "wu_daily" not in _add_job_id_literals(main_path), (
+        "src/main.py still registers a wu_daily add_job — the §8 Step 4 dedup must remove it"
+    )
+
+    # The SURVIVING owner (data-ingest) must not use a fixed hour=12, minute=0 WU cron...
     fixed_noon_pattern = re.compile(r'add_job\([^)]*hour=12[^)]*minute=0', re.DOTALL)
-    forbidden = fixed_noon_pattern.search(content)
+    forbidden = fixed_noon_pattern.search(ingest_content)
     assert not forbidden, (
-        f"src/main.py still has fixed hour=12, minute=0 WU daily cron: "
+        f"data-ingest has a fixed hour=12, minute=0 WU daily cron: "
         f"{forbidden.group() if forbidden else ''}"
     )
-    # Must reference the new scheduler or dispatch function
+    # ...and MUST route WU collection through the per-city scheduler / canonical daily_tick path.
     assert (
-        "wu_scheduler" in content
-        or "WuDailyScheduler" in content
-        or "_wu_daily_dispatch" in content
-        or "should_collect_now" in content
-    ), "src/main.py does not reference the new K2 scheduler/dispatcher"
+        "daily_tick" in ingest_content
+        or "WuDailyScheduler" in ingest_content
+        or "should_collect_now" in ingest_content
+    ), "data-ingest does not route WU daily collection through the K2 scheduler/daily_tick path"

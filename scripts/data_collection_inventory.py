@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Lifecycle: created=2026-05-24; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: Advisory job inventory + --check (registry mirrors scheduler) + executor/scheduler dry-run previews.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-05-24
+# Last reused or audited: 2026-06-08 (system_decomposition_plan §8 Step 4: removed "wu_daily"
+#   from _SRC_MAIN_DATA_COLLECTION_JOB_IDS — the order daemon no longer collects WU daily)
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR3);
-#   operator spec §"Job registry"; src/data/source_job_registry.py.
+#   operator spec §"Job registry"; src/data/source_job_registry.py;
+#   docs/architecture/system_decomposition_plan.md §8 Step 4.
 """Data-collection job inventory CLI — PR3 (advisory, read-only).
 
     python3 scripts/data_collection_inventory.py            # render the job matrix
@@ -52,19 +54,34 @@ _SRC_MAIN_FILE = REPO_ROOT / "src" / "main.py"
 # Data-collection jobs in src/main — these MUST be registered in JOB_REGISTRY (operator B list).
 # (user_ws_ingestor is a long-running thread, not an add_job, so it is registered but never
 # appears in the scheduled-id scan.)
+# PROCESS-TOPOLOGY REFACTOR P2 (2026-06-08, system_decomposition_plan §8 Step 1):
+# `market_discovery` was REMOVED from this src/main set — it is no longer scheduled in the
+# order daemon. It is lifted to the P2 substrate-observer daemon (owner_daemon=
+# "substrate_observer" in JOB_REGISTRY) and is registered/scheduled there instead.
+# PROCESS-TOPOLOGY REFACTOR P4 (2026-06-08, system_decomposition_plan §8 Step 2):
+# `harvester` was REMOVED from this src/main set — it is no longer scheduled in the order
+# daemon. It is lifted to the P4 post-trade-capital daemon (owner_daemon="post_trade_capital"
+# in JOB_REGISTRY) and is registered/scheduled there instead.
+# PROCESS-TOPOLOGY REFACTOR STEP 4 (2026-06-08, system_decomposition_plan §8 Step 4):
+# `wu_daily` was REMOVED from this src/main set — the order daemon no longer collects WU daily
+# observations. It was a VERIFIED-DUPLICATE of data-ingest's ingest_k2_daily_obs (which owns the
+# (observation, wu_icao_history) family); the duplicate src.main copy is deleted, not relocated.
 _SRC_MAIN_DATA_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
-    "market_discovery", "venue_heartbeat", "harvester", "wu_daily",
+    "venue_heartbeat",
 })
 
 # Explicitly NON-data-collection src/main jobs: trading-cycle modes + execution/chain ops +
 # the daemon's own heartbeat. Declared so --check can tell "known non-collection" apart from
 # "new unclassified job". update_reaction_* uses an f-string id (not a static literal) so it is
 # not extracted; it is a trading-cycle mode and intentionally not covered.
+# PROCESS-TOPOLOGY REFACTOR P4 (2026-06-08, system_decomposition_plan §8 Step 2): the chain
+# redemption + wrap ops (redeem_submitter, redeem_reconciler, wrap_intent_creator,
+# wrap_submitter, wrap_reconciler) were LIFTED to the P4 post-trade-capital daemon and are no
+# longer scheduled in src/main — so they are removed from this src/main non-collection set.
 _SRC_MAIN_NON_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
     "opening_hunt", "day0_capture", "imminent_open_capture",  # CycleRunner trading modes
     "heartbeat",                                              # daemon heartbeat (file-only)
-    "redeem_submitter", "redeem_reconciler",                  # chain redemption ops
-    "wrap_intent_creator", "wrap_submitter", "wrap_reconciler",  # chain wrap ops
+    "exit_monitor",                                           # exit-SUBMIT phase (P4 split kept in P1)
     "deployment_freshness",                                   # deploy-freshness gate
     # Trading-adjacent analysis + ops (classified 2026-06-11: not raw data collection;
     # these read already-collected data and produce derived outputs or control signals).
@@ -74,20 +91,16 @@ _SRC_MAIN_NON_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
     "settlement_skill_attribution",  # skill-vs-luck grade of settled positions (derived audit,
                                      # reads edli_live_profit_audit + settlement/forecast tables)
     "new_listing_scout",          # new market detection → intents (trading control, not raw data)
+    "afternoon_snapshot_capture", # same-day book capture for analysis, not raw source ingest
     "edli_event_reactor",         # EDLI event reactor (trading engine, not data collection)
     "edli_bankroll_warm",         # bankroll cache warm (trading prep, not collection)
     "edli_command_recovery",      # venue command recovery (execution layer)
     "maker_rest_escalation",      # REST maker order escalation (execution layer)
-    "edli_market_substrate_warm", # market substrate cache warm (trading prep)
     "edli_mainstream_warm",       # mainstream consensus warm (trading prep)
     "edli_continuous_redecision_screen",  # continuous redecision screen over held families
                                           # (trading control loop, reads already-collected data)
     "world_wal_checkpoint",       # WAL checkpoint (DB maintenance, not data collection)
-    "edli_user_channel_reconcile",  # EDLI user-channel order reconcile (execution layer)
-    "edli_market_channel_ingestor", # EDLI market-channel event ingestor (exchange events,
-                                    # NOT raw weather/settlement data; classified non-collection
-                                    # because it receives venue execution events, not source data)
-    "chain_sync_and_exit_monitor",  # chain sync + graceful-exit monitor (control plane)
+    "trades_wal_checkpoint",      # WAL checkpoint (DB maintenance, not data collection)
 })
 
 
@@ -212,6 +225,40 @@ def _orphan_callable_refs() -> list[str]:
         "ingest_main": (REPO_ROOT / "src" / "ingest_main.py").read_text(encoding="utf-8"),
         "forecast_live_daemon": (REPO_ROOT / "src" / "ingest" / "forecast_live_daemon.py").read_text(encoding="utf-8"),
         "main": _SRC_MAIN_FILE.read_text(encoding="utf-8"),
+        # PROCESS-TOPOLOGY REFACTOR P2 (2026-06-08, system_decomposition_plan §8 Step 1):
+        # the substrate-observer daemon (src/ingest/substrate_observer_daemon.py) registers
+        # the lifted jobs, but their callables are DEFINED in the trading-lane-free
+        # src/data/substrate_observer.py module it imports. Concatenate both so the
+        # orphan-check resolves `_market_discovery_cycle` (the `def` lives in the producer
+        # module) for owner_daemon="substrate_observer".
+        "substrate_observer": (
+            (REPO_ROOT / "src" / "ingest" / "substrate_observer_daemon.py").read_text(encoding="utf-8")
+            + "\n"
+            + (REPO_ROOT / "src" / "data" / "substrate_observer.py").read_text(encoding="utf-8")
+        ),
+        # PROCESS-TOPOLOGY REFACTOR P4 (2026-06-08, system_decomposition_plan §8 Step 2):
+        # the post-trade-capital daemon (src/ingest/post_trade_capital_daemon.py) registers
+        # the lifted jobs, but their callables are DEFINED in the
+        # src/execution/post_trade_capital.py module it imports. Concatenate both so the
+        # orphan-check resolves `_harvester_cycle` (the `def` lives in the cycle-body module)
+        # for owner_daemon="post_trade_capital".
+        "post_trade_capital": (
+            (REPO_ROOT / "src" / "ingest" / "post_trade_capital_daemon.py").read_text(encoding="utf-8")
+            + "\n"
+            + (REPO_ROOT / "src" / "execution" / "post_trade_capital.py").read_text(encoding="utf-8")
+        ),
+        # PROCESS-TOPOLOGY REFACTOR P3 (2026-06-08, system_decomposition_plan §8 Step 3):
+        # the price-channel-ingest daemon (src/ingest/price_channel_daemon.py) starts the
+        # user-channel WS ingestor thread + registers the two channel/reconcile cycles, but
+        # their callables are DEFINED in the trading-lane-free src/ingest/price_channel_ingest.py
+        # module it imports. Concatenate both so the orphan-check resolves
+        # `_start_user_channel_ingestor_if_enabled` (the `def` lives in the producer module)
+        # for owner_daemon="price_channel".
+        "price_channel": (
+            (REPO_ROOT / "src" / "ingest" / "price_channel_daemon.py").read_text(encoding="utf-8")
+            + "\n"
+            + (REPO_ROOT / "src" / "ingest" / "price_channel_ingest.py").read_text(encoding="utf-8")
+        ),
     }
     orphans: list[str] = []
     for job in JOB_REGISTRY.values():

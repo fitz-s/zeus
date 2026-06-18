@@ -1135,62 +1135,8 @@ def _run_mode_business_liveness(mode: DiscoveryMode, summary: object) -> dict:
     }
 
 
-@_scheduler_job("harvester")
-def _harvester_cycle():
-    """Phase 1.5 harvester split: trading-side P&L resolver.
-
-    Reads forecasts.settlements (written by ingest-side harvester_truth_writer)
-    and settles positions + writes decision_log. If the resolver is unavailable,
-    fail closed; the trading daemon must not fall back to the legacy integrated
-    harvester path, which can derive and write settlement truth in the same lane.
-    """
-    from src.data.dual_run_lock import acquire_lock
-    from src.state.db import get_trade_connection, get_forecasts_connection
-    with acquire_lock("harvester_pnl") as acquired:
-        if not acquired:
-            logger.info("harvester_pnl_resolver skipped_lock_held")
-            return
-        try:
-            from src.execution.harvester_pnl_resolver import resolve_pnl_for_settled_markets
-            # v4 plan §AX3: harvester PnL resolver = LIVE class.
-            # K1 (2026-05-11): settlements → zeus-forecasts.db; pass forecasts conn.
-            trade_conn = get_trade_connection(write_class="live")
-            forecasts_conn = get_forecasts_connection(write_class="live")
-            try:
-                result = resolve_pnl_for_settled_markets(trade_conn, forecasts_conn)
-            finally:
-                trade_conn.close()
-                forecasts_conn.close()
-        except ImportError as exc:
-            logger.error(
-                "harvester_pnl_resolver unavailable; refusing legacy run_harvester fallback: %s",
-                exc,
-            )
-            result = {
-                "status": "resolver_unavailable_fail_closed",
-                "positions_settled": 0,
-                "decision_log_rows_written": 0,
-                "errors": 1,
-            }
-    logger.info("Harvester: %s", result)
 
 
-@_scheduler_job("wu_daily")
-def _wu_daily_dispatch() -> None:
-    """K2 WU daily scheduler tick — collect WU daily observations for eligible cities.
-
-    Called hourly by the daemon scheduler. WuDailyScheduler.should_collect_now
-    gates collection per city using a window_minutes=60 default, so each city
-    fires at most once per hour at its configured local trigger time.
-
-    Cluster L wiring per G4_CLEANUP_DESIGN.md §2 L (2026-05-18).
-    K2 import (daily_obs_append) lives in wu_scheduler.run_wu_daily_dispatch
-    to keep src.main free of K2 ingest modules (Phase 3 boundary, antibody #8).
-    Operator may override interval post-merge if cadence needs tuning.
-    """
-    from src.data.wu_scheduler import run_wu_daily_dispatch
-
-    run_wu_daily_dispatch()
 
 
 @_scheduler_job("settlement_guard_report")
@@ -1321,602 +1267,14 @@ def _wrap_proceeds_same_tick(creds: dict, adapter: Any) -> None:
 _REDEEM_SUBMITTER_LAW_LOGGED = False
 
 
-@_scheduler_job("redeem_submitter")
-def _redeem_submitter_cycle() -> None:
-    """Poll settlement_commands for ALL _SUBMITTABLE_STATES rows + submit_redeem.
-
-    PR #126 review-fix (Codex P1 + Copilot 3254021478): poll the full
-    _SUBMITTABLE_STATES set (INTENT_CREATED + RETRYING), not just INTENT_CREATED.
-    Without RETRYING in the query, rows that hit an adapter exception once
-    and were durably moved to RETRYING by submit_redeem would never be
-    re-attempted.
-
-    PR #126 review-fix (Codex P1 + Copilot 3254021447/49): commit AFTER each
-    submit_redeem call. submit_redeem only commits when own_conn=True; the
-    poller passes conn=conn so own_conn=False; without an explicit commit
-    the state transitions roll back when conn closes → INTENT_CREATED rows
-    are re-processed every tick AND any real adapter tx_hash is not durably
-    anchored. Per-row commit gives partial-failure tolerance.
-    """
-    # REDEEM SUBMISSION FORBIDDEN (operator law 2026-06-10, ABSOLUTE): the
-    # scheduler NEVER drives redeem submission. redeem_submission_allowed() is
-    # now unconditionally False (the operator-override escape hatch was deleted),
-    # and submit_redeem / adapter.redeem each hard-raise REDEEM_SUBMISSION_FORBIDDEN
-    # as deeper defense layers. This cycle is a no-op that logs the law once per
-    # process so an operator scanning logs sees WHY redemption never runs here.
-    from src.execution.settlement_commands import redeem_submission_allowed
-
-    if not redeem_submission_allowed():
-        global _REDEEM_SUBMITTER_LAW_LOGGED
-        if not _REDEEM_SUBMITTER_LAW_LOGGED:
-            logger.info(
-                "redeem_submitter: SKIPPED — redeem submission FORBIDDEN (operator "
-                "law 2026-06-10). Redemption is EXTERNAL; Zeus books "
-                "EXTERNAL_REDEMPTION and never submits a redeem tx."
-            )
-            _REDEEM_SUBMITTER_LAW_LOGGED = True
-        return
-    from src.data.dual_run_lock import acquire_lock
-    from src.data.polymarket_client import (
-        resolve_polymarket_credentials,
-        _resolve_clob_v2_signature_type,
-        _resolve_q1_egress_evidence_path,
-    )
-    from src.execution.settlement_commands import (
-        _SUBMITTABLE_STATES,
-        submit_redeem,
-    )
-    from src.state.db import get_trade_connection
-    from src.venue.polymarket_v2_adapter import (
-        DEFAULT_Q1_EGRESS_EVIDENCE,
-        DEFAULT_POLYGON_RPC_URL,
-        DEFAULT_V2_HOST,
-        PolymarketV2Adapter,
-        Q1_EGRESS_EVIDENCE_ENV,
-    )
-
-    # PR-I.5.b — Karachi unblock prep (2026-05-18):
-    # Paper/dry-run skips cleanly; live mode requires keychain credentials
-    # before any adapter is constructed. The redeem adapter MUST share the
-    # same credential source as the entry adapter (polymarket_client._ensure_v2_adapter)
-    # to avoid the "structural decision incompletely executed" pattern:
-    # different credential paths for entry vs redeem = silent drift hazard.
-    #
-    # Codex P2 fix (PR #145): credential lookup is deferred until AFTER the
-    # empty-row check so that an idle daemon with no REDEEM_INTENT_CREATED /
-    # REDEEM_RETRYING rows does NOT mark _scheduler_job FAILED every 5 min
-    # merely because Keychain is unavailable at that moment.
-    # Fail-closed still applies: if work exists and creds are missing, raise.
-    if get_mode() != "live":
-        logger.info("redeem_submitter skipped_non_live mode=%s", get_mode())
-        return
-
-    with acquire_lock("redeem_submitter") as acquired:
-        if not acquired:
-            logger.info("redeem_submitter skipped_lock_held")
-            return
-        conn = get_trade_connection(write_class="live")
-        try:
-            from src.execution.settlement_commands import reseat_stub_deferred_rows_for_autonomous_retry
-            promoted = reseat_stub_deferred_rows_for_autonomous_retry(conn)
-            if promoted > 0:
-                conn.commit()
-                logger.info(
-                    "redeem_submitter: promoted %d stub-deferred rows to RETRYING",
-                    promoted,
-                )
-
-            def _build_adapter(creds_: dict) -> PolymarketV2Adapter:
-                q1_egress_evidence = _resolve_q1_egress_evidence_path(
-                    default=DEFAULT_Q1_EGRESS_EVIDENCE,
-                    env_name=Q1_EGRESS_EVIDENCE_ENV,
-                )
-                return PolymarketV2Adapter(
-                    host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
-                    funder_address=creds_["funder_address"],
-                    signer_key=creds_["private_key"],
-                    chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
-                    signature_type=_resolve_clob_v2_signature_type(),
-                    polygon_rpc_url=os.environ.get(
-                        "POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL
-                    ),
-                    api_creds=creds_.get("api_creds"),
-                    q1_egress_evidence_path=q1_egress_evidence,
-                )
-
-            # ── Inventory-truth auto-collect sweep (2026-06-09) ──────────────
-            # Operator directive: the system must auto-collect with no operator
-            # hands. The redeem trigger is the Safe's ACTUAL chain inventory
-            # (data-api positions + per-candidate chain-truth verification),
-            # NEVER the internal portfolio ledger — the ledger missed real
-            # winners (pending_exit/admin_closed phases) and could not see
-            # ledger-invisible holdings (London-16C YES ~$798, zero
-            # position_current rows). See src/execution/inventory_redeem_sweep.py.
-            # Fail-soft: any sweep failure logs and defers to the next tick;
-            # the submit loop below is unaffected. Kill switch:
-            # ZEUS_INVENTORY_REDEEM_SWEEP_DISABLED=1.
-            creds = None
-            adapter = None
-            _sweep_disabled = os.environ.get(
-                "ZEUS_INVENTORY_REDEEM_SWEEP_DISABLED", ""
-            ).strip().lower() in ("1", "true", "yes", "on")
-            if not _sweep_disabled:
-                try:
-                    creds = resolve_polymarket_credentials()
-                except RuntimeError:
-                    # Idle daemon without Keychain stays quiet (Codex P2 PR #145
-                    # posture preserved): only raise when submit work exists.
-                    creds = None
-                if creds is not None:
-                    from src.execution.inventory_redeem_sweep import (
-                        sweep_chain_inventory_for_redeems,
-                    )
-                    adapter = _build_adapter(creds)
-                    try:
-                        swept = sweep_chain_inventory_for_redeems(
-                            conn, adapter, creds["funder_address"],
-                        )
-                    except Exception as exc:  # noqa: BLE001 — fail-soft per tick
-                        logger.warning(
-                            "redeem_submitter: inventory sweep failed (fail-soft): %s",
-                            exc,
-                        )
-                        swept = []
-                    if swept:
-                        conn.commit()
-                        logger.info(
-                            "redeem_submitter: inventory sweep enqueued/active %d command(s)",
-                            len(swept),
-                        )
-                    # Proceeds-driven wrap (same tick): any USDC.e already
-                    # sitting at the Safe from earlier confirmed redemptions is
-                    # wrapped to pUSD NOW, not left for the slow periodic
-                    # balance poll. Fail-soft inside.
-                    _wrap_proceeds_same_tick(creds, adapter)
-            # Poll ALL submittable states (INTENT_CREATED + RETRYING).
-            placeholders = ",".join("?" * len(_SUBMITTABLE_STATES))
-            state_values = tuple(s.value for s in _SUBMITTABLE_STATES)
-            rows = conn.execute(
-                f"""
-                SELECT command_id FROM settlement_commands
-                 WHERE state IN ({placeholders})
-                 ORDER BY requested_at, command_id
-                 LIMIT 32
-                """,
-                state_values,
-            ).fetchall()
-            if not rows:
-                return
-            # Credentials resolved only when actual work exists — fail-closed:
-            # if Keychain is unavailable here, raise so the scheduler records
-            # FAILED and the operator sees a clear provisioning gap.
-            if creds is None:
-                try:
-                    creds = resolve_polymarket_credentials()
-                except RuntimeError as exc:
-                    raise RuntimeError(
-                        f"redeem_submitter: credentials unavailable (fail-closed): {exc}"
-                    ) from exc
-            if adapter is None:
-                adapter = _build_adapter(creds)
-            submitted = 0
-            failed = 0
-            for row in rows:  # already capped at 32 via SQL LIMIT
-                try:
-                    result = submit_redeem(
-                        row["command_id"], adapter, object(), conn=conn,
-                    )
-                    conn.commit()  # durable per-row commit; transitions stick
-                    submitted += 1
-                    logger.info(
-                        "redeem_submitter: command_id=%s state=%s",
-                        row["command_id"], result.state.value,
-                    )
-                except Exception as exc:  # noqa: BLE001 — fail-open per scheduler contract
-                    # On exception submit_redeem may have committed an intermediate
-                    # REDEEM_RETRYING via its own savepoint+commit (own_conn path
-                    # closed it); for own_conn=False we still rollback in-flight
-                    # uncommitted savepoints by closing the conn cleanly. Per-row
-                    # rollback isolates failures from successful prior rows.
-                    try:
-                        conn.rollback()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    failed += 1
-                    logger.error(
-                        "redeem_submitter: command_id=%s error=%s",
-                        row["command_id"], exc,
-                    )
-            logger.info(
-                "redeem_submitter: submitted=%d failed=%d", submitted, failed,
-            )
-            if failed:
-                raise RuntimeError(
-                    f"redeem_submitter: submitted={submitted} failed={failed}"
-                )
-        finally:
-            conn.close()
 
 
-@_scheduler_job("redeem_reconciler")
-def _redeem_reconciler_cycle() -> None:
-    """Poll REDEEM_TX_HASHED rows + reconcile_pending_redeems against web3.
-
-    PR-I.5 completion (2026-05-19): wires Web3 HTTPProvider + calls
-    reconcile_pending_redeems so the antibody guard merged in PR #192 is
-    reachable in production.  Karachi anchor: tx 0x0c85d94… (negRisk market
-    c8c220f5…) sitting in REDEEM_TX_HASHED since 2026-05-19T08:26 UTC.
-    """
-    from src.data.dual_run_lock import acquire_lock
-    from src.execution.settlement_commands import (
-        SettlementState,
-        list_commands,
-        reconcile_pending_redeems,
-    )
-    from src.state.db import get_trade_connection, get_trade_connection_read_only
-    from src.venue.polymarket_v2_adapter import DEFAULT_POLYGON_RPC_URL
-
-    if get_mode() != "live":
-        logger.info("redeem_reconciler skipped_non_live mode=%s", get_mode())
-        return
-
-    with acquire_lock("redeem_reconciler") as acquired:
-        if not acquired:
-            logger.info("redeem_reconciler skipped_lock_held")
-            return
-        conn = get_trade_connection(write_class="live")
-        try:
-            rows = list_commands(conn, state=SettlementState.REDEEM_TX_HASHED)
-            if not rows:
-                logger.info("redeem_reconciler: results=0")
-                return
-            try:
-                from web3 import Web3
-            except ImportError:
-                logger.info(
-                    "redeem_reconciler: web3 not installed; rows=%d sitting in "
-                    "TX_HASHED (expected pre-PR-I.5)", len(rows),
-                )
-                return
-            polygon_rpc_url = os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL)
-            w3 = Web3(Web3.HTTPProvider(polygon_rpc_url, request_kwargs={"timeout": 15}))
-            try:
-                results = reconcile_pending_redeems(w3, conn)
-                conn.commit()
-                logger.info(
-                    "redeem_reconciler: reconciled=%d states=%s",
-                    len(results), [r.state.value for r in results],
-                )
-                # Proceeds-driven wrap (same tick): a REDEEM_CONFIRMED batch
-                # means USDC.e proceeds just became chain-final at the Safe.
-                # Wrap them NOW in this tick instead of waiting for the
-                # periodic balance poll. Fail-soft: credential/adapter issues
-                # log and defer to the periodic wrap jobs.
-                if any(
-                    r.state == SettlementState.REDEEM_CONFIRMED for r in results
-                ):
-                    try:
-                        from src.data.polymarket_client import (
-                            resolve_polymarket_credentials as _resolve_creds,
-                            _resolve_clob_v2_signature_type as _sig_type,
-                        )
-                        from src.venue.polymarket_v2_adapter import (
-                            DEFAULT_V2_HOST as _V2_HOST,
-                            PolymarketV2Adapter as _V2Adapter,
-                        )
-                        _creds = _resolve_creds()
-                        _adapter = _V2Adapter(
-                            host=os.environ.get("POLYMARKET_CLOB_V2_HOST", _V2_HOST),
-                            funder_address=_creds["funder_address"],
-                            signer_key=_creds["private_key"],
-                            chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
-                            signature_type=_sig_type(),
-                            polygon_rpc_url=polygon_rpc_url,
-                            api_creds=_creds.get("api_creds"),
-                        )
-                        _wrap_proceeds_same_tick(_creds, _adapter)
-                    except Exception as _wrap_exc:  # noqa: BLE001 — fail-soft
-                        logger.warning(
-                            "redeem_reconciler: same-tick wrap skipped: %s",
-                            _wrap_exc,
-                        )
-            except Exception as exc:
-                try:
-                    conn.rollback()
-                except Exception:  # noqa: BLE001
-                    pass
-                logger.error("redeem_reconciler: error=%s", exc)
-                raise
-        finally:
-            conn.close()
 
 
-@_scheduler_job("wrap_intent_creator")
-def _wrap_intent_creator_cycle() -> None:
-    """Enqueue WRAP_REQUESTED if Safe USDC.e balance > threshold and no pending row.
-
-    On-chain balance-driven (not journal-driven). Idempotent: skips if any
-    non-terminal WRAP row already exists. Skipped in non-live mode.
-    """
-    from src.data.dual_run_lock import acquire_lock
-    from src.data.polymarket_client import resolve_polymarket_credentials
-    from src.execution.wrap_unwrap_commands import enqueue_wrap_if_balance_above_threshold
-    from src.state.db import get_world_connection
-    from src.venue.polymarket_v2_adapter import DEFAULT_POLYGON_RPC_URL
-
-    if get_mode() != "live":
-        logger.info("wrap_intent_creator skipped_non_live mode=%s", get_mode())
-        return
-
-    # P0-2 (d): single shared wrap state-machine lock (was "wrap_intent_creator").
-    with acquire_lock("wrap_state_machine") as acquired:
-        if not acquired:
-            logger.info("wrap_intent_creator skipped_lock_held")
-            return
-        try:
-            from web3 import Web3
-        except ImportError:
-            logger.info("wrap_intent_creator: web3 not installed; skipping")
-            return
-        # Resolve Safe address from the same Keychain-backed credential source
-        # used by wrap_submitter and wrap_reconciler so all three cycles agree
-        # on which Safe's balance to monitor and which Safe to transact against.
-        try:
-            creds = resolve_polymarket_credentials()
-        except RuntimeError as exc:
-            logger.warning("wrap_intent_creator: credentials unavailable, skipping: %s", exc)
-            return
-        safe_address = creds["funder_address"]
-        if not safe_address:
-            logger.warning("wrap_intent_creator: funder_address empty in credentials")
-            return
-        polygon_rpc_url = os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL)
-        w3 = Web3(Web3.HTTPProvider(polygon_rpc_url, request_kwargs={"timeout": 15}))
-        conn = get_world_connection()
-        try:
-            command_id = enqueue_wrap_if_balance_above_threshold(
-                safe_address, w3, conn,
-            )
-            if command_id:
-                conn.commit()
-                logger.info("wrap_intent_creator: enqueued command_id=%s", command_id)
-            else:
-                logger.debug("wrap_intent_creator: no wrap needed (threshold or pending)")
-        finally:
-            conn.close()
 
 
-@_scheduler_job("wrap_submitter")
-def _wrap_submitter_cycle() -> None:
-    """Submit APPROVE tx for WRAP_REQUESTED rows; WRAP tx for WRAP_APPROVED rows.
-
-    Each step is a separate Safe execTransaction. Skipped in non-live mode.
-    """
-    from src.data.dual_run_lock import acquire_lock
-    from src.data.polymarket_client import (
-        resolve_polymarket_credentials,
-        _resolve_clob_v2_signature_type,
-        _resolve_q1_egress_evidence_path,
-    )
-    from src.execution.wrap_unwrap_commands import (
-        WrapUnwrapState,
-        fail_wrap,
-        list_pending_wrap_commands,
-        mark_wrap_approve_tx_hashed,
-        mark_wrap_tx_hashed,
-    )
-    from src.state.db import get_world_connection
-    from src.venue.polymarket_v2_adapter import (
-        DEFAULT_Q1_EGRESS_EVIDENCE,
-        DEFAULT_POLYGON_RPC_URL,
-        DEFAULT_V2_HOST,
-        PolymarketV2Adapter,
-        Q1_EGRESS_EVIDENCE_ENV,
-    )
-
-    if get_mode() != "live":
-        logger.info("wrap_submitter skipped_non_live mode=%s", get_mode())
-        return
-
-    # P0-2 (d): single shared wrap state-machine lock (was "wrap_submitter").
-    with acquire_lock("wrap_state_machine") as acquired:
-        if not acquired:
-            logger.info("wrap_submitter skipped_lock_held")
-            return
-        conn = get_world_connection()
-        try:
-            rows = list_pending_wrap_commands(conn)
-            actionable = [
-                r for r in rows
-                if r["state"] in (
-                    WrapUnwrapState.WRAP_REQUESTED.value,
-                    WrapUnwrapState.WRAP_APPROVED.value,
-                )
-            ]
-            if not actionable:
-                logger.debug("wrap_submitter: no actionable rows")
-                return
-            try:
-                creds = resolve_polymarket_credentials()
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    f"wrap_submitter: credentials unavailable (fail-closed): {exc}"
-                ) from exc
-            q1_egress_evidence = _resolve_q1_egress_evidence_path(
-                default=DEFAULT_Q1_EGRESS_EVIDENCE, env_name=Q1_EGRESS_EVIDENCE_ENV,
-            )
-            adapter = PolymarketV2Adapter(
-                host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
-                funder_address=creds["funder_address"],
-                signer_key=creds["private_key"],
-                chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
-                signature_type=_resolve_clob_v2_signature_type(),
-                polygon_rpc_url=os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL),
-                api_creds=creds.get("api_creds"),
-                q1_egress_evidence_path=q1_egress_evidence,
-            )
-            # Derive signer EOA from private_key (same as redeem flow).
-            # creds["funder_address"] is the Safe proxy address, NOT an owner EOA.
-            # _wrap_via_safe validates signer_eoa against Safe.getOwners(), so
-            # passing funder_address would always fail with WRAP_SAFE_OWNER_MISMATCH.
-            from eth_account import Account as _Account  # type: ignore[import]
-            signer_eoa = _Account.from_key(creds["private_key"]).address
-            submitted = 0
-            failed = 0
-            for row in actionable:
-                command_id = row["command_id"]
-                amount_micro = row["amount_micro"]
-                current_state = row["state"]
-                tx_kind = "APPROVE" if current_state == WrapUnwrapState.WRAP_REQUESTED.value else "WRAP"
-                try:
-                    result = adapter._wrap_via_safe(
-                        safe_address=creds["funder_address"],
-                        amount_micro=amount_micro,
-                        tx_kind=tx_kind,
-                        signer_eoa=signer_eoa,
-                    )
-                    if result.get("errorCode") == "WRAP_DRY_RUN_LOGGED":
-                        logger.info(
-                            "wrap_submitter: dry_run command_id=%s tx_kind=%s fingerprint=%s",
-                            command_id, tx_kind, result.get("dry_run_fingerprint"),
-                        )
-                        continue
-                    if not result.get("success"):
-                        raise RuntimeError(
-                            f"_wrap_via_safe failed: {result.get('errorCode')} "
-                            f"{result.get('errorMessage')}"
-                        )
-                    tx_hash = result["tx_hash"]
-                    if tx_kind == "APPROVE":
-                        mark_wrap_approve_tx_hashed(
-                            command_id, tx_hash, conn=conn,
-                        )
-                    else:
-                        mark_wrap_tx_hashed(command_id, tx_hash, conn=conn)
-                    conn.commit()
-                    submitted += 1
-                    logger.info(
-                        "wrap_submitter: command_id=%s tx_kind=%s tx_hash=%s",
-                        command_id, tx_kind, tx_hash,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    try:
-                        conn.rollback()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    failed += 1
-                    logger.error(
-                        "wrap_submitter: command_id=%s tx_kind=%s error=%s",
-                        command_id, tx_kind, exc,
-                    )
-                    try:
-                        fail_wrap(
-                            command_id,
-                            error_payload={"error": str(exc), "tx_kind": tx_kind},
-                            conn=conn,
-                        )
-                        conn.commit()
-                    except Exception:  # noqa: BLE001
-                        pass
-            logger.info("wrap_submitter: submitted=%d failed=%d", submitted, failed)
-            if failed:
-                raise RuntimeError(f"wrap_submitter: submitted={submitted} failed={failed}")
-        finally:
-            conn.close()
 
 
-@_scheduler_job("wrap_reconciler")
-def _wrap_reconciler_cycle() -> None:
-    """Poll WRAP_APPROVE_TX_HASHED and WRAP_TX_HASHED rows; advance state on receipt.
-
-    On WRAP_CONFIRMED, calls adapter.update_balance_allowance() to refresh CLOB ledger.
-    Skipped in non-live mode.
-    """
-    from src.data.dual_run_lock import acquire_lock
-    from src.data.polymarket_client import (
-        resolve_polymarket_credentials,
-        _resolve_clob_v2_signature_type,
-        _resolve_q1_egress_evidence_path,
-    )
-    from src.execution.wrap_unwrap_commands import (
-        WrapUnwrapState,
-        init_wrap_unwrap_schema,
-        reconcile_pending_wraps,
-    )
-    from src.state.db import get_world_connection
-    from src.venue.polymarket_v2_adapter import (
-        DEFAULT_Q1_EGRESS_EVIDENCE,
-        DEFAULT_POLYGON_RPC_URL,
-        DEFAULT_V2_HOST,
-        PolymarketV2Adapter,
-        Q1_EGRESS_EVIDENCE_ENV,
-    )
-
-    if get_mode() != "live":
-        logger.info("wrap_reconciler skipped_non_live mode=%s", get_mode())
-        return
-
-    # P0-2 (d): single shared wrap state-machine lock (was "wrap_reconciler").
-    with acquire_lock("wrap_state_machine") as acquired:
-        if not acquired:
-            logger.info("wrap_reconciler skipped_lock_held")
-            return
-        try:
-            from web3 import Web3
-        except ImportError:
-            logger.info("wrap_reconciler: web3 not installed; skipping")
-            return
-        polygon_rpc_url = os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL)
-        w3 = Web3(Web3.HTTPProvider(polygon_rpc_url, request_kwargs={"timeout": 15}))
-        conn = get_world_connection()
-        try:
-            init_wrap_unwrap_schema(conn)
-            reconcile_states = (
-                WrapUnwrapState.WRAP_APPROVE_TX_HASHED.value,
-                WrapUnwrapState.WRAP_TX_HASHED.value,
-            )
-            rows = conn.execute(
-                "SELECT command_id FROM wrap_unwrap_commands WHERE state IN (?,?)",
-                reconcile_states,
-            ).fetchall()
-            if not rows:
-                logger.debug("wrap_reconciler: no rows to reconcile")
-                return
-            try:
-                creds = resolve_polymarket_credentials()
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    f"wrap_reconciler: credentials unavailable (fail-closed): {exc}"
-                ) from exc
-            q1_egress_evidence = _resolve_q1_egress_evidence_path(
-                default=DEFAULT_Q1_EGRESS_EVIDENCE, env_name=Q1_EGRESS_EVIDENCE_ENV,
-            )
-            adapter = PolymarketV2Adapter(
-                host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
-                funder_address=creds["funder_address"],
-                signer_key=creds["private_key"],
-                chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
-                signature_type=_resolve_clob_v2_signature_type(),
-                polygon_rpc_url=polygon_rpc_url,
-                api_creds=creds.get("api_creds"),
-                q1_egress_evidence_path=q1_egress_evidence,
-            )
-            try:
-                results = reconcile_pending_wraps(w3, adapter, conn)
-                conn.commit()
-                logger.info(
-                    "wrap_reconciler: reconciled=%d states=%s",
-                    len(results), [r.get("state") for r in results],
-                )
-            except Exception as exc:
-                try:
-                    conn.rollback()
-                except Exception:  # noqa: BLE001
-                    pass
-                logger.error("wrap_reconciler: error=%s", exc)
-                raise
-        finally:
-            conn.close()
 
 
 def _assert_cascade_liveness_contract(scheduler) -> None:
@@ -2879,217 +2237,6 @@ def _auto_derive_user_channel_condition_ids(
         return []
 
 
-def _start_user_channel_ingestor_if_enabled() -> None:
-    """Start M3 Polymarket user-channel ingest in a daemon thread when enabled.
-
-    Disabled by default so M3 adds no live WebSocket side effect until an
-    operator explicitly enables `ZEUS_USER_CHANNEL_WS_ENABLED=1` and supplies
-    condition IDs or enables condition auto-derive. L2 API credentials come
-    from the Polymarket adapter's signer-bound SDK client, not static env. If
-    enabled but misconfigured, the WS guard records an auth/config gap so new
-    submits fail closed.
-
-    Live-blockers 2026-05-01: when the WS is NOT enabled (or required env
-    vars are missing) we now emit a single CLEAR WARNING line listing every
-    missing var. Today the silent skip leaves operators with the cryptic
-    ``ws_user_channel.gap_reason='not_configured'`` symptom and no surface
-    explanation of which env vars to add to the launchd plist before the
-    daemon can leave reduce_only mode.
-
-    Auto-derive (2026-05-01): when ``ZEUS_USER_CHANNEL_WS_AUTO_DERIVE=1`` is
-    set together with the master toggle and ``POLYMARKET_USER_WS_CONDITION_IDS``
-    is empty, the subscription list is derived from the live market scanner
-    so the daemon subscribes to exactly the markets it can trade, without
-    a hardcoded plist value that would drift from on-chain truth as markets
-    rotate (operator directive 2026-05-01: hardcoded values are structural
-    failures). Operator can still pin a list via the env var; a non-empty
-    env var always wins. Auto-derive returning 0 markets is a WARNING, not
-    an error — the daemon stays in reduce_only mode, the WS guard reports
-    ``condition_ids_missing``, and no exception escapes boot.
-    """
-    global _user_channel_ingestor, _user_channel_thread
-    if not _truthy_env("ZEUS_USER_CHANNEL_WS_ENABLED"):
-        missing = [
-            name for name in USER_CHANNEL_REQUIRED_ENV_VARS
-            if not (os.environ.get(name) or "").strip()
-        ]
-        logger.warning(
-            "user-channel WS not configured: missing env vars %s; "
-            "daemon stays in reduce_only=True mode",
-            missing,
-        )
-        return
-    if _user_channel_thread is not None and _user_channel_thread.is_alive():
-        return
-
-    raw_markets = os.environ.get("POLYMARKET_USER_WS_CONDITION_IDS", "")
-    condition_ids = [m.strip() for m in raw_markets.split(",") if m.strip()]
-    auto_derived = False
-    if not condition_ids and _truthy_env("ZEUS_USER_CHANNEL_WS_AUTO_DERIVE"):
-        condition_ids = _auto_derive_user_channel_condition_ids()
-        auto_derived = True
-        logger.info(
-            "user-channel WS auto-derive yielded %d condition_ids "
-            "(POLYMARKET_USER_WS_CONDITION_IDS empty, ZEUS_USER_CHANNEL_WS_AUTO_DERIVE=1)",
-            len(condition_ids),
-        )
-
-    if not condition_ids:
-        from src.control.ws_gap_guard import record_gap
-
-        record_gap("condition_ids_missing", subscription_state="MARKET_MISMATCH")
-        if auto_derived:
-            logger.warning(
-                "user-channel WS auto-derive yielded 0 condition_ids; daemon stays "
-                "in reduce_only=True mode. Markets may be empty or the gamma query "
-                "failed; check src.data.market_scanner."
-            )
-            return
-        raise RuntimeError("POLYMARKET_USER_WS_CONDITION_IDS is required when ZEUS_USER_CHANNEL_WS_ENABLED=1")
-
-    from src.data.polymarket_client import PolymarketClient
-    from src.control.ws_gap_guard import record_gap
-    from src.ingest.polymarket_user_channel import PolymarketUserChannelIngestor, WSAuth
-
-    adapter = PolymarketClient()._ensure_v2_adapter()
-
-    _WS_RETRY_BASE_SECONDS = 5
-    _WS_RETRY_MAX_SECONDS = 300  # cap at 5 minutes
-
-    # Boot-time transient failures from signer-bound L2 credential derivation
-    # used to latch AUTH_FAILED forever because the
-    # creds fetch lived outside the retry loop with a bare `return` on exception —
-    # no thread ever started, ws_gap_guard never received a SUBSCRIBED message,
-    # daemon stayed in reduce_only=True until the next SIGTERM.
-    #
-    # Structural fix: factor creds+ingestor construction into a helper that gets
-    # invoked (a) eagerly so a healthy boot constructs synchronously like before,
-    # and (b) again from inside the retry loop whenever the prior attempt failed
-    # or the start() coroutine exited. Either path independently advances the
-    # daemon — transient API failures no longer permanently latch the WS guard.
-    # Map exception types to ws_gap_guard subscription_state so operator
-    # telemetry distinguishes "auth/creds failed" from generic transport/network
-    # failures. AUTH_FAILED gates differently from DISCONNECTED in the gap guard
-    # (auth requires operator intervention; disconnect retries cleanly).
-    # Conservative classification: only treat creds-shape failures as AUTH_FAILED.
-    def _classify_build_failure(exc: BaseException) -> str:
-        name = type(exc).__name__
-        msg = str(exc).lower()
-        auth_signals = (
-            "creds",
-            "auth",
-            "api_key",
-            "api-key",
-            "passphrase",
-            "secret",
-            "signature",
-            "unauthorized",
-            "401",
-            "403",
-        )
-        if any(sig in msg for sig in auth_signals):
-            return "AUTH_FAILED"
-        if name in {"WSAuthMissing", "ValueError", "TypeError"} and "creds" in msg:
-            return "AUTH_FAILED"
-        return "DISCONNECTED"
-
-    def _build_ingestor() -> "PolymarketUserChannelIngestor | None":
-        global _user_channel_ingestor
-        # Invalidate the adapter's memoized SDK client so this attempt forces a
-        # fresh signer-bound L2 credential derivation rather than reusing a cached
-        # client whose creds were None from a prior failed boot
-        # (codereview-may19 / Codex P1: src/venue/polymarket_v2_adapter.py:286
-        # memoizes self._client; without reset, every retry sees the same bad
-        # creds and the loop never recovers).
-        try:
-            adapter._client = None  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
-            # Adapter might not expose the attribute on all stub paths; non-fatal.
-            pass
-
-        try:
-            sdk_client = adapter._sdk_client()
-            sdk_creds = sdk_client.creds
-            if sdk_creds is None:
-                raise RuntimeError(
-                    "adapter._sdk_client().creds is None "
-                    "(signer-bound L2 credential derivation failed)"
-                )
-            ws_auth = WSAuth(
-                api_key=sdk_creds.api_key,
-                secret=sdk_creds.api_secret,
-                passphrase=sdk_creds.api_passphrase,
-            )
-            ingestor = PolymarketUserChannelIngestor(
-                adapter, condition_ids, auth=ws_auth
-            )
-            _user_channel_ingestor = ingestor
-            return ingestor
-        except Exception as exc:
-            subscription_state = _classify_build_failure(exc)
-            gap_reason = f"user_channel_attempt_failed:{type(exc).__name__}"
-            record_gap(gap_reason, subscription_state=subscription_state)
-            logger.error(
-                "M3 user-channel ingestor build failed (subscription_state=%s): %s; "
-                "will retry inside daemon thread",
-                subscription_state,
-                exc,
-                exc_info=True,
-            )
-            return None
-
-    # Eager best-effort construction (preserves the synchronous-build contract
-    # that callers and unit tests rely on when the boot environment is healthy).
-    _build_ingestor()
-
-    def _runner() -> None:
-        global _user_channel_ingestor
-        import asyncio
-        import time as _time
-
-        attempt = 0
-        while True:
-            attempt += 1
-            ingestor = _user_channel_ingestor or _build_ingestor()
-            if ingestor is not None:
-                try:
-                    asyncio.run(ingestor.start())
-                    logger.warning(
-                        "M3 user-channel ingestor exited cleanly; reconnecting"
-                    )
-                except Exception as exc:
-                    logger.error(
-                        "M3 user-channel ingestor attempt %d stopped: %s",
-                        attempt,
-                        exc,
-                        exc_info=True,
-                    )
-                # Force a fresh creds fetch on the next iteration — auth tokens may
-                # have expired and a stale ingestor would just fail-loop again.
-                _user_channel_ingestor = None
-            backoff = min(
-                _WS_RETRY_BASE_SECONDS * (2 ** min(attempt - 1, 6)),
-                _WS_RETRY_MAX_SECONDS,
-            )
-            logger.info(
-                "M3 user-channel ingestor will retry in %.0fs (attempt %d)",
-                backoff,
-                attempt,
-            )
-            _time.sleep(backoff)
-
-    _user_channel_thread = threading.Thread(
-        target=_runner,
-        name="polymarket-user-channel",
-        daemon=True,
-    )
-    _user_channel_thread.start()
-    logger.info(
-        "M3 user-channel ingestor thread launched for %d condition_ids "
-        "(auto_derived=%s); creds re-fetched per-attempt inside retry loop on failure",
-        len(condition_ids),
-        auto_derived,
-    )
 
 
 @_scheduler_job("venue_heartbeat")
@@ -4388,147 +3535,10 @@ def _refresh_pending_family_snapshots(
     return result
 
 
-def _edli_pending_opportunity_count() -> int:
-    """Return current pending EDLI event count for background substrate arbitration."""
-
-    from src.state.db import get_world_connection
-
-    conn = get_world_connection()
-    try:
-        try:
-            row = conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM opportunity_event_processing
-                WHERE consumer_name = 'edli_reactor_v1'
-                  AND processing_status = 'pending'
-                """
-            ).fetchone()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "market_discovery pending-count read failed; continuing discovery: %r",
-                exc,
-            )
-            return 0
-        return int(row[0] or 0) if row is not None else 0
-    finally:
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
-def _market_discovery_pending_fairness_seconds() -> float:
-    return max(
-        0.0,
-        float(os.environ.get("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300.0")),
-    )
 
 
-@_scheduler_job("market_discovery")
-def _market_discovery_cycle() -> None:
-    """Refresh executable market substrate outside decision-cycle critical path."""
-
-    global _market_discovery_last_completed_monotonic
-
-    if _defer_for_held_position_monitor("market_discovery"):
-        return
-    if _edli_reactor_active():
-        logger.info("market_discovery deferred: EDLI reactor active")
-        return
-    edli_cfg = _settings_section("edli", {})
-    pending_count = 0
-    defer_when_pending = str(
-        os.environ.get("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
-    ).strip().lower() not in {"0", "false", "no", "off"}
-    if edli_cfg.get("enabled") and defer_when_pending:
-        try:
-            pending_count = _edli_pending_opportunity_count()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "market_discovery pending-count arbitration failed; continuing discovery: %r",
-                exc,
-            )
-            pending_count = 0
-        fairness_s = _market_discovery_pending_fairness_seconds()
-        last_completed = _market_discovery_last_completed_monotonic
-        recent_discovery = (
-            fairness_s > 0
-            and last_completed is not None
-            and (time.monotonic() - last_completed) < fairness_s
-        )
-        if pending_count > 0 and recent_discovery:
-            logger.info(
-                "market_discovery deferred: %d EDLI pending events need substrate warm priority "
-                "(last discovery %.1fs ago, fairness %.1fs)",
-                pending_count,
-                time.monotonic() - last_completed,
-                fairness_s,
-            )
-            return
-    acquired = _market_discovery_lock.acquire(blocking=False)
-    if not acquired:
-        logger.warning("market_discovery skipped: previous market_discovery still running")
-        return
-    # ANTIBODY (2026-06-08, operator directive — kill the regression CATEGORY, not the instance):
-    # executable-substrate capture is NEVER gated by the EDLI pending backlog. The old
-    # "pending>0 -> topology-only (skip snapshot capture)" branch here was the coverage-collapse
-    # regression: a growing pending working set (e.g. the channel-event flood when the prune
-    # flag is off) kept market_discovery doing topology-only FOREVER, so families went
-    # uncaptured, FSR events dead-lettered on the snapshot gate, and the system silently stopped
-    # trading — with nothing connecting cause (a backlog) to effect (no coverage). Substrate
-    # capture is gated ONLY by substrate STALENESS (the fairness early-return above, keyed on
-    # _market_discovery_last_completed_monotonic), never by queue depth. Reaching here means the
-    # substrate is stale (the fresh case already returned at the fairness check), so capture the
-    # universe regardless of how many events are pending.
-    substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
-    if not substrate_acquired:
-        _market_discovery_lock.release()
-        logger.info("market_discovery deferred: executable substrate refresh already running")
-        return
-    try:
-        from src.data.market_scanner import (
-            find_weather_markets_or_raise,
-            refresh_executable_market_substrate_snapshots,
-        )
-        from src.data.polymarket_client import PolymarketClient
-        from src.state.db import get_trade_connection
-
-        events = find_weather_markets_or_raise(
-            min_hours_to_resolution=0.0,
-            include_slug_pattern=True,
-        )
-        conn = get_trade_connection(write_class="live")
-        try:
-            _discovery_clob_timeout = max(
-                1.0,
-                float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
-            )
-            with PolymarketClient(public_http_timeout=_discovery_clob_timeout) as snapshot_clob:
-                snapshot_summary = refresh_executable_market_substrate_snapshots(
-                    conn,
-                    markets=events,
-                    clob=snapshot_clob,
-                    captured_at=datetime.now(timezone.utc),
-                    scan_authority="VERIFIED",
-                )
-            conn.commit()
-        finally:
-            conn.close()
-        if snapshot_summary.get("attempted", 0) > 0 and snapshot_summary.get("inserted", 0) == 0:
-            raise RuntimeError(
-                "market_discovery refreshed events but captured no executable snapshots: "
-                f"{snapshot_summary}"
-            )
-        logger.info(
-            "market_discovery: refreshed %s weather events; executable_snapshots=%s",
-            len(events),
-            snapshot_summary,
-        )
-        _market_discovery_last_completed_monotonic = time.monotonic()
-    finally:
-        _market_substrate_refresh_lock.release()
-        _market_discovery_lock.release()
 
 
 @_scheduler_job("afternoon_snapshot_capture")
@@ -7284,93 +6294,6 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         _edli_redecision_screen_lock.release()
 
 
-@_scheduler_job("edli_market_substrate_warm")
-def _edli_market_substrate_warm_cycle() -> None:
-    """Dedicated EDLI executable-snapshot substrate warmer, DECOUPLED from the reactor.
-
-    THROUGHPUT STRUCTURAL FIX (2026-06-01): _refresh_pending_family_snapshots makes a
-    full-universe Gamma scan (find_weather_markets → _get_active_events, benchmarked
-    ~76s COLD; TTL 300s so it re-ran nearly every cycle) + per-token CLOB /book capture
-    across all pending-family bins. Running it INLINE at the top of
-    _edli_event_reactor_cycle made the reactor's wall-clock blow past its 1-min
-    APScheduler interval — with max_instances=1/coalesce=True, every overlapping trigger
-    was skipped, so process_pending essentially never ran (23 min with ZERO completed
-    cycles / ZERO trades observed on the live daemon, even though the submit path is
-    CODE-CLEAR to the venue POST boundary).
-
-    Moving the refresh here (mirroring _edli_bankroll_warm_cycle, #45) puts the expensive
-    venue-I/O on its OWN cadence so the reactor reads ALREADY-captured snapshots
-    (DB-only, microseconds) and reaches submit in seconds. This changes NO decision: the
-    reactor's no-submit proof, full gate chain, and just-in-time submit /book are
-    byte-for-byte unchanged — they just consume snapshots a background job produced.
-    Fail-closed is preserved: a family not yet captured this tick requeues via the
-    reactor's existing EXECUTABLE_SNAPSHOT_RETRY path.
-
-    Not a DB writer of its own ledger — it delegates to _refresh_pending_family_snapshots,
-    which owns its write trade connection + commit. The @_scheduler_job decorator is the
-    only wiring needed (B047). Fail-soft: a transient Gamma/CLOB failure logs but never
-    crashes this job (the next tick retries; consumers stay fail-closed in the interim).
-    """
-
-    edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled"):
-        return
-    if _defer_for_held_position_monitor("EDLI market-substrate warm"):
-        return
-    from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_world_connection
-
-    conn = get_world_connection()
-    # K1: the snapshot refresh reads market topology off the forecasts DB (market_events).
-    # Attach read-only (idempotent) so the family-topology lookup resolves, mirroring the
-    # reactor's own ATTACH. _refresh_pending_family_snapshots opens its own WRITE trade
-    # connection internally and commits — this conn is only the world-side pending-event
-    # reader.
-    try:
-        _attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
-        if "forecasts" not in _attached:
-            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
-    except Exception as _attach_exc:  # noqa: BLE001 — non-fatal; refresh logs+skips on topology miss
-        logger.warning(
-            "EDLI market-substrate warm: ATTACH forecasts failed (non-fatal): %r", _attach_exc
-        )
-    forecasts_conn = get_forecasts_connection_read_only()
-    substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
-    if not substrate_acquired:
-        logger.info("EDLI market-substrate warm skipped: executable substrate refresh already running")
-        try:
-            forecasts_conn.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            pass
-        return
-    try:
-        # _refresh_pending_family_snapshots never raises by contract (it logs+returns an
-        # error dict), but wrap defensively so a venue-I/O failure can NEVER propagate out
-        # of the scheduler job (the reactor stays decoupled and fail-closed regardless).
-        summary = _refresh_pending_family_snapshots(conn, forecasts_conn)
-        logger.info("EDLI market-substrate warm: refresh summary=%r", summary)
-    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
-        logger.error(
-            "EDLI market-substrate warm: refresh raised (non-fatal, snapshots did not "
-            "advance this tick): %r",
-            exc,
-        )
-    finally:
-        try:
-            _market_substrate_refresh_lock.release()
-        except RuntimeError:
-            pass
-        try:
-            forecasts_conn.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 @_scheduler_job("edli_mainstream_warm")
@@ -9129,215 +8052,6 @@ def _edli_pending_reconcile_aggregates(conn, *, limit: int) -> list:
     )
 
 
-def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
-    """MF-1: durable, idempotent, self-healing EDLI fill -> position_current scan.
-
-    THE authoritative bridge trigger (replaces the transient
-    ``_edli_fill_bridge_aggregate_ids`` set as the source of truth). Finds every
-    aggregate in ``edli_live_order_events`` carrying a ``UserTradeObserved`` with
-    ``fill_authority_state == 'FILL_CONFIRMED'`` whose deterministic
-    ``edli_bridge_position_id`` has NO ``position_current`` row, and materialises
-    each via the idempotent canonical bridge.
-
-    Why this closes the orphan window (the verified DEFECT): the old path only
-    bridged aggregates that went PENDING->PROCESSED *this cycle*, holding them in
-    an in-memory set. A daemon death OR a swallowed bridge exception between the
-    inbox PROCESSED commit and the separate bridge commit left a FILL_CONFIRMED
-    aggregate with no position_current row; on restart the set was empty and
-    nothing re-bridged it -> capital orphaned. This scan re-derives the work set
-    durably from ``edli_live_order_events`` (the persisted truth), so it heals any
-    such orphan on the very next cycle AND at boot, regardless of process restarts.
-
-    Idempotency: ``materialize_position_current_from_edli_fill`` upserts
-    ``position_current`` (ON CONFLICT(position_id) DO UPDATE) and appends
-    ``position_events`` keyed UNIQUE(position_id, sequence_no) — re-bridging an
-    already-bridged fill is a no-op for events and a safe UPDATE for the
-    projection. The absence filter below ALSO skips already-bridged aggregates so
-    a healthy daemon does no redundant work.
-
-    INV-37 / transaction ownership: reads ``edli_live_order_events`` and writes
-    ``position_current`` / ``position_events`` ON THE SAME connection ``conn``
-    (in production a trade connection with ``world`` ATTACHed). Performs NO
-    independent connection and does NOT commit — the caller owns the transaction
-    boundary (the cycle / boot wrapper commits once after the scan).
-
-    Returns the number of orphaned fills bridged this pass.
-    """
-    from src.events.edli_position_bridge import (
-        DISPOSITION_QUARANTINED,
-        DISPOSITION_SETTLED_MARKET,
-        _QUARANTINE_THRESHOLD,
-        _aggregate_event_rows,
-        _edli_events_table,
-        _has_confirmed_fill,
-        _increment_failure_count,
-        _latest_payload,
-        _market_is_settled,
-        _quarantine_aggregate,
-        _record_settled_disposition,
-        edli_bridge_position_id,
-        edli_bridge_position_id_legacy,
-        get_fill_bridge_disposition,
-        materialize_position_current_from_edli_fill,
-    )
-
-    now = now or datetime.now(timezone.utc)
-    now_str = now.isoformat()
-    today_utc = now_str[:10]
-
-    table = _edli_events_table(conn)
-    try:
-        if table == "world.edli_live_order_events":
-            sql = """
-            SELECT DISTINCT aggregate_id
-            FROM world.edli_live_order_events
-            WHERE event_type = 'UserTradeObserved'
-              AND json_extract(payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
-            ORDER BY aggregate_id ASC
-            """
-        elif table == "edli_live_order_events":
-            sql = """
-            SELECT DISTINCT aggregate_id
-            FROM edli_live_order_events
-            WHERE event_type = 'UserTradeObserved'
-              AND json_extract(payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
-            ORDER BY aggregate_id ASC
-            """
-        else:
-            raise ValueError(f"unexpected EDLI events table: {table!r}")
-
-        candidate_rows = conn.execute(sql).fetchall()
-    except Exception as exc:  # noqa: BLE001
-        # Missing table / attach (e.g. a degraded boot) must not crash the
-        # caller — the EDLI events persist and the next cycle retries.
-        logger.error(
-            "EDLI durable fill-bridge scan: candidate query failed "
-            "(non-fatal; retries next cycle): %s",
-            exc,
-            exc_info=True,
-        )
-        return 0
-
-    bridged = 0
-    new_fills_seen = 0  # counts only aggregates that need bridging (limit gate)
-    for row in candidate_rows:
-        aggregate_id = str(_row_get(row, "aggregate_id"))
-        position_id = edli_bridge_position_id(aggregate_id)
-        # Dual-probe: check BOTH the wide (new, 68-char) ID and the legacy
-        # narrow (old, 11-char) ID.  The 101 rows written before FIX #96
-        # carry the old short ID; probing only the wide ID would miss them
-        # and re-bridge the same aggregate into a second position_current row
-        # (duplicate position identity = live-money hazard).
-        legacy_position_id = edli_bridge_position_id_legacy(aggregate_id)
-        existing = conn.execute(
-            "SELECT 1 FROM position_current WHERE position_id IN (?, ?) LIMIT 1",
-            (position_id, legacy_position_id),
-        ).fetchone()
-        if existing is not None:
-            # Already bridged (wide or legacy id) — idempotent skip.
-            continue
-
-        # Disposition check: skip terminally routed aggregates (settled or quarantined).
-        # These do NOT count against the new-fill budget.
-        prior_disposition = get_fill_bridge_disposition(conn, aggregate_id)
-        if prior_disposition in (DISPOSITION_SETTLED_MARKET, DISPOSITION_QUARANTINED):
-            continue
-
-        # --- Settled-market routing (category-kill 1) ---
-        # Before attempting to bridge, check whether the market has settled.
-        # Read the PreSubmitRevalidated payload to get identity fields; if the
-        # aggregate lacks one or the EDLI events are absent, fall through to normal
-        # bridge logic (which will raise/fail on its own terms).
-        try:
-            events = _aggregate_event_rows(conn, aggregate_id)
-            if events and _has_confirmed_fill(events):
-                pre_submit = _latest_payload(events, "PreSubmitRevalidated") or {}
-                city = str(pre_submit.get("city") or "").strip()
-                target_date = str(pre_submit.get("target_date") or "").strip()
-                metric = str(pre_submit.get("metric") or pre_submit.get("temperature_metric") or "").strip().lower()
-                if target_date:  # only run settled check when we have a target_date
-                    is_settled, evidence = _market_is_settled(
-                        conn,
-                        city=city,
-                        target_date=target_date,
-                        temperature_metric=metric,
-                        today_utc=today_utc,
-                    )
-                    if is_settled:
-                        logger.warning(
-                            "EDLI fill-bridge: SETTLED_MARKET_FILL_BOOKED — "
-                            "aggregate=%s market already settled (%s); "
-                            "booked for accounting, no position_current row created",
-                            aggregate_id,
-                            evidence,
-                        )
-                        _record_settled_disposition(conn, aggregate_id, evidence, now_str)
-                        continue  # does NOT count against new_fills_seen budget
-        except Exception as _settle_exc:  # noqa: BLE001
-            # Settlement check is best-effort. If it fails, fall through to normal bridge
-            # logic (which will handle the failure via quarantine path below).
-            logger.debug(
-                "EDLI fill-bridge: settled-market check failed for %s (non-fatal): %s",
-                aggregate_id,
-                _settle_exc,
-            )
-
-        # --- New-fill budget gate (applied AFTER skipping disposed/settled aggregates) ---
-        # This ensures persistent failures do not starve new real fills in the budget.
-        if new_fills_seen >= max(0, limit):
-            break
-        new_fills_seen += 1
-
-        try:
-            result = materialize_position_current_from_edli_fill(
-                conn, aggregate_id, now=now
-            )
-            if result is not None:
-                bridged += 1
-                logger.warning(
-                    "EDLI durable fill-bridge: HEALED orphaned confirmed fill "
-                    "aggregate=%s -> position_id=%s shares=%s cost_basis_usd=%s",
-                    aggregate_id,
-                    result.get("position_id"),
-                    result.get("shares"),
-                    result.get("cost_basis_usd"),
-                )
-        except Exception as exc:  # noqa: BLE001
-            # --- Bounded-retry quarantine (category-kill 2) ---
-            # Track consecutive failures; quarantine after _QUARANTINE_THRESHOLD attempts.
-            # Transient faults will clear on the next cycle (attempt_count resets on success
-            # would require extra state; here we accept that count is monotone — the category
-            # of interest is aggregates that NEVER succeed, not those that occasionally fail).
-            error_str = str(exc)
-            try:
-                attempt_count = _increment_failure_count(conn, aggregate_id, error_str, now_str)
-            except Exception:  # noqa: BLE001
-                attempt_count = 1
-
-            if attempt_count >= _QUARANTINE_THRESHOLD:
-                logger.error(
-                    "EDLI fill-bridge: QUARANTINED aggregate=%s after %d consecutive failures "
-                    "(excluded from future scans); last_error=%s",
-                    aggregate_id,
-                    attempt_count,
-                    error_str[:500],
-                )
-                try:
-                    _quarantine_aggregate(conn, aggregate_id, error_str, attempt_count, now_str)
-                except Exception:  # noqa: BLE001
-                    pass
-            else:
-                # Still within retry window — log at error level but don't quarantine yet.
-                logger.error(
-                    "EDLI durable fill-bridge: failed to bridge aggregate %s "
-                    "(attempt %d/%d; EDLI events persist, next scan retries): %s",
-                    aggregate_id,
-                    attempt_count,
-                    _QUARANTINE_THRESHOLD,
-                    exc,
-                    exc_info=True,
-                )
-    return bridged
 
 
 def _edli_user_channel_reconcile_runtime_enabled(edli_cfg: dict) -> bool:
@@ -9348,235 +8062,6 @@ def _edli_user_channel_reconcile_runtime_enabled(edli_cfg: dict) -> bool:
     return False
 
 
-@_scheduler_job("edli_user_channel_reconcile")
-def _edli_user_channel_reconcile_cycle() -> None:
-    """EDLI user-channel/reconcile service boundary.
-
-    Disabled by default. The live-order aggregate may only accept fill/lifecycle
-    facts from authenticated user channel or explicit reconcile writers; public
-    market-channel data remains quote evidence only.
-    """
-
-    edli_cfg = _settings_section("edli", {})
-    if not _edli_user_channel_reconcile_runtime_enabled(edli_cfg):
-        return
-    max_messages = int(edli_cfg.get("edli_user_channel_reconcile_max_messages", 50))
-    pending_limit = int(edli_cfg.get("edli_user_channel_reconcile_pending_limit", 50))
-    now = datetime.now(timezone.utc)
-    message_count = 0
-    reconcile_count = 0
-    # DEFECT-1: aggregates whose user-channel TRADE message was processed this
-    # cycle. After the world-conn commit, the bridge materialises a canonical
-    # position_current row for each that reached FILL_CONFIRMED.
-    _edli_fill_bridge_aggregate_ids: set[str] = set()
-    from src.events.live_order_aggregate import LiveOrderAggregateLedger
-    from src.events.live_order_reconcile import append_reconciled
-    from src.events.triggers.user_channel_ingestor import (
-        INBOX_DUPLICATE,
-        INBOX_FAILED,
-        INBOX_PROCESSED,
-        INBOX_STALE_REJECTED,
-        append_user_channel_message,
-        enqueue_user_channel_inbox_message,
-        inbox_row_to_user_channel_message,
-        mark_user_channel_inbox_status,
-        pending_user_channel_inbox_messages,
-    )
-
-    conn = get_world_connection(write_class="live")
-    try:
-        ledger = LiveOrderAggregateLedger(conn)
-        user_channel_reader = _edli_user_channel_reader(edli_cfg)
-        for message in user_channel_reader.poll(max_messages=max_messages):
-            aggregate_id = _resolve_edli_user_channel_aggregate_id(conn, message)
-            message_hash = str(message.get("message_hash") or "").strip()
-            if not message_hash:
-                raise RuntimeError("EDLI_USER_CHANNEL_MESSAGE_HASH_REQUIRED")
-            occurred_at = _parse_edli_runtime_time(message, default=now)
-            enqueue_user_channel_inbox_message(
-                conn,
-                message=message,
-                aggregate_id=aggregate_id,
-                occurred_at=occurred_at,
-                received_at=now,
-            )
-
-        for inbox_row in pending_user_channel_inbox_messages(conn, limit=max_messages):
-            message_hash = str(_row_get(inbox_row, "message_hash"))
-            aggregate_id = str(_row_get(inbox_row, "aggregate_id"))
-            try:
-                message = inbox_row_to_user_channel_message(inbox_row)
-                occurred_at = _parse_edli_runtime_time(
-                    {"occurred_at": _row_get(inbox_row, "occurred_at")},
-                    default=now,
-                )
-                _edli_user_channel_message_not_stale(conn, aggregate_id=aggregate_id, occurred_at=occurred_at)
-                if _edli_user_channel_message_seen(conn, aggregate_id=aggregate_id, message_hash=message_hash):
-                    mark_user_channel_inbox_status(
-                        conn,
-                        message_hash=message_hash,
-                        status=INBOX_DUPLICATE,
-                        processed_at=now,
-                    )
-                    continue
-                append_user_channel_message(
-                    ledger,
-                    aggregate_id=aggregate_id,
-                    message=message,
-                    occurred_at=occurred_at,
-                )
-                mark_user_channel_inbox_status(
-                    conn,
-                    message_hash=message_hash,
-                    status=INBOX_PROCESSED,
-                    processed_at=now,
-                )
-                message_count += 1
-                # DEFECT-1 bridge (capital recoverability): a confirmed EDLI
-                # fill must materialise a canonical position_current row so
-                # chain-reconciliation / exit-lifecycle / harvester / redeem can
-                # see it. The actual cross-DB write happens AFTER this world-conn
-                # commit, on a trade-connection-with-world-attached (INV-37) —
-                # here we only record which aggregates received a trade message.
-                _message_kind = str(message.get("message_type") or message.get("type") or "").lower()
-                if _message_kind == "trade":
-                    _edli_fill_bridge_aggregate_ids.add(aggregate_id)
-            except RuntimeError as exc:
-                status = INBOX_STALE_REJECTED if "STALE" in str(exc) else INBOX_FAILED
-                mark_user_channel_inbox_status(
-                    conn,
-                    message_hash=message_hash,
-                    status=status,
-                    processed_at=now,
-                    error=str(exc),
-                )
-            except Exception as exc:
-                mark_user_channel_inbox_status(
-                    conn,
-                    message_hash=message_hash,
-                    status=INBOX_FAILED,
-                    processed_at=now,
-                    error=str(exc),
-                )
-
-        venue_reconcile_reader = _edli_venue_reconcile_reader(edli_cfg)
-        for pending in _edli_pending_reconcile_aggregates(conn, limit=pending_limit):
-            fact = venue_reconcile_reader.reconcile(pending)
-            if not fact:
-                continue
-            append_reconciled(
-                ledger,
-                aggregate_id=str(_row_get(pending, "aggregate_id")),
-                event_id=str(fact.get("event_id") or _row_get(pending, "event_id")),
-                final_intent_id=str(fact.get("final_intent_id") or _row_get(pending, "final_intent_id")),
-                source=str(fact.get("source") or "venue_reconcile"),
-                pending_reconcile=_parse_edli_runtime_bool(fact.get("pending_reconcile"), default=False),
-                occurred_at=_parse_edli_runtime_time(fact, default=now),
-                payload=fact.get("payload") if isinstance(fact.get("payload"), dict) else None,
-            )
-            reconcile_count += 1
-        from src.events.edli_trade_fact_bridge import (
-            append_confirmed_trade_facts_to_edli,
-            append_rest_filled_orphan_trade_facts_to_edli,
-        )
-
-        reconcile_count += append_confirmed_trade_facts_to_edli(conn, now=now)
-        # Fill-orphan recovery (HK 30C 2026-06-12 incident): a venue fill whose
-        # WS_USER CONFIRMED message was lost to a user-channel dropout exists
-        # only as a REST trade fact and can never reach FILL_CONFIRMED through
-        # the bridge above — the position is never materialised and the P&L is
-        # never booked. The recovery lane asserts fill truth under the explicit
-        # RECONCILE_SOURCE authority (cmd terminal FILLED/PARTIAL + REST fact +
-        # grace window for the user channel), with full provenance in payload.
-        if bool(_settings_section("edli", {}).get("edli_rest_filled_bridge_enabled", True)):
-            try:
-                reconcile_count += append_rest_filled_orphan_trade_facts_to_edli(conn, now=now)
-            except Exception as exc:  # noqa: BLE001 — recovery lane must not break WS truth path
-                logger.error(
-                    "EDLI rest-filled orphan bridge failed (non-fatal): %s", exc, exc_info=True
-                )
-        conn.commit()
-    finally:
-        conn.close()
-
-    # MF-1 / DEFECT-1 bridge pass (capital recoverability). The EDLI events are
-    # now durable on world.db. Materialise a canonical position_current row for
-    # any aggregate that reached FILL_CONFIRMED so the legacy lifecycle
-    # (chain-reconciliation / exit / harvester / redeem) can see and recover the
-    # position.
-    #
-    # AUTHORITATIVE TRIGGER = the durable, idempotent scan
-    # (_edli_durable_fill_bridge_scan): it re-derives the work set from the
-    # persisted edli_live_order_events on EVERY cycle, so a confirmed fill orphaned
-    # by a daemon death / swallowed exception between the inbox PROCESSED commit
-    # and this bridge commit is healed on the next cycle regardless of process
-    # restarts. The transient `_edli_fill_bridge_aggregate_ids` set is kept ONLY
-    # as a fast in-cycle optimisation (bridges the just-processed fills with zero
-    # extra scan cost); it is NO LONGER the source of truth, so the orphan window
-    # is closed. Both run on the SAME bridge connection within the SAME commit.
-    #
-    # INV-37: runs on a trade connection with world ATTACHed — the bridge reads
-    # world.edli_live_order_events and writes position_current / position_events on
-    # the SAME connection (ATTACH + SAVEPOINT, no independent connection).
-    # Idempotent: replay UPDATEs the same row, never duplicates; the durable scan
-    # skips aggregates that already have a position_current row.
-    # Fail-safe: a bridge error must not crash the scheduler job — log and retry
-    # next cycle (the EDLI events persist; the next durable scan re-runs).
-    bridged_positions = 0
-    if True:  # always run the durable scan; the fast set is an optimisation only
-        from src.events.edli_position_bridge import (
-            materialize_position_current_from_edli_fill,
-        )
-        from src.state.db import get_trade_connection_with_world_required
-
-        bridge_conn = None
-        try:
-            bridge_conn = get_trade_connection_with_world_required(write_class="live")
-            # Fast in-cycle path: bridge the fills processed THIS cycle first
-            # (zero extra scan). These will already exist by the time the durable
-            # scan runs, so the scan's absence filter skips them — no double work.
-            for _agg_id in sorted(_edli_fill_bridge_aggregate_ids):
-                try:
-                    result = materialize_position_current_from_edli_fill(
-                        bridge_conn, _agg_id, now=now
-                    )
-                    if result is not None:
-                        bridged_positions += 1
-                except Exception as exc:  # noqa: BLE001
-                    logger.error(
-                        "EDLI position bridge failed for aggregate %s (non-fatal; "
-                        "EDLI events persist, durable scan retries): %s",
-                        _agg_id,
-                        exc,
-                        exc_info=True,
-                    )
-            # Authoritative durable scan: heal ANY orphaned confirmed fill,
-            # including ones stranded by a prior restart / swallowed exception.
-            bridged_positions += _edli_durable_fill_bridge_scan(bridge_conn, now=now)
-            bridge_conn.commit()
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "EDLI position bridge pass failed (non-fatal): %s", exc, exc_info=True
-            )
-        finally:
-            if bridge_conn is not None:
-                try:
-                    bridge_conn.close()
-                except Exception:  # noqa: BLE001
-                    pass
-
-    _write_scheduler_health(
-        "edli_user_channel_reconcile",
-        failed=False,
-        extra={
-            "status": "processed_user_channel_reconcile_cycle",
-            "fill_authority": "user_channel_or_reconcile_only",
-            "public_market_channel_fill_truth": "forbidden",
-            "user_channel_messages": message_count,
-            "venue_reconciliations": reconcile_count,
-            "edli_positions_bridged": bridged_positions,
-        },
-    )
 
 
 def _edli_boot_fill_bridge_recovery() -> None:
@@ -9604,6 +8089,8 @@ def _edli_boot_fill_bridge_recovery() -> None:
         bridge_conn = None
         bridged = 0
         try:
+            from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
+
             bridge_conn = get_trade_connection_with_world_required(write_class="live")
             bridged = _edli_durable_fill_bridge_scan(bridge_conn, now=now)
             bridge_conn.commit()
@@ -9657,6 +8144,8 @@ def _edli_boot_settlement_redeem_recovery() -> None:
             return
         if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and not edli_cfg.get("enabled"):
             return
+        from src.execution.post_trade_capital import _harvester_cycle
+
         _harvester_cycle()
         logger.info(
             "守護 boot settlement-redeem recovery: ran one harvester pass before "
@@ -9738,246 +8227,19 @@ def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> d
     )
 
 
-@_scheduler_job("edli_market_channel_ingestor")
-def _edli_market_channel_ingestor_cycle() -> None:
-    """EDLI market-channel online data-service bootstrap.
-
-    This daemon-side job discovers active weather tokens and prepares the public
-    market-channel ingestor/quote cache. Actual fills remain user-channel or
-    reconcile authority only.
-    """
-
-    edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled") or not edli_cfg.get("market_channel_ingestor_enabled"):
-        return
-    global _edli_market_channel_thread
-    if _edli_market_channel_thread is not None and _edli_market_channel_thread.is_alive():
-        _write_scheduler_health(
-            "edli_market_channel_ingestor",
-            failed=False,
-            extra={
-                "thread": "alive",
-                "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
-                "fill_authority": "user_channel_or_reconcile_only",
-            },
-        )
-        return
-
-    from src.events.triggers.market_channel_ingestor import active_weather_token_metadata_from_snapshots
-    from src.state.db import get_trade_connection, get_world_connection
-
-    # Candidate universe (Blocker #52): tokens the reactor recently decided on must
-    # be PINNED into the ingestor universe so each has a fresh execution_feasibility_
-    # evidence row before the pre-submit witness reads it. The full latest-per-market
-    # universe is captured up to the cap; candidates are never dropped by the cap.
-    priority_token_ids: set[str] = set()
-    world_read = get_world_connection(write_class=None)
-    try:
-        priority_token_ids = _edli_candidate_priority_token_ids(world_read)
-    except Exception as exc:  # noqa: BLE001 - priority pinning is best-effort, universe still captured
-        logger.warning("EDLI ingestor candidate-priority read failed (non-fatal): %s", exc)
-    finally:
-        if world_read is not None:
-            world_read.close()
-
-    universe_cap = _edli_bounded_positive_int(
-        edli_cfg,
-        "market_channel_universe_max_tokens",
-        default=2000,
-        maximum=8000,
-    )
-
-    trade_conn = get_trade_connection(write_class=None)
-    try:
-        token_metadata = active_weather_token_metadata_from_snapshots(
-            trade_conn,
-            limit=universe_cap,
-            priority_token_ids=priority_token_ids,
-        )
-        token_ids = set(token_metadata)
-    finally:
-        trade_conn.close()
-
-    if not token_ids:
-        _write_scheduler_health(
-            "edli_market_channel_ingestor",
-            failed=False,
-            extra={
-                "active_weather_token_ids": 0,
-                "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
-                "fill_authority": "user_channel_or_reconcile_only",
-                "skipped": "no_active_weather_tokens",
-            },
-        )
-        return
-
-    def _runner() -> None:
-        from src.data.polymarket_client import PolymarketClient
-        from src.events.event_coalescer import EventCoalescer
-        from src.events.event_writer import EventWriter
-        from src.events.triggers.market_channel_ingestor import (
-            MarketChannelAction,
-            MarketChannelIngestor,
-            MarketChannelOnlineService,
-            invalidate_executable_snapshots_for_market_channel_action,
-            run_market_channel_service_forever,
-        )
-        from src.state.db import get_world_connection
-
-        world_conn = get_world_connection(write_class="live")
-        try:
-            def _invalidate_snapshot_action(action: MarketChannelAction) -> None:
-                from src.state.db import get_trade_connection
-
-                trade_conn = get_trade_connection(write_class="live")
-                try:
-                    invalidated = invalidate_executable_snapshots_for_market_channel_action(
-                        trade_conn,
-                        action,
-                        invalidated_at=datetime.now(timezone.utc),
-                    )
-                    if invalidated:
-                        trade_conn.commit()
-                finally:
-                    trade_conn.close()
-
-            def _refresh_snapshot_action(action: MarketChannelAction) -> None:
-                from src.data.market_scanner import (
-                    MarketEventsPersistenceError,
-                    find_weather_markets_or_raise,
-                    refresh_executable_market_substrate_snapshots,
-                )
-                from src.state.db import get_trade_connection
-
-                if _defer_for_held_position_monitor("EDLI market-channel substrate refresh"):
-                    return
-                substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
-                if not substrate_acquired:
-                    logger.info(
-                        "EDLI market-channel refresh skipped: executable substrate refresh already running"
-                    )
-                    return
-                trade_conn = None
-                try:
-                    trade_conn = get_trade_connection(write_class="live")
-                    try:
-                        markets = find_weather_markets_or_raise(
-                            min_hours_to_resolution=0.0,
-                            include_slug_pattern=True,
-                        )
-                    except MarketEventsPersistenceError as _persistence_exc:
-                        logger.error(
-                            "EDLI market-channel refresh aborted: market_events persistence "
-                            "failure — snapshot substrate not refreshed: %s",
-                            _persistence_exc,
-                        )
-                        return
-                    if action.condition_id:
-                        markets = _edli_filter_markets_for_condition(markets, action.condition_id)
-                        if not markets:
-                            logger.warning(
-                                "EDLI market-channel refresh skipped: condition_id=%s not found in active weather markets",
-                                action.condition_id,
-                            )
-                            return
-                    summary = refresh_executable_market_substrate_snapshots(
-                        trade_conn,
-                        **_edli_market_channel_refresh_kwargs(
-                            action, markets, clob, datetime.now(timezone.utc)
-                        ),
-                    )
-                    trade_conn.commit()
-                finally:
-                    try:
-                        if trade_conn is not None:
-                            trade_conn.close()
-                    finally:
-                        _market_substrate_refresh_lock.release()
-                logger.info(
-                    "EDLI market-channel refreshed executable snapshots: reason=%s token_id=%s condition_id=%s summary=%s",
-                    action.reason,
-                    action.token_id,
-                    action.condition_id,
-                    summary,
-                )
-
-            with PolymarketClient() as clob:
-                service = MarketChannelOnlineService(
-                    MarketChannelIngestor(
-                        EventWriter(world_conn),
-                        active_token_ids=token_ids,
-                        token_metadata=token_metadata,
-                        coalescer=EventCoalescer(max_market_keys=1000),
-                    ),
-                    fetch_orderbook=clob.get_orderbook_snapshot,
-                    invalidate_snapshot=_invalidate_snapshot_action,
-                    refresh_snapshot=_refresh_snapshot_action,
-                    max_refresh_actions_per_window=_edli_bounded_positive_int(
-                        edli_cfg,
-                        "market_channel_refresh_max_actions_per_window",
-                        default=5,
-                        maximum=20,
-                    ),
-                    refresh_window_seconds=float(edli_cfg.get("market_channel_refresh_window_seconds", 60.0) or 60.0),
-                )
-                run_market_channel_service_forever(
-                    service,
-                    logger=logger,
-                    commit=world_conn.commit,
-                )
-        finally:
-            world_conn.close()
-
-    _edli_market_channel_thread = threading.Thread(
-        target=_runner,
-        name="edli-market-channel",
-        daemon=True,
-    )
-    _edli_market_channel_thread.start()
-    _write_scheduler_health(
-        "edli_market_channel_ingestor",
-        failed=False,
-        extra={
-            "active_weather_token_ids": len(token_ids),
-            "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
-            "fill_authority": "user_channel_or_reconcile_only",
-            "thread": "started",
-            "rest_seed_status": "polymarket_public_orderbook",
-            "websocket_endpoint": "polymarket_public_market_channel",
-        },
-    )
 
 
-@_scheduler_job("chain_sync_and_exit_monitor")
-def _chain_sync_and_exit_monitor_cycle() -> None:
-    """Standalone chain-truth sync + exit-lifecycle monitoring job.
+@_scheduler_job("exit_monitor")
+def _exit_monitor_cycle() -> None:
+    """Standalone exit-lifecycle monitoring job owned by the order daemon.
 
-    Wired under BOTH legacy_cron AND EDLI_EVENT_DRIVEN_MODES (Blocker #56).
-
-    In legacy_cron mode the same logic also runs embedded inside run_cycle();
-    this standalone job is a belt-and-suspenders addition that ensures chain_shares
-    stays populated and exit_pending_missing / settled-but-active positions are
-    resolved regardless of which execution mode the daemon is in.
-
-    In EDLI event-driven modes this is the ONLY path that fires chain sync and exit
-    monitoring — run_cycle() is never called in those modes.
-
-    Submit safety: exit_order_submit_enabled follows real_order_submit_enabled.
-    When armed, the pre-chain held-position pass may submit exits before the
-    slower chain-sync scan completes; when unarmed, it still evaluates and
-    records state without placing venue orders.
-
-    run_chain_sync uses the Polymarket REST Data API
-    (data-api.polymarket.com/positions). If funder_address is absent from Keychain,
-    PolymarketClient degrades gracefully — the call returns None/raises, which is
-    caught here and logged without crashing the daemon.
-
-    Created: 2026-05-31
-    Authority: Blocker #56 fix — /tmp/exit_chain_dx.md root cause analysis.
+    The chain-truth READ phase was lifted to the P4 post-trade-capital daemon.
+    This order-runtime job keeps only the live exit-SUBMIT lane: held-position
+    monitoring, exit preflight, pending-exit state transitions, and gated sell
+    order submission when ``real_order_submit_enabled`` is true.
     """
     from src.data.polymarket_client import PolymarketClient
     from src.engine.cycle_runner import (
-        _run_chain_sync,
         _execute_monitoring_phase,
         get_connection,
         get_tracker,
@@ -9992,13 +8254,13 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
     edli_cfg = _settings_section("edli", {})
     real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
     if _held_position_monitor_active.is_set():
-        logger.warning("chain_sync_and_exit_monitor skipped: previous monitor cycle is still running")
+        logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return
     _held_position_monitor_active.set()
 
     conn = get_connection()
     if conn is None:
-        logger.warning("chain_sync_and_exit_monitor: DB write-lock degrade — skipping cycle")
+        logger.warning("exit_monitor: DB write-lock degrade — skipping cycle")
         _mark_held_position_monitor_complete()
         return
 
@@ -10020,19 +8282,19 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
             )
         with PolymarketClient() as clob:
             tracker = get_tracker()
-            pre_chain_artifact = CycleArtifact(
-                mode="held_position_monitor_pre_chain",
+            artifact = CycleArtifact(
+                mode="exit_monitor",
                 started_at=datetime.now(timezone.utc).isoformat(),
                 summary=summary,
             )
-            pre_chain_portfolio_dirty = False
-            pre_chain_tracker_dirty = False
+            portfolio_dirty = False
+            tracker_dirty = False
             try:
-                pre_chain_portfolio_dirty, pre_chain_tracker_dirty = _execute_monitoring_phase(
+                portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
                     conn,
                     clob,
                     portfolio,
-                    pre_chain_artifact,
+                    artifact,
                     tracker,
                     summary,
                     exit_order_submit_enabled=real_order_submit_enabled,
@@ -10040,105 +8302,13 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
                 )
             except Exception as exc:
                 logger.error(
-                    "chain_sync_and_exit_monitor: pre-chain held-position monitor failed (non-fatal): %s",
-                    exc,
-                    exc_info=True,
-                )
-                summary["pre_chain_monitoring_error"] = str(exc)
-
-            try:
-                _pre_chain_aid_box: list = [None]
-
-                def _pre_chain_db_op():
-                    _pre_chain_aid_box[0] = store_artifact(conn, pre_chain_artifact)
-                    return _pre_chain_aid_box[0]
-
-                def _pre_chain_export_portfolio():
-                    if pre_chain_portfolio_dirty:
-                        save_portfolio(
-                            portfolio,
-                            last_committed_artifact_id=_pre_chain_aid_box[0],
-                            source="held_position_monitor_pre_chain",
-                        )
-
-                def _pre_chain_export_tracker():
-                    if pre_chain_tracker_dirty:
-                        save_tracker(tracker)
-
-                commit_then_export(
-                    conn,
-                    db_op=_pre_chain_db_op,
-                    json_exports=[_pre_chain_export_portfolio, _pre_chain_export_tracker],
-                )
-            except Exception as exc:
-                logger.error(
-                    "chain_sync_and_exit_monitor: pre-chain held-position monitor commit failed (non-fatal): %s",
-                    exc,
-                    exc_info=True,
-                )
-                summary["pre_chain_monitoring_commit_error"] = str(exc)
-            finally:
-                _mark_held_position_monitor_complete()
-
-            # Phase 1: chain-truth sync — updates chain_shares / chain_avg_price / chain_state.
-            # Degrades gracefully if Keychain funder_address is absent (REST call fails → caught).
-            try:
-                chain_stats, _ = _run_chain_sync(portfolio, clob, conn)
-                if chain_stats:
-                    summary["chain_sync"] = chain_stats
-            except Exception as exc:
-                logger.error(
-                    "chain_sync_and_exit_monitor: chain sync failed (non-fatal): %s", exc, exc_info=True
-                )
-                summary["chain_sync_error"] = str(exc)
-
-            # WAL WRITE-LOCK RELEASE (2026-06-08 riskguard-flaps structural fix):
-            # Phase 1 (chain sync) opened an implicit DEFERRED txn on the first DML
-            # (chain_shares / chain_state updates) which upgrades to the exclusive WAL
-            # write lock on zeus_trades.db. With a single trailing commit the lock was
-            # held across ALL of Phase 2's per-position HTTP monitor calls — up to 5+
-            # minutes — starving riskguard.tick() (30s busy_timeout → DATA_DEGRADED),
-            # CollateralLedger heartbeat, and market_scanner snapshot inserts.
-            # Fix: commit chain-sync writes HERE, before Phase 2 HTTP calls begin, so
-            # the WAL write lock is released between the two phases. The world_write_lock
-            # docstring (db.py:295) establishes the same invariant: MUST NOT hold a DB
-            # write lock across blocking network/HTTP calls.
-            # INV-17 / DT#1 is preserved: chain-sync state is committed atomically
-            # before monitoring state, and the final commit_then_export below commits
-            # monitoring state before JSON export. The two phases are logically
-            # independent — chain_state is ground-truth from the REST API and does not
-            # need to be co-transactional with the monitoring state transitions.
-            try:
-                conn.commit()
-            except Exception as exc:
-                logger.warning(
-                    "chain_sync_and_exit_monitor: chain-sync interim commit failed (non-fatal): %s", exc
-                )
-
-            # Phase 2: exit-lifecycle monitoring — resolves exit_pending_missing,
-            # checks pending exit fills, runs monitor refresh for active positions.
-            # exit_order_submit_enabled=False in submit-disabled modes: state
-            # transitions run but no real sell orders are placed.
-            artifact = CycleArtifact(
-                mode="chain_sync_monitor",
-                started_at=datetime.now(timezone.utc).isoformat(),
-                summary=summary,
-            )
-            portfolio_dirty = tracker_dirty = False
-            try:
-                portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
-                    conn, clob, portfolio, artifact, tracker, summary,
-                    exit_order_submit_enabled=real_order_submit_enabled,
-                )
-            except Exception as exc:
-                logger.error(
-                    "chain_sync_and_exit_monitor: monitoring phase failed (non-fatal): %s",
+                    "exit_monitor: monitoring phase failed (non-fatal): %s",
                     exc,
                     exc_info=True,
                 )
                 summary["monitoring_error"] = str(exc)
 
-            # Phase 2b: DAY0 resting-order cancel sweep (adversarial review
+            # DAY0 resting-order cancel sweep (adversarial review
             # 2026-06-10 fix 2 — finding 4 "standing free option"). Cancels OUR
             # open resting ENTRY orders whose day0 bin is hard-fact dead for the
             # order's side, or whose family is oracle-anomaly paused. Cancels
@@ -10163,14 +8333,14 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
                         summary["day0_dead_bin_orders_cancelled"] = cancelled
                 except Exception as exc:  # noqa: BLE001 — sweep is additive
                     logger.warning(
-                        "chain_sync_and_exit_monitor: day0 dead-bin cancel sweep failed (non-fatal): %s",
+                        "exit_monitor: day0 dead-bin cancel sweep failed (non-fatal): %s",
                         exc,
                     )
 
         # INV-17 / DT#1: commit the DB transaction (monitoring state transitions) FIRST,
         # then export the derived portfolio/tracker JSON with the committed artifact id —
         # so canonical_write.detect_stale_portfolio's marker stays valid and JSON can
-        # never lead the DB. (Chain-sync writes were already committed above.)
+        # never lead the DB.
         _aid_box: list = [None]
 
         def _db_op():
@@ -10182,7 +8352,7 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
                 save_portfolio(
                     portfolio,
                     last_committed_artifact_id=_aid_box[0],
-                    source="chain_sync_monitor",
+                    source="exit_monitor",
                 )
 
         def _export_tracker():
@@ -10194,7 +8364,7 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
         )
     except Exception as exc:
         logger.error(
-            "chain_sync_and_exit_monitor: unexpected error: %s", exc, exc_info=True
+            "exit_monitor: unexpected error: %s", exc, exc_info=True
         )
     finally:
         try:
@@ -10207,7 +8377,7 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
     # In EDLI event-driven modes run_cycle() is never called, so the legacy
     # _export_status -> write_cycle_pulse path is silent and state/status_summary.json
     # goes stale -> the live-release gate fails status_summary / edli_stage_readiness.
-    # This chain-sync job runs under ALL EDLI modes, so emit a genuine business-plane
+    # This exit monitor runs under ALL EDLI modes, so emit a genuine business-plane
     # status pulse here each cycle. write_cycle_pulse re-reads the live DB read model
     # (open orders, risk, portfolio, capability) -> it reflects REAL current state,
     # never a hardcoded healthy value. Non-fatal: a pulse failure must not abort the
@@ -10217,19 +8387,18 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
         write_cycle_pulse(summary)
     except Exception as exc:
         logger.error(
-            "chain_sync_and_exit_monitor: status pulse failed (non-fatal): %s",
+            "exit_monitor: status pulse failed (non-fatal): %s",
             exc,
             exc_info=True,
         )
 
     _write_scheduler_health(
-        "chain_sync_and_exit_monitor",
+        "exit_monitor",
         failed=False,
         extra={
             "exit_order_submit_enabled": real_order_submit_enabled,
             "monitors": summary.get("monitors", 0),
             "exits": summary.get("exits", 0),
-            "chain_sync_summary": summary.get("chain_sync", {}),
         },
     )
 
@@ -10460,7 +8629,6 @@ def main():
     # Consume the warm record (efficiency #3): warm + gate = exactly ONE
     # current() acquisition. A None warm record → the gate fail-closes.
     _startup_wallet_check(bankroll_record=_warm_rec)
-    _start_user_channel_ingestor_if_enabled()
 
     # MF-1: durable self-healing capital spine — AT BOOT, before any new trading,
     # bridge any EDLI confirmed fill that was orphaned (no position_current) by a
@@ -10497,15 +8665,19 @@ def main():
     # workers were blocked on socket reads (py-sample: 189 read frames, 0 reactor
     # frames), so 0 no-submit receipts ever formed. An isolated pool guarantees
     # the reactor always has a worker. Authority: docs plan A2-throughput.
-    from apscheduler.executors.pool import ThreadPoolExecutor as _APThreadPoolExecutor
+    scheduler_kwargs = {"timezone": ZoneInfo("UTC")}
+    try:
+        from apscheduler.executors.pool import ThreadPoolExecutor as _APThreadPoolExecutor
 
-    scheduler = BlockingScheduler(
-        timezone=ZoneInfo("UTC"),
-        executors={
+        scheduler_kwargs["executors"] = {
             "default": _APThreadPoolExecutor(20),
             "reactor": _APThreadPoolExecutor(2),
-        },
-    )
+        }
+    except ModuleNotFoundError:
+        if BlockingScheduler is None or getattr(BlockingScheduler, "__module__", "").startswith("apscheduler"):
+            raise
+
+    scheduler = BlockingScheduler(**scheduler_kwargs)
     discovery = settings["discovery"]
 
     # All modes use the SAME CycleRunner with different DiscoveryMode values
@@ -10546,15 +8718,6 @@ def main():
             id="imminent_open_capture",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 15.0),
             max_instances=1, coalesce=True,
-        )
-        scheduler.add_job(
-            _market_discovery_cycle,
-            "interval",
-            minutes=5,
-            id="market_discovery",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 90.0),
-            max_instances=1,
-            coalesce=True,
         )
         # AFTERNOON CAPTURE — legacy_cron mode (2026-06-14): see EDLI registration below.
         scheduler.add_job(
@@ -10634,39 +8797,6 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-        # THROUGHPUT + FRESHNESS STRUCTURAL FIX: dedicated executable-snapshot substrate
-        # warmer, DECOUPLED from the reactor decision cycle. It must run inside the
-        # 30s executable-price freshness window and start before the first reactor tick;
-        # otherwise the reactor reads valid-but-expired price rows and every candidate
-        # rejects as EXECUTABLE_SNAPSHOT_STALE. The refresh is scoped to pending families
-        # (not a global weather scan) and max_instances=1/coalesce prevents stacked venue
-        # I/O. Data-only (no orders); fail-soft.
-        # Fitz #5 interval-fit invariant: the refresh budget MUST be strictly less
-        # than the interval so the cycle cannot overrun its own trigger (the live
-        # "skipped: maximum number of running instances reached" starvation). Asserted
-        # here at registration so a future env/default drift that re-breaks the
-        # relationship fails LOUDLY at boot instead of silently re-starving coverage.
-        _warm_refresh_budget_s = max(
-            5.0,
-            float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")),
-        )
-        if _warm_refresh_budget_s >= _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS:
-            raise RuntimeError(
-                "EDLI market-substrate warm budget-vs-interval misconfiguration: "
-                f"ZEUS_REACTOR_REFRESH_BUDGET_SECONDS={_warm_refresh_budget_s}s must be "
-                f"STRICTLY LESS than the {_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS}s warm "
-                "interval, else every overlapping cycle is skipped and the executable "
-                "substrate is never refreshed (coverage NONE, daemon starved)."
-            )
-        scheduler.add_job(
-            _edli_market_substrate_warm_cycle,
-            "interval",
-            seconds=_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS,
-            id="edli_market_substrate_warm",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 1.0),
-            max_instances=1,
-            coalesce=True,
-        )
         # NEW-LISTING SCOUT (operator 2026-06-09, dimensions a/b/c): lightweight 60s
         # head-page probe for brand-new Polymarket weather listings.  Detects new
         # condition_ids, stages a forecast-materialization fast-lane intent, and marks
@@ -10702,44 +8832,6 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-        # WIRING FIX (operator Point-1 directive 2026-06-08): the replacement-forecast
-        # download + live-materialize jobs were REMOVED from this live-trading scheduler
-        # and moved to the forecast-live (data) daemon. Heavy forecast fetches
-        # monopolized disk I/O on the trading process, starving the reactor +
-        # market_scanner and locking riskguard dependency reads -> DATA_DEGRADED flap that
-        # blocked all trades. They now run on the forecast-live daemon's lane, download
-        # cron-driven at publish time (00Z/12Z + release_lag) — see
-        # src/ingest/forecast_live_daemon.py and src/data/replacement_forecast_production.py.
-        # STRUCTURAL FIX (2026-05-31, #52 follow-up): executable_market_snapshots
-        # (EMS) substrate refresh in EDLI modes. market_discovery is the ONLY
-        # universe-wide writer of executable_market_snapshots (architecture/
-        # db_table_ownership.yaml::executable_market_snapshots; failure_chains.yaml::
-        # market_discovery_coverage_collapse) — but it was registered ONLY in
-        # legacy_cron (see legacy_cron block above), so in EDLI event-driven modes
-        # NOTHING refreshed the EMS substrate across the candidate universe. The
-        # edli_market_channel_ingestor (#52) writes execution_feasibility_evidence
-        # for the PRE-SUBMIT witness, NOT executable_market_snapshots, which the
-        # cert build's QUOTE_FEASIBILITY / executable-snapshot selection requires
-        # (src/engine/event_reactor_adapter.py::_latest_snapshot_rows_for_event_family
-        # → _passive_maker_context_from_authorities reads orderbook_top_bid/ask off
-        # the selected EMS row). With EMS frozen/aging, candidate families lost a
-        # fresh active-open snapshot for the selected bin → every live cert build
-        # failed EDLI_LIVE_CERTIFICATE_BUILD_FAILED:QUOTE_FEASIBILITY_BID_ASK_REQUIRED
-        # (and intermittently EXECUTABLE_SNAPSHOT_BLOCKED) → proof_accepted=0.
-        # market_discovery is a DATA-ONLY substrate writer: it submits no orders and
-        # touches no arming flags. Wave-1 2026-06-12: the market_substrate_refresh_enabled
-        # gate is DELETED — the EMS substrate refresh is structural plumbing the live cert
-        # build depends on (without it every cert build fails BID_ASK_REQUIRED), never an
-        # optional knob, so it is now ALWAYS registered.
-        scheduler.add_job(
-            _market_discovery_cycle,
-            "interval",
-            minutes=5,
-            id="market_discovery",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 90.0),
-            max_instances=1,
-            coalesce=True,
-        )
         # AFTERNOON CAPTURE (2026-06-14): dedicated 30-min capture for same-day
         # SETTLEMENT_DAY markets (hours_to_resolution ≤12).  The universe-wide
         # market_discovery and EDLI warm cycle target PENDING families; neither
@@ -10756,55 +8848,18 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-    if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("market_channel_ingestor_enabled"):
-        scheduler.add_job(
-            _edli_market_channel_ingestor_cycle,
-            "interval",
-            minutes=1,
-            id="edli_market_channel_ingestor",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 20.0),
-            max_instances=1,
-            coalesce=True,
-        )
-    if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and _edli_user_channel_reconcile_runtime_enabled(edli_cfg):
-        scheduler.add_job(
-            _edli_user_channel_reconcile_cycle,
-            "interval",
-            minutes=1,
-            id="edli_user_channel_reconcile",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 25.0),
-            max_instances=1,
-            coalesce=True,
-        )
-    # Blocker #56: chain-truth sync + exit-lifecycle monitoring. Registered in BOTH
-    # legacy_cron AND EDLI event-driven modes — in EDLI modes run_cycle() never fires,
-    # so this standalone job is the ONLY path that populates chain_shares/chain_avg_price
-    # and resolves exit_pending_missing / settled-but-active positions. Submit-safe:
-    # the job runs the monitoring phase with exit_order_submit_enabled=real_order_submit_enabled
-    # (False when live submit is disabled -> DB state transitions only, no real sell orders).
+    # Exit-lifecycle monitoring stays in the order daemon. Chain-sync READ,
+    # market/user channel ingest, substrate capture, and post-trade capital
+    # pollers are owned by their dedicated live daemons.
     scheduler.add_job(
-        _chain_sync_and_exit_monitor_cycle,
+        _exit_monitor_cycle,
         "interval",
         minutes=2,
-        id="chain_sync_and_exit_monitor",
+        id="exit_monitor",
         next_run_time=_utc_run_time_after(HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS),
         max_instances=1,
         coalesce=True,
     )
-    # 守護 (2026-06-03): settlement P&L + redeem-intent resolver. Registered in BOTH
-    # legacy_cron AND EDLI event-driven modes (see _harvester_should_register). In EDLI
-    # modes run_cycle() never fires, so this standalone hourly job is the ONLY producer
-    # that consumes VERIFIED settlement_outcomes → marks settled positions closed →
-    # enqueues REDEEM_INTENT_CREATED for the redeem pollers. Without it a FILLED position
-    # rides to settlement and sits phase=active forever (capital stuck). Shadow-safe: the
-    # resolver does no on-chain work; the on-chain redeem POST is the separately-gated
-    # _redeem_submitter_cycle, and the resolver is additionally gated by
-    # ZEUS_HARVESTER_LIVE_ENABLED (default-OFF no-op).
-    if _harvester_should_register(live_execution_mode):
-        scheduler.add_job(
-            _harvester_cycle, "interval", hours=1, id="harvester",
-            max_instances=1, coalesce=True,
-        )
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
                       max_instances=1, coalesce=True)
     # WAL checkpoint-starvation backstop (2026-06-04, part 2): periodic
@@ -10840,46 +8895,10 @@ def main():
         coalesce=True,
     )
 
-    # 2026-05-16 PR-I C3 — F14 + F16 cascade-liveness pollers per SCAFFOLD §K v5
-    # + architecture/cascade_liveness_contract.yaml. Insertion site is here per
-    # SCAFFOLD §K.8 v5 (after L988 venue_heartbeat block; pre-existing K2 jobs
-    # below were already migrated to src/ingest_main.py).
-    scheduler.add_job(
-        _redeem_submitter_cycle, "interval", minutes=5, id="redeem_submitter",
-        max_instances=1, coalesce=True,
-    )
-    scheduler.add_job(
-        _redeem_reconciler_cycle, "interval", minutes=10, id="redeem_reconciler",
-        max_instances=1, coalesce=True,
-    )
-    scheduler.add_job(
-        _wrap_intent_creator_cycle, "interval", minutes=5,
-        id="wrap_intent_creator", max_instances=1, coalesce=True,
-    )
-    scheduler.add_job(
-        _wrap_submitter_cycle, "interval", minutes=2,
-        id="wrap_submitter", max_instances=1, coalesce=True,
-    )
-    # P0-3: fast conditional cadence (30s). The reconciler early-exits cheaply
-    # (a single state-count query, BEFORE any credential resolution or adapter
-    # construction) when no *_TX_HASHED row exists — so the expensive RPC path
-    # only fires when there is in-flight wrap work to finalize. The same-tick
-    # path now leaves freshly-submitted txs in a TX_HASHED state for THIS job to
-    # confirm within ~30s, instead of synchronously blocking the redeem ticks.
-    scheduler.add_job(
-        _wrap_reconciler_cycle, "interval", seconds=30,
-        id="wrap_reconciler", max_instances=1, coalesce=True,
-    )
     # PR-S6: deployment freshness gate — runs every 60s, fail-closed at 24h uptime.
     scheduler.add_job(
         _check_deployment_freshness, "interval", seconds=60,
         id="deployment_freshness", max_instances=1, coalesce=True,
-    )
-    # K2 WU daily collection — hourly tick; WuDailyScheduler gates per-city.
-    # Cluster L wiring per G4_CLEANUP_DESIGN.md §2 L (2026-05-18).
-    scheduler.add_job(
-        _wu_daily_dispatch, "interval", hours=1, id="wu_daily",
-        max_instances=1, coalesce=True,
     )
     # Daily 守護 settlement-guard scorecard — runs at 09:15 UTC, after the
     # 07:30 forecasts tick and the hourly settlement-truth writes have landed.

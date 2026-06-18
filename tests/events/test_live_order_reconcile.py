@@ -1,5 +1,11 @@
 # Created: 2026-05-26
+# Last reused or audited: 2026-06-08
 # Authority basis: PR332 user-channel/reconcile authority substrate.
+#   2026-06-08 (system_decomposition_plan §8 Step 3, P3 lift): the user-channel/reconcile
+#   cycle was lifted from src.main to src.ingest.price_channel_ingest. The four
+#   reconcile-cycle relationship tests repoint their host + patch surface accordingly
+#   (bare call, not `.__wrapped__`; world-conn + scheduler-health patched on their
+#   canonical source modules); the reconcile invariants asserted are unchanged.
 from __future__ import annotations
 
 import sqlite3
@@ -418,7 +424,15 @@ def test_cap_consumed_before_venue_authority_fails_append_law():
 
 
 def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch, tmp_path):
-    import src.main as main
+    # P3 lift (system_decomposition_plan §8 Step 3): the user-channel/reconcile cycle
+    # moved from src.main to src.ingest.price_channel_ingest. The cycle is a BARE function
+    # there (the P3 daemon wraps it at add_job time, the P2 pattern), so call it directly
+    # (no `.__wrapped__`). `settings` is the lane module's own module global; the world
+    # connection + scheduler-health writer are imported INSIDE the cycle from their canonical
+    # source modules, so they are patched on those sources, not on this alias.
+    from src.ingest import price_channel_ingest as main
+    import src.state.db as _state_db
+    import src.observability.scheduler_health as _sched_health
 
     db_path = tmp_path / "world.db"
     conn = _conn(db_path)
@@ -471,10 +485,10 @@ def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch,
             }
         },
     )
-    monkeypatch.setattr(main, "get_world_connection", lambda *args, **kwargs: conn)
-    monkeypatch.setattr(main, "_write_scheduler_health", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_state_db, "get_world_connection", lambda *args, **kwargs: conn)
+    monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
-    main._edli_user_channel_reconcile_cycle.__wrapped__()
+    main._edli_user_channel_reconcile_cycle()
 
     check_ledger = LiveOrderAggregateLedger(_conn(db_path))
     projection = check_ledger.get_projection("event-1:intent-1")
@@ -491,7 +505,15 @@ def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch,
 
 
 def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_queue_messages(monkeypatch, tmp_path):
-    import src.main as main
+    # P3 lift (system_decomposition_plan §8 Step 3): the user-channel/reconcile cycle
+    # moved from src.main to src.ingest.price_channel_ingest. The cycle is a BARE function
+    # there (the P3 daemon wraps it at add_job time, the P2 pattern), so call it directly
+    # (no `.__wrapped__`). `settings` is the lane module's own module global; the world
+    # connection + scheduler-health writer are imported INSIDE the cycle from their canonical
+    # source modules, so they are patched on those sources, not on this alias.
+    from src.ingest import price_channel_ingest as main
+    import src.state.db as _state_db
+    import src.observability.scheduler_health as _sched_health
 
     db_path = tmp_path / "world.db"
     conn = _conn(db_path)
@@ -527,11 +549,11 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_queue_messages
             }
         },
     )
-    monkeypatch.setattr(main, "get_world_connection", lambda *args, **kwargs: _conn(db_path))
-    monkeypatch.setattr(main, "_write_scheduler_health", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_state_db, "get_world_connection", lambda *args, **kwargs: _conn(db_path))
+    monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
-    main._edli_user_channel_reconcile_cycle.__wrapped__()
-    main._edli_user_channel_reconcile_cycle.__wrapped__()
+    main._edli_user_channel_reconcile_cycle()
+    main._edli_user_channel_reconcile_cycle()
 
     check_conn = _conn(db_path)
     count = check_conn.execute(
@@ -612,7 +634,15 @@ def test_user_channel_inbox_persists_pending_until_ack_status():
 
 
 def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_trade_messages(monkeypatch, tmp_path):
-    import src.main as main
+    # P3 lift (system_decomposition_plan §8 Step 3): the user-channel/reconcile cycle
+    # moved from src.main to src.ingest.price_channel_ingest. The cycle is a BARE function
+    # there (the P3 daemon wraps it at add_job time, the P2 pattern), so call it directly
+    # (no `.__wrapped__`). `settings` is the lane module's own module global; the world
+    # connection + scheduler-health writer are imported INSIDE the cycle from their canonical
+    # source modules, so they are patched on those sources, not on this alias.
+    from src.ingest import price_channel_ingest as main
+    import src.state.db as _state_db
+    import src.observability.scheduler_health as _sched_health
 
     db_path = tmp_path / "world.db"
     conn = _conn(db_path)
@@ -648,11 +678,11 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_trade_messages
             }
         },
     )
-    monkeypatch.setattr(main, "get_world_connection", lambda *args, **kwargs: _conn(db_path))
-    monkeypatch.setattr(main, "_write_scheduler_health", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_state_db, "get_world_connection", lambda *args, **kwargs: _conn(db_path))
+    monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
-    main._edli_user_channel_reconcile_cycle.__wrapped__()
-    main._edli_user_channel_reconcile_cycle.__wrapped__()
+    main._edli_user_channel_reconcile_cycle()
+    main._edli_user_channel_reconcile_cycle()
 
     check_conn = _conn(db_path)
     count = check_conn.execute(
@@ -662,7 +692,15 @@ def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_trade_messages
 
 
 def test_user_channel_reconcile_cycle_clears_submit_unknown_from_venue_fact(monkeypatch, tmp_path):
-    import src.main as main
+    # P3 lift (system_decomposition_plan §8 Step 3): the user-channel/reconcile cycle
+    # moved from src.main to src.ingest.price_channel_ingest. The cycle is a BARE function
+    # there (the P3 daemon wraps it at add_job time, the P2 pattern), so call it directly
+    # (no `.__wrapped__`). `settings` is the lane module's own module global; the world
+    # connection + scheduler-health writer are imported INSIDE the cycle from their canonical
+    # source modules, so they are patched on those sources, not on this alias.
+    from src.ingest import price_channel_ingest as main
+    import src.state.db as _state_db
+    import src.observability.scheduler_health as _sched_health
 
     db_path = tmp_path / "world.db"
     conn = _conn(db_path)
@@ -705,10 +743,10 @@ def test_user_channel_reconcile_cycle_clears_submit_unknown_from_venue_fact(monk
             }
         },
     )
-    monkeypatch.setattr(main, "get_world_connection", lambda *args, **kwargs: conn)
-    monkeypatch.setattr(main, "_write_scheduler_health", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_state_db, "get_world_connection", lambda *args, **kwargs: conn)
+    monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
 
-    main._edli_user_channel_reconcile_cycle.__wrapped__()
+    main._edli_user_channel_reconcile_cycle()
 
     check_ledger = LiveOrderAggregateLedger(_conn(db_path))
     projection = check_ledger.get_projection("event-1:intent-1")

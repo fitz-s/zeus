@@ -364,7 +364,7 @@ def test_market_channel_refresh_budget_still_invalidates_dropped_actions():
 
 
 def test_market_channel_condition_refresh_does_not_fallback_to_unrelated_markets():
-    from src.main import _edli_filter_markets_for_condition
+    from src.ingest.price_channel_ingest import _edli_filter_markets_for_condition
 
     markets = [
         {"condition_id": "condition-top", "outcomes": []},

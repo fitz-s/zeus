@@ -39,10 +39,9 @@ import pytest
 # previously pinned the (now dead-by-law) credential-wiring / fail-closed
 # submitter machinery; they now pin that the cycle never reaches it.
 # ---------------------------------------------------------------------------
-def test_redeem_submitter_calm_skips_even_with_creds_in_live_mode(monkeypatch):
-    """Live mode + creds available → the cycle still calm-skips and never
-    constructs an adapter or resolves credentials (submission forbidden)."""
-    from src import main as main_mod
+def test_redeem_submitter_adapter_has_credentials_in_live_mode(monkeypatch):
+    """In live mode, redeem submission is forbidden before credential resolution."""
+    from src.execution import post_trade_capital as main_mod  # P4: redeem cycle lifted here
 
     adapter_constructed = {"count": 0}
     creds_resolved = {"count": 0}
@@ -62,22 +61,28 @@ def test_redeem_submitter_calm_skips_even_with_creds_in_live_mode(monkeypatch):
     ), patch(
         "src.venue.polymarket_v2_adapter.PolymarketV2Adapter", _FakeAdapter
     ):
-        assert main_mod._redeem_submitter_cycle.__wrapped__() is None
+        main_mod._redeem_submitter_cycle()
 
     assert adapter_constructed["count"] == 0, (
-        "redeem submission is FORBIDDEN — no adapter may be constructed"
+        "PolymarketV2Adapter must not be constructed; redeem submission is forbidden"
     )
     assert creds_resolved["count"] == 0, (
         "the cycle must calm-skip before resolving credentials"
     )
 
 
-# Antibody 2 — live mode + missing creds + work exists → cycle calm-skips
-#              before touching credentials or submit_redeem (NO raise: the
-#              unconditional forbidden-submission early return precedes the
-#              creds fail-closed path entirely).
-def test_redeem_submitter_calm_skips_before_creds_failclosed(monkeypatch):
-    from src import main as main_mod
+# ---------------------------------------------------------------------------
+# Antibody 2 — fail-closed: live mode + missing creds + work exists → raise
+#              before adapter construction and before submit_redeem.
+#
+# Codex P2 fix (PR #145): creds resolution moved to after empty-row check.
+# The prior assertion "DB must NOT be opened" was over-specified; a read-only
+# SELECT is not a write side effect. The real invariant is: no adapter
+# constructed and no submit_redeem called when creds missing AND work exists.
+# ---------------------------------------------------------------------------
+def test_redeem_submitter_fails_closed_when_creds_missing(monkeypatch):
+    """Missing creds are irrelevant because redeem submission calm-skips first."""
+    from src.execution import post_trade_capital as main_mod  # P4: redeem cycle lifted here
 
     adapter_constructed = {"count": 0}
     submit_called = {"count": 0}
@@ -97,9 +102,15 @@ def test_redeem_submitter_calm_skips_before_creds_failclosed(monkeypatch):
         "src.venue.polymarket_v2_adapter.PolymarketV2Adapter", _SpyAdapter
     ), patch(
         "src.execution.settlement_commands.submit_redeem", side_effect=_spy_submit
-    ):
-        assert main_mod._redeem_submitter_cycle.__wrapped__() is None
+    ), patch(
+        "src.data.dual_run_lock.acquire_lock",
+    ) as mock_lock:
+        mock_lock.return_value.__enter__.return_value = True
+        mock_lock.return_value.__exit__.return_value = False
 
+        result = main_mod._redeem_submitter_cycle()
+
+    assert result is None
     assert adapter_constructed["count"] == 0, (
         "PolymarketV2Adapter must NOT be constructed (submission forbidden)"
     )
@@ -115,7 +126,7 @@ def test_redeem_submitter_skips_in_non_live_mode(monkeypatch):
     """In non-live mode (paper/dry-run), the cycle returns cleanly without
     resolving credentials, constructing the adapter, or opening the DB.
     """
-    from src import main as main_mod
+    from src.execution import post_trade_capital as main_mod  # P4: redeem cycle lifted here
 
     creds_calls = {"count": 0}
     db_calls = {"count": 0}
@@ -138,7 +149,7 @@ def test_redeem_submitter_skips_in_non_live_mode(monkeypatch):
         "src.state.db.get_trade_connection", side_effect=_spy_db
     ):
         # No raise; no DB; no creds resolution. Just a clean return.
-        result = main_mod._redeem_submitter_cycle.__wrapped__()
+        result = main_mod._redeem_submitter_cycle()
 
     assert result is None
     assert creds_calls["count"] == 0
@@ -156,7 +167,7 @@ def test_redeem_submitter_idle_no_rows_no_raise_even_when_creds_missing(monkeypa
     """In live mode with no submittable rows, missing credentials must NOT
     cause a RuntimeError. The cycle returns cleanly after the empty-row check.
     """
-    from src import main as main_mod
+    from src.execution import post_trade_capital as main_mod  # P4: redeem cycle lifted here
 
     fake_conn = MagicMock()
     fake_conn.execute.return_value.fetchall.return_value = []  # no work
@@ -174,7 +185,7 @@ def test_redeem_submitter_idle_no_rows_no_raise_even_when_creds_missing(monkeypa
         mock_lock.return_value.__exit__.return_value = False
 
         # Must return cleanly — no raise.
-        result = main_mod._redeem_submitter_cycle.__wrapped__()
+        result = main_mod._redeem_submitter_cycle()
 
     assert result is None, (
         "Idle cycle with no rows must return None, not raise on missing creds"

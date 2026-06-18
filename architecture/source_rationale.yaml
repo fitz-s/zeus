@@ -2653,3 +2653,47 @@ files:
     why: Typed Observation/Proposal/Command/Outcome surface for Venus.
     hazards:
     - VENUS_CONTROL_ONLY
+  src/data/market_topology_rows.py:
+    zone: K2_runtime
+    authority_role: market_topology_projection_rows
+    why: Shared row helpers for market topology consumers after substrate observer decomposition; keeps topology row shape out of the order daemon.
+    downstream:
+    - src/data/substrate_observer.py
+  src/data/substrate_observer.py:
+    zone: K2_runtime
+    authority_role: executable_substrate_producer_lane
+    why: P2 live substrate observer; owns market_discovery and pending-family executable snapshot refresh outside the order daemon so reactor backlog cannot gate price substrate production.
+    downstream:
+    - src/ingest/substrate_observer_daemon.py
+    - src/engine/event_reactor_adapter.py
+  src/ingest/substrate_observer_daemon.py:
+    zone: K2_runtime
+    authority_role: executable_substrate_observer_daemon
+    why: Launchable daemon boundary for P2 substrate observer jobs that write executable market snapshots for live decision consumers.
+    downstream:
+    - deploy/launchd/com.zeus.substrate-observer.plist
+  src/ingest/price_channel_ingest.py:
+    zone: K2_runtime
+    authority_role: price_channel_fact_producer_lane
+    why: P3 live price/user channel ingest lane; owns CLOB/user-channel WS lifecycle, durable fill bridge scan, and execution_feasibility_evidence production outside the order daemon.
+    downstream:
+    - src/ingest/price_channel_daemon.py
+    - src/main.py
+  src/ingest/price_channel_daemon.py:
+    zone: K2_runtime
+    authority_role: price_channel_ingest_daemon
+    why: Launchable daemon boundary for P3 price/user channel ingest so venue feed failures cannot poison the order daemon process latch.
+    downstream:
+    - deploy/launchd/com.zeus.price-channel-ingest.plist
+  src/execution/post_trade_capital.py:
+    zone: K2_runtime
+    authority_role: post_trade_capital_lifecycle_lane
+    why: P4 post-trade capital lane; owns chain-sync READ, settlement harvester, redeem/wrap state-machine pollers, and preserves no sell-order submission in this process.
+    downstream:
+    - src/ingest/post_trade_capital_daemon.py
+  src/ingest/post_trade_capital_daemon.py:
+    zone: K2_runtime
+    authority_role: post_trade_capital_daemon
+    why: Launchable daemon boundary for P4 post-trade capital lifecycle so chain/redeem/wrap faults and WAL contention do not block live order decisions.
+    downstream:
+    - deploy/launchd/com.zeus.post-trade-capital.plist

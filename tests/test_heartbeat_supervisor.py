@@ -42,6 +42,7 @@ from src.control.heartbeat_supervisor import (
 )
 from src.state.db import init_schema
 from src.venue.polymarket_v2_adapter import HeartbeatAck
+import src.data.substrate_observer as substrate_observer
 
 
 class FakeHeartbeatAdapter:
@@ -1481,8 +1482,11 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
         "_ensure_venue_read_side_adapter",
         lambda: (_ for _ in ()).throw(AssertionError("market_discovery must use public CLOB read client")),
     )
+    # P2: force STALE substrate so the producer-local staleness gate falls through to capture
+    # (a prior test's successful cycle may leave a fresh time.monotonic() in this global).
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
 
-    main._market_discovery_cycle()
+    substrate_observer._market_discovery_cycle()
 
     assert ("find", 0.0) in calls
     refresh_calls = [call for call in calls if call[0] == "refresh"]
@@ -1536,10 +1540,13 @@ def test_market_discovery_scheduler_runs_while_cycle_lock_is_held(monkeypatch):
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
     monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
+    # P2: force STALE substrate so the staleness gate falls through to capture (the cycle is
+    # decoupled from main._cycle_lock — a P1 cycle-lock held must not block this producer).
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
 
     assert main._cycle_lock.acquire(blocking=False)
     try:
-        main._market_discovery_cycle()
+        substrate_observer._market_discovery_cycle()
     finally:
         main._cycle_lock.release()
 
@@ -1556,15 +1563,18 @@ def test_market_discovery_scheduler_defers_only_when_previous_refresh_runs(monke
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("self-overlap must not scan")),
     )
 
-    assert main._market_discovery_lock.acquire(blocking=False)
+    assert substrate_observer._market_discovery_lock.acquire(blocking=False)
     try:
-        main._market_discovery_cycle()
+        substrate_observer._market_discovery_cycle()
     finally:
-        main._market_discovery_lock.release()
+        substrate_observer._market_discovery_lock.release()
 
 
 def test_user_channel_auto_derive_prefers_persisted_ids_and_skips_boot_gamma_scan(monkeypatch):
-    from src import main
+    # P3 lift (system_decomposition_plan §8 Step 3): _auto_derive_user_channel_condition_ids
+    # + _market_events_user_channel_condition_ids moved from src.main to
+    # src.ingest.price_channel_ingest. Both the patch target and the call repoint together.
+    from src.ingest import price_channel_ingest as main
     import src.data.market_scanner as market_scanner
 
     monkeypatch.delenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", raising=False)
@@ -1579,7 +1589,9 @@ def test_user_channel_auto_derive_prefers_persisted_ids_and_skips_boot_gamma_sca
 
 
 def test_user_channel_auto_derive_returns_empty_without_boot_gamma_opt_in(monkeypatch):
-    from src import main
+    # P3 lift (system_decomposition_plan §8 Step 3): auto-derive helpers moved to
+    # src.ingest.price_channel_ingest; patch target + call repoint together.
+    from src.ingest import price_channel_ingest as main
     import src.data.market_scanner as market_scanner
 
     monkeypatch.delenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", raising=False)

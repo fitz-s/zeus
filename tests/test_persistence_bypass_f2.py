@@ -14,6 +14,7 @@ dropped while the caller proceeds as if discovery succeeded.
 import textwrap
 
 import pytest
+import src.data.substrate_observer as substrate_observer
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +155,7 @@ def test_refresh_pending_family_snapshots_reports_error_on_persistence_failure(m
 
     monkeypatch.setattr(state_db, "get_world_connection", lambda **_kw: _FakeConn())
 
-    result = main._refresh_pending_family_snapshots(_FakeConn(), _FakeConn())
+    result = substrate_observer._refresh_pending_family_snapshots(_FakeConn(), _FakeConn())
 
     assert result is not None
     status = result.get("status", "")
@@ -278,8 +279,12 @@ def test_auto_derive_user_channel_condition_ids_returns_empty_on_persistence_fai
     proceeds with stale (or empty-from-exception path) condition_ids.
     Post-fix: find_weather_markets_or_raise raises → caught by existing except → [] returned
     with a WARNING log.
+
+    P3 lift (system_decomposition_plan §8 Step 3): _auto_derive_user_channel_condition_ids
+    moved from src.main to src.ingest.price_channel_ingest. The persistence-failure-soft
+    invariant is unchanged; the host module is repointed.
     """
-    from src import main
+    from src.ingest import price_channel_ingest as main
     import src.data.market_scanner as ms
 
     logged_warnings = []

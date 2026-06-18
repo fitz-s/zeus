@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Created: 2026-06-08
+  Authority basis: docs/architecture/system_decomposition_plan.md §4.1 / §6 (P2 row) / §8 Step 1.
+
+  ARTIFACT ONLY. This launchd job description is committed for the operator to install
+  when the cutover is performed; the process-topology refactor that produced it does NOT
+  load, kickstart, or enable any service. It mirrors the existing com.zeus.data-ingest
+  pattern (KeepAlive + RunAtLoad + ThrottleInterval, ProgramArguments -> `python -m
+  <daemon module>`).
+
+  This is the NEW P2 substrate-observer program: it runs the two lifted substrate
+  producers (_market_discovery_cycle + _edli_market_substrate_warm_cycle) that write the
+  executable_market_snapshots / book_hash_transitions tables the order daemon only READS.
+  The order daemon (com.zeus.live-trading) no longer schedules these two jobs.
+
+  INSTALL (operator, NOT performed by the refactor):
+    cp deploy/launchd/com.zeus.substrate-observer.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.zeus.substrate-observer.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONPATH</key>
+		<string>/Users/leofitz/zeus</string>
+		<key>PYTHONSAFEPATH</key>
+		<string>1</string>
+		<key>ZEUS_PRIMARY_ROOT</key>
+		<string>/Users/leofitz/zeus</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.zeus.substrate-observer</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/leofitz/zeus/.venv/bin/python</string>
+		<string>-m</string>
+		<string>src.ingest.substrate_observer_daemon</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/leofitz/zeus/logs/zeus-substrate-observer.err</string>
+	<key>StandardOutPath</key>
+	<string>/Users/leofitz/zeus/logs/zeus-substrate-observer.log</string>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/leofitz/zeus</string>
+</dict>
+</plist>

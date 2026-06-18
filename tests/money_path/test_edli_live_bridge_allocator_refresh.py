@@ -319,7 +319,7 @@ def test_held_position_monitor_refreshes_allocator_before_exit_monitor():
 
     import src.main as main
 
-    source = inspect.getsource(main._chain_sync_and_exit_monitor_cycle)
+    source = inspect.getsource(main._exit_monitor_cycle)
 
     assert "_refresh_global_allocator_for_held_position_monitor(" in source
     assert source.index("_refresh_global_allocator_for_held_position_monitor(") < source.index(

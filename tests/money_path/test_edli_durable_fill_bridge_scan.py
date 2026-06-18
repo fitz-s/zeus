@@ -1,5 +1,8 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-06-03
+# Last reused/audited: 2026-06-08
+# P3 lift (system_decomposition_plan §8 Step 3): _edli_durable_fill_bridge_scan moved from
+#   src.main to src.ingest.price_channel_ingest (it WRITES the durable bridge in the P3
+#   reconcile cycle; src.main's boot recovery imports the SAME canonical copy). Logic unchanged.
 # Authority basis: MF-1 / DEFECT-1 — durable self-healing EDLI fill -> position_current
 #   bridge. Verified defect: the position bridge in src/main.py was driven SOLELY
 #   by the transient in-memory set ``_edli_fill_bridge_aggregate_ids`` (populated
@@ -180,7 +183,7 @@ class TestDurableFillBridgeScan:
         scan, so position_current is never created -> capital orphaned.
         """
         from src.events.edli_position_bridge import edli_bridge_position_id
-        from src.main import _edli_durable_fill_bridge_scan
+        from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
 
         conn = _make_conn()
         aggregate_id = "evtMF1:fiMF1"
@@ -225,7 +228,7 @@ class TestDurableFillBridgeScan:
         ON CONFLICT(position_id) + append-only UNIQUE(position_id, sequence_no)).
         """
         from src.events.edli_position_bridge import edli_bridge_position_id
-        from src.main import _edli_durable_fill_bridge_scan
+        from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
 
         conn = _make_conn()
         aggregate_id = "evtMF1b:fiMF1b"
@@ -263,7 +266,7 @@ class TestDurableFillBridgeScan:
         position_current.
         """
         from src.events.edli_position_bridge import edli_bridge_position_id
-        from src.main import _edli_durable_fill_bridge_scan
+        from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
 
         conn = _make_conn()
         aggregate_id = "evtMF1c:fiMF1c"
@@ -340,7 +343,7 @@ class TestDurableFillBridgeScan:
             edli_bridge_position_id,
             edli_bridge_position_id_legacy,
         )
-        from src.main import _edli_durable_fill_bridge_scan
+        from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
 
         conn = _make_conn()
         # 'agg-1508' → legacy short id 'edlid75be65' (brute-force verified)

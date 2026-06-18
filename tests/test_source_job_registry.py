@@ -1,10 +1,13 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Lifecycle: created=2026-05-24; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: Tests that the job registry mirrors the scheduler + efficiency audit flags.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-05-24
+# Last reused or audited: 2026-06-08 (system_decomposition_plan §8 Step 4: WU daily dedup —
+#   flipped test_no_duplicate_live_source_owners_after_registry_activation to assert the WU
+#   active-duplicate is now RESOLVED, gone from both the live detection map and the known-open list)
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR3);
-#   operator spec §"Job registry" + §4 (ownership map).
+#   operator spec §"Job registry" + §4 (ownership map);
+#   docs/architecture/system_decomposition_plan.md §8 Step 4.
 """Relationship tests for the job registry + inventory/audit CLIs (PR3, advisory).
 
 Key antibody: the registry must MIRROR the scheduler — a scheduled add_job id that is not
@@ -74,8 +77,10 @@ def test_src_main_partition_requires_every_scheduled_job_classified() -> None:
     scheduled = _scheduled_ids_in((_SRC_MAIN_FILE,))
     known = _SRC_MAIN_DATA_COLLECTION_JOB_IDS | _SRC_MAIN_NON_COLLECTION_JOB_IDS
     assert scheduled <= known, f"unclassified src/main jobs: {sorted(scheduled - known)}"
-    # execution/chain ops are explicitly NON-collection (not falsely registered as collectors):
-    assert {"redeem_submitter", "wrap_submitter", "deployment_freshness"} <= _SRC_MAIN_NON_COLLECTION_JOB_IDS
+    # execution/control ops that stay in src.main are explicitly NON-collection:
+    assert {"exit_monitor", "deployment_freshness"} <= _SRC_MAIN_NON_COLLECTION_JOB_IDS
+    assert "redeem_submitter" not in _SRC_MAIN_NON_COLLECTION_JOB_IDS
+    assert "wrap_submitter" not in _SRC_MAIN_NON_COLLECTION_JOB_IDS
 
 
 def test_no_duplicate_live_source_owners_after_registry_activation() -> None:
@@ -92,12 +97,18 @@ def test_no_duplicate_live_source_owners_after_registry_activation() -> None:
     assert unacknowledged_duplicate_live_owners() == {}, (
         f"untracked duplicate live owners (classify each): {unacknowledged_duplicate_live_owners()}"
     )
-    # The known WU active-duplicate is DETECTED and TRACKED (it must not vanish silently while the
-    # operator ownership decision is pending). When it is fixed (one daemon stops owning WU daily),
-    # this entry disappears from both the detection map and the known-open list.
+    # The WU active-duplicate was RESOLVED on 2026-06-08 (system_decomposition_plan §8 Step 4):
+    # main.wu_daily was removed, leaving ingest_main the SOLE live owner of WU daily collection.
+    # Per this test's own contract (and the gate's), a fixed duplicate VANISHES from BOTH the live
+    # detection map AND the known-open list — assert it is now absent from both (the fix landed).
+    from src.data.source_job_registry import _KNOWN_OPEN_DUPLICATE_LIVE_OWNERS
     open_v = open_duplicate_live_owner_violations()
-    assert ("observation", "wu_icao_history") in open_v, (
-        "the verified WU daily active-duplicate must remain DETECTED until the ownership fix lands"
+    assert ("observation", "wu_icao_history") not in open_v, (
+        "the WU daily active-duplicate was RESOLVED (main.wu_daily removed) — it must no longer "
+        "be DETECTED as a live duplicate owner"
+    )
+    assert ("observation", "wu_icao_history") not in _KNOWN_OPEN_DUPLICATE_LIVE_OWNERS, (
+        "the resolved WU active-duplicate must be removed from the known-open list"
     )
 
 

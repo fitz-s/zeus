@@ -1,7 +1,11 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
-# Authority basis: PR #211 bot review (Codex P1 + Copilot) responses
-# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
+# Last reused or audited: 2026-06-08
+# Authority basis: PR #211 bot review (Codex P1 + Copilot) responses;
+#   2026-06-08 system_decomposition_plan §8 Step 3 — the user-channel WS ingestor
+#   (_build_ingestor lives inside _start_user_channel_ingestor_if_enabled) was LIFTED
+#   from src.main into src.ingest.price_channel_ingest (P3). Invariants unchanged; host
+#   module repointed.
+# Lifecycle: created=2026-05-19; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: Antibody — _build_ingestor() resets the adapter's memoized SDK
 #          client on each retry, AND classifies failures into AUTH_FAILED
 #          vs DISCONNECTED for accurate operator telemetry.
@@ -40,7 +44,10 @@ from typing import Any
 
 import pytest
 
-import src.main as zeus_main
+# P3 lift (system_decomposition_plan §8 Step 3): the WS ingestor starter + its nested
+# _build_ingestor moved from src.main to src.ingest.price_channel_ingest. Alias kept as
+# `zeus_main` so test bodies repoint with one import change.
+import src.ingest.price_channel_ingest as zeus_main
 from src.control import ws_gap_guard
 
 
@@ -138,7 +145,7 @@ def _stub_environment(monkeypatch):
         def is_alive(self) -> bool:
             return False
 
-    monkeypatch.setattr("src.main.threading.Thread", _StubThread)
+    monkeypatch.setattr("src.ingest.price_channel_ingest.threading.Thread", _StubThread)
     monkeypatch.setenv("ZEUS_USER_CHANNEL_WS_ENABLED", "1")
     monkeypatch.setenv("POLYMARKET_USER_WS_CONDITION_IDS", "0xaaa,0xbbb")
     return adapter, started
@@ -215,7 +222,7 @@ def test_t1_creds_failure_classified_as_auth_failed(monkeypatch):
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", _StubClient)
     monkeypatch.setattr(
-        "src.main.threading.Thread",
+        "src.ingest.price_channel_ingest.threading.Thread",
         type("_NoopThread", (), {
             "__init__": lambda self, **kw: None,
             "start": lambda self: None,
@@ -250,7 +257,7 @@ def test_t2_generic_transport_failure_classified_as_disconnected(monkeypatch):
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", _StubClient)
     monkeypatch.setattr(
-        "src.main.threading.Thread",
+        "src.ingest.price_channel_ingest.threading.Thread",
         type("_NoopThread", (), {
             "__init__": lambda self, **kw: None,
             "start": lambda self: None,

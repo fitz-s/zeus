@@ -28,6 +28,10 @@ test_trust_policy:
   # Machine-readable registry: 122 tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_p2_substrate_observer_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P2 relationship tests: substrate observer producers move out of src.main, keep shared snapshot lock, remove reactor-backlog gates, and register in substrate-observer daemon."}
+    tests/test_p3_price_channel_ingest_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P3 relationship tests: price/user channel ingest and durable fill bridge move out of src.main into price-channel daemon while order runtime keeps only DB read/boot recovery seams."}
+    tests/test_p4_post_trade_capital_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P4 relationship tests: post-trade capital lifecycle and chain-sync READ move out of order daemon while exit-SUBMIT phase stays in src.main."}
+    tests/test_step4_wu_daily_dedup.py: {created: "2026-06-08", last_used: "2026-06-18", note: "WU daily dedup relationship tests: remove duplicate src.main WU collector and leave data-ingest as sole WU daily owner with duplicate-owner antibody."}
     tests/test_check_live_restart_preflight.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Read-only restart preflight gate: proves live trading daemon absence/presence, submit config, live posterior freshness, pending-exit restart risk, and held-position live belief coverage before operator restart. No DB writes or venue actions."}
     tests/engine/test_market_anchor_retired_from_live_adapter.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Live/experiment separation antibody: retired market-anchor cap must not be wired back into event_reactor_adapter or its live q_lcb path."}
     tests/test_replacement_member_vote_smoothing_not_live_wired.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Live/experiment separation antibody: AIFS member-vote smoothing remains experiment-layer math and must not reappear as an edli live settings switch or materializer reader."}

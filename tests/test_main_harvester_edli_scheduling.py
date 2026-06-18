@@ -32,17 +32,17 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _MAIN_PY = _REPO_ROOT / "src" / "main.py"
+# PROCESS-TOPOLOGY REFACTOR P4 (2026-06-08, system_decomposition_plan §8 Step 2): the
+# harvester resolver add_job moved from src/main.py to the P4 post-trade-capital daemon.
+_P4_DAEMON = _REPO_ROOT / "src" / "ingest" / "post_trade_capital_daemon.py"
 
-# Wave-2 item 5: canary collapsed into edli_live (the only event-driven live mode).
-_EDLI_EVENT_DRIVEN_MODES = (
-    "edli_shadow_no_submit",
-    "edli_submit_disabled_bridge",
-    "edli_live",
-)
+# The order daemon has one event-driven live mode. Historical shadow/bridge strings are
+# experiment/archive semantics and must not re-enter live scheduler expectations.
+_EDLI_EVENT_DRIVEN_MODES = ("edli_live",)
 
 
-def test_harvester_should_register_predicate_covers_edli_modes():
-    """(a) The mode-gate predicate registers the harvester in EDLI modes + legacy_cron."""
+def test_harvester_should_register_predicate_covers_live_boot_recovery_modes():
+    """(a) The order-daemon boot recovery predicate covers live + legacy only."""
     import src.main as main_mod
 
     assert hasattr(main_mod, "_harvester_should_register"), (
@@ -54,13 +54,14 @@ def test_harvester_should_register_predicate_covers_edli_modes():
     # legacy_cron keeps the harvester (no regression).
     assert pred("legacy_cron") is True
 
-    # RED before fix: every EDLI event-driven mode must register the resolver.
     for mode in _EDLI_EVENT_DRIVEN_MODES:
         assert pred(mode) is True, (
-            f"harvester resolver MUST be scheduled in {mode!r}: a FILLED position that "
-            "rides to settlement would otherwise never close/redeem (capital stuck)."
+            f"boot harvester recovery MUST run in {mode!r}: a FILLED position that "
+            "already settled before restart should be drained immediately."
         )
 
+    assert pred("edli_shadow_no_submit") is False
+    assert pred("edli_submit_disabled_bridge") is False
     # 'disabled' mode does not run the trading scheduler — no harvester needed.
     assert pred("disabled") is False
 
@@ -68,12 +69,15 @@ def test_harvester_should_register_predicate_covers_edli_modes():
 def _harvester_add_job_enclosing_gate() -> list[str]:
     """Return the string conditions guarding scheduler.add_job(_harvester_cycle,...).
 
-    Walks src/main.py AST; for the add_job call whose first positional arg is the
-    Name `_harvester_cycle`, collects the source of every enclosing `if` test up to
-    the function body. An empty list means unconditional registration.
+    PROCESS-TOPOLOGY REFACTOR P4: the harvester add_job moved to the P4 post-trade-capital
+    daemon, where it is registered UNCONDITIONALLY (the whole P4 process is the POST_TRADE
+    lane — it always runs regardless of the order daemon's trading mode). This helper now
+    walks the P4 daemon AST and collects the source of every enclosing `if` test around the
+    add_job(_harvester_cycle, ...) call. An empty list means unconditional registration —
+    the post-lift expectation.
     """
-    tree = ast.parse(_MAIN_PY.read_text())
-    src_lines = _MAIN_PY.read_text().splitlines()
+    tree = ast.parse(_P4_DAEMON.read_text())
+    src_lines = _P4_DAEMON.read_text().splitlines()
 
     # Locate the target call node.
     target_call = None
@@ -81,19 +85,29 @@ def _harvester_add_job_enclosing_gate() -> list[str]:
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Attribute) and func.attr == "add_job":
-                if node.args and isinstance(node.args[0], ast.Name) and node.args[0].id == "_harvester_cycle":
+                # The P4 daemon wraps the cycle in _scheduler_job("harvester")(_harvester_cycle);
+                # match the add_job whose first positional arg references _harvester_cycle.
+                arg0 = node.args[0] if node.args else None
+                refs_harvester = False
+                if isinstance(arg0, ast.Name) and arg0.id == "_harvester_cycle":
+                    refs_harvester = True
+                elif isinstance(arg0, ast.Call):
+                    for sub in ast.walk(arg0):
+                        if isinstance(sub, ast.Name) and sub.id == "_harvester_cycle":
+                            refs_harvester = True
+                            break
+                if refs_harvester:
                     target_call = node
                     break
-    assert target_call is not None, "scheduler.add_job(_harvester_cycle, ...) not found in src/main.py"
+    assert target_call is not None, (
+        "scheduler.add_job(_harvester_cycle, ...) not found in the P4 post-trade-capital daemon"
+    )
     target_lineno = target_call.lineno
 
     # Find enclosing if-tests by line range containment.
     enclosing = []
     for node in ast.walk(tree):
         if isinstance(node, ast.If):
-            start = node.test.lineno
-            end = getattr(node, "end_lineno", node.body[-1].end_lineno if node.body else start)
-            # Only consider If whose body region contains the call (not the orelse).
             body_start = node.body[0].lineno
             body_end = node.body[-1].end_lineno if node.body else body_start
             if body_start <= target_lineno <= body_end:
@@ -105,14 +119,21 @@ def _harvester_add_job_enclosing_gate() -> list[str]:
 def test_harvester_add_job_not_exclusively_legacy_cron():
     """(b) The harvester registration is NOT gated exclusively to legacy_cron.
 
-    RED before fix: the sole add_job(_harvester_cycle, ...) site sits under
-    `if live_execution_mode == "legacy_cron":`.
+    After the P4 lift the harvester is registered UNCONDITIONALLY in the post-trade-capital
+    daemon (POST_TRADE follow-up that must run even when trading is paused/dead — the
+    SUPERIORITY of the lift). So the enclosing-gate list must be empty (no mode gate at all),
+    which trivially satisfies 'not gated exclusively to legacy_cron'.
     """
     gates = _harvester_add_job_enclosing_gate()
     legacy_only = [g for g in gates if 'live_execution_mode == "legacy_cron"' in g]
     assert not legacy_only, (
         "scheduler.add_job(_harvester_cycle, ...) is gated exclusively to legacy_cron: "
-        f"{gates!r}. It must also register in EDLI event-driven modes."
+        f"{gates!r}. After the P4 lift it must register unconditionally in the post-trade "
+        "daemon so settled positions get drained in EVERY mode."
+    )
+    assert gates == [], (
+        "after the P4 lift the harvester must be registered UNCONDITIONALLY in the "
+        f"post-trade-capital daemon (no mode gate), got enclosing gates: {gates!r}"
     )
 
 
