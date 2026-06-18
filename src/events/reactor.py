@@ -2076,6 +2076,44 @@ class OpportunityEventReactor:
         envelope_json = self._build_regret_envelope_json(
             event, stage, reason, receipt=receipt, decision_time=decision_time, payload=payload
         )
+        family_level_all_rejected = str(reason or "").startswith(
+            "EVENT_BOUND_ALL_CANDIDATES_REJECTED:"
+        )
+        condition_id = _receipt_or_payload(receipt, payload, "condition_id")
+        token_id = _receipt_or_payload(receipt, payload, "token_id")
+        outcome_label = _receipt_or_payload(receipt, payload, "outcome_label")
+        bin_label = _receipt_or_payload(receipt, payload, "bin_label")
+        direction = _receipt_or_payload(receipt, payload, "direction")
+        q_live = _optional_float(_receipt_or_payload(receipt, payload, "q_live"))
+        q_lcb_5pct = _optional_float(_receipt_or_payload(receipt, payload, "q_lcb_5pct"))
+        c_fee_adjusted = _optional_float(
+            _receipt_or_payload(receipt, payload, "c_fee_adjusted")
+        )
+        c_cost_95pct = _optional_float(
+            _receipt_or_payload(receipt, payload, "c_cost_95pct")
+        )
+        p_fill_lcb = _optional_float(_receipt_or_payload(receipt, payload, "p_fill_lcb"))
+        trade_score = _optional_float(_receipt_or_payload(receipt, payload, "trade_score"))
+        native_quote_available = _optional_bool(
+            _receipt_or_payload(receipt, payload, "native_quote_available")
+        )
+        executable_snapshot_id = _receipt_or_payload(
+            receipt, payload, "executable_snapshot_id"
+        )
+        if family_level_all_rejected:
+            condition_id = None
+            token_id = None
+            outcome_label = None
+            bin_label = None
+            direction = None
+            q_live = None
+            q_lcb_5pct = None
+            c_fee_adjusted = None
+            c_cost_95pct = None
+            p_fill_lcb = None
+            trade_score = None
+            native_quote_available = None
+            executable_snapshot_id = None
         self._regret_ledger.insert_idempotent(
             NoTradeRegretEvent(
                 event_id=event.event_id,
@@ -2084,9 +2122,9 @@ class OpportunityEventReactor:
                 regret_bucket=_regret_bucket_for(reason),  # type: ignore[arg-type]
                 envelope_json=envelope_json,
                 market_slug=payload.get("market_slug"),
-                condition_id=_receipt_or_payload(receipt, payload, "condition_id"),
-                token_id=_receipt_or_payload(receipt, payload, "token_id"),
-                outcome_label=_receipt_or_payload(receipt, payload, "outcome_label"),
+                condition_id=condition_id,
+                token_id=token_id,
+                outcome_label=outcome_label,
                 decision_time=decision_time.astimezone(UTC).isoformat() if decision_time is not None else None,
                 city=_receipt_or_payload(receipt, payload, "city"),
                 target_date=_receipt_or_payload(receipt, payload, "target_date"),
@@ -2094,22 +2132,22 @@ class OpportunityEventReactor:
                 observation_time=payload.get("observation_time"),
                 decision_seq=_optional_int(payload.get("decision_seq")),
                 family_id=_receipt_or_payload(receipt, payload, "family_id"),
-                bin_label=_receipt_or_payload(receipt, payload, "bin_label"),
-                direction=_receipt_or_payload(receipt, payload, "direction"),
-                q_live=_optional_float(_receipt_or_payload(receipt, payload, "q_live")),
-                q_lcb_5pct=_optional_float(_receipt_or_payload(receipt, payload, "q_lcb_5pct")),
-                c_fee_adjusted=_optional_float(_receipt_or_payload(receipt, payload, "c_fee_adjusted")),
-                c_cost_95pct=_optional_float(_receipt_or_payload(receipt, payload, "c_cost_95pct")),
-                p_fill_lcb=_optional_float(_receipt_or_payload(receipt, payload, "p_fill_lcb")),
-                trade_score=_optional_float(_receipt_or_payload(receipt, payload, "trade_score")),
-                native_quote_available=_optional_bool(_receipt_or_payload(receipt, payload, "native_quote_available")),
+                bin_label=bin_label,
+                direction=direction,
+                q_live=q_live,
+                q_lcb_5pct=q_lcb_5pct,
+                c_fee_adjusted=c_fee_adjusted,
+                c_cost_95pct=c_cost_95pct,
+                p_fill_lcb=p_fill_lcb,
+                trade_score=trade_score,
+                native_quote_available=native_quote_available,
                 source_status=_receipt_or_payload(receipt, payload, "source_status"),
                 family_complete=_optional_bool(_receipt_or_payload(receipt, payload, "family_complete")),
                 hypothetical_order_type=payload.get("hypothetical_order_type"),
                 hypothetical_fill_status=payload.get("hypothetical_fill_status"),
                 hypothetical_fill_price=_optional_float(payload.get("hypothetical_fill_price")),
                 causal_snapshot_id=event.causal_snapshot_id,
-                executable_snapshot_id=_receipt_or_payload(receipt, payload, "executable_snapshot_id"),
+                executable_snapshot_id=executable_snapshot_id,
             )
         )
 

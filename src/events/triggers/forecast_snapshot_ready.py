@@ -548,6 +548,7 @@ class ForecastSnapshotReadyTrigger:
         already_pending_keys: set[str] | None = None,
         event_type: str = "FORECAST_SNAPSHOT_READY",
         restrict_to_families: set[tuple[str, str, str]] | None = None,
+        phase_filter_exempt_families: set[tuple[str, str, str]] | None = None,
     ) -> list[EventWriteResult]:
         """Catch up from committed source_run/source_run_coverage/snapshot rows.
 
@@ -862,7 +863,10 @@ class ForecastSnapshotReadyTrigger:
                 city = str(snapshot.get("city") or coverage.get("city") or "")
                 target_date = str(snapshot.get("target_date") or coverage.get("target_local_date") or "")
                 metric = str(snapshot.get("temperature_metric") or coverage.get("temperature_metric") or "")
-                if not market_phase_admits(
+                family_key = (city, target_date, metric)
+                if family_key in (phase_filter_exempt_families or set()):
+                    pass
+                elif not market_phase_admits(
                     city=city,
                     target_date=target_date,
                     metric=metric,

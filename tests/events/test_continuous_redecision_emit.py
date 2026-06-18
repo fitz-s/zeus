@@ -625,21 +625,8 @@ def test_held_position_families_are_admitted_to_redecision(monkeypatch):
     }
 
 
-def test_held_position_forecast_reemit_uses_forecast_phase_gate(monkeypatch):
-    """Only forecast-admissible held families should enter forecast re-emission."""
-
-    calls: list[tuple[str, str, str]] = []
-
-    def _fake_market_phase_admits(*, city, target_date, metric, decision_time, market_row):
-        assert decision_time == datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc)
-        assert market_row == {}
-        calls.append((city, target_date, metric))
-        return city == "Shenzhen"
-
-    monkeypatch.setattr(
-        "src.strategy.market_phase.market_phase_admits",
-        _fake_market_phase_admits,
-    )
+def test_held_position_forecast_reemit_bypasses_entry_phase_gate(monkeypatch):
+    """Real held exposure must keep redeciding even after new-entry phase closes."""
 
     assert main._edli_reemittable_held_position_family_keys(
         {
@@ -647,8 +634,7 @@ def test_held_position_forecast_reemit_uses_forecast_phase_gate(monkeypatch):
             ("Shenzhen", "2026-06-19", "high"),
         },
         decision_time=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
-    ) == {("Shenzhen", "2026-06-19", "high")}
-    assert set(calls) == {
+    ) == {
         ("Tokyo", "2026-06-18", "low"),
         ("Shenzhen", "2026-06-19", "high"),
     }
@@ -693,9 +679,42 @@ def test_redecision_screen_separates_held_monitor_from_forecast_reemit():
         in screen_src
     )
     assert "held_monitor_families=%d held_reemit_families=%d" in screen_src
+    assert "suppressed_existing_pending=%d" in screen_src
     assert "no_current_edge_rest_or_forecast_reemit_exposure" in inspect.getsource(
         main._edli_expire_unadmitted_redecision_pending
     )
+
+
+def test_held_redecision_trigger_phase_filter_exemption(monkeypatch):
+    fc = _seed_forecasts()
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    trig = _trigger(fc, world)
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready.market_phase_admits",
+        lambda **_kwargs: False,
+    )
+
+    blocked = trig.scan_committed_snapshots(
+        forecasts_conn=fc,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+        source="cycle-held-0",
+        event_type="EDLI_REDECISION_PENDING",
+        restrict_to_families={("Chicago", "2026-05-24", "high")},
+    )
+    admitted = trig.scan_committed_snapshots(
+        forecasts_conn=fc,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:18:00+00:00",
+        source="cycle-held-1",
+        event_type="EDLI_REDECISION_PENDING",
+        restrict_to_families={("Chicago", "2026-05-24", "high")},
+        phase_filter_exempt_families={("Chicago", "2026-05-24", "high")},
+    )
+
+    assert blocked == []
+    assert len(admitted) == 1
 
 
 def test_held_position_family_provider_excludes_closed_phases():

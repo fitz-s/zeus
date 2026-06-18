@@ -1772,13 +1772,14 @@ def event_bound_live_adapter_from_trade_conn(
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
                 command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
                 assert executor_submit is not None
-                _append_venue_submit_attempted_aggregate_event(
-                    live_cap_conn or trade_conn,
-                    command,
-                    decision_time=decision_time.astimezone(UTC),
-                )
-                _live_submit_count[0] += 1  # FIX-4: count actual venue submit calls
                 submit_result = executor_submit(final_intent, command)
+                if submit_result.venue_call_started:
+                    _append_venue_submit_attempted_aggregate_event(
+                        live_cap_conn or trade_conn,
+                        command,
+                        decision_time=decision_time.astimezone(UTC),
+                    )
+                    _live_submit_count[0] += 1
                 if submit_result.venue_ack_received:
                     _live_ack_count[0] += 1  # FIX-4 venue_acks: count actual ACKs
                 receipt_cert = build_execution_receipt_certificate(
@@ -5699,6 +5700,7 @@ def _append_submit_terminal_aggregate_event(
         )
         return event.event_hash
     if submit_result.status in {"REJECTED", "PRE_SUBMIT_ERROR"}:
+        is_pre_submit_rejection = submit_result.status == "PRE_SUBMIT_ERROR"
         event = LiveOrderAggregateLedger(conn).append_event(
             aggregate_id=aggregate_id,
             event_type="SubmitRejected",
@@ -5708,6 +5710,10 @@ def _append_submit_terminal_aggregate_event(
                 "execution_command_id": command.payload["execution_command_id"],
                 "execution_receipt_hash": receipt_cert.certificate_hash,
                 "reason_code": submit_result.reason_code,
+                "submit_status": submit_result.status,
+                "venue_call_started": submit_result.venue_call_started,
+                "venue_ack_received": submit_result.venue_ack_received,
+                "pre_submit_rejection": is_pre_submit_rejection,
                 "venue_order_id": submit_result.venue_order_id,
                 "raw_response_hash": submit_result.raw_response_hash,
             },

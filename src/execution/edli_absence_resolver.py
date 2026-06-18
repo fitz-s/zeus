@@ -43,6 +43,10 @@ from src.state.db import (
 logger = logging.getLogger(__name__)
 
 RESOLUTION_REASON = "AUTHENTICATED_CLOB_ABSENCE_NO_OPEN_ORDER_OR_TRADE"
+PRE_SUBMIT_ORPHAN_REASON = "PRE_SUBMIT_ORPHAN_RECOVERY_NO_VENUE_ATTEMPT"
+_LEGACY_PRE_SUBMIT_ORPHAN_REASON_PREFIX = (
+    "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:SubmitRejected requires preceding VenueSubmitAttempted"
+)
 
 
 def _json(row: sqlite3.Row) -> dict[str, Any]:
@@ -213,6 +217,192 @@ def _readiness_counts(conn: sqlite3.Connection) -> tuple[int, int]:
     return int(unresolved), int(reserved)
 
 
+def _pre_submit_orphan_proofs(conn: sqlite3.Connection, aggregate_id: str | None) -> list[dict[str, Any]]:
+    if aggregate_id:
+        rows = conn.execute(
+            _PRE_SUBMIT_ORPHAN_SQL_BY_AGGREGATE,
+            (_LEGACY_PRE_SUBMIT_ORPHAN_REASON_PREFIX + "%", aggregate_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            _PRE_SUBMIT_ORPHAN_SQL_ALL,
+            (_LEGACY_PRE_SUBMIT_ORPHAN_REASON_PREFIX + "%",),
+        ).fetchall()
+    proofs: list[dict[str, Any]] = []
+    for row in rows:
+        command = _latest_payload(conn, str(row["aggregate_id"]), "ExecutionCommandCreated")
+        plan = _latest_payload(conn, str(row["aggregate_id"]), "SubmitPlanBuilt")
+        proof = {
+            "schema_version": 1,
+            "source": "local_edli_event_ledger",
+            "recovery_reason": PRE_SUBMIT_ORPHAN_REASON,
+            "legacy_failure_reason": str(row["rejection_reason"]),
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "aggregate_id": str(row["aggregate_id"]),
+            "event_id": str(row["event_id"]),
+            "final_intent_id": str(row["final_intent_id"]),
+            "execution_command_id": str(row["execution_command_id"] or command.get("execution_command_id") or ""),
+            "usage_id": str(row["usage_id"]),
+            "token_id": str(plan.get("token_id") or ""),
+            "condition_id": str(plan.get("condition_id") or ""),
+            "direction": str(plan.get("direction") or ""),
+            "reserved_notional_usd": row["reserved_notional_usd"],
+            "cap_created_at": row["cap_created_at"],
+            "venue_submit_attempted_event_exists": False,
+            "terminal_event_exists": False,
+        }
+        proof["proof_hash"] = hashlib.sha256(json.dumps(proof, sort_keys=True, default=str).encode()).hexdigest()
+        proofs.append(proof)
+    return proofs
+
+
+_PRE_SUBMIT_ORPHAN_SQL_BASE = """
+SELECT
+    proj.aggregate_id,
+    proj.event_id,
+    proj.final_intent_id,
+    usage.usage_id,
+    usage.execution_command_id,
+    usage.reserved_notional_usd,
+    usage.created_at AS cap_created_at,
+    regret.rejection_reason
+FROM edli_live_order_projection proj
+JOIN edli_live_cap_usage usage
+  ON usage.event_id = proj.event_id
+ AND usage.final_intent_id = proj.final_intent_id
+ AND usage.reservation_status = 'RESERVED'
+JOIN no_trade_regret_events regret
+  ON regret.event_id = proj.event_id
+ AND regret.rejection_reason LIKE ?
+WHERE proj.current_state = 'EXECUTION_COMMAND_CREATED'
+  AND COALESCE(proj.pending_reconcile, 0) = 0
+"""
+
+_PRE_SUBMIT_ORPHAN_SQL_TAIL = """
+  AND NOT EXISTS (
+      SELECT 1 FROM edli_live_order_events attempted
+      WHERE attempted.aggregate_id = proj.aggregate_id
+        AND attempted.event_type = 'VenueSubmitAttempted'
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM edli_live_order_events terminal
+      WHERE terminal.aggregate_id = proj.aggregate_id
+        AND terminal.event_type IN (
+            'VenueSubmitAcknowledged', 'SubmitRejected', 'SubmitUnknown',
+            'Reconciled', 'CapTransitioned'
+        )
+  )
+ORDER BY usage.created_at ASC
+"""
+
+_PRE_SUBMIT_ORPHAN_SQL_ALL = _PRE_SUBMIT_ORPHAN_SQL_BASE + _PRE_SUBMIT_ORPHAN_SQL_TAIL
+_PRE_SUBMIT_ORPHAN_SQL_BY_AGGREGATE = (
+    _PRE_SUBMIT_ORPHAN_SQL_BASE
+    + "  AND proj.aggregate_id = ?\n"
+    + _PRE_SUBMIT_ORPHAN_SQL_TAIL
+)
+
+
+def resolve_pre_submit_orphans(
+    *,
+    aggregate_id: str | None,
+    apply: bool,
+    log: Callable[[str], None] = print,
+) -> int:
+    """Recover legacy pre-submit terminal rows that never reached venue.
+
+    This is intentionally narrower than the authenticated absence resolver. It
+    only clears aggregates that have local evidence of the legacy certificate
+    build bug and no VenueSubmitAttempted event. Ambiguous command-created rows
+    without that receipt remain fail-closed.
+    """
+    ro = get_world_connection_read_only()
+    try:
+        before = _readiness_counts(ro)
+        proofs = _pre_submit_orphan_proofs(ro, aggregate_id)
+        log(f"PRE_SUBMIT_ORPHAN_BEFORE: unresolved_submit={before[0]} reserved_cap={before[1]}")
+        log(f"pre-submit orphan aggregates selected: {len(proofs)}")
+        for proof in proofs:
+            log(
+                "PRE_SUBMIT_ORPHAN_PROOF "
+                + json.dumps(
+                    {
+                        "aggregate_id": proof["aggregate_id"][:80] + "...",
+                        "usage_id": proof["usage_id"],
+                        "token_id": proof["token_id"],
+                        "proof_hash": proof["proof_hash"],
+                    },
+                    sort_keys=True,
+                )
+            )
+    finally:
+        ro.close()
+    if not proofs:
+        return 1
+    if not apply:
+        log("DRY-RUN: re-run with --apply to append SubmitRejected + CapTransitioned(RELEASED).")
+        return 1
+
+    now = datetime.now(timezone.utc)
+    conn = get_world_connection(write_class="live")
+    conn.row_factory = sqlite3.Row
+    try:
+        with world_write_lock(conn):
+            ledger = LiveOrderAggregateLedger(conn)
+            cap_ledger = LiveCapLedger(conn)
+            for proof in proofs:
+                receipt_hash = "pre_submit_orphan:" + str(proof["proof_hash"])
+                ledger.append_event(
+                    aggregate_id=str(proof["aggregate_id"]),
+                    event_type="SubmitRejected",
+                    payload={
+                        "event_id": proof["event_id"],
+                        "final_intent_id": proof["final_intent_id"],
+                        "execution_command_id": proof["execution_command_id"],
+                        "execution_receipt_hash": receipt_hash,
+                        "reason_code": PRE_SUBMIT_ORPHAN_REASON,
+                        "submit_status": "PRE_SUBMIT_ERROR",
+                        "venue_call_started": False,
+                        "venue_ack_received": False,
+                        "pre_submit_rejection": True,
+                        "pre_submit_orphan_recovery_proof": proof,
+                    },
+                    occurred_at=now,
+                    source_authority="explicit_reconcile",
+                )
+                ledger.append_event(
+                    aggregate_id=str(proof["aggregate_id"]),
+                    event_type="CapTransitioned",
+                    payload={
+                        "event_id": proof["event_id"],
+                        "final_intent_id": proof["final_intent_id"],
+                        "execution_command_id": proof["execution_command_id"],
+                        "execution_receipt_hash": receipt_hash,
+                        "to_status": "RELEASED",
+                        "projection_status": "RELEASED",
+                        "transition_reason": PRE_SUBMIT_ORPHAN_REASON,
+                        "reconcile_proof_hash": proof["proof_hash"],
+                    },
+                    occurred_at=now,
+                    source_authority="explicit_reconcile",
+                )
+                cap_ledger.release(str(proof["usage_id"]), PRE_SUBMIT_ORPHAN_REASON)
+                log(
+                    f"PRE_SUBMIT_ORPHAN_RESOLVED {str(proof['aggregate_id'])[:80]}... "
+                    f"cap_usage={proof['usage_id']} proof_hash={proof['proof_hash']}"
+                )
+    finally:
+        conn.close()
+
+    ro = get_world_connection_read_only()
+    try:
+        after = _readiness_counts(ro)
+    finally:
+        ro.close()
+    log(f"PRE_SUBMIT_ORPHAN_AFTER: unresolved_submit={after[0]} reserved_cap={after[1]}")
+    return 0 if after == (0, 0) else 1
+
+
 def resolve(*, aggregate_id: str | None, apply: bool, log: Callable[[str], None] = print) -> int:
     """Resolve stuck post-submit unknowns by authenticated venue absence proof.
 
@@ -350,6 +540,16 @@ def boot_auto_resolve_stuck_unknowns(blocking_reasons: list[str]) -> bool:
     # if BOTH refuse do we fail-closed (genuinely ambiguous -> operator). Absence
     # writes nothing unless EVERY pending aggregate proves absent (its proofs are
     # built before any write), so falling through to presence is state-clean.
+    try:
+        rc0 = resolve_pre_submit_orphans(aggregate_id=None, apply=True, log=logger.warning)
+        if rc0 == 0:
+            return True
+        logger.warning("boot pre-submit orphan resolution did not fully clear (rc=%s); trying absence", rc0)
+    except Exception as exc:  # noqa: BLE001 — bounded local recovery failed -> try venue-truth resolvers
+        logger.warning(
+            "boot pre-submit orphan resolution refused (%s); attempting absence",
+            exc,
+        )
     try:
         rc = resolve(aggregate_id=None, apply=True, log=logger.warning)
         if rc == 0:

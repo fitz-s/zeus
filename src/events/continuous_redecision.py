@@ -842,8 +842,13 @@ def read_recent_full_economics_rejections(
                     )
                )
                AND family_id IS NOT NULL AND family_id != ''
-               AND bin_label IS NOT NULL AND bin_label != ''
-               AND direction IS NOT NULL AND direction != ''
+               AND (
+                    (
+                        bin_label IS NOT NULL AND bin_label != ''
+                        AND direction IS NOT NULL AND direction != ''
+                    )
+                    OR rejection_reason LIKE 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:%'
+               )
                AND created_at >= ?
              ORDER BY created_at DESC
             """,
@@ -873,7 +878,7 @@ def read_recent_full_economics_rejections(
         )
         if stable_key is not None and stable_key not in out:
             out[stable_key] = rejection
-        if legacy_key not in out:
+        if bin_label and direction and legacy_key not in out:
             out[legacy_key] = rejection
         reason = rejection.rejection_reason
         if city and target_date and metric in {"high", "low"} and (

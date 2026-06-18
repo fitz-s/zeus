@@ -6745,6 +6745,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     already_pending_keys=pending,
                     event_type=REDECISION_EVENT_TYPE,
                     restrict_to_families=emit_families,
+                    phase_filter_exempt_families=set(held_reemit_families),
                 )
             else:
                 emitted = []
@@ -6780,10 +6781,14 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         logger.info(
             "edli_redecision_screen: entry_candidates=%d entry_families=%d rest_pulls=%d "
             "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d "
+            "pending_redecision_families=%d suppressed_existing_pending=%d "
             "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d",
             len(redecisions), len(family_keys), len(rest_pulls), len(held_families),
             len(held_reemit_families),
-            len(all_families), len(emitted), cancelled, expired_unadmitted,
+            len(all_families),
+            len(pending_families),
+            len(set(all_families) & pending_families),
+            len(emitted), cancelled, expired_unadmitted,
         )
     finally:
         _edli_redecision_screen_lock.release()
@@ -7178,13 +7183,16 @@ def _edli_reemittable_held_position_family_keys(
     *,
     decision_time: datetime,
 ) -> set[tuple[str, str, str]]:
-    """Held-position families that may enter forecast redecision this tick."""
+    """Held-position families that must keep entering redecision attempts.
 
-    return _edli_reemittable_forecast_family_keys(
-        families,
-        decision_time=decision_time,
-        log_context="held-position",
-    )
+    New-entry redecision is forecast-phase gated because it is deciding whether to
+    open fresh risk. Held exposure is already real chain risk; it must continue to
+    re-evaluate through Day0 and settlement-day windows so monitor/exit/shift
+    logic sees current forecast and price evidence instead of being stranded by
+    the entry-only phase predicate.
+    """
+
+    return set(families or set())
 
 
 def _edli_expire_unadmitted_redecision_pending(

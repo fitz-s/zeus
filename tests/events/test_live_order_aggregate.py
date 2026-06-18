@@ -182,6 +182,57 @@ def test_live_order_submit_unknown_stays_pending_until_reconcile():
     assert projection.pending_reconcile is False
 
 
+def test_pre_submit_rejected_terminates_without_venue_submit_attempt():
+    ledger = LiveOrderAggregateLedger(_conn())
+    _seed_command_without_submit_attempt(ledger)
+
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitRejected",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "execution_receipt_hash": "receipt-hash",
+            "reason_code": "duplicate_entry_same_token:token-yes",
+            "submit_status": "PRE_SUBMIT_ERROR",
+            "venue_call_started": False,
+            "venue_ack_received": False,
+            "pre_submit_rejection": True,
+        },
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+
+    projection = ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "SUBMIT_REJECTED"
+    assert projection.pending_reconcile is False
+
+
+def test_non_pre_submit_rejected_requires_venue_submit_attempt():
+    ledger = LiveOrderAggregateLedger(_conn())
+    _seed_command_without_submit_attempt(ledger)
+
+    with pytest.raises(LiveOrderAggregateError, match="VenueSubmitAttempted"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="SubmitRejected",
+            payload={
+                "event_id": "event-1",
+                "final_intent_id": "intent-1",
+                "execution_command_id": "cmd-1",
+                "execution_receipt_hash": "receipt-hash",
+                "reason_code": "venue_rejected",
+                "submit_status": "REJECTED",
+                "venue_call_started": True,
+                "venue_ack_received": False,
+                "pre_submit_rejection": False,
+            },
+            occurred_at=NOW,
+            source_authority="existing_executor",
+        )
+
+
 def test_live_order_cap_transition_pending_reconcile_sets_projection_pending():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
@@ -461,6 +512,17 @@ def _pre_submit_payload(**overrides):
 
 
 def _seed_command_with_submit_attempt(ledger: LiveOrderAggregateLedger) -> None:
+    _seed_command_without_submit_attempt(ledger)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="VenueSubmitAttempted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1", "execution_command_id": "cmd-1"},
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+
+
+def _seed_command_without_submit_attempt(ledger: LiveOrderAggregateLedger) -> None:
     ledger.append_event(
         aggregate_id="event-1:intent-1",
         event_type="DecisionProofAccepted",
@@ -501,13 +563,6 @@ def _seed_command_with_submit_attempt(ledger: LiveOrderAggregateLedger) -> None:
         },
         occurred_at=NOW,
         source_authority="engine_adapter",
-    )
-    ledger.append_event(
-        aggregate_id="event-1:intent-1",
-        event_type="VenueSubmitAttempted",
-        payload={"event_id": "event-1", "final_intent_id": "intent-1", "execution_command_id": "cmd-1"},
-        occurred_at=NOW,
-        source_authority="existing_executor",
     )
 
 

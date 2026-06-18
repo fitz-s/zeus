@@ -467,6 +467,60 @@ def test_recent_full_economics_rejections_skip_impossible_q_lcb_rows():
     assert rejections == {}
 
 
+def test_all_candidates_rejected_row_is_family_backoff_not_candidate_backoff():
+    conn = _mem_world()
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            rejection_stage TEXT,
+            rejection_reason TEXT,
+            c_fee_adjusted REAL,
+            q_lcb_5pct REAL,
+            trade_score REAL,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            family_id, city, target_date, metric, bin_label, direction,
+            rejection_stage, rejection_reason, c_fee_adjusted, q_lcb_5pct,
+            trade_score, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "edli_family_london_hash",
+            "London",
+            "2026-06-18",
+            "low",
+            None,
+            None,
+            "TRADE_SCORE",
+            "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22; best_rejected=17C buy_yes",
+            None,
+            None,
+            None,
+            "2026-06-17T22:31:00+00:00",
+        ),
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+
+    assert ("family", "London", "2026-06-18", "low") in rejections
+    assert ("edli_family_london_hash", "", "") not in rejections
+    assert not any(
+        len(key) == 5 and key[:3] == ("London", "2026-06-18", "low")
+        for key in rejections
+    )
+
+
 def test_execution_quality_rejection_cools_entry_until_economics_improve():
     conn = _mem_world()
     label = "Will the highest temperature in Shenzhen be 35°C on June 19?"

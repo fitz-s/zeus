@@ -428,7 +428,8 @@ class LiveOrderAggregateLedger:
             return
         if event_type == "SubmitRejected":
             command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
-            self._require_latest_row_of_type(aggregate_id, "VenueSubmitAttempted", event_type)
+            if not _is_pre_submit_rejection_payload(payload):
+                self._require_latest_row_of_type(aggregate_id, "VenueSubmitAttempted", event_type)
             self._require_command_binding(event_type, payload, command_row)
             if not str(payload.get("reason_code") or payload.get("reject_reason") or "").strip():
                 raise LiveOrderAggregateError("SubmitRejected requires reason_code")
@@ -615,6 +616,14 @@ def _payload(row: sqlite3.Row) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise LiveOrderAggregateError("live-order event payload must be an object")
     return payload
+
+
+def _is_pre_submit_rejection_payload(payload: dict[str, Any]) -> bool:
+    return (
+        payload.get("pre_submit_rejection") is True
+        and payload.get("submit_status") == "PRE_SUBMIT_ERROR"
+        and payload.get("venue_call_started") is False
+    )
 
 
 def _optional_posterior_id(value: Any) -> int | None:
