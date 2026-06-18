@@ -1599,7 +1599,7 @@ def screen_resting_orders(
 ) -> list[tuple[OpenRest, RepriceDecision]]:
     """§4.5 resting-order management: for each OPEN maker rest, fire a PULL (cancel+re-decide) only
     when its belief decayed past BELIEF_REPRICE_DELTA on NEW evidence (screen_reprice), or the live
-    book has walked away from our limit by more than REST_BOOK_DRIFT_TICKS. Order age alone is not
+    book has walked away from our limit by at least REST_BOOK_DRIFT_TICKS. Order age alone is not
     trading value and not dead-book proof for an already-resting GTC order; the maker-rest deadline
     owner remains src.execution.maker_rest_escalation. Pure read; returns decisions only — the
     scheduler job enqueues the redecision and performs cancellation through the existing cancel path."""
@@ -1619,7 +1619,7 @@ def screen_resting_orders(
             resting_snapshot_id=rest.resting_snapshot_id,
         )
         if decision is None:
-            # 2) Moved-book pull: our limit has fallen >1 tick behind the live best bid for our side.
+            # 2) Moved-book pull: our limit is at least one full tick behind the live best bid for our side.
             bid = bid_by_cid.get((rest.condition_id, rest.side))
             if bid is not None:
                 try:
@@ -1629,7 +1629,7 @@ def screen_resting_orders(
                     bid = None
             if bid is not None:
                 drift = float(bid.price) - float(rest.limit_price)
-                if drift > REST_BOOK_DRIFT_TICKS * TICK_SIZE + _EPS:
+                if drift >= REST_BOOK_DRIFT_TICKS * TICK_SIZE - _EPS:
                     decision = RepriceDecision(
                         family_id=rest.family_id, bin_label=rest.bin_label, side=rest.side,
                         action="CANCEL_REPLACE", reason="BOOK_MOVED", detail=drift,

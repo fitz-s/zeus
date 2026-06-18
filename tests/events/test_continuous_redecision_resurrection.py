@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-06-18
 # Authority basis: operator stagnation root-cause 2026-06-12 ("continuous redecision没有作用中") +
 #   /tmp/continuous_redecision_resurrection.md. RELATIONSHIP antibodies for the P1 deadlock-free
 #   belief write, the P2 cheap screen, §4.5 rest management, and the EDLI_REDECISION_PENDING consume
@@ -598,6 +598,30 @@ def test_rest_pull_fires_when_best_bid_moves_past_limit_tolerance():
 
     assert len(pulls) == 1
     assert pulls[0][1].reason == "BOOK_MOVED"
+
+
+def test_rest_pull_fires_when_best_bid_is_one_tick_ahead_of_limit():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.71", ask="0.73")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=0.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "BOOK_MOVED"
+    assert pulls[0][1].detail == pytest.approx(cr.TICK_SIZE)
 
 
 def test_rest_pull_ignores_stale_book_moved_evidence():
