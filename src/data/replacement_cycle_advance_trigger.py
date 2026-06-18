@@ -217,8 +217,8 @@ def scope_needs_cycle_advance(
 def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, str, str]]:
     """The (city, target_date, temperature_metric) families with a HELD position right now.
 
-    Read-only from zeus_trades.position_current. A family is HELD only when it has a confirmed
-    position phase plus real economic quantity. Pending entries and open-row ghosts are deliberately
+    Read-only from zeus_trades.position_current. A family is HELD only when it has chain-confirmed
+    economic exposure. Pending entries, local-only rows, and open-row ghosts are deliberately
     excluded: new-money redecision admission comes from the positive-edge screen, while held-family
     admission is reserved for money already at risk. Fail-soft: any read/schema error -> empty set
     (no prioritization, never a crash).
@@ -235,20 +235,17 @@ def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, s
             ).fetchall()
         }:
             return set()
-        shares_expr = "COALESCE(shares, 0)"
-        if "chain_shares" in cols:
-            shares_expr = "MAX(COALESCE(shares, 0), COALESCE(chain_shares, 0))"
-        cost_terms = ["COALESCE(cost_basis_usd, 0)", "COALESCE(size_usd, 0)"]
-        if "chain_cost_basis_usd" in cols:
-            cost_terms.insert(0, "COALESCE(chain_cost_basis_usd, 0)")
-        cost_expr = "MAX(" + ", ".join(cost_terms) + ")"
+        required_chain_cols = {"chain_state", "chain_shares", "chain_cost_basis_usd"}
+        if not required_chain_cols.issubset(cols):
+            return set()
         rows = conn_trades.execute(
-            f"""
+            """
             SELECT DISTINCT city, target_date, temperature_metric
             FROM position_current
             WHERE COALESCE(phase, '') IN ('active', 'day0_window', 'pending_exit')
-              AND {shares_expr} > 0
-              AND {cost_expr} > 0
+              AND COALESCE(chain_state, '') = 'synced'
+              AND COALESCE(chain_shares, 0) > 0
+              AND COALESCE(chain_cost_basis_usd, 0) > 0
               AND city IS NOT NULL AND target_date IS NOT NULL
               AND temperature_metric IS NOT NULL
             """

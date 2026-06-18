@@ -679,22 +679,27 @@ def test_held_position_family_provider_excludes_closed_phases():
             target_date TEXT,
             temperature_metric TEXT,
             shares REAL,
+            chain_shares REAL,
             cost_basis_usd REAL,
+            chain_cost_basis_usd REAL,
             size_usd REAL,
+            chain_state TEXT,
             phase TEXT
         )
         """
     )
     conn.executemany(
-        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("Tokyo", "2026-06-18", "low", 19.5, 12.0, 12.0, "day0_window"),
-            ("Shenzhen", "2026-06-19", "high", 60.0, 44.4, 44.4, "active"),
-            ("Hong Kong", "2026-06-08", "high", 10.0, 8.0, 8.0, "economically_closed"),
-            ("Warsaw", "2026-06-08", "high", 15.75, 9.0, 9.0, "admin_closed"),
-            ("Seoul", "2026-06-08", "high", 7.0, 5.0, 5.0, "quarantined"),
-            ("Busan", "2026-06-20", "high", 22.0, 15.0, 15.0, "pending_entry"),
-            ("Osaka", "2026-06-21", "high", 12.0, 0.0, 0.0, "active"),
+            ("Tokyo", "2026-06-18", "low", 19.5, 19.5, 12.0, 12.0, 12.0, "synced", "day0_window"),
+            ("Shenzhen", "2026-06-19", "high", 60.0, 60.0, 44.4, 44.4, 44.4, "synced", "active"),
+            ("Hong Kong", "2026-06-08", "high", 10.0, 10.0, 8.0, 8.0, 8.0, "synced", "economically_closed"),
+            ("Warsaw", "2026-06-08", "high", 15.75, 15.75, 9.0, 9.0, 9.0, "synced", "admin_closed"),
+            ("Seoul", "2026-06-08", "high", 7.0, 7.0, 5.0, 5.0, 5.0, "synced", "quarantined"),
+            ("Busan", "2026-06-20", "high", 22.0, 22.0, 15.0, 15.0, 15.0, "synced", "pending_entry"),
+            ("Osaka", "2026-06-21", "high", 12.0, 12.0, 0.0, 0.0, 0.0, "synced", "active"),
+            ("Paris", "2026-06-22", "low", 10.0, 0.0, 8.0, 0.0, 8.0, "local_only", "active"),
+            ("Munich", "2026-06-22", "high", 5.0, 5.0, 3.0, 3.0, 3.0, "chain_confirmed_zero", "active"),
         ],
     )
 
@@ -717,15 +722,17 @@ def test_held_position_family_provider_accepts_chain_confirmed_quantity():
             cost_basis_usd REAL,
             size_usd REAL,
             chain_cost_basis_usd REAL,
+            chain_state TEXT,
             phase TEXT
         )
         """
     )
     conn.executemany(
-        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("Shenzhen", "2026-06-19", "high", 0.0, 60.0, 0.0, 0.0, 44.4, "active"),
-            ("Busan", "2026-06-20", "high", 0.0, 10.0, 0.0, 0.0, 7.0, "pending_entry"),
+            ("Shenzhen", "2026-06-19", "high", 0.0, 60.0, 0.0, 0.0, 44.4, "synced", "active"),
+            ("Busan", "2026-06-20", "high", 0.0, 10.0, 0.0, 0.0, 7.0, "synced", "pending_entry"),
+            ("Paris", "2026-06-21", "low", 0.0, 10.0, 0.0, 0.0, 7.0, "local_only", "active"),
         ],
     )
 
