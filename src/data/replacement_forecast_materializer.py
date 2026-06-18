@@ -1023,6 +1023,49 @@ def _replacement_bayes_precision_fusion_override(
             use_covariance=True,
         )
 
+        # METHOD UNIFY 2026-06-18: replace T2 BLUE center (fused.mu) with the RAW diagonal
+        # weighted mean — the SAME formula walk_forward_model_weights uses in the spine ENTRY.
+        # Closes the #135 two-center split (RAW-entry vs T2-BLUE-exit) so forecast_posteriors
+        # center == spine entry center for the same inputs.  Width (fused.sd) is UNCHANGED.
+        #
+        # Algorithm (mirrors walk_forward_model_weights exactly, via raw_second_moment_weights):
+        #  1. For each instrument in capture.likelihood, compute raw_m2 = mean(r²) from
+        #     train_residuals (in degC; bias² included — NO demeaning).
+        #  2. Include the anchor as a regular member with its own raw_m2 (from
+        #     capture.anchor_raw_m2_native).
+        #  3. Compute weights via the shared raw_second_moment_weights helper (same unit
+        #     scaling, same EB-shrink, same equal-weight fallback as the spine).
+        #  4. mu_diagonal = Σ_m w_m · z_m, where z_m = ins.z (already RAW via _raw_instrument).
+        from src.forecast.center import raw_second_moment_weights as _raw_w  # noqa: PLC0415
+        from src.forecast.model_selection import ANCHOR_MODEL as _ANCHOR  # noqa: PLC0415
+
+        _raw_m2_and_n: dict[str, tuple[float | None, int]] = {}
+        _z_by_model: dict[str, float] = {}
+        for _ins in capture.likelihood:
+            if _ins.train_residuals:
+                _m2 = sum(r * r for r in _ins.train_residuals) / len(_ins.train_residuals)
+                _raw_m2_and_n[_ins.model] = (_m2, _ins.n_train)
+            else:
+                _raw_m2_and_n[_ins.model] = (None, 0)
+            _z_by_model[_ins.model] = float(_ins.z)
+        # Include anchor as a MEMBER (not a separate Bayesian prior).
+        if capture.anchor_z is not None:
+            _raw_m2_and_n[_ANCHOR] = (capture.anchor_raw_m2_native, capture.anchor_raw_n_train)
+            _z_by_model[_ANCHOR] = float(capture.anchor_z)
+        # Serving unit (F-city vs C-city): read from the request bins (the degC residuals stored
+        # in train_residuals are always in degC so the unit scaling only affects the floor/shrink
+        # target — matching the spine's _u logic and the operator's f06d2176bc fix).
+        _serving_unit = _city_settlement_unit_from_bins(request)
+        _weights = _raw_w(_raw_m2_and_n, unit=_serving_unit)
+        if _weights and _z_by_model:
+            _mu_diagonal = float(sum(_weights.get(m, 0.0) * z for m, z in _z_by_model.items()))
+        elif _z_by_model:
+            # No precision signal at all → equal-weight RAW mean (pure RAW, never T2 BLUE).
+            _mu_diagonal = float(sum(_z_by_model.values()) / len(_z_by_model))
+        else:
+            # No instruments: unreachable after the has_extras guard above; use anchor RAW value.
+            _mu_diagonal = float(anchor_value_corrected_c)
+
         used_models = tuple(fused.used_models)
         # K3 ANTIBODY (2026-06-09): surface a STRUCTURALLY-incomplete decorrelated set LOUDLY. The
         # 4 declared decorrelated PROVIDERS are NOAA(gfs) / DWD-ICON(one of icon_d2|icon_eu|
@@ -1078,7 +1121,7 @@ def _replacement_bayes_precision_fusion_override(
         # anchor center, though passed as anchor_z_corrected, is the persisted anchor product).
         # Sorted + de-duped for a deterministic provenance list.
         dep_ids = set(consumed_ids)
-        from src.forecast.model_selection import ANCHOR_MODEL as _ANCHOR  # noqa: PLC0415
+        # _ANCHOR already imported above in the METHOD UNIFY block.
         anchor_row = persisted_current.get(_ANCHOR)
         if anchor_row is not None:
             dep_ids.add(int(anchor_row[1]))
@@ -1131,7 +1174,7 @@ def _replacement_bayes_precision_fusion_override(
         } or None
 
         return _BayesPrecisionFusionFusionOverride(
-            anchor_value_c=float(fused.mu),
+            anchor_value_c=_mu_diagonal,
             anchor_sigma_c=float(fused.sd),
             method=fused.method,
             used_models=used_models,

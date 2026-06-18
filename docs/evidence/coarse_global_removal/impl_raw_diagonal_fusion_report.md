@@ -212,3 +212,27 @@ belief/unify suites (`position_belief`/`monitor`/`single_belief`) → **30 passe
   filter raised to `edge_lcb > EDGE_FLOOR`; left at 0.0 to preserve the conservative existing bar.
 - The 4 pre-existing spine-integration failures (`blockers_pr409`, `routing`) are NOT addressed —
   they predate this work and are out of scope.
+
+## Method unify (2026-06-18)
+
+**Problem closed**: entry (spine PD) used `walk_forward_model_weights` (RAW diagonal), but
+`forecast_posteriors` center came from `fuse_bayes_precision_posterior` mu* (T2 full-Σ Bayesian
+BLUE). Both were RAW inputs post-§3, but the fusion METHOD differed — the #135 two-center split.
+
+**Changes** (4 files, 1 new test file):
+
+| File | Change |
+|---|---|
+| `src/forecast/center.py` | Added `raw_second_moment_weights(raw_m2_and_n, *, unit)` — shared helper, single source of truth for entry and exit weights. Identical logic to `walk_forward_model_weights` but keyed by model name, so both callers call ONE function. |
+| `src/data/bayes_precision_fusion_capture.py` | Extended `BayesPrecisionFusionCaptureResult` with `anchor_raw_m2_native: float | None` and `anchor_raw_n_train: int`. Populated in `capture_bayes_precision_instruments` from `anchor_hist.residuals` (mean(r²)). |
+| `src/data/replacement_forecast_materializer.py` | In `_replacement_bayes_precision_fusion_override`: after `fuse_bayes_precision_posterior` (kept for sd/width), compute `_mu_diagonal = Σ_m w_m·z_m` via `raw_second_moment_weights` over `capture.likelihood` train_residuals + anchor. Return `anchor_value_c=_mu_diagonal` (not `fused.mu`). F-city unit scaling via `_city_settlement_unit_from_bins`. Equal-weight fallback (no T2 leak) on missing precision signal. |
+| `tests/forecast/test_method_unify_center_coherence.py` | 8 RED-on-revert tests: (a) `raw_second_moment_weights` == `walk_forward_model_weights` for same inputs (full history, low-n shrink, no history, F-city unit scaling, sum-to-1); (b) materializer path: `BayesPrecisionFusionCaptureResult` carries anchor raw_m2, diagonal center differs from equal mean when precision varies, zero-history anchor uses equal-weight fallback. |
+
+**Invariants preserved**:
+- Width unchanged: `fused.sd` still used for `anchor_sigma_c`.
+- Anchor is a MEMBER (not a separate Bayesian prior) with its own `raw_m2`.
+- FULL/PARTIAL completeness contract, q-mode, calibration-credential paths intact.
+- No T2 BLUE path reachable: all three branches (precision signal / no signal / no instruments) produce a RAW center.
+- `debias_applied=false` already set by prior §3 (RAW instruments). `center_method` provenance inherits from `fused.method` which reflects EQUAL_WEIGHT or T2 — a follow-on provenance string update may relabel to `RAW_DIAGONAL` but is NOT a correctness gate.
+
+**Test run**: 91 passed (all `tests/forecast/ tests/decision/` + modal-collapse + unify suites). 1 pre-existing `test_emos_serve` failure unrelated to this work.

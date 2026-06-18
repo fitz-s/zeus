@@ -228,6 +228,74 @@ def walk_forward_model_weights(
 
 
 # ---------------------------------------------------------------------------
+# Shared RAW second-moment weight helper (single source of truth for ENTRY
+# and EXIT center alignment — METHOD UNIFY 2026-06-18).
+# ---------------------------------------------------------------------------
+
+def raw_second_moment_weights(
+    raw_m2_and_n: "dict[str, tuple[float | None, int]]",
+    *,
+    unit: str = "C",
+) -> "dict[str, float]":
+    """Non-negative weights summing to 1 — RAW diagonal precision basis.
+
+    Shared helper consumed by both the spine ENTRY (``walk_forward_model_weights``
+    via ``RawModelMember``) and the materializer EXIT path (``forecast_posteriors``
+    center — METHOD UNIFY 2026-06-18).  Using ONE function guarantees the entry and
+    exit centers are computed identically from the same weights formula so the
+    two-center split (#135) cannot re-open through weights drift.
+
+    ``raw_m2_and_n`` maps model → (raw_m2_native, n_train).  ``raw_m2_native`` is
+    Ê[(x−Y)²] in the model's NATIVE unit² (degC² for C-cities; degC² for
+    walk-forward residuals even when the materializer serves F — the caller is
+    responsible for supplying degC² from ``train_residuals`` which are stored in
+    degC).  ``unit`` is the SERVING unit: "F" scales the floor / shrink target by
+    (9/5)² (the same fix operator landed in f06d2176bc).
+
+    Returns {model: weight}.  Falls back to equal 1/n when no model has a usable
+    precision signal (no history, all thin, or non-finite).
+    """
+    models = list(raw_m2_and_n.keys())
+    n = len(models)
+    if n == 0:
+        return {}
+    _u = (9.0 / 5.0) ** 2 if unit == "F" else 1.0
+    floor_m2 = (SIGMA_FLOOR * SIGMA_FLOOR) * _u
+    equal_m2 = ((SIGMA_FLOOR * LOWN_INFLATE) ** 2) * _u
+    precisions: dict[str, float] = {}
+    have_any_signal = False
+    for model in models:
+        raw_m2, n_train = raw_m2_and_n[model]
+        try:
+            raw_m2_f = float(raw_m2) if raw_m2 is not None else None
+        except (TypeError, ValueError):
+            raw_m2_f = None
+        if raw_m2_f is None or not np.isfinite(raw_m2_f) or raw_m2_f <= 0.0 or n_train <= 0:
+            m2_eff = equal_m2
+        else:
+            have_any_signal = True
+            if n_train < MIN_TRAIN:
+                lam = n_train / (n_train + KAPPA)
+                m2_eff = lam * raw_m2_f + (1.0 - lam) * equal_m2
+            else:
+                m2_eff = raw_m2_f
+        precisions[model] = 1.0 / max(m2_eff, floor_m2)
+    if not have_any_signal:
+        eq = 1.0 / n
+        return {m: eq for m in models}
+    total = sum(precisions.values())
+    if not np.isfinite(total) or total <= 0.0:
+        eq = 1.0 / n
+        return {m: eq for m in models}
+    w = {m: max(0.0, v / total) for m, v in precisions.items()}
+    s = sum(w.values())
+    if s <= 0.0:
+        eq = 1.0 / n
+        return {m: eq for m in models}
+    return {m: v / s for m, v in w.items()}
+
+
+# ---------------------------------------------------------------------------
 # Weighted Huber location (spec line 247) — the in-envelope robust consensus.
 # ---------------------------------------------------------------------------
 

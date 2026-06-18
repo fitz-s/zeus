@@ -296,6 +296,10 @@ class BayesPrecisionFusionCaptureResult:
     # v3 rule 5: the anchor cell's sigma_repr^2 (degC^2), widening the fusion prior tau0.
     # 0.0 when the grid-representativeness deploy flag is OFF or the anchor cell is unknown.
     anchor_sigma_repr_sq: float = 0.0
+    # METHOD UNIFY 2026-06-18: anchor RAW second moment (degC²) and n_train for the shared
+    # raw_second_moment_weights helper.  None when the anchor has no walk-forward history.
+    anchor_raw_m2_native: float | None = None
+    anchor_raw_n_train: int = 0
 
     @property
     def has_extras(self) -> bool:
@@ -543,6 +547,16 @@ def capture_bayes_precision_instruments(
     # is unknown -> tau0 unchanged.
     anchor_sigma_repr_sq = _repr_sq(ANCHOR_MODEL)
 
+    # METHOD UNIFY 2026-06-18: compute the anchor's RAW second moment (degC²) for the
+    # shared raw_second_moment_weights helper.  residuals = forecast − settlement (degC),
+    # so raw_m2 = mean(r²) — bias² included, same formula as the spine producer.
+    _anchor_raw_m2: float | None = None
+    _anchor_raw_n: int = 0
+    if anchor_hist and anchor_hist.n_train > 0:
+        _rs = anchor_hist.residuals
+        _anchor_raw_m2 = sum(r * r for r in _rs) / len(_rs)
+        _anchor_raw_n = anchor_hist.n_train
+
     return BayesPrecisionFusionCaptureResult(
         anchor_z=anchor_z,
         anchor_tau0=anchor_tau0,
@@ -552,4 +566,6 @@ def capture_bayes_precision_instruments(
         dropped_models=tuple(dropped),
         admitted_on_missing_availability=_missing_avail_count,
         anchor_sigma_repr_sq=anchor_sigma_repr_sq,
+        anchor_raw_m2_native=_anchor_raw_m2,
+        anchor_raw_n_train=_anchor_raw_n,
     )
