@@ -760,6 +760,42 @@ def test_open_maker_rests_avoids_full_order_fact_window_scan():
     assert "WHERE VENUE_ORDER_ID = ?" in statements
 
 
+def test_open_maker_rests_skip_unresolved_orders_from_redecision_screen():
+    import src.main as main
+
+    world = _mem_world()
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT, "
+        "side TEXT, price REAL, snapshot_id TEXT, created_at TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "cmd-unresolved",
+            "order-unresolved",
+            "token-not-in-snapshot",
+            "m1",
+            "BUY",
+            0.75,
+            "snap1",
+            "2026-06-12T00:00:00+00:00",
+            "ENTRY",
+        ),
+    )
+    trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-unresolved", "LIVE", 1))
+    trade.commit()
+
+    rests = main._edli_open_maker_rests_for_screen(trade, world)
+
+    assert rests == []
+
+
 def test_open_rest_families_are_priority_warm_inputs_without_fact_window_scan():
     import src.main as main
 

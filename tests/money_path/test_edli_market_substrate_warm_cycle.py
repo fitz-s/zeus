@@ -166,10 +166,27 @@ def test_pending_family_refresh_has_no_fixed_family_cap():
     # families[:<int>] would be a hard drop; families[:start_offset] is the rotation.
     dropping_caps = re.findall(r"families\[:\s*\d+\s*\]", src)
     assert not dropping_caps, f"fixed-count family cap present: {dropping_caps}"
-    assert "families[:start_offset]" in src, (
-        "expected the rotating-cursor wrap-around families[:start_offset]; the "
+    assert "ordinary_families[:start_offset]" in src, (
+        "expected the rotating-cursor wrap-around ordinary_families[:start_offset]; the "
         "round-robin sweep is what prevents tail-family starvation"
     )
+
+
+def test_warm_lane_money_risk_priority_stays_ahead_of_pending_rotation():
+    """Open rests and held positions are live money-risk, not ordinary backlog.
+
+    They must remain ahead of the rotating pending-event tail every tick; the
+    fair cursor should rotate only the ordinary pending families so a large
+    pending queue cannot bury already-submitted orders or chain-confirmed
+    holdings.
+    """
+
+    src = inspect.getsource(main_module._refresh_pending_family_snapshots)
+
+    assert "get_trade_connection, get_trade_connection_read_only" in src
+    assert "held_position_priority_families" in src
+    assert "priority_families + new_priority_families + rotated_ordinary_families" in src
+    assert "ordinary_families[start_offset:] + ordinary_families[:start_offset]" in src
 
 
 def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatch):
@@ -1297,6 +1314,8 @@ def test_pending_family_refresh_matches_gamma_with_canonical_city_alias(monkeypa
 
 
 def test_mainstream_warm_cycle_uses_bounded_fresh_family_window(monkeypatch):
+    was_bootstrap_complete = main_module._held_position_monitor_bootstrap_complete.is_set()
+    main_module._held_position_monitor_bootstrap_complete.set()
     monkeypatch.setattr(
         main_module,
         "_settings_section",
@@ -1331,7 +1350,11 @@ def test_mainstream_warm_cycle_uses_bounded_fresh_family_window(monkeypatch):
 
     monkeypatch.setattr(mainstream, "warm_mainstream_point", _warm)
 
-    main_module._edli_mainstream_warm_cycle()
+    try:
+        main_module._edli_mainstream_warm_cycle()
+    finally:
+        if not was_bootstrap_complete:
+            main_module._held_position_monitor_bootstrap_complete.clear()
 
     assert warmed == rows[:2]
 

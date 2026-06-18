@@ -3351,7 +3351,7 @@ def _refresh_pending_family_snapshots(
     )
     from src.data.polymarket_client import PolymarketClient
     from src.engine.event_reactor_adapter import _event_family_market_topology_rows
-    from src.state.db import get_trade_connection
+    from src.state.db import get_trade_connection, get_trade_connection_read_only
     from src.strategy.market_phase import (
         family_venue_closed as _family_venue_closed,
     )
@@ -3408,13 +3408,13 @@ def _refresh_pending_family_snapshots(
             _canonical_refresh_metric(metric),
         )
 
-    families: list[tuple[str, str, str]] = []
+    pending_families: list[tuple[str, str, str]] = []
     for row in pending_rows:
         city = _canonical_refresh_city_name(row[0])
         target_date = str(row[1] or "").strip()
         metric = _canonical_refresh_metric(row[2])
         if city and target_date and metric:
-            families.append((city, target_date, metric))
+            pending_families.append((city, target_date, metric))
 
     open_rest_priority_families: list[tuple[str, str, str]] = []
     try:
@@ -3428,18 +3428,31 @@ def _refresh_pending_family_snapshots(
             "refresh_pending_family_snapshots: open-rest priority read failed (non-fatal): %s",
             exc,
         )
-    if open_rest_priority_families:
-        seen_family_keys = {_refresh_family_key(*family) for family in families}
-        prepend: list[tuple[str, str, str]] = []
-        for family in open_rest_priority_families:
-            key = _refresh_family_key(*family)
-            if key and key not in seen_family_keys:
-                prepend.append(family)
-                seen_family_keys.add(key)
-        families = prepend + families
+    held_position_priority_families = sorted(_edli_current_held_position_family_keys())
+
+    # Money-risk families are not ordinary pending-work backlog. A live unfilled
+    # rest already passed submit economics once, and a held family has
+    # chain-confirmed exposure. Keep them at the head of every warm tick and
+    # rotate only the ordinary pending-event tail so backlog fairness cannot
+    # starve active risk.
+    priority_families: list[tuple[str, str, str]] = []
+    priority_keys: set[tuple[str, str, str]] = set()
+    for family in list(open_rest_priority_families) + list(held_position_priority_families):
+        key = _refresh_family_key(*family)
+        if key and key not in priority_keys:
+            priority_families.append(family)
+            priority_keys.add(key)
+
+    families = priority_families + [
+        family for family in pending_families if _refresh_family_key(*family) not in priority_keys
+    ]
 
     if not families:
-        return {"status": "no_pending_or_open_rest_families", "open_rest_priority_families": 0}
+        return {
+            "status": "no_pending_open_rest_or_held_families",
+            "open_rest_priority_families": 0,
+            "held_position_priority_families": 0,
+        }
 
     # FUNNEL-STARVATION FIX (2026-06-09): rotate the per-cycle starting offset so
     # EVERY live family is refreshed within one SWEEP PERIOD instead of the newest
@@ -3495,9 +3508,16 @@ def _refresh_pending_family_snapshots(
                     pass
         except Exception:
             pass
+    ordinary_families = families[len(priority_families):]
+    n_ordinary_families = len(ordinary_families)
+    start_offset = _SUBSTRATE_REFRESH_CURSOR % max(1, n_ordinary_families)
+    rotated_ordinary_families = (
+        ordinary_families[start_offset:] + ordinary_families[:start_offset]
+        if ordinary_families
+        else []
+    )
+    families = priority_families + new_priority_families + rotated_ordinary_families
     n_families = len(families)
-    start_offset = _SUBSTRATE_REFRESH_CURSOR % n_families
-    families = new_priority_families + families[start_offset:] + families[:start_offset]
 
     # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
     # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
@@ -3691,8 +3711,9 @@ def _refresh_pending_family_snapshots(
         # path — all_fresh, refreshed, or a later gamma/capture error — advances
         # the cursor identically and no slice is ever skipped or double-swept.
         _SUBSTRATE_REFRESH_CURSOR = (
-            start_offset + max(1, families_processed_this_cycle)
-        ) % n_families
+            start_offset
+            + max(1, max(0, families_processed_this_cycle - len(priority_families)))
+        ) % max(1, n_ordinary_families)
 
         if not gamma_refresh_families and not cached_topology_markets:
             logger.info(
@@ -3706,6 +3727,7 @@ def _refresh_pending_family_snapshots(
                 "status": "all_fresh",
                 "families_checked": len(families),
                 "open_rest_priority_families": len(open_rest_priority_families),
+                "held_position_priority_families": len(held_position_priority_families),
                 "fresh_skipped": fresh_skipped,
                 "no_topology": no_topology,
                 "venue_closed_skipped": venue_closed_skipped,
@@ -4104,6 +4126,7 @@ def _refresh_pending_family_snapshots(
                 "status": "all_fresh",
                 "families_checked": len(families),
                 "open_rest_priority_families": len(open_rest_priority_families),
+                "held_position_priority_families": len(held_position_priority_families),
                 "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
                 "gamma_refresh_families": len(gamma_refresh_families),
                 "cached_topology_families": cached_topology_families,
@@ -4147,6 +4170,7 @@ def _refresh_pending_family_snapshots(
         "status": "refreshed",
         "families_checked": len(families),
         "open_rest_priority_families": len(open_rest_priority_families),
+        "held_position_priority_families": len(held_position_priority_families),
         "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
         "gamma_refresh_families": len(gamma_refresh_families),
         "cached_topology_families": cached_topology_families,
@@ -6649,6 +6673,8 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         except Exception:  # noqa: BLE001
             age_ms = 0.0
         screen_side = side_by_token.get(token_id, "buy_yes")
+        if not (cond and family_id and bin_label and snap_id):
+            continue
         resting_held_side_posterior = (
             1.0 - resting_posterior if screen_side == "buy_no" else resting_posterior
         )
