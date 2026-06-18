@@ -1,5 +1,5 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-06-18
 # Authority basis: STRUCTURAL_PLAN.md v3 §2 PR-S3 + B_patch_plan.md
 #
 # Relationship test: when Module A (position_current DB state) shows a non-terminal
@@ -22,6 +22,7 @@ from src.state.portfolio import (
     Position,
 )
 from src.engine.evaluator import _layer7_dedup_fires
+from src.execution.executor import _entry_duplicate_same_token_component
 
 TOKEN_X = "0xabc123_token_yes"
 TOKEN_X_NO = "0xabc123_token_no"
@@ -43,8 +44,11 @@ def mem_db():
             city TEXT,
             bin_label TEXT,
             direction TEXT NOT NULL DEFAULT 'buy_yes',
+            shares REAL DEFAULT 0,
+            cost_basis_usd REAL DEFAULT 0,
             token_id TEXT,
             no_token_id TEXT,
+            order_id TEXT,
             updated_at TEXT NOT NULL
         )
     """)
@@ -55,6 +59,7 @@ def mem_db():
             venue_order_id TEXT NOT NULL,
             command_id TEXT NOT NULL,
             state TEXT NOT NULL,
+            filled_size TEXT NOT NULL DEFAULT '0',
             observed_at TEXT NOT NULL,
             local_sequence INTEGER NOT NULL DEFAULT 1
         )
@@ -65,7 +70,24 @@ def mem_db():
             position_id TEXT NOT NULL,
             token_id TEXT NOT NULL,
             intent_kind TEXT NOT NULL DEFAULT 'EXIT',
-            state TEXT NOT NULL
+            side TEXT NOT NULL DEFAULT 'BUY',
+            venue_order_id TEXT,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT '2026-05-17T22:13:38',
+            updated_at TEXT NOT NULL DEFAULT '2026-05-17T22:13:38'
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE venue_order_facts (
+            fact_id INTEGER PRIMARY KEY,
+            venue_order_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            remaining_size TEXT,
+            matched_size TEXT,
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            local_sequence INTEGER NOT NULL DEFAULT 1
         )
     """)
     conn.commit()
@@ -76,12 +98,12 @@ def _insert_position(conn, position_id, phase, token_id, direction="buy_yes", no
     conn.execute(
         """INSERT INTO position_current
            (position_id, phase, trade_id, market_id, city, bin_label,
-            direction, token_id, no_token_id, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            direction, shares, cost_basis_usd, token_id, no_token_id, order_id, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             position_id, phase, "trade-" + position_id, "mkt-1",
-            "London", "18°C", direction, token_id,
-            no_token_id or TOKEN_X_NO, "2026-05-17T22:13:38",
+            "London", "18°C", direction, 0.0, 0.0, token_id,
+            no_token_id or TOKEN_X_NO, "order-" + position_id, "2026-05-17T22:13:38",
         ),
     )
     conn.commit()
@@ -354,6 +376,131 @@ def test_evaluator_rejects_when_only_inflight_exit_present(mem_db):
         "OR gate must reject: inflight-only scenario → ALREADY_HELD_SAME_TOKEN. "
         "If this fails, `or has_inflight_exit_for_token` was removed from _layer7_dedup_fires."
     )
+
+
+def test_executor_duplicate_gate_allows_cancelled_pending_entry_without_fill(mem_db):
+    _insert_position(
+        mem_db,
+        "stale-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
+                   'order-stale-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14', '2026-06-18T09:20:22')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-stale-pending', 'cmd-cancelled', 'CANCEL_CONFIRMED',
+                   '0', '0', 'REST', '2026-06-18T09:20:22', 1)"""
+    )
+    mem_db.commit()
+
+    result = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+    )
+
+    assert result["allowed"] is True
+
+
+def test_executor_duplicate_gate_blocks_cancelled_pending_entry_with_fill(mem_db):
+    _insert_position(
+        mem_db,
+        "filled-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-filled', 'filled-pending', ?, 'ENTRY', 'BUY',
+                   'order-filled-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14', '2026-06-18T09:20:22')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-filled-pending', 'cmd-filled', 'CANCEL_CONFIRMED',
+                   '4', '1', 'REST', '2026-06-18T09:20:22', 1)"""
+    )
+    mem_db.execute(
+        """INSERT INTO venue_trade_facts
+           (trade_fact_id, trade_id, venue_order_id, command_id, state, filled_size,
+            observed_at, local_sequence)
+           VALUES (2, 'trade-filled-pending', 'order-filled-pending', 'cmd-filled',
+                   'MATCHED', '1', '2026-06-18T09:20:22', 1)"""
+    )
+    mem_db.commit()
+
+    result = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+    )
+
+    assert result["allowed"] is False
+    assert result["reason"] == "open_position_same_token"
+
+
+def test_executor_duplicate_gate_does_not_let_stale_pending_hide_active_position(mem_db):
+    _insert_position(
+        mem_db,
+        "stale-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+    _insert_position(
+        mem_db,
+        "active-position",
+        "active",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
+                   'order-stale-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14', '2026-06-18T09:20:22')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-stale-pending', 'cmd-cancelled', 'CANCEL_CONFIRMED',
+                   '0', '0', 'REST', '2026-06-18T09:20:22', 1)"""
+    )
+    mem_db.commit()
+
+    result = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+    )
+
+    assert result["allowed"] is False
+    assert result["existing_position_id"] == "active-position"
 
 # ── Snapshot fallback (anti-rot for the dual-path) ───────────────────────────────
 

@@ -157,6 +157,9 @@ _ENTRY_DUPLICATE_OPEN_COMMAND_STATES = frozenset(
 _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES = frozenset(
     {"REJECTED", "SUBMIT_REJECTED", "CANCELLED", "EXPIRED"}
 )
+_ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES = frozenset(
+    {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
+)
 _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
 _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE = Decimal("0.03")
 _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD = Decimal("0.05")
@@ -176,6 +179,138 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         (table,),
     ).fetchone()
     return row is not None
+
+
+def _entry_has_positive_trade_fact(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str = "",
+    position_id: str = "",
+    order_id: str = "",
+) -> bool:
+    if not _table_exists(conn, "venue_trade_facts"):
+        return False
+    if command_id:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_trade_facts
+             WHERE CAST(filled_size AS REAL) > 0
+               AND command_id = ?
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        return row is not None
+    if not _table_exists(conn, "venue_commands"):
+        return False
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM venue_trade_facts vtf
+          JOIN venue_commands vc ON vc.command_id = vtf.command_id
+         WHERE CAST(vtf.filled_size AS REAL) > 0
+           AND (
+                (? != '' AND vc.position_id = ?)
+                OR (? != '' AND vc.venue_order_id = ?)
+           )
+         LIMIT 1
+        """,
+        (position_id, position_id, order_id, order_id),
+    ).fetchone()
+    return row is not None
+
+
+def _latest_entry_command_for_duplicate_position(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    order_id: str,
+) -> dict | None:
+    if not _table_exists(conn, "venue_commands"):
+        return None
+    row = conn.execute(
+        """
+        SELECT command_id, state, venue_order_id
+          FROM venue_commands
+         WHERE intent_kind = 'ENTRY'
+           AND (
+                position_id = ?
+                OR (? != '' AND venue_order_id = ?)
+           )
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1
+        """,
+        (position_id, order_id, order_id),
+    ).fetchone()
+    if row is None:
+        return None
+    if isinstance(row, sqlite3.Row):
+        return {key: row[key] for key in row.keys()}
+    return {"command_id": row[0], "state": row[1], "venue_order_id": row[2]}
+
+
+def _entry_command_has_terminal_no_fill_order_fact(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> bool:
+    if not command_id or not _table_exists(conn, "venue_order_facts"):
+        return False
+    row = conn.execute(
+        """
+        SELECT state, matched_size
+          FROM venue_order_facts
+         WHERE command_id = ?
+         ORDER BY local_sequence DESC, observed_at DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    state = str(row["state"] if isinstance(row, sqlite3.Row) else row[0] or "").upper()
+    if state not in _ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES:
+        return False
+    matched_size = row["matched_size"] if isinstance(row, sqlite3.Row) else row[1]
+    try:
+        return Decimal(str(matched_size or "0")) == Decimal("0")
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _pending_entry_terminal_no_fill_allows_entry(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row | tuple,
+) -> bool:
+    phase = str(row["phase"] if isinstance(row, sqlite3.Row) else row[1] or "").lower()
+    if phase != "pending_entry":
+        return False
+    position_id = str(row["position_id"] if isinstance(row, sqlite3.Row) else row[0] or "")
+    order_id = str(row["order_id"] if isinstance(row, sqlite3.Row) else row[2] or "")
+    try:
+        shares = Decimal(str(row["shares"] if isinstance(row, sqlite3.Row) else row[3] or "0"))
+        cost_basis = Decimal(str(row["cost_basis_usd"] if isinstance(row, sqlite3.Row) else row[4] or "0"))
+    except (InvalidOperation, ValueError):
+        return False
+    if shares != Decimal("0") or cost_basis != Decimal("0"):
+        return False
+    command = _latest_entry_command_for_duplicate_position(
+        conn,
+        position_id=position_id,
+        order_id=order_id,
+    )
+    if command is None:
+        return False
+    command_id = str(command.get("command_id") or "")
+    state = str(command.get("state") or "").upper()
+    if state not in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES:
+        return False
+    if _entry_has_positive_trade_fact(conn, position_id=position_id, order_id=order_id):
+        return False
+    return (
+        not _entry_has_positive_trade_fact(conn, command_id=command_id)
+        and _entry_command_has_terminal_no_fill_order_fact(conn, command_id)
+    )
 
 
 def _attached_schema_names(conn: sqlite3.Connection) -> tuple[str, ...]:
@@ -551,14 +686,13 @@ def _entry_duplicate_same_token_component(
 
     if _table_exists(conn, "position_current"):
         phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_TERMINAL_PHASES)
-        row = conn.execute(
+        rows = conn.execute(
             f"""
-            SELECT position_id, phase
+            SELECT position_id, phase, order_id, shares, cost_basis_usd
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
               AND position_id != ?
               AND phase NOT IN ({phase_placeholders})
-            LIMIT 1
             """,
             (
                 token,
@@ -566,8 +700,10 @@ def _entry_duplicate_same_token_component(
                 candidate_position_id,
                 *sorted(_ENTRY_DUPLICATE_TERMINAL_PHASES),
             ),
-        ).fetchone()
-        if row is not None:
+        ).fetchall()
+        for row in rows:
+            if _pending_entry_terminal_no_fill_allows_entry(conn, row):
+                continue
             return {
                 "component": "entry_duplicate_same_token",
                 "allowed": False,
@@ -582,7 +718,7 @@ def _entry_duplicate_same_token_component(
         terminal_no_exposure_placeholders = ",".join(
             "?" for _ in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES
         )
-        row = conn.execute(
+        rows = conn.execute(
             f"""
             SELECT vc.command_id, vc.position_id, vc.state, pc.phase
             FROM venue_commands vc
@@ -607,7 +743,6 @@ def _entry_duplicate_same_token_component(
                  )
               )
             ORDER BY vc.updated_at DESC, vc.created_at DESC
-            LIMIT 1
             """,
             (
                 token,
@@ -617,8 +752,8 @@ def _entry_duplicate_same_token_component(
                 *sorted(_ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES),
                 *sorted(_ENTRY_DUPLICATE_OPEN_COMMAND_STATES),
             ),
-        ).fetchone()
-        if row is not None:
+        ).fetchall()
+        for row in rows:
             if isinstance(row, sqlite3.Row):
                 command_id = str(row["command_id"])
                 position_id = str(row["position_id"])
@@ -629,6 +764,12 @@ def _entry_duplicate_same_token_component(
                 position_id = str(row[1])
                 state = str(row[2])
                 phase = row[3]
+            if (
+                state.upper() in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES
+                and not _entry_has_positive_trade_fact(conn, command_id=command_id)
+                and _entry_command_has_terminal_no_fill_order_fact(conn, command_id)
+            ):
+                continue
             return {
                 "component": "entry_duplicate_same_token",
                 "allowed": False,
