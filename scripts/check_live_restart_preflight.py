@@ -120,6 +120,76 @@ def _table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
     return row is not None
 
 
+def _table_columns(conn: sqlite3.Connection, schema: str, table: str) -> set[str]:
+    if not _table_exists(conn, schema, table):
+        return set()
+    try:
+        return {
+            str(row["name"])
+            for row in conn.execute(f"PRAGMA {schema}.table_info({table})").fetchall()
+        }
+    except sqlite3.Error:
+        return set()
+
+
+def _open_exposure_identity(row: sqlite3.Row) -> dict[str, Any]:
+    tokens = {
+        str(row[key] or "").strip()
+        for key in ("token_id", "no_token_id")
+        if key in row.keys()
+    }
+    tokens.discard("")
+    return {
+        "position_id": row["position_id"],
+        "phase": row["phase"],
+        "city": row["city"],
+        "target_date": row["target_date"],
+        "temperature_metric": row["temperature_metric"],
+        "bin_label": row["bin_label"],
+        "direction": row["direction"],
+        "condition_id": str(row["condition_id"] or "").strip() if "condition_id" in row.keys() else "",
+        "tokens": sorted(tokens),
+    }
+
+
+def _freshness_predicate_for_exposure(
+    *,
+    columns: set[str],
+    exposure: dict[str, Any],
+    token_columns: tuple[str, ...],
+) -> tuple[str, tuple[Any, ...]] | None:
+    clauses: list[str] = []
+    params: list[Any] = []
+    condition_id = str(exposure.get("condition_id") or "").strip()
+    if condition_id and "condition_id" in columns:
+        clauses.append("condition_id = ?")
+        params.append(condition_id)
+    tokens = [token for token in exposure.get("tokens", []) if token]
+    available_token_columns = [column for column in token_columns if column in columns]
+    if tokens and available_token_columns:
+        placeholders = ",".join("?" for _ in tokens)
+        for column in available_token_columns:
+            clauses.append(f"{column} IN ({placeholders})")
+            params.extend(tokens)
+    if not clauses:
+        return None
+    return "(" + " OR ".join(clauses) + ")", tuple(params)
+
+
+def _exposure_stub(exposure: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "position_id": exposure.get("position_id"),
+        "phase": exposure.get("phase"),
+        "city": exposure.get("city"),
+        "target_date": exposure.get("target_date"),
+        "temperature_metric": exposure.get("temperature_metric"),
+        "bin_label": exposure.get("bin_label"),
+        "direction": exposure.get("direction"),
+        "condition_id": exposure.get("condition_id"),
+        "tokens": exposure.get("tokens", []),
+    }
+
+
 def _sidecar_heartbeat_check(name: str, filename: str) -> CheckResult:
     path = STATE_DIR / filename
     evidence: dict[str, Any] = {
@@ -168,7 +238,7 @@ def _sidecar_heartbeat_checks() -> list[CheckResult]:
     return [_sidecar_heartbeat_check(name, filename) for name, filename in SIDECAR_HEARTBEATS]
 
 
-def _execution_feasibility_evidence_check() -> CheckResult:
+def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResult:
     now = datetime.now(timezone.utc)
     evidence: dict[str, Any] = {
         "table": "execution_feasibility_evidence",
@@ -182,13 +252,21 @@ def _execution_feasibility_evidence_check() -> CheckResult:
                 "execution feasibility evidence table is missing",
                 evidence,
             )
+        columns = _table_columns(conn, "main", "execution_feasibility_evidence")
         row = conn.execute(
             "SELECT MAX(quote_seen_at) AS latest_quote_seen_at, COUNT(*) AS rows FROM execution_feasibility_evidence"
         ).fetchone()
+        exposure_results = _execution_feasibility_exposure_freshness(
+            conn,
+            columns=columns,
+            exposures=[_open_exposure_identity(row) for row in rows],
+            now=now,
+        )
     latest = row["latest_quote_seen_at"] if row else None
     latest_dt = _parse_dt(latest)
     evidence["rows"] = int(row["rows"] or 0) if row else 0
     evidence["latest_quote_seen_at"] = latest
+    evidence.update(exposure_results)
     if latest_dt is None:
         return CheckResult(
             "execution_feasibility_evidence_freshness",
@@ -198,16 +276,63 @@ def _execution_feasibility_evidence_check() -> CheckResult:
         )
     age = (now - latest_dt).total_seconds()
     evidence["age_seconds"] = age
-    ok = 0.0 <= age <= EXECUTION_FEASIBILITY_MAX_AGE_SECONDS
+    ok = 0.0 <= age <= EXECUTION_FEASIBILITY_MAX_AGE_SECONDS and not exposure_results["risky"]
     return CheckResult(
         "execution_feasibility_evidence_freshness",
         ok,
-        "execution feasibility evidence is fresh" if ok else "execution feasibility evidence is stale",
+        (
+            "execution feasibility evidence is fresh for open exposures"
+            if ok
+            else "execution feasibility evidence is stale/missing for open exposures"
+        ),
         evidence,
     )
 
 
-def _executable_substrate_freshness_check() -> CheckResult:
+def _execution_feasibility_exposure_freshness(
+    conn: sqlite3.Connection,
+    *,
+    columns: set[str],
+    exposures: list[dict[str, Any]],
+    now: datetime,
+) -> dict[str, Any]:
+    risky: list[dict[str, Any]] = []
+    covered: list[dict[str, Any]] = []
+    for exposure in exposures:
+        predicate = _freshness_predicate_for_exposure(
+            columns=columns,
+            exposure=exposure,
+            token_columns=("token_id",),
+        )
+        item = _exposure_stub(exposure)
+        if predicate is None:
+            risky.append({**item, "risk": "missing_execution_identity_for_feasibility"})
+            continue
+        where_sql, params = predicate
+        row = conn.execute(
+            f"""
+            SELECT MAX(quote_seen_at) AS latest_quote_seen_at,
+                   COUNT(*) AS rows
+              FROM execution_feasibility_evidence
+             WHERE {where_sql}
+            """,
+            params,
+        ).fetchone()
+        latest = row["latest_quote_seen_at"] if row else None
+        latest_dt = _parse_dt(latest)
+        evidence = {**item, "rows": int(row["rows"] or 0) if row else 0, "latest_quote_seen_at": latest}
+        if latest_dt is None:
+            risky.append({**evidence, "risk": "missing_execution_feasibility_evidence"})
+            continue
+        age = (now - latest_dt).total_seconds()
+        evidence["age_seconds"] = age
+        covered.append(evidence)
+        if not (0.0 <= age <= EXECUTION_FEASIBILITY_MAX_AGE_SECONDS):
+            risky.append({**evidence, "risk": "stale_execution_feasibility_evidence"})
+    return {"scoped_exposure_count": len(exposures), "risky": risky, "covered": covered}
+
+
+def _executable_substrate_freshness_check(rows: list[sqlite3.Row]) -> CheckResult:
     now = datetime.now(timezone.utc)
     evidence: dict[str, Any] = {
         "table": "executable_market_snapshots",
@@ -221,6 +346,7 @@ def _executable_substrate_freshness_check() -> CheckResult:
                 "executable market snapshot table is missing",
                 evidence,
             )
+        columns = _table_columns(conn, "main", "executable_market_snapshots")
         row = conn.execute(
             """
             SELECT MAX(captured_at) AS latest_captured_at,
@@ -229,11 +355,18 @@ def _executable_substrate_freshness_check() -> CheckResult:
               FROM executable_market_snapshots
             """
         ).fetchone()
+        exposure_results = _executable_substrate_exposure_freshness(
+            conn,
+            columns=columns,
+            exposures=[_open_exposure_identity(row) for row in rows],
+            now=now,
+        )
     captured_dt = _parse_dt(row["latest_captured_at"] if row else None)
     deadline_dt = _parse_dt(row["latest_freshness_deadline"] if row else None)
     evidence["rows"] = int(row["rows"] or 0) if row else 0
     evidence["latest_captured_at"] = row["latest_captured_at"] if row else None
     evidence["latest_freshness_deadline"] = row["latest_freshness_deadline"] if row else None
+    evidence.update(exposure_results)
     if captured_dt is None:
         return CheckResult(
             "executable_substrate_freshness",
@@ -246,13 +379,68 @@ def _executable_substrate_freshness_check() -> CheckResult:
     age_ok = 0.0 <= age <= EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS
     evidence["age_seconds"] = age
     evidence["freshness_deadline_ok"] = deadline_ok
-    ok = age_ok or deadline_ok
+    ok = (age_ok or deadline_ok) and not exposure_results["risky"]
     return CheckResult(
         "executable_substrate_freshness",
         ok,
-        "executable market substrate is fresh" if ok else "executable market substrate is stale",
+        (
+            "executable market substrate is fresh for open exposures"
+            if ok
+            else "executable market substrate is stale/missing for open exposures"
+        ),
         evidence,
     )
+
+
+def _executable_substrate_exposure_freshness(
+    conn: sqlite3.Connection,
+    *,
+    columns: set[str],
+    exposures: list[dict[str, Any]],
+    now: datetime,
+) -> dict[str, Any]:
+    risky: list[dict[str, Any]] = []
+    covered: list[dict[str, Any]] = []
+    for exposure in exposures:
+        predicate = _freshness_predicate_for_exposure(
+            columns=columns,
+            exposure=exposure,
+            token_columns=("token_id", "yes_token_id", "no_token_id", "selected_outcome_token_id"),
+        )
+        item = _exposure_stub(exposure)
+        if predicate is None:
+            risky.append({**item, "risk": "missing_execution_identity_for_substrate"})
+            continue
+        where_sql, params = predicate
+        row = conn.execute(
+            f"""
+            SELECT MAX(captured_at) AS latest_captured_at,
+                   MAX(freshness_deadline) AS latest_freshness_deadline,
+                   COUNT(*) AS rows
+              FROM executable_market_snapshots
+             WHERE {where_sql}
+            """,
+            params,
+        ).fetchone()
+        captured_dt = _parse_dt(row["latest_captured_at"] if row else None)
+        deadline_dt = _parse_dt(row["latest_freshness_deadline"] if row else None)
+        evidence = {
+            **item,
+            "rows": int(row["rows"] or 0) if row else 0,
+            "latest_captured_at": row["latest_captured_at"] if row else None,
+            "latest_freshness_deadline": row["latest_freshness_deadline"] if row else None,
+        }
+        if captured_dt is None:
+            risky.append({**evidence, "risk": "missing_executable_substrate"})
+            continue
+        age = (now - captured_dt).total_seconds()
+        deadline_ok = deadline_dt is not None and deadline_dt >= now
+        evidence["age_seconds"] = age
+        evidence["freshness_deadline_ok"] = deadline_ok
+        covered.append(evidence)
+        if not (0.0 <= age <= EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS or deadline_ok):
+            risky.append({**evidence, "risk": "stale_executable_substrate"})
+    return {"scoped_exposure_count": len(exposures), "risky": risky, "covered": covered}
 
 
 def _posterior_summary() -> CheckResult:
@@ -303,15 +491,20 @@ def _posterior_summary() -> CheckResult:
 
 def _open_positions() -> list[Any]:
     with _connect_live_ro() as conn:
+        columns = _table_columns(conn, "main", "position_current")
+        optional_selects = []
+        for column in ("condition_id", "token_id", "no_token_id"):
+            optional_selects.append(column if column in columns else f"NULL AS {column}")
         return list(
             conn.execute(
-                """
+                f"""
                 SELECT position_id, phase, city, target_date, temperature_metric,
                        bin_label, direction, shares, chain_shares, order_status,
                        exit_reason, exit_retry_count, next_exit_retry_at,
                        last_monitor_prob, last_monitor_prob_is_fresh,
                        last_monitor_market_price, last_monitor_market_price_is_fresh,
-                       updated_at
+                       updated_at,
+                       {", ".join(optional_selects)}
                   FROM position_current
                  WHERE phase IN ('active', 'day0_window', 'pending_exit')
                    AND COALESCE(chain_shares, shares, 0) > 0
@@ -428,8 +621,8 @@ def evaluate() -> dict[str, Any]:
         ),
         _posterior_summary(),
         *_sidecar_heartbeat_checks(),
-        _executable_substrate_freshness_check(),
-        _execution_feasibility_evidence_check(),
+        _executable_substrate_freshness_check(rows),
+        _execution_feasibility_evidence_check(rows),
         _pending_exit_check(rows),
         _belief_check(rows),
     ]

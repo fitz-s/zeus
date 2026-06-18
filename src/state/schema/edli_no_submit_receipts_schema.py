@@ -58,7 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_edli_no_submit_receipts_decision_time
 """
 
 # H2_E2E (REAUDIT_0_1.md §4): partial index so "all replacement_0_1 orders today"
-# is an indexed scan, not a full-table scan over the ~60k shadow receipts.
+# is an indexed scan, not a full-table scan over the ~60k existing receipts.
 CREATE_PROBABILITY_AUTHORITY_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_edli_no_submit_receipts_probability_authority
     ON edli_no_submit_receipts(probability_authority)
@@ -101,11 +101,11 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     # receipt_hash stays byte-stable. Authority:
     # docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md.
     _ensure_column(conn, "envelope_json", "TEXT")
-    # C2 (task #60, 2026-06-13): selection-shrinkage shadow columns. The
+    # C2 (task #60, 2026-06-13): selection-shrinkage telemetry columns. The
     # vacuous {0,1}-p-value BH/FDR gate (event_reactor_adapter.py:9854/9876) is
     # replaced by posterior lfsr + correlation-aware EB selection shrinkage +
     # expected-log-utility license (authority statistical_calibration_addendum
-    # _2026-06-13 A2/D3). When the replacement flag is OFF these are SHADOW-only
+    # _2026-06-13 A2/D3). When the replacement flag is OFF these are telemetry-only
     # (computed and stamped, BH behavior unchanged); when ON they drive the
     # license. Nullable / no DEFAULT so existing-row receipt_hash stays
     # byte-stable (omit-when-None in receipt_json, mirroring envelope_json /
@@ -133,7 +133,7 @@ def _backfill_alpha_gap(conn: sqlite3.Connection) -> None:
     stored receipt_json blob and compute alpha_gap = q_live - c_fee_adjusted.
     Rows where c_fee_adjusted is missing in JSON are left NULL (fail-closed).
 
-    This ensures the column is populated for the ~60k existing shadow receipts on
+    This ensures the column is populated for the ~60k existing receipts on
     the live DB without requiring a full receipt re-process.
     """
     rows = conn.execute(

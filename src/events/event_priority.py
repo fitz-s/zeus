@@ -33,7 +33,7 @@ from typing import Final
 # These are a SUB-SORT WITHIN a claim tier (see CLAIM_TIER_CASE_SQL below): the
 # tier CASE dominates, then ``e.priority DESC`` breaks ties inside a tier. So a
 # higher integer here only wins among events in the SAME tier — it can never
-# promote a shadow-only event past a tradeable one (that is the tier's job).
+# promote a non-tradeable event past a tradeable one (that is the tier's job).
 # ---------------------------------------------------------------------------
 
 # Tradeable FORECAST_SNAPSHOT_READY families that are COMPLETE + LIVE_ELIGIBLE:
@@ -50,7 +50,7 @@ PRIORITY_DAY0_TRADEABLE: Final[int] = 60
 
 # Reserved low priority for non-tradeable Day0 scopes in tests or historical
 # replay only. Production live scope is forecast_plus_day0.
-PRIORITY_DAY0_SHADOW: Final[int] = 10
+PRIORITY_DAY0_NON_TRADEABLE: Final[int] = 10
 
 
 def day0_emit_priority(*, day0_is_tradeable: bool) -> int:
@@ -59,7 +59,7 @@ def day0_emit_priority(*, day0_is_tradeable: bool) -> int:
     ``day0_is_tradeable`` is derived from ``edli_live_scope``. Production live
     uses ``forecast_plus_day0`` so Day0 can submit through the same live lane.
     """
-    return PRIORITY_DAY0_TRADEABLE if day0_is_tradeable else PRIORITY_DAY0_SHADOW
+    return PRIORITY_DAY0_TRADEABLE if day0_is_tradeable else PRIORITY_DAY0_NON_TRADEABLE
 
 
 def day0_is_tradeable_for_scope(edli_live_scope: str | None) -> bool:
@@ -99,7 +99,7 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
          next certified decision crosses as TAKER_ESCALATED_AFTER_REST. Routed
          through the FSR path (not the dormant EDLI_REDECISION_PENDING type) so
          the full dispatch chain processes it without hard-block gaps. This is a
-         confirmed-armed, settlement-proven +EV cross, NOT a shadow, so it ranks
+         confirmed-armed, settlement-proven +EV cross, NOT non-tradeable telemetry, so it ranks
          ABOVE the entire per-city round-robin and fires on the next cycle instead
          of waiting ~2-3h for the 49-deep rotation (redecide-block fix
          2026-06-16). Evaluated FIRST and INDEPENDENT of ``day0_is_tradeable`` —
@@ -113,7 +113,7 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
          the freshest actionable alpha and must not sit behind forecast backlog).
       1  FORECAST_SNAPSHOT_READY that is COMPLETE + LIVE_ELIGIBLE — the direct
          tradeable order candidates.
-      2  Other decision-trigger events (incl. shadow-only DAY0_EXTREME_UPDATED
+      2  Other decision-trigger events (incl. non-tradeable DAY0_EXTREME_UPDATED
          when NOT ``day0_is_tradeable``) — still actionable/dead-letterable but
          must never starve a tradeable forecast family.
       3  Market-channel cache-hydration events — rejected immediately; demoted

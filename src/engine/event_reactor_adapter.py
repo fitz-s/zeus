@@ -38,7 +38,7 @@
 #   the receipt (price_moved_within_tolerance + admitted/recaptured/tolerance). Fixes the
 #   live sub-3¢ false-abort churn 2026-06-10.
 # Last reused or audited: 2026-06-08 (S7: deleted the last opportunity-book
-#   selector on/off gate artifacts — the dead `selector_enabled`/`selector_shadow`
+#   selector on/off gate artifacts — the dead `selector_enabled`/`selector_probe`
 #   cache keys, the `_env_flag_enabled` helper + its `import os`, and every literal
 #   toggle-name string. The marginal-utility ranker is the unconditional single
 #   selection path — "bin selection.md" §14 item 8 + operator directive 2026-06-08.
@@ -54,7 +54,7 @@
 #   operator directive 2026-06-08): _execution_price_from_snapshot now prices each
 #   native side with its OWN side-tagged ExecutableCostCurve (depth-walked convex
 #   curve) built from the same snapshot row's native ask ladder — replacing the
-#   scalar VWMP cost-kernel pricing. One pricing object, no flag, no shadow branch.
+#   scalar VWMP cost-kernel pricing. One pricing object, no flag, no alternate branch.
 #   S1-fix (2026-06-08, "bin selection.md" §5.3/§5.4/§13 + verifier REJECT):
 #   the proof path now sizes the candidate by exact SHARE count via
 #   ExecutableCostCurve.avg_cost_for_shares(min_order_size), NOT by converting
@@ -74,7 +74,7 @@
 #   proofs now gives buy_no a real q_no = 1 - q_yes point + native q_lcb_no, retiring
 #   the ADMISSION_BUY_NO_INDEPENDENT_NO_POSTERIOR_MISSING hardcode (Hidden #4) and the
 #   dead "q_lcb > q_value" boundary clamp (the invariant is now structural in the seam).
-#   One seam helper (_side_q_lcb_from_yes_samples), no flag, no shadow branch.
+#   One seam helper (_side_q_lcb_from_yes_samples), no flag, no alternate branch.
 #   S3 (2026-06-08, "bin selection.md" §14.2/§6 pseudocode/§4/§9 Hidden #1+#4/
 #   §11 Phase 1/§12.A native-side economics + operator directive 2026-06-08): each
 #   priced _CandidateProof now MATERIALIZES as the unified bin-selection
@@ -87,7 +87,7 @@
 #   receipt FROM that candidate — one materialization path, one candidate object.
 #   A missing native token/quote downgrades to a NATIVE_TOKEN_MISSING /
 #   NATIVE_QUOTE_MISSING no-trade candidate (no complement pricing). No flag, no
-#   shadow branch. (The CandidateEvaluation scalar-Kelly ranker / opportunity_book
+#   alternate branch. (The CandidateEvaluation scalar-Kelly ranker / opportunity_book
 #   selector remains the ranking surface until S4 replaces it with the
 #   marginal-utility ranker.)
 #   S3-fix (2026-06-08, "bin selection.md" §6/§7/§13/§14.7/§14.8 + verifier REJECT
@@ -105,7 +105,7 @@
 #   for display ranks/loser reasons. The off-able family-selector on/off env+settings
 #   toggle is REMOVED (the ranker is unconditional). q_lcb > q_point is a
 #   §13/Hidden #2 Q_LCB_INVALID no-trade. One ranking surface, one decision, one
-#   truth. No flag, no shadow branch.
+#   truth. No flag, no alternate branch.
 #   S5 (2026-06-08, "bin selection.md" §5.1-§5.3/§5.2/§14.7/§14.10/§9 Hidden #6+#15/
 #   §12.C.2/.3/.4 + operator directive 2026-06-08): the live decision body now sizes
 #   from RobustCandidateScore.optimal_stake_usd AND reprices the Kelly cost-of-entry
@@ -119,7 +119,7 @@
 #   heat haircut remains the multiplier bounding the ΔU stake (max_stake_usd), NOT a
 #   second scalar Kelly. New seam: _robust_marginal_utility_stake_and_price (returns
 #   stake + chosen-stake price) + _chosen_stake_execution_price; the float-only
-#   _robust_marginal_utility_optimal_stake_usd wraps the kernel. No flag, no shadow.
+#   _robust_marginal_utility_optimal_stake_usd wraps the kernel. No flag, no alternate path.
 #   S6 (2026-06-08, "bin selection.md" §5 submit pseudocode (recompute-not-validate)/
 #   §7 re-decision+reversal state machine/§9 Hidden #7/#14/#17/§13/§14.9/§14.10/§12.E +
 #   operator directive 2026-06-08): the live decision body now routes the submit
@@ -136,7 +136,7 @@
 #   eligibility check). Stale/failed recapture (no fresh curve) and a zero-ΔU stake
 #   fail closed (price-moved / edge-reversed). A family-rank reversal aborts and defers
 #   to a full re-rank (the engine never switches inline; a WATCH fallback cannot
-#   auto-submit, Hidden #7). One state machine, one abort taxonomy. No flag, no shadow.
+#   auto-submit, Hidden #7). One state machine, one abort taxonomy. No flag, no alternate path.
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -1372,7 +1372,7 @@ def _resolve_replacement_forecast_adapter_hook(
 def replacement_forecast_baseline_bundle_provider_from_forecast_conn(
     forecast_conn: sqlite3.Connection,
 ) -> Callable[["_CandidateProof", OpportunityEvent, datetime], object | None]:
-    """Build the B0 executable forecast provider used by replacement shadow/veto."""
+    """Build the B0 executable forecast provider used by replacement live veto."""
 
     def _provider(
         proof: _CandidateProof,
@@ -1472,7 +1472,7 @@ SUBMIT_LANE_SUBMIT_DISABLED = "SUBMIT_DISABLED"
 SUBMIT_LANE_NO_SUBMIT_ADAPTER = "NO_SUBMIT_ADAPTER"
 
 # The default no-submit reason hardcoded by the serializer. Honest ONLY where no
-# degrade drove the lane (shadow / test). On the NO_SUBMIT_ADAPTER lane a full-pass
+# degrade drove the lane (test/replay). On the NO_SUBMIT_ADAPTER lane a full-pass
 # receipt carrying THIS reason is the silent-kill signature, so the lane stamp
 # rewrites it to name the degrade cause.
 _DEFAULT_NO_SUBMIT_REASON = "event_bound_final_intent_no_submit"
@@ -1522,7 +1522,7 @@ def _stamp_live_adapter_lane(
 ) -> EventSubmissionReceipt:
     """Stamp the live adapter's lane onto a receipt it produced.
 
-    Production live receipts have no shadow lane. They are stamped LIVE when real
+    Production live receipts have no non-live lane. They are stamped LIVE when real
     submission is armed, otherwise SUBMIT_DISABLED for non-production tests or
     explicit adapter-level dry runs.
     """
@@ -1565,7 +1565,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
     rewritten to ``NO_SUBMIT_ADAPTER_LANE:<degrade_cause>`` so a full-pass entry consumed
     on the degrade lane names why the live lane was dark — never the default literal that
     is byte-identical to a genuine decline. The default ``"live_lane_unselected"`` keeps
-    shadow/test construction working; main.py threads the real cause.
+    test/replay construction working; main.py threads the real cause.
 
     Task #107 (portfolio/multi Kelly): ``portfolio_state_provider`` (mirrors
     ``bankroll_usd_provider``) lets Kelly size against the bankroll NET of
@@ -1690,7 +1690,7 @@ def event_bound_live_adapter_from_trade_conn(
 
     # Live production scope is forecast_plus_day0 only. Forecast and Day0 events
     # both use this same execution adapter; unknown events fail closed before the
-    # candidate pipeline. There is no shadow/no-submit scope inside production.
+    # candidate pipeline. There is no non-live/no-submit scope inside production.
 
     # FIX-4 (P2): per-cycle live submit call counter. Incremented ONLY when
     # executor_submit() is actually called (i.e., real_order_submit_enabled and
@@ -2533,7 +2533,7 @@ def _build_event_bound_no_submit_receipt_core(
     # utility ranker (the size authority, computed post-selection on the WINNING
     # leg with the family payoff matrix + existing exposure). The opportunity_book
     # per-candidate kelly_size_usd is a display field only; it is no longer fed by a
-    # parallel scalar-Kelly pass (one sizing surface, no shadow).
+    # parallel scalar-Kelly pass (one sizing surface, no alternate path).
     #
     # === Q-KERNEL REBUILD WAVE 5B — single cutover branch (2026-06-14) ============
     # ONE flag decides which authority computes the per-family DECISION (q +
@@ -2951,7 +2951,7 @@ def _build_event_bound_no_submit_receipt_core(
 
         Every receipt produced at or after the selection gate carries the
         quantities so settlement grading can run the winner's-curse slope
-        diagnostic. Pure dataclass_replace; never alters the decision.
+        telemetry. Pure dataclass_replace; never alters the decision.
         """
         return dataclass_replace(
             receipt,
@@ -2999,8 +2999,8 @@ def _build_event_bound_no_submit_receipt_core(
             family_complete=False,
         ))
     # GATE DECISION: the BH/FDR pass is the unconditional live selection authority
-    # (the EB-shrinkage decision-replacement flag was REMOVED 2026-06-13). Shadow
-    # quantities are stamped on the receipt regardless.
+    # (the EB-shrinkage decision-replacement flag was REMOVED 2026-06-13).
+    # Selection-shrinkage telemetry is stamped on the receipt regardless.
     _gate_passed = fdr.passed
     _gate_reject_reason = "FDR_REJECTED"
     if not _gate_passed:
@@ -3179,7 +3179,7 @@ def _build_event_bound_no_submit_receipt_core(
         # submit eligibility): the three abort branches (price-through-max, edge<=0 /
         # forecast-stale, family-rank reversed) are now first-class lifecycle states.
         # The intent is built ONLY when ``_recapture.may_submit`` is True — no parallel
-        # branch, no flag, no shadow.
+        # branch, no flag, no alternate path.
         _recapture_exposure = _family_existing_exposure_by_bin_id(
             proofs=proofs,
             selected_proof=proof,
@@ -7404,9 +7404,9 @@ _MIN_ROBUST_CAPITAL_EFFICIENCY_ROI = 0.0
 
 
 # REMOVED 2026-06-08 (S7; operator directive; "bin selection.md" §14 item 8): the
-# `_env_flag_enabled` helper was used ONLY to read the opportunity-book shadow
-# toggle env var into the cache_summary. With the shadow / off-able selector
-# artifacts deleted (single-primary-live, no flag, no shadow), it has no caller
+# `_env_flag_enabled` helper was used ONLY to read the opportunity-book probe
+# toggle env var into the cache_summary. With the probe / off-able selector
+# artifacts deleted (single-primary-live, no flag, no alternate path), it has no caller
 # and is removed — there is no env-driven branch on the selection path.
 
 
@@ -7634,7 +7634,7 @@ def _native_side_candidate_from_proof(
     S3 (spec §14.2 / §6 pseudocode / §11 Phase 1). This is the ONE materialization
     path: every priced YES/NO proof on the live selection path becomes a single
     ``NativeSideCandidate`` object — the unified candidate shape the ranker/selector
-    consumes. There is no flag, no shadow branch, and no alternate candidate shape.
+    consumes. There is no flag, no alternate branch, and no alternate candidate shape.
 
     DIRECTION LAW (money-path iron law, spec §4/§6): ``buy_yes`` -> ``side="YES"``
     (the proof's own bin is the WIN outcome); ``buy_no`` -> ``side="NO"`` (the own
@@ -7690,7 +7690,7 @@ def _native_side_candidate_from_proof(
     # No native BUY side for this direction, or the proof was not priced
     # (execution_price missing / native quote unavailable) -> NATIVE_QUOTE_MISSING.
     # No complement substitution: a side with no executable ask is recorded as a
-    # no-trade diagnostic, never a YES-derived price.
+    # no-trade telemetry, never a YES-derived price.
     if (
         side is None
         or proof.execution_price is None
@@ -8129,7 +8129,7 @@ def _opportunity_book_from_proofs(
     # spec §14 item 7/8) rather than re-deciding via legacy scalar-Kelly. The
     # bin-selection ranker is the unconditional single path: there is no off-able
     # gate, so the receipt's selected_candidate_id is always the ΔU decision (S7
-    # deleted the last `selector_enabled` / shadow toggle artifacts from the
+    # deleted the last `selector_enabled` / probe toggle artifacts from the
     # cache_summary; the receipt serializer records the decision unconditionally).
     #
     # A NON-executable selected_proof (execution_price None) is the best-belief
@@ -8349,7 +8349,7 @@ def _generate_candidate_proofs(
                     _spine_lst = [float(_x) for _x in _spine_arr.tolist()]
                     payload["_edli_spine_raw_members_native"] = _spine_lst
                     payload["_edli_spine_debiased_members_native"] = _spine_lst
-                    # RAW PRECISION (FINAL no-shadow §1-§2): the per-member raw second
+                    # RAW PRECISION (FINAL single-live §1-§2): the per-member raw second
                     # moment Ê[(x−Y)²] + n, in the SAME index order as the member list, so
                     # build_fresh_model_set can attach it to each RawModelMember and the
                     # spine's walk_forward_model_weights forms the RAW diagonal 1/E[r²]
@@ -9428,7 +9428,7 @@ def _robust_marginal_utility_stake_and_price(
     (:func:`_chosen_stake_execution_price`). Size and price come from ONE scored
     candidate and ONE curve, so the Kelly boundary the intent carries is the
     depth-walked cost the order actually pays (Hidden #6), not S1's cheap min-order
-    scalar. There is no second scalar Kelly and no shadow branch.
+    scalar. There is no second scalar Kelly and no alternate branch.
 
     ROBUST-LOWER-BOUND SIZING (money-path iron law): the stake derives from
     ``q_lcb`` (via the q_lcb-based π inside ``score_candidate``), NEVER from
@@ -11748,7 +11748,7 @@ def _spine_multimodel_members_for_event(
     to ``fresh_members_at_cycle``). Values are converted °C→native settlement unit
     exactly as ``build_family_spine`` does.
 
-    RAW PRECISION (2026-06-18 FINAL no-shadow execution flow §1-§2): alongside the
+    RAW PRECISION (2026-06-18 FINAL single-live execution flow §1-§2): alongside the
     member envelope, this returns the per-model RAW second moment Ê[(x−Y)²] + n via
     ``raw_second_moment_by_model`` (the SAME walk-forward residual source the capture
     path uses — NOT EB, NOT a parallel pipeline). Threaded onto ``RawModelMember`` so
@@ -11848,7 +11848,7 @@ def _spine_multimodel_members_for_event(
     def _c_to_native(v_c: float) -> float:
         return v_c if unit == "C" else (v_c * 9.0 / 5.0 + 32.0)
 
-    # RAW second-moment precision per model (FINAL no-shadow §1-§2). The walk-forward
+    # RAW second-moment precision per model (FINAL single-live §1-§2). The walk-forward
     # raw residual x−Y is in degC; the raw second moment Ê[(x−Y)²] is therefore in
     # degC². For an F-settled city the member VALUES are converted °C→°F above, so the
     # precision basis must be the SAME unit as the member values — convert the degC²
@@ -14158,7 +14158,7 @@ def _day0_remaining_day_q_enabled() -> bool:
     Unlike the conservative-only guards (boundary suppression, anomaly pause,
     bootstrap LCB), this CHANGES the day0 point q in both directions (it can
     RAISE q for the bin containing the running extreme post-peak). It must be
-    operator-flipped only after shadow receipts comparing
+    operator-flipped only after non-live telemetry receipts comparing
     _edli_day0_q_mode=remaining_day vs the legacy full-day-masked q look sane.
     """
     try:

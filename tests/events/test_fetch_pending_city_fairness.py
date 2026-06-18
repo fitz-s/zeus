@@ -405,7 +405,7 @@ def test_fresh_day0_event_does_not_precede_older_day_ahead_fsr():
     (day0_is_tradeable=False => day0 is Tier 2, below the tradeable FSR Tier 1).
     Day0 events still process AFTER the live ones — never dropped (the shadow
     evaluation needs the receipts)."""
-    from src.events.event_priority import PRIORITY_DAY0_SHADOW
+    from src.events.event_priority import PRIORITY_DAY0_NON_TRADEABLE
     from src.events.opportunity_event import (
         Day0ExtremeUpdatedPayload,
         make_day0_extreme_updated_event,
@@ -434,7 +434,7 @@ def test_fresh_day0_event_does_not_precede_older_day_ahead_fsr():
         received_at="2026-06-11T11:46:00+00:00",
         payload=day0_payload,
         causal_snapshot_id="ctx-st0",
-        priority=PRIORITY_DAY0_SHADOW,
+        priority=PRIORITY_DAY0_NON_TRADEABLE,
     )
     day_ahead_older = _tradeable_fsr(
         city,

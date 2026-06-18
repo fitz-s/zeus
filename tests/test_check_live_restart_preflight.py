@@ -206,6 +206,97 @@ def test_preflight_passes_when_sidecars_and_live_surfaces_are_fresh(monkeypatch,
     assert {check["name"] for check in result["checks"] if check["ok"] is False} == set()
 
 
+def test_preflight_blocks_open_position_when_only_irrelevant_sidecar_rows_are_fresh(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    trade.execute("ALTER TABLE position_current ADD COLUMN condition_id TEXT")
+    trade.execute("ALTER TABLE position_current ADD COLUMN token_id TEXT")
+    trade.execute("ALTER TABLE position_current ADD COLUMN no_token_id TEXT")
+    label = "Will the highest temperature in Seattle be between 82-83°F on June 19?"
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric, bin_label,
+            direction, shares, chain_shares, order_status, exit_reason,
+            exit_retry_count, next_exit_retry_at, last_monitor_prob,
+            last_monitor_prob_is_fresh, last_monitor_market_price,
+            last_monitor_market_price_is_fresh, updated_at,
+            condition_id, token_id, no_token_id
+        ) VALUES (
+            'active-pos', 'active', 'Seattle', '2026-06-19', 'high',
+            ?, 'buy_no', 9.0, 9.0, 'filled', NULL, 0, NULL,
+            0.84, 1, 0.72, 1, ?, 'cond-target', 'tok-yes-target', 'tok-no-target'
+        )
+        """,
+        (label, now.isoformat()),
+    )
+    trade.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            selected_outcome_token_id TEXT,
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        )
+        """
+    )
+    trade.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES ('cond-other', 'tok-other', ?)",
+        (now.isoformat(),),
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots VALUES (
+            'cond-other', 'tok-other-yes', 'tok-other-no', 'tok-other-yes', ?, ?
+        )
+        """,
+        (now.isoformat(), (now + timedelta(minutes=2)).isoformat()),
+    )
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, ?, 'live')
+        """,
+        (
+            now.isoformat(),
+            now.isoformat(),
+            json.dumps({label: 0.15}),
+        ),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    substrate = next(c for c in result["checks"] if c["name"] == "executable_substrate_freshness")
+    feasibility = next(c for c in result["checks"] if c["name"] == "execution_feasibility_evidence_freshness")
+    assert substrate["ok"] is False
+    assert feasibility["ok"] is False
+    assert substrate["evidence"]["risky"][0]["risk"] == "missing_executable_substrate"
+    assert feasibility["evidence"]["risky"][0]["risk"] == "missing_execution_feasibility_evidence"
+    assert substrate["evidence"]["risky"][0]["condition_id"] == "cond-target"
+    assert feasibility["evidence"]["risky"][0]["tokens"] == ["tok-no-target", "tok-yes-target"]
+
+
 def test_preflight_blocks_missing_sidecar_heartbeat(monkeypatch, tmp_path):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)

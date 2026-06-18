@@ -579,6 +579,16 @@ def test_scan_observation_instants_keeps_west_of_utc_target_day_after_midnight_z
     assert all(payload["local_date_status"] == "MATCH" for payload in payloads)
     assert all(payload["live_authority_status"] == "live" for payload in payloads)
 
+    second = Day0ExtremeUpdatedTrigger(EventWriter(conn)).scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(82),
+        decision_time=datetime(2026, 6, 18, 2, 10, tzinfo=timezone.utc),
+        received_at="2026-06-18T02:11:00+00:00",
+    )
+
+    assert second == []
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 2
+
 
 def test_scan_observation_instants_tokyo_low_uses_aggregate_target_day_min():
     """Tokyo regression: the first target-local-day LOW feeds the EDLI event lane.
