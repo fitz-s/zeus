@@ -2718,8 +2718,14 @@ def _settle_positions(
 
         settled += 1
 
-        logger.info("SETTLED %s: %s %s %s — PnL=$%.2f",
-                     pos.trade_id, "WON" if won else "LOST",
-                     pos.direction, pos.bin_label, pnl)
+        logger.info(
+            "SETTLED %s: %s %s %s (market_bin_%s) — PnL=$%.2f",
+            pos.trade_id,
+            "POSITION_WON" if exit_price > 0 else "POSITION_LOST",
+            pos.direction,
+            pos.bin_label,
+            "WON" if won else "LOST",
+            pnl,
+        )
 
     return settled

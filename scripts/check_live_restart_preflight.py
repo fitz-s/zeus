@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import plistlib
 import sqlite3
 import subprocess
 import sys
@@ -42,6 +44,7 @@ SETTINGS_PATH = ROOT / "config" / "settings.json"
 STATE_DIR = ROOT / "state"
 SCHEDULER_HEALTH_PATH = ROOT / "state" / "scheduler_jobs_health.json"
 FORECAST_LIVE_HEARTBEAT_PATH = ROOT / "state" / "forecast-live-heartbeat.json"
+LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
 DUST_SHARE_LIMIT = 0.01
 SIDECAR_HEARTBEAT_MAX_AGE_SECONDS = 180.0
 EXECUTION_FEASIBILITY_MAX_AGE_SECONDS = 180.0
@@ -458,6 +461,37 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _harvester_live_enabled() -> tuple[bool, dict[str, Any]]:
+    """Return whether the restart target will run the settlement P&L resolver.
+
+    The preflight usually runs from an operator shell, not inside launchd, so the
+    shell environment alone is not enough evidence. Prefer the current process
+    env when present, then inspect the launchd plist that owns src.main.
+    """
+    env_value = os.environ.get("ZEUS_HARVESTER_LIVE_ENABLED")
+    evidence: dict[str, Any] = {
+        "env_value": env_value,
+        "plist_path": str(LIVE_TRADING_PLIST_PATH),
+        "plist_value": None,
+        "source": "env" if env_value is not None else "plist",
+    }
+    if env_value is not None:
+        return env_value == "1", evidence
+
+    try:
+        with LIVE_TRADING_PLIST_PATH.open("rb") as handle:
+            payload = plistlib.load(handle)
+    except Exception as exc:
+        evidence["plist_error"] = str(exc)
+        return False, evidence
+    env_vars = payload.get("EnvironmentVariables")
+    plist_value = None
+    if isinstance(env_vars, dict):
+        plist_value = env_vars.get("ZEUS_HARVESTER_LIVE_ENABLED")
+    evidence["plist_value"] = plist_value
+    return str(plist_value or "") == "1", evidence
+
+
 def _forecast_sidecar_health() -> CheckResult:
     now = datetime.now(timezone.utc)
     current_git_head = _git_head()
@@ -624,6 +658,63 @@ def _open_positions() -> list[Any]:
         )
 
 
+def _verified_settlement_truth_for(rows: list[sqlite3.Row]) -> dict[tuple[str, str, str], dict[str, Any]]:
+    keys: set[tuple[str, str, str]] = set()
+    for row in rows:
+        if row["phase"] not in {"active", "day0_window"}:
+            continue
+        city = str(row["city"] or "").strip()
+        target_date = str(row["target_date"] or "").strip()
+        metric = str(row["temperature_metric"] or "high").strip().lower()
+        if city and target_date and metric in {"high", "low"}:
+            keys.add((city, target_date, metric))
+    if not keys:
+        return {}
+
+    truth: dict[tuple[str, str, str], dict[str, Any]] = {}
+    key_list = sorted(keys)
+    with _connect_live_ro() as conn:
+        for offset in range(0, len(key_list), 250):
+            batch = key_list[offset: offset + 250]
+            placeholders = ",".join(["(?, ?, ?)"] * len(batch))
+            params: list[str] = []
+            for city, target_date, metric in batch:
+                params.extend([city, target_date, metric])
+            try:
+                fetched = conn.execute(
+                    f"""
+                    SELECT city, target_date, COALESCE(temperature_metric, 'high') AS temperature_metric,
+                           market_slug, winning_bin, authority, settlement_source,
+                           settlement_value, settled_at
+                      FROM forecasts.settlement_outcomes
+                     WHERE authority = 'VERIFIED'
+                       AND (city, target_date, COALESCE(temperature_metric, 'high')) IN ({placeholders})
+                     ORDER BY datetime(settled_at) DESC
+                    """,
+                    params,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return truth
+            for row in fetched:
+                key = (
+                    str(row["city"] or ""),
+                    str(row["target_date"] or ""),
+                    str(row["temperature_metric"] or "high").lower(),
+                )
+                truth.setdefault(
+                    key,
+                    {
+                        "market_slug": row["market_slug"],
+                        "winning_bin": row["winning_bin"],
+                        "authority": row["authority"],
+                        "settlement_source": row["settlement_source"],
+                        "settlement_value": row["settlement_value"],
+                        "settled_at": row["settled_at"],
+                    },
+                )
+    return truth
+
+
 def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     risky: list[dict[str, Any]] = []
     tolerated: list[dict[str, Any]] = []
@@ -665,10 +756,42 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
 
     risky: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
+    settlement_recoverable: list[dict[str, Any]] = []
     max_age = monitor_belief_max_age_hours()
+    settlement_truth = _verified_settlement_truth_for(rows)
+    harvester_enabled, harvester_evidence = _harvester_live_enabled()
     for row in rows:
         if row["phase"] == "pending_exit":
             continue
+        item = {
+            "position_id": row["position_id"],
+            "phase": row["phase"],
+            "city": row["city"],
+            "target_date": row["target_date"],
+            "temperature_metric": row["temperature_metric"],
+            "bin_label": row["bin_label"],
+            "direction": row["direction"],
+        }
+        settlement = settlement_truth.get(
+            (
+                str(row["city"] or ""),
+                str(row["target_date"] or ""),
+                str(row["temperature_metric"] or "high").lower(),
+            )
+        )
+        if settlement is not None:
+            evidence = {
+                **item,
+                "risk": "verified_settlement_pending_harvester_recovery",
+                "settlement": settlement,
+                "harvester_live_enabled": harvester_enabled,
+            }
+            if harvester_enabled:
+                settlement_recoverable.append(evidence)
+                continue
+            risky.append({**evidence, "risk": "settled_position_harvester_disabled"})
+            continue
+
         belief = load_replacement_belief(
             city=str(row["city"] or ""),
             target_date=str(row["target_date"] or ""),
@@ -678,14 +801,6 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
             max_age_hours=max_age,
             db_path=str(FORECAST_DB),
         )
-        item = {
-            "position_id": row["position_id"],
-            "city": row["city"],
-            "target_date": row["target_date"],
-            "temperature_metric": row["temperature_metric"],
-            "bin_label": row["bin_label"],
-            "direction": row["direction"],
-        }
         if belief is None:
             risky.append({**item, "risk": "missing_live_belief"})
             continue
@@ -706,8 +821,17 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
     return CheckResult(
         "held_position_belief_coverage",
         not risky,
-        "all active held positions have fresh live belief" if not risky else "active held positions have stale/missing live belief",
-        {"risky": risky, "covered": covered, "max_age_hours": max_age},
+        "all active held positions have fresh live belief or verified settlement recovery"
+        if not risky
+        else "active held positions have stale/missing live belief or blocked settlement recovery",
+        {
+            "risky": risky,
+            "covered": covered,
+            "settlement_recoverable": settlement_recoverable,
+            "max_age_hours": max_age,
+            "harvester_live_enabled": harvester_enabled,
+            "harvester_evidence": harvester_evidence,
+        },
     )
 
 
