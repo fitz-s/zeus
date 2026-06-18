@@ -787,5 +787,74 @@ def _build_minimal_db() -> sqlite3.Connection:
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    init_schema(conn)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            trade_id TEXT,
+            market_id TEXT,
+            city TEXT,
+            cluster TEXT,
+            target_date TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            unit TEXT,
+            size_usd REAL,
+            shares REAL,
+            cost_basis_usd REAL,
+            entry_price REAL,
+            p_posterior REAL,
+            last_monitor_prob REAL,
+            last_monitor_edge REAL,
+            last_monitor_market_price REAL,
+            decision_snapshot_id TEXT,
+            entry_method TEXT,
+            strategy_key TEXT,
+            edge_source TEXT,
+            discovery_mode TEXT,
+            chain_state TEXT,
+            token_id TEXT,
+            no_token_id TEXT,
+            condition_id TEXT,
+            order_id TEXT,
+            order_status TEXT,
+            updated_at TEXT,
+            temperature_metric TEXT,
+            -- PR #352 (Part-3): D0b durable authority columns are now part of
+            -- CANONICAL_POSITION_CURRENT_COLUMNS (asserted by
+            -- assert_canonical_transaction_schema) and read by the positions
+            -- summary query. This minimal fixture predated D0b; without these
+            -- columns the canonical-schema assertion and the fill_authority
+            -- SELECT both fail.
+            fill_authority TEXT,
+            recovery_authority TEXT,
+            chain_shares REAL,
+            -- F1 (docs/findings_2026_05_28.md §F1, 2026-05-28).
+            chain_avg_price REAL,
+            chain_cost_basis_usd REAL,
+            chain_seen_at TEXT,
+            chain_absence_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            event_version INTEGER NOT NULL DEFAULT 1,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            phase_before TEXT,
+            phase_after TEXT,
+            strategy_key TEXT,
+            decision_id TEXT,
+            snapshot_id TEXT,
+            order_id TEXT,
+            command_id TEXT,
+            caused_by TEXT,
+            idempotency_key TEXT,
+            venue_status TEXT,
+            source_module TEXT,
+            env TEXT NOT NULL DEFAULT 'live',
+            payload_json TEXT
+        );
+    """)
     return conn

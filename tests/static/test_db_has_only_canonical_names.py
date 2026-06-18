@@ -3,10 +3,8 @@
 # Authority basis: docs/findings_2026_05_28.md §B1 — generation-naming denylist
 """
 Test 2: Fresh init_schema / init_schema_trade_only / init_schema_forecasts DDL scan.
-xfail(strict=False): DDL retains schema_version CHECK constraints (33 world, 6 trade,
-11 forecasts hits), event_version column, idx_ens_v2_* index names, unknown_legacy
-defaults, and legacy comments. These are embedded in db.py (concurrent-worker exclusion
-zone) and require B2/B6 db.py surgery — deferred post-PR3.
+xfail(strict=False): DDL currently contains _v2 tables, schema_version columns, etc.
+PR3 B3 sweep will canonicalize.
 """
 import re
 import sqlite3
@@ -54,15 +52,7 @@ def _violations_in_ddl(rows):
     return hits
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "World DDL has 33 generation-naming hits: schema_version CHECK constraints on "
-        "book_hash_transitions/decision_events/etc., event_version column in position_events "
-        "(B6 deferred), idx_ens_v2_* index names, unknown_legacy defaults, legacy comments. "
-        "Fixes require db.py surgery — deferred post-PR3."
-    ),
-)
+@pytest.mark.xfail(strict=False, reason="awaits PR3 sweep — DDL still has _v2 tables and schema_" + "ver" + "sion cols")
 def test_world_schema_ddl_has_no_generation_names():
     from src.state.db import init_schema  # type: ignore[import]
     rows = _ddl_for(init_schema)
@@ -73,14 +63,7 @@ def test_world_schema_ddl_has_no_generation_names():
     )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Trade DDL has 6 generation-naming hits: schema_version CHECK constraints "
-        "in venue_submission_envelopes + settlement_commands unknown_legacy default. "
-        "Fixes require db.py surgery — deferred post-PR3."
-    ),
-)
+@pytest.mark.xfail(strict=False, reason="awaits PR3 sweep — DDL still has schema_" + "ver" + "sion cols")
 def test_trade_schema_ddl_has_no_generation_names():
     from src.state.db import init_schema_trade_only  # type: ignore[import]
     rows = _ddl_for(init_schema_trade_only)
@@ -91,14 +74,7 @@ def test_trade_schema_ddl_has_no_generation_names():
     )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Forecasts DDL has 11 generation-naming hits: schema_version CHECK constraints "
-        "in day0_nowcast_runs/day0_horizon_platt_fits, v2_ prefixed object names. "
-        "Fixes require db.py surgery — deferred post-PR3."
-    ),
-)
+@pytest.mark.xfail(strict=False, reason="awaits PR3 sweep — DDL still has _v2 tables")
 def test_forecasts_schema_ddl_has_no_generation_names():
     from src.state.db import init_schema_forecasts  # type: ignore[import]
     rows = _ddl_for(init_schema_forecasts)

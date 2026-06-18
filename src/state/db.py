@@ -1365,11 +1365,14 @@ def get_connection(
     return conn
 
 
-# B2 (2026-05-28): SCHEMA_VERSION counter cancelled. Schema drift is now detected via
-# content-hash fingerprint in scripts/check_schema_fingerprint.py + architecture/_schema_fingerprint.txt.
-# Row-level provenance columns (decision_events.schema_version etc.) retain their current
-# CHECK constraints and new rows write the last-frozen value (55, post-#358) permanently.
-# Per-table schema constants in src/state/schema/* are B2-followup (out of scope here).
+# Last reused or audited: 2026-05-11
+# Authority basis: PLAN docs/operations/task_2026-05-11_init_schema_boot_invariant/PLAN.md
+# Schema currency sentinel. Bump on EVERY DDL change in this file OR in
+# init_provenance_projection_schema (:1729) OR apply_v2_schema (:2222).
+# CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
+# a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
+# the PR if SCHEMA_VERSION did not change in lockstep.
+SCHEMA_VERSION = 42  # 2026-05-28 F1 (docs/findings_2026_05_28.md §F1): position_current gains chain_avg_price + chain_cost_basis_usd so balance-only rescue persists chain-observed economics without overwriting submitted entry_price/cost_basis_usd/size_usd. Prior: 41 = merge #349+#352.
 
 
 def init_schema(
@@ -1835,7 +1838,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -3147,7 +3150,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -3183,7 +3186,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)
                     THEN schema_version
                 ELSE 36
             END,
@@ -9773,11 +9776,6 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         "chain_cost_basis_usd",
         "chain_seen_at",
         "chain_absence_at",
-        "entry_ci_width",
-        "last_monitor_prob_is_fresh",
-        "last_monitor_market_price_is_fresh",
-        "exit_retry_count",
-        "next_exit_retry_at",
     )
     authority_select_expr = ", ".join(
         c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
@@ -10570,7 +10568,7 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
     # FILL_AUTHORITY_NONE.  The Position properties (effective_shares,
     # effective_cost_basis_usd, effective_exposure) already route correctly via
     # has_chain_observed_authority when fill_authority is preserved here.
-    row_fill_authority = str(_row_optional("fill_authority") or "").strip()
+    row_fill_authority = str(row["fill_authority"] or "").strip()
     effective_fill_authority = (
         row_fill_authority
         if row_fill_authority and row_fill_authority != FILL_AUTHORITY_NONE
