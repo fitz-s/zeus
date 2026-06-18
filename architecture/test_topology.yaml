@@ -314,7 +314,7 @@ test_trust_policy:
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
     tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-06-10"}
-    tests/test_day0_shadow_scope_no_submit.py: {created: "2026-06-09", last_used: "2026-06-10"}
+    tests/test_day0_shadow_scope_no_submit.py: {created: "2026-06-09", last_used: "2026-06-18", note: "live-only EDLI adapter boundary: forecast_plus_day0 is the only production scope; former day0_shadow/forecast_only scopes reject before proof build or executor submit"}
     tests/test_diurnal_peak_prob_monotone.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_edli_status_pulse_submit_counter.py: {created: "2026-06-09", last_used: "2026-06-10"}
     tests/test_stake_min_order_not_edge_reversed.py: {created: "2026-06-09", last_used: "2026-06-10"}
@@ -757,9 +757,9 @@ test_trust_policy:
     tests/events/test_live_cap_no_caps_directive.py: {created: "2026-06-05", last_used: "2026-06-05", note: "no-caps directive RT: $250 ceiling + rate-window flag-gated — disabled ⇒ no cap; ON ⇒ caps unchanged"}
     tests/events/test_reactor_reservation_rollback_flow.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT: reactor reservation rollback flow on the no-caps path"}
     tests/sizing/test_portfolio_reservation_rollback.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT: portfolio reservation rollback under multi-bet correlated sizing"}
-    # day0-activate — day0 shadow activation: live absorbing-mask direction antibody + day0_shadow scope (2026-06-05)
+    # day0 live activation: absorbing-mask direction antibody + single live scope (2026-06-05, modernized 2026-06-18)
     tests/engine/test_day0_live_mask_direction.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P0 RT: pins LIVE day0 absorbing-mask direction (observed-so-far → mask → posterior) so inversion is UNCONSTRUCTABLE; reproduces #98 Paris low=14°C wrong-side"}
-    tests/money_path/test_day0_shadow_scope.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P1 RT: day0_shadow edli_live_scope admits day0 + structural no-submit (scope ⊥ arm axis); forecast_only stays byte-identical"}
+    tests/money_path/test_day0_shadow_scope.py: {created: "2026-06-05", last_used: "2026-06-18", note: "live-only EDLI scope law: forecast_plus_day0 is the only production scope; day0_shadow/forecast_only/unknown scopes fail closed before entering execution semantics"}
     tests/engine/test_day0_mask_consolidation.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P2 RT: collapse to ONE absorbing mask — hardened inline _edli_day0_mask_for_analysis truth table (zero behavioral delta), dark module deleted"}
     tests/engine/test_day0_mask_runtime_gate.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P3 RT: runtime DAY0_MASK_CONTRADICTS_OBSERVATION fail-closed gate — surviving bin contradicting rounded_value raises; future inversion fails CLOSED"}
     tests/engine/test_no_loss_class_nonexecutable_yes_gate.py: {created: "2026-06-13", last_used: "2026-06-13", note: "RED-on-revert antibody for the buy-NO loss-class gate in _canonical_probability_and_fdr_proof: a NON-executable-YES far bin emits q_lcb_no=0.0/p=1.0/prefilter=False (profitable-era gate), while an EXECUTABLE-YES bin's buy_no stays reconciled via the native NO edge (GOOD-fill path). RED-on-revert proven by temporarily restoring the 745aa10c6f forecast-NO else-branch (q_lcb_no jumps to 0.775). Authority: settled-data loss-class replay 2026-06-13, n=485, 98.1% admit; git regression 745aa10c6f"}
@@ -1310,7 +1310,7 @@ categories:
     - tests/test_boot_guard_kelly_ceiling.py
     - tests/test_startup_wallet_dedup.py
     - tests/test_startup_wallet_warm_overlap.py
-    # day0-activate — day0 shadow activation antibodies (2026-06-05)
+    # day0 live activation antibodies (2026-06-05, modernized 2026-06-18)
     - tests/engine/test_day0_live_mask_direction.py
     - tests/money_path/test_day0_shadow_scope.py
     - tests/engine/test_day0_mask_consolidation.py

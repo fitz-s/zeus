@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-09
-# Authority basis: EDLI PR332 deploy-ready review plus day0_shadow bridge;
+# Last reused/audited: 2026-06-18
+# Authority basis: EDLI live-only execution scope;
 #                  + 2026-06-08 (system_decomposition_plan §8 Step 3, P3 lift): the
 #                    _run_main_with_fake_scheduler boot harness dropped the obsolete
 #                    _start_user_channel_ingestor_if_enabled stub (WS ingestor THREAD lifted
@@ -14,7 +14,7 @@
 #                    "in job_ids" assertions were flipped to "not in job_ids" (it now lives in
 #                    src.ingest.post_trade_capital_daemon, id="harvester"). Net-new regression caught
 #                    by the Step-cleanup re-regression sweep; production code was already correct.
-# Day0 may run in shadow/no-submit only, never as real capital authorization.
+# Day0 and forecast events share forecast_plus_day0 as the only production execution scope.
 #                  + 2026-06-04 arm direction-gate boot guard DELETED (mainstream is
 #                    display-only, never a decision/arm input — operator Rule-4 antibody)
 #                  + 2026-06-09 STALE_LAW re-pin: operator ARMED the live canary
@@ -56,7 +56,7 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     real_submit = edli["real_order_submit_enabled"]
     assert real_submit is True, "ARMED: operator armed real order submission (live)"
     assert edli["live_execution_mode"] == "edli_live", "ARMED: edli_live mode"
-    assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
+    assert edli["edli_live_scope"] == "forecast_plus_day0"
     assert edli["day0_extreme_trigger_enabled"] is True
     assert edli["day0_authority_catchup_scanner_enabled"] is True
     assert edli["day0_hard_fact_live_enabled"] is True
@@ -152,7 +152,7 @@ def test_day0_scope_admits_day0_with_market_channel_armed():
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli"]
 
-    assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
+    assert edli["edli_live_scope"] == "forecast_plus_day0"
     assert edli["day0_extreme_trigger_enabled"] is True
     assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["day0_authority_catchup_scanner_enabled"] is True
@@ -177,7 +177,7 @@ def test_pr_scope_document_matches_settings_flags():
     real_submit = edli["real_order_submit_enabled"]
     assert real_submit is True, "ARMED: operator armed real order submission (live)"
     assert edli["live_execution_mode"] == "edli_live", "ARMED: edli_live mode"
-    assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
+    assert edli["edli_live_scope"] == "forecast_plus_day0"
     assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is True
     # The PR332 package doc still exists and documents the Day0 scope it shipped.
@@ -207,8 +207,8 @@ def test_edli_online_invariants_market_channel_and_submit_are_armed():
 def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     source = Path("src/main.py").read_text()
     assert "edli_event_reactor" in source
-    assert "edli_market_channel_ingestor" in source
-    assert "edli_user_channel_reconcile" in source
+    assert "edli_market_channel_ingestor" not in source
+    assert 'id="edli_user_channel_reconcile"' not in source
     assert "_edli_emit_forecast_snapshot_events" in source
     assert "_edli_emit_day0_extreme_events" in source
     assert "day0_authority_catchup_scanner_enabled" in source
@@ -246,7 +246,6 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "run_cycle" not in edli_source
     assert "_assert_live_execution_mode_contract" in source
     assert "live_execution_mode == \"legacy_cron\"" in source
-    assert "edli_submit_disabled_bridge" in source
     assert "edli_live" in source
     assert "EDLI_EVENT_DRIVEN_MODES" in source
     for existing_job in ("opening_hunt", "day0_capture", "imminent_open_capture", "market_discovery", "harvester"):
@@ -291,8 +290,8 @@ def test_live_execution_mode_legacy_cron_does_not_register_edli_reactor(monkeypa
     # to the order runtime's lifecycle is the exact TRADING_DEPENDENCE violation §8 Step 2
     # removes. The order daemon is a pure reader of the settlement state machine.
     assert "harvester" not in job_ids
-    assert settings_copy["edli_v1"]["enabled"] is False
-    assert settings_copy["edli_v1"]["live_execution_mode"] == "legacy_cron"
+    assert settings_copy["edli"]["enabled"] is False
+    assert settings_copy["edli"]["live_execution_mode"] == "legacy_cron"
 
 
 def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron(monkeypatch, tmp_path):
@@ -300,15 +299,15 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
         monkeypatch,
         {
             "enabled": True,
-            "live_execution_mode": "edli_submit_disabled_bridge",
-            "reactor_mode": "submit_disabled_live_bridge",
+            "live_execution_mode": "edli_live",
+            "reactor_mode": "live",
             "event_writer_enabled": True,
             "forecast_snapshot_trigger_enabled": True,
             "day0_extreme_trigger_enabled": False,
             "day0_hard_fact_live_enabled": False,
             "market_channel_ingestor_enabled": True,
             "edli_user_channel_reconcile_enabled": True,
-            "real_order_submit_enabled": False,
+            "real_order_submit_enabled": True,
             **_stage_evidence_updates(tmp_path),
         },
     )
@@ -348,12 +347,12 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
     # the separately-gated _redeem_submitter_cycle (also in P4), never this resolver.
     assert "harvester" not in job_ids
     assert "heartbeat" in job_ids
-    assert settings_copy["edli"]["live_execution_mode"] == "edli_submit_disabled_bridge"
+    assert settings_copy["edli"]["live_execution_mode"] == "edli_live"
     assert settings_copy["edli"]["forecast_snapshot_trigger_enabled"] is True
     assert settings_copy["edli"]["day0_extreme_trigger_enabled"] is False
     assert settings_copy["edli"]["market_channel_ingestor_enabled"] is True
     assert settings_copy["edli"]["edli_user_channel_reconcile_enabled"] is True
-    assert settings_copy["edli"]["real_order_submit_enabled"] is False
+    assert bool(settings_copy["edli"]["real_order_submit_enabled"]) is True
 
 
 def test_market_substrate_warm_cadence_stays_inside_executable_price_ttl():
@@ -375,43 +374,29 @@ def test_market_substrate_warm_cadence_stays_inside_executable_price_ttl():
     )
 
 
-def test_shadow_no_submit_with_user_ws_does_not_register_lifted_p3_reconcile_job(monkeypatch, tmp_path):
+def test_shadow_no_submit_mode_is_not_a_live_startup_mode(monkeypatch, tmp_path):
     # Post-P3 (system_decomposition_plan §8 Step 3) this test pins the LIFT: with the WS
     # ingestor enabled, the ORDER DAEMON must NOT host the user-channel/reconcile cycle —
     # that producer now lives in the P3 price-channel-ingest process. (Renamed from
     # ..._registers_reconcile_job, which encoded the pre-lift in-process topology.)
     monkeypatch.setenv("ZEUS_USER_CHANNEL_WS_ENABLED", "1")
-    scheduler, settings_copy = _run_main_with_fake_scheduler(
-        monkeypatch,
-        {
-            "enabled": True,
-            "live_execution_mode": "edli_shadow_no_submit",
-            "reactor_mode": "live_no_submit",
-            "event_writer_enabled": True,
-            "forecast_snapshot_trigger_enabled": True,
-            "day0_extreme_trigger_enabled": False,
-            "day0_hard_fact_live_enabled": False,
-            "market_channel_ingestor_enabled": False,
-            "edli_user_channel_reconcile_enabled": False,
-            "real_order_submit_enabled": False,
-            **_stage_evidence_updates(tmp_path),
-        },
-    )
-
-    job_ids = {job.id for job in scheduler.jobs}
-    # PROCESS-TOPOLOGY REFACTOR P3 (system_decomposition_plan §8 Step 3): the
-    # user-channel/reconcile cycle was LIFTED out of the order daemon into the P3
-    # price-channel-ingest process. With ZEUS_USER_CHANNEL_WS_ENABLED=1 the order daemon
-    # NO LONGER registers `edli_user_channel_reconcile` (nor starts the WS ingestor
-    # thread) — those run in src.ingest.price_channel_daemon. The order runtime is a pure
-    # READER of the durable fill bridge that cycle writes. The P3-side registration is
-    # asserted in tests/test_p3_price_channel_ingest_lift.py
-    # (test_new_daemon_entry_point_exists_and_starts_ws_and_registers_both_cycles).
-    assert "edli_user_channel_reconcile" not in job_ids
-    assert "edli_market_channel_ingestor" not in job_ids
-    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_shadow_no_submit"
-    assert settings_copy["edli_v1"]["real_order_submit_enabled"] is False
-    assert settings_copy["edli_v1"]["edli_user_channel_reconcile_enabled"] is False
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:edli_shadow_no_submit"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            {
+                "enabled": True,
+                "live_execution_mode": "edli_shadow_no_submit",
+                "reactor_mode": "live_no_submit",
+                "event_writer_enabled": True,
+                "forecast_snapshot_trigger_enabled": True,
+                "day0_extreme_trigger_enabled": False,
+                "day0_hard_fact_live_enabled": False,
+                "market_channel_ingestor_enabled": False,
+                "edli_user_channel_reconcile_enabled": False,
+                "real_order_submit_enabled": False,
+                **_stage_evidence_updates(tmp_path),
+            },
+        )
 
 
 def test_live_execution_mode_rejects_legacy_cron_with_edli_runtime_enabled(monkeypatch):
@@ -457,8 +442,8 @@ def test_live_execution_mode_rejects_disabled_with_edli_runtime_enabled(monkeypa
         )
 
 
-def test_forecast_only_live_scope_rejects_day0_runtime(monkeypatch):
-    with pytest.raises(RuntimeError, match="DAY0_OUT_OF_SCOPE_FOR_PR332"):
+def test_non_live_scope_rejects_runtime(monkeypatch):
+    with pytest.raises(RuntimeError, match="UNSUPPORTED_EDLI_LIVE_SCOPE:forecast_only"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
@@ -492,7 +477,7 @@ def test_live_execution_mode_stage_requires_matching_reactor_mode(monkeypatch):
             },
         )
 
-    with pytest.raises(RuntimeError, match="EDLI_SUBMIT_DISABLED_BRIDGE_REQUIRES_REACTOR_MODE_SUBMIT_DISABLED_LIVE_BRIDGE"):
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:edli_submit_disabled_bridge"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
@@ -507,7 +492,7 @@ def test_live_execution_mode_stage_requires_matching_reactor_mode(monkeypatch):
             },
         )
 
-    with pytest.raises(RuntimeError, match="EDLI_SHADOW_NO_SUBMIT_REQUIRES_REACTOR_MODE_LIVE_NO_SUBMIT"):
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:edli_shadow_no_submit"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
@@ -536,8 +521,8 @@ def test_live_execution_mode_rejects_ambiguous_edli_event_driven_mode(monkeypatc
         )
 
 
-def test_submit_disabled_bridge_requires_lifecycle_authorities(monkeypatch):
-    with pytest.raises(RuntimeError, match="EDLI_SUBMIT_DISABLED_BRIDGE_REQUIRES_MARKET_CHANNEL_INGESTOR_ENABLED"):
+def test_submit_disabled_bridge_is_not_a_live_startup_mode(monkeypatch):
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_EXECUTION_MODE:edli_submit_disabled_bridge"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             {
@@ -649,7 +634,7 @@ def test_edli_live_canary_with_stage_evidence_waits_for_qualifying_event(monkeyp
     # mode (incl. live-canary). The reactor STAYS and reads the durable fill bridge.
     assert "edli_market_channel_ingestor" not in job_ids
     assert "edli_user_channel_reconcile" not in job_ids
-    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_live_canary"
+    assert settings_copy["edli"]["live_execution_mode"] == "edli_live"
 
 
 def test_edli_live_canary_does_not_consume_promotion_arm_artifact(monkeypatch, tmp_path):
@@ -992,8 +977,8 @@ def test_edli_live_accepts_positive_promotion_artifact(monkeypatch, tmp_path):
     # mode (incl. fully-armed edli_live). The reactor STAYS and reads the durable fill bridge.
     assert "edli_market_channel_ingestor" not in job_ids
     assert "edli_user_channel_reconcile" not in job_ids
-    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_live"
-    assert settings_copy["edli_v1"]["edli_live_operator_authorized"] is True
+    assert settings_copy["edli"]["live_execution_mode"] == "edli_live"
+    assert settings_copy["edli"]["edli_live_operator_authorized"] is True
 
 
 def test_market_discovery_constructs_public_clob_with_bounded_timeout(monkeypatch):

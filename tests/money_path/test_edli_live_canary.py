@@ -1433,6 +1433,8 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
                 submit_started_at="2026-05-24T18:10:00+00:00",
                 submit_finished_at="2026-05-24T18:10:01+00:00",
                 raw_response={"status": "submitted"},
+                venue_call_started=True,
+                venue_ack_received=True,
             )
 
         submit = adapter.event_bound_live_adapter_from_trade_conn(
@@ -1495,6 +1497,8 @@ def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch):
                 submit_started_at="2026-05-24T18:10:00+00:00",
                 submit_finished_at="2026-05-24T18:10:01+00:00",
                 raw_response={"status": "submitted"},
+                venue_call_started=True,
+                venue_ack_received=True,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
         )
@@ -1624,6 +1628,7 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
                 submit_started_at="2026-05-24T18:10:00+00:00",
                 submit_finished_at="2026-05-24T18:10:01+00:00",
                 raw_response={"status": "rejected"},
+                venue_call_started=True,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
         )
@@ -1770,6 +1775,8 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
                 submit_finished_at="2026-05-24T18:10:30+00:00",
                 raw_response={"status": "timeout"},
                 reconciliation_followup_required=True,
+                venue_call_started=True,
+                side_effect_known=False,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
         )
@@ -1929,7 +1936,6 @@ def test_main_live_mode_wires_production_executor_boundary_source():
     assert "submit_event_bound_final_intent_via_existing_executor" in source
     assert "executor_submit=lambda final_intent_cert, execution_command_cert" in source
     assert "live_bridge_mode" in source
-    assert "submit_disabled_live_bridge" in source
     assert "pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn" in source
 
 

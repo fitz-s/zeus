@@ -95,10 +95,13 @@ def _reset_substrate_refresh_cursor():
     """
     saved = main_module._SUBSTRATE_REFRESH_CURSOR
     main_module._SUBSTRATE_REFRESH_CURSOR = 0
+    saved_lifted = substrate_observer._SUBSTRATE_REFRESH_CURSOR
+    substrate_observer._SUBSTRATE_REFRESH_CURSOR = 0
     try:
         yield
     finally:
         main_module._SUBSTRATE_REFRESH_CURSOR = saved
+        substrate_observer._SUBSTRATE_REFRESH_CURSOR = saved_lifted
 
 
 def _enable_edli_cfg(monkeypatch, *, enabled: bool = True) -> None:
@@ -110,7 +113,7 @@ def _enable_edli_cfg(monkeypatch, *, enabled: bool = True) -> None:
         substrate_observer,
         "_settings_section",
         lambda name, default=None: (
-            {"enabled": enabled} if name == "edli" else (default if default is not None else {})
+            {"enabled": enabled} if name in {"edli", "edli_v1"} else (default if default is not None else {})
         ),
     )
 
@@ -186,7 +189,7 @@ def test_warm_lane_money_risk_priority_stays_ahead_of_pending_rotation():
     holdings.
     """
 
-    src = inspect.getsource(main_module._refresh_pending_family_snapshots)
+    src = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
 
     assert "get_trade_connection, get_trade_connection_read_only" in src
     assert "held_position_priority_families" in src
@@ -341,6 +344,7 @@ def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     monkeypatch.setattr(
         state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **_kwargs: _FakeConn())
     _enable_edli_cfg(monkeypatch, enabled=True)
 
     substrate_observer._edli_market_substrate_warm_cycle()
@@ -361,6 +365,7 @@ def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
     monkeypatch.setattr(
         state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **_kwargs: _FakeConn())
     _enable_edli_cfg(monkeypatch, enabled=True)
 
     assert main_module._edli_reactor_active_lock.acquire(blocking=False)
@@ -614,9 +619,11 @@ def test_pending_family_refresh_does_not_truncate_to_fixed_family_cap(monkeypatc
 
     monkeypatch.setattr(adapter, "_event_family_market_topology_rows", _topology_rows)
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **_k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **_k: _FakeConn())
     monkeypatch.setattr(scanner, "reconstruct_weather_market_from_static_topology", _reconstruct)
     monkeypatch.setattr(scanner, "_gamma_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Gamma should not be called")))
     monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [])
+    monkeypatch.setenv("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "1.0")
 
     submitted: list[list[dict]] = []
     refresh_kwargs: list[dict] = []
@@ -1382,7 +1389,7 @@ def test_mainstream_warm_cycle_uses_bounded_fresh_family_window(monkeypatch):
         ("Paris", "2026-06-06", "high"),
     ]
     monkeypatch.setattr(
-        substrate_observer,
+        main_module,
         "_pending_family_rows_for_refresh",
         lambda *a, **k: rows,
     )

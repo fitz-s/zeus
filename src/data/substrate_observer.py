@@ -53,6 +53,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from typing import Iterable
 
 from src.config import settings
 
@@ -69,6 +70,9 @@ _market_substrate_refresh_lock = threading.Lock()
 # Producer-local staleness clock — the SOLE trigger for the universe sweep after the
 # outer pending gates were deleted (§9 point 2). Never references consumer state.
 _market_discovery_last_completed_monotonic: float | None = None
+_SUBSTRATE_REFRESH_CURSOR = 0
+_GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
+_NEW_FAMILY_CONDITION_IDS: set[str] = set()
 
 
 def _settings_section(name: str, default=None):
@@ -83,15 +87,28 @@ def _settings_section(name: str, default=None):
 
 
 def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
+    event_window_limit = max(
+        100,
+        min(
+            10000,
+            int(os.environ.get("ZEUS_PENDING_FAMILY_REFRESH_EVENT_WINDOW_LIMIT", "2000")),
+        ),
+    )
     return world_conn.execute(
         """
+        WITH pending AS (
+            SELECT p.event_id
+            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            WHERE p.consumer_name = ? AND p.processing_status = 'pending'
+            ORDER BY p.updated_at DESC
+            LIMIT ?
+        )
         SELECT
             json_extract(e.payload_json, '$.city')        AS city,
             json_extract(e.payload_json, '$.target_date') AS target_date,
             json_extract(e.payload_json, '$.metric')      AS metric
-        FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+        FROM pending p
         JOIN opportunity_events e ON e.event_id = p.event_id
-        WHERE p.consumer_name = ? AND p.processing_status = 'pending'
         GROUP BY city, target_date, metric
         -- Refresh the newest target date first. Old target-date rows can remain
         -- pending after a market has disappeared from Gamma; if they consume the
@@ -103,8 +120,114 @@ def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
             MAX(e.available_at) DESC,
             MIN(e.event_id) ASC
         """,
-        (consumer_name,),
+        (consumer_name, event_window_limit),
     ).fetchall()
+
+
+def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]:
+    """Families with live unfilled entry rests that need fresh executable books."""
+
+    try:
+        commands = trade_conn.execute(
+            """
+            SELECT command_id, position_id, venue_order_id
+              FROM venue_commands
+             WHERE intent_kind = 'ENTRY'
+               AND venue_order_id IS NOT NULL
+               AND venue_order_id != ''
+            """
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    open_states = {"LIVE", "RESTING", "PARTIALLY_MATCHED"}
+    for row in commands:
+        venue_order_id = str(row[2] or "")
+        if not venue_order_id:
+            continue
+        try:
+            fact = trade_conn.execute(
+                """
+                SELECT state
+                  FROM venue_order_facts
+                 WHERE venue_order_id = ?
+                 ORDER BY local_sequence DESC
+                 LIMIT 1
+                """,
+                (venue_order_id,),
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            continue
+        if fact is None or str(fact[0] or "") not in open_states:
+            continue
+        position_id = str(row[1] or "")
+        if not position_id:
+            continue
+        try:
+            pos = trade_conn.execute(
+                """
+                SELECT city, target_date, temperature_metric
+                  FROM position_current
+                 WHERE position_id = ?
+                   AND phase IN ('pending_entry', 'active', 'day0_window')
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            continue
+        if pos is None:
+            continue
+        family = (
+            str(pos[0] or "").strip(),
+            str(pos[1] or "").strip(),
+            str(pos[2] or "").strip(),
+        )
+        if all(family) and family not in seen:
+            seen.add(family)
+            out.append(family)
+    return out
+
+
+def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
+    """Current held-position families for warmer priority.
+
+    Fail-soft: a producer read failure must not crash the substrate daemon.
+    """
+
+    from src.state.db import get_trade_connection_read_only
+
+    try:
+        conn = get_trade_connection_read_only()
+        try:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT city, target_date, temperature_metric
+                  FROM position_current
+                 WHERE phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "substrate_observer: held-position family read failed; held families not prioritized this tick: %r",
+            exc,
+        )
+        return set()
+    out: set[tuple[str, str, str]] = set()
+    for row in rows:
+        family = (
+            str(row[0] or "").strip(),
+            str(row[1] or "").strip(),
+            str(row[2] or "").strip(),
+        )
+        if all(family):
+            out.add(family)
+    return out
+
+
 def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str) -> bool:
     rows = write_conn.execute(
         """
@@ -245,6 +368,9 @@ def _refresh_pending_family_snapshots(
     forecasts_conn,
     *,
     consumer_name: str = "edli_reactor_v1",
+    now_utc: datetime | None = None,
+    extra_priority_families: Iterable[tuple[str, str, str]] | None = None,
+    include_pending_families: bool = True,
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
 
@@ -268,19 +394,22 @@ def _refresh_pending_family_snapshots(
     )
     from src.data.market_topology_rows import _event_family_market_topology_rows
     from src.data.polymarket_client import PolymarketClient
-    from src.state.db import get_trade_connection
+    from src.state.db import get_trade_connection, get_trade_connection_read_only
 
-    now_utc = datetime.now(timezone.utc)
+    now_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
     now_iso = now_utc.isoformat()
 
     # Step 1: Collect distinct (city, target_date, metric) for pending events.
-    try:
-        pending_rows = _pending_family_rows_for_refresh(
-            world_conn, consumer_name=consumer_name
-        )
-    except Exception as exc:
-        logger.warning("refresh_pending_family_snapshots: pending-event query failed: %s", exc)
-        return {"status": "error", "reason": str(exc)}
+    if include_pending_families:
+        try:
+            pending_rows = _pending_family_rows_for_refresh(
+                world_conn, consumer_name=consumer_name
+            )
+        except Exception as exc:
+            logger.warning("refresh_pending_family_snapshots: pending-event query failed: %s", exc)
+            return {"status": "error", "reason": str(exc)}
+    else:
+        pending_rows = []
 
     from src.config import cities_by_name as _refresh_cities_by_name
 
@@ -318,16 +447,88 @@ def _refresh_pending_family_snapshots(
             _canonical_refresh_metric(metric),
         )
 
-    families: list[tuple[str, str, str]] = []
+    pending_families: list[tuple[str, str, str]] = []
     for row in pending_rows:
         city = _canonical_refresh_city_name(row[0])
         target_date = str(row[1] or "").strip()
         metric = _canonical_refresh_metric(row[2])
         if city and target_date and metric:
-            families.append((city, target_date, metric))
+            pending_families.append((city, target_date, metric))
+
+    open_rest_priority_families: list[tuple[str, str, str]] = []
+    try:
+        trade_ro = get_trade_connection_read_only()
+        try:
+            open_rest_priority_families = _open_rest_family_rows_for_refresh(trade_ro)
+        finally:
+            trade_ro.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "refresh_pending_family_snapshots: open-rest priority read failed (non-fatal): %s",
+            exc,
+        )
+    held_position_priority_families = sorted(_edli_current_held_position_family_keys())
+
+    priority_families: list[tuple[str, str, str]] = []
+    priority_keys: set[tuple[str, str, str]] = set()
+    explicit_priority_families = list(extra_priority_families or ())
+    for family in (
+        explicit_priority_families
+        + list(open_rest_priority_families)
+        + list(held_position_priority_families)
+    ):
+        key = _refresh_family_key(*family)
+        if key and key not in priority_keys:
+            priority_families.append(family)
+            priority_keys.add(key)
+
+    families = priority_families + [
+        family for family in pending_families if _refresh_family_key(*family) not in priority_keys
+    ]
 
     if not families:
-        return {"status": "no_pending_families"}
+        return {
+            "status": "no_pending_open_rest_or_held_families",
+            "open_rest_priority_families": 0,
+            "held_position_priority_families": 0,
+            "explicit_priority_families": 0,
+            "include_pending_families": bool(include_pending_families),
+        }
+
+    global _SUBSTRATE_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS, _GAMMA_EMPTY_BACKOFF_UNTIL
+    new_priority_families: list[tuple[str, str, str]] = []
+    if _NEW_FAMILY_CONDITION_IDS:
+        try:
+            new_cids_snapshot = set(_NEW_FAMILY_CONDITION_IDS)
+            _NEW_FAMILY_CONDITION_IDS.clear()
+            for cid in sorted(new_cids_snapshot):
+                try:
+                    row_q = world_conn.execute(
+                        "SELECT city, target_date, temperature_metric FROM market_events WHERE condition_id = ? LIMIT 1",
+                        (cid,),
+                    ).fetchone()
+                    if row_q is not None:
+                        city_v, td_v, metric_v = (
+                            _canonical_refresh_city_name(row_q[0]),
+                            str(row_q[1] or "").strip(),
+                            _canonical_refresh_metric(row_q[2]),
+                        )
+                        fk = _refresh_family_key(city_v, td_v, metric_v)
+                        if fk not in {_refresh_family_key(*f) for f in families}:
+                            new_priority_families.append((city_v, td_v, metric_v))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    ordinary_families = families[len(priority_families):]
+    n_ordinary_families = len(ordinary_families)
+    start_offset = _SUBSTRATE_REFRESH_CURSOR % max(1, n_ordinary_families)
+    rotated_ordinary_families = (
+        ordinary_families[start_offset:] + ordinary_families[:start_offset]
+        if ordinary_families
+        else []
+    )
+    families = priority_families + new_priority_families + rotated_ordinary_families
 
     # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
     # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
@@ -386,6 +587,7 @@ def _refresh_pending_family_snapshots(
 
     write_conn = get_trade_connection(write_class="live")
     try:
+        families_processed_this_cycle = 0
         for index, (city, target_date, metric) in enumerate(families):
             if time.monotonic() >= topology_deadline and (
                 cached_topology_markets or gamma_refresh_families
@@ -400,6 +602,7 @@ def _refresh_pending_family_snapshots(
                     snapshot_reserve_s,
                 )
                 break
+            families_processed_this_cycle += 1
             payload = {"city": city, "target_date": target_date, "metric": metric}
             topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
             if not topology_rows:
@@ -446,6 +649,11 @@ def _refresh_pending_family_snapshots(
             else:
                 fresh_skipped += 1
 
+        _SUBSTRATE_REFRESH_CURSOR = (
+            start_offset
+            + max(1, max(0, families_processed_this_cycle - len(priority_families)))
+        ) % max(1, n_ordinary_families)
+
         if not gamma_refresh_families and not cached_topology_markets:
             logger.info(
                 "refresh_pending_family_snapshots: all families fresh, skipped. "
@@ -455,6 +663,10 @@ def _refresh_pending_family_snapshots(
             return {
                 "status": "all_fresh",
                 "families_checked": len(families),
+                "explicit_priority_families": len(explicit_priority_families),
+                "include_pending_families": bool(include_pending_families),
+                "open_rest_priority_families": len(open_rest_priority_families),
+                "held_position_priority_families": len(held_position_priority_families),
                 "fresh_skipped": fresh_skipped,
                 "no_topology": no_topology,
                 "cached_topology_incomplete": cached_topology_incomplete,
