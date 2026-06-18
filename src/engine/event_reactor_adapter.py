@@ -6823,7 +6823,7 @@ def _forecast_authority_payload_from_posterior(
     )
     if members is None:
         return None
-    members_native, _causal_sct = members
+    members_native, _causal_sct, _spine_precision = members
     if len(members_native) < 3:
         return None
     member_count = len(members_native)
@@ -8307,12 +8307,24 @@ def _generate_candidate_proofs(
                 decision_time=decision_time,
             )
             if _spine_multimodel is not None:
-                _spine_raw, _spine_source_cycle = _spine_multimodel
+                _spine_raw, _spine_source_cycle, _spine_precision = _spine_multimodel
                 _spine_arr = np.asarray(_spine_raw, dtype=float).ravel()
                 if _spine_arr.size:
                     _spine_lst = [float(_x) for _x in _spine_arr.tolist()]
                     payload["_edli_spine_raw_members_native"] = _spine_lst
                     payload["_edli_spine_debiased_members_native"] = _spine_lst
+                    # RAW PRECISION (FINAL no-shadow §1-§2): the per-member raw second
+                    # moment Ê[(x−Y)²] + n, in the SAME index order as the member list, so
+                    # build_fresh_model_set can attach it to each RawModelMember and the
+                    # spine's walk_forward_model_weights forms the RAW diagonal 1/E[r²]
+                    # weight. None entries (no walk-forward history) stay equal-weighted.
+                    if _spine_precision and len(_spine_precision) == len(_spine_lst):
+                        payload["_edli_spine_raw_m2_by_index"] = [
+                            (None if _m2 is None else float(_m2)) for (_mid, _m2, _n) in _spine_precision
+                        ]
+                        payload["_edli_spine_n_by_index"] = [
+                            int(_n) for (_mid, _m2, _n) in _spine_precision
+                        ]
                     _spine_mean = sum(_spine_lst) / len(_spine_lst)
                     payload["_edli_spine_mu_native"] = float(_spine_mean)
                     if len(_spine_lst) >= 2:
@@ -11768,7 +11780,7 @@ def _spine_multimodel_members_for_event(
     event: OpportunityEvent,
     family,
     decision_time: datetime,
-) -> tuple[list[float], str] | None:
+) -> tuple[list[float], str, list[tuple[str, float | None, int]]] | None:
     """The Q-KERNEL SPINE member envelope sourced from the MULTI-MODEL DETERMINISTIC
     fusion table ``raw_model_forecasts`` — the SAME source the strategy-of-record,
     the de-bias provider, and the ARM-replay validation all use.
@@ -11793,10 +11805,19 @@ def _spine_multimodel_members_for_event(
     to ``fresh_members_at_cycle``). Values are converted °C→native settlement unit
     exactly as ``build_family_spine`` does.
 
+    RAW PRECISION (2026-06-18 FINAL no-shadow execution flow §1-§2): alongside the
+    member envelope, this returns the per-model RAW second moment Ê[(x−Y)²] + n via
+    ``raw_second_moment_by_model`` (the SAME walk-forward residual source the capture
+    path uses — NOT EB, NOT a parallel pipeline). Threaded onto ``RawModelMember`` so
+    ``center.walk_forward_model_weights`` forms the RAW diagonal ``1/E[r²]`` weight
+    instead of equal 1/n. A model with no walk-forward history carries ``raw_m2=None``
+    (→ that member is equal-weighted). The lookup NEVER moves μ (no shift) and is
+    fail-soft (any error → all-None precision → equal-weight, unchanged behavior).
+
     FAIL-CLOSED: returns ``None`` (→ honest SPINE_INPUTS_UNAVAILABLE) when the causal
     cycle cannot be established, the forecasts table is absent, or fewer than 3 members
     survive (the replay's ``len(members_raw) < 3`` guard). NEVER falls back to the
-    ensemble (that reintroduces the bug). Read-only; one indexed SQL query; never feeds
+    ensemble (that reintroduces the bug). Read-only; indexed SQL only; never feeds
     q, sizing, or submit.
     """
     if getattr(event, "event_type", None) not in _FORECAST_DECISION_EVENT_TYPES:
@@ -11884,8 +11905,48 @@ def _spine_multimodel_members_for_event(
     def _c_to_native(v_c: float) -> float:
         return v_c if unit == "C" else (v_c * 9.0 / 5.0 + 32.0)
 
-    members_native = [_c_to_native(v) for v in best.values()]
-    return members_native, str(_causal_sct)
+    # RAW second-moment precision per model (FINAL no-shadow §1-§2). The walk-forward
+    # raw residual x−Y is in degC; the raw second moment Ê[(x−Y)²] is therefore in
+    # degC². For an F-settled city the member VALUES are converted °C→°F above, so the
+    # precision basis must be the SAME unit as the member values — convert the degC²
+    # second moment to °F² by the variance scale (1.8² = 3.24). The lead is the integer
+    # day gap from the causal cycle date to the target date (the SAME key the residual
+    # table stores). FAIL-SOFT: any error → empty map → all members equal-weighted.
+    raw_m2_by_model: dict[str, tuple[float, int]] = {}
+    try:
+        from datetime import date as _date  # noqa: PLC0415
+        from src.data.bayes_precision_fusion_history_provider import (  # noqa: PLC0415
+            raw_second_moment_by_model,
+        )
+
+        _cycle_d = _date.fromisoformat(causal_cycle_date)
+        _target_d = _date.fromisoformat(str(family.target_date)[:10])
+        _lead_days = max(0, (_target_d - _cycle_d).days)
+        raw_m2_by_model = raw_second_moment_by_model(
+            conn,
+            city=str(family.city),
+            metric=str(family.metric),
+            lead_days=_lead_days,
+            target_date=_target_d,
+            models=list(best.keys()),
+        )
+    except Exception:  # noqa: BLE001 — precision is best-effort; equal-weight is the floor.
+        raw_m2_by_model = {}
+
+    _c2_to_native_var = 1.0 if unit == "C" else (9.0 / 5.0) ** 2  # degC²→native² scale
+    members_native: list[float] = []
+    precision_by_index: list[tuple[str, float | None, int]] = []
+    # Deterministic order (best is dict-ordered by insertion = the SQL model order).
+    for _model, _val_c in best.items():
+        members_native.append(_c_to_native(_val_c))
+        _hit = raw_m2_by_model.get(_model)
+        if _hit is not None:
+            _m2_c2, _n = _hit
+            _m2_native = float(_m2_c2) * _c2_to_native_var
+            precision_by_index.append((str(_model), _m2_native, int(_n)))
+        else:
+            precision_by_index.append((str(_model), None, 0))
+    return members_native, str(_causal_sct), precision_by_index
 
 
 def _day0_seed_members_multimodel(

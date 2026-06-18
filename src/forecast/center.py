@@ -126,58 +126,87 @@ class CenterEstimate:
 
 
 # ---------------------------------------------------------------------------
-# Walk-forward model weights (spec line 246: "shrink to equal weights by n/SE").
-# Reuses the bayes_precision_fusion EB / inverse-variance / low-n-inflation
-# primitives rather than reinventing the weighting math.
+# Walk-forward model weights — RAW DIAGONAL PRECISION (2026-06-18 FINAL no-shadow
+# execution flow §2). Basis = inverse RAW SECOND MOMENT 1/max(Ê[(x−Y)²], floor²),
+# NOT the inverse demeaned variance. Reads RawModelMember.walk_forward_raw_m2_native.
+# Reuses ONLY the SIGMA_FLOOR / KAPPA / MIN_TRAIN / LOWN_INFLATE scalars from
+# bayes_precision_fusion — never shrink_cov / diag_cov / np.var / np.std (those
+# discard bias² and are the WRONG basis under the RAW no-de-bias law).
 # ---------------------------------------------------------------------------
 
 def walk_forward_model_weights(
     case: ForecastCase,
     members: Sequence[RawModelMember],
 ) -> np.ndarray:
-    """Non-negative model weights that sum to 1, shrunk toward equal by n / SE.
+    """Non-negative model weights that sum to 1 — RAW diagonal precision basis.
 
-    Spec line 246: ``weights = walk_forward_model_weights(case, members)  # shrink
-    to equal weights by n/SE``. The precision basis is the inverse residual
-    variance (the same inverse-variance / precision idea ``bayes_precision_fusion``
-    fuses on); thin-history members are inflated toward equal weight via the SAME
-    EB low-n rule the fusion uses (``KAPPA`` shrink, ``MIN_TRAIN`` threshold,
-    ``LOWN_INFLATE`` σ multiplier, ``SIGMA_FLOOR`` floor).
+    RAW DIAGONAL PRECISION (2026-06-18 FINAL no-shadow execution flow §2; consult
+    resolution ledger BLOCKER 3). Under the no-de-bias RAW law the optimal diagonal
+    weighting is the inverse RAW SECOND MOMENT, NOT the inverse demeaned variance:
 
-    A ``RawModelMember`` carries no per-model walk-forward residual vector in the
-    Stage-1 contract (``src/forecast/types.py``), so the *available* precision
-    signal is uniform across members; the EB shrink therefore collapses to EQUAL
-    weights — the conservative shrink-to-equal posture the spec comment names. When
-    a later contract threads per-model SE/n onto the member (or the fresh set), this
-    function is the single seam that converts it to inverse-variance precision
-    weights without touching the envelope proof: ANY non-negative weights summing
-    to 1 keep ``mu_consensus`` a convex combination of the member values, so INV-C1
-    holds regardless of the weighting detail.
+        ``w_m ∝ 1 / max(Ê[(x_m − Y)²], SIGMA_FLOOR²)``
 
-    The weights are returned in member order. With ``n`` members and no per-model
-    precision signal the result is ``np.full(n, 1/n)``.
+    where ``Ê[(x_m − Y)²]`` (``member.walk_forward_raw_m2_native``) is the
+    strictly-prior, date-aligned mean of the SQUARED raw residual (forecast minus
+    settlement) over this model's walk-forward history. The raw second moment
+    INCLUDES the bias² term ``E[r]²`` — which is exactly what a RAW (uncorrected)
+    center must price, because under RAW the per-model location bias is part of the
+    realized error. This is settlement-confirmed to beat ``1/demeaned-var`` (the
+    ``np.cov``/``np.var`` basis that discards bias²): ``diag_raw2mom`` 1.676 bin-NLL
+    vs the EB-cost table. DO NOT route this through ``shrink_cov`` / ``diag_cov`` /
+    ``np.var`` / ``np.std`` / any demeaning — those estimate Σ (demeaned) and are
+    the WRONG basis under RAW.
+
+    SHRINK-TO-EQUAL AT LOW n: a member whose ``walk_forward_n < MIN_TRAIN`` cannot
+    be trusted to dominate on a thin raw second moment, so its precision is shrunk
+    toward the equal-weight precision (the pooled-equal floor) by the EB low-n rule
+    ``lam = n/(n+KAPPA)``: ``m2_eff = lam·raw_m2 + (1−lam)·(SIGMA_FLOOR·LOWN_INFLATE)²``.
+    A member with NO history (``raw_m2 is None`` / non-finite / n == 0) gets the
+    conservative equal-precision floor ``(SIGMA_FLOOR·LOWN_INFLATE)²`` — so the
+    absent-history member set collapses to EQUAL 1/n (never EB, never demeaned var).
+
+    The weights are non-negative and sum to 1, so ``mu_consensus`` stays a convex
+    combination of the member values and INV-C1 holds regardless of the weighting
+    detail. Returned in member order. With ``n`` members and NO per-model precision
+    signal the result is exactly ``np.full(n, 1/n)``.
     """
     n = len(members)
     if n == 0:
         return np.asarray([], dtype=float)
 
-    # Inverse-variance precision per member, shrunk toward equal by the EB low-n
-    # rule. With no per-model residual history on the member, every member shares
-    # the same floored σ and the same low-n inflation, so precisions are equal and
-    # the normalized weights are exactly 1/n (shrink-to-equal). The structure below
-    # is the seam: a future per-model (se, n) makes the precisions diverge.
+    floor_m2 = SIGMA_FLOOR * SIGMA_FLOOR
+    equal_m2 = (SIGMA_FLOOR * LOWN_INFLATE) ** 2  # the pooled-equal low-trust floor
+
     precisions = np.empty(n, dtype=float)
+    have_any_signal = False
     for i, member in enumerate(members):
-        se = float(getattr(member, "walk_forward_se_native", SIGMA_FLOOR) or SIGMA_FLOOR)
+        raw_m2 = getattr(member, "walk_forward_raw_m2_native", None)
         n_train = int(getattr(member, "walk_forward_n", 0) or 0)
-        sigma = max(se, SIGMA_FLOOR)
-        if n_train < MIN_TRAIN:
-            # EB shrink toward equal: thin history -> inflate σ toward the
-            # low-trust floor so a thin member cannot dominate (lam = n/(n+KAPPA)).
-            lam = n_train / (n_train + KAPPA)
-            sigma = lam * sigma + (1.0 - lam) * (SIGMA_FLOOR * LOWN_INFLATE)
-            sigma = max(sigma, SIGMA_FLOOR)
-        precisions[i] = 1.0 / (sigma * sigma)
+        try:
+            raw_m2_f = float(raw_m2) if raw_m2 is not None else None
+        except (TypeError, ValueError):
+            raw_m2_f = None
+        if raw_m2_f is None or not np.isfinite(raw_m2_f) or raw_m2_f <= 0.0 or n_train <= 0:
+            # No usable raw second-moment signal for this member -> equal-precision
+            # floor (it cannot dominate; the set shrinks toward equal 1/n).
+            m2_eff = equal_m2
+        else:
+            have_any_signal = True
+            if n_train < MIN_TRAIN:
+                # EB shrink toward the equal-precision floor by lam = n/(n+KAPPA):
+                # a thin raw second moment cannot dominate a deep one.
+                lam = n_train / (n_train + KAPPA)
+                m2_eff = lam * raw_m2_f + (1.0 - lam) * equal_m2
+            else:
+                m2_eff = raw_m2_f
+        # Precision = 1 / max(E[r^2], SIGMA_FLOOR^2). The floor is on the raw second
+        # moment itself (a sub-floor realized error is the floor's certainty cap).
+        precisions[i] = 1.0 / max(m2_eff, floor_m2)
+
+    # No member carried any precision signal at all -> exact equal weights (the
+    # absent-history posture; the spine's dormant seam before history is threaded).
+    if not have_any_signal:
+        return np.full(n, 1.0 / n, dtype=float)
 
     total = float(precisions.sum())
     if not np.isfinite(total) or total <= 0.0:

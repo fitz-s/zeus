@@ -48,6 +48,62 @@ def _settlement_to_celsius(value: float, unit: str | None) -> float:
     return float(value)
 
 
+def raw_second_moment_by_model(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    metric: str,
+    lead_days: int,
+    target_date: date | str,
+    models: Sequence[str],
+) -> dict[str, tuple[float, int]]:
+    """RAW second moment Ê[(x−Y)²] + walk-forward n per model (FINAL no-shadow §1).
+
+    The strictly-prior, date-aligned RAW second moment of the residual ``x − Y``
+    (forecast minus settlement, in degC) for each requested model at this
+    (city, metric, lead). REUSES the EXACT SAME walk-forward residual source the
+    capture/fusion path uses (``BayesPrecisionFusionHistoryProvider`` →
+    ``ModelHistory.residual_by_target_date``) — NOT a parallel residual pipeline,
+    NOT EB-corrected. For each model it SQUARES every raw residual then AVERAGES:
+
+        ``Ê[(x − Y)²] = mean( (forecast − settlement)² )``
+
+    over settlements with ``target_date < decision_date`` (the SAME no-leak SQL:
+    endpoint='previous_runs', authority='VERIFIED', strict target_date <). Returns
+    ``{model: (raw_m2_degC, n_train)}`` for every model with ≥1 walk-forward
+    residual; a model with no history is simply absent (the caller treats absent as
+    equal-weight). FAIL-SOFT: any error → empty mapping (never raises).
+
+    This is the precision basis ``center.walk_forward_model_weights`` consumes via
+    ``RawModelMember.walk_forward_raw_m2_native`` — the RAW diagonal 1/E[r²] center.
+    It does NOT de-bias (no EB shift on the residual), so threading it onto the
+    member keeps the served center RAW (zero shift) while upgrading equal-weight to
+    raw-precision weight.
+    """
+    provider = BayesPrecisionFusionHistoryProvider(conn)
+    try:
+        histories = provider(
+            city=city, metric=metric, lead_days=int(lead_days),
+            target_date=target_date, models=list(models),
+        )
+    except Exception as exc:  # FAIL-SOFT: never raise into the live producer.
+        _LOG.warning(
+            "raw_second_moment_by_model query failed (fail-soft, no precision): %s", exc
+        )
+        return {}
+    out: dict[str, tuple[float, int]] = {}
+    for model, hist in histories.items():
+        # residual_by_target_date = {date: forecast - settlement} (RAW, no EB). The raw
+        # second moment is the mean of the SQUARED raw residuals (bias² INCLUDED).
+        resids = list(hist.residual_by_target_date.values())
+        n = len(resids)
+        if n <= 0:
+            continue
+        raw_m2 = sum(r * r for r in resids) / n
+        out[str(model)] = (float(raw_m2), int(n))
+    return out
+
+
 class BayesPrecisionFusionHistoryProvider:
     """Walk-forward residual history reader. Constructed with an OPEN zeus-forecasts.db
     connection (the live materializer wires the forecast-store connection; tests inject an
