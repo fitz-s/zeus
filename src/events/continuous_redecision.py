@@ -579,8 +579,17 @@ def enqueue_live_redecisions(
                 conservative_q = q_lcb_yes if direction == "buy_yes" else q_lcb_no
                 if conservative_q is None:
                     continue
-                edge = float(conservative_q) - float(quote.price) - _fee_at(float(quote.price))
-                if edge < min_edge - _EPS:
+                posterior_q = (
+                    float(belief.p_posterior_vec[idx])
+                    if direction == "buy_yes"
+                    else one_minus(float(belief.p_posterior_vec[idx]))
+                )
+                score = _entry_screen_robust_trade_score(
+                    q_posterior=posterior_q,
+                    q_lcb_5pct=float(conservative_q),
+                    price=float(quote.price),
+                )
+                if score < min_edge - _EPS:
                     continue
                 rejection = None
                 if recent_full_economics_rejections is not None:
@@ -617,10 +626,10 @@ def enqueue_live_redecisions(
                 if acted_state is not None:
                     acted_key: RedecisionScreenKey = stable_key or legacy_key
                     last = acted_state.get(acted_key)
-                    if last is not None and edge <= last + IMPROVE_DELTA + _EPS:
+                    if last is not None and score <= last + IMPROVE_DELTA + _EPS:
                         continue  # not materially improved → do not re-fire (anti price-noise)
-                    acted_state[acted_key] = edge
-                out.append(EnqueuedRedecision(belief.family_id, label, direction, edge))
+                    acted_state[acted_key] = score
+                out.append(EnqueuedRedecision(belief.family_id, label, direction, score))
     return out
 
 
@@ -698,6 +707,37 @@ def _candidate_refutation_is_at_least_as_fresh(
 
 def _all_in_cost(price: float) -> float:
     return float(price) + _fee_at(float(price))
+
+
+def _entry_screen_c95_cost(price: float) -> float:
+    """Conservative screen-side approximation of the final gate's c_cost_95pct.
+
+    The final EDLI submit gate scores on ``c_cost_95pct`` rather than the raw
+    top-book price. The screen only has the freshest top quote, not the full
+    depth curve, so it must be conservative: all-in top cost plus one tick. This
+    mirrors ``_execution_price_from_snapshot`` for ordinary taker quotes and
+    prevents deterministic TRADE_SCORE_NON_POSITIVE redecision admissions.
+    """
+
+    return min(0.999999, _all_in_cost(float(price)) + TICK_SIZE)
+
+
+def _entry_screen_robust_trade_score(
+    *,
+    q_posterior: float,
+    q_lcb_5pct: float,
+    price: float,
+) -> float:
+    """Screen with the same robust-cost sign contract as final submission.
+
+    ``p_fill_lcb`` is set to 1.0 because the screen is an admission filter, not
+    the fill-policy authority. Multiplying by any positive fill probability does
+    not change the sign; the final gate still computes the executable
+    side-specific fill LCB from the full snapshot before any order can submit.
+    """
+
+    c95 = _entry_screen_c95_cost(float(price))
+    return min(float(q_lcb_5pct) - c95, float(q_posterior) - c95)
 
 
 def _optional_float(value: object) -> float | None:

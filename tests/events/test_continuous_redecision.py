@@ -146,6 +146,57 @@ def test_entry_screen_uses_conservative_q_lcb_not_point_posterior():
     assert enqueued == [], "point posterior edge is not confirmed trading value without q_lcb edge"
 
 
+def test_entry_screen_requires_robust_c95_value_not_raw_top_quote_edge():
+    conn = _mem_world()
+    c95 = cr._entry_screen_c95_cost(0.50)
+    cr.cache_belief(
+        conn,
+        family_id="Wuhan|2026-06-01|high",
+        city="Wuhan",
+        target_date="2026-06-01",
+        snapshot_id="snap1",
+        calibrator_model_hash="identity",
+        bin_labels=["b29", "b30"],
+        p_posterior_vec=[0.001, c95 + 0.005],
+        q_lcb_yes_vec=[0.001, c95 + 0.005],
+        q_lcb_no_vec=[0.999, 0.01],
+        recorded_at="2026-05-31T00:00:00+00:00",
+    )
+    price_lookup = {
+        ("Wuhan|2026-06-01|high", "b30", "buy_yes"): cr.PriceQuote(
+            price=0.50,
+            freshness_deadline="2026-05-31T01:00:00+00:00",
+        ),
+    }
+
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-05-31T00:30:00+00:00",
+        price_lookup=price_lookup,
+        min_edge=0.01,
+    ) == []
+
+    cr.cache_belief(
+        conn,
+        family_id="Wuhan|2026-06-01|high",
+        city="Wuhan",
+        target_date="2026-06-01",
+        snapshot_id="snap2",
+        calibrator_model_hash="identity",
+        bin_labels=["b29", "b30"],
+        p_posterior_vec=[0.001, c95 + 0.02],
+        q_lcb_yes_vec=[0.001, c95 + 0.02],
+        q_lcb_no_vec=[0.999, 0.01],
+        recorded_at="2026-05-31T00:10:00+00:00",
+    )
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-05-31T00:30:00+00:00",
+        price_lookup=price_lookup,
+        min_edge=0.01,
+    )
+
+
 def test_latest_beliefs_dedupe_dynamic_family_hash_by_stable_market_identity():
     conn = _mem_world()
     label = "Will the lowest temperature in Shanghai be 24°C on June 19?"
@@ -606,8 +657,8 @@ def test_R6_second_cycle_price_improvement_reenqueues():
     conn = _mem_world()
     _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00")
     acted: dict = {}  # in-memory dedup state, held across cycles (the reactor owns this live).
-    # Cycle 1: YES cost 0.88 → edge ≈ +0.01 (clears min 0.01) → enqueue.
-    q1 = {("Wuhan|2026-06-01|high", "b30", "buy_yes"): cr.PriceQuote(price=0.88, freshness_deadline="2026-05-31T01:00:00+00:00")}
+    # Cycle 1: YES cost 0.85 clears the robust c95 screen → enqueue.
+    q1 = {("Wuhan|2026-06-01|high", "b30", "buy_yes"): cr.PriceQuote(price=0.85, freshness_deadline="2026-05-31T01:00:00+00:00")}
     e1 = cr.enqueue_live_redecisions(conn, decision_time="2026-05-31T00:30:00+00:00", price_lookup=q1, min_edge=0.01, acted_state=acted)
     assert len(e1) == 1
     # Cycle 2: price improves to 0.80 → edge ≈ +0.09, materially better → re-enqueue (NOT deduped away).
