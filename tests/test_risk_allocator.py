@@ -37,6 +37,7 @@ from src.risk_allocator import (
     count_unknown_side_effects,
     load_cap_policy,
     load_position_lots,
+    refresh_global_allocator,
     select_global_order_type,
     summary as risk_allocator_summary,
 )
@@ -559,7 +560,7 @@ def test_optimistic_vs_confirmed_split_in_capacity_check():
 
 def test_position_lots_reader_uses_latest_append_only_state_and_counts_guards():
     conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
+    assert conn.row_factory is None
     conn.executescript(
         """
         CREATE TABLE venue_commands (
@@ -636,6 +637,7 @@ def test_position_lots_reader_uses_latest_append_only_state_and_counts_guards():
     lots = load_position_lots(conn)
     unknown_count, unknown_markets = count_unknown_side_effects(conn)
 
+    assert conn.row_factory is None
     assert [(lot.market_id, lot.state, lot.exposure_micro) for lot in lots] == [
         ("m1", "CONFIRMED_EXPOSURE", 5_000_000),
         ("m2", "OPTIMISTIC_EXPOSURE", 5_000_000),
@@ -646,6 +648,65 @@ def test_position_lots_reader_uses_latest_append_only_state_and_counts_guards():
     assert unknown_count == 3
     assert unknown_markets == ("m2", "m3", "m4")
     assert count_open_reconcile_findings(conn) == 1
+
+
+def test_refresh_global_allocator_accepts_live_default_sqlite_row_factory():
+    conn = sqlite3.connect(":memory:")
+    assert conn.row_factory is None
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+          command_id TEXT PRIMARY KEY,
+          market_id TEXT,
+          token_id TEXT,
+          decision_id TEXT,
+          state TEXT,
+          updated_at TEXT
+        );
+        CREATE TABLE position_lots (
+          lot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          position_id INTEGER,
+          state TEXT,
+          shares INTEGER,
+          entry_price_avg TEXT,
+          source_command_id TEXT,
+          source TEXT,
+          raw_payload_json TEXT,
+          local_sequence INTEGER
+        );
+        CREATE TABLE venue_command_events (
+          event_id TEXT,
+          command_id TEXT,
+          sequence_no INTEGER,
+          event_type TEXT,
+          payload_json TEXT,
+          state_after TEXT
+        );
+        CREATE TABLE exchange_reconcile_findings (
+          finding_id INTEGER PRIMARY KEY,
+          resolved_at TEXT
+        );
+        """
+    )
+
+    class Ledger:
+        current_drawdown_pct = 0.0
+        risk_level = "GREEN"
+
+    try:
+        result = refresh_global_allocator(
+            conn,
+            ledger=Ledger(),
+            heartbeat={"health": "HEALTHY"},
+            ws_status={"m5_reconcile_required": False},
+            cap_policy=CapPolicy(),
+        )
+    finally:
+        clear_global_allocator()
+
+    assert conn.row_factory is None
+    assert result["configured"] is True
+    assert result["entry"] == {"allow_submit": True, "reason": "ok"}
 
 
 def test_create_execution_intent_populates_typed_allocation_metadata():

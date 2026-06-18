@@ -11,11 +11,13 @@ cancels, redeems, mutates production DB/state artifacts, or authorizes cutover.
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Iterator, Literal, Mapping, Sequence
 
 from src.control.heartbeat_supervisor import HeartbeatHealth, HeartbeatStatus
 from src.contracts.execution_intent import ExecutionIntent
@@ -507,43 +509,44 @@ def load_cap_policy(path: str | Path = "config/risk_caps.yaml") -> CapPolicy:
 def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
     """Read active exposure lots from ``position_lots`` without mutation."""
 
-    rows = conn.execute(
-        """
-        SELECT
-          lot.position_id,
-          lot.state,
-          lot.shares,
-          lot.entry_price_avg,
-          lot.source,
-          lot.raw_payload_json,
-          (
-            SELECT event.payload_json
-            FROM venue_command_events event
-            WHERE event.command_id = cmd.command_id
-              AND event.event_type = 'SUBMIT_REQUESTED'
-            ORDER BY event.sequence_no DESC
-            LIMIT 1
-          ) AS submit_payload_json,
-          COALESCE(cmd.market_id, CAST(lot.position_id AS TEXT)) AS market_id,
-          COALESCE(cmd.token_id, CAST(lot.position_id AS TEXT)) AS token_id,
-          COALESCE(cmd.decision_id, cmd.market_id, CAST(lot.position_id AS TEXT)) AS event_id
-        FROM position_lots lot
-        JOIN (
-          SELECT position_id, MAX(local_sequence) AS max_sequence
-          FROM position_lots
-          GROUP BY position_id
-        ) latest
-          ON latest.position_id = lot.position_id
-         AND latest.max_sequence = lot.local_sequence
-        LEFT JOIN venue_commands cmd ON cmd.command_id = lot.source_command_id
-        WHERE lot.state IN (
-          'OPTIMISTIC_EXPOSURE',
-          'CONFIRMED_EXPOSURE',
-          'EXIT_PENDING'
-        )
-        ORDER BY lot.position_id, lot.lot_id
-        """
-    ).fetchall()
+    with _named_sqlite_rows(conn) as read_conn:
+        rows = read_conn.execute(
+            """
+            SELECT
+              lot.position_id,
+              lot.state,
+              lot.shares,
+              lot.entry_price_avg,
+              lot.source,
+              lot.raw_payload_json,
+              (
+                SELECT event.payload_json
+                FROM venue_command_events event
+                WHERE event.command_id = cmd.command_id
+                  AND event.event_type = 'SUBMIT_REQUESTED'
+                ORDER BY event.sequence_no DESC
+                LIMIT 1
+              ) AS submit_payload_json,
+              COALESCE(cmd.market_id, CAST(lot.position_id AS TEXT)) AS market_id,
+              COALESCE(cmd.token_id, CAST(lot.position_id AS TEXT)) AS token_id,
+              COALESCE(cmd.decision_id, cmd.market_id, CAST(lot.position_id AS TEXT)) AS event_id
+            FROM position_lots lot
+            JOIN (
+              SELECT position_id, MAX(local_sequence) AS max_sequence
+              FROM position_lots
+              GROUP BY position_id
+            ) latest
+              ON latest.position_id = lot.position_id
+             AND latest.max_sequence = lot.local_sequence
+            LEFT JOIN venue_commands cmd ON cmd.command_id = lot.source_command_id
+            WHERE lot.state IN (
+              'OPTIMISTIC_EXPOSURE',
+              'CONFIRMED_EXPOSURE',
+              'EXIT_PENDING'
+            )
+            ORDER BY lot.position_id, lot.lot_id
+            """
+        ).fetchall()
     lots: list[ExposureLot] = []
     for row in rows:
         row_map = _row_mapping(row)
@@ -580,15 +583,16 @@ def count_unknown_side_effects(conn: Any) -> tuple[int, tuple[str, ...]]:
     UNKNOWN are operator/recovery handoff states, not allocation clearance.
     """
 
-    rows = conn.execute(
-        """
-        SELECT market_id
-        FROM venue_commands
-        WHERE state IN (?, ?, ?)
-        ORDER BY updated_at, command_id
-        """,
-        tuple(sorted(_UNRESOLVED_SIDE_EFFECT_STATES)),
-    ).fetchall()
+    with _named_sqlite_rows(conn) as read_conn:
+        rows = read_conn.execute(
+            """
+            SELECT market_id
+            FROM venue_commands
+            WHERE state IN (?, ?, ?)
+            ORDER BY updated_at, command_id
+            """,
+            tuple(sorted(_UNRESOLVED_SIDE_EFFECT_STATES)),
+        ).fetchall()
     markets = tuple(
         sorted({str(_row_mapping(row).get("market_id") or "") for row in rows if str(_row_mapping(row).get("market_id") or "")})
     )
@@ -596,9 +600,10 @@ def count_unknown_side_effects(conn: Any) -> tuple[int, tuple[str, ...]]:
 
 
 def count_open_reconcile_findings(conn: Any) -> int:
-    row = conn.execute(
-        "SELECT COUNT(*) AS count FROM exchange_reconcile_findings WHERE resolved_at IS NULL"
-    ).fetchone()
+    with _named_sqlite_rows(conn) as read_conn:
+        row = read_conn.execute(
+            "SELECT COUNT(*) AS count FROM exchange_reconcile_findings WHERE resolved_at IS NULL"
+        ).fetchone()
     if row is None:
         return 0
     return int(_row_mapping(row).get("count", 0) or 0)
@@ -728,6 +733,21 @@ def _row_mapping(row: Any) -> Mapping[str, Any]:
     if hasattr(row, "keys"):
         return {key: row[key] for key in row.keys()}
     return dict(row)
+
+
+@contextmanager
+def _named_sqlite_rows(conn: Any) -> Iterator[Any]:
+    """Ensure sqlite reads return name-addressable rows, then restore caller state."""
+
+    if not isinstance(conn, sqlite3.Connection):
+        yield conn
+        return
+    previous_factory = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.row_factory = previous_factory
 
 
 def _coerce_payload(raw: Any) -> Mapping[str, Any]:
