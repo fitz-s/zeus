@@ -497,11 +497,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             current_value = row[field] if hasattr(row, "keys") else row[idx]
             if current_value is None:
                 continue
-            if field == "exit_retry_count":
-                projection[field] = current_value
-                continue
-            if projection.get(field) in (None, ""):
-                projection[field] = current_value
+            projection[field] = current_value
 
     def _append_canonical_rescue_if_available(position: Position) -> bool:
         if conn is None:
