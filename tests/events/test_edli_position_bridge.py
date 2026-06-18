@@ -439,6 +439,68 @@ def test_same_order_duplicate_aggregate_absorbs_existing_open_row(conn):
     assert after_count == before_count
 
 
+def test_same_order_duplicate_preserves_chain_corrected_size(conn):
+    first_aggregate = _seed_confirmed_buy_no_aggregate(conn, aggregate_id="agg-edli-chain-a")
+    first = materialize_position_current_from_edli_fill(conn, first_aggregate)
+    assert first["created"] is True
+
+    second_aggregate = _seed_confirmed_buy_no_aggregate(conn, aggregate_id="agg-edli-chain-b")
+    second = materialize_position_current_from_edli_fill(conn, second_aggregate)
+    assert second["position_id"] == first["position_id"]
+
+    before_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MANUAL_OVERRIDE_APPLIED'
+           AND source_module = 'src.events.edli_position_bridge'
+        """,
+        (first["position_id"],),
+    ).fetchone()[0]
+
+    conn.execute(
+        """
+        UPDATE position_current
+           SET shares = 5.13,
+               cost_basis_usd = 3.6936,
+               size_usd = 3.6936,
+               entry_price = 0.72,
+               chain_state = 'synced',
+               chain_shares = 5.13,
+               chain_avg_price = 0.72,
+               chain_cost_basis_usd = 3.6936
+         WHERE position_id = ?
+        """,
+        (first["position_id"],),
+    )
+
+    replay = materialize_position_current_from_edli_fill(conn, second_aggregate)
+    row = conn.execute(
+        "SELECT shares, cost_basis_usd, size_usd, entry_price, chain_state, chain_shares "
+        "FROM position_current WHERE position_id = ?",
+        (first["position_id"],),
+    ).fetchone()
+    after_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MANUAL_OVERRIDE_APPLIED'
+           AND source_module = 'src.events.edli_position_bridge'
+        """,
+        (first["position_id"],),
+    ).fetchone()[0]
+
+    assert replay["created"] is False
+    assert replay["position_id"] == first["position_id"]
+    assert row["chain_state"] == "synced"
+    assert row["chain_shares"] == pytest.approx(5.13)
+    assert row["shares"] == pytest.approx(5.13)
+    assert row["cost_basis_usd"] == pytest.approx(3.6936)
+    assert row["size_usd"] == pytest.approx(3.6936)
+    assert row["entry_price"] == pytest.approx(0.72)
+    assert after_count == before_count
+
+
 # --------------------------------------------------------------------------- #
 # 4. No confirmed fill → nothing to bridge (None)
 # --------------------------------------------------------------------------- #

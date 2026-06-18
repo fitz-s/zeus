@@ -644,6 +644,26 @@ def _bridge_numeric_equal(left: object, right: object, *, tol: float = 1e-9) -> 
         return False
 
 
+def _same_order_chain_size_authority_must_be_preserved(existing: sqlite3.Row) -> bool:
+    """Whether a same-order bridge replay must not overwrite current sizing.
+
+    Once chain reconciliation has observed wallet inventory, chain shares/cost
+    become the stronger live-money authority for current exposure. The EDLI
+    bridge projection is still useful for initial materialisation and fill
+    provenance, but replaying it after chain reconciliation must not inflate the
+    position back to stale fill-projection size.
+    """
+    try:
+        chain_state = _bridge_norm(existing["chain_state"])
+    except (KeyError, IndexError):
+        chain_state = ""
+    try:
+        chain_shares = float(existing["chain_shares"] or 0.0)
+    except (KeyError, IndexError, TypeError, ValueError):
+        chain_shares = 0.0
+    return chain_state == "synced" and chain_shares > 0.0
+
+
 def _same_order_absorb_already_recorded(
     conn: sqlite3.Connection,
     *,
@@ -710,6 +730,8 @@ def _absorb_same_order_duplicate_bridge_fill(
     existing = matches[0]
     position_id = str(existing["position_id"])
     attempted_position_id = str(projection.get("position_id") or "")
+    if _same_order_chain_size_authority_must_be_preserved(existing):
+        return position_id
     if (
         _same_order_absorb_already_recorded(
             conn,
