@@ -1244,6 +1244,115 @@ class TestRecoveryResolutionTable:
         assert payload["required_predicates"]["latest_event_is_cancel_replace_blocked"] is True
         assert payload["required_predicates"]["point_order_status_live"] is True
 
+    def test_post_ack_review_required_terminal_no_fill_expires(self, conn, mock_client):
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, command_id="cmd-post-ack", position_id="pos-post-ack")
+        _advance_to_acked(conn, command_id="cmd-post-ack", venue_order_id="ord-post-ack")
+        append_event(
+            conn,
+            command_id="cmd-post-ack",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "reason": "entry_ack_persistence_failed_after_side_effect",
+                "venue_order_id": "ord-post-ack",
+                "side_effect_boundary_crossed": True,
+                "sdk_submit_returned_order_id": True,
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-post-ack",
+            order_id="ord-post-ack",
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="10",
+            source="WS_USER",
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        mock_client.get_order.return_value = {
+            "orderID": "ord-post-ack",
+            "status": "CANCELED",
+            "size_matched": "0",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        before_count, _ = count_unknown_side_effects(conn)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert before_count == 1
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-post-ack") == "EXPIRED"
+        events = _get_events(conn, "cmd-post-ack")
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "acked_submit_terminal_no_fill"
+        assert payload["required_predicates"]["terminal_order_fact_no_fill"] is True
+        assert payload["required_predicates"]["no_matching_open_orders"] is True
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 0
+        assert after_markets == ()
+
+    def test_post_ack_review_required_terminal_no_fill_stays_with_trade_fact(
+        self, conn, mock_client
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, command_id="cmd-post-ack-fill", position_id="pos-post-ack-fill")
+        _advance_to_acked(
+            conn,
+            command_id="cmd-post-ack-fill",
+            venue_order_id="ord-post-ack-fill",
+        )
+        append_event(
+            conn,
+            command_id="cmd-post-ack-fill",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "reason": "entry_ack_persistence_failed_after_side_effect",
+                "venue_order_id": "ord-post-ack-fill",
+                "side_effect_boundary_crossed": True,
+                "sdk_submit_returned_order_id": True,
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-post-ack-fill",
+            order_id="ord-post-ack-fill",
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="10",
+            source="WS_USER",
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id="cmd-post-ack-fill",
+            order_id="ord-post-ack-fill",
+            trade_id="trade-post-ack-fill",
+            filled_size="1",
+            fill_price="0.5",
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        mock_client.get_order.return_value = {
+            "orderID": "ord-post-ack-fill",
+            "status": "CANCELED",
+            "size_matched": "0",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-post-ack-fill") == "REVIEW_REQUIRED"
+        assert summary["advanced"] == 0
+        assert summary["stayed"] == 1
+
     def test_cancel_unknown_review_required_matched_order_with_confirmed_trade_fills(self, conn, mock_client):
         _insert(conn, intent_kind="EXIT", side="SELL", size=5, price=0.55)
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-exit")

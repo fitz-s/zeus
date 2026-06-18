@@ -117,6 +117,10 @@ _EXIT_PENDING_PROJECTION_TRADE_STATES = frozenset({
     "MINED",
 })
 _SAFE_REPLAY_MIN_AGE_SECONDS = 15 * 60
+_POST_ACK_PERSISTENCE_REVIEW_REASONS = frozenset({
+    "entry_ack_persistence_failed_after_side_effect",
+    "exit_ack_persistence_failed_after_side_effect",
+})
 
 
 def _canonical_order_truth_cte(
@@ -5032,6 +5036,277 @@ def _review_required_cancel_unknown_live_order_recovery(
     return "advanced"
 
 
+def _latest_order_fact_for_command(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> dict | None:
+    if not _table_exists(conn, "venue_order_facts"):
+        return None
+    row = conn.execute(
+        """
+        SELECT *
+          FROM venue_order_facts
+         WHERE command_id = ?
+         ORDER BY local_sequence DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    return _dict_row(row) if row is not None else None
+
+
+def _order_fact_is_terminal_no_fill(fact: dict | None, venue_order_id: str) -> bool:
+    if not fact:
+        return False
+    if str(fact.get("venue_order_id") or "") != str(venue_order_id or ""):
+        return False
+    if str(fact.get("state") or "") not in _TERMINAL_NO_FILL_ORDER_FACT_STATES:
+        return False
+    return _decimal_is_zero(fact.get("matched_size"))
+
+
+def _no_positive_position_projection(conn: sqlite3.Connection, command: dict) -> bool:
+    position_id = str(command.get("position_id") or "")
+    if not position_id or not _table_exists(conn, "position_current"):
+        return True
+    row = conn.execute(
+        """
+        SELECT shares, cost_basis_usd
+          FROM position_current
+         WHERE position_id = ?
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return True
+    current = _dict_row(row)
+    try:
+        shares = Decimal(str(current.get("shares") or "0"))
+        cost_basis = Decimal(str(current.get("cost_basis_usd") or "0"))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return shares == Decimal("0") and cost_basis == Decimal("0")
+
+
+def _review_required_post_ack_terminal_no_fill_recovery(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+    client,
+) -> str:
+    events = _command_events(conn, cmd.command_id)
+    latest_reason = _latest_review_required_payload(events).get("reason")
+    if latest_reason not in _POST_ACK_PERSISTENCE_REVIEW_REASONS:
+        return "stayed"
+    venue_order_id = str(cmd.venue_order_id or "").strip()
+    if not venue_order_id:
+        return "stayed"
+    command = _dict_row(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (cmd.command_id,),
+        ).fetchone()
+    )
+    try:
+        open_orders = [_raw_payload(order) for order in _client_open_orders(client)]
+        trades = [_raw_payload(trade) for trade in _client_trades(client)]
+    except Exception as exc:  # noqa: BLE001 - recovery should retry later on venue read failures.
+        logger.warning(
+            "recovery: command %s REVIEW_REQUIRED post-ACK no-fill proof read failed: %s",
+            cmd.command_id,
+            exc,
+        )
+        return "error"
+
+    matching_open_orders = _matching_open_orders_for_command(
+        client,
+        command,
+        open_orders=open_orders,
+    )
+    matching_trades = _matching_trades_for_command(
+        client,
+        command,
+        trades=trades,
+    )
+    if matching_open_orders or matching_trades:
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED post-ACK stayed "
+            "(matching_open=%s matching_trades=%s)",
+            cmd.command_id,
+            len(matching_open_orders),
+            len(matching_trades),
+        )
+        return "stayed"
+
+    now = _now_iso()
+    latest_fact = _latest_order_fact_for_command(conn, cmd.command_id)
+    point_order: dict | None = None
+    point_order_status = ""
+    point_order_matched = "0"
+    try:
+        point_order = _venue_order_payload(client.get_order(venue_order_id)) or None
+    except Exception:
+        point_order = None
+    if point_order:
+        point_order_status = _order_status(point_order)
+        point_order_matched = _point_order_matched_size(point_order)
+        fact_state = _terminal_fact_state_for_venue_status(
+            point_order_status,
+            venue_resp_present=True,
+        )
+        if (
+            fact_state is not None
+            and _decimal_is_zero(point_order_matched)
+            and not _order_fact_is_terminal_no_fill(latest_fact, venue_order_id)
+        ):
+            fact_id, _fact_payload = _append_point_order_terminal_no_fill_fact(
+                conn,
+                command=command,
+                observed_at=now,
+                venue_status=point_order_status,
+                point_order=point_order,
+                matching_open_orders=matching_open_orders,
+                matching_trades=matching_trades,
+                source_reason="acked_submit_point_order_terminal_no_fill",
+            )
+            latest_fact = _latest_order_fact_for_command(conn, cmd.command_id)
+            if latest_fact is not None:
+                latest_fact["fact_id"] = latest_fact.get("fact_id") or fact_id
+
+    if not _order_fact_is_terminal_no_fill(latest_fact, venue_order_id):
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED post-ACK stayed "
+            "(latest order fact is not terminal no-fill)",
+            cmd.command_id,
+        )
+        return "stayed"
+    if _trade_fact_count(conn, cmd.command_id) != 0:
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED post-ACK stayed (trade facts exist)",
+            cmd.command_id,
+        )
+        return "stayed"
+    if not _no_positive_position_projection(conn, command):
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED post-ACK stayed "
+            "(positive position projection exists)",
+            cmd.command_id,
+        )
+        return "stayed"
+
+    terminal_fact_id = latest_fact.get("fact_id")
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_no_venue_exposure",
+        "command_id": cmd.command_id,
+        "venue_order_id": venue_order_id,
+        "proof_class": "acked_submit_terminal_no_fill",
+        "side_effect_boundary_crossed": True,
+        "sdk_submit_attempted": True,
+        "required_predicates": {
+            "latest_event_is_review_required": True,
+            "review_reason_post_ack_persistence_failure": True,
+            "venue_order_id_present": True,
+            "terminal_order_fact_latest": True,
+            "terminal_order_fact_no_fill": True,
+            "no_trade_facts": True,
+            "no_matching_open_orders": True,
+            "no_matching_trades": True,
+            "no_positive_position_projection": True,
+        },
+        "terminal_order_fact_id": terminal_fact_id,
+        "terminal_order_fact": {
+            "venue_order_id": latest_fact.get("venue_order_id"),
+            "state": latest_fact.get("state"),
+            "matched_size": latest_fact.get("matched_size"),
+            "remaining_size": latest_fact.get("remaining_size"),
+            "source": latest_fact.get("source"),
+            "observed_at": latest_fact.get("observed_at"),
+            "local_sequence": latest_fact.get("local_sequence"),
+        },
+        "venue_absence_proof": {
+            "source": "authenticated_clob_user_read",
+            "owner_scope": "authenticated_funder",
+            "observed_at": now,
+            "command_id": cmd.command_id,
+            "decision_id": str(command.get("decision_id") or ""),
+            "market_id": str(command.get("market_id") or ""),
+            "token_id": str(command.get("token_id") or ""),
+            "side": str(command.get("side") or ""),
+            "price": str(Decimal(str(command.get("price")))),
+            "size": str(Decimal(str(command.get("size")))),
+            "time_window_start": command.get("created_at"),
+            "time_window_end": now,
+            "open_orders_checked": True,
+            "trades_checked": True,
+            "open_orders_query_complete": True,
+            "trades_query_complete": True,
+            "pagination_scope": "sdk_get_trades_returned_all_visible_user_trades",
+            "matching_open_order_count": 0,
+            "matching_trade_count": 0,
+            "matching_open_orders": [],
+            "matching_trades": [],
+            "point_order_status": point_order_status,
+            "point_order_matched_size": point_order_matched,
+            "point_order": point_order,
+        },
+        "source_proof": {
+            "source_commit": "runtime",
+            "source_function": "command_recovery._reconcile_row",
+            "source_reason": "acked_submit_terminal_no_fill",
+        },
+        "review_required_proof": {
+            "reason": latest_reason,
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": now,
+    }
+    safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
+    sp_name = f"sp_post_ack_no_fill_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        append_event(
+            conn,
+            command_id=cmd.command_id,
+            event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value,
+            occurred_at=now,
+            payload=payload,
+        )
+        if _entry_projection_is_pending_zero_exposure(
+            conn,
+            command=command,
+            order_id=venue_order_id,
+        ):
+            _append_entry_order_voided_projection(
+                conn,
+                command=command,
+                order_fact={
+                    **command,
+                    "order_fact_id": terminal_fact_id,
+                    "order_fact_state": latest_fact.get("state"),
+                    "order_fact_observed_at": latest_fact.get("observed_at") or now,
+                    "order_fact_venue_order_id": venue_order_id,
+                    "order_fact_remaining_size": latest_fact.get("remaining_size") or "0",
+                    "order_fact_matched_size": latest_fact.get("matched_size") or "0",
+                    "order_fact_source": latest_fact.get("source") or "REST",
+                },
+                occurred_at=now,
+            )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    logger.info(
+        "recovery: command %s REVIEW_REQUIRED post-ACK -> EXPIRED "
+        "(venue_order_id=%s terminal_fact=%s)",
+        cmd.command_id,
+        venue_order_id,
+        terminal_fact_id,
+    )
+    return "advanced"
+
+
 def _geoblock_403_predicates(
     conn: sqlite3.Connection,
     command: dict,
@@ -6528,6 +6803,9 @@ def _reconcile_row(
         state = cmd.state
 
         if state == CommandState.REVIEW_REQUIRED:
+            outcome = _review_required_post_ack_terminal_no_fill_recovery(conn, cmd, client)
+            if outcome != "stayed":
+                return outcome
             outcome = _review_required_cancel_unknown_live_order_recovery(conn, cmd, client)
             if outcome != "stayed":
                 return outcome
