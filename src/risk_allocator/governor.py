@@ -644,6 +644,77 @@ def _command_has_fact(conn: Any, table: str, command_id: str) -> bool:
     return row is not None
 
 
+def _review_required_has_materialized_entry_exposure(conn: Any, row: Mapping[str, Any]) -> bool:
+    """Return true when REVIEW_REQUIRED has become known open exposure.
+
+    A REVIEW_REQUIRED command is unsafe while the venue side-effect is unknown.
+    Once the same command has a positive confirmed trade fact, an active exposure
+    lot, and an open position_current projection, the risk is no longer unknown:
+    it is canonical held exposure that should flow through monitor/redecision.
+    """
+
+    command_id = str(row.get("command_id") or "").strip()
+    position_id = str(row.get("position_id") or "").strip()
+    if not command_id or not position_id:
+        return False
+    if str(row.get("intent_kind") or "").upper() != "ENTRY":
+        return False
+    if str(row.get("side") or "").upper() != "BUY":
+        return False
+    required_tables = ("venue_trade_facts", "position_lots", "position_current")
+    if any(not _has_table(conn, table) for table in required_tables):
+        return False
+
+    lot_row = conn.execute(
+        """
+        WITH latest_lot AS (
+            SELECT lot.*
+              FROM position_lots lot
+              JOIN (
+                    SELECT source_trade_fact_id, MAX(local_sequence) AS max_sequence
+                      FROM position_lots
+                     WHERE source_command_id = ?
+                       AND source_trade_fact_id IS NOT NULL
+                     GROUP BY source_trade_fact_id
+              ) latest
+                ON latest.source_trade_fact_id = lot.source_trade_fact_id
+               AND latest.max_sequence = lot.local_sequence
+        )
+        SELECT 1
+          FROM venue_trade_facts fact
+          JOIN latest_lot lot
+            ON lot.source_trade_fact_id = fact.trade_fact_id
+         WHERE fact.command_id = ?
+           AND fact.state = 'CONFIRMED'
+           AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+           AND lot.source_command_id = ?
+           AND lot.state IN ('CONFIRMED_EXPOSURE', 'EXIT_PENDING')
+           AND CAST(COALESCE(lot.shares, '0') AS REAL) > 0
+         LIMIT 1
+        """,
+        (
+            command_id,
+            command_id,
+            command_id,
+        ),
+    ).fetchone()
+    if lot_row is None:
+        return False
+
+    current_row = conn.execute(
+        """
+        SELECT 1
+          FROM position_current
+         WHERE position_id = ?
+           AND phase IN ('active', 'day0_window', 'pending_exit')
+           AND CAST(COALESCE(shares, chain_shares, 0) AS REAL) > 0
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    return current_row is not None
+
+
 def _review_required_carries_submit_side_effect_risk(conn: Any, row: Mapping[str, Any]) -> bool:
     """Classify REVIEW_REQUIRED rows for the global unknown-side-effect latch.
 
@@ -654,6 +725,8 @@ def _review_required_carries_submit_side_effect_risk(conn: Any, row: Mapping[str
     """
 
     command_id = str(row.get("command_id") or "")
+    if _review_required_has_materialized_entry_exposure(conn, row):
+        return False
     latest_reason = _latest_review_required_reason(conn, command_id)
     venue_order_id = str(row.get("venue_order_id") or "").strip()
     if latest_reason not in _PRE_SDK_REVIEW_REQUIRED_REASONS:
@@ -680,7 +753,7 @@ def count_unknown_side_effects(conn: Any) -> tuple[int, tuple[str, ...]]:
         venue_order_id_select = ", venue_order_id" if has_venue_order_id else ""
         rows = read_conn.execute(
             f"""
-            SELECT command_id, market_id, state{venue_order_id_select}
+            SELECT command_id, market_id, position_id, intent_kind, side, state{venue_order_id_select}
             FROM venue_commands
             WHERE state IN (?, ?, ?)
             ORDER BY updated_at, command_id

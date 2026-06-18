@@ -290,6 +290,61 @@ def _insert_pre_sdk_decision_log(
     conn.commit()
 
 
+def _materialize_confirmed_entry_exposure(
+    conn,
+    *,
+    command_id: str,
+    position_id: str = "trade-m2",
+    venue_order_id: str = "ord-m2-materialized",
+    include_position_current: bool = True,
+) -> None:
+    conn.execute(
+        "UPDATE venue_commands SET venue_order_id = ? WHERE command_id = ?",
+        (venue_order_id, command_id),
+    )
+    cur = conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+          trade_id, venue_order_id, command_id, state, filled_size,
+          fill_price, source, observed_at, local_sequence, raw_payload_hash
+        ) VALUES ('trade-materialized', ?, ?, 'CONFIRMED', '9.393702',
+                  '0.73', 'REST', ?, 1, ?)
+        """,
+        (venue_order_id, command_id, NOW.isoformat(), "c" * 64),
+    )
+    trade_fact_id = int(cur.lastrowid)
+    conn.execute(
+        """
+        INSERT INTO position_lots (
+          position_id, state, shares, entry_price_avg, source_command_id,
+          source_trade_fact_id, captured_at, state_changed_at, source,
+          observed_at, local_sequence, raw_payload_hash
+        ) VALUES (4392, 'CONFIRMED_EXPOSURE', '9.393702', '0.73', ?,
+                  ?, ?, ?, 'REST', ?, 1, ?)
+        """,
+        (
+            command_id,
+            trade_fact_id,
+            NOW.isoformat(),
+            NOW.isoformat(),
+            NOW.isoformat(),
+            "d" * 64,
+        ),
+    )
+    if include_position_current:
+        conn.execute(
+            """
+            INSERT INTO position_current (
+              position_id, phase, strategy_key, market_id, token_id, shares,
+              chain_state, order_id, order_status, updated_at, temperature_metric
+            ) VALUES (?, 'active', 'center_buy', 'condition-m2', 'tok-m2',
+                      9.393702, 'synced', ?, 'partial', ?, 'high')
+            """,
+            (position_id, venue_order_id, NOW.isoformat()),
+        )
+    conn.commit()
+
+
 def _review_clearance_payload(command_id: str = "cmd-m2") -> dict:
     return {
         "schema_version": 1,
@@ -964,6 +1019,46 @@ def test_review_required_pre_sdk_no_side_effect_can_be_cleared(conn):
         price=0.55,
         size=18.19,
     ) is None
+
+
+def test_review_required_confirmed_entry_exposure_does_not_hold_global_reduce_only(conn):
+    from src.risk_allocator.governor import count_unknown_side_effects
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-materialized",
+        token_id="tok-m2",
+        idem="e" * 32,
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_confirmed_requires_trade_fact"},
+    )
+    _materialize_confirmed_entry_exposure(conn, command_id="cmd-m2-materialized")
+
+    unknown_count, unknown_markets = count_unknown_side_effects(conn)
+    assert unknown_count == 0
+    assert unknown_markets == ()
+
+
+def test_review_required_confirmed_trade_without_position_projection_still_blocks(conn):
+    from src.risk_allocator.governor import count_unknown_side_effects
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-materialized-no-position",
+        token_id="tok-m2",
+        idem="f" * 32,
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_confirmed_requires_trade_fact"},
+    )
+    _materialize_confirmed_entry_exposure(
+        conn,
+        command_id="cmd-m2-materialized-no-position",
+        include_position_current=False,
+    )
+
+    unknown_count, unknown_markets = count_unknown_side_effects(conn)
+    assert unknown_count == 1
+    assert unknown_markets == ("condition-m2",)
 
 
 def test_review_required_recovery_no_venue_exposure_can_be_cleared(conn):
