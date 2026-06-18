@@ -462,6 +462,47 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             )
         return phase
 
+    def _preserve_existing_chain_noop_projection_fields(
+        projection: dict,
+        position_id: str,
+    ) -> None:
+        """Keep non-chain lifecycle/monitor fields stable on chain no-op writes.
+
+        Chain observation and size-correction events are chain-truth writes. They
+        must not erase the latest exit reason, retry state, or monitor snapshot
+        just because the runtime Position cache lacks those fields.
+        """
+        if conn is None:
+            return
+        fields = (
+            "exit_reason",
+            "exit_retry_count",
+            "next_exit_retry_at",
+            "last_monitor_prob",
+            "last_monitor_prob_is_fresh",
+            "last_monitor_edge",
+            "last_monitor_market_price",
+            "last_monitor_market_price_is_fresh",
+        )
+        try:
+            row = conn.execute(
+                f"SELECT {', '.join(fields)} FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+        except Exception:
+            return
+        if row is None:
+            return
+        for idx, field in enumerate(fields):
+            current_value = row[field] if hasattr(row, "keys") else row[idx]
+            if current_value is None:
+                continue
+            if field == "exit_retry_count":
+                projection[field] = current_value
+                continue
+            if projection.get(field) in (None, ""):
+                projection[field] = current_value
+
     def _append_canonical_rescue_if_available(position: Position) -> bool:
         if conn is None:
             return False
@@ -540,6 +581,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
                 phase_after=current_phase,
                 source_module="src.state.chain_reconciliation",
+            )
+            _preserve_existing_chain_noop_projection_fields(
+                projection,
+                getattr(position, "trade_id", ""),
             )
             append_many_and_project(conn, events, projection)
         except Exception as exc:
@@ -728,6 +773,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 chain_shares_before=persisted_chain_shares,
                 source_module="src.state.chain_reconciliation",
             )
+            _preserve_existing_chain_noop_projection_fields(projection, trade_id)
             append_many_and_project(conn, events, projection)
         except Exception as exc:
             logger.warning(

@@ -110,6 +110,12 @@ _TERMINAL_NO_VALUE_SQL = """
          OR rejection_reason LIKE 'entry_taker_quality:%'
         )
     )
+ OR (
+        rejection_stage = 'EXECUTOR_EXPRESSIBILITY'
+        AND (
+            rejection_reason LIKE 'EDLI_LIVE_CERTIFICATE_BUILD_FAILED:NO_SUBMIT_CERTIFICATE_REJECTED:%'
+        )
+    )
 """
 
 
@@ -748,6 +754,26 @@ def _is_execution_quality_rejection_reason(reason: str) -> bool:
     )
 
 
+def _is_family_level_redecision_refutation(reason: str) -> bool:
+    """Return true when a prior full path proves this family is not actionable yet.
+
+    These rows do not identify one bin/direction. They are still live evidence
+    that the same family must not keep entering continuous entry redecision until
+    either the short family cooldown expires or fresh evidence creates a new
+    decision attempt.
+    """
+
+    return (
+        reason.startswith("TRADE_SCORE_NON_POSITIVE")
+        or reason.startswith("TRADE_SCORE_BLOCKED")
+        or reason.startswith("FDR_REJECTED")
+        or reason.startswith("EVENT_BOUND_ALL_CANDIDATES_REJECTED:")
+        or reason.startswith(
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:NO_SUBMIT_CERTIFICATE_REJECTED:"
+        )
+    )
+
+
 def _full_decision_family_refutation_still_blocks(
     rejection: FullEconomicsReject,
     *,
@@ -859,8 +885,9 @@ def read_recent_full_economics_rejections(
     except sqlite3.Error:
         return {}
     required = {
-        "family_id", "bin_label", "direction", "rejection_stage", "rejection_reason",
-        "c_fee_adjusted", "q_lcb_5pct", "trade_score", "created_at",
+        "family_id", "city", "target_date", "metric", "bin_label", "direction",
+        "rejection_stage", "rejection_reason", "c_fee_adjusted", "q_lcb_5pct",
+        "trade_score", "created_at",
     }
     if not required.issubset(cols):
         return {}
@@ -876,13 +903,13 @@ def read_recent_full_economics_rejections(
                    {q_live_select}
              FROM no_trade_regret_events
              WHERE ({_TERMINAL_NO_VALUE_SQL})
-               AND family_id IS NOT NULL AND family_id != ''
                AND (
                     (
                         bin_label IS NOT NULL AND bin_label != ''
                         AND direction IS NOT NULL AND direction != ''
                     )
                     OR rejection_reason LIKE 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:%'
+                    OR rejection_reason LIKE 'EDLI_LIVE_CERTIFICATE_BUILD_FAILED:NO_SUBMIT_CERTIFICATE_REJECTED:%'
                )
                AND created_at >= ?
              ORDER BY created_at DESC
@@ -895,7 +922,8 @@ def read_recent_full_economics_rejections(
     for row in rows:
         if _invalid_probability_bound_reject(row[11], row[7]):
             continue
-        legacy_key: EntryScreenKey = (str(row[0]), str(row[4]), str(row[5]))
+        family_id = str(row[0] or "").strip()
+        legacy_key: EntryScreenKey = (family_id, str(row[4]), str(row[5]))
         stable_key: StableEntryScreenKey | None = None
         city = str(row[1] or "").strip()
         target_date = str(row[2] or "").strip()
@@ -913,14 +941,14 @@ def read_recent_full_economics_rejections(
         )
         if stable_key is not None and stable_key not in out:
             out[stable_key] = rejection
-        if bin_label and direction and legacy_key not in out:
+        if family_id and bin_label and direction and legacy_key not in out:
             out[legacy_key] = rejection
         reason = rejection.rejection_reason
-        if city and target_date and metric in {"high", "low"} and (
-            reason.startswith("TRADE_SCORE_NON_POSITIVE")
-            or reason.startswith("TRADE_SCORE_BLOCKED")
-            or reason.startswith("FDR_REJECTED")
-            or reason.startswith("EVENT_BOUND_ALL_CANDIDATES_REJECTED:")
+        if (
+            city
+            and target_date
+            and metric in {"high", "low"}
+            and _is_family_level_redecision_refutation(reason)
         ):
             family_key: FamilyRedecisionScreenKey = ("family", city, target_date, metric)
             if family_key not in out:

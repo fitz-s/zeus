@@ -590,6 +590,113 @@ def test_all_candidates_rejected_row_is_family_backoff_not_candidate_backoff():
     )
 
 
+def test_certificate_build_failure_without_family_id_is_family_backoff():
+    conn = _mem_world()
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            rejection_stage TEXT,
+            rejection_reason TEXT,
+            c_fee_adjusted REAL,
+            q_lcb_5pct REAL,
+            trade_score REAL,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            family_id, city, target_date, metric, bin_label, direction,
+            rejection_stage, rejection_reason, c_fee_adjusted, q_lcb_5pct,
+            trade_score, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            None,
+            "Hong Kong",
+            "2026-06-19",
+            "low",
+            None,
+            None,
+            "EXECUTOR_EXPRESSIBILITY",
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:NO_SUBMIT_CERTIFICATE_REJECTED:max_parent_source_available_at after decision_time",
+            None,
+            None,
+            None,
+            "2026-06-18T06:00:51+00:00",
+        ),
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+
+    assert ("family", "Hong Kong", "2026-06-19", "low") in rejections
+    assert not any(len(key) == 3 for key in rejections)
+    assert not any(
+        len(key) == 5 and key[:3] == ("Hong Kong", "2026-06-19", "low")
+        for key in rejections
+    )
+
+
+def test_entry_screen_blocks_family_after_certificate_build_failure_cooldown():
+    conn = _mem_world()
+    label = "Will the lowest temperature in Hong Kong be 27°C or lower on June 19?"
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_hong_kong_low_hash",
+        city="Hong Kong",
+        target_date="2026-06-19",
+        temperature_metric="low",
+        snapshot_id="snap-hk",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.90],
+        q_lcb_yes_vec=[0.86],
+        q_lcb_no_vec=[0.01],
+        recorded_at="2026-06-18T06:01:00+00:00",
+    )
+    family_key = ("family", "Hong Kong", "2026-06-19", "low")
+    rejections = {
+        family_key: cr.FullEconomicsReject(
+            execution_price=None,
+            q_lcb_5pct=None,
+            trade_score=None,
+            created_at="2026-06-18T06:00:51+00:00",
+            rejection_reason=(
+                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:NO_SUBMIT_CERTIFICATE_REJECTED:"
+                "max_parent_source_available_at after decision_time"
+            ),
+        )
+    }
+    price_lookup = {
+        ("edli_family_hong_kong_low_hash", label, "buy_yes"): cr.PriceQuote(
+            price=0.50,
+            freshness_deadline="2026-06-18T06:40:00+00:00",
+        ),
+    }
+
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-18T06:02:00+00:00",
+        price_lookup=price_lookup,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejections,
+    ) == []
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-18T06:31:00+00:00",
+        price_lookup=price_lookup,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejections,
+    )
+
+
 def test_execution_quality_rejection_cools_entry_until_economics_improve():
     conn = _mem_world()
     label = "Will the highest temperature in Shenzhen be 35°C on June 19?"
