@@ -8,11 +8,11 @@ from typing import Mapping
 
 
 STRATEGY_KEY = "openmeteo_ecmwf_ifs9_bayes_fusion"
-TRADE_AUTHORITY_FLAG = "openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"
+LIVE_FLAG = "openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"
 KELLY_INCREASE_FLAG = "openmeteo_ecmwf_ifs9_bayes_fusion_kelly_increase_enabled"
 DIRECTION_FLIP_FLAG = "openmeteo_ecmwf_ifs9_bayes_fusion_direction_flip_enabled"
 REQUIRED_FLAGS = (
-    TRADE_AUTHORITY_FLAG,
+    LIVE_FLAG,
     KELLY_INCREASE_FLAG,
     DIRECTION_FLIP_FLAG,
 )
@@ -188,14 +188,14 @@ def _matches_expected(value: float | None, expected: float) -> bool:
 class ReplacementForecastRuntimePolicy:
     status: str
     reason_codes: tuple[str, ...]
-    trade_authority_enabled: bool
+    live_enabled: bool
     kelly_increase_enabled: bool
     direction_flip_enabled: bool
     strategy_key: str = STRATEGY_KEY
 
     @property
     def can_initiate_trade(self) -> bool:
-        return self.status == LIVE_STATUS and self.trade_authority_enabled
+        return self.status == LIVE_STATUS and self.live_enabled
 
     @property
     def can_increase_kelly(self) -> bool:
@@ -223,13 +223,13 @@ def resolve_replacement_forecast_runtime_policy(
 ) -> ReplacementForecastRuntimePolicy:
     """Resolve the only allowed runtime authority state from strict feature flags."""
 
-    trade_authority = _strict_bool(flags, TRADE_AUTHORITY_FLAG)
+    live_enabled = _strict_bool(flags, LIVE_FLAG)
     kelly_increase = _strict_bool(flags, KELLY_INCREASE_FLAG)
     direction_flip = _strict_bool(flags, DIRECTION_FLIP_FLAG)
 
     reasons: list[str] = []
-    if not trade_authority and (kelly_increase or direction_flip):
-        reasons.append("REPLACEMENT_TRADE_AUTHORITY_REQUIRED_FOR_DANGEROUS_FLAGS")
+    if not live_enabled and (kelly_increase or direction_flip):
+        reasons.append("REPLACEMENT_LIVE_REQUIRED_FOR_DANGEROUS_FLAGS")
     if direction_flip and not kelly_increase:
         reasons.append("REPLACEMENT_DIRECTION_FLIP_REQUIRES_KELLY_AUTHORITY")
 
@@ -240,20 +240,20 @@ def resolve_replacement_forecast_runtime_policy(
         return ReplacementForecastRuntimePolicy(
             status=BLOCKED_STATUS,
             reason_codes=tuple(reasons),
-            trade_authority_enabled=False,
+            live_enabled=False,
             kelly_increase_enabled=False,
             direction_flip_enabled=False,
         )
-    if not trade_authority:
+    if not live_enabled:
         status = SAFE_DEFAULT_STATUS
-        reason_codes = ("REPLACEMENT_TRADE_AUTHORITY_DISABLED",)
+        reason_codes = ("REPLACEMENT_LIVE_DISABLED",)
     else:
         status = LIVE_STATUS
         reason_codes = ("REPLACEMENT_LIVE_ENABLED",)
     return ReplacementForecastRuntimePolicy(
         status=status,
         reason_codes=reason_codes,
-        trade_authority_enabled=trade_authority if status == LIVE_STATUS else False,
+        live_enabled=live_enabled if status == LIVE_STATUS else False,
         kelly_increase_enabled=kelly_increase if status == LIVE_STATUS else False,
         direction_flip_enabled=direction_flip if status == LIVE_STATUS else False,
     )

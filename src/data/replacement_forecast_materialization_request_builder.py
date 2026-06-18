@@ -14,7 +14,6 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
 )
-from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin
 
 
 UTC = timezone.utc
@@ -94,36 +93,40 @@ def _bins(rows: object, *, settlement_step_c: float = 1.0) -> list[dict[str, obj
         raise ValueError("bins must be a non-empty array")
     if settlement_step_c <= 0:
         raise ValueError("settlement_step_c must be positive")
-    validated: list[AifsTemperatureBin] = []
     out: list[dict[str, object]] = []
     for row in rows:
         if not isinstance(row, Mapping):
             raise ValueError("bins entries must be objects")
-        bin_spec = AifsTemperatureBin(
-            bin_id=str(row.get("bin_id") or ""),
-            lower_c=None if row.get("lower_c") is None else float(row["lower_c"]),
-            upper_c=None if row.get("upper_c") is None else float(row["upper_c"]),
-            center_c=None if row.get("center_c") is None else float(row["center_c"]),
-            display_unit=str(row.get("display_unit") or "C").strip().upper(),  # type: ignore[arg-type]
-            settlement_unit=str(row.get("settlement_unit") or "C").strip().upper(),  # type: ignore[arg-type]
-            rounding_rule=str(row.get("rounding_rule") or "wmo_half_up").strip(),  # type: ignore[arg-type]
-        )
-        validated.append(bin_spec)
+        bin_id = str(row.get("bin_id") or "")
+        if not bin_id:
+            raise ValueError("bin_id is required")
+        lower_c = None if row.get("lower_c") is None else float(row["lower_c"])
+        upper_c = None if row.get("upper_c") is None else float(row["upper_c"])
+        center_c = None if row.get("center_c") is None else float(row["center_c"])
+        if lower_c is not None and upper_c is not None and upper_c < lower_c:
+            raise ValueError("bin upper_c must be >= lower_c")
+        display_unit = str(row.get("display_unit") or "C").strip().upper()  # type: ignore[arg-type]
+        settlement_unit = str(row.get("settlement_unit") or "C").strip().upper()  # type: ignore[arg-type]
+        rounding_rule = str(row.get("rounding_rule") or "wmo_half_up").strip()  # type: ignore[arg-type]
+        if display_unit not in {"C", "F"} or settlement_unit not in {"C", "F"}:
+            raise ValueError("bin display_unit and settlement_unit must be C or F")
+        if not rounding_rule:
+            raise ValueError("bin rounding_rule is required")
         out.append(
             {
-                "bin_id": bin_spec.bin_id,
-                "lower_c": bin_spec.lower_c,
-                "upper_c": bin_spec.upper_c,
-                "center_c": bin_spec.center_c,
-                "display_unit": bin_spec.display_unit,
-                "settlement_unit": bin_spec.settlement_unit,
-                "rounding_rule": bin_spec.rounding_rule,
+                "bin_id": bin_id,
+                "lower_c": lower_c,
+                "upper_c": upper_c,
+                "center_c": center_c,
+                "display_unit": display_unit,
+                "settlement_unit": settlement_unit,
+                "rounding_rule": rounding_rule,
             }
         )
-    # Reuse the probability bridge validation without needing member data.
-    from src.strategy.ecmwf_aifs_sampled_2t_probabilities import _validate_full_family_bins
 
-    _validate_full_family_bins(validated, settlement_step_c=float(settlement_step_c))
+    seen = {str(item["bin_id"]) for item in out}
+    if len(seen) != len(out):
+        raise ValueError("bins must have unique bin_id values")
     return out
 
 
@@ -172,19 +175,7 @@ def build_replacement_forecast_materialization_request(
 
     baseline_available = _dt(payload.get("baseline_source_available_at"), field_name="baseline_source_available_at")
     openmeteo_available = _dt(payload.get("openmeteo_source_available_at"), field_name="openmeteo_source_available_at")
-    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): AIFS is no longer fetched, so the
-    # request no longer REQUIRES an AIFS leg. When the payload still carries AIFS fields (transition /
-    # archived runs) they are threaded through as optional cross-check provenance; when absent the
-    # request omits them and the materializer materializes the fused Normal with aifs_extraction=None.
-    aifs_present = "aifs_source_available_at" in payload and payload.get("aifs_source_available_at") is not None
-    aifs_available = (
-        _dt(payload.get("aifs_source_available_at"), field_name="aifs_source_available_at")
-        if aifs_present
-        else None
-    )
     future_candidates = [baseline_available, openmeteo_available]
-    if aifs_available is not None:
-        future_candidates.append(aifs_available)
     if max(future_candidates) > computed_at:
         return ReplacementForecastMaterializationRequestBuildResult(
             status="BLOCKED",
@@ -200,18 +191,6 @@ def build_replacement_forecast_materialization_request(
             reason_codes=precision_reasons,
             request=None,
         )
-
-    # AIFS DROPPED (operator directive 2026-06-17): the AIFS samples/GRIB input is no longer required.
-    # When present (transition / archived) it is threaded through; when absent the request carries no
-    # AIFS input and the materializer materializes the fused Normal without it.
-    aifs_input_key: str | None = None
-    aifs_input_value: str | None = None
-    if "aifs_samples_json" in payload:
-        aifs_input_key = "aifs_samples_json"
-        aifs_input_value = _existing_path(payload, "aifs_samples_json", base_dir=base_path)
-    elif "aifs_grib_path" in payload:
-        aifs_input_key = "aifs_grib_path"
-        aifs_input_value = _existing_path(payload, "aifs_grib_path", base_dir=base_path)
 
     request = {
         "city": city,
@@ -234,16 +213,8 @@ def build_replacement_forecast_materialization_request(
         "openmeteo_payload_json": _existing_path(payload, "openmeteo_payload_json", base_dir=base_path),
         "precision_metadata_json": precision_metadata_json,
     }
-    # Optional AIFS cross-check fields: include only when the payload actually carries them.
-    if aifs_present and aifs_available is not None:
-        request["aifs_source_run_id"] = _required_text(payload, "aifs_source_run_id")
-        request["aifs_source_available_at"] = aifs_available.isoformat()
-    if aifs_input_key is not None and aifs_input_value is not None:
-        request[aifs_input_key] = aifs_input_value
     for optional_key in (
-        "aifs_manifest_json",
         "openmeteo_manifest_json",
-        "aifs_artifact_id",
         "openmeteo_anchor_artifact_id",
         "latitude",
         "longitude",

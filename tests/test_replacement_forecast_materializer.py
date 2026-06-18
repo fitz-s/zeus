@@ -1,8 +1,8 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06
-# Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + AIFS sampled-2t replacement posterior authority.
-# Reuse: Run before changing replacement forecast live/diagnostic write path.
+# Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
+# Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
 """Replacement forecast materializer tests."""
 
@@ -12,13 +12,12 @@ import json
 import sqlite3
 import subprocess
 import sys
-from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from src.data.ecmwf_aifs_sampled_2t_localday import AifsMemberLocalDayExtrema, AifsSampledLocalDayExtraction
 from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoIfs9LocalDayAnchor
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
@@ -26,19 +25,20 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
 )
 from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
 from src.data.replacement_forecast_materializer import (
+    _BayesPrecisionFusionFusionOverride,
     REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
     REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,
     ReplacementForecastMaterializeRequest,
     _QLCB_BASIS,
-    _ensure_forecast_posteriors_live_authority_check,
+    _ensure_forecast_posteriors_runtime_layer,
     _ensure_replacement_identity_columns,
-    _replacement_is_live_authority,
+    _replacement_is_live_layer,
     materialize_replacement_forecast_shadow,
 )
+import src.data.replacement_forecast_materializer as materializer_mod
+from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, STRATEGY_KEY
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
-from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin
-
 
 UTC = timezone.utc
 _DEFAULT_PRECISION_GUARD = object()
@@ -55,6 +55,17 @@ class _BaselineBundle:
     evidence: _Evidence
 
 
+@dataclass(frozen=True)
+class _TemperatureBin:
+    bin_id: str
+    lower_c: float | None = None
+    upper_c: float | None = None
+    center_c: float | None = None
+    display_unit: str = "C"
+    settlement_unit: str = "C"
+    rounding_rule: str = "wmo_half_up"
+
+
 def _dt(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 6, 6, hour, minute, tzinfo=UTC)
 
@@ -67,36 +78,17 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def _aifs_extraction(*, source_cycle_time: datetime | None = None) -> AifsSampledLocalDayExtraction:
-    cycle = source_cycle_time or _dt(0)
-    return AifsSampledLocalDayExtraction(
-        city_timezone="Asia/Shanghai",
-        target_local_date=date(2026, 6, 7),
-        source_cycle_time=cycle,
-        target_window_start_utc=_dt(16),
-        target_window_end_utc=datetime(2026, 6, 7, 16, tzinfo=UTC),
-        members=(
-            AifsMemberLocalDayExtrema("pf-001", high_c=24.0, low_c=18.0, sample_count=4, contributing_valid_times_utc=(_dt(18), _dt(0), _dt(6), _dt(12))),
-            AifsMemberLocalDayExtrema("pf-002", high_c=26.0, low_c=19.0, sample_count=4, contributing_valid_times_utc=(_dt(18), _dt(0), _dt(6), _dt(12))),
-            AifsMemberLocalDayExtrema("pf-003", high_c=32.0, low_c=21.0, sample_count=4, contributing_valid_times_utc=(_dt(18), _dt(0), _dt(6), _dt(12))),
-        ),
-    )
-
-
 def _anchor(*, source_cycle_time: datetime | None = None) -> OpenMeteoIfs9LocalDayAnchor:
+    local_tz = timezone(timedelta(hours=8))
+    contributing_local_times = tuple(datetime(2026, 6, 7, hour, tzinfo=local_tz) for hour in range(24))
     return OpenMeteoIfs9LocalDayAnchor(
         city_timezone="Asia/Shanghai",
         target_local_date=date(2026, 6, 7),
         high_c=27.0,
         low_c=18.5,
-        sample_count=4,
-        contributing_local_times=(
-            datetime(2026, 6, 7, 0, tzinfo=timezone.utc),
-            datetime(2026, 6, 7, 6, tzinfo=timezone.utc),
-            datetime(2026, 6, 7, 12, tzinfo=timezone.utc),
-            datetime(2026, 6, 7, 18, tzinfo=timezone.utc),
-        ),
-        contributing_valid_times_utc=(_dt(16), _dt(22), datetime(2026, 6, 7, 4, tzinfo=UTC), datetime(2026, 6, 7, 10, tzinfo=UTC)),
+        sample_count=24,
+        contributing_local_times=contributing_local_times,
+        contributing_valid_times_utc=tuple(item.astimezone(UTC) for item in contributing_local_times),
         source_cycle_time=source_cycle_time or _dt(0),
     )
 
@@ -137,12 +129,35 @@ def _precision_guard(**overrides: object):
     )
 
 
-def _bins() -> tuple[AifsTemperatureBin, ...]:
+def _bins() -> tuple[_TemperatureBin, ...]:
     return (
-        AifsTemperatureBin("cool", upper_c=20.0, center_c=19.0),
-        AifsTemperatureBin("warm", lower_c=21.0, upper_c=30.0),
-        AifsTemperatureBin("hot", lower_c=31.0, center_c=32.0),
+        _TemperatureBin("cool", upper_c=20.0, center_c=19.0),
+        _TemperatureBin("warm", lower_c=21.0, upper_c=30.0),
+        _TemperatureBin("hot", lower_c=31.0, center_c=32.0),
     )
+
+
+def _install_live_fusion(monkeypatch: pytest.MonkeyPatch, *, complete: bool = True) -> None:
+    override = _BayesPrecisionFusionFusionOverride(
+        anchor_value_c=25.0,
+        anchor_sigma_c=0.35,
+        method="test_bayes_precision_fusion",
+        used_models=("ecmwf_ifs9", "gfs", "icon", "gem", "jma"),
+        model_set_hash="test-model-set",
+        resolution_mix_hash="test-resolution-mix",
+        lead_bucket="d1",
+        dropped_models=(),
+        excluded_regionals=(),
+        dropped_aliases=(),
+        raw_model_forecast_ids=(101, 102, 103),
+        anchor_bridge={"test": True},
+        predictive_sigma_c=2.0,
+        decorrelated_providers_complete=complete,
+        decorrelated_providers_served=5 if complete else 4,
+        decorrelated_providers_expected=5,
+        current_value_serving={"ecmwf_ifs9": {"served_via": "single_runs"}},
+    )
+    monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", lambda *args, **kwargs: override)
 
 
 def _request(
@@ -150,15 +165,12 @@ def _request(
     baseline_data_version: str = "ecmwf_opendata_mx2t3_local_calendar_day_max",
     baseline_source_run_id: str = "b0-run",
     baseline_source_available_at: datetime | None = None,
-    aifs_source_run_id: str = "aifs-run",
-    aifs_source_available_at: datetime | None = None,
     openmeteo_source_run_id: str | None = "om9-run",
     openmeteo_source_available_at: datetime | None = None,
     source_cycle_time: datetime | None = None,
     computed_at: datetime | None = None,
     expires_at: datetime | None = None,
     anchor_artifact_id: int | None = None,
-    aifs_artifact_id: int | None = None,
     openmeteo_precision_guard=_DEFAULT_PRECISION_GUARD,
 ) -> ReplacementForecastMaterializeRequest:
     guard = _precision_guard() if openmeteo_precision_guard is _DEFAULT_PRECISION_GUARD else openmeteo_precision_guard
@@ -171,9 +183,6 @@ def _request(
         baseline_source_run_id=baseline_source_run_id,
         baseline_data_version=baseline_data_version,
         baseline_source_available_at=baseline_source_available_at or _dt(2),
-        aifs_extraction=_aifs_extraction(source_cycle_time=source_cycle_time),
-        aifs_source_run_id=aifs_source_run_id,
-        aifs_source_available_at=aifs_source_available_at or _dt(2, 30),
         openmeteo_anchor=_anchor(source_cycle_time=source_cycle_time),
         openmeteo_source_run_id=openmeteo_source_run_id,
         openmeteo_source_available_at=openmeteo_source_available_at or _dt(3),
@@ -182,7 +191,6 @@ def _request(
         computed_at=computed_at or _dt(4),
         expires_at=expires_at or _dt(6),
         anchor_artifact_id=anchor_artifact_id,
-        aifs_artifact_id=aifs_artifact_id,
         openmeteo_precision_guard=guard,
     )
 
@@ -201,51 +209,49 @@ def test_materializer_blocks_non_live_posterior_before_execution_authority_table
     assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
 
-def test_materializer_does_not_write_unlicensed_intermediate_cycle_as_live_authority() -> None:
+def test_materializer_writes_authorized_06z_cycle_as_live_layer(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
+    _install_live_fusion(monkeypatch)
 
     result = materialize_replacement_forecast_shadow(
         conn,
-        replace(
-            _request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12)),
-            aifs_extraction=None,
-            aifs_source_run_id=None,
-            aifs_source_available_at=None,
-        ),
+        _request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12)),
     )
 
-    assert result.ok is False
-    assert result.reason_codes == (REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,)
-    assert result.posterior_id is None
+    assert result.ok is True
     assert result.anchor_id is not None
-    assert result.readiness_id is None
-    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
+    assert result.posterior_id is not None
+    row = conn.execute("SELECT runtime_layer, provenance_json FROM forecast_posteriors").fetchone()
+    provenance = json.loads(row["provenance_json"])
+    assert row["runtime_layer"] == LIVE_RUNTIME_LAYER
+    assert provenance["cycle_phase"] == "synoptic"
 
 
-def test_live_authority_status_requires_live_flags_and_bootstrap_bounds() -> None:
-    live_authority = _replacement_is_live_authority(
+def test_runtime_layer_requires_live_flags_and_bootstrap_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(materializer_mod, "REQUIRED_FLAGS", ())
+
+    live_layer = _replacement_is_live_layer(
         replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         q_lcb_map={"cool": 0.1, "warm": 0.6, "hot": 0.05},
         q_ucb_map={"cool": 0.3, "warm": 0.9, "hot": 0.2},
         q_lcb_basis=_QLCB_BASIS,
-        cycle_phase="synoptic",
     )
 
-    assert live_authority is True
+    assert live_layer is True
 
 
-def test_live_authority_status_rejects_wilson_or_missing_bounds() -> None:
-    assert _replacement_is_live_authority(
+def test_runtime_layer_rejects_wilson_or_missing_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(materializer_mod, "REQUIRED_FLAGS", ())
+
+    assert _replacement_is_live_layer(
         replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         q_lcb_map={"cool": 0.1},
         q_ucb_map={"cool": 0.3},
-        q_lcb_basis="wilson_aifs_member_votes",
-        cycle_phase="synoptic",
+        q_lcb_basis="legacy_wilson_member_votes",
     ) is False
 
 
-def test_forecast_posteriors_live_authority_check_migration_discards_non_live_rows() -> None:
+def test_forecast_posteriors_runtime_layer_migration_discards_legacy_status_rows() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -267,36 +273,37 @@ def test_forecast_posteriors_live_authority_check_migration_discards_non_live_ro
         ("LIVE_AUTHORITY", '{"good":1}'),
     )
 
-    _ensure_forecast_posteriors_live_authority_check(conn)
+    _ensure_forecast_posteriors_runtime_layer(conn)
 
-    rows = conn.execute("SELECT posterior_id, trade_authority_status, q_json FROM forecast_posteriors").fetchall()
-    assert [dict(row) for row in rows] == [
-        {"posterior_id": 2, "trade_authority_status": "LIVE_AUTHORITY", "q_json": '{"good":1}'}
-    ]
+    rows = conn.execute("SELECT posterior_id, runtime_layer, q_json FROM forecast_posteriors").fetchall()
+    assert [dict(row) for row in rows] == []
     conn.execute(
-        "INSERT INTO forecast_posteriors (trade_authority_status, q_json) VALUES (?, ?)",
-        ("LIVE_AUTHORITY", "{}"),
+        "INSERT INTO forecast_posteriors (trade_authority_status, runtime_layer, q_json) VALUES (?, ?, ?)",
+        ("LIVE_AUTHORITY", LIVE_RUNTIME_LAYER, "{}"),
     )
     statuses = [
-        row["trade_authority_status"]
-        for row in conn.execute("SELECT trade_authority_status FROM forecast_posteriors ORDER BY posterior_id")
+        row["runtime_layer"]
+        for row in conn.execute("SELECT runtime_layer FROM forecast_posteriors ORDER BY posterior_id")
     ]
-    assert statuses == ["LIVE_AUTHORITY", "LIVE_AUTHORITY"]
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(
-            "INSERT INTO forecast_posteriors (trade_authority_status, q_json) VALUES (?, ?)",
-            ("DIAGNOSTIC_ONLY", "{}"),
-        )
-    assert _replacement_is_live_authority(
+    assert statuses == [LIVE_RUNTIME_LAYER]
+    conn.execute(
+        "INSERT INTO forecast_posteriors (trade_authority_status, runtime_layer, q_json) VALUES (?, ?, ?)",
+        ("DIAGNOSTIC_ONLY", "experiment", "{}"),
+    )
+    _ensure_forecast_posteriors_runtime_layer(conn)
+    assert [
+        row["runtime_layer"]
+        for row in conn.execute("SELECT runtime_layer FROM forecast_posteriors ORDER BY posterior_id")
+    ] == [LIVE_RUNTIME_LAYER]
+    assert _replacement_is_live_layer(
         replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         q_lcb_map={"cool": 0.1},
         q_ucb_map=None,
         q_lcb_basis=_QLCB_BASIS,
-        cycle_phase="synoptic",
     ) is False
 
 
-def test_legacy_anchor_schema_migration_preserves_raw_shadow_parent_fk() -> None:
+def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
@@ -376,17 +383,18 @@ def test_legacy_anchor_schema_migration_preserves_raw_shadow_parent_fk() -> None
         "SELECT trade_authority_status FROM deterministic_forecast_anchors WHERE anchor_id = 1"
     ).fetchone()["trade_authority_status"]
     conn.execute(
-        "INSERT INTO forecast_posteriors (openmeteo_anchor_id, trade_authority_status) VALUES (?, ?)",
-        (1, "LIVE_AUTHORITY"),
+        "INSERT INTO forecast_posteriors (openmeteo_anchor_id, trade_authority_status, runtime_layer) VALUES (?, ?, ?)",
+        (1, "SHADOW_ONLY", LIVE_RUNTIME_LAYER),
     )
 
     assert raw_status == "SHADOW_ONLY"
-    assert anchor_status == "DIAGNOSTIC_ONLY"
+    assert anchor_status == "SHADOW_ONLY"
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-def test_materializer_keeps_readiness_separate_by_baseline_source_run() -> None:
+def test_materializer_keeps_readiness_separate_by_baseline_source_run(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
+    _install_live_fusion(monkeypatch)
 
     first = materialize_replacement_forecast_shadow(
         conn,
@@ -416,30 +424,34 @@ def test_materializer_keeps_readiness_separate_by_baseline_source_run() -> None:
         WHERE city = 'Shanghai'
           AND target_local_date = '2026-06-07'
           AND temperature_metric = 'high'
-          AND strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
+          AND strategy_key = ?
         ORDER BY track
-        """
+        """,
+        (STRATEGY_KEY,),
     ).fetchall()
-    assert len(rows) == 2
-    assert rows[0]["track"] == "soft_anchor_posterior:ecmwf_open_data:mx2t6_high:2026-06-06T12Z"
-    assert rows[1]["track"] == "soft_anchor_posterior:ecmwf_open_data:mx2t6_high:2026-06-07T00Z"
-    assert "2026-06-06T12Z" in rows[0]["dependency_json"]
-    assert "2026-06-07T00Z" in rows[1]["dependency_json"]
+    assert len(rows) == 1
+    assert rows[0]["track"] == "soft_anchor_posterior"
+    assert "2026-06-07T00Z" in rows[0]["dependency_json"]
 
 
-def test_materializer_does_not_fabricate_directional_no_lcb() -> None:
+def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
+    _install_live_fusion(monkeypatch)
 
     result = materialize_replacement_forecast_shadow(conn, _request())
 
     assert result.ok is True
-    posterior_row = conn.execute("SELECT q_json, q_lcb_json, provenance_json FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
+    posterior_row = conn.execute("SELECT q_json, q_lcb_json, q_ucb_json, provenance_json, runtime_layer FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
     q = json.loads(posterior_row["q_json"])
     q_lcb = json.loads(posterior_row["q_lcb_json"])
+    q_ucb = json.loads(posterior_row["q_ucb_json"])
     provenance = json.loads(posterior_row["provenance_json"])
-    assert q_lcb == q
+    assert posterior_row["runtime_layer"] == LIVE_RUNTIME_LAYER
+    assert set(q_lcb) == set(q) == set(q_ucb)
+    for key, point in q.items():
+        assert q_lcb[key] <= point <= q_ucb[key]
     assert not any(str(key).startswith(("buy_no:", "no:")) for key in q_lcb)
-    assert provenance["q_lcb_json_role"] == "shadow_point_probability_capped_downstream"
+    assert provenance["q_lcb_json_role"] == "fused_center_bootstrap_lcb"
 
 
 def test_materializer_blocks_readiness_when_baseline_identity_is_wrong() -> None:
@@ -460,24 +472,26 @@ def test_materializer_blocks_readiness_when_baseline_identity_is_wrong() -> None
     assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
 
-def test_materializer_preserves_raw_artifact_lineage_in_anchor_posterior_and_readiness() -> None:
+def test_materializer_preserves_openmeteo_artifact_lineage_without_aifs(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
+    _install_live_fusion(monkeypatch)
 
-    result = materialize_replacement_forecast_shadow(conn, _request(anchor_artifact_id=11, aifs_artifact_id=22))
+    result = materialize_replacement_forecast_shadow(conn, _request(anchor_artifact_id=11))
 
     assert result.ok is True
     anchor_row = conn.execute("SELECT artifact_id FROM deterministic_forecast_anchors WHERE anchor_id = ?", (result.anchor_id,)).fetchone()
     assert anchor_row["artifact_id"] == 11
     posterior_row = conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
-    assert '"aifs_artifact_id":22' in posterior_row["provenance_json"]
+    assert "aifs_artifact_id" not in posterior_row["provenance_json"]
     assert '"openmeteo_anchor_artifact_id":11' in posterior_row["provenance_json"]
     readiness_row = conn.execute("SELECT dependency_json FROM readiness_state WHERE readiness_id = ?", (result.readiness_id,)).fetchone()
-    assert '"artifact_id":22' in readiness_row["dependency_json"]
+    assert '"artifact_id":22' not in readiness_row["dependency_json"]
     assert '"artifact_id":11' in readiness_row["dependency_json"]
 
 
-def test_materializer_records_precision_guard_in_anchor_and_posterior_provenance() -> None:
+def test_materializer_records_precision_guard_in_anchor_and_posterior_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
+    _install_live_fusion(monkeypatch)
 
     result = materialize_replacement_forecast_shadow(
         conn,
@@ -489,7 +503,7 @@ def test_materializer_records_precision_guard_in_anchor_and_posterior_provenance
     posterior_row = conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
     anchor_provenance = json.loads(anchor_row["provenance_json"])
     posterior_provenance = json.loads(posterior_row["provenance_json"])
-    assert anchor_provenance["precision_guard"]["status"] == "DIAGNOSTIC_ONLY"
+    assert anchor_provenance["precision_guard"]["status"] == "SHADOW_ONLY"
     assert anchor_provenance["precision_guard"]["high_risk_bucket"] == "coastal"
     assert posterior_provenance["openmeteo_precision_guard"]["reason_codes"] == ["OM9_LAND_SEA_HIGH_RISK_FOR_CITY_CLASS"]
 
@@ -522,7 +536,7 @@ def test_materializer_blocks_future_dependency_before_writing_shadow_rows() -> N
 
     result = materialize_replacement_forecast_shadow(
         conn,
-        _request(aifs_source_available_at=_dt(5)),
+        _request(openmeteo_source_available_at=_dt(5)),
     )
 
     assert result.ok is False
@@ -550,12 +564,13 @@ def test_materializer_requires_dependency_source_run_ids_before_writing_shadow_r
     assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
 
-def test_materializer_posterior_available_at_includes_baseline_dependency() -> None:
+def test_materializer_posterior_available_at_includes_baseline_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _conn()
+    _install_live_fusion(monkeypatch)
 
     result = materialize_replacement_forecast_shadow(
         conn,
-        _request(baseline_source_available_at=_dt(3, 30), aifs_source_available_at=_dt(2), openmeteo_source_available_at=_dt(3)),
+        _request(baseline_source_available_at=_dt(3, 30), openmeteo_source_available_at=_dt(3)),
     )
 
     assert result.ok is True
@@ -591,17 +606,6 @@ def test_materialize_script_template_requires_precision_metadata() -> None:
 
 
 def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) -> None:
-    (tmp_path / "aifs_samples.json").write_text(
-        json.dumps(
-            {
-                "samples": [
-                    {"member_id": "pf-001", "valid_time_utc": "2026-06-06T18:00:00+00:00", "temperature": 24.0, "temperature_unit": "C"},
-                    {"member_id": "pf-002", "valid_time_utc": "2026-06-06T18:00:00+00:00", "temperature": 25.0, "temperature_unit": "C"},
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
     (tmp_path / "openmeteo_payload.json").write_text(
         json.dumps(
             {
@@ -626,12 +630,9 @@ def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) ->
         "baseline_source_run_id": "b0-run",
         "baseline_data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
         "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
-        "aifs_source_run_id": "aifs-run",
-        "aifs_source_available_at": "2026-06-06T02:30:00+00:00",
         "openmeteo_source_run_id": "om9-run",
         "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
         "bins": [{"bin_id": "warm", "lower_c": 20.0, "upper_c": 30.0, "center_c": 25.0}],
-        "aifs_samples_json": "aifs_samples.json",
         "openmeteo_payload_json": "openmeteo_payload.json",
     }
     input_json = tmp_path / "request.json"

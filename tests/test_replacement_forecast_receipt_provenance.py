@@ -2,8 +2,8 @@
 # Last reused/audited: 2026-06-08
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: Protect replacement forecast receipt provenance as forecast-only attribution with no settlement authority.
-# Reuse: Run before attaching replacement live/diagnostic provenance to receipts or attribution reports.
-# Authority basis: Replacement forecast live/diagnostic provenance with readiness-declared dependency roles.
+# Reuse: Run before attaching replacement live provenance to receipts or attribution reports.
+# Authority basis: Replacement forecast live-layer provenance with readiness-declared dependency roles.
 """Replacement forecast receipt provenance tests."""
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from src.data.replacement_forecast_bundle_reader import PRODUCT_ID, SOURCE_ID
+from src.data.replacement_forecast_bundle_reader import HIGH_DATA_VERSION, PRODUCT_ID, SOURCE_ID
 from src.data.replacement_forecast_guardrail_report import ReplacementForecastGuardrailReplayRow, build_replacement_forecast_guardrail_report
-from src.data.replacement_forecast_readiness import ReplacementForecastDependency, build_replacement_forecast_readiness
+from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, ReplacementForecastDependency, build_replacement_forecast_readiness
 from src.data.replacement_forecast_receipt_provenance import (
     RECEIPT_ROLE,
     SETTLEMENT_AUTHORITY_STATUS,
@@ -27,7 +27,7 @@ def _dt(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 6, 6, hour, minute, tzinfo=UTC)
 
 
-def _readiness(*, require_aifs: bool = False):
+def _readiness():
     dependencies = (
         ReplacementForecastDependency(
             role="baseline_b0",
@@ -36,15 +36,6 @@ def _readiness(*, require_aifs: bool = False):
             data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
             source_run_id="b0-run",
             source_available_at=_dt(2),
-        ),
-        ReplacementForecastDependency(
-            role="aifs_sampled_2t",
-            source_id="ecmwf_aifs_ens",
-            product_id="ecmwf_aifs_ens_sampled_2t_6h_v1",
-            data_version="ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_max",
-            source_run_id="aifs-run",
-            source_available_at=_dt(2, 30),
-            artifact_id=11,
         ),
         ReplacementForecastDependency(
             role="openmeteo_ifs9_anchor",
@@ -59,21 +50,11 @@ def _readiness(*, require_aifs: bool = False):
             role="soft_anchor_posterior",
             source_id=SOURCE_ID,
             product_id=PRODUCT_ID,
-            data_version="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1",
+            data_version=HIGH_DATA_VERSION,
             source_run_id="posterior-run",
             source_available_at=_dt(3, 5),
             posterior_id=77,
         ),
-    )
-    required_roles = (
-        "baseline_b0",
-        "aifs_sampled_2t",
-        "openmeteo_ifs9_anchor",
-        "soft_anchor_posterior",
-    ) if require_aifs else (
-        "baseline_b0",
-        "openmeteo_ifs9_anchor",
-        "soft_anchor_posterior",
     )
     return build_replacement_forecast_readiness(
         city="Shanghai",
@@ -83,7 +64,6 @@ def _readiness(*, require_aifs: bool = False):
         computed_at=_dt(4, 1),
         expires_at=_dt(6),
         dependencies=dependencies,
-        required_roles=required_roles,
     )
 
 
@@ -108,7 +88,7 @@ def _veto_decision(**overrides):
         "allowed_kelly_fraction": 0.02,
         "veto": True,
         "reasons": ("SOFT_ANCHOR_LOWER_Q_LCB", "SOFT_ANCHOR_LOWER_KELLY"),
-        "trade_authority_status": "LIVE_AUTHORITY",
+        "runtime_layer": LIVE_RUNTIME_LAYER,
     }
     params.update(overrides)
     return params
@@ -128,7 +108,7 @@ def test_receipt_provenance_is_forecast_attribution_only() -> None:
     assert provenance["readiness_id"].startswith("replacement_readiness:")
     assert provenance["training_allowed"] is False
     assert provenance["promotion_allowed"] is False
-    assert provenance["trade_authority_status"] == "LIVE_AUTHORITY"
+    assert provenance["runtime_layer"] == LIVE_RUNTIME_LAYER
     assert provenance["authority_limits"] == {
         "can_flip_direction": False,
         "can_increase_kelly": False,
@@ -161,20 +141,6 @@ def test_receipt_provenance_carries_dependency_and_veto_identity() -> None:
     assert provenance["allowed_direction"] == "buy_yes:warm"
     assert provenance["allowed_q_lcb"] == pytest.approx(0.55)
     assert provenance["allowed_kelly_fraction"] == pytest.approx(0.02)
-
-
-def test_receipt_provenance_preserves_aifs_when_readiness_requires_it() -> None:
-    provenance = build_replacement_forecast_receipt_provenance(
-        veto_decision=_veto_decision(),
-        readiness=_readiness(require_aifs=True),
-    ).as_dict()
-
-    assert provenance["dependency_source_run_ids"] == {
-        "baseline_b0": "b0-run",
-        "aifs_sampled_2t": "aifs-run",
-        "openmeteo_ifs9_anchor": "om9-run",
-        "soft_anchor_posterior": "posterior-run",
-    }
 
 
 def test_receipt_provenance_preserves_guardrail_regression_clusters() -> None:
@@ -216,7 +182,7 @@ def test_receipt_provenance_preserves_guardrail_regression_clusters() -> None:
     assert provenance["net_delta_after_cost_pnl"] == pytest.approx(-0.60)
 
 
-def test_receipt_provenance_rejects_settlement_truth_and_records_live_trade_authority_only() -> None:
+def test_receipt_provenance_rejects_settlement_truth_and_records_live_layer_only() -> None:
     with pytest.raises(ValueError, match="settlement truth field"):
         build_replacement_forecast_receipt_provenance(
             veto_decision=_veto_decision(),
@@ -224,21 +190,21 @@ def test_receipt_provenance_rejects_settlement_truth_and_records_live_trade_auth
             extra_provenance={"settlement_value": 78},
         )
 
-    live_authority = {**_veto_decision(), "trade_authority_status": "LIVE_AUTHORITY"}
+    live_layer = {**_veto_decision(), "runtime_layer": LIVE_RUNTIME_LAYER}
     provenance = build_replacement_forecast_receipt_provenance(
-        veto_decision=live_authority,
+        veto_decision=live_layer,
         readiness=_readiness(),
     ).as_dict()
-    assert provenance["trade_authority_status"] == "LIVE_AUTHORITY"
+    assert provenance["runtime_layer"] == LIVE_RUNTIME_LAYER
     assert provenance["authority_limits"]["can_initiate_trade"] is True
     assert provenance["authority_limits"]["can_settle_market"] is False
     assert provenance["authority_limits"]["can_train_model"] is False
     assert provenance["promotion_allowed"] is False
 
-    diagnostic = {**_veto_decision(), "trade_authority_status": "DIAGNOSTIC_ONLY"}
-    with pytest.raises(ValueError, match="trade authority status"):
+    experiment = {**_veto_decision(), "runtime_layer": "experiment"}
+    with pytest.raises(ValueError, match="runtime layer"):
         build_replacement_forecast_receipt_provenance(
-            veto_decision=diagnostic,
+            veto_decision=experiment,
             readiness=_readiness(),
         )
 

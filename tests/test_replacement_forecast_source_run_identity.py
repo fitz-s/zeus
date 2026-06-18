@@ -3,7 +3,7 @@
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
 # Purpose: Protect replacement source_run/source_run_coverage identity from cross-product lineage drift.
 # Reuse: Run before writing or reading replacement source_run dependencies, readiness rows, or replay provenance.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
+# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + Bayes fusion live integration.
 """Replacement source-run identity validator tests."""
 
 from __future__ import annotations
@@ -50,17 +50,16 @@ def test_expected_dependency_identity_map_separates_raw_anchor_and_derived_produ
     high = expected_replacement_dependency_identity_by_role("high")
     low = expected_replacement_dependency_identity_by_role("low")
 
-    assert high["aifs_sampled_2t"].product_id == "ecmwf_aifs_ens_sampled_2t_6h_v1"
-    assert high["aifs_sampled_2t"].data_version.endswith("_max")
-    assert low["aifs_sampled_2t"].data_version.endswith("_min")
-    assert high["aifs_sampled_2t"].raw_ensemble_eligible is True
+    assert set(high) == {"baseline_b0", "openmeteo_ifs9_anchor", "soft_anchor_posterior"}
     assert high["openmeteo_ifs9_anchor"].raw_ensemble_eligible is False
     assert high["soft_anchor_posterior"].raw_ensemble_eligible is False
-    assert high["soft_anchor_posterior"].source_id == "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
+    assert high["soft_anchor_posterior"].source_id == "openmeteo_ecmwf_ifs9_bayes_fusion"
+    assert high["soft_anchor_posterior"].data_version.endswith("_high_v1")
+    assert low["soft_anchor_posterior"].data_version.endswith("_low_v1")
 
 
 def test_source_run_identity_validates_source_run_and_coverage_pair() -> None:
-    for role in ("baseline_b0", "aifs_sampled_2t", "openmeteo_ifs9_anchor", "soft_anchor_posterior"):
+    for role in ("baseline_b0", "openmeteo_ifs9_anchor", "soft_anchor_posterior"):
         decision = validate_replacement_source_run_identity(
             role=role,
             temperature_metric="high",
@@ -74,11 +73,11 @@ def test_source_run_identity_validates_source_run_and_coverage_pair() -> None:
 
 def test_source_run_identity_blocks_wrong_data_version_and_metric() -> None:
     decision = validate_replacement_source_run_identity(
-        role="aifs_sampled_2t",
+        role="baseline_b0",
         temperature_metric="high",
         source_run=_source_run(
-            "aifs_sampled_2t",
-            dataset_id="ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_min",
+            "baseline_b0",
+            dataset_id="ecmwf_opendata_mn2t3_local_calendar_day_min",
             temperature_metric="low",
         ),
     )
@@ -101,9 +100,9 @@ def test_source_run_identity_blocks_non_ensemble_members_on_anchor_and_posterior
 
 def test_source_run_identity_requires_exact_expected_members_for_ensemble_products() -> None:
     decision = validate_replacement_source_run_identity(
-        role="aifs_sampled_2t",
+        role="baseline_b0",
         temperature_metric="high",
-        source_run=_source_run("aifs_sampled_2t", expected_members=50, observed_members=50),
+        source_run=_source_run("baseline_b0", expected_members=50, observed_members=50),
     )
 
     assert decision.valid is False

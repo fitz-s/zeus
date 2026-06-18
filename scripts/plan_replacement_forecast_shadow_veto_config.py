@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan or apply the replacement forecast live-authority config switch."""
+"""Plan or apply the replacement forecast live config switch."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from src.data.replacement_forecast_config_switch import (  # noqa: E402
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--settings-json", default="config/settings.json", help="Settings JSON path to inspect.")
-    parser.add_argument("--apply", action="store_true", help="Persist the planned live-authority feature flag patch.")
+    parser.add_argument("--apply", action="store_true", help="Persist the planned live feature flag patch.")
     parser.add_argument("--stdout", action="store_true", help="Print the JSON report to stdout.")
     return parser.parse_args()
 

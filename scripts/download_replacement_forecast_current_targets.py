@@ -564,6 +564,34 @@ def download_current_target_raw_inputs(
     }
 
 
+def download_current_target_openmeteo_inputs(
+    *,
+    forecast_db: Path,
+    output_dir: Path,
+    cycle: datetime,
+    limit: int | None,
+    write_db: bool,
+    release_lag_hours: float,
+    anchor_sigma_c: float,
+    include_covered: bool = False,
+) -> dict[str, object]:
+    """Live replacement-chain downloader for Open-Meteo current-target inputs."""
+
+    return download_current_target_raw_inputs(
+        forecast_db=forecast_db,
+        output_dir=output_dir,
+        cycle=cycle,
+        limit=limit,
+        write_db=write_db,
+        skip_aifs=True,
+        skip_openmeteo=False,
+        release_lag_hours=release_lag_hours,
+        anchor_sigma_c=anchor_sigma_c,
+        aifs_retries=0,
+        include_covered=include_covered,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Download current replacement forecast raw inputs")
     parser.add_argument("--forecast-db", type=Path, default=ROOT / "state" / "zeus-forecasts.db")

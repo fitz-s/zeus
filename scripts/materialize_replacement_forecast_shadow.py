@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
-"""Materialize Open-Meteo ECMWF IFS 9km + AIFS sampled-2t shadow posterior."""
+"""Materialize Open-Meteo ECMWF IFS 9km + Bayes fusion posterior."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.data.ecmwf_aifs_sampled_2t_localday import AifsInstantSample, extract_aifs_sampled_2t_localday  # noqa: E402
-from src.data.ecmwf_aifs_grib_samples import extract_aifs_2t_point_samples_from_grib  # noqa: E402
 from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
     build_anchor_request,
     extract_openmeteo_ecmwf_ifs9_localday_anchor,
@@ -32,10 +29,20 @@ from src.data.replacement_forecast_materializer import (  # noqa: E402
     materialize_replacement_forecast_shadow,
 )
 from src.data.raw_forecast_artifact_manifest import read_manifest, write_manifest_to_db  # noqa: E402
-from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin  # noqa: E402
 
 
 UTC = timezone.utc
+
+
+@dataclass(frozen=True)
+class TemperatureBin:
+    bin_id: str
+    lower_c: float | None
+    upper_c: float | None
+    center_c: float | None
+    display_unit: str = "C"
+    settlement_unit: str = "C"
+    rounding_rule: str = "wmo_half_up"
 
 
 def _dt(value: str, *, field_name: str) -> datetime:
@@ -64,41 +71,16 @@ def _resolve_input_path(path_value: object, *, base_dir: Path) -> Path:
     return base_candidate
 
 
-def _identity_tuple_hash(values: Sequence[object]) -> str:
-    return hashlib.sha256(
-        json.dumps(tuple(values), sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()
-
-
-def _aifs_samples(payload: Mapping[str, Any]) -> list[AifsInstantSample]:
-    rows = payload.get("samples")
-    if not isinstance(rows, list) or not rows:
-        raise ValueError("AIFS JSON must contain non-empty samples[]")
-    samples: list[AifsInstantSample] = []
-    for row in rows:
-        if not isinstance(row, Mapping):
-            raise ValueError("AIFS samples[] entries must be objects")
-        samples.append(
-            AifsInstantSample(
-                member_id=str(row["member_id"]),
-                valid_time_utc=_dt(str(row["valid_time_utc"]), field_name="valid_time_utc"),
-                temperature=float(row["temperature"]),
-                temperature_unit=str(row.get("temperature_unit", "C")),
-            )
-        )
-    return samples
-
-
-def _bins(payload: Mapping[str, Any]) -> tuple[AifsTemperatureBin, ...]:
+def _bins(payload: Mapping[str, Any]) -> tuple[TemperatureBin, ...]:
     rows = payload.get("bins")
     if not isinstance(rows, list) or not rows:
         raise ValueError("input JSON must contain non-empty bins[]")
-    bins: list[AifsTemperatureBin] = []
+    bins: list[TemperatureBin] = []
     for row in rows:
         if not isinstance(row, Mapping):
             raise ValueError("bins[] entries must be objects")
         bins.append(
-            AifsTemperatureBin(
+            TemperatureBin(
                 bin_id=str(row["bin_id"]),
                 lower_c=None if row.get("lower_c") is None else float(row["lower_c"]),
                 upper_c=None if row.get("upper_c") is None else float(row["upper_c"]),
@@ -124,8 +106,6 @@ def _template() -> dict[str, object]:
         "baseline_source_run_id": "b0-run",
         "baseline_data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
         "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
-        "aifs_source_run_id": "aifs-run",
-        "aifs_source_available_at": "2026-06-06T02:30:00+00:00",
         "openmeteo_source_run_id": "om9-run",
         "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
         "anchor_weight": 0.80,
@@ -135,7 +115,6 @@ def _template() -> dict[str, object]:
             {"bin_id": "warm", "lower_c": 21.0, "upper_c": 30.0, "center_c": 25.5},
             {"bin_id": "hot", "lower_c": 31.0, "upper_c": None, "center_c": 32.0},
         ],
-        "aifs_samples_json": "aifs_samples.json",
         "openmeteo_payload_json": "openmeteo_payload.json",
         "precision_metadata_json": "openmeteo_precision_metadata.json",
         "latitude": 31.2304,
@@ -163,43 +142,11 @@ def main(argv: list[str] | None = None) -> int:
         metric = str(payload["temperature_metric"])
         target_date = date.fromisoformat(str(payload["target_date"]))
         source_cycle_time = _dt(str(payload["source_cycle_time"]), field_name="source_cycle_time")
-        aifs_artifact_id = None if payload.get("aifs_artifact_id") in (None, "") else int(payload["aifs_artifact_id"])
         anchor_artifact_id = (
             None
             if payload.get("openmeteo_anchor_artifact_id") in (None, "")
             else int(payload["openmeteo_anchor_artifact_id"])
         )
-        # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): AIFS is no longer fetched, so the
-        # input no longer REQUIRES an aifs_samples_json / aifs_grib_path selector. When one IS present
-        # (transition / archived runs) the extraction is built and threaded through as cross-check
-        # provenance; when ABSENT aifs_extraction stays None and the materializer materializes the
-        # multi-model fused Normal without it.
-        aifs_grib_identity: Mapping[str, object] | None = None
-        aifs_samples: list | None = None
-        if "aifs_samples_json" in payload:
-            aifs_payload = _load_json(_resolve_input_path(payload["aifs_samples_json"], base_dir=base_dir))
-            if not isinstance(aifs_payload, Mapping):
-                raise ValueError("AIFS samples JSON must decode to an object")
-            aifs_samples = _aifs_samples(aifs_payload)
-        elif "aifs_grib_path" in payload:
-            if "latitude" not in payload or "longitude" not in payload:
-                raise ValueError("aifs_grib_path input requires latitude and longitude")
-            aifs_grib = _resolve_input_path(payload["aifs_grib_path"], base_dir=base_dir)
-            aifs_point_extraction = extract_aifs_2t_point_samples_from_grib(
-                aifs_grib,
-                latitude=float(payload["latitude"]),
-                longitude=float(payload["longitude"]),
-                source_cycle_time=source_cycle_time,
-            )
-            aifs_samples = list(aifs_point_extraction.samples)
-            aifs_grib_identity = {
-                "identity_decision_valid": True,
-                "identity_reason_codes": tuple(aifs_point_extraction.identity_reason_codes),
-                "identity_decision_hash": aifs_point_extraction.identity_decision_hash,
-                "member_ids_hash": _identity_tuple_hash(aifs_point_extraction.member_ids),
-                "step_hours_hash": _identity_tuple_hash(aifs_point_extraction.step_hours),
-                "raw_sha256": aifs_point_extraction.raw_sha256,
-            }
         if "openmeteo_payload_json" in payload:
             openmeteo_payload = _load_json(_resolve_input_path(payload["openmeteo_payload_json"], base_dir=base_dir))
             if not isinstance(openmeteo_payload, Mapping):
@@ -215,16 +162,6 @@ def main(argv: list[str] | None = None) -> int:
                     timezone_name=str(payload["city_timezone"]),
                 )
             )
-        aifs_extraction = None
-        if aifs_samples is not None:
-            aifs_extraction = extract_aifs_sampled_2t_localday(
-                aifs_samples,
-                city_timezone=str(payload["city_timezone"]),
-                target_local_date=target_date,
-                source_cycle_time=source_cycle_time,
-            )
-            if aifs_grib_identity is not None:
-                aifs_extraction = replace(aifs_extraction, **dict(aifs_grib_identity))
         openmeteo_anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
             openmeteo_payload,
             city_timezone=str(payload["city_timezone"]),
@@ -248,13 +185,6 @@ def main(argv: list[str] | None = None) -> int:
             baseline_source_run_id=str(payload["baseline_source_run_id"]),
             baseline_data_version=str(payload["baseline_data_version"]),
             baseline_source_available_at=_dt(str(payload["baseline_source_available_at"]), field_name="baseline_source_available_at"),
-            aifs_extraction=aifs_extraction,
-            aifs_source_run_id=(str(payload["aifs_source_run_id"]) if payload.get("aifs_source_run_id") else None),
-            aifs_source_available_at=(
-                _dt(str(payload["aifs_source_available_at"]), field_name="aifs_source_available_at")
-                if payload.get("aifs_source_available_at")
-                else None
-            ),
             openmeteo_anchor=openmeteo_anchor,
             openmeteo_source_run_id=str(payload.get("openmeteo_source_run_id") or ""),
             openmeteo_source_available_at=_dt(str(payload["openmeteo_source_available_at"]), field_name="openmeteo_source_available_at"),
@@ -290,32 +220,14 @@ def main(argv: list[str] | None = None) -> int:
             if args.init_schema:
                 ensure_replacement_forecast_shadow_schema(conn)
                 _create_readiness_state(conn)
-            if "aifs_manifest_json" in payload:
-                aifs_artifact_id = write_manifest_to_db(
-                    conn,
-                    read_manifest(_resolve_input_path(payload["aifs_manifest_json"], base_dir=base_dir)),
-                    root=ROOT,
-                )
             if "openmeteo_manifest_json" in payload:
                 anchor_artifact_id = write_manifest_to_db(
                     conn,
                     read_manifest(_resolve_input_path(payload["openmeteo_manifest_json"], base_dir=base_dir)),
                     root=ROOT,
                 )
-            if aifs_artifact_id is not None or anchor_artifact_id is not None:
-                replacement_kwargs: dict[str, object] = {
-                    "anchor_artifact_id": anchor_artifact_id,
-                    "aifs_artifact_id": aifs_artifact_id,
-                }
-                if aifs_artifact_id is not None:
-                    replacement_kwargs["aifs_extraction"] = replace(
-                        request.aifs_extraction,
-                        artifact_id=aifs_artifact_id,
-                    )
-                request = replace(
-                    request,
-                    **replacement_kwargs,
-                )
+            if anchor_artifact_id is not None:
+                request = replace(request, anchor_artifact_id=anchor_artifact_id)
             result = materialize_replacement_forecast_shadow(conn, request)
             if args.commit:
                 conn.commit()
@@ -334,7 +246,6 @@ def main(argv: list[str] | None = None) -> int:
                 "posterior_id": result.posterior_id,
                 "anchor_id": result.anchor_id,
                 "readiness_id": result.readiness_id,
-                "aifs_artifact_id": aifs_artifact_id,
                 "openmeteo_anchor_artifact_id": anchor_artifact_id,
                 "committed": bool(args.commit),
             },

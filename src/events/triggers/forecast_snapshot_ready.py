@@ -18,8 +18,8 @@ from src.events.opportunity_event import (
 from src.strategy.market_phase import market_phase_admits
 
 UTC = timezone.utc
-REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
-REPLACEMENT_0_1_TRACK_LABEL = "replacement_0_1_aifs_openmeteo_soft_anchor"
+REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_bayes_fusion_v1"
+REPLACEMENT_0_1_TRACK_LABEL = "replacement_0_1_openmeteo_bayes_fusion"
 
 # mx2t3 carrier-decouple (GATE-1, residual_legacy_sources.md C-A): under the replacement
 # trade authority the FSR readiness/selection is sourced from ``forecast_posteriors`` (the
@@ -88,8 +88,8 @@ def _intake_phase_filter_enabled() -> bool:
         return False
 
 
-def _replacement_trade_authority_enabled() -> bool:
-    """True when live FSR probability authority is the 0.1 replacement posterior.
+def _replacement_live_enabled() -> bool:
+    """True when live FSR probability source is the 0.1 replacement posterior.
 
     Fail-closed for the replacement-specific paths: when this flag is on, an FSR
     without a matching replacement posterior must not enter live re-decision as a
@@ -101,7 +101,7 @@ def _replacement_trade_authority_enabled() -> bool:
 
         return bool(
             settings["feature_flags"].get(
-                "openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled",
+                "openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled",
                 False,
             )
         )
@@ -574,7 +574,7 @@ class ForecastSnapshotReadyTrigger:
         # ``forecast_posteriors`` (mx2t3-independent), so the required-table guard switches to it —
         # otherwise this scan early-returns ``[]`` once the cold ensemble tables freeze/absent.
         _posterior_lane = (
-            _replacement_trade_authority_enabled()
+            _replacement_live_enabled()
             and _table_exists(forecasts_conn, "forecast_posteriors")
         )
         if _posterior_lane:
@@ -719,7 +719,7 @@ class ForecastSnapshotReadyTrigger:
             )
         else:
             replacement_filter = ""
-            if _replacement_trade_authority_enabled():
+            if _replacement_live_enabled():
                 if not _table_exists(forecasts_conn, "forecast_posteriors"):
                     replacement_filter = " AND 0"
                 else:
@@ -800,7 +800,7 @@ class ForecastSnapshotReadyTrigger:
                 """
             _replacement_params: tuple[str, ...] = (
                 (_decision_iso, _decision_iso)
-                if _replacement_trade_authority_enabled()
+                if _replacement_live_enabled()
                 and _table_exists(forecasts_conn, "forecast_posteriors")
                 else ()
             )
@@ -1027,7 +1027,7 @@ def _serving_track_label(*, track: str, data_version: str) -> str:
     leaking legacy t3/t6 carrier names into trading receipts/events.
     """
 
-    if _replacement_trade_authority_enabled():
+    if _replacement_live_enabled():
         return REPLACEMENT_0_1_TRACK_LABEL
     if data_version == "ecmwf_opendata_mx2t3_local_calendar_day_max":
         return "mx2t3_high_full_horizon" if track.endswith("_full_horizon") else "mx2t3_high"

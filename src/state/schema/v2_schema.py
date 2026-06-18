@@ -24,6 +24,13 @@ import os
 import sqlite3
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
 def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
     """Create settlement_outcomes table + indexes. Idempotent. K1 forecast-class table.
 
@@ -224,7 +231,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
         # contract_version + boundary_min_value columns dropped in P7B (no live
         # consumer; P8 will re-add if needed when shadow-activation consumers land).
         "ALTER TABLE ensemble_snapshots ADD COLUMN unit TEXT",
-        # PLAN_v4 executable forecast-entry linkage. NULL means legacy/shadow-only.
+        # PLAN_v4 executable forecast-entry linkage. NULL means no live consumer.
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_id TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_transport TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_run_id TEXT",
@@ -232,7 +239,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_cycle_time TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_release_time TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_available_at TEXT",
-        # 2026-05-07 LOW/HIGH alignment recovery: nullable shadow columns for
+        # 2026-05-07 LOW/HIGH alignment recovery: nullable evidence columns for
         # contract-object and explicit forecast-window evidence. These columns
         # only make evidence persistable; they do not relax training_allowed or
         # change live decision authority.
@@ -279,6 +286,28 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
                 source_run_id
             )
     """)
+
+
+def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connection) -> None:
+    """Ensure forecast_posteriors carries the runtime-layer column."""
+
+    columns = _table_columns(conn, "forecast_posteriors")
+    if not columns:
+        return
+    if "runtime_layer" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE forecast_posteriors
+            ADD COLUMN runtime_layer TEXT
+                CHECK (runtime_layer IS NULL OR runtime_layer IN ('live'))
+            """
+        )
+        columns.add("runtime_layer")
+    if {"runtime_layer", "city", "target_date", "temperature_metric", "computed_at"}.issubset(columns):
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_runtime_layer_target
+                ON forecast_posteriors(runtime_layer, city, target_date, temperature_metric, computed_at)
+        """)
 
 
 def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None:
@@ -362,7 +391,6 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             q_lcb_json TEXT,
             q_ucb_json TEXT,
             posterior_method TEXT NOT NULL,
-            aifs_source_run_id TEXT,
             openmeteo_anchor_id INTEGER REFERENCES deterministic_forecast_anchors(anchor_id),
             dependency_source_run_ids_json TEXT NOT NULL DEFAULT '[]',
             family_id TEXT,
@@ -391,6 +419,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             ON forecast_posteriors(posterior_identity_hash)
             WHERE posterior_identity_hash IS NOT NULL
     """)
+    _ensure_forecast_posteriors_runtime_layer_compatibility(conn)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS replacement_shadow_decisions (
@@ -426,16 +455,16 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     # ------------------------------------------------------------------------
     # raw_model_forecasts  (BAYES_PRECISION_FUSION_SPEC.md §6 F1 raw capture)
     # ------------------------------------------------------------------------
-    # The spec-named SHADOW-ONLY multi-model walk-forward capture table. One row per
+    # Multi-model walk-forward capture table. One row per
     # (model, city, target_date, metric, source_cycle_time, endpoint): the decorrelated
     # globals (gfs_global/icon_global/gem_global/jma_seamless/icon_eu) + in-domain regionals
     # (icon_d2/arome) fetched ALONGSIDE the single ECMWF anchor. forecast_value_c is ALWAYS
     # degC (SPEC §7 "C/F unit mix" antibody — the residual against settlement is taken in C).
     # endpoint distinguishes single_runs (live capture, variable-lead, replay) from
     # previous_runs (fixed-lead, the ONLY rows that train walk-forward history; SPEC §3
-    # causality run_time != source_available_at). SHADOW_ONLY + training_allowed=0 are
-    # CHECK-pinned exactly like raw_forecast_artifacts: this is a research-accrual surface,
-    # NEVER an order/training truth table. Lives ONLY on zeus-forecasts.db (FORECAST_CLASS,
+    # causality run_time != source_available_at). training_allowed=0 is
+    # CHECK-pinned exactly like raw_forecast_artifacts: this is an experiment-accrual surface,
+    # never an order/training truth table. Lives ONLY on zeus-forecasts.db (FORECAST_CLASS,
     # INV-37 single-DB). The walk-forward history JOIN (src/data/bayes_precision_fusion_history_provider.py)
     # reads endpoint='previous_runs' rows JOINed to settlement_outcomes (same DB) with
     # target_date < decision_date and authority='VERIFIED' (no-leak, IRON RULE #3).
@@ -815,10 +844,10 @@ def _create_settlement_capture_verifications(conn: sqlite3.Connection) -> None:
 
 
 def ensure_replacement_forecast_shadow_schema(conn: sqlite3.Connection) -> None:
-    """Create only the replacement forecast shadow tables on a forecast DB.
+    """Create only the replacement forecast live-support tables on a forecast DB.
 
     This is the targeted simple-switch initializer for the Open-Meteo ECMWF IFS
-    9km + AIFS sampled-2t path. It deliberately avoids the broader canonical
+    9km + Bayes fusion path. It deliberately avoids the broader canonical
     schema migration surface and creates no world/trade truth tables.
     """
 

@@ -1,9 +1,9 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
-# Purpose: Protect replacement shadow event payload provenance without mutating baseline FSR wire format.
-# Reuse: Run before wiring replacement shadow/veto payloads into the event reactor.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
+# Purpose: Protect replacement live event payload provenance without mutating baseline FSR wire format.
+# Reuse: Run before wiring replacement live payloads into the event reactor.
+# Authority basis: Operator-directed live replacement forecast materializer/readiness/payload semantics.
 """Replacement forecast event payload provenance tests."""
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pytest
 
 from src.data.replacement_forecast_bundle_reader import HIGH_DATA_VERSION, PRODUCT_ID, SOURCE_ID, ReplacementForecastPosteriorBundle
 from src.data.replacement_forecast_event_payload import build_replacement_forecast_event_payload
-from src.data.replacement_forecast_readiness import ReplacementForecastDependency, build_replacement_forecast_readiness
+from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, ReplacementForecastDependency, build_replacement_forecast_readiness
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 
 
@@ -66,14 +66,14 @@ def _bundle() -> ReplacementForecastPosteriorBundle:
         q={"cool": 0.25, "warm": 0.75},
         q_lcb={"cool": 0.20, "warm": 0.65},
         q_ucb={"cool": 0.30, "warm": 0.85},
-        posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        posterior_method="openmeteo_ecmwf_ifs9_bayes_fusion",
         source_cycle_time="2026-06-06T00:00:00+00:00",
         source_available_at="2026-06-06T03:00:00+00:00",
         computed_at="2026-06-06T03:05:00+00:00",
         baseline_source_run_id="b0-run",
-        dependency_json={"source_run_ids": ["b0-run", "aifs-run", "om9-run"]},
+        dependency_json={"source_run_ids": ["b0-run", "om9-run"]},
         provenance_json={"test": True},
-        trade_authority_status="LIVE_AUTHORITY",
+        runtime_layer=LIVE_RUNTIME_LAYER,
         bin_topology_hash="topology-hash",
         family_id="Shanghai|2026-06-07|high",
     )
@@ -88,15 +88,6 @@ def _readiness():
             data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
             source_run_id="b0-run",
             source_available_at=_dt(2),
-        ),
-        ReplacementForecastDependency(
-            role="aifs_sampled_2t",
-            source_id="ecmwf_aifs_ens",
-            product_id="ecmwf_aifs_ens_sampled_2t_6h_v1",
-            data_version="ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_max",
-            source_run_id="aifs-run",
-            source_available_at=_dt(2),
-            artifact_id=11,
         ),
         ReplacementForecastDependency(
             role="openmeteo_ifs9_anchor",
@@ -168,7 +159,7 @@ def test_replacement_live_payload_carries_product_and_dependency_identity() -> N
     assert replacement["data_version"] == HIGH_DATA_VERSION
     assert replacement["posterior_id"] == 77
     assert replacement["readiness_status"] == "READY"
-    assert replacement["trade_authority_status"] == "LIVE_AUTHORITY"
+    assert replacement["runtime_layer"] == LIVE_RUNTIME_LAYER
     assert replacement["dependency_source_run_ids"] == {
         "baseline_b0": "b0-run",
         "openmeteo_ifs9_anchor": "om9-run",
@@ -196,9 +187,9 @@ def test_replacement_live_payload_rejects_shadow_bundle_unready_or_mismatched_id
         **{**_bundle().__dict__, "source_id": "different_source_id"}
     )
 
-    with pytest.raises(ValueError, match="LIVE_AUTHORITY"):
+    with pytest.raises(ValueError, match="runtime_layer"):
         ReplacementForecastPosteriorBundle(
-            **{**_bundle().__dict__, "trade_authority_status": "SHADOW_VETO_ONLY"}
+            **{**_bundle().__dict__, "runtime_layer": "experiment"}
         )
 
     with pytest.raises(ValueError, match="identity mismatch"):

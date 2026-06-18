@@ -1,4 +1,4 @@
-"""Config switch planner for replacement forecast live-authority activation."""
+"""Config switch planner for replacement forecast live activation."""
 
 from __future__ import annotations
 
@@ -10,16 +10,16 @@ from typing import Any, Mapping
 from src.data.replacement_forecast_runtime_policy import (
     DIRECTION_FLIP_FLAG,
     KELLY_INCREASE_FLAG,
+    LIVE_FLAG,
     REQUIRED_FLAGS,
     ReplacementForecastCapitalObjectiveEvidence,
     ReplacementForecastPromotionEvidence,
-    TRADE_AUTHORITY_FLAG,
     resolve_replacement_forecast_runtime_policy,
 )
 
 
-TARGET_LIVE_AUTHORITY_FLAGS = {
-    TRADE_AUTHORITY_FLAG: True,
+TARGET_LIVE_FLAGS = {
+    LIVE_FLAG: True,
     KELLY_INCREASE_FLAG: True,
     DIRECTION_FLIP_FLAG: True,
 }
@@ -92,30 +92,30 @@ def _materialization_config(settings_payload: Mapping[str, Any]) -> Mapping[str,
 def build_replacement_forecast_config_switch_plan(
     settings_payload: Mapping[str, Any],
 ) -> ReplacementForecastConfigSwitchPlan:
-    """Compatibility entry point; plan the live-authority config change."""
+    """Compatibility entry point; plan the live config change."""
 
     return _build_replacement_forecast_config_switch_plan(
         settings_payload,
-        target_flags=TARGET_LIVE_AUTHORITY_FLAGS,
-        target_policy_status="LIVE_AUTHORITY",
+        target_flags=TARGET_LIVE_FLAGS,
+        target_policy_status="live",
         promotion_evidence=None,
         capital_objective_evidence=None,
         dangerous_flags_allowed=True,
     )
 
 
-def build_replacement_forecast_live_authority_config_switch_plan(
+def build_replacement_forecast_live_config_switch_plan(
     settings_payload: Mapping[str, Any],
     *,
     promotion_evidence: ReplacementForecastPromotionEvidence,
     capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> ReplacementForecastConfigSwitchPlan:
-    """Plan the direct new-data live-authority switch."""
+    """Plan the direct new-data live switch."""
 
     return _build_replacement_forecast_config_switch_plan(
         settings_payload,
-        target_flags=TARGET_LIVE_AUTHORITY_FLAGS,
-        target_policy_status="LIVE_AUTHORITY",
+        target_flags=TARGET_LIVE_FLAGS,
+        target_policy_status="live",
         promotion_evidence=promotion_evidence,
         capital_objective_evidence=capital_objective_evidence,
         dangerous_flags_allowed=True,
@@ -164,7 +164,7 @@ def _build_replacement_forecast_config_switch_plan(
         reasons.append(f"REPLACEMENT_CONFIG_TARGET_NOT_{target_policy_status}")
         reasons.extend(policy.reason_codes)
     if not dangerous_flags_allowed and (
-        target[TRADE_AUTHORITY_FLAG] or target[KELLY_INCREASE_FLAG] or target[DIRECTION_FLIP_FLAG]
+        target[LIVE_FLAG] or target[KELLY_INCREASE_FLAG] or target[DIRECTION_FLIP_FLAG]
     ):
         reasons.append("REPLACEMENT_CONFIG_DANGEROUS_TARGET_FLAG")
 
@@ -195,7 +195,7 @@ def _build_replacement_forecast_config_switch_plan(
     status = "READY" if not reasons else "BLOCKED"
     return ReplacementForecastConfigSwitchPlan(
         status=status,
-        reason_codes=tuple(dict.fromkeys(reasons or patch_notes or ["REPLACEMENT_CONFIG_LIVE_AUTHORITY_PATCH_READY"])),
+        reason_codes=tuple(dict.fromkeys(reasons or patch_notes or ["REPLACEMENT_CONFIG_LIVE_PATCH_READY"])),
         current_flags=current,
         target_flags=target,
         current_materialization_config=dict(materialization_config),
@@ -223,7 +223,7 @@ def apply_replacement_forecast_config_switch(settings_path: Path | str) -> Repla
     flags = payload.setdefault("feature_flags", {})
     if not isinstance(flags, dict):
         raise ValueError("feature_flags must be an object")
-    flags.update(TARGET_LIVE_AUTHORITY_FLAGS)
+    flags.update(TARGET_LIVE_FLAGS)
     materialization_config = payload.setdefault("replacement_forecast_live", {})
     if not isinstance(materialization_config, dict):
         raise ValueError("replacement_forecast_live must be an object")
@@ -232,7 +232,7 @@ def apply_replacement_forecast_config_switch(settings_path: Path | str) -> Repla
     return plan
 
 
-def apply_replacement_forecast_live_authority_config_switch(
+def apply_replacement_forecast_live_config_switch(
     settings_path: Path | str,
     *,
     promotion_evidence: ReplacementForecastPromotionEvidence,
@@ -242,7 +242,7 @@ def apply_replacement_forecast_live_authority_config_switch(
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("settings JSON must decode to an object")
-    plan = build_replacement_forecast_live_authority_config_switch_plan(
+    plan = build_replacement_forecast_live_config_switch_plan(
         payload,
         promotion_evidence=promotion_evidence,
         capital_objective_evidence=capital_objective_evidence,
@@ -252,7 +252,7 @@ def apply_replacement_forecast_live_authority_config_switch(
     flags = payload.setdefault("feature_flags", {})
     if not isinstance(flags, dict):
         raise ValueError("feature_flags must be an object")
-    flags.update(TARGET_LIVE_AUTHORITY_FLAGS)
+    flags.update(TARGET_LIVE_FLAGS)
     materialization_config = payload.setdefault("replacement_forecast_live", {})
     if not isinstance(materialization_config, dict):
         raise ValueError("replacement_forecast_live must be an object")

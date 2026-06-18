@@ -33,9 +33,9 @@ Field sources of truth (derived from the ACTUAL consumers, not invented):
   ``src.data.replacement_forecast_materialization_request_builder``
   ``.build_replacement_forecast_materialization_request`` (its output is the
   exact JSON ``scripts/materialize_replacement_forecast_shadow.py`` consumes),
-  combined with the queue's pre-spawn poison-pill gate
-  (``temperature_metric``, ``target_date``, ``source_cycle_time`` plus one
-  AIFS input selector are accessed immediately by the subprocess).
+	  combined with the queue's pre-spawn poison-pill gate
+	  (``temperature_metric``, ``target_date``, ``source_cycle_time`` are
+	  accessed immediately by the subprocess).
 
 * ``MATERIALIZATION_SEED`` — the seed the request builder consumes.
   Authority: the seed dict assembled by
@@ -56,7 +56,7 @@ Each contract exposes:
   ``ContractViolation`` with a precise, field-naming message on any violation.
 
 The validators are deliberately *structural* — they check presence, type, and
-the one-of AIFS-input rule, NOT the deep domain invariants (timezone-awareness
+	structural request shape, NOT the deep domain invariants (timezone-awareness
 of timestamps, precision-guard passability, bin-family completeness) that the
 producer builders already enforce and that require DB / artifact context. The
 contract is the producer⇄consumer compatibility boundary, not a re-run of the
@@ -244,7 +244,6 @@ _SEED_REQUIRED_TEXT_KEYS: tuple[str, ...] = (
     "temperature_metric",
     "computed_at",
     "baseline_source_run_id",
-    # AIFS DROPPED (operator directive 2026-06-17): aifs_source_run_id is no longer hard-required.
     "openmeteo_source_run_id",
     "openmeteo_payload_json",
     "precision_metadata_json",
@@ -256,10 +255,6 @@ _SEED_OPTIONAL_TEXT_KEYS: tuple[str, ...] = (
     "expires_at",
     "baseline_data_version",
     "baseline_source_available_at",
-    # AIFS DROPPED (operator directive 2026-06-17): AIFS source-run id / available-at are optional
-    # cross-check provenance now, validated for type IF present, never required.
-    "aifs_source_run_id",
-    "aifs_source_available_at",
     "openmeteo_source_available_at",
 )
 _SEED_OPTIONAL_NUMBER_KEYS: tuple[str, ...] = (
@@ -283,19 +278,15 @@ class MaterializationSeed:
     temperature_metric: str
     computed_at: str
     baseline_source_run_id: str
-    aifs_source_run_id: str
     openmeteo_source_run_id: str
     openmeteo_payload_json: str
     precision_metadata_json: str
     bins: tuple[Mapping[str, object], ...]
-    aifs_input_key: str
-    aifs_input_value: str
     city_timezone: str = ""
     source_cycle_time: str = ""
     expires_at: str = ""
     baseline_data_version: str = ""
     baseline_source_available_at: str = ""
-    aifs_source_available_at: str = ""
     openmeteo_source_available_at: str = ""
     anchor_weight: float | None = None
     anchor_sigma_c: float | None = None
@@ -318,28 +309,6 @@ def _validate_bins(
         if not str(row.get("bin_id") or "").strip():
             raise ContractViolation(kind, schema_version, f"bins[{index}] missing bin_id")
     return tuple(dict(row) for row in rows)
-
-
-def _validate_aifs_input(
-    payload: Mapping[str, object],
-    *,
-    kind: str,
-    schema_version: str,
-) -> tuple[str, str]:
-    """AIFS-input selector (one-of), now OPTIONAL.
-
-    AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): AIFS is no longer fetched, so a
-    seed/request no longer REQUIRES an aifs_samples_json / aifs_grib_path selector. When one IS
-    present (transition / archived runs) it is validated and threaded through as cross-check
-    provenance; when ABSENT this returns ("", "") (the materializer materializes the fused Normal
-    with aifs_extraction=None). ``kind`` / ``schema_version`` retained for signature stability.
-    """
-    del kind, schema_version  # no longer used (absence is allowed, not a violation)
-    for key in ("aifs_samples_json", "aifs_grib_path"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return key, value.strip()
-    return "", ""
 
 
 def validate_materialization_seed(payload: Mapping[str, object]) -> MaterializationSeed:
@@ -373,26 +342,21 @@ def validate_materialization_seed(payload: Mapping[str, object]) -> Materializat
             detail_parts.append("bad_type=" + ",".join(sorted(bad_type)))
         raise ContractViolation(kind, sv, "; ".join(detail_parts))
     bins = _validate_bins(payload, kind=kind, schema_version=sv)
-    aifs_input_key, aifs_input_value = _validate_aifs_input(payload, kind=kind, schema_version=sv)
     return MaterializationSeed(
         city=text_values["city"],
         target_date=text_values["target_date"],
         temperature_metric=metric,
         computed_at=text_values["computed_at"],
         baseline_source_run_id=text_values["baseline_source_run_id"],
-        aifs_source_run_id=optional_text["aifs_source_run_id"],
         openmeteo_source_run_id=text_values["openmeteo_source_run_id"],
         openmeteo_payload_json=text_values["openmeteo_payload_json"],
         precision_metadata_json=text_values["precision_metadata_json"],
         bins=bins,
-        aifs_input_key=aifs_input_key,
-        aifs_input_value=aifs_input_value,
         city_timezone=optional_text["city_timezone"],
         source_cycle_time=optional_text["source_cycle_time"],
         expires_at=optional_text["expires_at"],
         baseline_data_version=optional_text["baseline_data_version"],
         baseline_source_available_at=optional_text["baseline_source_available_at"],
-        aifs_source_available_at=optional_text["aifs_source_available_at"],
         openmeteo_source_available_at=optional_text["openmeteo_source_available_at"],
         anchor_weight=number_values["anchor_weight"],
         anchor_sigma_c=number_values["anchor_sigma_c"],
@@ -413,8 +377,7 @@ MATERIALIZATION_REQUEST_SCHEMA_VERSION = "1"
 #   * CONSUMER gate (the queue, pre-spawn): the materializer subprocess
 #     (scripts/materialize_replacement_forecast_shadow.py:163-165, then
 #     173/178/197) accesses ONLY these keys as a hard, immediate top-level
-#     read before any work: temperature_metric, target_date, source_cycle_time,
-#     and one AIFS-input selector (aifs_samples_json | aifs_grib_path). A file
+    #     read before any work: temperature_metric, target_date, source_cycle_time. A file
 #     carrying those is RUNNABLE; a file missing any of them KeyError-crashes
 #     the subprocess. So the consumer contract's HARD-REQUIRED set is exactly
 #     that minimal-runnable set — no more. The scout stub
@@ -447,8 +410,6 @@ _REQUEST_OPTIONAL_TEXT_KEYS: tuple[str, ...] = (
     "baseline_source_run_id",
     "baseline_data_version",
     "baseline_source_available_at",
-    "aifs_source_run_id",
-    "aifs_source_available_at",
     "openmeteo_source_run_id",
     "openmeteo_source_available_at",
     "openmeteo_payload_json",
@@ -474,8 +435,6 @@ class MaterializationRequest:
     temperature_metric: str
     target_date: str
     source_cycle_time: str
-    aifs_input_key: str
-    aifs_input_value: str
     city: str = ""
     city_id: str = ""
     city_timezone: str = ""
@@ -484,8 +443,6 @@ class MaterializationRequest:
     baseline_source_run_id: str = ""
     baseline_data_version: str = ""
     baseline_source_available_at: str = ""
-    aifs_source_run_id: str = ""
-    aifs_source_available_at: str = ""
     openmeteo_source_run_id: str = ""
     openmeteo_source_available_at: str = ""
     openmeteo_payload_json: str = ""
@@ -541,13 +498,10 @@ def validate_materialization_request(payload: Mapping[str, object]) -> Materiali
     bins: tuple[Mapping[str, object], ...] = ()
     if payload.get("bins") is not None:
         bins = _validate_bins(payload, kind=kind, schema_version=sv)
-    aifs_input_key, aifs_input_value = _validate_aifs_input(payload, kind=kind, schema_version=sv)
     return MaterializationRequest(
         temperature_metric=metric,
         target_date=text_values["target_date"],
         source_cycle_time=text_values["source_cycle_time"],
-        aifs_input_key=aifs_input_key,
-        aifs_input_value=aifs_input_value,
         city=optional_text["city"],
         city_id=optional_text["city_id"],
         city_timezone=optional_text["city_timezone"],
@@ -556,8 +510,6 @@ def validate_materialization_request(payload: Mapping[str, object]) -> Materiali
         baseline_source_run_id=optional_text["baseline_source_run_id"],
         baseline_data_version=optional_text["baseline_data_version"],
         baseline_source_available_at=optional_text["baseline_source_available_at"],
-        aifs_source_run_id=optional_text["aifs_source_run_id"],
-        aifs_source_available_at=optional_text["aifs_source_available_at"],
         openmeteo_source_run_id=optional_text["openmeteo_source_run_id"],
         openmeteo_source_available_at=optional_text["openmeteo_source_available_at"],
         openmeteo_payload_json=optional_text["openmeteo_payload_json"],

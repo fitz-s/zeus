@@ -2798,20 +2798,23 @@ def test_replacement_live_authority_direction_rebinds_to_sibling_proof():
 
 
 def test_replacement_live_authority_same_direction_replaces_receipt_probability(monkeypatch):
-    from src.engine.replacement_forecast_reactor_hook import ReplacementForecastReactorHookResult
+    from src.engine.replacement_forecast_reactor_hook import (
+        REPLACEMENT_EXECUTION_LIVE_STATUS,
+        ReplacementForecastReactorHookResult,
+    )
 
     monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
 
     class _ReplacementProvenance:
         def as_dict(self):
             return {
-                "trade_authority_status": "LIVE_AUTHORITY",
+                "runtime_layer": "live",
                 "source_id": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
             }
 
     def _live_authority_hook(proof, event, decision_time):
         return ReplacementForecastReactorHookResult(
-            status="LIVE_AUTHORITY",
+            status=REPLACEMENT_EXECUTION_LIVE_STATUS,
             reason_codes=("test-live-authority",),
             effective_direction=proof.direction,
             effective_q_posterior=0.82,
@@ -2834,7 +2837,7 @@ def test_replacement_live_authority_same_direction_replaces_receipt_probability(
     assert receipt.trade_score is not None
     assert receipt.trade_score > 0.0
     assert receipt.replacement_forecast is not None
-    assert receipt.replacement_forecast["trade_authority_status"] == "LIVE_AUTHORITY"
+    assert receipt.replacement_forecast["runtime_layer"] == "live"
 
 
 def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypatch):

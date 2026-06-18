@@ -1,4 +1,4 @@
-"""Dry-run gate for replacement forecast simple-switch readiness."""
+"""Dry-run gate for replacement forecast live readiness."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from src.data.replacement_forecast_runtime_policy import REQUIRED_FLAGS, resolve
 from src.state.db import _connect, list_sqlite_tables_and_views_read_only
 
 
-OPTIONAL_DEPENDENCIES = ("requests", "ecmwf.opendata", "eccodes")
+OPTIONAL_DEPENDENCIES = ("requests",)
 
 
 @dataclass(frozen=True)
@@ -155,23 +155,29 @@ def _replacement_materialization_inventory(forecast_db: Path) -> tuple[int, int,
             latest_posterior: Mapping[str, object] | None = None
             latest_decision: Mapping[str, object] | None = None
             if "forecast_posteriors" in tables:
+                posterior_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
+                }
+                if "runtime_layer" not in posterior_columns:
+                    return 0, decision_count, None, latest_decision
                 posterior_count = int(
                     conn.execute(
                         """
                         SELECT COUNT(*)
                         FROM forecast_posteriors
-                        WHERE source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
-                          AND trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY')
+                        WHERE source_id = 'openmeteo_ecmwf_ifs9_bayes_fusion'
+                          AND runtime_layer = 'live'
                         """
                     ).fetchone()[0]
                 )
                 row = conn.execute(
                     """
                     SELECT posterior_id, city, target_date, temperature_metric, data_version,
-                           trade_authority_status, training_allowed, computed_at
+                           runtime_layer, training_allowed, computed_at
                     FROM forecast_posteriors
-                    WHERE source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
-                      AND trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY')
+                    WHERE source_id = 'openmeteo_ecmwf_ifs9_bayes_fusion'
+                      AND runtime_layer = 'live'
                     ORDER BY posterior_id DESC
                     LIMIT 1
                     """
@@ -193,7 +199,6 @@ def _replacement_materialization_inventory(forecast_db: Path) -> tuple[int, int,
                         "temperature_metric",
                         "baseline_direction",
                         "allowed_direction",
-                        "trade_authority_status",
                         "recorded_at",
                     )
                     if column in decision_columns
@@ -215,7 +220,7 @@ def _replacement_materialization_inventory(forecast_db: Path) -> tuple[int, int,
 
 
 def _raw_artifact_lineage_inventory(forecast_db: Path, *, assume_available: bool) -> tuple[str, Mapping[str, int]]:
-    required_sources = ("openmeteo_ecmwf_ifs_9km", "ecmwf_aifs_ens")
+    required_sources = ("openmeteo_ecmwf_ifs_9km",)
     empty_counts = {source_id: 0 for source_id in required_sources}
     if assume_available:
         return "ASSUMED_READY", empty_counts
@@ -239,7 +244,7 @@ def _raw_artifact_lineage_inventory(forecast_db: Path, *, assume_available: bool
                 """
                 SELECT source_id, COUNT(*) AS count
                 FROM raw_forecast_artifacts
-                WHERE source_id IN ('openmeteo_ecmwf_ifs_9km', 'ecmwf_aifs_ens')
+                WHERE source_id IN ('openmeteo_ecmwf_ifs_9km')
                   AND source_available_at IS NOT NULL
                   AND source_available_at != ''
                   AND artifact_path IS NOT NULL
@@ -265,10 +270,6 @@ def _latest_readiness_artifact_inventory(
     latest_posterior: Mapping[str, object] | None,
     assume_available: bool,
 ) -> tuple[str, Mapping[str, int]]:
-    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): the live readiness artifact inventory
-    # no longer requires an aifs_sampled_2t dependency role — the materializer no longer emits one, so
-    # requiring it here would report MISSING_DEPENDENCY_ROLE for every drop-AIFS posterior. Only the
-    # OM9 anchor leg is inventoried (the baseline + fused rows are validated elsewhere).
     required_roles = ("openmeteo_ifs9_anchor",)
     empty_counts = {role: 0 for role in required_roles}
     if assume_available:
@@ -306,7 +307,7 @@ def _latest_readiness_artifact_inventory(
                     """
                     SELECT dependency_json, provenance_json
                     FROM readiness_state
-                    WHERE strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
+                    WHERE strategy_key = 'openmeteo_ecmwf_ifs9_bayes_fusion'
                       AND city = ?
                       AND target_local_date = ?
                       AND temperature_metric = ?
@@ -319,7 +320,7 @@ def _latest_readiness_artifact_inventory(
                 """
                 SELECT dependency_json, provenance_json
                 FROM readiness_state
-                WHERE strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
+                WHERE strategy_key = 'openmeteo_ecmwf_ifs9_bayes_fusion'
                 ORDER BY computed_at DESC, recorded_at DESC
                 """
             ).fetchall()
@@ -511,10 +512,9 @@ def build_replacement_forecast_live_dry_run_report(
         raise TypeError("request must be ReplacementForecastLiveDryRunInput")
     root = Path(request.root)
     flags = {key: bool(request.runtime_flags.get(key, False)) for key in REQUIRED_FLAGS}
-    # The resolver ignores the old promotion / capital-objective evidence objects and
-    # resolves the same flag-derived policy.status as the live daemon. That policy is
-    # necessary but not sufficient for live trading: the materialized posterior row must
-    # also be row-level LIVE_AUTHORITY with fused q and certified bootstrap bounds.
+    # The resolver mirrors the live daemon. That policy is necessary but not sufficient:
+    # the materialized posterior row must also be runtime_layer='live' with fused q and
+    # certified bootstrap bounds.
     policy = resolve_replacement_forecast_runtime_policy(
         flags,
         promotion_evidence=None,
@@ -572,7 +572,7 @@ def build_replacement_forecast_live_dry_run_report(
     current_target_coverage_status, current_target_coverage_counts, current_target_coverage_missing_examples = (
         _current_target_coverage_inventory(forecast_db)
     )
-    switch_surface_ready = live_switch.simple_switch_ready or live_switch.live_authority_ready
+    switch_surface_ready = live_switch.simple_switch_ready or live_switch.live_ready
     reasons = list(live_switch.reason_codes if not switch_surface_ready else ())
     if refit_handoff_status.startswith("INVALID:"):
         reasons.append("REPLACEMENT_DRY_RUN_REFIT_HANDOFF_INVALID")
@@ -596,10 +596,6 @@ def build_replacement_forecast_live_dry_run_report(
         reasons.append("REPLACEMENT_DRY_RUN_CURRENT_TARGET_COVERAGE_NOT_READY")
     if "requests" in dependencies and dependencies.get("requests") != "OK":
         reasons.append("REPLACEMENT_DRY_RUN_OPENMETEO_REQUESTS_MISSING")
-    if "eccodes" in dependencies and dependencies.get("eccodes") != "OK":
-        reasons.append("REPLACEMENT_DRY_RUN_AIFS_GRIB_DECODER_MISSING")
-    if "ecmwf.opendata" in dependencies and dependencies.get("ecmwf.opendata") != "OK":
-        reasons.append("REPLACEMENT_DRY_RUN_AIFS_DOWNLOAD_CLIENT_MISSING")
     status = "DRY_RUN_READY" if not reasons else "BLOCKED"
     return ReplacementForecastLiveDryRunReport(
         status=status,

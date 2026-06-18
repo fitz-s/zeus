@@ -171,14 +171,11 @@ def build_replacement_forecast_materialization_seed(
     temperature_metric: str,
     market_bins: Sequence[Mapping[str, object]],
     baseline_coverage: Mapping[str, object],
-    aifs_manifest: RawForecastArtifactManifest,
     openmeteo_manifest: RawForecastArtifactManifest,
     openmeteo_payload_json: Path | str,
     precision_metadata_json: Path | str,
     computed_at: datetime | str,
     base_dir: Path | str,
-    aifs_samples_json: Path | str | None = None,
-    aifs_grib_path: Path | str | None = None,
     expires_at: datetime | str | None = None,
     anchor_weight: float = 0.80,
     anchor_sigma_c: float = 3.00,
@@ -204,8 +201,6 @@ def build_replacement_forecast_materialization_seed(
         reasons.append("BASELINE_COVERAGE_DATA_VERSION_MISMATCH")
     if baseline_coverage.get("temperature_metric") != metric:
         reasons.append("BASELINE_COVERAGE_METRIC_MISMATCH")
-    if aifs_manifest.source_id != expected["aifs_sampled_2t"].source_id or aifs_manifest.data_version != expected["aifs_sampled_2t"].data_version:
-        reasons.append("AIFS_MANIFEST_IDENTITY_MISMATCH")
     if openmeteo_manifest.source_id != expected["openmeteo_ifs9_anchor"].source_id or openmeteo_manifest.data_version != expected["openmeteo_ifs9_anchor"].data_version:
         reasons.append("OPENMETEO_MANIFEST_IDENTITY_MISMATCH")
     if reasons:
@@ -217,22 +212,14 @@ def build_replacement_forecast_materialization_seed(
         baseline_coverage.get("source_available_at") or baseline_coverage.get("computed_at"),
         field_name="baseline_source_available_at",
     )
-    if max(baseline_available, aifs_manifest.source_available_at, openmeteo_manifest.source_available_at) > computed:
+    if max(baseline_available, openmeteo_manifest.source_available_at) > computed:
         return ReplacementForecastMaterializationSeedResult(
             status="BLOCKED",
             reason_codes=("REPLACEMENT_MATERIALIZATION_SEED_HAS_FUTURE_DEPENDENCY",),
             seed=None,
         )
-    if aifs_manifest.source_cycle_time != openmeteo_manifest.source_cycle_time:
-        return ReplacementForecastMaterializationSeedResult(
-            status="BLOCKED",
-            reason_codes=("REPLACEMENT_MATERIALIZATION_SEED_AIFS_OM9_CYCLE_MISMATCH",),
-            seed=None,
-        )
-    source_cycle_time = aifs_manifest.source_cycle_time
+    source_cycle_time = openmeteo_manifest.source_cycle_time
     expiry = _dt(expires_at, field_name="expires_at") if expires_at is not None else computed + timedelta(hours=3)
-    if aifs_samples_json is None and aifs_grib_path is None:
-        raise ValueError("aifs_samples_json or aifs_grib_path is required")
 
     seed = {
         "city": city_name,
@@ -248,8 +235,6 @@ def build_replacement_forecast_materialization_seed(
         "baseline_completeness_status": str(baseline_coverage.get("completeness_status") or ""),
         "baseline_readiness_status": str(baseline_coverage.get("readiness_status") or ""),
         "baseline_source_available_at": baseline_available.isoformat(),
-        "aifs_source_run_id": _manifest_source_run_id(aifs_manifest, role="aifs"),
-        "aifs_source_available_at": aifs_manifest.source_available_at.isoformat(),
         "openmeteo_source_run_id": _manifest_source_run_id(openmeteo_manifest, role="openmeteo"),
         "openmeteo_source_available_at": openmeteo_manifest.source_available_at.isoformat(),
         "anchor_weight": float(anchor_weight),
@@ -262,21 +247,13 @@ def build_replacement_forecast_materialization_seed(
         ),
         "openmeteo_payload_json": _relative_or_absolute(Path(openmeteo_payload_json), base_dir=base_path),
         "precision_metadata_json": _relative_or_absolute(Path(precision_metadata_json), base_dir=base_path),
-        "aifs_artifact_id": aifs_manifest.product_metadata.get("artifact_id"),
         "openmeteo_anchor_artifact_id": openmeteo_manifest.product_metadata.get("artifact_id"),
-        "aifs_manifest_json": _relative_or_absolute(Path(str(aifs_manifest.product_metadata.get("manifest_json") or "")), base_dir=base_path)
-        if aifs_manifest.product_metadata.get("manifest_json")
-        else None,
         "openmeteo_manifest_json": _relative_or_absolute(Path(str(openmeteo_manifest.product_metadata.get("manifest_json") or "")), base_dir=base_path)
         if openmeteo_manifest.product_metadata.get("manifest_json")
         else None,
         "latitude": getattr(city_config, "lat", None),
         "longitude": getattr(city_config, "lon", None),
     }
-    if aifs_samples_json is not None:
-        seed["aifs_samples_json"] = _relative_or_absolute(Path(aifs_samples_json), base_dir=base_path)
-    if aifs_grib_path is not None:
-        seed["aifs_grib_path"] = _relative_or_absolute(Path(aifs_grib_path), base_dir=base_path)
     final_seed = {key: value for key, value in seed.items() if value is not None}
     # BOUNDARY CONTRACT (2026-06-10): validate the assembled seed against the
     # shared producer⇄consumer schema BEFORE returning it READY. A seed that

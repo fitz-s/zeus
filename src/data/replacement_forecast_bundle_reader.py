@@ -14,11 +14,13 @@ from typing import Any, Mapping
 from src.config import cities_by_name
 from src.data.replacement_forecast_cycle_policy import (
     REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT,
-    classify_cycle_phase,
     cycle_age_exceeds_bound,
     replacement_source_cycle_max_age_hours,
 )
 from src.data.replacement_forecast_readiness import (
+    HIGH_DATA_VERSION,
+    LIVE_RUNTIME_LAYER,
+    LOW_DATA_VERSION,
     PRODUCT_ID,
     READY_STATUS,
     SOURCE_ID,
@@ -26,8 +28,6 @@ from src.data.replacement_forecast_readiness import (
 )
 
 
-HIGH_DATA_VERSION = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1"
-LOW_DATA_VERSION = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_low_v1"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
 # Operator clobber-category directive 2026-06-10 — live-latest read semantics.
@@ -35,19 +35,19 @@ _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 # instruments yet materializes a bounds-less posterior (q_lcb_json NULL,
 # replacement_q_mode=BAYES_PRECISION_FUSION_CAPTURE_MISSING — a diagnostic row). The
 # absolute-latest read semantics (ORDER BY computed_at DESC) must not serve that diagnostic row over
-# the still-current live-authority FUSED row, collapsing live eligibility for the whole scope.
+# the still-current live FUSED row, collapsing live eligibility for the whole scope.
 # This is the THIRD recurrence; the seed-coverage antibody only fixed the masking side.
 #
-# A posterior is LIVE-AUTHORITY-GRADE iff the row itself is stamped LIVE_AUTHORITY,
+# A posterior is live-grade iff the row itself is in runtime_layer == "live",
 # carries certified bounds (q_lcb_json/q_ucb_json NOT NULL), and its provenance
 # replacement_q_mode is one of the fused-Normal modes. Mirrored here so LIVE
-# selection can prefer the latest live-authority row WITHOUT importing the adapter
+# selection can prefer the latest live row WITHOUT importing the adapter
 # (no cycle); the constant set is asserted equal in a relationship test.
 _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset({"FUSED_NORMAL_FULL", "FUSED_NORMAL_PARTIAL"})
 
 # H3 (REAUDIT_0_1.md §2): fail-closed staleness horizon. ``readiness.expires_at``
 # was loaded but NEVER compared to decision_time; a forecast cycle this many hours
-# (or older) before the decision is treated as DEAD and refused live authority. The
+# (or older) before the decision is treated as stale. The
 # horizon + its env override now live in src/data/replacement_forecast_cycle_policy.py
 # (single source of truth shared with the materialization-side fail-closed gate).
 # Re-exported here for backward compatibility with existing imports.
@@ -55,23 +55,6 @@ _replacement_source_cycle_max_age_hours = replacement_source_cycle_max_age_hours
 
 
 logger = logging.getLogger("zeus.replacement_forecast_bundle_reader")
-
-_REPLACEMENT_INTERMEDIATE_CYCLE_LIVE_FLAG = "replacement_0_1_intermediate_cycle_live_admission_enabled"
-
-
-def _replacement_intermediate_cycle_live_admission_enabled() -> bool:
-    """Whether intermediate-phase (06/18Z) posteriors may be admitted LIVE. Default FALSE.
-
-    Fail-closed: any config error -> False. The operator promotes this only after a
-    settlement-graded synoptic-vs-intermediate skill comparison; until then 06/18Z posteriors
-    are excluded from live authority.
-    """
-    try:
-        from src.config import settings  # noqa: PLC0415
-
-        return bool(settings["edli"].get(_REPLACEMENT_INTERMEDIATE_CYCLE_LIVE_FLAG, False))
-    except Exception:
-        return False
 
 
 @dataclass(frozen=True)
@@ -101,7 +84,7 @@ class ReplacementForecastPosteriorBundle:
         for field_name, value in (("source_id", self.source_id), ("product_id", self.product_id), ("data_version", self.data_version)):
             if _FORBIDDEN_TRANSCRIPT_ALIAS in value.lower():
                 raise ValueError(f"{field_name} must use full product identity")
-        if self.runtime_layer != "live":
+        if self.runtime_layer != LIVE_RUNTIME_LAYER:
             raise ValueError("replacement posterior bundle requires runtime_layer=live")
         _normalize_probability_map(self.q, field_name="q")
         if self.q_lcb is not None:
@@ -208,10 +191,8 @@ def _dependency_source_run_mismatch(
     readiness: ReplacementForecastReadinessDecision,
     posterior_dependency_json: Mapping[str, Any],
 ) -> bool:
-    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): the AIFS leg is no longer a required
-    # dependency role for the source-run-id consistency check. The fused posterior depends on the
-    # baseline + OM9 anchor + multi-model fusion rows, not AIFS; a posterior is no longer born with an
-    # aifs_sampled_2t dependency, so requiring it here would reject every drop-AIFS row.
+    # The live fused posterior depends on baseline + OM9 anchor + multi-model fusion rows.
+    # Do not require deprecated ensemble roles for source-run-id consistency.
     for role in ("baseline_b0", "openmeteo_ifs9_anchor"):
         readiness_dependency = _readiness_dependency_by_role(readiness, role)
         if readiness_dependency is None:
@@ -236,9 +217,9 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
-def _row_is_live_authority_grade(row_map: Mapping[str, Any]) -> bool:
+def _row_is_live_grade(row_map: Mapping[str, Any]) -> bool:
     """A posterior row is executable iff it is live and has the certified live q carrier."""
-    if str(row_map.get("runtime_layer") or "") != "live":
+    if str(row_map.get("runtime_layer") or "") != LIVE_RUNTIME_LAYER:
         return False
     if not row_map.get("q_lcb_json"):
         return False
@@ -514,19 +495,19 @@ def read_replacement_forecast_bundle(
     # (2026-06-11T12:00Z: every bucket-whitelist-excluded city died hours before its 00Z
     # replacement could structurally exist). The bound's job is to PURSUE fresher data
     # (downloads / polls / re-seeds key off it, unchanged) and to BRAND age honestly —
-    # never to refuse the freshest live-authority row that exists. Expiry is recorded as a provenance
+    # never to refuse the freshest live row that exists. Expiry is recorded as a provenance
     # staleness violation on the served bundle (observable, alarm-able) instead of a
-    # block. Selection below serves the freshest live-authority-grade row by construction, so
+    # block. Selection below serves the freshest live-grade row by construction, so
     # the served row is always the best available.
     staleness_violations: list[str] = []
     if readiness.expires_at is not None and readiness.expires_at <= decision_utc:
         staleness_violations.append(
-            "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED:"
+            "REPLACEMENT_LIVE_READINESS_EXPIRED:"
             f"expires_at={readiness.expires_at.isoformat()}"
         )
         logger.warning(
             "serve-freshest-available: readiness expired for %s %s %s "
-            "(expires_at=%s <= decision=%s) — serving freshest live-authority row with "
+            "(expires_at=%s <= decision=%s) — serving freshest live row with "
             "staleness brand instead of going dark",
             city,
             target_date_text,
@@ -546,11 +527,11 @@ def read_replacement_forecast_bundle(
           AND product_id = ?
           AND data_version = ?
           AND training_allowed = 0
-          AND runtime_layer = 'live'
+          AND runtime_layer = ?
         ORDER BY computed_at DESC, posterior_id DESC
         LIMIT 16
         """,
-        (city, target_date_text, metric, SOURCE_ID, PRODUCT_ID, data_version),
+        (city, target_date_text, metric, SOURCE_ID, PRODUCT_ID, data_version, LIVE_RUNTIME_LAYER),
     ).fetchall()
     if not candidate_rows:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_MISSING")
@@ -558,7 +539,7 @@ def read_replacement_forecast_bundle(
     live_row_map: dict | None = None
     for candidate in candidate_rows:
         candidate_map = dict(candidate)
-        if _row_is_live_authority_grade(candidate_map):
+        if _row_is_live_grade(candidate_map):
             live_row_map = candidate_map
             break
     if live_row_map is None:
@@ -591,17 +572,17 @@ def read_replacement_forecast_bundle(
     _source_cycle_utc = _parse_utc(str(row_map["source_cycle_time"]), field_name="source_cycle_time")
     if cycle_age_exceeds_bound(decision_utc, _source_cycle_utc):
         # SERVE-FRESHEST-AVAILABLE (operator law — see the readiness-expiry brand above):
-        # the selected row IS the freshest live-authority row that exists for this scope; an
+        # the selected row IS the freshest live row that exists for this scope; an
         # over-bound age becomes a provenance brand + WARN, never darkness. The bound
         # keeps driving the download/re-seed pursuit unchanged.
         _age_hours = (decision_utc - _source_cycle_utc).total_seconds() / 3600.0
         staleness_violations.append(
-            "REPLACEMENT_0_1_LIVE_AUTHORITY_CYCLE_AGE_EXCEEDS_BOUND:"
+            "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND:"
             f"source_cycle={_source_cycle_utc.isoformat()}:age_hours={_age_hours:.1f}"
         )
         logger.warning(
             "serve-freshest-available: %s %s %s serving cycle %s aged %.1fh beyond the "
-            "staleness bound — freshest live-authority row that exists; branded, not blocked",
+            "staleness bound — freshest live row that exists; branded, not blocked",
             city,
             target_date_text,
             metric,
@@ -615,7 +596,7 @@ def read_replacement_forecast_bundle(
         # scope readiness was overwritten in place by the newer diagnostic cycle's materialization
         # (readiness_state upserts on scope_key — no cycle in the key), so it no longer points at
         # this row. The served row is self-certifying: it was materialized WITH its own READY
-        # readiness (a BAYES_PRECISION_FUSION/bounds-less row is never live-authority-grade), and it carries its own
+        # readiness (a BAYES_PRECISION_FUSION/bounds-less row is never live-grade), and it carries its own
         # immutable dependency_source_run_ids_json + identity hashes. We bind the bundle's
         # baseline_source_run_id to the served row's intrinsic baseline (not the overwritten
         # readiness's), and we DO NOT require the scope readiness to point at this posterior.
@@ -667,7 +648,7 @@ def read_replacement_forecast_bundle(
             "tradeable_latest_selection": {
                 "served_posterior_id": int(row_map["posterior_id"]),
                 "newer_diagnostic_posterior_id": _newer_diagnostic_posterior_id,
-                "reason": "newer_row_not_live_authority_grade_served_older_live_bounds",
+                "reason": "newer_row_not_live_grade_served_older_live_bounds",
             },
         }
     if staleness_violations:

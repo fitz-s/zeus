@@ -2,8 +2,8 @@
 
 This module is intentionally a read-model. It describes what the live runtime
 switch is allowed to read, what it must not write, and which evidence gates must
-be satisfied before the Open-Meteo ECMWF IFS 9km + AIFS sampled-2t path can
-carry live authority.
+be satisfied before the Open-Meteo ECMWF IFS 9km + Bayes fusion path can run
+in the live layer.
 """
 
 from __future__ import annotations
@@ -61,9 +61,8 @@ PROHIBITED_SIMPLE_SWITCH_WRITES = (
     "venue_commands",
 )
 REQUIRED_EVIDENCE_GATES = (
-    "runtime_policy_allows_live_authority",
+    "runtime_policy_allows_live",
     "baseline_executable_reader_ready",
-    "aifs_sampled_2t_source_run_ready",
     "openmeteo_ecmwf_ifs9_anchor_ready",
     "derived_posterior_available_before_decision",
     "same_clob_market_snapshot_bound",
@@ -129,15 +128,15 @@ class ReplacementForecastLiveSwitchReport:
     missing_evidence_gates: tuple[str, ...]
     proposed_forbidden_writes: tuple[str, ...]
     reversible: bool
-    live_trade_authority: bool
+    live_trade_enabled: bool
 
     @property
     def simple_switch_ready(self) -> bool:
         return self.status == "SIMPLE_SWITCH_READY"
 
     @property
-    def live_authority_ready(self) -> bool:
-        return self.status == "LIVE_AUTHORITY_READY"
+    def live_ready(self) -> bool:
+        return self.status == "live"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -154,8 +153,8 @@ class ReplacementForecastLiveSwitchReport:
             "proposed_forbidden_writes": list(self.proposed_forbidden_writes),
             "reversible": self.reversible,
             "simple_switch_ready": self.simple_switch_ready,
-            "live_authority_ready": self.live_authority_ready,
-            "live_trade_authority": self.live_trade_authority,
+            "live_ready": self.live_ready,
+            "live_trade_enabled": self.live_trade_enabled,
         }
 
 
@@ -223,7 +222,7 @@ def build_replacement_forecast_live_switch_report(
     if reasons:
         status = "BLOCKED"
     elif request.runtime_policy.can_initiate_trade:
-        status = "LIVE_AUTHORITY_READY"
+        status = "live"
     else:
         status = "SIMPLE_SWITCH_READY"
     return ReplacementForecastLiveSwitchReport(
@@ -231,7 +230,7 @@ def build_replacement_forecast_live_switch_report(
         reason_codes=tuple(
             reasons
             or (
-                ("REPLACEMENT_SWITCH_LIVE_AUTHORITY_READY",)
+                ("REPLACEMENT_SWITCH_LIVE_READY",)
                 if request.runtime_policy.can_initiate_trade
                 else ("REPLACEMENT_SWITCH_READ_ONLY_REVERSIBLE_READY",)
             )
@@ -246,7 +245,7 @@ def build_replacement_forecast_live_switch_report(
         missing_evidence_gates=missing_evidence,
         proposed_forbidden_writes=forbidden_writes,
         reversible=not forbidden_writes,
-        live_trade_authority=request.runtime_policy.can_initiate_trade,
+        live_trade_enabled=request.runtime_policy.can_initiate_trade,
     )
 
 

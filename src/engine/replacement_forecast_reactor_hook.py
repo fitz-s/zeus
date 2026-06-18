@@ -28,14 +28,14 @@ from src.data.replacement_forecast_readiness import ReplacementForecastReadiness
 from src.data.replacement_forecast_receipt_provenance import ReplacementForecastReceiptProvenance, build_replacement_forecast_receipt_provenance
 from src.data.replacement_forecast_runtime_policy import (
     BLOCKED_STATUS,
-    LIVE_AUTHORITY_STATUS,
+    LIVE_STATUS,
     ReplacementForecastRuntimePolicy,
     SAFE_DEFAULT_STATUS,
 )
 from src.data.replacement_forecast_switch_decision import (
     SWITCH_BLOCKED,
     SWITCH_DISABLED,
-    SWITCH_LIVE_AUTHORITY,
+    SWITCH_LIVE,
     ReplacementForecastSwitchDecision,
 )
 from src.engine.replacement_forecast_veto import ReplacementForecastVetoDecision
@@ -52,8 +52,7 @@ class _ExecutionLayerReceiptProvenance:
 
     def as_dict(self) -> dict[str, Any]:
         payload = self.inner.as_dict()
-        if payload.get("trade_authority_status") == LIVE_AUTHORITY_STATUS:
-            payload["trade_authority_status"] = REPLACEMENT_EXECUTION_LIVE_STATUS
+        payload["runtime_layer"] = REPLACEMENT_EXECUTION_LIVE_STATUS
         return payload
 
 
@@ -270,7 +269,7 @@ def _forecast_decision_payload(
         "condition_id": candidate.condition_id,
         "token_id": candidate.token_id,
         "decision_time": candidate.decision_time,
-        "trade_authority_status": status,
+        "runtime_layer": status,
     }
 
 
@@ -306,13 +305,13 @@ def apply_replacement_forecast_reactor_hook(
         return _no_change(candidate_view, status="BLOCKED", reason_codes=switch_decision.reason_codes)
     if policy.status == BLOCKED_STATUS:
         return _no_change(candidate_view, status="BLOCKED", reason_codes=policy.reason_codes)
-    if policy.status != LIVE_AUTHORITY_STATUS and (
+    if policy.status != LIVE_STATUS and (
         policy.can_initiate_trade or policy.can_increase_kelly or policy.can_flip_direction
     ):
         return _no_change(candidate_view, status="BLOCKED", reason_codes=("REPLACEMENT_REACTOR_POLICY_UNSUPPORTED",))
     if not (
-        policy.status == LIVE_AUTHORITY_STATUS
-        and switch_decision.status == SWITCH_LIVE_AUTHORITY
+        policy.status == LIVE_STATUS
+        and switch_decision.status == SWITCH_LIVE
         and switch_decision.can_initiate_trade
     ):
         return _no_change(candidate_view, status="BLOCKED", reason_codes=("REPLACEMENT_REACTOR_POLICY_UNSUPPORTED",))
@@ -349,8 +348,8 @@ def apply_replacement_forecast_reactor_hook(
     decision_payload = _forecast_decision_payload(
         replacement_bundle=replacement_bundle,
         candidate=candidate_view,
-        status="LIVE_AUTHORITY",
-        reasons=("REPLACEMENT_LIVE_AUTHORITY_APPLIED",),
+        status=REPLACEMENT_EXECUTION_LIVE_STATUS,
+        reasons=("REPLACEMENT_LIVE_APPLIED",),
     )
     live_receipt_provenance = _ExecutionLayerReceiptProvenance(
         build_replacement_forecast_receipt_provenance(
@@ -361,7 +360,7 @@ def apply_replacement_forecast_reactor_hook(
     )
     return ReplacementForecastReactorHookResult(
         status=REPLACEMENT_EXECUTION_LIVE_STATUS,
-        reason_codes=("REPLACEMENT_LIVE_AUTHORITY_APPLIED",),
+        reason_codes=("REPLACEMENT_LIVE_APPLIED",),
         effective_direction=candidate_view.candidate_direction,
         effective_q_posterior=candidate_view.candidate_q_posterior,
         effective_q_lcb=candidate_view.candidate_q_lcb,

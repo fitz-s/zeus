@@ -9,7 +9,7 @@ from src.data.replacement_forecast_readiness import READY_STATUS, ReplacementFor
 from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDecision
 from src.data.replacement_forecast_runtime_policy import (
     BLOCKED_STATUS,
-    LIVE_AUTHORITY_STATUS,
+    LIVE_STATUS,
     SAFE_DEFAULT_STATUS,
     ReplacementForecastCapitalObjectiveEvidence,
     ReplacementForecastRuntimePolicy,
@@ -18,7 +18,7 @@ from src.data.replacement_forecast_runtime_policy import (
 
 SWITCH_DISABLED = "DISABLED"
 SWITCH_BLOCKED = "BLOCKED"
-SWITCH_LIVE_AUTHORITY = "LIVE_AUTHORITY"
+SWITCH_LIVE = "live"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
 
@@ -60,12 +60,12 @@ class ReplacementForecastSwitchDecision:
     readiness_id: str | None
 
     def __post_init__(self) -> None:
-        if self.status not in {SWITCH_DISABLED, SWITCH_BLOCKED, SWITCH_LIVE_AUTHORITY}:
+        if self.status not in {SWITCH_DISABLED, SWITCH_BLOCKED, SWITCH_LIVE}:
             raise ValueError("invalid replacement switch decision status")
         for reason in self.reason_codes:
             _reject_alias(str(reason), field_name="reason_codes")
-        if self.status != SWITCH_LIVE_AUTHORITY and (self.can_initiate_trade or self.can_increase_kelly or self.can_flip_direction):
-            raise ValueError("only live-authority switch decisions can grant live trade authority")
+        if self.status != SWITCH_LIVE and (self.can_initiate_trade or self.can_increase_kelly or self.can_flip_direction):
+            raise ValueError("only live switch decisions can grant live trading")
     @property
     def blocked(self) -> bool:
         return self.status == SWITCH_BLOCKED
@@ -106,19 +106,15 @@ def evaluate_replacement_forecast_switch_decision(
             readiness_id=None,
         )
 
-    # Runtime-policy LIVE_AUTHORITY from the flag ladder is necessary for
-    # can_initiate_trade, but not sufficient to turn an arbitrary posterior row
-    # into live probability authority. The live bundle reader still requires a
-    # row-level LIVE_AUTHORITY carrier with fused q and certified bootstrap bounds.
     reasons: list[str] = []
     if policy.status == BLOCKED_STATUS:
         reasons.extend(policy.reason_codes)
     simple_switch_reasons = tuple(
         reason
         for reason in live_switch.reason_codes
-        if reason != "REPLACEMENT_SWITCH_TRADE_AUTHORITY_NOT_SIMPLE_SWITCH"
+        if reason != "REPLACEMENT_SWITCH_LIVE_NOT_SIMPLE_SWITCH"
     )
-    if simple_switch_reasons and live_switch.status not in {"SIMPLE_SWITCH_READY", "LIVE_AUTHORITY_READY"}:
+    if simple_switch_reasons and live_switch.status not in {"SIMPLE_SWITCH_READY", "live"}:
         reasons.extend(simple_switch_reasons)
     if readiness is None:
         reasons.append("REPLACEMENT_SWITCH_READINESS_MISSING")
@@ -137,10 +133,10 @@ def evaluate_replacement_forecast_switch_decision(
             readiness_id=getattr(readiness, "readiness_id", None),
         )
 
-    if policy.status == LIVE_AUTHORITY_STATUS:
+    if policy.status == LIVE_STATUS:
         return ReplacementForecastSwitchDecision(
-            status=SWITCH_LIVE_AUTHORITY,
-            reason_codes=("REPLACEMENT_SWITCH_LIVE_AUTHORITY_ADMITTED",),
+            status=SWITCH_LIVE,
+            reason_codes=("REPLACEMENT_SWITCH_LIVE_ADMITTED",),
             can_read_live_posterior=True,
             can_apply_reactor_hook=True,
             can_initiate_trade=policy.can_initiate_trade,

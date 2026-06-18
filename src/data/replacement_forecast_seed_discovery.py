@@ -205,8 +205,8 @@ def _candidate_targets(
         # TRADEABLE-GRADE COVERAGE (2026-06-11, third site of the 2026-06-10 K-decision;
         # basis-predicate fix 2026-06-12): only a CERTIFIED-bootstrap-bounded posterior counts as
         # coverage. The old proxy `p.q_lcb_json IS NOT NULL` broke once the soft-anchor path began
-        # carrying a promoted Wilson q_lcb (basis="wilson_aifs_member_votes") instead of NULL — a
-        # CAPTURE_MISSING row would then mask its own fusion repair (the mask-and-starve category).
+        # carrying non-certified q_lcb instead of NULL — a CAPTURE_MISSING row would then mask
+        # its own fusion repair (the mask-and-starve category).
         # Now keyed on the certified bootstrap basis. Single authority: cycle_policy. Same clause as
         # the queue antibody and the plan builder.
         _tradeable = tradeable_grade_coverage_sql(
@@ -217,19 +217,19 @@ def _candidate_targets(
               NOT EXISTS (
                   SELECT 1
                   FROM forecast_posteriors p
-                  WHERE p.source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
+                  WHERE p.source_id = 'openmeteo_ecmwf_ifs9_bayes_fusion'
                     AND p.city = c.city
                     AND p.target_date = c.target_local_date
                     AND p.temperature_metric = c.temperature_metric
                     AND p.training_allowed = 0
-                    AND p.trade_authority_status = 'LIVE_AUTHORITY'
+                    AND p.runtime_layer = 'live'
                     {_tradeable}
                     AND json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = c.source_run_id
               )
               OR NOT EXISTS (
                   SELECT 1
                   FROM readiness_state r
-                  WHERE r.strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
+                  WHERE r.strategy_key = 'openmeteo_ecmwf_ifs9_bayes_fusion'
                     AND json_extract(r.provenance_json, '$.city') = c.city
                     AND json_extract(r.provenance_json, '$.target_date') = c.target_local_date
                     AND json_extract(r.provenance_json, '$.temperature_metric') = c.temperature_metric
@@ -382,13 +382,6 @@ def discover_replacement_forecast_materialization_seeds(
             metric = str(target["temperature_metric"])
             target_key = f"{city}|{target_date}|{metric}"
             expected = expected_replacement_dependency_identity_by_role(metric)
-            aifs = _latest_manifest(
-                manifests,
-                source_id=expected["aifs_sampled_2t"].source_id,
-                data_version=expected["aifs_sampled_2t"].data_version,
-                city=city,
-                target_date=target_date,
-            )
             openmeteo = _latest_manifest(
                 manifests,
                 source_id=expected["openmeteo_ifs9_anchor"].source_id,
@@ -396,15 +389,13 @@ def discover_replacement_forecast_materialization_seeds(
                 city=city,
                 target_date=target_date,
             )
-            if aifs is None or openmeteo is None:
+            if openmeteo is None:
                 failed.append(target_key)
                 reasons.append("REPLACEMENT_SEED_DISCOVERY_REQUIRED_MANIFEST_MISSING")
                 continue
-            aifs_samples = _manifest_path_value(aifs, "aifs_samples_json") or _manifest_path_value(aifs, "sample_points_json")
-            aifs_grib = None if aifs_samples else aifs.artifact_path
             openmeteo_payload = _manifest_path_value(openmeteo, "openmeteo_payload_json") or openmeteo.artifact_path
             precision_metadata = _manifest_path_value(openmeteo, "precision_metadata_json")
-            if not (aifs_samples or aifs_grib) or not openmeteo_payload or not precision_metadata:
+            if not openmeteo_payload or not precision_metadata:
                 failed.append(target_key)
                 reasons.append("REPLACEMENT_SEED_DISCOVERY_MANIFEST_METADATA_INCOMPLETE")
                 continue
@@ -424,7 +415,6 @@ def discover_replacement_forecast_materialization_seeds(
                 failed.append(target_key)
                 reasons.append("REPLACEMENT_SEED_DISCOVERY_DB_CONTEXT_MISSING")
                 continue
-            aifs_base_dir = _manifest_base_dir(aifs, fallback=raw_dir)
             openmeteo_base_dir = _manifest_base_dir(openmeteo, fallback=raw_dir)
             seed_result = build_replacement_forecast_materialization_seed(
                 city=city,
@@ -432,14 +422,11 @@ def discover_replacement_forecast_materialization_seeds(
                 temperature_metric=metric,
                 market_bins=bins,
                 baseline_coverage=coverage,
-                aifs_manifest=aifs,
                 openmeteo_manifest=openmeteo,
                 openmeteo_payload_json=_resolve_path(openmeteo_payload, base_dir=openmeteo_base_dir),
                 precision_metadata_json=_resolve_path(precision_metadata, base_dir=openmeteo_base_dir),
                 computed_at=computed,
                 base_dir=seed_path,
-                aifs_samples_json=None if aifs_samples is None else _resolve_path(aifs_samples, base_dir=aifs_base_dir),
-                aifs_grib_path=None if aifs_grib is None else _resolve_path(aifs_grib, base_dir=aifs_base_dir),
             )
             if not seed_result.ok or seed_result.seed is None:
                 failed.append(target_key)

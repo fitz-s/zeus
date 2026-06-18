@@ -6587,7 +6587,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
 # authority carries — MUST equal src/decision_kernel/verifier.POSTERIOR_MEMBERS_JSON_SOURCE (kept as
 # a local literal to avoid an adapter→verifier import cycle; the two MUST agree).
 _POSTERIOR_MEMBERS_JSON_SOURCE = "raw_model_forecasts.multimodel"
-_REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
+_REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_bayes_fusion_v1"
 # The posterior applied-validations set the cert verifier/compiler require for posterior provenance
 # (verifier.REQUIRED_POSTERIOR_FORECAST_VALIDATIONS). Stamped only when the posterior row exists and
 # the decorrelated model floor is met — never fabricated.
@@ -10660,7 +10660,7 @@ def _replacement_authority_enabled() -> bool:
         flags = settings["feature_flags"]
     except Exception:
         return False
-    return bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled", False))
+    return bool(flags.get("openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled", False))
 
 
 def _replacement_q_market_anchor_enabled() -> bool:

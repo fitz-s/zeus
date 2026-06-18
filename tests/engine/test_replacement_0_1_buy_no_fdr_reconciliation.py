@@ -79,8 +79,6 @@ def _replacement_bundle() -> SimpleNamespace:
                 # graded 0.60 while the robust lower bound fails cost.
                 "bin-28": ([0.60] * 120) + ([0.40] * 80),
             },
-            "aifs_member_count": 51,
-            "aifs_probabilities": {"bin-22": 4 / 51, "bin-28": 41 / 51},
             "bin_topology": [
                 {"bin_id": "bin-22", "lower_c": 22.0, "upper_c": 22.0},
                 {"bin_id": "bin-28", "lower_c": 28.0, "upper_c": 28.0},
@@ -89,14 +87,57 @@ def _replacement_bundle() -> SimpleNamespace:
     )
 
 
+def _passing_evidence():
+    from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
+
+    return ReplacementForecastPromotionEvidence(
+        official_days=5,
+        official_rows=250,
+        after_cost_pnl=1.0,
+        q_lcb_coverage=0.95,
+        anti_lookahead_violations=0,
+        source_availability_violations=0,
+        unresolved_regression_clusters=0,
+        same_clob_replay_passed=True,
+        nested_walk_forward_passed=True,
+        same_clob_replay_scored_rows=250,
+        same_clob_replay_blocked_rows=0,
+        fee_depth_fill_evidence_passed=True,
+        unit_pnl_only=False,
+        nested_holdout_brier=0.20,
+        nested_holdout_log_loss=0.50,
+        nested_selected_anchor_weight=0.80,
+        nested_selected_anchor_sigma_c=3.00,
+        nested_guardrail_bucket_count=1,
+        nested_guardrail_bucket_min_rows=20,
+        product_specific_refit_passed=True,
+    )
+
+
+def _capital_objective_evidence():
+    from src.data.replacement_forecast_runtime_policy import (
+        EXPECTED_CAPITAL_OBJECTIVE_LABEL,
+        ReplacementForecastCapitalObjectiveEvidence,
+    )
+
+    return ReplacementForecastCapitalObjectiveEvidence(
+        selected_label=EXPECTED_CAPITAL_OBJECTIVE_LABEL,
+        replay_status="EMPIRICAL_WINNER",
+        after_cost_pnl=1.0,
+        source_availability_observed=True,
+        source_availability_violations=0,
+        anti_lookahead_violations=0,
+        same_clob_replay_passed=True,
+        fee_depth_fill_evidence_passed=True,
+        unit_pnl_only=False,
+        product_specific_refit_passed=True,
+    )
+
+
 def _run(native_costs):
     from src.config import settings
     from src.data import replacement_forecast_bundle_reader as reader
     from src.engine import replacement_forecast_hook_factory as hook_factory
-    from tests.test_replacement_forecast_runtime_policy import (
-        _capital_objective_evidence,
-        _passing_evidence,
-    )
 
     import pytest as _pytest
 

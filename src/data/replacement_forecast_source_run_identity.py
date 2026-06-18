@@ -1,4 +1,4 @@
-"""Source-run identity guards for replacement forecast shadow dependencies."""
+"""Source-run identity guards for replacement forecast live dependencies."""
 
 from __future__ import annotations
 
@@ -36,9 +36,8 @@ def expected_replacement_dependency_identity_by_role(
     suffix = "max" if temperature_metric == "high" else "min"
     baseline_param = "mx2t3" if temperature_metric == "high" else "mn2t3"
     baseline_physical = "mx2t3_local_calendar_day_max" if temperature_metric == "high" else "mn2t3_local_calendar_day_min"
-    aifs_physical = f"sampled_2t_6h_local_calendar_day_{suffix}"
     anchor_physical = f"deterministic_2t_anchor_local_calendar_day_{suffix}"
-    posterior_physical = f"aifs_sampled_2t_plus_openmeteo_ecmwf_ifs9_anchor_local_calendar_day_{suffix}"
+    posterior_physical = f"openmeteo_ecmwf_ifs9_bayes_fusion_local_calendar_day_{suffix}"
     observation_field = "high_temp" if temperature_metric == "high" else "low_temp"
     return {
         "baseline_b0": ReplacementDependencyExpectedIdentity(
@@ -47,16 +46,6 @@ def expected_replacement_dependency_identity_by_role(
             product_id="ecmwf_opendata_ifs_ens_0p25",
             data_version=f"ecmwf_opendata_{baseline_param}_local_calendar_day_{suffix}",
             physical_quantity=baseline_physical,
-            observation_field=observation_field,
-            expected_members=51,
-            raw_ensemble_eligible=True,
-        ),
-        "aifs_sampled_2t": ReplacementDependencyExpectedIdentity(
-            role="aifs_sampled_2t",
-            source_id="ecmwf_aifs_ens",
-            product_id="ecmwf_aifs_ens_sampled_2t_6h_v1",
-            data_version=f"ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_{suffix}",
-            physical_quantity=aifs_physical,
             observation_field=observation_field,
             expected_members=51,
             raw_ensemble_eligible=True,
@@ -73,9 +62,9 @@ def expected_replacement_dependency_identity_by_role(
         ),
         "soft_anchor_posterior": ReplacementDependencyExpectedIdentity(
             role="soft_anchor_posterior",
-            source_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
-            product_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
-            data_version=f"openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_{temperature_metric}_v1",
+            source_id="openmeteo_ecmwf_ifs9_bayes_fusion",
+            product_id="openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+            data_version=f"openmeteo_ecmwf_ifs9_bayes_fusion_{temperature_metric}_v1",
             physical_quantity=posterior_physical,
             observation_field=observation_field,
             expected_members=None,

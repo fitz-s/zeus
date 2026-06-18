@@ -208,6 +208,18 @@ class CycleLegAvailability:
         return self.aifs_available and self.anchor_available
 
 
+@dataclass(frozen=True)
+class AnchorCycleAvailability:
+    """Published state of one candidate cycle's Open-Meteo anchor leg."""
+
+    cycle: datetime
+    anchor_available: bool
+
+    @property
+    def complete(self) -> bool:
+        return self.anchor_available
+
+
 def resolve_cycle_leg_availability(
     now: datetime,
     *,
@@ -249,8 +261,29 @@ def resolve_cycle_leg_availability(
     return tuple(out)
 
 
+def resolve_anchor_cycle_availability(
+    now: datetime,
+    *,
+    probe_anchor: Callable[[datetime], bool],
+    max_lookback_cycles: int = DEFAULT_MAX_LOOKBACK_CYCLES,
+) -> tuple[AnchorCycleAvailability, ...]:
+    """Anchor-only availability for the current replacement live chain."""
+
+    out: list[AnchorCycleAvailability] = []
+    anchor_known_available_from: datetime | None = None
+    for cycle in candidate_cycles(now, max_lookback_cycles=max_lookback_cycles):
+        if anchor_known_available_from is not None and cycle <= anchor_known_available_from:
+            anchor_ok = True
+        else:
+            anchor_ok = bool(probe_anchor(cycle))
+            if anchor_ok:
+                anchor_known_available_from = cycle
+        out.append(AnchorCycleAvailability(cycle=cycle, anchor_available=anchor_ok))
+    return tuple(out)
+
+
 def newest_complete_cycle(
-    availability: tuple[CycleLegAvailability, ...],
+    availability: tuple[CycleLegAvailability, ...] | tuple[AnchorCycleAvailability, ...],
 ) -> datetime | None:
     for leg in availability:  # newest→oldest order preserved
         if leg.complete:

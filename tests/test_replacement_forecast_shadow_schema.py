@@ -1,9 +1,9 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
-# Purpose: Protect replacement forecast shadow tables from contaminating raw ensemble snapshots or live trade authority.
+# Purpose: Protect replacement forecast live-support tables from contaminating raw ensemble snapshots.
 # Reuse: Run before changing replacement forecast artifact/posterior/shadow-decision schema.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow integration.
+# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + Bayes fusion integration.
 """Replacement forecast shadow schema tests."""
 
 from __future__ import annotations
@@ -54,14 +54,13 @@ def test_replacement_shadow_tables_are_forecast_class_only() -> None:
         "captured_at",
         "sha256",
         "byte_size",
-        "trade_authority_status",
         "training_allowed",
     } <= _columns(forecast_conn, "raw_forecast_artifacts")
     assert {"anchor_value_c", "native_grid", "delivery_grid_resolution", "interpolation_method"} <= _columns(
         forecast_conn,
         "deterministic_forecast_anchors",
     )
-    assert {"q_json", "q_lcb_json", "aifs_source_run_id", "openmeteo_anchor_id"} <= _columns(
+    assert {"q_json", "q_lcb_json", "openmeteo_anchor_id"} <= _columns(
         forecast_conn,
         "forecast_posteriors",
     )
@@ -107,6 +106,83 @@ def test_targeted_replacement_shadow_schema_initializer_commit_creates_only_shad
     assert "venue_commands" not in tables
 
 
+def test_legacy_forecast_posteriors_statuses_do_not_map_to_runtime_layer() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            q_json TEXT NOT NULL,
+            posterior_method TEXT NOT NULL,
+            bin_topology_hash TEXT,
+            posterior_identity_hash TEXT,
+            trade_authority_status TEXT NOT NULL
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date,
+            temperature_metric, source_cycle_time, source_available_at,
+            computed_at, q_json, posterior_method, bin_topology_hash,
+            posterior_identity_hash, trade_authority_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "replacement",
+                "replacement_v1",
+                "replacement_high_v1",
+                "Shanghai",
+                "2026-06-06",
+                "high",
+                "2026-06-06T00:00:00+00:00",
+                "2026-06-06T02:00:00+00:00",
+                "2026-06-06T02:05:00+00:00",
+                '{"warm": 1.0}',
+                "replacement",
+                "topology-1",
+                "identity-live",
+                "LIVE_AUTHORITY",
+            ),
+            (
+                "replacement",
+                "replacement_v1",
+                "replacement_high_v1",
+                "Shanghai",
+                "2026-06-06",
+                "high",
+                "2026-06-06T06:00:00+00:00",
+                "2026-06-06T08:00:00+00:00",
+                "2026-06-06T08:05:00+00:00",
+                '{"warm": 0.8}',
+                "replacement",
+                "topology-1",
+                "identity-diagnostic",
+                "DIAGNOSTIC_ONLY",
+            ),
+        ],
+    )
+
+    apply_canonical_schema(conn, forecast_tables=True)
+
+    assert "runtime_layer" in _columns(conn, "forecast_posteriors")
+    rows = conn.execute(
+        "SELECT posterior_id, runtime_layer FROM forecast_posteriors ORDER BY posterior_id"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [(1, None), (2, None)]
+
+
 def test_replacement_raw_artifacts_are_shadow_only_and_not_training_authority() -> None:
     conn = sqlite3.connect(":memory:")
     apply_canonical_schema(conn, forecast_tables=True)
@@ -131,7 +207,7 @@ def test_replacement_raw_artifacts_are_shadow_only_and_not_training_authority() 
         ),
     )
 
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(sqlite3.OperationalError):
         conn.execute(
             """
             INSERT INTO raw_forecast_artifacts (
