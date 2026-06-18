@@ -6434,7 +6434,7 @@ def _maker_rest_escalation_cycle() -> None:
             )
 
 
-def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
+def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -> "list":
     """Build OpenRest entries for §4.5 rest management: every OPEN maker ENTRY rest joined to its
     decision belief via condition_id. Pure read on both DBs.
 
@@ -6520,7 +6520,8 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
         except Exception:  # noqa: BLE001 — token→condition resolution is best-effort
             cond_by_token = {}
             side_by_token = {}
-    beliefs = _all_latest_beliefs(world_conn)
+    if beliefs is None:
+        beliefs = _all_latest_beliefs(world_conn)
     # Index belief bins by condition_id → (belief, bin_label, posterior).
     bin_by_cond: dict[str, tuple] = {}
     for belief in beliefs:
@@ -6602,6 +6603,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     try:
         from datetime import datetime, timezone
         from src.events.continuous_redecision import (
+            _all_latest_beliefs,
             screen_entry_redecisions,
             screened_family_keys,
             screen_resting_orders,
@@ -6626,15 +6628,17 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         world_ro = get_world_connection_read_only()
         trade_ro = get_trade_connection_read_only()
         try:
+            beliefs = _all_latest_beliefs(world_ro)
             redecisions = screen_entry_redecisions(
                 world_ro,
                 trade_ro,
                 decision_time=received_at,
                 min_edge=min_edge,
                 acted_state=_edli_redecision_acted_state,
+                beliefs=beliefs,
             )
-            raw_entry_family_keys = screened_family_keys(world_ro, redecisions)
-            open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro)
+            raw_entry_family_keys = screened_family_keys(world_ro, redecisions, beliefs=beliefs)
+            open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)
             rest_pulls = screen_resting_orders(
                 world_ro,
                 trade_ro,
@@ -6656,17 +6660,9 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         # runs through the maker_rest_escalation cancel path below.
         rest_pull_families: set = set()
         if rest_pulls:
-            from src.events.continuous_redecision import _all_latest_beliefs as _alb
-            world_ro2 = get_world_connection_read_only()
-            try:
-                by_family = {
-                    b.family_id: (b.city, b.target_date, b.metric) for b in _alb(world_ro2)
-                }
-            finally:
-                try:
-                    world_ro2.close()
-                except Exception:  # noqa: BLE001
-                    pass
+            by_family = {
+                b.family_id: (b.city, b.target_date, b.metric) for b in beliefs
+            }
             for rest, _decision in rest_pulls:
                 key = by_family.get(rest.family_id)
                 if key is not None and all(key):

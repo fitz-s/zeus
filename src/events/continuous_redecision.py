@@ -200,6 +200,13 @@ def _belief_decision_id(family_id: str, snapshot_id: str, calibrator_model_hash:
     return f"{_BELIEF_PREFIX}{family_id}:{snapshot_id}:{calibrator_model_hash}"
 
 
+def _prefix_upper_bound(prefix: str) -> str:
+    """Return the exclusive upper bound for a SQLite text-prefix range."""
+    if not prefix:
+        raise ValueError("prefix must be non-empty")
+    return prefix[:-1] + chr(ord(prefix[-1]) + 1)
+
+
 def _parse_belief_decision_id(decision_id: str) -> tuple[str, str, str] | None:
     if not decision_id.startswith(_BELIEF_PREFIX):
         return None
@@ -539,14 +546,16 @@ def latest_cached_belief(conn: sqlite3.Connection, *, family_id: str) -> CachedB
         cols += ", q_lcb_yes_json"
     if _has_column(conn, "probability_trace_fact", "q_lcb_no_json"):
         cols += ", q_lcb_no_json"
+    prefix = _BELIEF_PREFIX + str(family_id) + ":"
     rows = conn.execute(
         f"SELECT {cols} FROM probability_trace_fact "
-        "WHERE decision_id LIKE ? ORDER BY recorded_at DESC LIMIT 1",
-        (_BELIEF_PREFIX + str(family_id) + ":%",),
+        "WHERE decision_id >= ? AND decision_id < ?",
+        (prefix, _prefix_upper_bound(prefix)),
     ).fetchall()
     if not rows:
         return None
-    return _row_to_belief(rows[0])
+    latest = max(rows, key=lambda row: str(row["recorded_at"] or ""))
+    return _row_to_belief(latest)
 
 
 def _all_latest_beliefs(conn: sqlite3.Connection) -> list[CachedBelief]:
@@ -561,9 +570,10 @@ def _all_latest_beliefs(conn: sqlite3.Connection) -> list[CachedBelief]:
         cols += ", q_lcb_no_json"
     rows = conn.execute(
         f"SELECT {cols} FROM probability_trace_fact "
-        "WHERE decision_id LIKE ? ORDER BY recorded_at DESC",
-        (_BELIEF_PREFIX + "%",),
+        "WHERE decision_id >= ? AND decision_id < ?",
+        (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX)),
     ).fetchall()
+    rows = sorted(rows, key=lambda row: str(row["recorded_at"] or ""), reverse=True)
     seen: set[RedecisionScreenKey] = set()
     out: list[CachedBelief] = []
     for row in rows:
@@ -590,6 +600,7 @@ def enqueue_live_redecisions(
     min_edge: float,
     acted_state: dict[RedecisionScreenKey, float] | None = None,
     recent_full_economics_rejections: dict[RedecisionScreenKey, FullEconomicsReject] | None = None,
+    beliefs: list[CachedBelief] | None = None,
 ) -> list[EnqueuedRedecision]:
     """Screen live entry pairs against FRESH price and conservative q_lcb evidence.
 
@@ -600,7 +611,7 @@ def enqueue_live_redecisions(
     """
     dt = _parse(decision_time)
     out: list[EnqueuedRedecision] = []
-    for belief in _all_latest_beliefs(conn):
+    for belief in beliefs if beliefs is not None else _all_latest_beliefs(conn):
         family_key = _stable_family_screen_key(belief)
         for idx, label in enumerate(belief.bin_labels):
             if idx >= len(belief.p_posterior_vec):
@@ -1294,7 +1305,8 @@ def screen_entry_redecisions(
     *,
     decision_time: str,
     min_edge: float,
-    acted_state: dict[tuple[str, str, str], float] | None = None,
+    acted_state: dict[RedecisionScreenKey, float] | None = None,
+    beliefs: list[CachedBelief] | None = None,
 ) -> list[EnqueuedRedecision]:
     """P2 ENTRY screen end-to-end: cached beliefs (world) × freshest executable prices (trade) →
     cheap edge screen → re-decisions. Joins each belief's per-bin condition_ids to the price map, so
@@ -1302,7 +1314,8 @@ def screen_entry_redecisions(
     keyed correctly without any market-topology re-derivation.
 
     Pure read on both DBs. NO HTTP, NO writes. The reactor's scheduler job owns ``acted_state``."""
-    beliefs = _all_latest_beliefs(world_conn)
+    if beliefs is None:
+        beliefs = _all_latest_beliefs(world_conn)
     # Collect every condition_id referenced by a cached belief (one price read for the batch).
     all_cids: set[str] = set()
     for belief in beliefs:
@@ -1330,18 +1343,21 @@ def screen_entry_redecisions(
         min_edge=min_edge,
         acted_state=acted_state,
         recent_full_economics_rejections=recent_rejections,
+        beliefs=beliefs,
     )
 
 
 def screened_family_keys(
     world_conn: sqlite3.Connection,
     redecisions: list[EnqueuedRedecision],
+    *,
+    beliefs: list[CachedBelief] | None = None,
 ) -> set[tuple[str, str, str]]:
     """Map firing redecisions → the ``(city, target_date, metric)`` family keys the P2 job feeds to
     the FSR re-emitter's ``restrict_to_families``. Resolved from each redecision's family_id via the
     cached belief (city/target_date/metric), so only screened families re-emit — never the universe."""
     by_family: dict[str, tuple[str, str, str]] = {}
-    for belief in _all_latest_beliefs(world_conn):
+    for belief in beliefs if beliefs is not None else _all_latest_beliefs(world_conn):
         by_family[belief.family_id] = (belief.city, belief.target_date, belief.metric)
     out: set[tuple[str, str, str]] = set()
     for rd in redecisions:

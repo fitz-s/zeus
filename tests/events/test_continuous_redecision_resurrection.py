@@ -70,6 +70,67 @@ def _cache(conn, *, family_id="hyp|live|Wuhan|2026-06-12|high|disc", p_yes=0.99,
     )
 
 
+def test_belief_reads_use_indexable_prefix_ranges_not_like_scans():
+    world = _mem_world()
+    family_id = "hyp|live|Wuhan|2026-06-12|high|disc"
+    _cache(
+        world,
+        family_id=family_id,
+        p_yes=0.70,
+        snapshot_id="old",
+        recorded_at="2026-06-12T00:00:00+00:00",
+    )
+    _cache(
+        world,
+        family_id=family_id,
+        p_yes=0.80,
+        snapshot_id="new",
+        recorded_at="2026-06-12T01:00:00+00:00",
+    )
+    captured = _SqlCaptureConn(world)
+
+    latest = cr.latest_cached_belief(captured, family_id=family_id)
+    beliefs = cr._all_latest_beliefs(captured)
+
+    assert latest is not None
+    assert latest.snapshot_id == "new"
+    assert len(beliefs) == 1
+    statements = "\n".join(captured.statements).upper()
+    probability_reads = [
+        stmt for stmt in captured.statements
+        if "FROM probability_trace_fact" in stmt
+    ]
+    assert probability_reads
+    for stmt in probability_reads:
+        upper = stmt.upper()
+        assert " LIKE " not in upper
+        assert "DECISION_ID >= ?" in upper
+        assert "DECISION_ID < ?" in upper
+        assert "ORDER BY" not in upper
+    assert "ROW_NUMBER" not in statements
+    assert "PARTITION BY" not in statements
+
+
+def test_screen_entry_reuses_supplied_beliefs_without_probability_trace_read():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.99, cond="0xc30")
+    _snapshot(trade, bid="0.30", ask="0.70", selected_outcome_token_id="yes-c30")
+    beliefs = cr._all_latest_beliefs(world)
+    captured_world = _SqlCaptureConn(world)
+
+    fired = cr.screen_entry_redecisions(
+        captured_world,
+        trade,
+        decision_time="2026-06-12T00:45:00+00:00",
+        min_edge=0.01,
+        beliefs=beliefs,
+    )
+
+    assert len(fired) == 1
+    assert all("probability_trace_fact" not in stmt for stmt in captured_world.statements)
+
+
 def _snapshot(
     conn,
     *,
