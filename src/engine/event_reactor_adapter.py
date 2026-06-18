@@ -616,6 +616,7 @@ _DURABLE_LIVE_CAP_TERMINAL_COMMAND_STATES = frozenset(
 _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES = frozenset(
     {"active", "day0_window", "pending_exit"}
 )
+_ENTRY_HELD_POSITION_REASON_BASE = "OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED"
 
 
 def _durable_live_cap_final_intent_token(final_intent_id: str) -> str:
@@ -676,6 +677,99 @@ def _durable_live_cap_usage_is_represented_in_trade_truth(
             f"DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
         ) from exc
     return False
+
+
+def _position_current_columns(conn: sqlite3.Connection) -> set[str]:
+    try:
+        return {
+            str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+            for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+    except Exception as exc:  # noqa: BLE001 - live exposure truth ambiguity is fatal.
+        raise RuntimeError(
+            f"OPEN_POSITION_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
+        ) from exc
+
+
+def _entry_held_position_same_token_reason(
+    conn: sqlite3.Connection | None,
+    *,
+    token_id: str,
+) -> str | None:
+    """Return a selection-exclusion reason when an entry token is already held.
+
+    ``position_current`` is the canonical held-position truth. A held token belongs
+    to the monitor/exit/redecision lifecycle, not to the ordinary new-entry
+    selector. The executor keeps its duplicate gate as the last boundary, but the
+    reactor must not use that boundary as normal control flow.
+    """
+    token = str(token_id or "").strip()
+    if conn is None or not token:
+        return None
+    try:
+        if not _adapter_table_exists(conn, "position_current"):
+            return None
+        columns = _position_current_columns(conn)
+        token_columns = [name for name in ("token_id", "no_token_id") if name in columns]
+        if not token_columns:
+            return None
+        phase_expr = "phase" if "phase" in columns else "''"
+        position_id_expr = "position_id" if "position_id" in columns else "''"
+        positive_terms = [
+            f"COALESCE({name}, 0) > 0"
+            for name in ("chain_shares", "shares", "chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+            if name in columns
+        ]
+        positive_sql = " AND (" + " OR ".join(positive_terms) + ")" if positive_terms else ""
+        token_sql = " OR ".join(f"NULLIF({name}, '') = ?" for name in token_columns)
+        phase_sql = (
+            "phase IN ({})".format(
+                ",".join("?" for _ in _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES)
+            )
+            if "phase" in columns
+            else "1=1"
+        )
+        row = conn.execute(
+            f"""
+            SELECT {position_id_expr} AS position_id, {phase_expr} AS phase
+              FROM position_current
+             WHERE {phase_sql}
+               AND ({token_sql})
+               {positive_sql}
+             LIMIT 1
+            """,
+            (
+                *(
+                    sorted(_DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES)
+                    if "phase" in columns
+                    else ()
+                ),
+                *(token for _ in token_columns),
+            ),
+        ).fetchone()
+        if row is None:
+            return None
+        position_id = str(row["position_id"] if isinstance(row, sqlite3.Row) else row[0] or "")
+        phase = str(row["phase"] if isinstance(row, sqlite3.Row) else row[1] or "")
+        return (
+            f"{_ENTRY_HELD_POSITION_REASON_BASE}:"
+            f"position_id={position_id or 'unknown'}:"
+            f"phase={phase or 'unknown'}"
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed on exposure truth ambiguity.
+        raise RuntimeError(
+            f"OPEN_POSITION_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
+        ) from exc
+
+
+def _entry_held_position_reason_for_proof(
+    conn: sqlite3.Connection | None,
+    proof: "_CandidateProof",
+) -> str | None:
+    return _entry_held_position_same_token_reason(
+        conn,
+        token_id=str(getattr(proof, "token_id", "") or ""),
+    )
 
 
 def _durable_unmaterialized_live_cap_reservations(
@@ -2519,26 +2613,36 @@ def _build_event_bound_no_submit_receipt_core(
             portfolio_state_provider=portfolio_state_provider,
             family=family,
         )
-        _spine_result = decide_family_via_spine(
-            family=family,
-            payload=payload,
+        _spine_entry_proofs = _selection_scoped_proofs(
             proofs=proofs,
-            decision_time=decision_time,
-            native_side_candidate_from_proof=_native_side_candidate_from_proof,
-            candidate_bin_id=_candidate_bin_id,
-            payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
-            exposure_builder=_robust_marginal_utility_exposure,
-            baseline_usd_provider=_robust_marginal_utility_baseline_usd,
-            per_bin_yes_q_lcb=_per_bin_yes_q_lcb(proofs),
-            extra_exposure_by_bin_id=(_spine_selection_exposure or None),
+            locked_opportunity_conn=locked_opportunity_conn,
+            held_position_conn=trade_conn,
         )
-        proof = _spine_result.selected_proof
-        _spine_no_trade_reason = _spine_result.no_trade_reason
+        if not _spine_entry_proofs:
+            proof = None
+            _spine_no_trade_reason = None
+        else:
+            _spine_result = decide_family_via_spine(
+                family=family,
+                payload=payload,
+                proofs=_spine_entry_proofs,
+                decision_time=decision_time,
+                native_side_candidate_from_proof=_native_side_candidate_from_proof,
+                candidate_bin_id=_candidate_bin_id,
+                payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
+                exposure_builder=_robust_marginal_utility_exposure,
+                baseline_usd_provider=_robust_marginal_utility_baseline_usd,
+                per_bin_yes_q_lcb=_per_bin_yes_q_lcb(proofs),
+                extra_exposure_by_bin_id=(_spine_selection_exposure or None),
+            )
+            proof = _spine_result.selected_proof
+            _spine_no_trade_reason = _spine_result.no_trade_reason
     else:
         proof = _selected_candidate_proof(
             payload,
             proofs,
             locked_opportunity_conn=locked_opportunity_conn,
+            held_position_conn=trade_conn,
         )
     opportunity_book = _opportunity_book_from_proofs(
         event_id=event.event_id,
@@ -2546,6 +2650,7 @@ def _build_event_bound_no_submit_receipt_core(
         proofs=proofs,
         selected_proof=proof,
         locked_opportunity_conn=locked_opportunity_conn,
+        held_position_conn=trade_conn,
     )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
@@ -2761,6 +2866,7 @@ def _build_event_bound_no_submit_receipt_core(
                     proofs=proofs,
                     selected_proof=proof,
                     locked_opportunity_conn=locked_opportunity_conn,
+                    held_position_conn=trade_conn,
                 )
                 if execution_price is None or row is None:
                     return EventSubmissionReceipt(
@@ -3156,6 +3262,7 @@ def _build_event_bound_no_submit_receipt_core(
                 # called with this same conn at selection) — else a locked / below-min-tick
                 # leg scoped OUT of selection falsely reverses the chosen leg.
                 locked_opportunity_conn=locked_opportunity_conn,
+                held_position_conn=trade_conn,
                 stake_floor_out=_stake_floor_provenance,
                 free_cash_usd=free_cash_usd,
             )
@@ -7738,6 +7845,7 @@ def _selection_scoped_proofs(
     *,
     proofs: tuple[_CandidateProof, ...],
     locked_opportunity_conn: sqlite3.Connection | None = None,
+    held_position_conn: sqlite3.Connection | None = None,
 ) -> tuple[_CandidateProof, ...]:
     executable = [proof for proof in proofs if proof.execution_price is not None]
     # FIX A/B hardening (2026-06-10 Milan-24C incident): a priced proof that an
@@ -7771,6 +7879,16 @@ def _selection_scoped_proofs(
             scoped = unlocked
         elif scoped:
             return ()
+    if held_position_conn is not None:
+        unheld = [
+            proof
+            for proof in scoped
+            if _entry_held_position_reason_for_proof(held_position_conn, proof) is None
+        ]
+        if unheld:
+            scoped = unheld
+        elif scoped:
+            return ()
     return tuple(scoped)
 
 
@@ -7778,6 +7896,7 @@ def _opportunity_book_proofs_with_selection_rejections(
     *,
     proofs: tuple[_CandidateProof, ...],
     locked_opportunity_conn: sqlite3.Connection | None = None,
+    held_position_conn: sqlite3.Connection | None = None,
 ) -> tuple[_CandidateProof, ...]:
     excluded_by_id: dict[str, str] = {}
     selected_ids = {
@@ -7785,6 +7904,7 @@ def _opportunity_book_proofs_with_selection_rejections(
         for proof in _selection_scoped_proofs(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
+            held_position_conn=held_position_conn,
         )
     }
     for proof in proofs:
@@ -7797,6 +7917,11 @@ def _opportunity_book_proofs_with_selection_rejections(
         if reason is None and locked_opportunity_conn is not None:
             reason = _locked_candidate_no_price_improvement_reason(
                 locked_opportunity_conn,
+                proof,
+            )
+        if reason is None and held_position_conn is not None:
+            reason = _entry_held_position_reason_for_proof(
+                held_position_conn,
                 proof,
             )
         if reason is not None:
@@ -7840,6 +7965,7 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     ("DIRECTION_LAW_BIN_FORECAST_MISMATCH", "direction_law"),
     ("ADMISSION_WIN_RATE_FLOOR", "win_rate_floor"),
     ("ADMISSION_LCB_CONSISTENCY", "lcb_consistency"),
+    (_ENTRY_HELD_POSITION_REASON_BASE, "held_position_monitor_owned"),
     # Genuinely-no-book classes (proof had execution_price None): the maker-quote
     # lane's own-ask-empty marker, plus the structural pre-pricing misses.
     ("clob_no_ask_illiquid", "native_ask_missing"),
@@ -7945,6 +8071,7 @@ def _opportunity_book_from_proofs(
     proofs: tuple[_CandidateProof, ...],
     selected_proof: _CandidateProof | None = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
+    held_position_conn: sqlite3.Connection | None = None,
 ) -> OpportunityBook:
     # The per-candidate kelly_size_usd is a DISPLAY field only (S4): the pre-
     # selection scalar-Kelly pass that used to populate it is retired; the live
@@ -7958,6 +8085,7 @@ def _opportunity_book_from_proofs(
         for proof in _opportunity_book_proofs_with_selection_rejections(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
+            held_position_conn=held_position_conn,
         )
     )
     # The live decision is the ΔU ranker's pick (selected_proof). The book RECORDS
@@ -9614,6 +9742,7 @@ def _family_rank_reversed_at_recapture(
     selected_proof: _CandidateProof,
     all_proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
     locked_opportunity_conn: sqlite3.Connection | None = None,
+    held_position_conn: sqlite3.Connection | None = None,
 ) -> bool:
     """True iff the FRESH-curve re-rank no longer makes ``selected_proof`` primary.
 
@@ -9645,6 +9774,7 @@ def _family_rank_reversed_at_recapture(
     scoped = _selection_scoped_proofs(
         proofs=tuple(all_proofs),
         locked_opportunity_conn=locked_opportunity_conn,
+        held_position_conn=held_position_conn,
     )
     if not scoped:
         # Nothing survives selection scoping on the fresh set (all locked / untradeable):
@@ -9675,6 +9805,7 @@ def _evaluate_submit_recapture_for_selected(
     kelly_multiplier: float,
     forecast_still_current: bool,
     locked_opportunity_conn: sqlite3.Connection | None = None,
+    held_position_conn: sqlite3.Connection | None = None,
     stake_floor_out: dict[str, object] | None = None,
     order_rests_at_admitted_price: bool = False,
     free_cash_usd: float | None = None,
@@ -9771,6 +9902,7 @@ def _evaluate_submit_recapture_for_selected(
         selected_proof=selected_proof,
         all_proofs=all_proofs,
         locked_opportunity_conn=locked_opportunity_conn,
+        held_position_conn=held_position_conn,
     ):
         return (
             SubmitRecaptureDecision(
@@ -10037,6 +10169,7 @@ def _selected_candidate_proof(
     proofs: tuple[_CandidateProof, ...],
     *,
     locked_opportunity_conn: sqlite3.Connection | None = None,
+    held_position_conn: sqlite3.Connection | None = None,
 ) -> _CandidateProof | None:
     """Pick the single live primary leg via the bin-selection ΔU ranker (§14.7).
 
@@ -10073,6 +10206,7 @@ def _selected_candidate_proof(
         _selection_scoped_proofs(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
+            held_position_conn=held_position_conn,
         )
     )
     if not executable:
