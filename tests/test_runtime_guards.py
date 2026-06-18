@@ -26,11 +26,11 @@ import src.data.ensemble_client as ensemble_client
 import src.engine.cycle_runner as cycle_runner
 import src.engine.cycle_runtime as cycle_runtime
 import src.engine.evaluator as evaluator_module
-# STALE_LAW re-pin 2026-06-09: the NATIVE_MULTIBIN_BUY_NO_* flag-key constants moved from
+# STALE_LAW re-pin 2026-06-09: the BUY_NO_NATIVE_QUOTE_EVIDENCE_* flag-key constants moved from
 # src.engine.evaluator to src.strategy.family_exclusive_dedup (22dba73349 + slim bce3091a0d).
 from src.strategy.family_exclusive_dedup import (
-    NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG,
-    NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG,
+    BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG,
+    BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG,
 )
 import src.execution.exit_lifecycle as exit_lifecycle_module
 from src.backtest.economics import check_economics_readiness
@@ -142,10 +142,10 @@ def _allow_entry_gates_for_runtime_test(monkeypatch) -> None:
     monkeypatch.setattr("src.runtime.posture.read_runtime_posture", lambda: "NORMAL")
 
 
-def _set_native_multibin_buy_no_flags(monkeypatch, *, shadow: bool, live: bool = False) -> None:
+def _set_buy_no_native_quote_evidence_flags(monkeypatch, *, evidence: bool, submit: bool = False) -> None:
     flags = dict(settings["feature_flags"])
-    flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = shadow
-    flags[NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = live
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = evidence
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG] = submit
     monkeypatch.setitem(settings._data, "feature_flags", flags)
 
 
@@ -169,13 +169,13 @@ def _run_live_buy_no_authorization_case(
             "stale_quote_detector", "weather_event_arbitrage",
         ],
     })
-    # cycle_runtime lazily imports native_multibin_buy_no_live_enabled from
+    # cycle_runtime lazily imports buy_no_native_quote_evidence_submit_enabled from
     # src.engine.evaluator (line 5741), but the function lives in
     # src.strategy.family_exclusive_dedup. Expose it on evaluator_module so the
     # lazy import succeeds; the actual flag value is controlled by
-    # _set_native_multibin_buy_no_flags via settings.
-    from src.strategy.family_exclusive_dedup import native_multibin_buy_no_live_enabled as _buy_no_live_fn
-    monkeypatch.setattr(evaluator_module, "native_multibin_buy_no_live_enabled", _buy_no_live_fn, raising=False)
+    # _set_buy_no_native_quote_evidence_flags via settings.
+    from src.strategy.family_exclusive_dedup import buy_no_native_quote_evidence_submit_enabled as _buy_no_live_fn
+    monkeypatch.setattr(evaluator_module, "buy_no_native_quote_evidence_submit_enabled", _buy_no_live_fn, raising=False)
     monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
     conn = get_connection(tmp_path / f"live-buy-no-{strategy_key}-{mode.value}.db")
     init_schema(conn)
@@ -966,7 +966,7 @@ def test_entry_evaluator_uses_ask_only_buy_quote_when_yes_bid_is_absent(monkeypa
     """RELATIONSHIP: persisted executable BUY support must not require a YES bid."""
 
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
-    _set_native_multibin_buy_no_flags(monkeypatch, shadow=False, live=False)
+    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=False, submit=False)
     captured: dict[str, object] = {}
 
     candidate = MarketCandidate(
@@ -1096,7 +1096,7 @@ def test_entry_evaluator_missing_ask_still_fails_closed(monkeypatch):
     """RELATIONSHIP: ask-only fallback must not make missing asks executable."""
 
     monkeypatch.setattr(evaluator_module, "get_mode", lambda: "test")
-    _set_native_multibin_buy_no_flags(monkeypatch, shadow=False, live=False)
+    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=False, submit=False)
 
     candidate = MarketCandidate(
         city=NYC,
@@ -4503,8 +4503,8 @@ def test_executable_snapshot_repricing_updates_edge_and_size(tmp_path):
     assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.23)
     assert reprice["repriced_size_usd"] == pytest.approx(decision.size_usd)
     assert reprice["live_submit_authority"] is True
-    shadow = reprice["corrected_pricing_shadow"]
-    assert shadow["shadow_only"] is False
+    shadow = reprice["corrected_pricing_evidence"]
+    assert shadow["submit_authority_absent"] is False
     assert shadow["live_submit_authority"] is True
     assert shadow["field_semantics"] == "final_execution_intent_submit_authority"
     assert shadow["order_policy"] == "post_only_passive_limit"
@@ -4831,7 +4831,7 @@ def test_live_passive_reprice_records_fill_probability_context(tmp_path):
     assert best_ask is None
     reprice = decision.tokens["executable_snapshot_reprice"]
     assert reprice["passive_maker_expected_fill_probability"] == pytest.approx(0.25)
-    assert reprice["corrected_pricing_shadow"]["passive_maker_context"][
+    assert reprice["corrected_pricing_evidence"]["passive_maker_context"][
         "expected_fill_probability"
     ] == "0.25"
 
@@ -4920,7 +4920,7 @@ def test_live_passive_reprice_estimates_fill_context_from_trade_facts(tmp_path):
     assert reprice["passive_fill_model_source"] == "venue_command_trade_history"
     assert reprice["passive_fill_model_order_count"] == 3
     assert reprice["passive_fill_model_fill_count"] == 2
-    assert reprice["corrected_pricing_shadow"]["passive_maker_context"][
+    assert reprice["corrected_pricing_evidence"]["passive_maker_context"][
         "queue_depth_ahead"
     ] == "20"
 
@@ -4966,7 +4966,7 @@ def test_executable_snapshot_repricing_passive_buy_limit_cannot_rest_below_best_
     assert reprice["snapshot_best_ask"] == pytest.approx(0.31)
     assert reprice["final_limit_price"] == pytest.approx(0.29)
     assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.29)
-    shadow = reprice["corrected_pricing_shadow"]
+    shadow = reprice["corrected_pricing_evidence"]
     assert shadow["order_policy"] == "post_only_passive_limit"
     assert shadow["live_submit_authority"] is True
     assert shadow["candidate_final_limit_price"] == "0.29"
@@ -5013,7 +5013,7 @@ def test_executable_snapshot_repricing_tick_aligns_raw_passive_limit_before_fina
     assert reprice["snapshot_limit_price"] == pytest.approx(0.29)
     assert reprice["final_limit_price"] == pytest.approx(0.29)
     assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.29)
-    shadow = reprice["corrected_pricing_shadow"]
+    shadow = reprice["corrected_pricing_evidence"]
     assert shadow["live_submit_authority"] is True
     assert shadow["candidate_final_limit_price"] == "0.29"
     assert decision.final_execution_intent.final_limit_price == Decimal("0.29")
@@ -5137,20 +5137,20 @@ def test_executable_snapshot_repricing_can_cross_ask_inside_slippage_budget(tmp_
     assert reprice["best_ask_slippage_bps"] == pytest.approx((0.41 - 0.405) / 0.405 * 10_000.0)
     assert reprice["best_ask_blocked_by_slippage"] is False
     assert reprice["final_limit_price"] == pytest.approx(0.41)
-    assert reprice["corrected_pricing_shadow"]["candidate_final_limit_price"] == "0.41"
+    assert reprice["corrected_pricing_evidence"]["candidate_final_limit_price"] == "0.41"
     assert (
-        reprice["corrected_pricing_shadow"]["candidate_fee_adjusted_execution_price"]
+        reprice["corrected_pricing_evidence"]["candidate_fee_adjusted_execution_price"]
         == "0.417257"
     )
-    assert reprice["corrected_pricing_shadow"]["fee_rate"] == "0.03"
-    assert reprice["corrected_pricing_shadow"]["fee_source"] == "test_snapshot_taker_fee"
-    assert reprice["corrected_pricing_shadow"]["sweep_attempted"] is True
-    assert reprice["corrected_pricing_shadow"]["sweep_depth_status"] == "PASS"
-    assert reprice["corrected_pricing_shadow"]["sweep_book_side"] == "asks"
-    assert reprice["corrected_pricing_shadow"]["order_policy"] == "marketable_limit_depth_bound"
-    assert reprice["corrected_pricing_shadow"]["live_submit_authority"] is False
+    assert reprice["corrected_pricing_evidence"]["fee_rate"] == "0.03"
+    assert reprice["corrected_pricing_evidence"]["fee_source"] == "test_snapshot_taker_fee"
+    assert reprice["corrected_pricing_evidence"]["sweep_attempted"] is True
+    assert reprice["corrected_pricing_evidence"]["sweep_depth_status"] == "PASS"
+    assert reprice["corrected_pricing_evidence"]["sweep_book_side"] == "asks"
+    assert reprice["corrected_pricing_evidence"]["order_policy"] == "marketable_limit_depth_bound"
+    assert reprice["corrected_pricing_evidence"]["live_submit_authority"] is False
     assert (
-        reprice["corrected_pricing_shadow"]["unsupported_reason"]
+        reprice["corrected_pricing_evidence"]["unsupported_reason"]
         == "MARKETABLE_FINAL_INTENT_REQUIRES_IMMEDIATE_ORDER_TYPE"
     )
     assert getattr(decision, "final_execution_intent", None) is None
@@ -5202,7 +5202,7 @@ def test_executable_snapshot_repricing_falls_back_to_maker_when_taker_quality_fa
     conn.close()
 
     reprice = decision.tokens["executable_snapshot_reprice"]
-    shadow = reprice["corrected_pricing_shadow"]
+    shadow = reprice["corrected_pricing_evidence"]
     assert best_ask is None
     assert reprice["selected_order_type"] == "GTC"
     assert reprice["final_order_type"] == "GTC"
@@ -5262,7 +5262,7 @@ def test_executable_snapshot_repricing_fok_without_taker_edge_becomes_maker(tmp_
     conn.close()
 
     reprice = decision.tokens["executable_snapshot_reprice"]
-    shadow = reprice["corrected_pricing_shadow"]
+    shadow = reprice["corrected_pricing_evidence"]
     assert best_ask is None
     assert reprice["selected_order_type"] == "FOK"
     assert reprice["final_order_type"] == "GTC"
@@ -5342,7 +5342,7 @@ def test_executable_snapshot_repricing_keeps_low_notional_marketable_buy_passive
     conn.close()
 
     reprice = decision.tokens["executable_snapshot_reprice"]
-    shadow = reprice["corrected_pricing_shadow"]
+    shadow = reprice["corrected_pricing_evidence"]
     assert best_ask is None
     assert reprice["marketable_buy_below_venue_min"] is True
     assert reprice["marketable_buy_submitted_notional_usd"] < 1.0
@@ -5525,7 +5525,7 @@ def test_executable_snapshot_repricing_crosses_positive_ev_ask_outside_flat_slip
     expected_size = (0.47 - taker_fee_price) / (1 - taker_fee_price) * 0.25 * 100.0
     expected_fok_haircut_size = expected_size * 0.30
     reprice = decision.tokens["executable_snapshot_reprice"]
-    shadow = reprice["corrected_pricing_shadow"]
+    shadow = reprice["corrected_pricing_evidence"]
     assert best_ask == pytest.approx(0.30)
     assert reprice["best_ask_slippage_bps"] > reprice["max_slippage_bps"]
     assert reprice["best_ask_blocked_by_slippage"] is False
@@ -5722,7 +5722,7 @@ def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path)
     expected_size = (0.70 - 0.61) / (1 - 0.61) * 0.25 * 100.0
     assert best_ask == pytest.approx(0.61)
     reprice = decision.tokens["executable_snapshot_reprice"]
-    shadow = reprice["corrected_pricing_shadow"]
+    shadow = reprice["corrected_pricing_evidence"]
     assert decision.size_usd == pytest.approx(float(shadow["candidate_size_usd"]))
     assert 0 < decision.size_usd <= expected_size
     assert reprice["depth_sweep_limit_price"] == pytest.approx(0.61)
@@ -5742,11 +5742,11 @@ def test_executable_snapshot_repricing_sweeps_deeper_ask_inside_budget(tmp_path)
     )
 
 
-@pytest.mark.skip(reason="DEAD_TEST 2026-06-10: shoulder_sell strategy retired (commit d07fed213a) — not in UPDATE_REACTION phase allowlist; strategy_phase_mismatch fires before reaching the buy_no live flag check at cycle_runtime.py:5736. Separately, native_multibin_buy_no_live_enabled moved from evaluator to family_exclusive_dedup, making the import at cycle_runtime.py:5741 raise ImportError (same root cause as DEAD_TEST block at line 5794-5802)")
+@pytest.mark.skip(reason="DEAD_TEST 2026-06-10: shoulder_sell strategy retired (commit d07fed213a) — not in UPDATE_REACTION phase allowlist; strategy_phase_mismatch fires before reaching the buy_no live flag check at cycle_runtime.py:5736. Separately, buy_no_native_quote_evidence_submit_enabled moved from evaluator to family_exclusive_dedup, making the import at cycle_runtime.py:5741 raise ImportError (same root cause as DEAD_TEST block at line 5794-5802)")
 def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
     from dataclasses import replace
 
-    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=False)
+    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=True, submit=False)
     conn = get_connection(tmp_path / "live-buy-no-flag.db")
     init_schema(conn)
     artifact = CycleArtifact(mode=DiscoveryMode.UPDATE_REACTION.value, started_at="2026-04-03T00:00:00Z")
@@ -5829,15 +5829,15 @@ def test_live_multibin_buy_no_requires_live_feature_flag(monkeypatch, tmp_path):
     assert summary["no_trades"] == 1
     assert artifact.no_trade_cases[0].rejection_stage == "RISK_REJECTED"
     assert artifact.no_trade_cases[0].rejection_reasons == [
-        "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+        "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED"
     ]
 
 
-@pytest.mark.skip(reason="DEAD_TEST 2026-06-10: same root cause as test_live_multibin_buy_no_requires_live_feature_flag — shoulder_sell retired, not in UPDATE_REACTION allowlist; phase rejection fires before buy_no live flag check; native_multibin_buy_no_live_enabled import wrong module path")
+@pytest.mark.skip(reason="DEAD_TEST 2026-06-10: same root cause as test_live_multibin_buy_no_requires_live_feature_flag — shoulder_sell retired, not in UPDATE_REACTION allowlist; phase rejection fires before buy_no live flag check; buy_no_native_quote_evidence_submit_enabled import wrong module path")
 def test_live_binary_buy_no_requires_native_live_feature_flag(monkeypatch, tmp_path):
     from dataclasses import replace
 
-    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=False)
+    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=True, submit=False)
     conn = get_connection(tmp_path / "live-binary-buy-no-flag.db")
     init_schema(conn)
     artifact = CycleArtifact(mode=DiscoveryMode.UPDATE_REACTION.value, started_at="2026-04-03T00:00:00Z")
@@ -5919,12 +5919,12 @@ def test_live_binary_buy_no_requires_native_live_feature_flag(monkeypatch, tmp_p
     assert summary["no_trades"] == 1
     assert artifact.no_trade_cases[0].rejection_stage == "RISK_REJECTED"
     assert artifact.no_trade_cases[0].rejection_reasons == [
-        "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+        "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED"
     ]
 
 
 def test_live_buy_no_requires_canonical_quote_evidence_even_when_flags_true(monkeypatch, tmp_path):
-    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=True)
+    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=True, submit=True)
 
     summary, artifact = _run_live_buy_no_authorization_case(
         monkeypatch,
@@ -5945,7 +5945,7 @@ def test_live_buy_no_requires_canonical_quote_evidence_even_when_flags_true(monk
 
 
 def test_day0_live_buy_no_requires_promotion_even_when_flags_and_quote_true(monkeypatch, tmp_path):
-    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=True)
+    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=True, submit=True)
 
     summary, artifact = _run_live_buy_no_authorization_case(
         monkeypatch,
@@ -5966,7 +5966,7 @@ def test_day0_live_buy_no_requires_promotion_even_when_flags_and_quote_true(monk
 
 
 def test_live_buy_no_approved_context_still_requires_promotion_evidence(monkeypatch, tmp_path):
-    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=True)
+    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=True, submit=True)
     monkeypatch.setattr(
         cycle_runtime,
         "NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS",
@@ -6048,7 +6048,7 @@ def test_executable_snapshot_repricing_uses_native_no_snapshot_for_buy_no(tmp_pa
     assert decision.size_usd == pytest.approx((0.62 - 0.40) / (1 - 0.40) * 0.25 * 100.0)
     assert decision.tokens["executable_snapshot_reprice"]["outcome_label"] == "NO"
     assert decision.tokens["executable_snapshot_reprice"]["best_ask_blocked_by_slippage"] is True
-    shadow = decision.tokens["executable_snapshot_reprice"]["corrected_pricing_shadow"]
+    shadow = decision.tokens["executable_snapshot_reprice"]["corrected_pricing_evidence"]
     assert shadow["selected_token_id"] == "no1"
     assert shadow["direction"] == "buy_no"
     assert shadow["snapshot_id"] == "snap-reprice-no-1"
@@ -6096,7 +6096,7 @@ def test_executable_snapshot_repricing_does_not_jump_to_negative_edge_ask(tmp_pa
     assert decision.edge.vwmp == pytest.approx(0.34)
     assert decision.edge.edge == pytest.approx(0.13)
     assert decision.tokens["executable_snapshot_reprice"]["final_limit_price"] == pytest.approx(0.32)
-    assert decision.tokens["executable_snapshot_reprice"]["corrected_pricing_shadow"]["submit_path"] is None
+    assert decision.tokens["executable_snapshot_reprice"]["corrected_pricing_evidence"]["submit_path"] is None
 
 
 def test_executable_snapshot_repricing_rejects_insufficient_best_ask_depth(tmp_path):
@@ -6303,7 +6303,7 @@ def test_live_reprice_binds_intent_limit_when_dynamic_gap_would_not_jump(tmp_pat
     assert reprice["submitted_limit_price"] == pytest.approx(0.25)
     assert reprice["repriced_limit_forced"] is True
     assert reprice["corrected_candidate_limit_price"] == pytest.approx(0.25)
-    shadow = reprice["corrected_pricing_shadow"]
+    shadow = reprice["corrected_pricing_evidence"]
     assert shadow["candidate_final_limit_price"] == "0.25"
     assert shadow["submitted_limit_price"] == "0.25"
     assert shadow["submit_path"] == "final_execution_intent"
@@ -6575,10 +6575,10 @@ def test_live_reprice_builds_post_only_passive_final_intent(monkeypatch, tmp_pat
     assert captured["intent"].order_type == "GTC"
     assert captured["intent"].post_only is True
     reprice = decision.tokens["executable_snapshot_reprice"]
-    shadow = reprice["corrected_pricing_shadow"]
+    shadow = reprice["corrected_pricing_evidence"]
     assert shadow["submit_path"] == "final_execution_intent"
     assert shadow["live_submit_authority"] is True
-    assert shadow["shadow_only"] is False
+    assert shadow["submit_authority_absent"] is False
     assert "unsupported_reason" not in shadow
 
 
@@ -9241,7 +9241,7 @@ def test_shoulder_sell_is_phase_compatible_but_runtime_live_blocked(monkeypatch,
     monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
     from dataclasses import replace
 
-    _set_native_multibin_buy_no_flags(monkeypatch, shadow=True, live=True)
+    _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=True, submit=True)
     monkeypatch.setattr(control_plane_module, "_control_state", {})
     conn = get_connection(tmp_path / "shoulder-sell-runtime-live-blocked.db")
     init_schema(conn)

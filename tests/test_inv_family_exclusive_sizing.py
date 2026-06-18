@@ -47,8 +47,8 @@ from src.engine.evaluator import EdgeDecision
 from src.strategy.family_exclusive_dedup import (
     FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
-    NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG,
-    NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG,
+    BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG,
+    BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG,
     WeatherFamilyExposureReducer,
     WeatherFamilyExposure,
     WeatherFamilyKey,
@@ -907,8 +907,8 @@ def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monke
     """Live-disabled buy_no is a structural non-executable leg, not fallback capacity."""
 
     flags = dict(evaluator_module.settings["feature_flags"])
-    flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = True
-    flags[NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = False
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = True
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG] = False
     monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
 
     bins = {s[2]: s for s in _BIN_SPECS}
@@ -934,15 +934,15 @@ def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monke
         best_buy_yes,
     )
     assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
-    assert family_decision.dropped[0].rejection_reason == "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+    assert family_decision.dropped[0].rejection_reason == "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED"
 
 
 def test_family_decision_all_live_disabled_buy_no_does_not_self_drop(monkeypatch) -> None:
     """If no executable sibling exists, blocked diagnostics must not mark the selected leg dropped."""
 
     flags = dict(evaluator_module.settings["feature_flags"])
-    flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = True
-    flags[NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = False
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = True
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG] = False
     monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
 
     bins = {s[2]: s for s in _BIN_SPECS}

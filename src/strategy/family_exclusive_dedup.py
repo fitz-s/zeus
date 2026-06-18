@@ -63,8 +63,8 @@ logger = logging.getLogger(__name__)
 
 ENV_FLAG = "ZEUS_LIVE_MAX_ONE_ENTRY_PER_WEATHER_FAMILY"
 _DEFAULT = "1"  # ON by default (live-money fail-safe).
-NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG = "NATIVE_MULTIBIN_BUY_NO_SHADOW"
-NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG = "NATIVE_MULTIBIN_BUY_NO_LIVE"
+BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_ENABLED"
+BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_ENABLED"
 
 # Wave 4 (2026-05-27): Stage B family-portfolio optimizer activation.
 # Two-tier env var split so operator can promote multi-leg sizing through
@@ -1152,24 +1152,24 @@ def _strict_feature_flag(name: str, *, default: bool = False) -> bool:
 
 
 def _native_buy_no_live_rejection_reason() -> str | None:
-    if not native_multibin_buy_no_live_enabled():
-        return "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+    if not buy_no_native_quote_evidence_submit_enabled():
+        return "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED"
     return None
 
 
-def native_multibin_buy_no_shadow_enabled() -> bool:
-    return _strict_feature_flag(NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG)
+def buy_no_native_quote_evidence_enabled() -> bool:
+    return _strict_feature_flag(BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG)
 
 
-def native_multibin_buy_no_live_enabled() -> bool:
-    shadow_enabled = native_multibin_buy_no_shadow_enabled()
-    live_enabled = _strict_feature_flag(NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG)
-    if live_enabled and not shadow_enabled:
+def buy_no_native_quote_evidence_submit_enabled() -> bool:
+    evidence_enabled = buy_no_native_quote_evidence_enabled()
+    submit_enabled = _strict_feature_flag(BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG)
+    if submit_enabled and not evidence_enabled:
         raise ValueError(
-            f"{NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG}=true requires "
-            f"{NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG}=true"
+            f"{BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG}=true requires "
+            f"{BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG}=true"
         )
-    return live_enabled
+    return submit_enabled
 
 
 def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
@@ -1182,7 +1182,7 @@ def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
     try:
         return _native_buy_no_live_rejection_reason()
     except ValueError as exc:
-        return f"NATIVE_MULTIBIN_BUY_NO_FLAG_INVALID:{exc}"
+        return f"BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID:{exc}"
 
 
 def preselect_single_family_edge_before_kelly(

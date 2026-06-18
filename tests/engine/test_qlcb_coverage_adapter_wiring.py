@@ -1,19 +1,19 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
 # Authority basis: Phase-2 K3. Adapter-boundary wiring of the QlcbProvenance carrier
-#   + the settlement-coverage SHADOW flag (edli.q_lcb_settlement_coverage_gate_enabled,
-#   default FALSE). Proves: (1) the live lcb carrier is the typed QlcbByDirection so a
+#   + the live settlement-coverage safety gate (edli.q_lcb_settlement_coverage_gate_enabled).
+#   Proves: (1) the live lcb carrier is the typed QlcbByDirection so a
 #   bare float is unconstructable at the seam; (2) the coverage shrink helpers leave the
-#   float byte-identical when the flag is OFF; (3) the carrier helpers read/write float
+#   float byte-identical when no shrink is licensed; (3) the carrier helpers read/write float
 #   transparently so every existing consumer keeps working.
-"""Adapter-level wiring tests for the K3 q_lcb carrier + shadow flag.
+"""Adapter-level wiring tests for the K3 q_lcb carrier + live coverage gate.
 
 These bridge the standalone module tests to the live adapter:
   * the q_lcb carrier helpers (_qlcb_float / _set_qlcb_provenance) round-trip a float
     through QlcbProvenance and read it back identically — the "consumer still sees the
     same number" contract;
-  * apply_settlement_coverage with the flag OFF is byte-identical to the input even on
-    an UNLICENSED verdict (the live byte-identical contract).
+  * live coverage shrinking remains carrier-local and only changes q_lcb when a
+    coverage verdict licenses a downward correction.
 """
 from __future__ import annotations
 
@@ -67,14 +67,14 @@ def test_set_qlcb_provenance_on_plain_dict_writes_bare_float():
     assert isinstance(typed[("c", "buy_no")], QlcbProvenance)
 
 
-def test_default_shadow_flag_is_off():
-    """The K3 shadow flag must ship DEFAULT FALSE — the coverage shrink is OFF until
-    the operator arms it. (Rule-6: overconfidence=ruin; HIGH-risk behavior shadowed.)"""
+def test_live_coverage_gate_is_enabled_in_settings():
+    """The K3 coverage gate is a live safety gate; settings must not drift back to an
+    experiment-only default."""
     import json
     from pathlib import Path
 
     root = Path(__file__).parent.parent.parent
     cfg = json.loads((root / "config" / "settings.json").read_text())
     assert (
-        cfg["edli"].get("q_lcb_settlement_coverage_gate_enabled") is False
-    ), "q_lcb_settlement_coverage_gate_enabled must ship default FALSE (shadow-safe)"
+        cfg["edli"].get("q_lcb_settlement_coverage_gate_enabled") is True
+    ), "q_lcb_settlement_coverage_gate_enabled must stay live-enabled"

@@ -92,9 +92,8 @@ def main() -> int:
 
     capture = f_edli("replacement_0_1_bayes_precision_fusion_capture_enabled")
     fusion = f_edli("replacement_0_1_bayes_precision_fusion_enabled")
-    eb = f_edli("replacement_0_1_eb_bias_correction_enabled")
-    smooth = f_edli("replacement_0_1_member_vote_smoothing_enabled")
-    qlcb = f_edli("replacement_qlcb_settlement_sigma_floor_enabled")
+    fused_q = f_edli("replacement_0_1_fused_q_shape_enabled")
+    coverage = f_edli("q_lcb_settlement_coverage_gate_enabled")
     live = f_ff("openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled")
     kelly = f_ff("openmeteo_ecmwf_ifs9_bayes_fusion_kelly_increase_enabled")
     flip = f_ff("openmeteo_ecmwf_ifs9_bayes_fusion_direction_flip_enabled")
@@ -119,24 +118,24 @@ def main() -> int:
     else:
         stage = "4  ARMED (real money path open)"
     print("POSTURE  : stage", stage)
-    print("EVIDENCE : gate %s%s" % (
-        "PASS" if ev_ok else "FAIL",
-        "" if ev_ok else "  blockers=" + "; ".join(ev_blockers)))
+    print("HISTORICAL_EVIDENCE : %s%s" % (
+        "PASS" if ev_ok else "ADVISORY_STALE",
+        "" if ev_ok else "  gaps=" + "; ".join(ev_blockers)))
 
     # ---- coherence / hazards ----
     issues = []
     if fusion and not capture:
         issues.append(("WARN", "fusion ON but capture OFF — forward history will go stale; "
                                "ensure raw_model_forecasts was seeded (scripts/backfill_bayes_precision_fusion_history_from_b0.py)"))
-    if (live or kelly or flip) and not ev_ok:
-        issues.append(("CRITICAL", "bayes_fusion live/kelly/flip ON while evidence gate FAILS — "
-                                   "resolver footgun. Set these FALSE until the gate passes (Fault C)."))
-    if arm and not ev_ok:
-        issues.append(("CRITICAL", "edli_live_operator_authorized ON while evidence gate FAILS — "
-                                   "real money path open without promotion evidence. CLOSE the arm."))
+    if fusion and not fused_q:
+        issues.append(("CRITICAL", "fusion ON but fused q-shape OFF — live would not use the current single-q replacement kernel."))
+    if live and not coverage:
+        issues.append(("CRITICAL", "replacement live flag ON but q_lcb settlement coverage gate OFF — restart would skip the current reliability guard."))
     if (live or arm) and not fusion:
         issues.append(("WARN", "live/arm ON but fusion OFF — you would trade the single-anchor path, "
                                "not the proven BAYES_PRECISION_FUSION fusion."))
+    if (live or kelly or flip or arm) and not ev_ok:
+        issues.append(("WARN", "historical promotion_evidence is stale/incomplete; current live code does not use it as an arm gate."))
 
     print("-" * 72)
     if issues:
@@ -150,27 +149,24 @@ def main() -> int:
     print("-" * 72)
     if not capture:
         nxt = ("replacement_0_1_bayes_precision_fusion_capture_enabled = TRUE",
-               "start multi-model accrual (shadow, zero trading effect). "
+               "start multi-model raw input capture. "
                "Pair with: run scripts/backfill_bayes_precision_fusion_history_from_b0.py --db <forecasts.db> to seed history NOW.")
     elif not fusion:
-        nxt = ("replacement_0_1_bayes_precision_fusion_enabled = TRUE (+ eb_bias + member_vote_smoothing)",
+        nxt = ("replacement_0_1_bayes_precision_fusion_enabled = TRUE",
                "history is seeded/accruing -> fusion reaches T2_BAYES. Verify "
                "posterior_method shows the_path_bayes_precision_fusion before opening live.")
-    elif not qlcb:
-        nxt = ("replacement_qlcb_settlement_sigma_floor_enabled = TRUE",
-               "license after >=30 settled per-band coverage passes (only-lowers, conservative).")
-    elif not ev_ok:
-        nxt = ("(blocked) regenerate/satisfy the evidence gate",
-               "live cannot be opened until the gate passes. "
-               "Blockers: " + "; ".join(ev_blockers) + ". "
-               "NOTE: the retrospective backtest (14,370 settled, HIGH win 63.9%) is settlement-grade "
-               "evidence — operator decision whether to regenerate promotion_evidence from it vs forward accrual.")
+    elif not fused_q:
+        nxt = ("replacement_0_1_fused_q_shape_enabled = TRUE",
+               "enable the current single-q replacement kernel before live order decisions.")
+    elif not coverage:
+        nxt = ("q_lcb_settlement_coverage_gate_enabled = TRUE",
+               "apply the settlement-graded q_lcb reliability guard used by live restart checks.")
     elif not (live and kelly and flip):
         nxt = ("openmeteo_ecmwf_ifs9_bayes_fusion_{live,kelly_increase,direction_flip}_enabled = TRUE",
-               "evidence gate PASSES -> open live bayes_fusion execution (resolver now enforces it).")
+               "open live bayes_fusion execution after confirming current live inputs are present.")
     elif not arm:
         nxt = ("edli_live_operator_authorized = TRUE  (FINAL ARM — operator only)",
-               "open the real money path. Confirm shadow candidates match internal + mainstream forecast first.")
+              "open the real money path. Confirm candidate evidence matches internal + mainstream forecast first.")
     else:
         nxt = ("(none)",
                "fully armed. Monitor after-cost EV/PnL/log-growth, q_lcb coverage, "

@@ -38,8 +38,6 @@ from src.data.replacement_forecast_switch_decision import (
     SWITCH_LIVE,
     ReplacementForecastSwitchDecision,
 )
-from src.engine.replacement_forecast_veto import ReplacementForecastVetoDecision
-
 
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 REPLACEMENT_EXECUTION_LIVE_STATUS = "live"
@@ -165,16 +163,17 @@ class ReplacementForecastReactorHookResult:
     effective_q_posterior: float
     effective_q_lcb: float
     effective_kelly_fraction: float
-    veto_decision: ReplacementForecastVetoDecision | None = None
+    veto_decision: Mapping[str, Any] | None = None
     receipt_provenance: ReplacementForecastReceiptProvenance | _ExecutionLayerReceiptProvenance | None = None
 
     @property
     def changed_baseline(self) -> bool:
-        return self.veto_decision is not None and (
-            self.effective_direction != self.veto_decision.baseline_direction
-            or abs(self.effective_q_posterior - self.veto_decision.baseline_q_posterior) > 1e-15
-            or abs(self.effective_q_lcb - self.veto_decision.baseline_q_lcb) > 1e-15
-            or abs(self.effective_kelly_fraction - self.veto_decision.baseline_kelly_fraction) > 1e-15
+        decision = self.veto_decision
+        return decision is not None and (
+            self.effective_direction != decision.get("baseline_direction")
+            or abs(self.effective_q_posterior - float(decision.get("baseline_q_posterior", 0.0))) > 1e-15
+            or abs(self.effective_q_lcb - float(decision.get("baseline_q_lcb", 0.0))) > 1e-15
+            or abs(self.effective_kelly_fraction - float(decision.get("baseline_kelly_fraction", 0.0))) > 1e-15
         )
 
     def effective_values(self) -> dict[str, object]:

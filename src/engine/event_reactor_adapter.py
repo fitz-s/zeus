@@ -236,6 +236,8 @@ from src.strategy.live_inference.live_admission import (
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
 )
+
+_SELECTION_DIAGNOSTIC_PI_MIN = 0.90
 # pr408 #1 CRITICAL (2026-06-14): the live calibration credential licenses through the K3
 # admission predicates (allows_arm = LICENSED/INSUFFICIENT_DATA license-by-default;
 # refutes_claim = UNLICENSED), NOT a status-name allowlist that excluded INSUFFICIENT_DATA
@@ -2146,24 +2148,18 @@ def _forecast_lane_phase_admits(evidence: "_market_phase_evidence.MarketPhaseEvi
 
 
 def _selection_pi_min() -> float:
-    """Posterior probability threshold P(e>e_min|D) for the EB-shrinkage SHADOW
-    license computation (A2: 0.90).
+    """Fixed diagnostic threshold for the selection-shrinkage receipt fields.
 
-    The EB-shrinkage decision-replacement flag was REMOVED 2026-06-13 in the
-    q-shadow gate-mass collapse: the live selection gate is the BH/FDR pass
-    UNCONDITIONALLY. This threshold now parameterizes only the shadow telemetry
-    (lfsr / edge_shrunk / edge_shrunk_posterior_sd / selection_authority stamped
-    on edli_no_submit_receipts for the winner's-curse slope diagnostic); it never
-    influences the live decision."""
-    try:
-        return float(settings["edli"].get("replacement_selection_pi_min", 0.90))
-    except Exception:
-        return 0.90
+    This value is intentionally not configurable from live settings. The live
+    selection gate remains the BH/FDR pass; the shrinkage quantities are recorded
+    for later attribution and cannot change the selected order.
+    """
+    return _SELECTION_DIAGNOSTIC_PI_MIN
 
 
 @dataclass(frozen=True)
 class _SelectionShrinkageVerdict:
-    """Shadow/decision output of the C2 EB-shrinkage selection stage."""
+    """Diagnostic output of the C2 EB-shrinkage selection attribution stage."""
 
     lfsr: float | None
     edge_shrunk: float | None
@@ -2187,11 +2183,10 @@ def _compute_selection_shrinkage(
     Per-candidate edge ê = q_lcb_5pct − price; the per-candidate posterior SD is
     derived from the one-sided 5% LCB gap s ≈ (q_posterior − q_lcb_5pct)/z_{0.95}.
 
-    Returns the shadow quantities (always) plus the EB license verdict (when an
-    executable universe exists). selection_authority names the gate that decided:
-    "EB_SHRINKAGE" when the flag is ON, "BH_FDR" when OFF (current behavior).
+    Returns diagnostic quantities plus the EB license verdict when an executable
+    universe exists. The live order selection does not branch on this result.
     Fail-soft: any construction error leaves the quantities None and authority
-    "BH_FDR" so the live BH path is never disturbed by shadow computation.
+    "BH_FDR" so the live BH path is never disturbed by attribution computation.
     """
     from src.strategy.selection_shrinkage import (
         eb_shrink_edges,
@@ -2939,12 +2934,10 @@ def _build_event_bound_no_submit_receipt_core(
         )
     hypothesis_id = f"{family.family_id}:{selected_token_id}"
     # C2 (task #60): compute the posterior lfsr + EB-shrunk selected edge over the
-    # family's executable bins. SHADOW-ONLY: the BH/FDR pass is the unconditional
-    # live selection gate. The EB-shrinkage decision-replacement flag was REMOVED
-    # 2026-06-13 in the q-shadow gate-mass collapse; ``authority_on=False`` pins the
-    # shadow stamp to selection_authority="BH_FDR" (byte-identical to the prior
-    # flag-OFF live path) while the lfsr / edge_shrunk quantities are still computed
-    # and stamped on edli_no_submit_receipts for the winner's-curse slope diagnostic.
+    # family's executable bins as attribution only. The BH/FDR pass is the
+    # unconditional live selection gate; ``authority_on=False`` pins the receipt
+    # stamp to selection_authority="BH_FDR" while lfsr / edge_shrunk remain
+    # available for later winner's-curse analysis.
     _shrink = _compute_selection_shrinkage(
         proofs=proofs,
         selected_token_id=selected_token_id,
@@ -2954,11 +2947,11 @@ def _build_event_bound_no_submit_receipt_core(
     )
 
     def _with_shrink(receipt: EventSubmissionReceipt) -> EventSubmissionReceipt:
-        """Stamp the C2 shadow selection-shrinkage columns onto a post-gate receipt.
+        """Stamp the C2 selection-shrinkage attribution columns onto a post-gate receipt.
 
-        Every receipt produced at or after the selection gate carries the shadow
+        Every receipt produced at or after the selection gate carries the
         quantities so settlement grading can run the winner's-curse slope
-        diagnostic. Pure dataclass_replace — never alters the decision.
+        diagnostic. Pure dataclass_replace; never alters the decision.
         """
         return dataclass_replace(
             receipt,
@@ -8463,36 +8456,6 @@ def _generate_candidate_proofs(
                     )
                 except ValueError as exc:
                     missing_reason = str(exc)
-            # MARKET ANCHOR (objective-math audit 2026-06-11, flag default OFF): cap a
-            # near-center buy_no's tradable q_lcb at the legacy α-blend of model-NO with
-            # the market-implied NO. The σ-flattened fused q manufactures a phantom NO
-            # edge in the adjacent-center ring (Part A: C3 −4.8pt mean, 30-54pt tail) by
-            # under-weighting its OWN near bins vs the sharper market; the ranking
-            # objective max(q_lcb−price) then ranks it first. The cap reuses the SINGLE
-            # blending authority (market_fusion semantics) and only ever LOWERS q_lcb_no
-            # (one-sided), so it can never create a trade. Flag OFF -> byte-identical: the
-            # block is not entered. Applied to buy_no only, before score/gates/proof.
-            if (
-                direction == "buy_no"
-                and execution_price is not None
-                and _replacement_q_market_anchor_enabled()
-            ):
-                _anchor = _market_anchor_no_lcb_for_candidate(
-                    candidate=candidate,
-                    q_lcb_no=q_lcb,
-                    q_model_no=q_value,
-                    market_no_price=float(execution_price.value),
-                    mu=direction_law_mu,
-                )
-                if _anchor is not None and _anchor.capped:
-                    import logging as _logging
-
-                    _logging.getLogger("zeus.replacement_qlcb_shadow").info(
-                        "market_anchor cap %s %s: q_lcb_no %.4f->%.4f (q_market_no=%.4f alpha=%.3f)",
-                        condition_id, direction, q_lcb, _anchor.q_lcb_no_out,
-                        _anchor.q_market_no, _anchor.alpha,
-                    )
-                    q_lcb = float(_anchor.q_lcb_no_out)
             # FIX C (mode-consistent EV; operator directive 2026-06-10): the
             # trade_score is the CHOSEN execution mode's EV, never the hybrid
             # taker-cost x visible-depth-p_fill. TAKER-chosen scores are
@@ -9035,47 +8998,6 @@ def _direction_law_reason_for_candidate(
         predictive_sigma=predictive_sigma,
         mu_settled=mu_settled,
         settle_value=settle_value,
-    )
-
-
-def _market_anchor_no_lcb_for_candidate(
-    *,
-    candidate,
-    q_lcb_no: float,
-    q_model_no: float,
-    market_no_price: float,
-    mu: float | None,
-):
-    """Per-candidate market-anchor cap (flag-gated caller checks enablement first).
-
-    Computes the bin's |distance(bin, mu)| in settlement steps so the pure module can
-    scope the cap to the near-center classes (C1-C3) and leave the far-NO harvest (C4)
-    untouched. ``mu`` arrives ALREADY in the bin unit (from _direction_law_family_center),
-    exactly as the direction-law uses it. Returns a MarketAnchorResult or None when the
-    bin cannot be measured (no cap — fail toward leaving the value unchanged)."""
-    from src.strategy.live_inference.direction_law import (
-        bin_forecast_distance,
-        _SETTLEMENT_STEP_BY_UNIT,
-    )
-    from src.strategy.live_inference.market_anchor import market_anchored_no_lcb
-
-    bin_obj = getattr(candidate, "bin", None)
-    if bin_obj is None:
-        return None
-    step = _SETTLEMENT_STEP_BY_UNIT.get(str(bin_obj.unit))
-    dist_steps: float | None = None
-    if mu is not None and step:
-        try:
-            raw = bin_forecast_distance(bin_low=bin_obj.low, bin_high=bin_obj.high, mu=float(mu))
-            dist_steps = float(raw) / float(step)
-        except Exception:  # noqa: BLE001 — unmeasurable distance -> near-center default
-            dist_steps = None
-    return market_anchored_no_lcb(
-        q_lcb_no=q_lcb_no,
-        q_model_no=q_model_no,
-        market_no_price=market_no_price,
-        alpha=_market_anchor_alpha(),
-        bin_distance_steps=dist_steps,
     )
 
 
@@ -10445,8 +10367,8 @@ def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bo
     GRANDFATHER REVOKED (operator directive 2026-06-10 P0): the former q_shape=="fused_normal_direct"
     grandfather branch that returned (True, "FUSED_NORMAL_GRANDFATHERED") has been DELETED. Old DB
     rows with no replacement_q_mode key and q_shape=="fused_normal_direct" are NOT live-eligible —
-    they have no bounds and would size Kelly under fused-Normal q + Wilson/AIFS q_lcb (two-measures
-    disease, root cause of the Milan wrong order). Those rows must rematerialize to get proper bounds.
+    they have no certified bootstrap bounds and would size Kelly with mismatched probability and
+    q_lcb measures. Those rows must rematerialize to get proper bounds.
     """
     provenance = getattr(replacement_bundle, "provenance_json", None)
     if not isinstance(provenance, Mapping):
@@ -10783,37 +10705,6 @@ def _replacement_authority_enabled() -> bool:
     return bool(flags.get("openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled", False))
 
 
-def _replacement_q_market_anchor_enabled() -> bool:
-    """Market-anchor cap flag (objective-math audit 2026-06-11, default FALSE).
-
-    When OFF the tradable NO q_lcb is byte-identical to today — the market anchor is
-    NEVER consulted (no extra read; the NO all-in execution price is already in scope).
-    When ON, a buy_no candidate whose bin is within the near-center reach has its
-    tradable q_lcb_no CAPPED at the legacy α-blend of model-NO with the market-implied
-    NO (src/strategy/market_fusion semantics, single authority). One-sided: the cap only
-    ever LOWERS the lower bound, so it can never create a trade — it only kills the
-    phantom near-center NO edge the σ-flattened fused q manufactures (Part A: C3 −4.8pt
-    mean, 30-54pt tail). The direction-law bans STAY as defense-in-depth."""
-    try:
-        return bool(settings["edli"].get("replacement_q_market_anchor_enabled", False))
-    except Exception:
-        return False
-
-
-def _market_anchor_alpha() -> float:
-    """Conservative per-decision α for the market-anchor cap, from the SINGLE legacy
-    registry (config edge.base_alpha). The calibration level is not threaded to this
-    selection seam, so a single conservative level (level-3) is used — NOT a new α: the
-    value comes from the same compute_alpha registry the legacy chain blended with. A
-    lower α = stronger market anchor; level-3 (0.4) is the conservative mid-trust point."""
-    try:
-        return float(settings["edge"]["base_alpha"]["level3"])
-    except Exception:
-        from src.strategy.live_inference.market_anchor import DEFAULT_FALLBACK_ALPHA
-
-        return DEFAULT_FALLBACK_ALPHA
-
-
 def _wilson_lower_bound(successes: float, trials: float, *, z: float = 1.645) -> float:
     if trials <= 0.0:
         return 0.0
@@ -10875,9 +10766,9 @@ def _replacement_bound_to_c(value: object, *, unit: str) -> float | None:
 def _replacement_anchor_mu_c(replacement_bundle: object) -> float | None:
     """The soft-anchor point estimate μ (°C) the bundle was built around.
 
-    Read from ``provenance_json.anchor_value_c`` (the deterministic IFS9 anchor the AIFS
-    prior is fused with; confirmed present on all live posteriors). ``None`` when absent
-    so the floor is skipped (degrade, never crash)."""
+    Read from ``provenance_json.anchor_value_c`` (the deterministic IFS9 anchor value carried
+    by legacy posterior rows and retained as provenance on current live posteriors). ``None``
+    when absent so the floor is skipped (degrade, never crash)."""
     provenance = getattr(replacement_bundle, "provenance_json", None) or {}
     if not isinstance(provenance, Mapping):
         return None
@@ -11036,7 +10927,7 @@ def _replacement_authority_probability_and_fdr_proof(
     # now granted by the trade_authority flag (_replacement_authority_enabled, above).
     # The REAL forward risk controls remain enforced BELOW and are untouched: readiness
     # freshness (READINESS_MISSING raise), the bundle gate (BUNDLE_BLOCKED), the q_lcb
-    # settlement-sigma floor (QLCB_FLOOR_MISSING — blocks, never degrades to raw Wilson),
+    # fused-center bootstrap bounds (must exist for live-eligible q modes),
     # the direction law (re-derived from argmax(BAYES_PRECISION_FUSION.q) per bin), fractional Kelly, the
     # after-cost cost floor, and RiskGuard. Overconfidence is bounded FORWARD by q_lcb +
     # fractional Kelly and judged by settlement, not by a pre-trade evidence checklist.
@@ -11068,8 +10959,8 @@ def _replacement_authority_probability_and_fdr_proof(
     replacement_bundle = bundle_result.bundle
     # DecisionProvenanceEnvelope (operator law 2026-06-11): record the SERVED bundle the moment it
     # is bound — BEFORE the q-mode / bounds gates below — so every rejection raised after the read
-    # (q-mode ineligible, bounds missing, floor missing, ...) still carries the exact data
-    # combination it examined. Observability only; never read back into any gate.
+    # (q-mode ineligible, bounds missing, ...) still carries the exact data combination it
+    # examined. Observability only; never read back into any gate.
     if provenance_capture is not None:
         provenance_capture["replacement_bundle"] = replacement_bundle
     # FIX 1 (2026-06-09) — q-mode live eligibility gate. Real submit is allowed ONLY when the
@@ -11127,27 +11018,10 @@ def _replacement_authority_probability_and_fdr_proof(
     p_values: dict[tuple[str, str], float] = {}
     prefilter: dict[tuple[str, str], bool] = {}
     q_map = replacement_bundle.q
-    # QLCB_HONESTY.md FIX-C — settlement σ-floor inputs, resolved ONCE per family (flag
-    # ON only). μ is the soft-anchor point (°C); σ-floor is the per-(city,season,metric)
-    # realized-residual cell.
-    #
-    # PR#400 the_path audit BLOCKER 7 — this function is the LIVE replacement_0_1 authority
-    # builder: it is reached after `_replacement_authority_enabled()` (TRADE_AUTHORITY flag)
-    # ALONE. NOTE (operator directive 2026-06-08): the settlement-evidence promotion gate
-    # `replacement_live_authority_evidence_gate` was REMOVED and NO LONGER gates this path
-    # (zero call-sites; flag-only live — see replacement_forecast_runtime_policy).
-    # The q_lcb it returns is stamped probability_authority="replacement_0_1" and sizes REAL
-    # capital. So the missing-floor mode here is unconditionally live/authority/capital.
-    # A missing floor input must therefore BLOCK (never degrade to the raw, overconfident
-    # Wilson bound) — both at family-setup time and per-bin. The block raises a ValueError
-    # that the caller (_generate_candidate_proofs :1388) converts to a no-submit receipt.
     # Wave-2 item 6 (2026-06-12): the per-bin replacement q_lcb SETTLEMENT-σ-GROUNDED FLOOR
-    # (formerly gated by replacement_qlcb_settlement_sigma_floor_enabled, permanently FALSE)
-    # is a DISTINCT correction from the materializer's σ-SHAPE floor (item 6 merges only the
-    # latter, by per-cell data availability). This q_lcb-grounding correction was never live;
-    # activating it as a side effect of the flag cleanup would be a silent, unvalidated change
-    # to live sizing. Per the operator law it is DELETED, not activated — the live q_lcb keeps
-    # its current honest value (the certified fused-center bootstrap bound), unchanged.
+    # is DELETED, not activated. The live replacement q_lcb is the certified fused-center
+    # bootstrap bound carried by the bundle; the q-mode/bounds gates above are the live
+    # fail-closed checks.
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         bin_id = _candidate_replacement_bin_id(candidate, replacement_bundle)
@@ -11214,13 +11088,9 @@ def _replacement_authority_probability_and_fdr_proof(
             else (0.0 if no_edge_lcb_positive else 1.0)
         )
         prefilter[(condition_id, "buy_no")] = bool(no_edge_lcb_positive)
-    # ITEM 2 (FIX-B) — wire the EXISTING K3 settlement-backward-coverage shrink into the
-    # LIVE replacement path (its sole prior call site was the canonical/EMOS path). SAME
-    # helper, SAME flag (edli.q_lcb_settlement_coverage_gate_enabled, default FALSE):
-    # flag OFF → immediate no-op (byte-identical); flag ON → only ever LOWERS the q_lcb,
-    # fails open. No-op (INSUFFICIENT_DATA) until ≥min_n replacement markets settle —
-    # wired now so the protection is live the moment June fills resolve (one builder; no
-    # duplicate helper).
+    # K3 settlement-backward coverage is a live safety gate. It only ever lowers an
+    # unlicensed q_lcb; INSUFFICIENT_DATA is a typed no-shrink verdict, while structural
+    # coverage-authority faults fail closed instead of serving an unlicensed bound.
     _maybe_apply_settlement_coverage_to_lcb(
         family=family,
         forecast_conn=conn,
@@ -11631,11 +11501,9 @@ def _canonical_probability_and_fdr_proof(
 
     # K3 (Phase-2) SETTLEMENT-BACKWARD COVERAGE — license each q_lcb against the
     # REALIZED settlement win-rate in its band, shrinking an UNLICENSED band to the
-    # realized rate minus 1pp (source SETTLEMENT_ISOTONIC). SHADOW FLAG, DEFAULT OFF
-    # (edli.q_lcb_settlement_coverage_gate_enabled): with the flag OFF this is a
-    # pure no-op and the q_lcb is byte-identical to the EMOS/MC value above. The
-    # coverage table is built ONLY through the spine grade_receipt. FAIL-OPEN: any
-    # error keeps the upstream lcb (never crash, never widen optimistically).
+    # realized rate minus 1pp (source SETTLEMENT_ISOTONIC). This is a live safety gate:
+    # legitimate INSUFFICIENT_DATA keeps the upstream lcb, but structural authority
+    # faults fail closed instead of serving an unlicensed bound.
     _maybe_apply_settlement_coverage_to_lcb(
         family=family,
         forecast_conn=conn,
@@ -14074,14 +13942,10 @@ def _maybe_apply_settlement_coverage_to_lcb(
 ) -> None:
     """K3 (Phase-2): shrink an UNLICENSED q_lcb to its realized settlement rate.
 
-    SHADOW FLAG (edli.q_lcb_settlement_coverage_gate_enabled, default FALSE):
-    flag OFF → IMMEDIATE no-op, the q_lcb is byte-identical to the EMOS/MC value.
-    Flag ON → for each (cond, direction) build the backward-coverage stream through
-    grade_receipt, run settlement_backward_coverage_check, and apply the shrink via
-    apply_settlement_coverage (only UNLICENSED moves the number; the shrink only ever
-    LOWERS the LCB). The new entry's calibration_source becomes SETTLEMENT_ISOTONIC.
-
-    GATE OFF (default): IMMEDIATE no-op, byte-identical lcb (never reached below).
+    For each (cond, direction), build the backward-coverage stream through grade_receipt,
+    run settlement_backward_coverage_check, and apply the shrink via apply_settlement_coverage.
+    Only UNLICENSED moves the number; the shrink only ever LOWERS the LCB. The new entry's
+    calibration_source becomes SETTLEMENT_ISOTONIC.
 
     FINDING-C FIX (external review 2026-06-12): when the GATE IS ON (live coverage
     licensing), this is a SAFETY gate (it can only LOWER an unlicensed bound). Two

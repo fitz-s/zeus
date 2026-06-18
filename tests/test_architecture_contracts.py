@@ -4212,7 +4212,7 @@ def _stub_reprice_from_snapshot(conn, d, fields, ctx):
         "live_submit_authority": True,
         "final_execution_intent_id": intent_id,
         "corrected_candidate_limit_price": price_str,
-        "corrected_pricing_shadow": {
+        "corrected_pricing_evidence": {
             "sweep_submitted_shares": "20",
             "sweep_filled_shares": "20",
         },

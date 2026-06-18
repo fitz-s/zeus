@@ -369,10 +369,7 @@ class Walker:
 
             edli = settings["edli"]
             details.append(f"scope={edli.get('edli_live_scope')}")
-            details.append(
-                "intermediate_admission="
-                + str(edli.get("replacement_0_1_intermediate_cycle_live_admission_enabled"))
-            )
+            details.append("replacement_cycles=00/06/12/18Z_live")
         except Exception as exc:  # noqa: BLE001
             details.append(f"settings=unreadable({exc})")
         verdict = "PASS" if "unresolved_findings=0" in details and "risk=GREEN" in " ".join(details) else "WARN"

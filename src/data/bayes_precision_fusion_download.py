@@ -24,7 +24,7 @@ no longer fetched here.)
   (2) fixed-lead previous_runs fetch — the no-leak walk-forward train value via the OM
       previous-runs API temperature_2m_previous_dayN hourly var (SPEC §3 fixed-lead). Forces
       temperature_unit=celsius (forecast_value_c is ALWAYS degC -> SPEC §7 C/F unit-mix antibody).
-  (3) INSERTs the surviving rows into raw_model_forecasts (SHADOW_ONLY, training_allowed=0),
+  (3) INSERTs the surviving rows into raw_model_forecasts (raw live input, training_allowed=0),
       on a SINGLE zeus-forecasts.db connection (INV-37), UNIQUE-idempotent per cycle.
   (4) PRUNES rows older than the retention cutoff (~180d, SPEC §5) in the same transaction.
 
@@ -62,7 +62,7 @@ from src.forecast.model_selection import (
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_download")
 
-# SPEC §5: ~6 months retention on the shadow capture table.
+# SPEC §5: ~6 months retention on the raw input capture table.
 RETENTION_DAYS = 180
 
 

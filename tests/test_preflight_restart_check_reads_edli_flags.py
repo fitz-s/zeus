@@ -1,13 +1,13 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: BLOCKER 1 — preflight_restart_check.py must read flag values from their correct scope (edli for capture/fusion/arm; feature_flags for soft_anchor) not the top-level cfg dict.
+# Purpose: BLOCKER 1 — preflight_restart_check.py must read flag values from their correct scope (edli for capture/fusion/arm; feature_flags for replacement live) not the top-level cfg dict.
 # Reuse: Run with pytest; update if flag scopes or scope-routing in preflight_restart_check.py changes.
 """
 tests/test_preflight_restart_check_reads_edli_flags.py
 
 Operator-specified TDD test for BLOCKER 1:
 preflight_restart_check.py must read flag values from their ACTUAL scope
-in config/settings.json (edli for capture/fusion/arm/caps/qlcb;
-feature_flags for soft_anchor flags) — NOT from the top-level cfg dict.
+in config/settings.json (edli for capture/fusion/fused-q/coverage/arm;
+feature_flags for replacement live flags) — NOT from the top-level cfg dict.
 
 Assertion spec (operator-named):
   edli.replacement_0_1_bayes_precision_fusion_capture_enabled=true
@@ -60,7 +60,7 @@ def _run_preflight(settings: dict, promotion_evidence: dict | None = None) -> di
 
     with tempfile.TemporaryDirectory() as root:
         config_dir = os.path.join(root, "config")
-        state_dir = os.path.join(root, "state", "replacement_forecast_shadow")
+        state_dir = os.path.join(root, "state", "replacement_forecast_live")
         os.makedirs(config_dir)
         os.makedirs(state_dir)
 
@@ -103,18 +103,20 @@ def _run_preflight(settings: dict, promotion_evidence: dict | None = None) -> di
 def _settings(*, capture: bool, fusion: bool,
                arm: bool = False,
                qlcb: bool = False,
+               fused_q: bool = True,
                auth: bool = False, kelly: bool = False, flip: bool = False) -> dict:
     return {
         "edli": {
             "replacement_0_1_bayes_precision_fusion_capture_enabled": capture,
             "replacement_0_1_bayes_precision_fusion_enabled": fusion,
-            "replacement_qlcb_settlement_sigma_floor_enabled": qlcb,
+            "replacement_0_1_fused_q_shape_enabled": fused_q,
+            "q_lcb_settlement_coverage_gate_enabled": qlcb,
             "edli_live_operator_authorized": arm,
         },
         "feature_flags": {
-            "openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled": auth,
-            "openmeteo_ecmwf_ifs9_aifs_soft_anchor_kelly_increase_enabled": kelly,
-            "openmeteo_ecmwf_ifs9_aifs_soft_anchor_direction_flip_enabled": flip,
+            "openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled": auth,
+            "openmeteo_ecmwf_ifs9_bayes_fusion_kelly_increase_enabled": kelly,
+            "openmeteo_ecmwf_ifs9_bayes_fusion_direction_flip_enabled": flip,
         },
     }
 
@@ -131,8 +133,8 @@ def test_capture_on_fusion_off_reads_edli_stage_is_accruing():
     would fall through to SHADOW — the failure proves the bug exists.
     """
     result = _run_preflight(_settings(capture=True, fusion=False))
-    assert "ACCRUING" in result["stage"], (
-        f"Expected ACCRUING stage but got: {result['stage']!r}\n"
+    assert "EXPERIMENT_ACCRUAL" in result["stage"], (
+        f"Expected EXPERIMENT_ACCRUAL stage but got: {result['stage']!r}\n"
         f"Full output:\n{result['stdout']}"
     )
 
@@ -153,10 +155,10 @@ def test_capture_on_fusion_off_next_flip_is_fusion_flag():
 # Stage ladder completeness — all rungs read from correct scope
 # ---------------------------------------------------------------------------
 
-def test_capture_off_fusion_off_stage_is_shadow():
+def test_capture_off_fusion_off_stage_is_experiment_only():
     result = _run_preflight(_settings(capture=False, fusion=False))
-    assert "SHADOW" in result["stage"], (
-        f"Expected SHADOW but got: {result['stage']!r}"
+    assert "EXPERIMENT_ONLY" in result["stage"], (
+        f"Expected EXPERIMENT_ONLY but got: {result['stage']!r}"
     )
 
 
@@ -167,10 +169,10 @@ def test_capture_off_stage_next_flip_is_capture_flag():
     )
 
 
-def test_fusion_on_no_auth_stage_is_shadow_fusion():
+def test_fusion_on_no_auth_stage_is_blocked_for_live():
     result = _run_preflight(_settings(capture=True, fusion=True))
-    assert "SHADOW-FUSION" in result["stage"], (
-        f"Expected SHADOW-FUSION but got: {result['stage']!r}"
+    assert "BLOCKED_FOR_LIVE" in result["stage"], (
+        f"Expected BLOCKED_FOR_LIVE but got: {result['stage']!r}"
     )
 
 
@@ -187,19 +189,19 @@ def test_arm_flag_reads_from_edli():
     )
 
 
-def test_soft_anchor_flags_read_from_feature_flags():
+def test_replacement_live_flags_read_from_feature_flags():
     """
-    auth/kelly/flip=true in feature_flags (not edli) -> CRITICAL coherence
-    warning fires when evidence gate fails (no promotion_evidence file).
+    auth/kelly/flip=true in feature_flags (not edli) -> historical evidence
+    advisory is reported, but it is not a live arm blocker.
     """
     result = _run_preflight(
-        _settings(capture=True, fusion=True, auth=True, kelly=True, flip=True)
+        _settings(capture=True, fusion=True, qlcb=True, auth=True, kelly=True, flip=True)
     )
-    assert "CRITICAL" in result["stdout"], (
-        f"Expected CRITICAL in output when authority ON + evidence FAIL:\n{result['stdout']}"
+    assert "ADVISORY_STALE" in result["stdout"], (
+        f"Expected historical-evidence advisory when evidence is stale:\n{result['stdout']}"
     )
-    assert result["exit_code"] == 2, (
-        f"Expected exit_code=2 for CRITICAL but got {result['exit_code']}"
+    assert result["exit_code"] == 0, (
+        f"Expected exit_code=0 for advisory evidence gap but got {result['exit_code']}"
     )
 
 
@@ -230,9 +232,9 @@ def test_promotion_evidence_path_still_read():
         _settings(capture=True, fusion=True),
         promotion_evidence=pe,
     )
-    assert "PASS" in result["stdout"], (
-        f"Expected evidence gate PASS:\n{result['stdout']}"
+    assert "HISTORICAL_EVIDENCE : PASS" in result["stdout"], (
+        f"Expected historical evidence PASS:\n{result['stdout']}"
     )
-    assert "blockers=" not in result["stdout"], (
-        f"Expected no blockers with passing evidence:\n{result['stdout']}"
+    assert "gaps=" not in result["stdout"], (
+        f"Expected no gaps with passing evidence:\n{result['stdout']}"
     )

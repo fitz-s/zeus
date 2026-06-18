@@ -737,8 +737,7 @@ def _resolve_unified_exit_bias_native(
     Returns the native-unit per-city bias SHIFT to subtract from the member extrema BEFORE
     p_raw on the exit/monitor path, so the exit belief matches the entry belief — or None.
 
-    Flag-gated by ``feature_flags.exit_bias_family_unify_enabled`` (default OFF → returns None
-    immediately, exit path byte-identical to today). When ON, reads the SAME populated VERIFIED
+    The live flag ``feature_flags.exit_bias_family_unify_enabled`` reads the SAME populated VERIFIED
     family the reactor entry uses (``event_reactor_adapter._EDLI_BIAS_FAMILY`` =
     'edli_per_city_v1', 71 rows) with the reactor's EXACT read shape:
     ``month=target_month, target_month=target_month, authority='VERIFIED', lead_bucket=None``.

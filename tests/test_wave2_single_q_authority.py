@@ -279,9 +279,12 @@ def test_item5_routing_tables_use_edli_live_only():
     assert "edli_live_canary" not in main.EDLI_EVENT_DRIVEN_MODES
     assert "edli_live_canary" not in main.REACTOR_MODE_BY_LIVE_STAGE
     assert main.REACTOR_MODE_BY_LIVE_STAGE["edli_live"] == "live"
-    # The remaining modes that route real behavior are kept.
-    for kept in ("legacy_cron", "edli_shadow_no_submit", "edli_submit_disabled_bridge"):
+    # The remaining modes that route real behavior are kept; shadow/submit-disabled
+    # bridge modes must not be valid live execution modes.
+    for kept in ("legacy_cron", "disabled"):
         assert kept in main.LIVE_EXECUTION_MODES
+    assert "edli_shadow_no_submit" not in main.LIVE_EXECUTION_MODES
+    assert "edli_submit_disabled_bridge" not in main.LIVE_EXECUTION_MODES
 
 
 def test_item5_old_canary_mode_string_in_persisted_data_still_readable():

@@ -1,14 +1,14 @@
 # Created: 2026-06-07
 # Last reused/audited: 2026-06-07
 # Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-07
-# Purpose: Relationship tests for flag-gated additive (Laplace/Dirichlet) smoothing of the
-#   AIFS sampled-2t member-vote prior so the soft_anchor.py:197-198 zero-prior -inf veto can
+# Purpose: Relationship tests for additive (Laplace/Dirichlet) smoothing of the
+#   AIFS sampled-2t member-vote prior so the soft_anchor.py zero-prior -inf veto can
 #   no longer make a market bin structurally un-hittable. Fitz #5: kill the category, not the
 #   instance — every bin gets a strictly-positive prior so the 0.1 anchor Gaussian (weight 0.80)
 #   can place mass in formerly-0-vote bins (the soft anchor becomes soft).
-# Reuse: Run before changing member-prior construction, the alpha constant, or the smoothing flag.
-# Authority basis: Operator task replacement_0_1_member_vote_smoothing_enabled (edli, default OFF).
-"""Flag-gated additive smoothing of the AIFS member-vote prior (the zero-prior veto fix)."""
+# Reuse: Run before changing member-prior construction or the alpha constant.
+# Authority basis: AIFS experiment-layer probability construction; not a live settings switch.
+"""Additive smoothing of the experiment-layer AIFS member-vote prior."""
 
 from __future__ import annotations
 

@@ -20,6 +20,8 @@ from src.data.replacement_forecast_live_switch_surface import (
     build_replacement_forecast_live_switch_report,
 )
 from src.data.replacement_forecast_readiness import (
+    HIGH_DATA_VERSION,
+    LOW_DATA_VERSION,
     PRODUCT_ID,
     READY_STATUS,
     SOURCE_ID,
@@ -116,8 +118,8 @@ def _latest_replacement_readiness(
         (
             STRATEGY_KEY,
             SOURCE_ID,
-            "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1",
-            "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_low_v1",
+            HIGH_DATA_VERSION,
+            LOW_DATA_VERSION,
             city,
             target_date,
             temperature_metric,
@@ -517,7 +519,7 @@ def build_replacement_forecast_event_hook(
         )
         candidate_view = _candidate_view_from_proof(proof, decision_time)
         if switch_decision.blocked:
-            if policy.status != "LIVE_AUTHORITY":
+            if not policy.can_initiate_trade:
                 return _replacement_unavailable_result(
                     candidate_view,
                     reason_codes=switch_decision.reason_codes,
@@ -536,7 +538,7 @@ def build_replacement_forecast_event_hook(
             else None
         )
         if baseline_bundle is None:
-            if policy.status != "LIVE_AUTHORITY":
+            if not policy.can_initiate_trade:
                 return _replacement_unavailable_result(
                     candidate_view,
                     reason_codes=("REPLACEMENT_HOOK_BASELINE_BUNDLE_MISSING",),
@@ -552,11 +554,11 @@ def build_replacement_forecast_event_hook(
                 temperature_metric=temperature_metric,
                 decision_time=decision_time,
                 current_bin_topology_hash=_current_bin_topology_hash(proof, event),
-                require_baseline_bundle=policy.status != "LIVE_AUTHORITY",
+                require_baseline_bundle=not policy.can_initiate_trade,
             )
         if bundle_result is None or not bundle_result.ok:
             reason_code = bundle_result.reason_code if bundle_result is not None else "REPLACEMENT_HOOK_READINESS_MISSING"
-            if policy.status != "LIVE_AUTHORITY":
+            if not policy.can_initiate_trade:
                 return _replacement_unavailable_result(
                     candidate_view,
                     reason_codes=(reason_code,),
@@ -567,7 +569,7 @@ def build_replacement_forecast_event_hook(
             )
         replacement_bundle = bundle_result.bundle if bundle_result is not None and bundle_result.ok else None
         # Wave-2 item 1: single q authority — the replacement q_lcb is used directly
-        # only when the live hook returns LIVE_AUTHORITY.
+        # only when the runtime policy is live.
         candidate_view = _candidate_view_from_proof(
             proof,
             decision_time,

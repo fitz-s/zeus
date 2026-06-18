@@ -732,7 +732,7 @@ def _attach_corrected_pricing_authority(
         setattr(decision, "final_execution_intent", final_intent)
     payload = {
         "pricing_semantics_id": cost_basis.pricing_semantics_id,
-        "shadow_only": final_intent is None,
+        "submit_authority_absent": final_intent is None,
         "live_submit_authority": final_intent is not None,
         "field_semantics": (
             "final_execution_intent_submit_authority"
@@ -817,12 +817,12 @@ def _attach_corrected_pricing_authority(
             or "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
         )
     payload.update(sweep_payload)
-    tokens["corrected_pricing_shadow"] = payload
+    tokens["corrected_pricing_evidence"] = payload
     decision.tokens = tokens
     validation = (
         "final_execution_intent_built"
         if final_intent is not None
-        else "corrected_pricing_shadow_built"
+        else "corrected_pricing_evidence_built"
     )
     if validation not in decision.applied_validations:
         decision.applied_validations.append(validation)
@@ -1623,7 +1623,7 @@ def _reprice_decision_from_executable_snapshot(
                         float(corrected_candidate_size),
                         float(passive_floor * Decimal(str(snapshot.min_order_size))),
                     )
-    corrected_pricing_shadow = _attach_corrected_pricing_authority(
+    corrected_pricing_evidence = _attach_corrected_pricing_authority(
         decision=decision,
         snapshot=snapshot,
         candidate_limit_price=float(corrected_candidate_price),
@@ -1637,11 +1637,11 @@ def _reprice_decision_from_executable_snapshot(
         taker_quality_proof=taker_quality_proof,
     )
     if (
-        isinstance(corrected_pricing_shadow, dict)
-        and corrected_pricing_shadow.get("live_submit_authority") is True
+        isinstance(corrected_pricing_evidence, dict)
+        and corrected_pricing_evidence.get("live_submit_authority") is True
     ):
         corrected_candidate_size = float(
-            Decimal(str(corrected_pricing_shadow["candidate_size_usd"]))
+            Decimal(str(corrected_pricing_evidence["candidate_size_usd"]))
         )
         repriced_size = corrected_candidate_size
     if strategy_key_for_live_quality:
@@ -1776,15 +1776,15 @@ def _reprice_decision_from_executable_snapshot(
         "corrected_candidate_size_usd": float(corrected_candidate_size),
         "repriced_edge": repriced_edge,
         "repriced_size_usd": float(repriced_size),
-        "live_submit_authority": bool(corrected_pricing_shadow.get("live_submit_authority"))
-        if isinstance(corrected_pricing_shadow, dict)
+        "live_submit_authority": bool(corrected_pricing_evidence.get("live_submit_authority"))
+        if isinstance(corrected_pricing_evidence, dict)
         else False,
-        "final_execution_intent_id": corrected_pricing_shadow.get("final_execution_intent_id")
-        if isinstance(corrected_pricing_shadow, dict)
+        "final_execution_intent_id": corrected_pricing_evidence.get("final_execution_intent_id")
+        if isinstance(corrected_pricing_evidence, dict)
         else None,
     }
-    if corrected_pricing_shadow is not None:
-        tokens["executable_snapshot_reprice"]["corrected_pricing_shadow"] = corrected_pricing_shadow
+    if corrected_pricing_evidence is not None:
+        tokens["executable_snapshot_reprice"]["corrected_pricing_evidence"] = corrected_pricing_evidence
     decision.tokens = tokens
     return final_best_ask
 
@@ -2365,7 +2365,7 @@ def _record_final_intent_frontier(
         maybe_reprice = tokens.get("executable_snapshot_reprice")
         if isinstance(maybe_reprice, dict):
             reprice_payload = maybe_reprice
-    snapshot_shadow = reprice_payload.get("corrected_pricing_shadow")
+    snapshot_shadow = reprice_payload.get("corrected_pricing_evidence")
     if not isinstance(snapshot_shadow, dict):
         snapshot_shadow = {}
     fields = snapshot_fields or {}
@@ -2542,7 +2542,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
     try:
         corrected_shadow = (
             decision.tokens.get("executable_snapshot_reprice", {})
-            .get("corrected_pricing_shadow", {})
+            .get("corrected_pricing_evidence", {})
         )
     except AttributeError:
         corrected_shadow = {}
@@ -5658,7 +5658,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         }
                         for d in decisions
                     ]
-                    shadow_payload = {
+                    evidence_payload = {
                         "city": city.name,
                         "target_date": candidate.target_date,
                         "timestamp": decision_time.isoformat(),
@@ -5669,7 +5669,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         "lead_hours": float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
                     }
 
-                    def _write_shadow_signal(payload=shadow_payload) -> None:
+                    def _write_shadow_signal(payload=evidence_payload) -> None:
                         from src.state.db import log_shadow_signal
 
                         log_shadow_signal(conn, **payload)
@@ -5889,10 +5889,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         and d.edge is not None
                         and d.edge.direction == "buy_no"
                     ):
-                        from src.engine.evaluator import native_multibin_buy_no_live_enabled
+                        from src.strategy.family_exclusive_dedup import (
+                            buy_no_native_quote_evidence_submit_enabled,
+                        )
 
                         try:
-                            native_buy_no_live_enabled = native_multibin_buy_no_live_enabled()
+                            native_buy_no_live_enabled = buy_no_native_quote_evidence_submit_enabled()
                             live_flag_error = ""
                         except ValueError as exc:
                             native_buy_no_live_enabled = False
@@ -5900,7 +5902,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         if not native_buy_no_live_enabled:
                             buy_no_live_rejection_reason = (
                                 live_flag_error
-                                or "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+                                or "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED"
                             )
                         else:
                             buy_no_live_rejection_reason = _native_buy_no_live_authorization_rejection_reason(
@@ -6192,18 +6194,18 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             if not isinstance(reprice_payload, dict):
                                 raise ValueError("FINAL_EXECUTION_INTENT_MISSING: reprice payload unavailable")
                             final_intent = getattr(d, "final_execution_intent", None)
-                            shadow_payload = reprice_payload.get("corrected_pricing_shadow")
+                            evidence_payload = reprice_payload.get("corrected_pricing_evidence")
                             if reprice_payload.get("live_submit_authority") is not True:
                                 unsupported_reason = None
-                                if isinstance(shadow_payload, dict):
-                                    unsupported_reason = shadow_payload.get("unsupported_reason")
+                                if isinstance(evidence_payload, dict):
+                                    unsupported_reason = evidence_payload.get("unsupported_reason")
                                 raise ValueError(
                                     "FINAL_EXECUTION_INTENT_UNAVAILABLE:"
                                     f"{unsupported_reason or 'live_submit_authority_false'}"
                                 )
                             if final_intent is None:
                                 raise ValueError("FINAL_EXECUTION_INTENT_MISSING")
-                            sweep_payload = reprice_payload.get("corrected_pricing_shadow")
+                            sweep_payload = reprice_payload.get("corrected_pricing_evidence")
                             if not isinstance(sweep_payload, dict):
                                 sweep_payload = reprice_payload
                             if getattr(final_intent, "order_policy", "") == "post_only_passive_limit":
@@ -6326,23 +6328,23 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     "reason",
                                     None,
                                 )
-                            if isinstance(shadow_payload, dict):
-                                shadow_payload["execution_path"] = "final_execution_intent"
-                                shadow_payload["submitted_limit_price"] = (
+                            if isinstance(evidence_payload, dict):
+                                evidence_payload["execution_path"] = "final_execution_intent"
+                                evidence_payload["submitted_limit_price"] = (
                                     None
                                     if submit_rejected
                                     else _decimal_payload(final_limit_decimal)
                                 )
-                                shadow_payload["submit_path"] = (
+                                evidence_payload["submit_path"] = (
                                     None if submit_rejected else "final_execution_intent"
                                 )
-                                shadow_payload["submitted_matches_corrected_candidate"] = (
+                                evidence_payload["submitted_matches_corrected_candidate"] = (
                                     False
                                     if submit_rejected
                                     else abs(final_limit_decimal - corrected_candidate_limit) <= tick_tolerance
                                 )
                                 if submit_rejected:
-                                    shadow_payload["submit_rejected_reason"] = getattr(
+                                    evidence_payload["submit_rejected_reason"] = getattr(
                                         result,
                                         "reason",
                                         None,

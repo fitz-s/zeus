@@ -129,7 +129,6 @@ def test_replacement_0_1_authority_uses_yes_posterior_and_blocks_no_without_nati
     from src.engine import replacement_forecast_hook_factory as hook_factory
 
     feature_flags = dict(settings._data.get("feature_flags", {}))
-    feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = True
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
     monkeypatch.setattr(hook_factory, "_latest_replacement_readiness", lambda *a, **k: object())
     monkeypatch.setattr(
@@ -209,7 +208,7 @@ def test_replacement_reactor_hook_success_status_is_plain_live(
     policy = ReplacementForecastRuntimePolicy(
         status="live",
         reason_codes=("REPLACEMENT_LIVE_ENABLED",),
-        trade_authority_enabled=True,
+        live_enabled=True,
         kelly_increase_enabled=False,
         direction_flip_enabled=False,
     )

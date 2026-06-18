@@ -32,14 +32,14 @@ from src.state.db import get_connection, init_schema, init_schema_forecasts
 from src.state.portfolio import PortfolioState
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.fdr_filter import fdr_filter
-# STALE_LAW re-pin 2026-06-09: the NATIVE_MULTIBIN_BUY_NO_* flag-key constants and the
+# STALE_LAW re-pin 2026-06-09: the BUY_NO_NATIVE_QUOTE_EVIDENCE_* flag-key constants and the
 # *_enabled() readers were relocated from src.engine.evaluator to
 # src.strategy.family_exclusive_dedup (commit 22dba73349 + slim bce3091a0d). Import them
-# from their current home; evaluator re-exports only native_multibin_buy_no_shadow_enabled.
+# from their current home; evaluator re-exports only buy_no_native_quote_evidence_enabled.
 import src.strategy.family_exclusive_dedup as dedup_module
 from src.strategy.family_exclusive_dedup import (
-    NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG,
-    NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG,
+    BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG,
+    BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG,
 )
 import src.strategy.market_analysis as market_analysis_module
 from src.strategy.market_analysis import MarketAnalysis
@@ -147,10 +147,10 @@ def _patch_mature_calibration(monkeypatch) -> None:
     )
 
 
-def _set_native_multibin_buy_no_flags(monkeypatch, *, shadow: bool, live: bool = False) -> None:
+def _set_buy_no_native_quote_evidence_flags(monkeypatch, *, evidence: bool, submit: bool = False) -> None:
     flags = dict(evaluator_module.settings["feature_flags"])
-    flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = shadow
-    flags[NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = live
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = evidence
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG] = submit
     monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
 
 
@@ -615,19 +615,19 @@ class TestSelectionFamilySubstrate:
         assert analysis.supports_buy_no_edges(0) is False
         assert all(edge.direction != "buy_no" for edge in analysis.find_edges(n_bootstrap=2))
 
-    def test_native_multibin_buy_no_flags_are_strict_boolean(self, monkeypatch):
+    def test_buy_no_native_quote_evidence_flags_are_strict_boolean(self, monkeypatch):
         flags = dict(evaluator_module.settings["feature_flags"])
-        flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = "yes"
+        flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = "yes"
         monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
 
         with pytest.raises(ValueError, match="must be boolean"):
-            evaluator_module.native_multibin_buy_no_shadow_enabled()
+            evaluator_module.buy_no_native_quote_evidence_enabled()
 
-    def test_native_multibin_buy_no_live_requires_shadow(self, monkeypatch):
-        _set_native_multibin_buy_no_flags(monkeypatch, shadow=False, live=True)
+    def test_buy_no_native_quote_evidence_submit_requires_evidence(self, monkeypatch):
+        _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=False, submit=True)
 
         with pytest.raises(ValueError, match="requires"):
-            dedup_module.native_multibin_buy_no_live_enabled()
+            dedup_module.buy_no_native_quote_evidence_submit_enabled()
 
     @pytest.mark.skip(reason="DEAD_TEST 2026-06-10: _bootstrap_bin_no CI test depends on find_edges()/family scan emitting a buy_no edge; both paths short-circuit (market_analysis.py:723 and family_scan.py:111) before computing the bootstrap CI for buy_no; no independent native-NO posterior → no buy_no edge emitted → CI assertion never reached")
     def test_multi_bin_buy_no_bootstrap_uses_native_no_market_price(self, monkeypatch):
@@ -868,7 +868,7 @@ class TestSelectionFamilySubstrate:
         )
         now = datetime.now(timezone.utc)
         _patch_mature_calibration(monkeypatch)
-        _set_native_multibin_buy_no_flags(monkeypatch, shadow=True)
+        _set_buy_no_native_quote_evidence_flags(monkeypatch, evidence=True)
 
         class FakeEns:
             def __init__(self, *args, **kwargs):

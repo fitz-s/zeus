@@ -134,8 +134,8 @@ from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
 from src.strategy.family_exclusive_dedup import (
     FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
+    buy_no_native_quote_evidence_enabled,
     build_weather_family_decision,
-    native_multibin_buy_no_shadow_enabled,
 )
 from src.strategy.kelly import (
     _unified_uncertainty_budget_enabled,
@@ -3422,8 +3422,8 @@ def _resolve_unified_entry_bias_native(
     and ``monitor_refresh._resolve_unified_exit_bias_native``.
 
     Returns the native-unit per-city bias SHIFT to subtract from member extrema BEFORE p_raw,
-    or None. Flag-gated by ``feature_flags.exit_bias_family_unify_enabled`` (default OFF →
-    None → byte-identical to today). When ON, reads the SAME populated VERIFIED family the
+    or None. The live flag ``feature_flags.exit_bias_family_unify_enabled`` keeps entry,
+    evaluator, and monitor on the same populated VERIFIED family the
     reactor entry uses (``event_reactor_adapter._EDLI_BIAS_FAMILY`` = 'edli_per_city_v1')
     with the reactor's EXACT read shape (month=target_month, target_month=target_month,
     authority='VERIFIED', lead_bucket=None) — the legacy ft read shape (month=0,
@@ -4876,22 +4876,20 @@ def evaluate_candidate(
         [None] * len(bins) if _evaluator_eqe_enabled() else None
     )
     try:
-        # The legacy flag name says "multibin", but the authority rule is now
-        # broader: every executable buy_no needs native NO-token quote evidence.
-        probe_native_no_quotes = native_multibin_buy_no_shadow_enabled()
+        probe_native_no_quotes = buy_no_native_quote_evidence_enabled()
     except ValueError as exc:
         return [EdgeDecision(
             False,
             decision_id=_decision_id(),
             rejection_stage="RISK_REJECTED",
-            rejection_reasons=[NoTradeReason.NATIVE_MULTIBIN_BUY_NO_FLAG_INVALID.value],
+            rejection_reasons=[NoTradeReason.BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID.value],
             availability_status="CONFIG_INVALID",
             selected_method=selected_method,
-            applied_validations=[*entry_validations, "native_multibin_buy_no_flag_invalid"],
+            applied_validations=[*entry_validations, "buy_no_native_quote_evidence_flag_invalid"],
             decision_snapshot_id=snapshot_id,
             p_raw=p_raw,
             p_cal=p_cal,
-            rejection_reason_enum=NoTradeReason.NATIVE_MULTIBIN_BUY_NO_FLAG_INVALID,
+            rejection_reason_enum=NoTradeReason.BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID,
             rejection_reason_detail=str(exc),
         )]
     native_no_quote_unavailable_labels: list[str] = []
