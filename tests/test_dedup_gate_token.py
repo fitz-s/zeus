@@ -13,6 +13,8 @@
 # of whether the rest of the system treats it as a formal lifecycle state.
 
 import sqlite3
+from datetime import datetime
+
 import pytest
 from src.state.portfolio import (
     has_same_token_open,
@@ -22,7 +24,11 @@ from src.state.portfolio import (
     Position,
 )
 from src.engine.evaluator import _layer7_dedup_fires
-from src.execution.executor import _entry_duplicate_same_token_component
+from src.execution.executor import (
+    _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
+    _entry_duplicate_same_token_component,
+    _entry_same_token_cooldown_component,
+)
 
 TOKEN_X = "0xabc123_token_yes"
 TOKEN_X_NO = "0xabc123_token_no"
@@ -537,6 +543,84 @@ def test_executor_duplicate_gate_does_not_let_stale_pending_hide_active_position
 
     assert result["allowed"] is False
     assert result["existing_position_id"] == "active-position"
+
+
+def test_executor_cooldown_allows_cancelled_entry_without_fill(mem_db):
+    _insert_position(
+        mem_db,
+        "stale-pending",
+        "pending_entry",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
+                   'order-stale-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-stale-pending', 'cmd-cancelled', 'CANCEL_CONFIRMED',
+                   '12.7', '0', 'WS_USER', '2026-06-18T09:59:00+00:00', 1)"""
+    )
+    mem_db.commit()
+
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        now=datetime.fromisoformat("2026-06-18T10:00:00+00:00"),
+    )
+
+    assert result["allowed"] is True
+    assert result["reason"] == "allowed_terminal_no_fill_prior_entries"
+
+
+def test_executor_cooldown_still_blocks_when_active_command_exists(mem_db):
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-cancelled', 'stale-pending', ?, 'ENTRY', 'BUY',
+                   'order-stale-pending', 'CANCELLED',
+                   '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_order_facts
+           (venue_order_id, command_id, state, remaining_size, matched_size, source,
+            observed_at, local_sequence)
+           VALUES ('order-stale-pending', 'cmd-cancelled', 'CANCEL_CONFIRMED',
+                   '12.7', '0', 'WS_USER', '2026-06-18T09:59:00+00:00', 1)"""
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-acked', 'active-entry', ?, 'ENTRY', 'BUY',
+                   'order-active-entry', 'ACKED',
+                   '2026-06-18T09:58:30+00:00', '2026-06-18T09:58:30+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.commit()
+
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        now=datetime.fromisoformat("2026-06-18T10:00:00+00:00"),
+    )
+
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_entry_cooling_down"
+    assert result["remaining_seconds"] == _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - 90
 
 # ── Snapshot fallback (anti-rot for the dual-path) ───────────────────────────────
 

@@ -605,7 +605,7 @@ def _entry_same_token_cooldown_component(
             "allowed": True,
             "reason": "missing_venue_commands_table",
         }
-    row = conn.execute(
+    rows = conn.execute(
         """
         SELECT command_id, position_id, state, created_at, updated_at
         FROM venue_commands
@@ -614,29 +614,48 @@ def _entry_same_token_cooldown_component(
           AND token_id = ?
           AND position_id != ?
         ORDER BY updated_at DESC, created_at DESC
-        LIMIT 1
         """,
         (token, candidate_position_id),
-    ).fetchone()
-    if row is None:
+    ).fetchall()
+    if not rows:
         return {
             "component": "entry_same_token_cooldown",
             "allowed": True,
             "reason": "allowed_no_prior_entry",
             "token_id": token,
         }
-    if isinstance(row, sqlite3.Row):
-        command_id = str(row["command_id"])
-        position_id = str(row["position_id"])
-        state = str(row["state"])
-        created_at = row["created_at"]
-        updated_at = row["updated_at"]
+    command_id = ""
+    position_id = ""
+    state = ""
+    created_at = ""
+    updated_at = ""
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            command_id = str(row["command_id"])
+            position_id = str(row["position_id"])
+            state = str(row["state"])
+            created_at = row["created_at"]
+            updated_at = row["updated_at"]
+        else:
+            command_id = str(row[0])
+            position_id = str(row[1])
+            state = str(row[2])
+            created_at = row[3]
+            updated_at = row[4]
+        if _entry_terminal_command_has_no_fill_exposure(
+            conn,
+            command_id=command_id,
+            state=state,
+        ):
+            continue
+        break
     else:
-        command_id = str(row[0])
-        position_id = str(row[1])
-        state = str(row[2])
-        created_at = row[3]
-        updated_at = row[4]
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "allowed_terminal_no_fill_prior_entries",
+            "token_id": token,
+        }
     last_seen = _parse_sqlite_timestamp(updated_at) or _parse_sqlite_timestamp(created_at)
     if last_seen is None:
         return {
