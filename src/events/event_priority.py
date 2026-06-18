@@ -93,10 +93,10 @@ def day0_is_tradeable_for_scope(edli_live_scope: str | None) -> bool:
 # (redecide-block fix 2026-06-16). The escalation cancel job emits a
 # FORECAST_SNAPSHOT_READY for a JUST-CANCELLED, ARMED family using a source that
 # starts with this prefix; the claim-tier CASE keys off it (plus the event_type)
-# to rank ONLY those re-decisions at Tier 0 — below the 49-deep per-city
-# round-robin. No other emitter uses this prefix, so the lane is exact.
-# EDLI_REDECISION_PENDING is DORMANT (hard-blocked at 6+ dispatch sites); routing
-# through FSR avoids patching every site while keeping the Tier-0 identity.
+# to rank ONLY those escalation re-decisions at Tier 0. Ordinary continuous
+# EDLI_REDECISION_PENDING is now also Tier 0, but via its own event-type clause:
+# the screen owns current edge/rest/held admission, while this prefix remains the
+# exact identity of the separate just-cancelled escalation path.
 ESCALATION_CROSS_SOURCE_PREFIX: Final[str] = "escalation_cross-"
 
 
@@ -121,6 +121,10 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
          2026-06-16). Evaluated FIRST and INDEPENDENT of ``day0_is_tradeable`` —
          it is a bounded, self-extinguishing set (one event per confirmed cancel),
          never a flood, so it cannot starve the round-robin.
+      0  EDLI_REDECISION_PENDING — continuous redecision rows admitted by the
+         screen after current positive-entry/held-position pruning. These are
+         live money-at-risk or confirmed-positive-value rechecks, so they must
+         not wait behind the ordinary FSR discovery round-robin.
       0  DAY0_EXTREME_UPDATED  — ONLY when ``day0_is_tradeable`` (realized obs is
          the freshest actionable alpha and must not sit behind forecast backlog).
       1  FORECAST_SNAPSHOT_READY that is COMPLETE + LIVE_ELIGIBLE — the direct
@@ -137,16 +141,20 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
     byte-identical to the historical authority. The escalation-origin Tier-0
     clause is ALWAYS present (independent of the day0 scope).
 
-    NON-ESCALATION FAIRNESS IS UNTOUCHED: the escalation clause matches ONLY a
+    NON-REDECISION FAIRNESS IS UNTOUCHED: the escalation clause matches ONLY a
     FORECAST_SNAPSHOT_READY whose source begins with ``escalation_cross-``. A
     regular FSR (source ``forecast_snapshot_ready_trigger`` or ``cycle-*``) does
-    NOT match and stays Tier 1. Every other event (continuous-redecision
-    EDLI_REDECISION_PENDING, day0, channel) evaluates EXACTLY as before, so the
-    2026-06-11 per-city round-robin law holds verbatim for all of them.
+    NOT match and stays Tier 1. Continuous EDLI_REDECISION_PENDING now shares
+    Tier 0 because admission is owned by the screen's current edge/rest/held
+    pruning; ordinary FSR still uses the 2026-06-11 per-city round-robin law.
     """
     escalation_tier0_clause = (
         "WHEN e.event_type = 'FORECAST_SNAPSHOT_READY'\n"
         "                 AND e.source LIKE '" + ESCALATION_CROSS_SOURCE_PREFIX + "%'\n"
+        "                THEN 0\n              "
+    )
+    redecision_tier0_clause = (
+        "WHEN e.event_type = 'EDLI_REDECISION_PENDING'\n"
         "                THEN 0\n              "
     )
     day0_tier0_clause = (
@@ -157,6 +165,7 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
     return (
         "CASE\n              "
         + escalation_tier0_clause
+        + redecision_tier0_clause
         + day0_tier0_clause
         + "WHEN e.event_type = 'FORECAST_SNAPSHOT_READY'\n"
         "                 AND json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'\n"

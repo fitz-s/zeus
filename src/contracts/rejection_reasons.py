@@ -222,6 +222,12 @@ class RejectionReason(str, Enum):
         RejectionCategory.DESIGNED_GATE,
         "day0 hard-fact authority (observed extreme) contradicts the candidate.",
     )
+    ENTRY_COOLDOWN = (
+        "entry_cooldown",
+        RejectionCategory.DESIGNED_GATE,
+        "Duplicate-entry suppression while the same token/direction is cooling down "
+        "or already active; prevents repeated same-order submission.",
+    )
     LIVE_CANARY_DISABLED = (
         "LIVE_CANARY_DISABLED",
         RejectionCategory.DESIGNED_GATE,

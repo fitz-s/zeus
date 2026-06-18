@@ -121,10 +121,13 @@ def _escalation_redecision(city: str, snapshot_id: str, *, available_at: str, re
 
 
 def _continuous_redecision(city: str, snapshot_id: str, *, available_at: str, received_at: str):
-    """A CONTINUOUS (non-escalation) EDLI_REDECISION_PENDING with a 'cycle-*' source.
-    Stays Tier 2 (ELSE branch): the Tier-0 clause matches FORECAST_SNAPSHOT_READY +
-    source LIKE 'escalation_cross-%', so EDLI_REDECISION_PENDING regardless of source
-    is never Tier 0. Must NOT jump ahead of tradeable FSR (Tier 1)."""
+    """A CONTINUOUS EDLI_REDECISION_PENDING with a 'cycle-*' source.
+
+    The screen owns admission: current robust-positive entry candidates and held
+    families survive; stale/unadmitted rows are expired before the skip-set
+    snapshot. Once admitted, the queue must not make these rechecks wait behind
+    the ordinary FSR round-robin.
+    """
     payload = _fsr_payload(city, snapshot_id, available_at=available_at)
     return make_opportunity_event(
         event_type="EDLI_REDECISION_PENDING",
@@ -193,13 +196,11 @@ def test_escalation_redecision_jumps_full_city_backlog():
     assert sum(1 for e in page if e.event_id == armed.event_id) == 1
 
 
-def test_escalation_lane_does_not_disturb_non_escalation_city_fairness():
-    """PER-CITY FAIRNESS PIN (2026-06-11 incident law preserved). The escalation
-    Tier-0 lane must touch ONLY escalation-origin EDLI_REDECISION_PENDING. With NO
-    escalation event present, a continuous ('cycle-*') re-decision and the FSR
-    backlog keep their exact pre-fix tiers: every tradeable FSR (Tier 1) is claimed
-    before the continuous re-decision (Tier 2). A claim-storm / fairness regression
-    would surface as the 'cycle-*' event jumping ahead of the FSR page."""
+def test_continuous_redecision_jumps_ordinary_fsr_backlog():
+    """A screen-admitted continuous redecision is already confirmed live work
+    (positive entry screen or held-position monitor). It must be claimed before
+    the ordinary FSR discovery backlog, otherwise a one-event budget can leave
+    orders/positions stale for another full city round-robin."""
     conn = _world_conn()
     store = EventStore(conn)
 
@@ -213,29 +214,19 @@ def test_escalation_lane_does_not_disturb_non_escalation_city_fairness():
                 received_at=f"2026-06-16T06:{rank:02d}:30+00:00",
             )
         )
-    # A continuous (non-escalation) re-decision with the NEWEST available_at — under
-    # a tier-blind order it would lead; correct behavior keeps it Tier 2, BEHIND the
-    # tradeable FSR. The Tier-0 clause matches only FORECAST_SNAPSHOT_READY +
-    # 'escalation_cross-%' source; a cycle-* EDLI_REDECISION_PENDING is never Tier 0.
+    # A continuous re-decision with the OLDEST available_at and priority 0. Only
+    # the Tier-0 EDLI_REDECISION_PENDING lane can promote it ahead of the FSR page.
     cont = _continuous_redecision(
         cities[0],
         "snap-continuous",
-        available_at="2026-06-16T11:59:00+00:00",
-        received_at="2026-06-16T11:59:30+00:00",
+        available_at="2026-06-16T05:00:00+00:00",
+        received_at="2026-06-16T05:00:30+00:00",
     )
     store.insert_or_ignore(cont)
 
-    page = store.fetch_pending(decision_time=_DECISION_TIME, limit=20)
-    # The continuous re-decision (Tier 2) must come AFTER every tradeable FSR (Tier 1).
-    fsr_ids = {
-        e.event_id for e in page if e.event_type == "FORECAST_SNAPSHOT_READY"
-    }
-    cont_index = next(i for i, e in enumerate(page) if e.event_id == cont.event_id)
-    last_fsr_index = max(
-        i for i, e in enumerate(page) if e.event_id in fsr_ids
-    )
-    assert cont_index > last_fsr_index, (
-        "a continuous (non-escalation) re-decision must NOT get the escalation "
-        "Tier-0 lane — it must stay Tier 2, behind the tradeable FSR round-robin "
-        f"(cont at {cont_index}, last FSR at {last_fsr_index})"
+    claimed = store.fetch_pending(decision_time=_DECISION_TIME, limit=1)
+    assert len(claimed) == 1
+    assert claimed[0].event_id == cont.event_id, (
+        "a screen-admitted EDLI_REDECISION_PENDING row must not be stuck behind "
+        "ordinary FSR discovery when the cycle budget reaches only one event"
     )
