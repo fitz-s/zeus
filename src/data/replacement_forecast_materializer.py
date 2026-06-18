@@ -1517,6 +1517,15 @@ def _build_fused_q_bounds(
     When ``return_samples`` is true, also return the per-bin draw vectors so the
     live decision adapter can compute empirical edge p-values directly.
 
+    PATH-A COHERENCE (2026-06-18 FINAL no-shadow execution flow §5): each draw's row is
+    renormalized to the probability simplex BEFORE the marginal quantile — the IDENTICAL
+    renormalize-then-quantile transform ``src/probability/joint_q_band.build_joint_q_band``
+    (the q_lcb AUTHORITY) performs. This makes the modal-collapse defect of the old raw
+    per-bin-percentile Path B unconstructable: a tight modal spike most draws agree on keeps
+    a high q_lcb. This bound is no longer an INDEPENDENT q_lcb method — it applies the same
+    coherent transform as the authority, so the persisted forecast_posteriors q_lcb can never
+    carry a collapsed value.
+
     Raises on any construction failure. The caller fail-softs the certified bootstrap bounds, then
     may promote non-certified Wilson member-vote bounds under their own basis.
     """
@@ -1565,7 +1574,28 @@ def _build_fused_q_bounds(
     z_high = (highs[None, :] - mu_draws[:, None]) / sigma  # (N, M)
     probs = np.clip(ndtr(z_high) - ndtr(z_low), 0.0, 1.0)  # (N, M) per-draw per-bin mass
 
-    q_lcb_vec = np.percentile(probs, 5.0, axis=0)  # (M,)
+    # PATH-A COHERENCE (2026-06-18 FINAL no-shadow execution flow §5): renormalize EACH
+    # draw's row to the probability simplex BEFORE taking the marginal quantile — the
+    # EXACT transformation src/probability/joint_q_band.build_joint_q_band performs
+    # (q_k = q_k / q_k.sum() per draw, then quantile along axis 0). Without this the
+    # per-bin 5th percentile is taken over RAW masses that do NOT sum to 1, and a narrow
+    # high-belief MODAL bin's q_lcb COLLAPSES to ~0 because the handful of draws whose
+    # spike landed one bin over drive its low quantile toward 0 (the modal-collapse
+    # defect this module's Path B used to ship). Per-row renormalization makes the
+    # marginal quantiles quantiles of COHERENT joint distributions, so a tight modal
+    # spike most draws agree on keeps a high q_lcb. build_joint_q_band is the q_lcb
+    # AUTHORITY; this vectorized materializer bound applies the IDENTICAL renormalize-
+    # then-quantile transform so the persisted forecast_posteriors q_lcb can never
+    # carry the collapsed Path-B value. Over the standard-bin grid the open-tail bins
+    # (lower_c/upper_c None) carry the residual mass so each row already sums to ~1; the
+    # explicit renormalize is the structural guarantee (a degenerate all-zero row — no
+    # finite bin captured the draw — is left as-is rather than divided by zero).
+    _row_sums = probs.sum(axis=1, keepdims=True)  # (N, 1)
+    _safe = _row_sums[:, 0] > 0.0
+    if np.any(_safe):
+        probs[_safe, :] = probs[_safe, :] / _row_sums[_safe, :]
+
+    q_lcb_vec = np.percentile(probs, 5.0, axis=0)  # (M,) marginal quantile of coherent rows
     q_ucb_vec = np.percentile(probs, 95.0, axis=0)  # (M,)
 
     q_lcb_map: dict[str, float] = {}
@@ -1615,13 +1645,17 @@ def _insert_posterior(
     # SIGN: δ_city = anchor − settlement; applied below as corrected = raw − δ_city, so a cold
     # anchor (δ<0) warms and a hot anchor (δ>0) cools; the corrected center feeds the fusion prior
     # → the de-bias propagates into the fused μ*. FAIL-SOFT: any error → None (family-level fallback).
-    bias_shift_c: float | None
-    try:
-        from src.calibration.anchor_representativeness_debias import get_city_debias_c  # noqa: PLC0415
-
-        bias_shift_c = get_city_debias_c(request.city, metric)
-    except Exception:
-        bias_shift_c = None
+    # RAW NO-DE-BIAS LAW (2026-06-18 FINAL no-shadow execution flow §3-§4; operator
+    # "NO fitted forward per-city de-bias"): the consumed posterior center is RAW. The
+    # per-city representativeness de-bias (``get_city_debias_c`` → δ_city) is a FITTED
+    # FORWARD PER-CITY shift on μ — forbidden under the RAW law. It is forced to None
+    # here (fail-closed: even were the artifact placed in state/, the consumed center
+    # stays RAW), so ``anchor_value_corrected_c == raw_anchor_value_c`` (zero shift) and
+    # the fused μ* the materializer writes to forecast_posteriors is the RAW diagonal
+    # center — the SAME RAW belief the spine entry serves. The q_lcb empirical
+    # reliability guard (decision layer) — NOT a center de-bias — is what makes RAW
+    # honest. (Removing this RAW pin re-enables a forbidden forward per-city de-bias.)
+    bias_shift_c: float | None = None
     # THE_PATH member-vote smoothing: flag-gated additive Laplace/Dirichlet alpha so the AIFS
     # member prior is strictly positive on every bin and the soft_anchor.py:197-198 zero-prior
     # -inf veto can never make a bin un-hittable. None when flag OFF -> byte-identical to today.

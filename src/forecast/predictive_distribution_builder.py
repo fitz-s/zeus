@@ -385,6 +385,35 @@ class PredictiveDistributionBuilder:
         ineligibility_reason = sigma_decision.ineligibility_reason
         sigma_native = float(sigma_decision.sigma_native)
 
+        # --- RAW PROVENANCE FAIL-CLOSED (FINAL no-shadow execution flow §7) -------
+        # Under the operator RAW no-de-bias law the served center MUST be RAW (zero
+        # de-bias shift) — the spine injects _NoOpDebiasAuthority so debias_applied is
+        # false and aggregate_shift_native == 0. If a live-eligible distribution ever
+        # carries a NON-ZERO de-bias shift (a regression that re-wired a real
+        # DebiasAuthority onto the spine, or a wrong center_method), REJECT it as
+        # ineligible rather than serve a forbidden de-biased μ. This is the structural
+        # antibody that makes a forbidden forward de-bias unconstructable on the live
+        # decision path (it does not move μ — it refuses to serve one that was moved).
+        # The day0-active path is exempt: day0 is the SEPARATE observed-extreme license,
+        # not a de-bias, and its shift lives in day0.center_after_native, not debias.
+        _debias_shift = float(getattr(applied, "aggregate_shift_native", 0.0) or 0.0)
+        if live_eligible and abs(_debias_shift) > 1e-9:
+            live_eligible = False
+            ineligibility_reason = (
+                f"RAW_LAW_VIOLATION_DEBIAS_SHIFT_NONZERO: debias_applied with "
+                f"aggregate_shift_native={_debias_shift:+.6f} on a live-eligible "
+                f"distribution (RAW law forbids a forward de-bias on the served center)"
+            )
+        _valid_center_methods = {
+            "WEIGHTED_HUBER_CONSENSUS", "SHRUNK_EMOS", "RAW_FALLBACK",
+        }
+        if live_eligible and center.center_method not in _valid_center_methods:
+            live_eligible = False
+            ineligibility_reason = (
+                f"RAW_LAW_VIOLATION_CENTER_METHOD: center_method="
+                f"{center.center_method!r} is not a recognized RAW center method"
+            )
+
         identity_hash = _identity_hash(
             case,
             mu_native,

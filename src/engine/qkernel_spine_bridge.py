@@ -453,13 +453,49 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
     source_cycle = _parse_source_cycle_time(payload.get("_edli_spine_source_cycle_time_utc"))
     if source_cycle is None:
         return None
+    # RAW PRECISION (FINAL no-shadow §1-§2): the per-member raw second moment Ê[(x−Y)²]
+    # + walk-forward n, threaded by the Stage-0 producer in the SAME index order as the
+    # member arrays. Lifted here so build_fresh_model_set can attach it to each
+    # RawModelMember and the spine's walk_forward_model_weights forms the RAW diagonal
+    # 1/E[r²] weight. Absent (None) ⇒ equal-weight (the dormant-seam behavior, unchanged).
+    raw_m2_by_index = _coerce_optional_float_list(payload.get("_edli_spine_raw_m2_by_index"))
+    n_by_index = _coerce_int_list(payload.get("_edli_spine_n_by_index"))
     return {
         "mu_native": mu_f,
         "sigma_native": sigma_f,
         "debiased_members_native": members,
         "raw_members_native": raw_members,
         "source_cycle_time_utc": source_cycle,
+        "raw_m2_by_index": raw_m2_by_index,
+        "n_by_index": n_by_index,
     }
+
+
+def _coerce_optional_float_list(value: Any) -> Optional[tuple[Optional[float], ...]]:
+    """Coerce a threaded list of (float|None) raw second moments. None on any fault."""
+    if value is None:
+        return None
+    try:
+        out: list[Optional[float]] = []
+        for v in value:
+            if v is None:
+                out.append(None)
+                continue
+            fv = float(v)
+            out.append(fv if np.isfinite(fv) and fv > 0.0 else None)
+        return tuple(out)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int_list(value: Any) -> Optional[tuple[int, ...]]:
+    """Coerce a threaded list of walk-forward counts. None on any fault."""
+    if value is None:
+        return None
+    try:
+        return tuple(int(v) for v in value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_source_cycle_time(value: Any) -> Optional[datetime]:
@@ -525,6 +561,33 @@ def build_fresh_model_set(
     arr = np.asarray(values, dtype=float)
     if arr.size == 0:
         arr = np.asarray([float(served["mu_native"])], dtype=float)
+    # RAW PRECISION (FINAL no-shadow §1-§2): the per-member raw second moment Ê[(x−Y)²]
+    # + walk-forward n, lifted by _served_predictive_inputs in the SAME index order as
+    # the member array. Attached to each RawModelMember so build_center's
+    # walk_forward_model_weights forms the RAW diagonal 1/E[r²] weight. When absent /
+    # length-mismatched, every member carries raw_m2=None ⇒ equal-weight (unchanged).
+    _raw_m2 = served.get("raw_m2_by_index")
+    _n_by = served.get("n_by_index")
+    _have_precision = (
+        isinstance(_raw_m2, (tuple, list))
+        and len(_raw_m2) == int(arr.size)
+        and isinstance(_n_by, (tuple, list))
+        and len(_n_by) == int(arr.size)
+    )
+
+    def _member_m2(i: int) -> float | None:
+        if not _have_precision:
+            return None
+        return _raw_m2[i]
+
+    def _member_n(i: int) -> int:
+        if not _have_precision:
+            return 0
+        try:
+            return int(_n_by[i])
+        except (TypeError, ValueError):
+            return 0
+
     members = tuple(
         RawModelMember(
             model_id=f"reactor_served_{i}",
@@ -536,6 +599,8 @@ def build_fresh_model_set(
             station_mapping_id=case.station_id,
             raw_forecast_artifact_id="reactor_served",
             data_version="reactor_served",
+            walk_forward_raw_m2_native=_member_m2(i),
+            walk_forward_n=_member_n(i),
         )
         for i, v in enumerate(arr.tolist())
     )
