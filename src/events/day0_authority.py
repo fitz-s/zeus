@@ -12,6 +12,21 @@ class Day0AuthorityError(ValueError):
     """Raised when a Day0 observation cannot authorize live hard facts."""
 
 
+def normalize_day0_live_authority_status(value: object, *, default: str = "UNKNOWN") -> str:
+    """Normalize durable Day0 authority status at read boundaries.
+
+    New writers emit only ``live`` or ``blocked``. The upper-case aliases are
+    accepted only to drain pre-cutover durable rows/events safely after restart.
+    """
+
+    raw = str(value or default)
+    if raw == "LIVE_AUTHORITY":
+        return "live"
+    if raw == "NON_LIVE_AUTHORITY":
+        return "blocked"
+    return raw
+
+
 @dataclass(frozen=True)
 class Day0AuthorityEvidence:
     city: str
@@ -44,7 +59,10 @@ def assert_live_day0_authority(evidence: Day0AuthorityEvidence) -> None:
         "source_authorized_status": {"AUTHORIZED"},
     }
     for field_name, accepted in expected.items():
-        if getattr(evidence, field_name) not in accepted:
+        value = getattr(evidence, field_name)
+        if field_name == "live_authority_status":
+            value = normalize_day0_live_authority_status(value)
+        if value not in accepted:
             raise Day0AuthorityError(f"{field_name} does not authorize live Day0 fact")
     rounded = int(evidence.settlement_semantics.round_single(evidence.raw_value))
     if rounded != evidence.rounded_value:
@@ -52,7 +70,8 @@ def assert_live_day0_authority(evidence: Day0AuthorityEvidence) -> None:
 
 
 def observability_row_to_authority(row: Mapping[str, object]) -> Day0AuthorityEvidence:
-    if row.get("live_authority_status") != "live":
+    live_authority_status = normalize_day0_live_authority_status(row.get("live_authority_status"))
+    if live_authority_status != "live":
         raise Day0AuthorityError("observability row is not live authority")
     semantics = row.get("settlement_semantics")
     if not isinstance(semantics, SettlementSemantics):
@@ -68,7 +87,7 @@ def observability_row_to_authority(row: Mapping[str, object]) -> Day0AuthorityEv
         metric_match_status=str(row.get("metric_match_status") or "UNKNOWN"),
         rounding_status=str(row.get("rounding_status") or "UNKNOWN"),
         source_authorized_status=str(row.get("source_authorized_status") or "UNKNOWN"),
-        live_authority_status=str(row.get("live_authority_status") or "UNKNOWN"),
+        live_authority_status=live_authority_status,
         observation_available_at=str(row.get("observation_available_at") or ""),
         observation_time=str(row.get("observation_time") or ""),
         raw_value=float(row.get("raw_value") or 0.0),

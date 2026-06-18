@@ -74,7 +74,7 @@ def _forecast_event(
     )
 
 
-def _day0_event(*, live_authority_status: str = "LIVE_AUTHORITY"):
+def _day0_event(*, live_authority_status: str = "live"):
     payload = Day0ExtremeUpdatedPayload(
         city="Chicago",
         target_date="2026-05-24",
@@ -254,6 +254,41 @@ def test_day0_event_requires_live_authority_status():
             [_candidate(target_date="2026-05-24")],
             decision_time=DECISION_TIME,
         )
+
+
+def test_day0_event_accepts_pre_cutover_durable_live_authority_alias():
+    event = _day0_event(live_authority_status="LIVE_AUTHORITY")
+    full_family = [
+        _candidate(
+            target_date="2026-05-24",
+            condition_id="condition-1", yes_token_id="yes-1", no_token_id="no-1",
+            bin=Bin(low=70, high=71, unit="F", label="70-71°F"),
+        ),
+        _candidate(
+            target_date="2026-05-24",
+            condition_id="condition-2", yes_token_id="yes-2", no_token_id="no-2",
+            bin=Bin(low=72, high=73, unit="F", label="72-73°F"),
+        ),
+        _candidate(
+            target_date="2026-05-24",
+            condition_id="condition-low", yes_token_id="yes-low", no_token_id="no-low",
+            bin=Bin(low=None, high=69, unit="F", label="69°F or below"),
+        ),
+        _candidate(
+            target_date="2026-05-24",
+            condition_id="condition-high", yes_token_id="yes-high", no_token_id="no-high",
+            bin=Bin(low=74, high=None, unit="F", label="74°F or above"),
+        ),
+    ]
+
+    family = bind_event_to_candidate_family(
+        event,
+        full_family,
+        decision_time=DECISION_TIME,
+    )
+
+    assert family.event_type == "DAY0_EXTREME_UPDATED"
+    assert family.target_date == "2026-05-24"
 
 
 def test_market_event_never_creates_live_trade_candidate():

@@ -202,7 +202,7 @@ def test_tokyo_local_midnight_low_event_updates_probability_before_trade_gates()
                 "observation_time": "2026-06-17T15:00:00+00:00",
                 "observation_available_at": "2026-06-17T15:07:34.690000+00:00",
                 "station_id": "RJTT",
-                "live_authority_status": "LIVE_AUTHORITY",
+                "live_authority_status": "live",
             },
             "causal_snapshot_id": "",
         }

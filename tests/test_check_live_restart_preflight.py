@@ -66,6 +66,8 @@ def _patch_paths(monkeypatch, tmp_path):
     trade_db = tmp_path / "zeus_trades.db"
     forecast_db = tmp_path / "zeus-forecasts.db"
     world_db = tmp_path / "zeus-world.db"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({"edli": {"real_order_submit_enabled": True}}))
     sqlite3.connect(world_db).close()
@@ -73,13 +75,46 @@ def _patch_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(preflight, "WORLD_DB", world_db)
     monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
     monkeypatch.setattr(preflight, "SETTINGS_PATH", settings)
+    monkeypatch.setattr(preflight, "STATE_DIR", state_dir)
     monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
     monkeypatch.setattr(preflight, "_git_head", lambda: "testsha")
-    return trade_db, forecast_db
+    return trade_db, forecast_db, state_dir
+
+
+def _init_sidecar_surfaces(conn, *, now: datetime):
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            quote_seen_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES (?)",
+        (now.isoformat(),),
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?)",
+        (now.isoformat(), (now + timedelta(minutes=2)).isoformat()),
+    )
+    conn.commit()
+
+
+def _write_fresh_sidecar_heartbeats(state_dir, *, now: datetime):
+    for _, filename in preflight.SIDECAR_HEARTBEATS:
+        (state_dir / filename).write_text(json.dumps({"alive_at": now.isoformat(), "pid": 123}))
 
 
 def test_preflight_blocks_dust_projection_that_would_reload_as_pending_exit(monkeypatch, tmp_path):
-    trade_db, forecast_db = _patch_paths(monkeypatch, tmp_path)
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
     _init_forecast_db(forecast_db).close()
     trade.execute(
@@ -104,7 +139,7 @@ def test_preflight_blocks_dust_projection_that_would_reload_as_pending_exit(monk
 
 
 def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tmp_path):
-    trade_db, forecast_db = _patch_paths(monkeypatch, tmp_path)
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
     label = "Will the highest temperature in Seattle be between 82-83°F on June 19?"
@@ -143,3 +178,58 @@ def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tm
     belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
     assert belief["ok"] is False
     assert belief["evidence"]["risky"][0]["risk"] == "stale_live_belief"
+
+
+def test_preflight_passes_when_sidecars_and_live_surfaces_are_fresh(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is True
+    assert {check["name"] for check in result["checks"] if check["ok"] is False} == set()
+
+
+def test_preflight_blocks_missing_sidecar_heartbeat(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    (state_dir / "daemon-heartbeat-price-channel-ingest.json").unlink()
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    heartbeat = next(c for c in result["checks"] if c["name"] == "price_channel_daemon_heartbeat")
+    assert heartbeat["ok"] is False
+    assert heartbeat["detail"] == "sidecar heartbeat file is missing"

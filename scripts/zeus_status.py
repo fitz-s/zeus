@@ -414,7 +414,7 @@ def section_selection() -> dict:
     intercept != 0 means residual center bias. This is the settlement-graded
     winner's-curse diagnostic over the EB-shrinkage SHADOW columns (the
     decision-replacement flag was removed 2026-06-13; the live selection gate is
-    the BH/FDR pass unconditionally — these columns remain shadow telemetry).
+    the BH/FDR pass unconditionally — these columns remain settlement telemetry).
 
     Join: edli_no_submit_receipts (WORLD: token_id, edge_shrunk,
     selection_authority) <-> position_current settled rows (TRADES: token_id,

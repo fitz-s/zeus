@@ -5,15 +5,15 @@
 #   pr408 review C1+C2 #2 CRITICAL (2026-06-14): the cheap-tail guard was a forbidden
 #   ONE-SIDED fail-CLOSED gate (operator law 3) that killed +edge cheap trades. The PURE
 #   PREDICATE (coverage_unlicensed_tail_rejection_reason) is retained as the single
-#   definition of the tail concern and is now used ONLY for shadow telemetry; it no longer
+#   definition of the tail concern and is now used ONLY for decision telemetry; it no longer
 #   zeros score / fails prefilter / sets a no-trade reason / alters size on the live path.
-"""Predicate + shadow-only wiring for the unlicensed cheap-tail disagreement signal.
+"""Predicate + telemetry-only wiring for the unlicensed cheap-tail disagreement signal.
 
 The PURE PREDICATE still classifies the category (market price < 0.05 while a
 FORECAST_BOOTSTRAP settlement-unlicensed q_lcb claims > 2x the market; near-center and
 licensed bands abstain). pr408 #2: the live proof seam records this ONLY as
-``would_fail_unlicensed_tail_shadow`` — it never score-zeros, never fails prefilter, never
-becomes a live reason. RED-on-revert: a candidate that would have been killed now trades.
+``unlicensed_tail_coverage_telemetry`` — it never score-zeros, never fails prefilter,
+never becomes a live reason. RED-on-revert: a candidate that would have been killed now trades.
 """
 from __future__ import annotations
 
@@ -188,13 +188,13 @@ def _wired_proofs(*, calibration_source: str):
     return {p.direction: p for p in proofs}
 
 
-def test_proof_seam_unlicensed_adjacent_tail_is_shadow_only_not_killed():
+def test_proof_seam_unlicensed_adjacent_tail_is_telemetry_only_not_killed():
     """pr408 #2 RED-on-revert: a cheap-tail unlicensed +edge candidate is FLAGGED in the
-    shadow but stays eligible — never score-zeroed, never a live reason, never prefilter-
+    telemetry but stays eligible — never score-zeroed, never a live reason, never prefilter-
     failed by the tail concern. Reverting (re-adding the live gate) makes score==0."""
     p = _wired_proofs(calibration_source="FORECAST_BOOTSTRAP")["buy_yes"]
     # the tail concern is recorded for settlement-graded study ...
-    assert p.would_fail_unlicensed_tail_shadow is True
+    assert p.unlicensed_tail_coverage_telemetry is True
     # ... but it does NOT kill the trade: no COVERAGE_UNLICENSED_TAIL live reason, the
     # score is not zeroed BY THE TAIL GUARD, and the candidate is not prefilter-failed by it.
     assert p.missing_reason is None or not p.missing_reason.startswith(
@@ -204,9 +204,9 @@ def test_proof_seam_unlicensed_adjacent_tail_is_shadow_only_not_killed():
     assert p.passed_prefilter is True
 
 
-def test_proof_seam_settlement_licensed_tail_has_no_shadow_flag():
+def test_proof_seam_settlement_licensed_tail_has_no_telemetry_flag():
     p = _wired_proofs(calibration_source="SETTLEMENT_ISOTONIC")["buy_yes"]
-    assert p.would_fail_unlicensed_tail_shadow is False
+    assert p.unlicensed_tail_coverage_telemetry is False
     assert p.missing_reason is None or not p.missing_reason.startswith(
         "COVERAGE_UNLICENSED_TAIL"
     )

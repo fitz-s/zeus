@@ -353,6 +353,72 @@ def test_day0_scanner_limit_prioritizes_newest_rows_not_old_duplicates():
     assert "75.0" in conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0]
 
 
+def test_scan_authority_rows_normalizes_pre_cutover_live_authority_alias():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    conn.execute(
+        """
+        CREATE TABLE settlement_day_observation_authority (
+            authority_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            decision_time_utc TEXT,
+            source TEXT,
+            station_id TEXT,
+            observation_time_utc TEXT,
+            high_so_far REAL,
+            low_so_far REAL,
+            current_temp REAL,
+            local_date_matches_target INTEGER,
+            source_authorized_for_settlement INTEGER,
+            payload_json TEXT,
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO settlement_day_observation_authority VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "legacy-live",
+            "Chicago",
+            "2026-05-24",
+            "high",
+            "2026-05-24T18:05:00+00:00",
+            "WU",
+            "KORD",
+            "2026-05-24T18:05:00+00:00",
+            75.1,
+            None,
+            None,
+            1,
+            1,
+            json.dumps(
+                {
+                    "dst_status": "UNAMBIGUOUS",
+                    "rounding_status": "MATCH",
+                    "source_match_status": "MATCH",
+                    "station_match_status": "MATCH",
+                    "metric_match_status": "MATCH",
+                    "live_authority_status": "LIVE_AUTHORITY",
+                }
+            ),
+            "2026-05-24T18:06:00+00:00",
+        ),
+    )
+
+    results = Day0ExtremeUpdatedTrigger(EventWriter(conn)).scan_authority_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(75),
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+        received_at="2026-05-24T18:10:00+00:00",
+    )
+
+    assert len(results) == 1
+    payload = json.loads(conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
+    assert payload["live_authority_status"] == "live"
+
+
 def test_scan_observation_instants_rows_emits_live_authority_day0_event():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
@@ -450,6 +516,68 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
     assert all('"event_type":"DAY0_EXTREME_UPDATED"' not in payload for payload in payloads)
     assert all('"live_authority_status":"live"' in payload for payload in payloads)
     assert all('"source_authorized_status":"AUTHORIZED"' in payload for payload in payloads)
+
+
+def test_scan_observation_instants_keeps_west_of_utc_target_day_after_midnight_z():
+    """Chicago local 2026-06-17 is still live at 2026-06-18T02Z."""
+
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO observation_instants (
+            city, target_date, source, timezone_name, local_hour, local_timestamp,
+            utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
+            is_missing_local_hour, time_basis, temp_current, running_max, running_min,
+            temp_unit, station_id, observation_count, imported_at, authority,
+            data_version, provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "Chicago",
+            "2026-06-17",
+            "wu_icao_history",
+            "America/Chicago",
+            21.0,
+            "2026-06-17T21:00:00-05:00",
+            "2026-06-18T02:00:00+00:00",
+            -300,
+            1,
+            0,
+            0,
+            "observed",
+            82.0,
+            82.0,
+            70.0,
+            "F",
+            "KORD",
+            1,
+            "2026-06-18T02:05:00+00:00",
+            "VERIFIED",
+            "v1.wu-native",
+            '{"source_url":"redacted","station_id":"KORD"}',
+            1,
+            "OK",
+            "historical_hourly",
+        ),
+    )
+
+    results = Day0ExtremeUpdatedTrigger(EventWriter(conn)).scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(82),
+        decision_time=datetime(2026, 6, 18, 2, 10, tzinfo=timezone.utc),
+        received_at="2026-06-18T02:10:00+00:00",
+    )
+
+    assert len(results) == 2
+    payloads = [
+        json.loads(row[0])
+        for row in conn.execute("SELECT payload_json FROM opportunity_events").fetchall()
+    ]
+    assert {payload["metric"] for payload in payloads} == {"high", "low"}
+    assert all(payload["target_date"] == "2026-06-17" for payload in payloads)
+    assert all(payload["local_date_status"] == "MATCH" for payload in payloads)
+    assert all(payload["live_authority_status"] == "live" for payload in payloads)
 
 
 def test_scan_observation_instants_tokyo_low_uses_aggregate_target_day_min():

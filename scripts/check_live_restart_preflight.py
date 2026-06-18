@@ -39,7 +39,16 @@ TRADE_DB = ROOT / "state" / "zeus_trades.db"
 WORLD_DB = ROOT / "state" / "zeus-world.db"
 FORECAST_DB = ROOT / "state" / "zeus-forecasts.db"
 SETTINGS_PATH = ROOT / "config" / "settings.json"
+STATE_DIR = ROOT / "state"
 DUST_SHARE_LIMIT = 0.01
+SIDECAR_HEARTBEAT_MAX_AGE_SECONDS = 180.0
+EXECUTION_FEASIBILITY_MAX_AGE_SECONDS = 180.0
+EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS = 600.0
+SIDECAR_HEARTBEATS = (
+    ("substrate_observer_daemon", "daemon-heartbeat-substrate-observer.json"),
+    ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
+    ("post_trade_capital_daemon", "daemon-heartbeat-post-trade-capital.json"),
+)
 
 
 @dataclass
@@ -98,6 +107,152 @@ def _parse_dt(raw: object) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    try:
+        row = conn.execute(
+            f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _sidecar_heartbeat_check(name: str, filename: str) -> CheckResult:
+    path = STATE_DIR / filename
+    evidence: dict[str, Any] = {
+        "path": str(path),
+        "max_age_seconds": SIDECAR_HEARTBEAT_MAX_AGE_SECONDS,
+    }
+    if not path.exists():
+        return CheckResult(
+            f"{name}_heartbeat",
+            False,
+            "sidecar heartbeat file is missing",
+            evidence,
+        )
+    try:
+        payload = json.loads(path.read_text())
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            f"{name}_heartbeat",
+            False,
+            "sidecar heartbeat file is unreadable",
+            evidence,
+        )
+    alive_at = _parse_dt(payload.get("alive_at") or payload.get("generated_at") or payload.get("timestamp"))
+    evidence["payload"] = payload
+    evidence["alive_at"] = alive_at.isoformat() if alive_at else None
+    if alive_at is None:
+        return CheckResult(
+            f"{name}_heartbeat",
+            False,
+            "sidecar heartbeat timestamp is invalid",
+            evidence,
+        )
+    age = (datetime.now(timezone.utc) - alive_at).total_seconds()
+    evidence["age_seconds"] = age
+    ok = 0.0 <= age <= SIDECAR_HEARTBEAT_MAX_AGE_SECONDS
+    return CheckResult(
+        f"{name}_heartbeat",
+        ok,
+        "sidecar heartbeat is fresh" if ok else "sidecar heartbeat is stale",
+        evidence,
+    )
+
+
+def _sidecar_heartbeat_checks() -> list[CheckResult]:
+    return [_sidecar_heartbeat_check(name, filename) for name, filename in SIDECAR_HEARTBEATS]
+
+
+def _execution_feasibility_evidence_check() -> CheckResult:
+    now = datetime.now(timezone.utc)
+    evidence: dict[str, Any] = {
+        "table": "execution_feasibility_evidence",
+        "max_age_seconds": EXECUTION_FEASIBILITY_MAX_AGE_SECONDS,
+    }
+    with _connect_live_ro() as conn:
+        if not _table_exists(conn, "main", "execution_feasibility_evidence"):
+            return CheckResult(
+                "execution_feasibility_evidence_freshness",
+                False,
+                "execution feasibility evidence table is missing",
+                evidence,
+            )
+        row = conn.execute(
+            "SELECT MAX(quote_seen_at) AS latest_quote_seen_at, COUNT(*) AS rows FROM execution_feasibility_evidence"
+        ).fetchone()
+    latest = row["latest_quote_seen_at"] if row else None
+    latest_dt = _parse_dt(latest)
+    evidence["rows"] = int(row["rows"] or 0) if row else 0
+    evidence["latest_quote_seen_at"] = latest
+    if latest_dt is None:
+        return CheckResult(
+            "execution_feasibility_evidence_freshness",
+            False,
+            "execution feasibility evidence is absent or timestamp-invalid",
+            evidence,
+        )
+    age = (now - latest_dt).total_seconds()
+    evidence["age_seconds"] = age
+    ok = 0.0 <= age <= EXECUTION_FEASIBILITY_MAX_AGE_SECONDS
+    return CheckResult(
+        "execution_feasibility_evidence_freshness",
+        ok,
+        "execution feasibility evidence is fresh" if ok else "execution feasibility evidence is stale",
+        evidence,
+    )
+
+
+def _executable_substrate_freshness_check() -> CheckResult:
+    now = datetime.now(timezone.utc)
+    evidence: dict[str, Any] = {
+        "table": "executable_market_snapshots",
+        "max_age_seconds": EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS,
+    }
+    with _connect_live_ro() as conn:
+        if not _table_exists(conn, "main", "executable_market_snapshots"):
+            return CheckResult(
+                "executable_substrate_freshness",
+                False,
+                "executable market snapshot table is missing",
+                evidence,
+            )
+        row = conn.execute(
+            """
+            SELECT MAX(captured_at) AS latest_captured_at,
+                   MAX(freshness_deadline) AS latest_freshness_deadline,
+                   COUNT(*) AS rows
+              FROM executable_market_snapshots
+            """
+        ).fetchone()
+    captured_dt = _parse_dt(row["latest_captured_at"] if row else None)
+    deadline_dt = _parse_dt(row["latest_freshness_deadline"] if row else None)
+    evidence["rows"] = int(row["rows"] or 0) if row else 0
+    evidence["latest_captured_at"] = row["latest_captured_at"] if row else None
+    evidence["latest_freshness_deadline"] = row["latest_freshness_deadline"] if row else None
+    if captured_dt is None:
+        return CheckResult(
+            "executable_substrate_freshness",
+            False,
+            "executable market substrate is absent or timestamp-invalid",
+            evidence,
+        )
+    age = (now - captured_dt).total_seconds()
+    deadline_ok = deadline_dt is not None and deadline_dt >= now
+    age_ok = 0.0 <= age <= EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS
+    evidence["age_seconds"] = age
+    evidence["freshness_deadline_ok"] = deadline_ok
+    ok = age_ok or deadline_ok
+    return CheckResult(
+        "executable_substrate_freshness",
+        ok,
+        "executable market substrate is fresh" if ok else "executable market substrate is stale",
+        evidence,
+    )
 
 
 def _posterior_summary() -> CheckResult:
@@ -272,6 +427,9 @@ def evaluate() -> dict[str, Any]:
             {"edli.real_order_submit_enabled": real_submit},
         ),
         _posterior_summary(),
+        *_sidecar_heartbeat_checks(),
+        _executable_substrate_freshness_check(),
+        _execution_feasibility_evidence_check(),
         _pending_exit_check(rows),
         _belief_check(rows),
     ]

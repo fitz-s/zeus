@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
 
+from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.idempotency import canonical_json, sha256_text
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
 from src.types.market import Bin, BinTopologyError, to_json_safe, validate_bin_topology
@@ -235,7 +236,10 @@ def _validate_day0_event(payload: dict) -> None:
         "source_authorized_status": {"AUTHORIZED"},
     }
     for field_name, accepted in required_statuses.items():
-        if payload.get(field_name) not in accepted:
+        value = payload.get(field_name)
+        if field_name == "live_authority_status":
+            value = normalize_day0_live_authority_status(value)
+        if value not in accepted:
             raise CandidateBindingError(
                 f"Day0 candidate binding requires {field_name} in {sorted(accepted)!r}"
             )

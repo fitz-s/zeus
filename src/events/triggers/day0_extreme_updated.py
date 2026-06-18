@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.config import runtime_cities_by_name
+from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.event_priority import day0_emit_priority
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, OpportunityEvent, make_day0_extreme_updated_event
@@ -37,7 +38,7 @@ class Day0HardFactGate:
             and self.metric_match_status == "MATCH"
             and self.rounding_status == "MATCH"
             and self.source_authorized_status == "AUTHORIZED"
-            and self.live_authority_status == "live"
+            and normalize_day0_live_authority_status(self.live_authority_status) == "live"
         )
 
 
@@ -74,7 +75,9 @@ def build_day0_extreme_updated_event(
         metric_match_status=str(observation.get("metric_match_status", "UNKNOWN")),
         rounding_status=str(observation.get("rounding_status", "UNKNOWN")),
         source_authorized_status=str(observation.get("source_authorized_status", "UNKNOWN")),
-        live_authority_status=str(observation.get("live_authority_status", "UNKNOWN")),
+        live_authority_status=normalize_day0_live_authority_status(
+            observation.get("live_authority_status"),
+        ),
     )
     entity_key = "|".join((payload.city, payload.target_date, payload.metric, payload.station_id))
     return make_day0_extreme_updated_event(
@@ -218,7 +221,7 @@ class Day0ExtremeUpdatedTrigger:
     ) -> list[EventWriteResult]:
         """Emit Day0 events from canonical live observation_instants rows.
 
-        EDLI day0 shadow needs the current observation stream. The older
+        Day0 live redecision needs the current observation stream. The older
         settlement_day_observation_authority catch-up table is written only by
         the legacy cycle path and can be stale or empty while live observation
         ingestion is healthy. This scanner reads the canonical world
@@ -251,6 +254,7 @@ class Day0ExtremeUpdatedTrigger:
         if not required_columns.issubset(columns):
             return []
         decision_iso = decision_time.astimezone(UTC).isoformat()
+        target_floor = _local_target_date_scan_floor(decision_time)
         rows = _dict_rows(
             observation_conn,
             f"""
@@ -273,7 +277,7 @@ class Day0ExtremeUpdatedTrigger:
                     MIN(source_role) AS source_role
                 FROM {table}
                 WHERE target_date IS NOT NULL
-                  AND target_date >= date(?)
+                  AND target_date >= ?
                   AND utc_timestamp <= ?
                   AND imported_at <= ?
                   AND substr(local_timestamp, 1, 10) = target_date
@@ -292,7 +296,7 @@ class Day0ExtremeUpdatedTrigger:
             ORDER BY observation_available_at DESC, observation_time DESC
             LIMIT ?
             """,
-            (decision_iso, decision_iso, decision_iso, max(1, int(limit))),
+            (target_floor, decision_iso, decision_iso, max(1, int(limit))),
         )
         results: list[EventWriteResult] = []
         # CHANGE-GATE (2026-06-15 firehose fix). The GROUP BY recomputes
@@ -307,14 +311,14 @@ class Day0ExtremeUpdatedTrigger:
         # carries no new decision; a price-driven re-decision is EDLI_REDECISION_PENDING,
         # not a day0 re-emit. The in-call watermark is advanced on each emit so two
         # source rows for one family in the same batch cannot double-emit one extreme.
-        high_water, low_water = self._emitted_extreme_watermarks(decision_iso)
+        high_water, low_water = self._emitted_extreme_watermarks(target_floor)
         for row in reversed(rows):
             for metric in ("high", "low"):
                 try:
                     observation = observation_instant_row_to_day0_observation(row, metric=metric)
                 except ValueError:
                     continue
-                if observation.get("live_authority_status") != "live":
+                if normalize_day0_live_authority_status(observation.get("live_authority_status")) != "live":
                     continue
                 key = (
                     str(observation.get("city") or ""),
@@ -347,7 +351,7 @@ class Day0ExtremeUpdatedTrigger:
         return results
 
     def _emitted_extreme_watermarks(
-        self, decision_iso: str
+        self, target_floor: str
     ) -> tuple[dict[tuple[str, str, str], float], dict[tuple[str, str, str], float]]:
         """Per (city, target_date, station_id) high-/low-water marks over ALREADY-emitted
         DAY0_EXTREME_UPDATED events, scoped to non-past target dates.
@@ -363,7 +367,6 @@ class Day0ExtremeUpdatedTrigger:
         low_water: dict[tuple[str, str, str], float] = {}
         try:
             conn = self._writer.conn
-            target_floor = decision_iso[:10]
             rows = conn.execute(
                 """
                 SELECT json_extract(payload_json, '$.city')        AS c,
@@ -419,7 +422,10 @@ def authority_row_to_observation(row: dict[str, Any]) -> dict[str, Any]:
         "source_authorized_status": (
             "AUTHORIZED" if row.get("source_authorized_for_settlement") == 1 else "UNKNOWN"
         ),
-        "live_authority_status": payload.get("live_authority_status", "blocked"),
+        "live_authority_status": normalize_day0_live_authority_status(
+            payload.get("live_authority_status"),
+            default="blocked",
+        ),
         "settlement_unit": payload.get("settlement_unit") or payload.get("measurement_unit"),
         "settlement_precision": payload.get("settlement_precision") or payload.get("precision"),
         "rounding_rule": payload.get("rounding_rule"),
@@ -638,6 +644,12 @@ def _source_matches_config(source: str, settlement_source_type: str) -> bool:
     if source_type == "hko":
         return src == "hko_daily_api" or src.startswith("hko_daily_api_")
     return False
+
+
+def _local_target_date_scan_floor(decision_time: datetime) -> str:
+    """Earliest local target date that can still be live at this UTC decision time."""
+
+    return (decision_time.astimezone(UTC).date() - timedelta(days=1)).isoformat()
 
 
 def _observation_local_date_status(*, observation_time: str, city_timezone: str, target_date: str) -> tuple[str, str]:

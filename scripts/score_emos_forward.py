@@ -369,9 +369,9 @@ def main() -> None:
     # 1. Load ledger
     all_rows = _load_ledger()
     if not all_rows:
-        print("Ledger is empty (0 rows).  Enable the flag and collect data first.")
+        print("Ledger is empty (0 rows).  Live EMOS shadow-ledger writes are retired.")
         print(f"  Ledger path: {LEDGER}")
-        print("  Flag: settings['edli']['edli_emos_shadow_ledger_enabled'] = true")
+        print("  This scorer now only reads archived/exported ledger rows; do not set a live flag.")
         return
 
     total_rows = len(all_rows)

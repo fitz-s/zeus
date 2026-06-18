@@ -49,6 +49,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from src.decision_kernel import claims
+from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.event_store import EventStore
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
 from src.state.db import world_write_mutex
@@ -308,7 +309,7 @@ class EventSubmissionReceipt:
     # attribute EMOS-cells vs maze-cells per city — the PROMOTE evidence.
     q_source: str | None = None
     strategy_key: str | None = None
-    # Shadow-only Opportunity Book selector evidence. Omitted from receipt_json
+    # Telemetry-only Opportunity Book selector evidence. Omitted from receipt_json
     # when None so pre-book receipts keep byte-identical hashes.
     opportunity_book: dict[str, Any] | None = None
     replacement_forecast: dict[str, Any] | None = None
@@ -389,7 +390,7 @@ class EventSubmissionReceipt:
     # None in receipt_json keeps existing receipt_hash byte-stable, and readers MUST
     # tolerate its absence (only NEW writes carry/enforce it).
     submit_lane: str | None = None
-    # C2 SELECTION SHRINKAGE SHADOW (task #60, 2026-06-13). The trading-path
+    # C2 SELECTION SHRINKAGE TELEMETRY (task #60, 2026-06-13). The trading-path
     # FDR/BH gate consumes degenerate {0,1} p-values (a no-op multiplicity
     # correction; event_reactor_adapter.py:9854/9876) and, even with continuous
     # p-values, mutually-exclusive bins violate PRDS so BH is invalid and FDR is
@@ -404,8 +405,10 @@ class EventSubmissionReceipt:
     #   edge_shrunk_posterior_sd — posterior SD of the shrunk edge.
     #   selection_authority      — which gate DECIDED: "BH_FDR" (flag OFF, the
     #                              current behavior) | "EB_SHRINKAGE" (flag ON).
-    # When the replacement flag is OFF these are SHADOW-only (computed + stamped,
-    # selection unchanged). DECISION provenance, so serialized into receipt_json;
+    # These are DECISION provenance fields. Current live selection remains unchanged
+    # unless selection_authority explicitly records an EB_SHRINKAGE gate result; the
+    # fields are serialized into receipt_json so later attribution can audit the
+    # selected order without feeding this data back into the same decision.
     # None on legacy / gate-reject receipts; omit-when-None keeps existing
     # receipt_hash byte-stable, mirroring submit_lane / envelope_json travel.
     lfsr: float | None = None
@@ -2589,6 +2592,11 @@ _POSTERIOR_STALENESS_REASON_BASES = frozenset(
     {
         "REPLACEMENT_0_1_LIVE_READINESS_MISSING",
         "REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED",
+        # Pre-cutover queued/durable reason bases. These are read-boundary
+        # compatibility only; producers now emit the LIVE_READINESS/BUNDLE names
+        # above. Old rows still need the same single-family reseed cure.
+        "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
+        "REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED",
     }
 )
 
@@ -2613,7 +2621,7 @@ def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:
         and payload.get("metric_match_status") == "MATCH"
         and payload.get("rounding_status") == "MATCH"
         and payload.get("source_authorized_status", "AUTHORIZED") == "AUTHORIZED"
-        and payload.get("live_authority_status") == "live"
+        and normalize_day0_live_authority_status(payload.get("live_authority_status")) == "live"
     )
 
 

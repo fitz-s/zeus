@@ -254,7 +254,7 @@ def test_config_switch_cli_defaults_to_read_only_plan(tmp_path) -> None:
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/plan_replacement_forecast_shadow_veto_config.py",
+            "scripts/plan_replacement_forecast_live_config.py",
             "--settings-json",
             str(settings_path),
             "--stdout",
@@ -281,7 +281,7 @@ def test_config_switch_cli_apply_updates_temp_settings_only(tmp_path) -> None:
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/plan_replacement_forecast_shadow_veto_config.py",
+            "scripts/plan_replacement_forecast_live_config.py",
             "--settings-json",
             str(settings_path),
             "--apply",

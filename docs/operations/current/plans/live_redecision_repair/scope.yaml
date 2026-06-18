@@ -9,8 +9,8 @@ allowed_files:
   - architecture/script_manifest.yaml
   - config/settings.json
   - scripts/check_replacement_forecast_live_dry_run.py
-  - scripts/apply_replacement_forecast_shadow_veto_switch.py
-  - scripts/plan_replacement_forecast_shadow_veto_config.py
+  - scripts/apply_replacement_forecast_live_switch.py
+  - scripts/plan_replacement_forecast_live_config.py
   - scripts/verify_e2e_money_path.py
   - src/execution/exit_lifecycle.py
   - src/execution/collateral.py

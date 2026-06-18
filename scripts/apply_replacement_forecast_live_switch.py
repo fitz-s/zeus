@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the replacement forecast live-authority switch with a rollback receipt."""
+"""Apply the replacement forecast live switch with a rollback receipt."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def _ensure_live_materialization_dirs(root: Path) -> dict[str, str]:
     return created_or_existing
 
 
-def apply_replacement_forecast_live_authority_switch(
+def apply_replacement_forecast_live_switch(
     *,
     live_root: Path,
     evidence_json: Path,
@@ -120,7 +120,7 @@ def apply_replacement_forecast_live_authority_switch(
     apply: bool = False,
     optional_dependencies: tuple[str, ...] = ("requests",),
 ) -> dict[str, object]:
-    """Plan or apply the chosen replacement strategy as live authority."""
+    """Plan or apply the chosen replacement strategy as live."""
 
     root = Path(live_root)
     generated_at = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -142,8 +142,8 @@ def apply_replacement_forecast_live_authority_switch(
         reasons.append("REPLACEMENT_SWITCH_CURRENT_FACT_PLAN_BLOCKED")
     if not refit_plan.ready:
         reasons.append("REPLACEMENT_SWITCH_REFIT_HANDOFF_PLAN_BLOCKED")
-    if config_plan.policy_status_after != "LIVE_AUTHORITY":
-        reasons.append("REPLACEMENT_SWITCH_TARGET_POLICY_NOT_LIVE_AUTHORITY")
+    if config_plan.policy_status_after != "live":
+        reasons.append("REPLACEMENT_SWITCH_TARGET_POLICY_NOT_LIVE")
     if any(config_plan.target_flags.get(key) is not True for key in (TRADE_AUTHORITY_FLAG, KELLY_INCREASE_FLAG, DIRECTION_FLIP_FLAG)):
         reasons.append("REPLACEMENT_SWITCH_LIVE_TARGET_FLAG_MISSING")
 
@@ -193,12 +193,12 @@ def apply_replacement_forecast_live_authority_switch(
     )
     if apply and not dry_run.ok:
         reasons.append("REPLACEMENT_SWITCH_POST_APPLY_DRY_RUN_BLOCKED")
-    status = "LIVE_AUTHORITY_SWITCH_APPLIED" if apply and not reasons else "LIVE_AUTHORITY_SWITCH_READY" if not apply and not reasons else "LIVE_AUTHORITY_SWITCH_BLOCKED"
+    status = "LIVE_SWITCH_APPLIED" if apply and not reasons else "LIVE_SWITCH_READY" if not apply and not reasons else "LIVE_SWITCH_BLOCKED"
     live_root_written = bool(apply and applied_steps)
     return {
-        "schema_version": "replacement_forecast_live_authority_switch_receipt_v1",
+        "schema_version": "replacement_forecast_live_switch_receipt",
         "status": status,
-        "reason_codes": list(dict.fromkeys(reasons or ["REPLACEMENT_LIVE_AUTHORITY_SWITCH_READY"])),
+        "reason_codes": list(dict.fromkeys(reasons or ["REPLACEMENT_LIVE_SWITCH_READY"])),
         "live_root": str(root),
         "live_root_written": live_root_written,
         "apply_requested": bool(apply),
@@ -221,7 +221,7 @@ def apply_replacement_forecast_live_authority_switch(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Apply replacement forecast live-authority switch")
+    parser = argparse.ArgumentParser(description="Apply replacement forecast live switch")
     parser.add_argument("--live-root", type=Path, default=ROOT)
     parser.add_argument("--evidence-json", type=Path, required=True)
     parser.add_argument("--refit-handoff-json", type=Path, required=True)
@@ -232,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stdout", action="store_true")
     args = parser.parse_args(argv)
     try:
-        receipt = apply_replacement_forecast_live_authority_switch(
+        receipt = apply_replacement_forecast_live_switch(
             live_root=args.live_root,
             evidence_json=args.evidence_json,
             refit_handoff_json=args.refit_handoff_json,
@@ -250,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(receipt, sort_keys=True, default=_json_default))
     else:
         print(f"{receipt['status']}: {','.join(receipt['reason_codes'])}")
-    return 0 if receipt["status"] in {"LIVE_AUTHORITY_SWITCH_READY", "LIVE_AUTHORITY_SWITCH_APPLIED"} else 1
+    return 0 if receipt["status"] in {"LIVE_SWITCH_READY", "LIVE_SWITCH_APPLIED"} else 1
 
 
 if __name__ == "__main__":

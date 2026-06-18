@@ -461,6 +461,41 @@ def test_posterior_readiness_missing_also_enqueues_cycle_advance():
     assert enqueues == [("Chicago", "2026-05-24", "high")]
 
 
+def test_pre_cutover_posterior_staleness_reason_alias_enqueues_cycle_advance():
+    payload = json.loads(_forecast_event().payload_json)
+    enqueues: list[tuple] = []
+
+    def _submit(event, _dt):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=False,
+            side_effect_status="NO_SUBMIT",
+            reason="REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
+        )
+
+    def _enqueuer(*, city, target_date, metric):
+        enqueues.append((city, target_date, metric))
+        return True
+
+    _conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    reactor = _reactor(
+        store,
+        snapshot_present={"v": True},
+        cycle_advance_enqueuer=_enqueuer,
+        submit=_submit,
+    )
+    reactor.process_pending(decision_time=_DT)
+    assert enqueues == [("Chicago", "2026-05-24", "high")]
+
+
 def test_non_substrate_reason_does_not_enqueue_cycle_advance():
     """A NON-substrate block (e.g. an honest trade-score reject) must NOT trigger a cycle-advance
     enqueue — only stale/absent posterior reasons do."""
