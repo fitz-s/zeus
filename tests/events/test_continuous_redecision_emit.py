@@ -33,7 +33,7 @@ ENTITY_KEY = "Chicago|2026-05-24|high|run-1"
 @pytest.fixture(autouse=True)
 def _replacement_authority_disabled_by_default(monkeypatch):
     monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
         lambda: False,
     )
 

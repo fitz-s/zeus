@@ -582,7 +582,7 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
         # try/except absorbs it. Here we patch the inner trigger via the wrapper's
         # fail-soft contract by making the config lookup raise.
         monkeypatch.setattr(
-            "src.data.replacement_forecast_production._replacement_forecast_shadow_materialization_queue_config",
+            "src.data.replacement_forecast_production._replacement_forecast_live_materialization_queue_config",
             _boom,
         )
         monkeypatch.setattr(mr, "_refresh_ens_member_counting", lambda **kw: (0.5, []))

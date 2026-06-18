@@ -258,8 +258,32 @@ def _ensure_forecast_posteriors_runtime_layer(conn: sqlite3.Connection) -> None:
     if not columns:
         return
     if "runtime_layer" not in columns:
-        conn.execute("ALTER TABLE forecast_posteriors ADD COLUMN runtime_layer TEXT NOT NULL DEFAULT 'experiment'")
-    conn.execute("DELETE FROM forecast_posteriors WHERE runtime_layer != 'live'")
+        conn.execute(
+            """
+            ALTER TABLE forecast_posteriors
+            ADD COLUMN runtime_layer TEXT
+                CHECK (runtime_layer IS NULL OR runtime_layer IN ('live'))
+            """
+        )
+        columns.add("runtime_layer")
+    if "trade_authority_status" in columns:
+        conn.execute(
+            """
+            UPDATE forecast_posteriors
+               SET runtime_layer = ?
+             WHERE runtime_layer IS NULL
+               AND trade_authority_status = 'LIVE_AUTHORITY'
+            """,
+            (LIVE_RUNTIME_LAYER,),
+        )
+    conn.execute(
+        """
+        DELETE FROM forecast_posteriors
+         WHERE runtime_layer IS NULL
+            OR runtime_layer != ?
+        """,
+        (LIVE_RUNTIME_LAYER,),
+    )
 
 
 def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:

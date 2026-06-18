@@ -720,12 +720,16 @@ class ForecastSnapshotReadyTrigger:
         else:
             replacement_filter = ""
             if _replacement_live_enabled():
-                if not _table_exists(forecasts_conn, "forecast_posteriors"):
+                if (
+                    not _table_exists(forecasts_conn, "forecast_posteriors")
+                    or "runtime_layer" not in _table_columns(forecasts_conn, "forecast_posteriors")
+                ):
                     replacement_filter = " AND 0"
                 else:
                     replacement_filter = (
                         " AND EXISTS (SELECT 1 FROM forecast_posteriors fp"
                         " WHERE fp.product_id = '" + REPLACEMENT_0_1_PRODUCT_ID + "'"
+                        " AND fp.runtime_layer = 'live'"
                         " AND fp.city = c.city"
                         " AND fp.target_date = c.target_local_date"
                         " AND fp.temperature_metric = c.temperature_metric"

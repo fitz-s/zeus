@@ -1105,14 +1105,19 @@ class FamilyDecisionEngine:
                 pass
             return None, NO_TRADE_NO_POSITIVE_EDGE
 
+        def _capital_efficiency(d: CandidateDecision) -> float:
+            cost = max(float(d.economics.cost.value), 1e-9)
+            return float(d.economics.optimal_delta_u) / cost
+
         # SELECT: argmax optimal_delta_u over the survivors. The scalar trade score is NOT
-        # the key — only the vector ΔU. Ties resolve to the higher edge_lcb then the lower
-        # cost (deterministic), still never on the scalar.
+        # the key. Capital efficiency is a deterministic tie-break before lower raw cost, so
+        # equal-utility routes prefer the same expected growth with less capital tied up.
         selected = max(
             survivors,
             key=lambda d: (
                 d.economics.optimal_delta_u,
                 d.economics.edge_lcb,
+                _capital_efficiency(d),
                 -float(d.economics.cost.value),
             ),
         )

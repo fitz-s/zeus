@@ -19,7 +19,7 @@ _ORIGINAL_SOURCE_HEALTH_STATUS = healthcheck._source_health_status
 _ORIGINAL_LIVE_DB_HOLDER_STATUS = healthcheck._live_db_holder_status
 _ORIGINAL_POSITION_CURRENT_SCHEMA_STATUS = healthcheck._position_current_schema_status
 _ORIGINAL_FORECAST_POSTERIORS_SCHEMA_STATUS = (
-    healthcheck._forecast_posteriors_live_authority_schema_status
+    healthcheck._forecast_posteriors_runtime_layer_schema_status
 )
 _ORIGINAL_PROCESS_LOADED_CODE_STATUS = healthcheck._process_loaded_code_status
 _ORIGINAL_SETTLEMENT_TRUTH_STATUS = healthcheck._settlement_truth_status
@@ -115,12 +115,12 @@ def _mock_position_current_schema_status(monkeypatch):
 def _mock_forecast_posteriors_schema_status(monkeypatch):
     monkeypatch.setattr(
         healthcheck,
-        "_forecast_posteriors_live_authority_schema_status",
+        "_forecast_posteriors_runtime_layer_schema_status",
         lambda: {
             "ok": True,
             "path": "/tmp/zeus-forecasts.db",
             "issue": None,
-            "live_authority_status_supported": True,
+            "runtime_layer_supported": True,
         },
     )
 
@@ -1182,7 +1182,7 @@ def test_position_current_schema_status_accepts_monitor_freshness_cols(
     assert result["missing_columns"] == []
 
 
-def test_forecast_posteriors_schema_status_rejects_missing_live_authority_status(
+def test_forecast_posteriors_schema_status_rejects_missing_runtime_layer(
     monkeypatch, tmp_path
 ):
     db_path = tmp_path / "zeus-forecasts.db"
@@ -1203,11 +1203,11 @@ def test_forecast_posteriors_schema_status_rejects_missing_live_authority_status
     result = _ORIGINAL_FORECAST_POSTERIORS_SCHEMA_STATUS()
 
     assert result["ok"] is False
-    assert result["issue"] == "FORECAST_POSTERIORS_LIVE_AUTHORITY_SCHEMA_DRIFT"
-    assert result["live_authority_status_supported"] is False
+    assert result["issue"] == "FORECAST_POSTERIORS_RUNTIME_LAYER_SCHEMA_DRIFT"
+    assert result["runtime_layer_supported"] is False
 
 
-def test_forecast_posteriors_schema_status_accepts_live_authority_status(
+def test_forecast_posteriors_schema_status_accepts_runtime_layer(
     monkeypatch, tmp_path
 ):
     db_path = tmp_path / "zeus-forecasts.db"
@@ -1216,8 +1216,8 @@ def test_forecast_posteriors_schema_status_accepts_live_authority_status(
         """
         CREATE TABLE forecast_posteriors (
             posterior_id INTEGER PRIMARY KEY,
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'LIVE_AUTHORITY'))
+            runtime_layer TEXT NOT NULL DEFAULT 'live'
+                CHECK (runtime_layer IN ('live'))
         )
         """
     )
@@ -1229,7 +1229,7 @@ def test_forecast_posteriors_schema_status_accepts_live_authority_status(
 
     assert result["ok"] is True
     assert result["issue"] is None
-    assert result["live_authority_status_supported"] is True
+    assert result["runtime_layer_supported"] is True
 
 
 def test_live_db_holder_status_blocks_long_lived_forecast_holder(monkeypatch, tmp_path):

@@ -84,7 +84,7 @@ def test_a_posterior_lane_emits_complete_fsr_with_neutral_snapshot_id():
             captured.append(ev)
             return SimpleNamespace(event=ev, written=True)
 
-    with mock.patch.object(fsr, "_replacement_trade_authority_enabled", return_value=True):
+    with mock.patch.object(fsr, "_replacement_live_enabled", return_value=True):
         trig = fsr.ForecastSnapshotReadyTrigger(_W())
         results = trig.scan_committed_snapshots(
             forecasts_conn=con, decision_time=_DT, received_at=_DT.isoformat(), limit=10,
@@ -107,7 +107,7 @@ def test_a2_posterior_lane_requires_same_cycle_raw_model_spine_members():
         def write(self, ev):  # noqa: ANN001
             raise AssertionError(f"must not emit without q-kernel raw-model members: {ev!r}")
 
-    with mock.patch.object(fsr, "_replacement_trade_authority_enabled", return_value=True):
+    with mock.patch.object(fsr, "_replacement_live_enabled", return_value=True):
         trig = fsr.ForecastSnapshotReadyTrigger(_W())
         results = trig.scan_committed_snapshots(
             forecasts_conn=con, decision_time=_DT, received_at=_DT.isoformat(), limit=10,
@@ -131,7 +131,7 @@ def test_b_spine_resolves_causal_cycle_from_neutral_id_without_ensemble():
             con, event=event, family=_family(), decision_time=_DT,
         )
     assert members is not None, "spine must resolve members from the neutral id + raw_model_forecasts"
-    members_native, causal_sct = members
+    members_native, causal_sct, *_ = members
     assert len(members_native) == 5
     assert str(causal_sct).startswith("2026-06-17"), causal_sct
 

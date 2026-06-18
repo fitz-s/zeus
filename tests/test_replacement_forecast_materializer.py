@@ -251,7 +251,7 @@ def test_runtime_layer_rejects_wilson_or_missing_bounds(monkeypatch: pytest.Monk
     ) is False
 
 
-def test_forecast_posteriors_runtime_layer_migration_discards_legacy_status_rows() -> None:
+def test_forecast_posteriors_runtime_layer_migration_preserves_legacy_live_rows() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -276,7 +276,9 @@ def test_forecast_posteriors_runtime_layer_migration_discards_legacy_status_rows
     _ensure_forecast_posteriors_runtime_layer(conn)
 
     rows = conn.execute("SELECT posterior_id, runtime_layer, q_json FROM forecast_posteriors").fetchall()
-    assert [dict(row) for row in rows] == []
+    assert [dict(row) for row in rows] == [
+        {"posterior_id": 2, "runtime_layer": LIVE_RUNTIME_LAYER, "q_json": '{"good":1}'}
+    ]
     conn.execute(
         "INSERT INTO forecast_posteriors (trade_authority_status, runtime_layer, q_json) VALUES (?, ?, ?)",
         ("LIVE_AUTHORITY", LIVE_RUNTIME_LAYER, "{}"),
@@ -285,16 +287,16 @@ def test_forecast_posteriors_runtime_layer_migration_discards_legacy_status_rows
         row["runtime_layer"]
         for row in conn.execute("SELECT runtime_layer FROM forecast_posteriors ORDER BY posterior_id")
     ]
-    assert statuses == [LIVE_RUNTIME_LAYER]
+    assert statuses == [LIVE_RUNTIME_LAYER, LIVE_RUNTIME_LAYER]
     conn.execute(
-        "INSERT INTO forecast_posteriors (trade_authority_status, runtime_layer, q_json) VALUES (?, ?, ?)",
-        ("DIAGNOSTIC_ONLY", "experiment", "{}"),
+        "INSERT INTO forecast_posteriors (trade_authority_status, q_json) VALUES (?, ?)",
+        ("DIAGNOSTIC_ONLY", "{}"),
     )
     _ensure_forecast_posteriors_runtime_layer(conn)
     assert [
         row["runtime_layer"]
         for row in conn.execute("SELECT runtime_layer FROM forecast_posteriors ORDER BY posterior_id")
-    ] == [LIVE_RUNTIME_LAYER]
+    ] == [LIVE_RUNTIME_LAYER, LIVE_RUNTIME_LAYER]
     assert _replacement_is_live_layer(
         replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         q_lcb_map={"cool": 0.1},

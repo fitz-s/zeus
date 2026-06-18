@@ -8,7 +8,6 @@ allowed_files:
   - architecture/_schema_fingerprint.txt
   - architecture/script_manifest.yaml
   - config/settings.json
-  - scripts/repair_replacement_live_authority.py
   - scripts/check_replacement_forecast_live_dry_run.py
   - scripts/apply_replacement_forecast_shadow_veto_switch.py
   - scripts/plan_replacement_forecast_shadow_veto_config.py

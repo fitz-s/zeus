@@ -25,7 +25,7 @@ UTC = timezone.utc
 @pytest.fixture(autouse=True)
 def _replacement_authority_disabled_by_default(monkeypatch):
     monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
         lambda: False,
     )
 
@@ -152,7 +152,7 @@ def test_opendata_t3_data_version_normalizes_legacy_track_label():
 
 def test_replacement_authority_track_masks_legacy_t3_carrier(monkeypatch):
     monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
         lambda: True,
     )
     conn = sqlite3.connect(":memory:")
@@ -186,7 +186,7 @@ def test_replacement_authority_track_masks_legacy_t3_carrier(monkeypatch):
 
     payload = _json.loads(conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
     assert payload["source_run_id"] == "ecmwf_open_data:mx2t6_high:2026-06-05T12Z"
-    assert payload["track"] == "replacement_0_1_aifs_openmeteo_soft_anchor"
+    assert payload["track"] == "replacement_0_1_openmeteo_bayes_fusion"
     assert "t3" not in payload["track"]
     assert "t6" not in payload["track"]
 
@@ -535,7 +535,7 @@ def test_scan_emits_zero_for_strictly_past_target_local_day():
 
 def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch):
     monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
         lambda: True,
     )
     forecasts_conn = sqlite3.connect(":memory:")
@@ -562,18 +562,18 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
             source_id, product_id, data_version, city, target_date, temperature_metric,
             source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
             q_ucb_json, posterior_method, dependency_source_run_ids_json,
-            provenance_json, trade_authority_status, training_allowed
+            provenance_json, runtime_layer, training_allowed
         ) VALUES (
-            'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
-            'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
-            'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
             'Chicago', '2026-05-24', 'high',
             '2026-05-24T00:00:00+00:00',
             '2026-05-24T04:15:00+00:00',
             '2026-05-24T04:16:00+00:00',
             '{"bin:28":0.42}', NULL, NULL,
-            'aifs_openmeteo_soft_anchor',
-            '[]', '{}', 'DIAGNOSTIC_ONLY', 0
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
+            '[]', '{}', 'live', 0
         )
         """
     )
@@ -615,7 +615,7 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
     import json
 
     payload = json.loads(world_conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
-    assert payload["track"] == "replacement_0_1_aifs_openmeteo_soft_anchor"
+    assert payload["track"] == "replacement_0_1_openmeteo_bayes_fusion"
 
 
 def test_scan_emits_only_for_families_with_a_market_when_markets_exist():

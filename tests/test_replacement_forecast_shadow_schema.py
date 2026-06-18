@@ -106,7 +106,7 @@ def test_targeted_replacement_shadow_schema_initializer_commit_creates_only_shad
     assert "venue_commands" not in tables
 
 
-def test_legacy_forecast_posteriors_statuses_do_not_map_to_runtime_layer() -> None:
+def test_legacy_forecast_posteriors_live_status_migrates_to_runtime_layer() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
@@ -180,7 +180,7 @@ def test_legacy_forecast_posteriors_statuses_do_not_map_to_runtime_layer() -> No
     rows = conn.execute(
         "SELECT posterior_id, runtime_layer FROM forecast_posteriors ORDER BY posterior_id"
     ).fetchall()
-    assert [tuple(row) for row in rows] == [(1, None), (2, None)]
+    assert [tuple(row) for row in rows] == [(1, "live")]
 
 
 def test_replacement_raw_artifacts_are_shadow_only_and_not_training_authority() -> None:

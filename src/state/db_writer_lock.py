@@ -798,7 +798,6 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/rebuild_calibration_pairs.py",          # already_guarded: writes under bulk_lock_with_chunker (K3 retrofit)
         "scripts/rebuild_settlements.py",                   # already_guarded: writes under db_writer_lock(BULK)
         "scripts/refit_platt.py",                           # already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
-        "scripts/repair_replacement_live_authority.py",     # already_guarded: dry-run ro; --apply writes zeus-forecasts.db under db_writer_lock(BULK)
         # --- ENS full_transport_v1 offline staging tools (2026-05-24): isolated --db only,
         #     refuse the shared world DB via _resolve_isolated_calibration_write_db_path;
         #     single-process offline operator runs, never the live daemon path ---

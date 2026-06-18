@@ -303,6 +303,20 @@ def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connec
             """
         )
         columns.add("runtime_layer")
+    if "trade_authority_status" in columns:
+        conn.execute(
+            """
+            UPDATE forecast_posteriors
+               SET runtime_layer = 'live'
+             WHERE runtime_layer IS NULL
+               AND trade_authority_status = 'LIVE_AUTHORITY'
+            """
+        )
+    conn.execute("""
+        DELETE FROM forecast_posteriors
+         WHERE runtime_layer IS NULL
+            OR runtime_layer != 'live'
+    """)
     if {"runtime_layer", "city", "target_date", "temperature_metric", "computed_at"}.issubset(columns):
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_runtime_layer_target

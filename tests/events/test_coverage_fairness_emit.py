@@ -61,7 +61,7 @@ def _pin_replacement_filter_off(monkeypatch: Any) -> None:
     the fairness contract under test is orthogonal to the replacement filter.
     """
     monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
         lambda: False,
     )
 
