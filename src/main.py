@@ -7417,6 +7417,23 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     batch_limit = _edli_prune_batch_limit(edli_cfg)
 
     try:
+        _orphan_archived = store.archive_orphan_processing_rows(batch_limit=batch_limit)
+        if _orphan_archived:
+            logger.info(
+                "EDLI reactor: archived %d orphan opportunity_event_processing rows "
+                "(missing opportunity_events provenance) → 'expired'; active working "
+                "set no longer includes unclaimable IDs (batch_limit=%d)",
+                _orphan_archived,
+                batch_limit,
+            )
+    except Exception as _orphan_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_orphan_processing_rows sweep failed "
+            "(non-fatal; joined readers still ignore orphan IDs): %r",
+            _orphan_sweep_exc,
+        )
+
+    try:
         _archived = store.archive_expired_candidates(
             decision_time=decision_time.isoformat(),
             batch_limit=batch_limit,

@@ -775,3 +775,11 @@ def test_redecision_cycle_prunes_before_snapshotting_pending_keys():
 
     src = inspect.getsource(main._edli_event_reactor_cycle)
     assert src.index("_edli_prune_pending_working_set(") < src.index("_edli_pending_entity_keys(")
+
+
+def test_reactor_prune_archives_orphan_processing_rows():
+    """Active rows without opportunity_events provenance must leave the working set."""
+
+    src = inspect.getsource(main._edli_prune_pending_working_set)
+    assert "archive_orphan_processing_rows" in src
+    assert src.index("archive_orphan_processing_rows") < src.index("archive_expired_candidates")

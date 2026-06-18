@@ -457,6 +457,57 @@ class EventStore:
             )
         return len(expired_ids)
 
+    def archive_orphan_processing_rows(self, *, batch_limit: int = 5_000) -> int:
+        """Expire active processing rows whose immutable event row is missing.
+
+        ``opportunity_events`` is the append-only provenance row. A mutable
+        ``opportunity_event_processing`` row without that parent can never be
+        claimed, re-decided, or converted into an order because every money-path
+        reader joins back to the event payload. Leaving such rows in
+        ``pending``/``processing`` pollutes active working-set counts and keeps
+        maintenance queries scanning dead IDs. Mark only the mutable row
+        ``expired``; do not delete anything, so the anomaly remains auditable.
+        """
+
+        self._require_world_event_tables()
+        rows = self.conn.execute(
+            """
+            SELECT p.event_id
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              LEFT JOIN opportunity_events e
+                ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status IN ('pending', 'processing')
+               AND e.event_id IS NULL
+             ORDER BY p.updated_at ASC, p.event_id ASC
+             LIMIT ?
+            """,
+            (self.consumer_name, batch_limit),
+        ).fetchall()
+        event_ids = [str(row[0]) for row in rows]
+        if not event_ids:
+            return 0
+
+        now = _utc_now()
+        _CHUNK = 500
+        for chunk_start in range(0, len(event_ids), _CHUNK):
+            chunk = event_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       last_error = 'ORPHAN_EVENT_ROW_MISSING',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id IN ({placeholders})
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, self.consumer_name, *chunk),
+            )
+        return len(event_ids)
+
     # Channel event types that carry a per-token price-update stream and are
     # subject to the superseded-keep-latest sweep. NEW_MARKET_DISCOVERED is
     # included because a re-discovered market replaces prior discovery events

@@ -132,6 +132,55 @@ def test_processing_state_separate_from_event_row():
     assert conn.execute("SELECT payload_hash FROM opportunity_events WHERE event_id = ?", (event.event_id,)).fetchone()[0] == event.payload_hash
 
 
+def test_archive_orphan_processing_rows_expires_only_rows_without_event_provenance():
+    conn = _world_conn()
+    store = EventStore(conn)
+    live_event = _event(
+        "snap-live",
+        0,
+        "2026-05-24T04:15:00+00:00",
+        "2026-05-24T04:16:00+00:00",
+    )
+    store.insert_or_ignore(live_event)
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count, updated_at
+        ) VALUES (?, ?, 'pending', 2, ?)
+        """,
+        ("edli_reactor_v1", "missing-event-row", "2026-05-24T04:16:30+00:00"),
+    )
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count, claimed_at, updated_at
+        ) VALUES (?, ?, 'processing', 1, ?, ?)
+        """,
+        (
+            "edli_reactor_v1",
+            "missing-processing-row",
+            "2026-05-24T04:16:30+00:00",
+            "2026-05-24T04:16:30+00:00",
+        ),
+    )
+
+    assert store.archive_orphan_processing_rows(batch_limit=10) == 2
+
+    rows = dict(
+        conn.execute(
+            """
+            SELECT event_id, processing_status || ':' || COALESCE(last_error, '')
+              FROM opportunity_event_processing
+             WHERE event_id IN (?, ?, ?)
+            """,
+            (live_event.event_id, "missing-event-row", "missing-processing-row"),
+        ).fetchall()
+    )
+    assert rows[live_event.event_id] == "pending:"
+    assert rows["missing-event-row"] == "expired:ORPHAN_EVENT_ROW_MISSING"
+    assert rows["missing-processing-row"] == "expired:ORPHAN_EVENT_ROW_MISSING"
+
+
 def test_world_conn_required_for_event_tables():
     conn = _world_conn()
     store = EventStore(conn)
