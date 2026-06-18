@@ -69,13 +69,46 @@ def _patch_paths(monkeypatch, tmp_path):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     settings = tmp_path / "settings.json"
+    scheduler_health = tmp_path / "scheduler_jobs_health.json"
+    forecast_live_heartbeat = tmp_path / "forecast-live-heartbeat.json"
+    now = datetime.now(timezone.utc).isoformat()
     settings.write_text(json.dumps({"edli": {"real_order_submit_enabled": True}}))
+    scheduler_health.write_text(
+        json.dumps(
+            {
+                "replacement_forecast_download": {
+                    "status": "OK",
+                    "last_run_at": now,
+                    "last_success_at": now,
+                },
+                "replacement_forecast_live_materialize": {
+                    "status": "OK",
+                    "last_run_at": now,
+                    "last_success_at": now,
+                },
+            }
+        )
+    )
+    forecast_live_heartbeat.write_text(
+        json.dumps(
+            {
+                "daemon": "forecast-live",
+                "status": "alive",
+                "timestamp": now,
+                "written_at": now,
+                "pid": 123,
+                "git_head": "testsha",
+            }
+        )
+    )
     sqlite3.connect(world_db).close()
     monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
     monkeypatch.setattr(preflight, "WORLD_DB", world_db)
     monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
     monkeypatch.setattr(preflight, "SETTINGS_PATH", settings)
     monkeypatch.setattr(preflight, "STATE_DIR", state_dir)
+    monkeypatch.setattr(preflight, "SCHEDULER_HEALTH_PATH", scheduler_health)
+    monkeypatch.setattr(preflight, "FORECAST_LIVE_HEARTBEAT_PATH", forecast_live_heartbeat)
     monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
     monkeypatch.setattr(preflight, "_git_head", lambda: "testsha")
     return trade_db, forecast_db, state_dir
@@ -111,6 +144,50 @@ def _init_sidecar_surfaces(conn, *, now: datetime):
 def _write_fresh_sidecar_heartbeats(state_dir, *, now: datetime):
     for _, filename in preflight.SIDECAR_HEARTBEATS:
         (state_dir / filename).write_text(json.dumps({"alive_at": now.isoformat(), "pid": 123}))
+
+
+def test_preflight_blocks_unhealthy_replacement_forecast_sidecar(monkeypatch, tmp_path):
+    trade_db, forecast_db = _patch_paths(monkeypatch, tmp_path)
+    _init_trade_db(trade_db).close()
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    forecasts.commit()
+    forecasts.close()
+    preflight.SCHEDULER_HEALTH_PATH.write_text(
+        json.dumps(
+            {
+                "replacement_forecast_download": {
+                    "status": "OK",
+                    "last_run_at": fresh.isoformat(),
+                    "last_success_at": fresh.isoformat(),
+                },
+                "replacement_forecast_live_materialize": {
+                    "status": "OK",
+                    "last_run_at": (fresh + timedelta(seconds=1)).isoformat(),
+                    "last_success_at": fresh.isoformat(),
+                    "last_failure_at": (fresh + timedelta(seconds=1)).isoformat(),
+                    "last_failure_reason": "no such column: p.trade_authority_status",
+                },
+            }
+        )
+    )
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    sidecar = next(c for c in result["checks"] if c["name"] == "forecast_sidecar_health")
+    assert sidecar["ok"] is False
+    assert sidecar["evidence"]["risky"][0]["risk"] == "latest_scheduler_outcome_failed"
+    assert "trade_authority_status" in sidecar["evidence"]["risky"][0]["last_failure_reason"]
 
 
 def test_preflight_blocks_dust_projection_that_would_reload_as_pending_exit(monkeypatch, tmp_path):

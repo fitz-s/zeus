@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-05-23
+# Last reused/audited: 2026-06-18
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md (ECMWF 00z ingest schedule fix).
 """Dedicated OpenData live forecast producer daemon.
 
@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -32,6 +33,21 @@ _scheduler: Any | None = None
 # src/riskguard/riskguard.py emit. See WAVE3_BATCH_C_PER_FINDING_ACCOUNTING.md
 # carry-forward #5.
 _PROCESS_START = time.monotonic()
+
+
+def _git_head_at_boot() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return ""
+
+
+_PROCESS_GIT_HEAD = _git_head_at_boot()
 
 FORECAST_LIVE_DAILY_HIGH_JOB_ID = "forecast_live_opendata_daily_mx2t6"       # 00z trigger
 FORECAST_LIVE_DAILY_HIGH_12Z_JOB_ID = "forecast_live_opendata_daily_mx2t6_12z"  # 12z trigger
@@ -155,6 +171,7 @@ def _write_forecast_live_heartbeat(
         "timestamp": now.isoformat(),
         "written_at": now.isoformat(),
         "pid": os.getpid(),
+        "git_head": _PROCESS_GIT_HEAD,
         "jobs": sorted(_active_forecast_live_job_ids()),
         "cadence_seconds": FORECAST_LIVE_HEARTBEAT_SECONDS,
     }
@@ -966,7 +983,10 @@ def _replacement_forecast_materialize_job() -> None:
         _replacement_forecast_live_materialize_cycle,
     )
 
-    _replacement_forecast_live_materialize_cycle()
+    # Single health writer: the forecast-live scheduler wrapper owns this job's
+    # health entry. Calling the production wrapper would swallow exceptions and
+    # then let this outer wrapper overwrite FAILED with OK.
+    _replacement_forecast_live_materialize_cycle.__wrapped__()
 
 
 def _replacement_forecast_live_cfg() -> dict:

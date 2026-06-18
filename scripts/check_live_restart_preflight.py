@@ -40,14 +40,21 @@ WORLD_DB = ROOT / "state" / "zeus-world.db"
 FORECAST_DB = ROOT / "state" / "zeus-forecasts.db"
 SETTINGS_PATH = ROOT / "config" / "settings.json"
 STATE_DIR = ROOT / "state"
+SCHEDULER_HEALTH_PATH = ROOT / "state" / "scheduler_jobs_health.json"
+FORECAST_LIVE_HEARTBEAT_PATH = ROOT / "state" / "forecast-live-heartbeat.json"
 DUST_SHARE_LIMIT = 0.01
 SIDECAR_HEARTBEAT_MAX_AGE_SECONDS = 180.0
 EXECUTION_FEASIBILITY_MAX_AGE_SECONDS = 180.0
 EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS = 600.0
+FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS = 120.0
 SIDECAR_HEARTBEATS = (
     ("substrate_observer_daemon", "daemon-heartbeat-substrate-observer.json"),
     ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
     ("post_trade_capital_daemon", "daemon-heartbeat-post-trade-capital.json"),
+)
+REPLACEMENT_SIDECAR_JOBS = (
+    "replacement_forecast_download",
+    "replacement_forecast_live_materialize",
 )
 
 
@@ -443,6 +450,93 @@ def _executable_substrate_exposure_freshness(
     return {"scoped_exposure_count": len(exposures), "risky": risky, "covered": covered}
 
 
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _forecast_sidecar_health() -> CheckResult:
+    now = datetime.now(timezone.utc)
+    current_git_head = _git_head()
+    heartbeat = _read_json(FORECAST_LIVE_HEARTBEAT_PATH)
+    heartbeat_at = _parse_dt(heartbeat.get("written_at") or heartbeat.get("timestamp"))
+    heartbeat_age = None
+    if heartbeat_at is not None:
+        heartbeat_age = (now - heartbeat_at).total_seconds()
+
+    scheduler_health = _read_json(SCHEDULER_HEALTH_PATH)
+    job_evidence: dict[str, Any] = {}
+    risky: list[dict[str, Any]] = []
+    for job_name in REPLACEMENT_SIDECAR_JOBS:
+        entry = scheduler_health.get(job_name)
+        if not isinstance(entry, dict):
+            risky.append({"job": job_name, "risk": "missing_scheduler_health_entry"})
+            job_evidence[job_name] = None
+            continue
+        status = str(entry.get("status") or "")
+        last_success = _parse_dt(entry.get("last_success_at"))
+        last_failure = _parse_dt(entry.get("last_failure_at"))
+        item = {
+            "status": status,
+            "last_run_at": entry.get("last_run_at"),
+            "last_success_at": entry.get("last_success_at"),
+            "last_failure_at": entry.get("last_failure_at"),
+            "last_failure_reason": entry.get("last_failure_reason"),
+        }
+        job_evidence[job_name] = item
+        if status == "FAILED":
+            risky.append({"job": job_name, "risk": "scheduler_job_failed", **item})
+            continue
+        if last_failure is not None and (last_success is None or last_failure > last_success):
+            risky.append({"job": job_name, "risk": "latest_scheduler_outcome_failed", **item})
+
+    heartbeat_ok = (
+        str(heartbeat.get("daemon") or "") == "forecast-live"
+        and heartbeat_age is not None
+        and 0.0 <= heartbeat_age <= FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS
+    )
+    if not heartbeat_ok:
+        risky.append(
+            {
+                "job": "forecast-live-heartbeat",
+                "risk": "forecast_live_heartbeat_stale_or_missing",
+                "heartbeat_age_seconds": heartbeat_age,
+                "heartbeat": heartbeat,
+            }
+        )
+    if str(heartbeat.get("git_head") or "") != current_git_head:
+        risky.append(
+            {
+                "job": "forecast-live-heartbeat",
+                "risk": "forecast_live_code_head_mismatch",
+                "heartbeat_git_head": heartbeat.get("git_head"),
+                "current_git_head": current_git_head,
+            }
+        )
+
+    ok = not risky
+    return CheckResult(
+        "forecast_sidecar_health",
+        ok,
+        "forecast sidecar heartbeat and replacement jobs are healthy"
+        if ok
+        else "forecast sidecar heartbeat or replacement production jobs are unhealthy",
+        {
+            "heartbeat_path": str(FORECAST_LIVE_HEARTBEAT_PATH),
+            "heartbeat_age_seconds": heartbeat_age,
+            "heartbeat": heartbeat,
+            "current_git_head": current_git_head,
+            "scheduler_health_path": str(SCHEDULER_HEALTH_PATH),
+            "jobs": job_evidence,
+            "risky": risky,
+            "heartbeat_max_age_seconds": FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS,
+        },
+    )
+
+
 def _posterior_summary() -> CheckResult:
     now = datetime.now(timezone.utc)
     with _connect_live_ro() as conn:
@@ -619,6 +713,7 @@ def evaluate() -> dict[str, Any]:
             "real order submit config read",
             {"edli.real_order_submit_enabled": real_submit},
         ),
+        _forecast_sidecar_health(),
         _posterior_summary(),
         *_sidecar_heartbeat_checks(),
         _executable_substrate_freshness_check(rows),
