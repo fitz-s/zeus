@@ -449,6 +449,34 @@ def test_redecision_skip_set_is_event_type_scoped():
     ) == {redecision.entity_key}
 
 
+def test_redecision_pending_family_keys_parse_only_valid_families():
+    assert main._edli_redecision_family_keys_from_entity_keys(
+        {
+            "Tokyo|2026-06-18|low|run-rd",
+            "Shenzhen|2026-06-19|high|run-rd",
+            "Paris|2026-06-19|bogus|run-rd",
+            "malformed",
+        }
+    ) == {
+        ("Tokyo", "2026-06-18", "low"),
+        ("Shenzhen", "2026-06-19", "high"),
+    }
+
+
+def test_redecision_screen_skips_forecast_scan_when_pending_covers_admission():
+    """Already-pending admitted families must not trigger an expensive no-op re-emit scan."""
+
+    screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    assert "pending_families = _edli_redecision_family_keys_from_entity_keys(pending)" in screen_src
+    assert "emit_families = set(all_families) - pending_families" in screen_src
+    assert "if emit_families:" in screen_src
+    assert "restrict_to_families=emit_families" in screen_src
+    assert "emitted = []" in screen_src
+    assert screen_src.index("emit_families = set(all_families) - pending_families") < screen_src.index(
+        "trig.scan_committed_snapshots"
+    )
+
+
 def test_unadmitted_redecision_pending_is_expired():
     """Pending redecisions must remain backed by current edge/rest/held admission."""
 

@@ -6724,16 +6724,21 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
             )
             pending = _edli_pending_entity_keys(world, event_types=(REDECISION_EVENT_TYPE,))
-            emitted = trig.scan_committed_snapshots(
-                forecasts_conn=forecasts_ro,
-                decision_time=now,
-                received_at=received_at,
-                limit=rd_cap,
-                source=_edli_next_redecision_source(),
-                already_pending_keys=pending,
-                event_type=REDECISION_EVENT_TYPE,
-                restrict_to_families=all_families,
-            )
+            pending_families = _edli_redecision_family_keys_from_entity_keys(pending)
+            emit_families = set(all_families) - pending_families
+            if emit_families:
+                emitted = trig.scan_committed_snapshots(
+                    forecasts_conn=forecasts_ro,
+                    decision_time=now,
+                    received_at=received_at,
+                    limit=rd_cap,
+                    source=_edli_next_redecision_source(),
+                    already_pending_keys=pending,
+                    event_type=REDECISION_EVENT_TYPE,
+                    restrict_to_families=emit_families,
+                )
+            else:
+                emitted = []
             world.commit()
         finally:
             emit_mutex.release()
@@ -7294,6 +7299,24 @@ def _edli_pending_entity_keys(
                 world_conn.execute("PRAGMA busy_timeout = %d" % saved_busy_timeout_ms)
             except Exception:  # noqa: BLE001 — restore best-effort; next get_world_connection reapplies
                 pass
+
+
+def _edli_redecision_family_keys_from_entity_keys(
+    entity_keys: set[str],
+) -> set[tuple[str, str, str]]:
+    """Extract (city, target_date, metric) keys from pending redecision entity keys."""
+
+    out: set[tuple[str, str, str]] = set()
+    for entity_key in entity_keys or set():
+        parts = str(entity_key or "").split("|")
+        if len(parts) < 3:
+            continue
+        city = parts[0].strip()
+        target_date = parts[1].strip()
+        metric = parts[2].strip()
+        if city and target_date and metric in {"high", "low"}:
+            out.add((city, target_date, metric))
+    return out
 
 
 _EDLI_LAST_PRUNE_MONOTONIC: float | None = None
