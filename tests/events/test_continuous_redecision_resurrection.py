@@ -566,6 +566,68 @@ def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
     assert rests[0].matched_size is None
 
 
+def test_open_maker_rests_avoids_full_order_fact_window_scan():
+    import src.main as main
+
+    world = _mem_world()
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT, "
+        "side TEXT, price REAL, snapshot_id TEXT, created_at TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    trade.execute(
+        "CREATE UNIQUE INDEX idx_test_order_seq "
+        "ON venue_order_facts(venue_order_id, local_sequence)"
+    )
+    _cache(world, p_yes=0.20, snapshot_id="snap1", cond="0xc30")
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        yes_token_id="yes-c30",
+        no_token_id="no-c30",
+        selected_outcome_token_id="no-c30",
+        bid="0.18",
+        ask="0.22",
+        snapshot_id="snap1",
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "cmd-no",
+            "order-no",
+            "no-c30",
+            "m1",
+            "BUY",
+            0.75,
+            "snap1",
+            "2026-06-12T00:00:00+00:00",
+            "ENTRY",
+        ),
+    )
+    for seq in range(1, 201):
+        trade.execute(
+            "INSERT INTO venue_order_facts VALUES (?,?,?)",
+            (f"closed-{seq}", "EXPIRED", seq),
+        )
+    trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-no", "LIVE", 1))
+    trade.commit()
+
+    captured = _SqlCaptureConn(trade)
+
+    rests = main._edli_open_maker_rests_for_screen(captured, world)
+
+    assert len(rests) == 1
+    statements = "\n".join(captured.statements).upper()
+    assert "ROW_NUMBER" not in statements
+    assert "PARTITION BY" not in statements
+    assert "WHERE VENUE_ORDER_ID = ?" in statements
+
+
 # ───────────────────────────────────────────────────────────────────────────────────────────────
 # ANTIBODY 4 — FEE is the canonical price-dependent model, not the flat 1¢ magic number.
 # ───────────────────────────────────────────────────────────────────────────────────────────────

@@ -6449,33 +6449,38 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
     from src.execution.maker_rest_escalation import OPEN_REST_FACT_STATES
 
     now = datetime.now(timezone.utc)
-    placeholders = ",".join("?" for _ in OPEN_REST_FACT_STATES)
     try:
         fact_cols = {str(row[1]) for row in trade_conn.execute("PRAGMA table_info(venue_order_facts)").fetchall()}
     except Exception:  # noqa: BLE001
         fact_cols = set()
     matched_select = "matched_size" if "matched_size" in fact_cols else "NULL AS matched_size"
-    rows = trade_conn.execute(
-        f"""
-        WITH latest_facts AS (
-            SELECT venue_order_id, state, {matched_select},
-                   ROW_NUMBER() OVER (
-                       PARTITION BY venue_order_id ORDER BY local_sequence DESC
-                   ) AS rn
-            FROM venue_order_facts
-        )
-        SELECT vc.command_id, vc.venue_order_id, vc.token_id, vc.market_id,
-               vc.side, vc.price, vc.snapshot_id, vc.created_at,
-               lf.state AS fact_state, lf.matched_size
-        FROM venue_commands vc
-        JOIN latest_facts lf
-          ON lf.venue_order_id = vc.venue_order_id AND lf.rn = 1
-        WHERE vc.intent_kind = 'ENTRY'
-          AND vc.venue_order_id IS NOT NULL AND vc.venue_order_id != ''
-          AND lf.state IN ({placeholders})
-        """,
-        tuple(OPEN_REST_FACT_STATES),
+    command_rows = trade_conn.execute(
+        """
+        SELECT command_id, venue_order_id, token_id, market_id,
+               side, price, snapshot_id, created_at
+          FROM venue_commands
+         WHERE intent_kind = 'ENTRY'
+           AND venue_order_id IS NOT NULL AND venue_order_id != ''
+        """
     ).fetchall()
+    rows = []
+    if command_rows:
+        fact_sql = f"""
+            SELECT state, {matched_select}
+              FROM venue_order_facts
+             WHERE venue_order_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+        """
+        open_states = set(OPEN_REST_FACT_STATES)
+        for vc in command_rows:
+            latest_fact = trade_conn.execute(fact_sql, (vc[1],)).fetchone()
+            if latest_fact is None:
+                continue
+            fact_state = str(latest_fact[0] or "")
+            if fact_state not in open_states:
+                continue
+            rows.append(tuple(vc) + (fact_state, latest_fact[1]))
     if not rows:
         return []
     # Resolve token_id -> condition_id and held-side direction from the freshest
