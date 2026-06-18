@@ -6788,9 +6788,9 @@ def _maker_rest_escalation_cycle() -> None:
     from src.data.polymarket_client import PolymarketClient
     from src.execution.maker_rest_escalation import (
         find_expired_resting_entries,
-        run_cancels_for_expired_rests,
+        run_persisted_cancels_for_expired_rests,
     )
-    from src.state.db import get_trade_connection_read_only
+    from src.state.db import get_trade_connection, get_trade_connection_read_only
 
     # Clean shape (dependency_db_locked antibody, 2026-06-11): SNAPSHOT the
     # expired-rest candidates on a short read-only connection and CLOSE it before
@@ -6810,10 +6810,14 @@ def _maker_rest_escalation_cycle() -> None:
     # whose rest was CONFIRMED-cancelled so we can emit a Tier-0 re-decision for
     # each — the just-cancelled, ARMED family crosses as TAKER_ESCALATED_AFTER_REST
     # on the NEXT cycle instead of waiting ~2-3h for the 49-deep per-city
-    # round-robin. The collect rides an out-parameter so `stats` stays byte-identical.
+    # round-robin. The cancel path now journals CANCEL_REQUESTED/CANCEL_ACKED around
+    # the venue side effect so a successfully pulled rest cannot remain a local ACK ghost.
     cancelled_entries: list[dict] = []
-    stats = run_cancels_for_expired_rests(
-        expired, clob, collect_cancelled=cancelled_entries
+    stats = run_persisted_cancels_for_expired_rests(
+        expired,
+        clob,
+        conn_factory=lambda: get_trade_connection(write_class="live"),
+        collect_cancelled=cancelled_entries,
     )
     if stats["scanned"]:
         logger.info("maker_rest_escalation: %s", stats)
@@ -7220,7 +7224,8 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         cancelled = 0
         if rest_pulls and get_mode() == "live":
             from src.data.polymarket_client import PolymarketClient
-            from src.execution.maker_rest_escalation import run_cancels_for_expired_rests
+            from src.execution.maker_rest_escalation import run_persisted_cancels_for_expired_rests
+            from src.state.db import get_trade_connection
 
             to_cancel = [
                 {"command_id": rest.command_id, "venue_order_id": rest.venue_order_id,
@@ -7229,7 +7234,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                  "cancel_action": decision.action, "cancel_detail": decision.detail}
                 for rest, decision in rest_pulls
             ]
-            cstats = run_cancels_for_expired_rests(to_cancel, PolymarketClient())
+            cstats = run_persisted_cancels_for_expired_rests(
+                to_cancel,
+                PolymarketClient(),
+                conn_factory=lambda: get_trade_connection(write_class="live"),
+            )
             cancelled = cstats.get("cancelled", 0)
 
         logger.info(

@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger("zeus.maker_rest_escalation")
 
@@ -178,6 +178,183 @@ def run_cancels_for_expired_rests(
                 "rested_since=%s fact_state=%s matched=%s (deadline=%.0fmin; the next "
                 "certified decision for this family may cross as TAKER_ESCALATED_AFTER_REST)",
                 entry.get("command_id"),
+                order_id,
+                entry.get("created_at"),
+                entry.get("fact_state"),
+                entry.get("matched_size"),
+                float(deadline_minutes if deadline_minutes is not None else _deadline_minutes()),
+            )
+    return stats
+
+
+def _close_conn_if_needed(conn: sqlite3.Connection, *, close: bool) -> None:
+    if not close:
+        return
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _append_cancel_journal_event(
+    conn_factory: Callable[[], sqlite3.Connection],
+    *,
+    command_id: str,
+    event_type: str,
+    occurred_at: str,
+    payload: dict[str, Any],
+    close_connections: bool,
+) -> None:
+    from src.state.venue_command_repo import append_event
+
+    conn = conn_factory()
+    try:
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=event_type,
+            occurred_at=occurred_at,
+            payload=payload,
+        )
+        conn.commit()
+    finally:
+        _close_conn_if_needed(conn, close=close_connections)
+
+
+def run_persisted_cancels_for_expired_rests(
+    expired: list[dict[str, Any]],
+    clob: Any,
+    *,
+    conn_factory: Callable[[], sqlite3.Connection],
+    close_connections: bool = True,
+    deadline_minutes: float | None = None,
+    collect_cancelled: list[dict[str, Any]] | None = None,
+) -> dict[str, int]:
+    """Cancel rests with durable command-journal truth around the venue side effect.
+
+    The legacy pure-network helper intentionally held no DB connection, but live
+    callers that use it directly create a false local ACK ghost after a successful
+    venue cancel. This wrapper preserves close-before-network while restoring the
+    command contract:
+
+    1. append CANCEL_REQUESTED and commit,
+    2. close the connection before the HTTP cancel,
+    3. append CANCEL_ACKED / CANCEL_FAILED / CANCEL_REPLACE_BLOCKED and commit.
+
+    A command whose pre-side-effect journal write fails is not sent to the venue.
+    A successful venue cancel whose post-side-effect journal write fails is not
+    harvested for redecision; command recovery must resolve the CANCEL_PENDING row.
+    """
+    from src.execution.exit_safety import parse_cancel_response
+
+    stats = {
+        "scanned": len(expired),
+        "cancelled": 0,
+        "cancel_failed": 0,
+        "cancel_journal_failed": 0,
+    }
+    for entry in expired:
+        command_id = str(entry.get("command_id") or "")
+        order_id = str(entry.get("venue_order_id") or "")
+        now = datetime.now(UTC).isoformat()
+        try:
+            _append_cancel_journal_event(
+                conn_factory,
+                command_id=command_id,
+                event_type="CANCEL_REQUESTED",
+                occurred_at=now,
+                payload={
+                    "venue_order_id": order_id,
+                    "source": "maker_rest_escalation",
+                    "cancel_reason": str(entry.get("cancel_reason") or ""),
+                    "cancel_action": str(entry.get("cancel_action") or ""),
+                    "cancel_detail": entry.get("cancel_detail"),
+                },
+                close_connections=close_connections,
+            )
+        except Exception as exc:  # noqa: BLE001
+            stats["cancel_failed"] += 1
+            logger.error(
+                "maker_rest_escalation: pre-cancel journal failed command=%s order=%s: %r",
+                command_id,
+                order_id,
+                exc,
+            )
+            continue
+
+        try:
+            raw = clob.cancel_order(order_id)
+            outcome = parse_cancel_response(raw)
+        except Exception as exc:  # noqa: BLE001 — possible side effect; record unknown
+            outcome = None
+            raw = {"exception_type": type(exc).__name__, "exception_message": str(exc)}
+
+        if outcome is not None and outcome.status == "CANCELED":
+            event_type = "CANCEL_ACKED"
+            payload = {"venue_order_id": order_id, "cancel_outcome": outcome.raw_response}
+        elif outcome is not None and outcome.status == "NOT_CANCELED":
+            event_type = "CANCEL_FAILED"
+            payload = {
+                "venue_order_id": order_id,
+                "reason": outcome.reason,
+                "cancel_outcome": outcome.raw_response,
+            }
+        else:
+            event_type = "CANCEL_REPLACE_BLOCKED"
+            payload = {
+                "venue_order_id": order_id,
+                "reason": "post_cancel_unknown_possible_side_effect",
+                "cancel_outcome": raw,
+            }
+
+        try:
+            _append_cancel_journal_event(
+                conn_factory,
+                command_id=command_id,
+                event_type=event_type,
+                occurred_at=datetime.now(UTC).isoformat(),
+                payload=payload,
+                close_connections=close_connections,
+            )
+        except Exception as exc:  # noqa: BLE001
+            stats["cancel_journal_failed"] += 1
+            logger.error(
+                "maker_rest_escalation: post-cancel journal failed command=%s order=%s "
+                "event=%s: %r",
+                command_id,
+                order_id,
+                event_type,
+                exc,
+            )
+            continue
+
+        if event_type == "CANCEL_ACKED":
+            stats["cancelled"] += 1
+            if collect_cancelled is not None:
+                collect_cancelled.append(entry)
+        else:
+            stats["cancel_failed"] += 1
+
+        cancel_reason = str(entry.get("cancel_reason") or "").strip()
+        if event_type == "CANCEL_ACKED" and cancel_reason:
+            logger.info(
+                "maker_rest_escalation: cancelled screened rest command=%s order=%s "
+                "reason=%s action=%s detail=%s rested_since=%s fact_state=%s matched=%s",
+                command_id,
+                order_id,
+                cancel_reason,
+                entry.get("cancel_action"),
+                entry.get("cancel_detail"),
+                entry.get("created_at"),
+                entry.get("fact_state"),
+                entry.get("matched_size"),
+            )
+        elif event_type == "CANCEL_ACKED":
+            logger.info(
+                "maker_rest_escalation: cancelled expired rest command=%s order=%s "
+                "rested_since=%s fact_state=%s matched=%s (deadline=%.0fmin; the next "
+                "certified decision for this family may cross as TAKER_ESCALATED_AFTER_REST)",
+                command_id,
                 order_id,
                 entry.get("created_at"),
                 entry.get("fact_state"),
