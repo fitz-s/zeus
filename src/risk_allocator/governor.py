@@ -41,6 +41,10 @@ _UNRESOLVED_SIDE_EFFECT_STATES = {
     "UNKNOWN",
     "REVIEW_REQUIRED",
 }
+_PRE_SDK_REVIEW_REQUIRED_REASONS = {
+    "pre_submit_collateral_reservation_failed",
+    "recovery_no_venue_order_id",
+}
 
 
 @dataclass(frozen=True)
@@ -241,10 +245,6 @@ class RiskAllocator:
             return "heartbeat_lost"
         if governor_state.ws_gap_active and governor_state.ws_gap_seconds > policy.ws_gap_seconds_limit:
             return "ws_gap_threshold"
-        if governor_state.unknown_side_effect_count > policy.unknown_side_effect_limit:
-            return "unknown_side_effect_threshold"
-        if governor_state.reconcile_finding_count > policy.reconcile_finding_limit:
-            return "reconcile_finding_threshold"
         if governor_state.current_drawdown_pct >= policy.max_drawdown_pct:
             return "drawdown_threshold"
         return None
@@ -575,6 +575,96 @@ def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
     return tuple(lots)
 
 
+def _has_table(conn: Any, table: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _has_column(conn: Any, table: str, column: str) -> bool:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except Exception:
+        return False
+    for row in rows:
+        mapping = _row_mapping(row)
+        if str(mapping.get("name") or "") == column:
+            return True
+    return False
+
+
+def _latest_review_required_reason(conn: Any, command_id: str) -> str:
+    if not _has_table(conn, "venue_command_events"):
+        return ""
+    try:
+        row = conn.execute(
+            """
+            SELECT payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = 'REVIEW_REQUIRED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    except Exception:
+        return ""
+    if row is None:
+        return ""
+    payload_raw = _row_mapping(row).get("payload_json")
+    if not payload_raw:
+        return ""
+    try:
+        payload = json.loads(str(payload_raw))
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, Mapping):
+        return ""
+    return str(payload.get("reason") or "").strip()
+
+
+def _command_has_fact(conn: Any, table: str, command_id: str) -> bool:
+    if not _has_table(conn, table):
+        return False
+    try:
+        row = conn.execute(
+            f"SELECT 1 FROM {table} WHERE command_id = ? LIMIT 1",
+            (command_id,),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _review_required_carries_submit_side_effect_risk(conn: Any, row: Mapping[str, Any]) -> bool:
+    """Classify REVIEW_REQUIRED rows for the global unknown-side-effect latch.
+
+    REVIEW_REQUIRED is a handoff state, not always proof that the venue side-effect
+    boundary was crossed.  Pre-SDK recovery rows with no venue order id and no
+    order/trade facts must not freeze reduce-only exits for unrelated held
+    positions; actual unknown/ambiguous venue exposure remains counted.
+    """
+
+    command_id = str(row.get("command_id") or "")
+    latest_reason = _latest_review_required_reason(conn, command_id)
+    venue_order_id = str(row.get("venue_order_id") or "").strip()
+    if latest_reason not in _PRE_SDK_REVIEW_REQUIRED_REASONS:
+        return True
+    if venue_order_id:
+        return True
+    if _command_has_fact(conn, "venue_order_facts", command_id):
+        return True
+    if _command_has_fact(conn, "venue_trade_facts", command_id):
+        return True
+    return False
+
+
 def count_unknown_side_effects(conn: Any) -> tuple[int, tuple[str, ...]]:
     """Count venue commands that still carry unresolved submit-side-effect risk.
 
@@ -584,19 +674,28 @@ def count_unknown_side_effects(conn: Any) -> tuple[int, tuple[str, ...]]:
     """
 
     with _named_sqlite_rows(conn) as read_conn:
+        has_venue_order_id = _has_column(read_conn, "venue_commands", "venue_order_id")
+        venue_order_id_select = ", venue_order_id" if has_venue_order_id else ""
         rows = read_conn.execute(
-            """
-            SELECT market_id
+            f"""
+            SELECT command_id, market_id, state{venue_order_id_select}
             FROM venue_commands
             WHERE state IN (?, ?, ?)
             ORDER BY updated_at, command_id
             """,
             tuple(sorted(_UNRESOLVED_SIDE_EFFECT_STATES)),
         ).fetchall()
+        risky_rows = []
+        for raw_row in rows:
+            row = _row_mapping(raw_row)
+            state = str(row.get("state") or "")
+            if state == "REVIEW_REQUIRED" and not _review_required_carries_submit_side_effect_risk(read_conn, row):
+                continue
+            risky_rows.append(row)
     markets = tuple(
-        sorted({str(_row_mapping(row).get("market_id") or "") for row in rows if str(_row_mapping(row).get("market_id") or "")})
+        sorted({str(row.get("market_id") or "") for row in risky_rows if str(row.get("market_id") or "")})
     )
-    return len(rows), markets
+    return len(risky_rows), markets
 
 
 def count_open_reconcile_findings(conn: Any) -> int:
@@ -718,10 +817,6 @@ def _automatic_kill_switch_reason(
         return "heartbeat_lost"
     if ws_gap_active and ws_gap_seconds > policy.ws_gap_seconds_limit:
         return "ws_gap_threshold"
-    if unknown_side_effect_count > policy.unknown_side_effect_limit:
-        return "unknown_side_effect_threshold"
-    if reconcile_finding_count > policy.reconcile_finding_limit:
-        return "reconcile_finding_threshold"
     if current_drawdown_pct >= policy.max_drawdown_pct:
         return "drawdown_threshold"
     return None

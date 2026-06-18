@@ -1046,7 +1046,7 @@ class TestRecoveryResolutionTable:
         before_count, _ = count_unknown_side_effects(conn)
         summary = reconcile_unresolved_commands(conn, mock_client)
 
-        assert before_count == 1
+        assert before_count == 0
         assert _get_state(conn, "cmd-no-order") == "EXPIRED"
         assert summary["advanced"] == 1
         events = _get_events(conn, "cmd-no-order")

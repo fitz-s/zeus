@@ -515,8 +515,6 @@ def test_polymarket_client_threads_selected_order_type_to_v2_adapter():
 @pytest.mark.parametrize(
     ("state_kwargs", "reason"),
     [
-        ({"unknown_side_effect_count": 1}, "unknown_side_effect_threshold"),
-        ({"reconcile_finding_count": 1}, "reconcile_finding_threshold"),
         ({"ws_gap_active": True, "ws_gap_seconds": 16}, "ws_gap_threshold"),
     ],
 )
@@ -524,6 +522,30 @@ def test_kill_switch_trips_on_configured_thresholds(state_kwargs, reason):
     allocator = RiskAllocator(CapPolicy(unknown_side_effect_limit=0, reconcile_finding_limit=0, ws_gap_seconds_limit=15))
 
     assert allocator.can_allocate(_intent(size=1), _state(**state_kwargs)).reason == reason
+
+
+@pytest.mark.parametrize(
+    "state_kwargs",
+    [
+        {"unknown_side_effect_count": 1},
+        {"reconcile_finding_count": 1},
+    ],
+)
+def test_uncertain_side_effect_states_are_reduce_only_not_exit_kill_switch(state_kwargs):
+    allocator = RiskAllocator(CapPolicy(unknown_side_effect_limit=0, reconcile_finding_limit=0))
+    state = _state(**state_kwargs)
+
+    entry_decision = allocator.can_allocate(_intent(size=1), state)
+
+    assert not entry_decision.allowed
+    assert entry_decision.reason == "reduce_only_mode_active"
+    configure_global_allocator(allocator, state)
+    try:
+        exit_decision = assert_global_submit_allows(reduce_only=True)
+    finally:
+        clear_global_allocator()
+    assert exit_decision.allowed
+    assert exit_decision.reduce_only is True
 
 
 def test_portfolio_governor_update_state_arms_threshold_kill_switch():
@@ -648,6 +670,64 @@ def test_position_lots_reader_uses_latest_append_only_state_and_counts_guards():
     assert unknown_count == 3
     assert unknown_markets == ("m2", "m3", "m4")
     assert count_open_reconcile_findings(conn) == 1
+
+
+def test_pre_sdk_review_required_no_order_id_does_not_latch_unknown_side_effect_count():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+          command_id TEXT PRIMARY KEY,
+          market_id TEXT,
+          token_id TEXT,
+          decision_id TEXT,
+          state TEXT,
+          venue_order_id TEXT,
+          updated_at TEXT
+        );
+        CREATE TABLE venue_command_events (
+          event_id TEXT,
+          command_id TEXT,
+          sequence_no INTEGER,
+          event_type TEXT,
+          payload_json TEXT,
+          state_after TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands
+          (command_id, market_id, token_id, decision_id, state, venue_order_id, updated_at)
+        VALUES
+          ('cmd-pre-sdk', 'm-pre-sdk', 'tok-pre-sdk', 'dec-pre-sdk',
+           'REVIEW_REQUIRED', '', '2026-06-18T06:31:29Z')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_command_events VALUES (
+          'evt-pre-sdk', 'cmd-pre-sdk', 2, 'REVIEW_REQUIRED',
+          '{"reason":"recovery_no_venue_order_id"}',
+          'REVIEW_REQUIRED'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands
+          (command_id, market_id, token_id, decision_id, state, venue_order_id, updated_at)
+        VALUES
+          ('cmd-real-unknown', 'm-unknown', 'tok-unknown', 'dec-unknown',
+           'SUBMIT_UNKNOWN_SIDE_EFFECT', '', '2026-06-18T06:32:00Z')
+        """
+    )
+
+    unknown_count, unknown_markets = count_unknown_side_effects(conn)
+
+    assert unknown_count == 1
+    assert unknown_markets == ("m-unknown",)
 
 
 def test_refresh_global_allocator_accepts_live_default_sqlite_row_factory():

@@ -645,8 +645,8 @@ def test_restricted_redecision_filters_before_fairness_window():
     )
 
 
-def test_held_position_families_are_admitted_to_redecision(monkeypatch):
-    """Held families are monitor inputs even when no new-entry screen fires."""
+def test_held_position_families_are_monitor_inputs_for_entry_suppression(monkeypatch):
+    """Held families are monitor inputs and duplicate-entry suppressors, not entry re-emits."""
 
     monkeypatch.setattr(
         main,
@@ -706,17 +706,11 @@ def test_redecision_screen_separates_held_monitor_from_forecast_reemit():
 
     assert "raw_entry_family_keys = screened_family_keys" in screen_src
     assert "family_keys = _edli_entry_redecision_family_keys" in screen_src
-    assert (
-        "held_reemit_families = _edli_reemittable_held_position_family_keys"
-        in screen_src
-    )
-    assert (
-        "all_families = set(family_keys) | rest_pull_families | held_reemit_families"
-        in screen_src
-    )
-    assert "held_monitor_families=%d held_reemit_families=%d" in screen_src
+    assert "held_reemit_families" not in screen_src
+    assert "all_families = set(family_keys) | rest_pull_families" in screen_src
+    assert "held_monitor_families=%d families_reemitted=%d" in screen_src
     assert "suppressed_existing_pending=%d" in screen_src
-    assert "no_current_edge_rest_or_forecast_reemit_exposure" in inspect.getsource(
+    assert "no_current_edge_or_rest_reprice_value" in inspect.getsource(
         main._edli_expire_unadmitted_redecision_pending
     )
 
@@ -738,6 +732,53 @@ def test_entry_redecision_excludes_current_held_families(monkeypatch):
     )
 
     assert admitted == {("Shanghai", "2026-06-19", "low")}
+
+
+def test_unvalued_pending_redecision_expires_even_when_family_is_held():
+    """Held exposure is handled by monitor/exit; it must not keep an entry redecision pending."""
+
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    held_only = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Tokyo|2026-06-18|low|run-held-only",
+        source="cycle-held-only",
+        observed_at="2026-06-17T15:00:00+00:00",
+        available_at="2026-06-17T15:00:00+00:00",
+        received_at="2026-06-17T15:00:00+00:00",
+        causal_snapshot_id="snap-held-only",
+        payload=_ready_payload(
+            city="Tokyo",
+            target_date="2026-06-18",
+            metric="low",
+            source_run_id="run-held-only",
+            snapshot_id="snap-held-only",
+        ),
+        priority=50,
+    )
+    store.insert_or_ignore(held_only)
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        set(),
+        decision_time="2026-06-17T16:00:00+00:00",
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.entity_key = ?
+        """,
+        (held_only.entity_key,),
+    ).fetchone()
+    assert expired == 1
+    assert tuple(row) == (
+        "expired",
+        "REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value",
+    )
 
 
 def test_held_position_family_provider_excludes_closed_phases():

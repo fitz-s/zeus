@@ -2292,6 +2292,14 @@ def _run_ws_gap_reconcile_if_required(
         )
         conn.commit()
         if result.get("status") == "cleared":
+            released = _release_ws_gap_blocked_exit_retries_after_m5_clear(
+                conn,
+                observed_at=current,
+            )
+            if released.get("released", 0):
+                conn.commit()
+            result["exit_retries_released"] = released.get("released", 0)
+            result["exit_retry_position_ids"] = released.get("position_ids", [])
             logger.info("M5 WS-gap reconcile cleared submit latch: %s", result)
         else:
             logger.info("M5 WS-gap reconcile kept submit latch closed: %s", result)
@@ -2307,6 +2315,147 @@ def _run_ws_gap_reconcile_if_required(
     finally:
         if owns_connection and conn is not None:
             conn.close()
+
+
+def _release_ws_gap_blocked_exit_retries_after_m5_clear(
+    conn,
+    *,
+    observed_at: datetime,
+) -> dict:
+    """Release reduce-only exit retries that were delayed only by the M5 WS latch.
+
+    M5 clearing proves the user-channel gap has been reconciled. Keeping positions
+    that were rejected for ``ws_gap...m5_reconcile_required=True`` on exponential
+    backoff after that proof delays exits for no additional safety evidence.
+    """
+
+    now_iso = observed_at.isoformat()
+    recent_cutoff = (observed_at - timedelta(minutes=10)).isoformat()
+    try:
+        rows = conn.execute(
+            """
+            SELECT pc.position_id
+              FROM position_current pc
+             WHERE COALESCE(pc.exit_retry_count, 0) > 0
+               AND COALESCE(pc.next_exit_retry_at, '') > ?
+               AND COALESCE(pc.phase, '') IN ('active', 'day0_window', 'pending_exit')
+               AND (
+                    COALESCE(pc.chain_shares, 0) > 0
+                 OR (
+                        COALESCE(pc.chain_shares, 0) = 0
+                    AND COALESCE(pc.shares, 0) > 0
+                    AND COALESCE(pc.chain_state, '') = 'synced'
+                    )
+               )
+               AND EXISTS (
+                    SELECT 1
+                      FROM position_events pe
+                     WHERE pe.position_id = pc.position_id
+                       AND pe.event_type = 'EXIT_ORDER_REJECTED'
+                       AND pe.occurred_at >= ?
+                       AND COALESCE(json_extract(pe.payload_json, '$.error'), '') LIKE 'ws_gap=%'
+                       AND COALESCE(json_extract(pe.payload_json, '$.error'), '') LIKE '%m5_reconcile_required=True%'
+               )
+             ORDER BY pc.next_exit_retry_at, pc.position_id
+            """,
+            (now_iso, recent_cutoff),
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - maintenance must not crash heartbeat.
+        logger.warning("M5 exit-retry release query failed closed: %s", exc)
+        return {"released": 0, "position_ids": [], "error": str(exc)}
+    position_ids = [str(row[0]) for row in rows if str(row[0] or "")]
+    if not position_ids:
+        return {"released": 0, "position_ids": []}
+    changed = 0
+    for start in range(0, len(position_ids), 250):
+        chunk = position_ids[start : start + 250]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"""
+            UPDATE position_current
+               SET next_exit_retry_at = ?,
+                   updated_at = ?
+             WHERE position_id IN ({placeholders})
+            """,
+            (now_iso, now_iso, *chunk),
+        )
+        changed += int(cur.rowcount or 0)
+    logger.info(
+        "M5 cleared WS latch; released %d ws-gap-blocked exit retries: %s",
+        changed,
+        position_ids,
+    )
+    return {"released": changed, "position_ids": position_ids}
+
+
+def _release_allocator_config_blocked_exit_retries_after_refresh(
+    conn,
+    portfolio,
+    *,
+    observed_at: datetime,
+) -> dict:
+    """Release exits delayed only because allocator refresh had not run yet."""
+
+    now_iso = observed_at.isoformat()
+    recent_cutoff = (observed_at - timedelta(minutes=10)).isoformat()
+    try:
+        rows = conn.execute(
+            """
+            SELECT pc.position_id
+              FROM position_current pc
+             WHERE COALESCE(pc.exit_retry_count, 0) > 0
+               AND COALESCE(pc.next_exit_retry_at, '') > ?
+               AND COALESCE(pc.phase, '') IN ('active', 'day0_window', 'pending_exit')
+               AND (
+                    COALESCE(pc.chain_shares, 0) > 0
+                 OR (
+                        COALESCE(pc.chain_shares, 0) = 0
+                    AND COALESCE(pc.shares, 0) > 0
+                    AND COALESCE(pc.chain_state, '') = 'synced'
+                    )
+               )
+               AND EXISTS (
+                    SELECT 1
+                      FROM position_events pe
+                     WHERE pe.position_id = pc.position_id
+                       AND pe.event_type = 'EXIT_ORDER_REJECTED'
+                       AND pe.occurred_at >= ?
+                       AND COALESCE(json_extract(pe.payload_json, '$.error'), '') = 'allocator_not_configured'
+               )
+             ORDER BY pc.next_exit_retry_at, pc.position_id
+            """,
+            (now_iso, recent_cutoff),
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - maintenance must not crash monitor.
+        logger.warning("Allocator-config exit-retry release query failed closed: %s", exc)
+        return {"released": 0, "position_ids": [], "error": str(exc)}
+    position_ids = [str(row[0]) for row in rows if str(row[0] or "")]
+    if not position_ids:
+        return {"released": 0, "position_ids": []}
+    changed = 0
+    for start in range(0, len(position_ids), 250):
+        chunk = position_ids[start : start + 250]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"""
+            UPDATE position_current
+               SET next_exit_retry_at = ?,
+                   updated_at = ?
+             WHERE position_id IN ({placeholders})
+            """,
+            (now_iso, now_iso, *chunk),
+        )
+        changed += int(cur.rowcount or 0)
+    id_set = set(position_ids)
+    for pos in getattr(portfolio, "positions", []) or []:
+        if str(getattr(pos, "trade_id", "")) in id_set:
+            pos.next_exit_retry_at = now_iso
+    logger.info(
+        "Allocator configured; released %d allocator-not-configured exit retries: %s",
+        changed,
+        position_ids,
+    )
+    return {"released": changed, "position_ids": position_ids}
 
 
 def _refresh_reconcile_findings_if_required(
@@ -5626,6 +5775,61 @@ def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
         }
 
 
+def _refresh_global_allocator_for_held_position_monitor(conn, portfolio) -> dict:
+    """Configure risk allocator before held-position exit decisions run.
+
+    The held-position monitor is an independent live lane and can run before the
+    EDLI reactor's allocator refresh after daemon restart. It must not reach the
+    executor with unconfigured risk singletons, because that turns real exit
+    decisions into ``allocator_not_configured`` backoff.
+    """
+
+    from src.control.heartbeat_supervisor import summary as _heartbeat_summary
+    from src.control.ws_gap_guard import summary as _ws_gap_summary
+    from src.risk_allocator import configure_global_allocator, refresh_global_allocator
+    from src.riskguard.riskguard import get_current_level
+
+    try:
+        _baseline = float(getattr(portfolio, "daily_baseline_total", 0.0) or 0.0)
+        _current_bankroll = float(getattr(portfolio, "bankroll", 0.0) or 0.0)
+        _drawdown_pct = (
+            max(((_baseline - _current_bankroll) / _baseline) * 100.0, 0.0)
+            if _baseline > 0.0
+            else 0.0
+        )
+        result = refresh_global_allocator(
+            conn,
+            ledger={
+                "current_drawdown_pct": _drawdown_pct,
+                "risk_level": get_current_level().value,
+            },
+            heartbeat=_heartbeat_summary(),
+            ws_status=_ws_gap_summary(),
+        )
+        logger.info(
+            "held-position monitor allocator refresh: configured=%r drawdown_pct=%.3f",
+            result.get("configured"),
+            _drawdown_pct,
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001 - fail closed with explicit state.
+        try:
+            configure_global_allocator(None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        logger.error(
+            "held-position monitor allocator refresh FAILED: %s; exit submit remains fail-closed",
+            exc,
+            exc_info=True,
+        )
+        return {
+            "configured": False,
+            "fail_closed": True,
+            "error": str(exc),
+            "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
+        }
+
+
 # WIRING FIX (operator Point-1 directive 2026-06-08): the BAYES_PRECISION_FUSION/replacement forecast
 # PRODUCTION functions (raw-input download + light shadow materialization) were moved
 # VERBATIM to src/data/replacement_forecast_production.py and are now SCHEDULED on the
@@ -6800,11 +7004,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             held_families,
             decision_time=now,
         )
-        held_reemit_families = _edli_reemittable_held_position_family_keys(
-            held_families,
-            decision_time=now,
-        )
-        all_families = set(family_keys) | rest_pull_families | held_reemit_families
+        all_families = set(family_keys) | rest_pull_families
         expired_unadmitted = 0
         if not all_families:
             from src.state.db import world_write_mutex as _world_write_mutex
@@ -6827,7 +7027,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     pass
             logger.info(
                 "edli_redecision_screen: entry_candidates=%d entry_families=0 rest_pulls=%d "
-                "held_monitor_families=%d held_reemit_families=0 families_reemitted=0 "
+                "held_monitor_families=%d families_reemitted=0 "
                 "events_emitted=0 rests_cancelled=0 expired_unadmitted=%d reason=no_screened_families",
                 len(redecisions),
                 len(rest_pulls),
@@ -6878,7 +7078,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     already_pending_keys=pending,
                     event_type=REDECISION_EVENT_TYPE,
                     restrict_to_families=emit_families,
-                    phase_filter_exempt_families=set(held_reemit_families),
+                    phase_filter_exempt_families=set(),
                 )
             else:
                 emitted = []
@@ -6913,11 +7113,10 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 
         logger.info(
             "edli_redecision_screen: entry_candidates=%d entry_families=%d rest_pulls=%d "
-            "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d "
+            "held_monitor_families=%d families_reemitted=%d "
             "pending_redecision_families=%d suppressed_existing_pending=%d "
             "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d",
             len(redecisions), len(family_keys), len(rest_pulls), len(held_families),
-            len(held_reemit_families),
             len(all_families),
             len(pending_families),
             len(set(all_families) & pending_families),
@@ -7236,11 +7435,12 @@ def _edli_emit_forecast_snapshot_events(
 
 
 def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
-    """Current held-position families for monitor/redecision admission.
+    """Current held-position families for monitor and duplicate-entry suppression.
 
-    This is the broad monitor universe: any family with real position_current exposure must
-    keep receiving position-monitor attention even when no new-entry edge fires. Forecast
-    re-emission is narrower and phase-gated by _edli_reemittable_held_position_family_keys().
+    Any family with real position_current exposure must keep receiving position-monitor
+    attention even when no new-entry edge fires. Held exposure is not re-emitted as an
+    EDLI_REDECISION_PENDING entry event; the monitor/exit lane owns hold/exit/shift
+    decisions for already-owned tokens.
     Fail-soft matches the reactor held-family provider; a read failure must not crash the daemon.
     """
 
@@ -7338,7 +7538,7 @@ def _edli_reemittable_held_position_family_keys(
     *,
     decision_time: datetime,
 ) -> set[tuple[str, str, str]]:
-    """Compatibility shim: held exposure no longer enters entry redecision.
+    """Legacy compatibility shim: held exposure never enters entry redecision.
 
     The live held-position decision path is monitor_refresh -> Position.evaluate_exit
     -> exit_lifecycle. Returning families here would re-emit FSR-shaped entry
@@ -7357,7 +7557,7 @@ def _edli_expire_unadmitted_redecision_pending(
     *,
     decision_time: str,
 ) -> int:
-    """Expire pending redecision rows no longer backed by edge/rest/held admission."""
+    """Expire pending redecision rows no longer backed by entry edge or rest reprice value."""
 
     from src.events.continuous_redecision import REDECISION_EVENT_TYPE as _REDECISION_EVENT_TYPE
 
@@ -7406,7 +7606,7 @@ def _edli_expire_unadmitted_redecision_pending(
                SET processing_status = 'expired',
                    processed_at = ?,
                    updated_at = ?,
-                   last_error = 'REDECISION_ADMISSION_EXPIRED:no_current_edge_rest_or_forecast_reemit_exposure'
+                   last_error = 'REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value'
              WHERE consumer_name = 'edli_reactor_v1'
                AND processing_status = 'pending'
                AND event_id IN ({placeholders})
@@ -9384,6 +9584,19 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
     summary: dict = {"monitors": 0, "exits": 0}
     try:
         portfolio = load_portfolio()
+        held_monitor_allocator_refresh = _refresh_global_allocator_for_held_position_monitor(
+            conn,
+            portfolio,
+        )
+        summary["held_monitor_allocator_refresh"] = held_monitor_allocator_refresh
+        if held_monitor_allocator_refresh.get("configured"):
+            summary["held_monitor_allocator_retry_release"] = (
+                _release_allocator_config_blocked_exit_retries_after_refresh(
+                    conn,
+                    portfolio,
+                    observed_at=datetime.now(timezone.utc),
+                )
+            )
         with PolymarketClient() as clob:
             tracker = get_tracker()
             pre_chain_artifact = CycleArtifact(

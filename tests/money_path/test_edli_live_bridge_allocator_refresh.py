@@ -311,3 +311,17 @@ def test_main_edli_cycle_refreshes_allocator_for_shadow_no_submit_visibility():
     assert "trade_conn = get_trade_connection_with_world_required(write_class=None)" in source
     assert "if live_submit_effective:\n            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)" in source
     assert "if live_bridge_mode and not _alloc_refresh.get(\"configured\")" in source
+
+
+def test_held_position_monitor_refreshes_allocator_before_exit_monitor():
+    """Held-position exits must not run before the risk allocator singleton is configured."""
+    import inspect
+
+    import src.main as main
+
+    source = inspect.getsource(main._chain_sync_and_exit_monitor_cycle)
+
+    assert "_refresh_global_allocator_for_held_position_monitor(" in source
+    assert source.index("_refresh_global_allocator_for_held_position_monitor(") < source.index(
+        "_execute_monitoring_phase("
+    )

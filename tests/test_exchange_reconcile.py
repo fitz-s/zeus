@@ -5244,6 +5244,117 @@ def test_live_heartbeat_runs_ws_gap_m5_sweep_without_closing_external_test_conn(
         ws_gap_guard.clear_for_test(observed_at=NOW)
 
 
+def test_m5_clear_releases_ws_gap_blocked_exit_retry(conn):
+    import src.main as main_module
+    from src.control import ws_gap_guard
+
+    seed_command(conn, size=5)
+    conn.execute("UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = 'cmd-m5'")
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, bin_label, direction,
+            shares, chain_shares, chain_state, strategy_key, updated_at,
+            temperature_metric, exit_retry_count, next_exit_retry_at
+        ) VALUES (?, 'pending_exit', 'Hong Kong', '2026-06-19', '21C', 'buy_no',
+                  12.0, 12.0, 'synced', 'opening_inertia', ?, 'low', 4, ?)
+        """,
+        (
+            "exit-ws-gap",
+            (NOW - timedelta(minutes=1)).isoformat(),
+            (NOW + timedelta(minutes=40)).isoformat(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, source_module, payload_json, env
+        ) VALUES (?, ?, 1, 'EXIT_ORDER_REJECTED', ?, 'active', 'pending_exit',
+                  'opening_inertia', 'src.execution.exit_lifecycle', ?, 'live')
+        """,
+        (
+            "exit-ws-gap-rejected",
+            "exit-ws-gap",
+            (NOW - timedelta(seconds=30)).isoformat(),
+            json.dumps({"error": "ws_gap=SUBSCRIBED:message_received; m5_reconcile_required=True"}),
+        ),
+    )
+    configure_subscribed_m5_latch()
+
+    try:
+        result = main_module._run_ws_gap_reconcile_if_required(
+            FakeM5Adapter(open_orders=[order(order_id="ord-m5")], trades=[], positions=[]),
+            conn_factory=lambda: conn,
+            now=NOW,
+        )
+
+        retry_at = conn.execute(
+            "SELECT next_exit_retry_at FROM position_current WHERE position_id = ?",
+            ("exit-ws-gap",),
+        ).fetchone()[0]
+        assert result["status"] == "cleared"
+        assert result["exit_retries_released"] == 1
+        assert result["exit_retry_position_ids"] == ["exit-ws-gap"]
+        assert retry_at == NOW.isoformat()
+    finally:
+        ws_gap_guard.clear_for_test(observed_at=NOW)
+
+
+def test_allocator_refresh_release_updates_db_and_loaded_position(conn):
+    import src.main as main_module
+
+    position = SimpleNamespace(
+        trade_id="exit-allocator-config",
+        next_exit_retry_at=(NOW + timedelta(minutes=40)).isoformat(),
+    )
+    portfolio = SimpleNamespace(positions=[position])
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, bin_label, direction,
+            shares, chain_shares, chain_state, strategy_key, updated_at,
+            temperature_metric, exit_retry_count, next_exit_retry_at
+        ) VALUES (?, 'pending_exit', 'Chengdu', '2026-06-19', '33C', 'buy_no',
+                  15.25, 15.25, 'synced', 'opening_inertia', ?, 'high', 5, ?)
+        """,
+        (
+            "exit-allocator-config",
+            (NOW - timedelta(minutes=1)).isoformat(),
+            (NOW + timedelta(minutes=40)).isoformat(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, source_module, payload_json, env
+        ) VALUES (?, ?, 1, 'EXIT_ORDER_REJECTED', ?, 'active', 'pending_exit',
+                  'opening_inertia', 'src.execution.exit_lifecycle', ?, 'live')
+        """,
+        (
+            "exit-allocator-config-rejected",
+            "exit-allocator-config",
+            (NOW - timedelta(seconds=30)).isoformat(),
+            json.dumps({"error": "allocator_not_configured"}),
+        ),
+    )
+
+    result = main_module._release_allocator_config_blocked_exit_retries_after_refresh(
+        conn,
+        portfolio,
+        observed_at=NOW,
+    )
+
+    retry_at = conn.execute(
+        "SELECT next_exit_retry_at FROM position_current WHERE position_id = ?",
+        ("exit-allocator-config",),
+    ).fetchone()[0]
+    assert result == {"released": 1, "position_ids": ["exit-allocator-config"]}
+    assert retry_at == NOW.isoformat()
+    assert position.next_exit_retry_at == NOW.isoformat()
+
+
 def test_findings_actuator_loop_resolves_findings_via_operator_decision(conn):
     from src.execution.exchange_reconcile import (
         list_unresolved_findings,
