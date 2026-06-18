@@ -306,11 +306,14 @@ def test_preflight_blocks_forecast_live_heartbeat_missing_replacement_jobs(monke
     assert "forecast_live_heartbeat_missing_replacement_jobs" in risks
 
 
-def test_preflight_blocks_running_replacement_forecast_sidecar_job(monkeypatch, tmp_path):
-    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
-    _init_trade_db(trade_db).close()
+def test_preflight_accepts_fresh_running_replacement_forecast_sidecar_job(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
     fresh = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    trade.close()
     forecasts.execute(
         """
         INSERT INTO forecast_posteriors (
@@ -332,11 +335,49 @@ def test_preflight_blocks_running_replacement_forecast_sidecar_job(monkeypatch, 
 
     result = preflight.evaluate()
 
+    assert result["ok"] is True
+    sidecar = next(c for c in result["checks"] if c["name"] == "forecast_sidecar_health")
+    assert sidecar["ok"] is True
+    assert sidecar["evidence"]["risky"] == []
+
+
+def test_preflight_blocks_stale_running_replacement_forecast_sidecar_job(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    trade.close()
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    forecasts.commit()
+    forecasts.close()
+    stale_started = fresh - timedelta(
+        seconds=preflight.REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS + 60
+    )
+    health = json.loads(preflight.SCHEDULER_HEALTH_PATH.read_text())
+    health["replacement_forecast_download"] = {
+        "status": "RUNNING",
+        "last_run_at": stale_started.isoformat(),
+        "last_started_at": stale_started.isoformat(),
+    }
+    preflight.SCHEDULER_HEALTH_PATH.write_text(json.dumps(health))
+
+    result = preflight.evaluate()
+
     assert result["ok"] is False
     sidecar = next(c for c in result["checks"] if c["name"] == "forecast_sidecar_health")
     assert sidecar["ok"] is False
     risks = {item["risk"] for item in sidecar["evidence"]["risky"]}
-    assert "scheduler_job_not_ok" in risks
+    assert "scheduler_job_running_stale" in risks
 
 
 def test_preflight_blocks_dust_projection_that_would_reload_as_pending_exit(monkeypatch, tmp_path):

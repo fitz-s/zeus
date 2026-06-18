@@ -50,6 +50,7 @@ SIDECAR_HEARTBEAT_MAX_AGE_SECONDS = 180.0
 EXECUTION_FEASIBILITY_MAX_AGE_SECONDS = 180.0
 EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS = 600.0
 FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS = 120.0
+REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS = 1800.0
 SIDECAR_HEARTBEATS = (
     ("substrate_observer_daemon", "daemon-heartbeat-substrate-observer.json"),
     ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
@@ -513,16 +514,30 @@ def _forecast_sidecar_health() -> CheckResult:
         status = str(entry.get("status") or "")
         last_success = _parse_dt(entry.get("last_success_at"))
         last_failure = _parse_dt(entry.get("last_failure_at"))
+        last_started = _parse_dt(entry.get("last_started_at") or entry.get("last_run_at"))
+        running_age = None
+        if last_started is not None:
+            running_age = (now - last_started).total_seconds()
         item = {
             "status": status,
             "last_run_at": entry.get("last_run_at"),
+            "last_started_at": entry.get("last_started_at"),
             "last_success_at": entry.get("last_success_at"),
             "last_failure_at": entry.get("last_failure_at"),
             "last_failure_reason": entry.get("last_failure_reason"),
+            "running_age_seconds": running_age,
         }
         job_evidence[job_name] = item
         if status == "FAILED":
             risky.append({"job": job_name, "risk": "scheduler_job_failed", **item})
+            continue
+        if status == "RUNNING":
+            if last_started is None:
+                risky.append({"job": job_name, "risk": "scheduler_job_running_start_missing", **item})
+            elif running_age is None or running_age < 0.0:
+                risky.append({"job": job_name, "risk": "scheduler_job_running_clock_invalid", **item})
+            elif running_age > REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS:
+                risky.append({"job": job_name, "risk": "scheduler_job_running_stale", **item})
             continue
         if status != "OK":
             risky.append({"job": job_name, "risk": "scheduler_job_not_ok", **item})
@@ -582,6 +597,9 @@ def _forecast_sidecar_health() -> CheckResult:
             "jobs": job_evidence,
             "risky": risky,
             "heartbeat_max_age_seconds": FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS,
+            "replacement_sidecar_running_max_age_seconds": (
+                REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS
+            ),
         },
     )
 
