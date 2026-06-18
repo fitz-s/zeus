@@ -45,8 +45,9 @@ from src.forecast.bayes_precision_fusion import (
     DISAGREE_W,
     MIN_TRAIN,
     ModelInstrument,
-    eb_bias,
 )
+# NOTE (FINAL no-shadow §4): ``eb_bias`` is deliberately NOT imported — the consumed
+# posterior center is RAW (z = x), so the EB shift primitive must never reach this path.
 from src.forecast.grid_representativeness_loader import (
     sigma_repr_sq_for as _sigma_repr_sq_for,
 )
@@ -303,11 +304,27 @@ class BayesPrecisionFusionCaptureResult:
         return len(self.likelihood) > 0
 
 
-def _eb_corrected(model: str, raw_value: float, history: ModelHistory | None, parent_bias: float) -> tuple[float, int]:
-    """Return (z = raw - b_hat, n_train) using walk-forward EB bias. No history -> bias 0."""
-    resids = list(history.residuals) if history else []
-    b_hat = eb_bias(resids, parent_bias) if resids else 0.0
-    return raw_value - b_hat, (history.n_train if history else 0)
+def _raw_instrument(model: str, raw_value: float, history: ModelHistory | None, parent_bias: float) -> tuple[float, int]:
+    """Return (z = raw_value, n_train) — RAW instrument, NO de-bias (FINAL no-shadow §4).
+
+    2026-06-18 UNIFY (FINAL no-shadow execution flow §4): under the operator RAW
+    no-de-bias law the consumed-posterior instrument center is the RAW model value
+    ``z = x`` — NOT the EB-corrected ``z = x − b̂``. This is the change that makes the
+    materialized ``forecast_posteriors`` center the RAW diagonal center, so the EXIT
+    (``position_belief``) and MONITOR (``monitor_refresh``) belief reads — both
+    sourced from ``forecast_posteriors`` — match the spine ENTRY belief (which is
+    already RAW via ``_NoOpDebiasAuthority``). It closes the #135 two-center split
+    (RAW-entry vs EB-exit) WITHOUT a shadow product: there is one RAW belief.
+
+    The walk-forward ``history`` is RETAINED but consumed ONLY for width / provenance
+    (the residual std → anchor τ0, the cross-source disagreement var, the predictive
+    σ_resid) — it NEVER shifts the center. ``parent_bias`` is now unused for the
+    center (kept in the signature so the call sites and the pooled-residual provenance
+    are byte-stable); the RAW law forbids applying it to μ. ``n_train`` is carried
+    through unchanged (it drives the low-n width inflation, not a center move).
+    """
+    del parent_bias  # RAW law: no de-bias shift on the consumed center.
+    return float(raw_value), (history.n_train if history else 0)
 
 
 def capture_bayes_precision_instruments(
@@ -444,9 +461,14 @@ def capture_bayes_precision_instruments(
             return 0.0
         return _sigma_repr_sq_for(city, model_name)
 
+    # UNIFY (FINAL no-shadow §4): instruments enter RAW (z = x), NOT EB-corrected
+    # (z = x − b̂). The walk-forward residual history is retained for width/provenance
+    # (anchor τ0, disagreement var, σ_resid) but never shifts the center, so the fused
+    # μ* the materializer writes to forecast_posteriors is the RAW diagonal center —
+    # the same RAW belief the spine entry path serves (one belief, no shadow).
     instruments: list[ModelInstrument] = []
     for m in selection.likelihood_globals:
-        z, n = _eb_corrected(m, present_values[m], histories.get(m), parent_bias)
+        z, n = _raw_instrument(m, present_values[m], histories.get(m), parent_bias)
         h = histories.get(m)
         instruments.append(ModelInstrument(
             model=m, z=z, train_residuals=tuple(h.residuals) if h else (),
@@ -454,7 +476,7 @@ def capture_bayes_precision_instruments(
             n_train=n, is_regional=False, sigma_repr_sq=_repr_sq(m),
         ))
     for m in selection.regional_experts:
-        z, n = _eb_corrected(m, present_values[m], histories.get(m), parent_bias)
+        z, n = _raw_instrument(m, present_values[m], histories.get(m), parent_bias)
         h = histories.get(m)
         instruments.append(ModelInstrument(
             model=m, z=z, train_residuals=tuple(h.residuals) if h else (),

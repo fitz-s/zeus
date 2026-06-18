@@ -1751,13 +1751,17 @@ def _insert_posterior(
     # SIGN: δ_city = anchor − settlement; applied below as corrected = raw − δ_city, so a cold
     # anchor (δ<0) warms and a hot anchor (δ>0) cools; the corrected center feeds the fusion prior
     # → the de-bias propagates into the fused μ*. FAIL-SOFT: any error → None (family-level fallback).
-    bias_shift_c: float | None
-    try:
-        from src.calibration.anchor_representativeness_debias import get_city_debias_c  # noqa: PLC0415
-
-        bias_shift_c = get_city_debias_c(request.city, metric)
-    except Exception:
-        bias_shift_c = None
+    # RAW NO-DE-BIAS LAW (2026-06-18 FINAL no-shadow execution flow §3-§4; operator
+    # "NO fitted forward per-city de-bias"): the consumed posterior center is RAW. The
+    # per-city representativeness de-bias (``get_city_debias_c`` → δ_city) is a FITTED
+    # FORWARD PER-CITY shift on μ — forbidden under the RAW law. It is forced to None
+    # here (fail-closed: even were the artifact placed in state/, the consumed center
+    # stays RAW), so ``anchor_value_corrected_c == raw_anchor_value_c`` (zero shift) and
+    # the fused μ* the materializer writes to forecast_posteriors is the RAW diagonal
+    # center — the SAME RAW belief the spine entry serves. The q_lcb empirical
+    # reliability guard (decision layer) — NOT a center de-bias — is what makes RAW
+    # honest. (Removing this RAW pin re-enables a forbidden forward per-city de-bias.)
+    bias_shift_c: float | None = None
     # THE_PATH member-vote smoothing: flag-gated additive Laplace/Dirichlet alpha so the AIFS
     # member prior is strictly positive on every bin and the soft_anchor.py:197-198 zero-prior
     # -inf veto can never make a bin un-hittable. None when flag OFF -> byte-identical to today.
