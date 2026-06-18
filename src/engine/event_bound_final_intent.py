@@ -191,6 +191,7 @@ def _final_execution_intent_from_payload(final_payload: dict):
         DecisionSourceContext,
         FinalExecutionIntent,
         PassiveMakerExecutionContext,
+        quantize_submit_shares_for_venue_at_most,
     )
 
     snapshot_hash = _required_text(final_payload, "executable_snapshot_hash")
@@ -252,8 +253,14 @@ def _final_execution_intent_from_payload(final_payload: dict):
             raise EventBoundExecutorExpressibilityError("post_only maker final intent requires GTC/GTD executor_order_type")
         order_policy = "post_only_passive_limit"
         post_only = True
-    size = _decimal(final_payload.get("size"), "size")
     limit_price = _decimal(final_payload.get("limit_price"), "limit_price")
+    size = quantize_submit_shares_for_venue_at_most(
+        str(final_payload["direction"]),
+        _decimal(final_payload.get("size"), "size"),
+        final_limit_price=limit_price,
+        order_type=executor_order_type,
+        tick_size=_decimal(final_payload.get("tick_size"), "tick_size"),
+    )
     # Wall C (2026-06-01): for TAKER FOK orders the sweep VWAP (expected fill) may
     # differ from limit_price (multi-level book).  The cert builder stores the
     # pre-computed sweep average as "expected_fill_price_before_fee"; fall back to

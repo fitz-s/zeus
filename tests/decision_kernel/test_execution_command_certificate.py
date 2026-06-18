@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -24,7 +25,10 @@ from src.decision_kernel.certificates.execution import (
     build_executor_expressibility_certificate,
     build_final_intent_certificate_from_actionable,
 )
-from src.engine.event_bound_final_intent import validate_final_intent_cert_for_existing_executor
+from src.engine.event_bound_final_intent import (
+    _final_execution_intent_from_payload,
+    validate_final_intent_cert_for_existing_executor,
+)
 
 
 NOW = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
@@ -115,6 +119,48 @@ def test_execution_command_has_no_max_notional_ceiling():
     parents, command = execution_graph(command_payload={"size": 20.0, "limit_price": 0.40})
 
     verify_execution_command(command, parents)
+
+
+def test_maker_final_intent_size_is_frozen_to_venue_submit_grid():
+    actionable, final_intent, _expressibility, _live_cap = builder_chain(
+        actionable_payload={
+            **_actionable_payload(),
+            "c_fee_adjusted": 0.75,
+            "kelly_size_usd": 3.8,
+            "live_cap_reserved_notional_usd": 3.8,
+        },
+        final_payload=None,
+    )
+
+    assert actionable.payload["direction"] == "buy_yes"
+    assert final_intent.payload["post_only"] is True
+    assert final_intent.payload["time_in_force"] == "GTC"
+    assert final_intent.payload["limit_price"] == 0.75
+    assert final_intent.payload["size"] == 5.06
+    assert final_intent.payload["notional_usd"] == pytest.approx(3.795)
+
+
+def test_event_bound_final_intent_normalizes_legacy_fractional_maker_size():
+    _actionable, final_intent, _expressibility, _live_cap = builder_chain(
+        final_payload={
+            "limit_price": 0.75,
+            "expected_fill_price_before_fee": 0.75,
+            "size": 5.066666666666666,
+            "notional_usd": 3.8,
+            "executor_order_type": "GTC",
+            "time_in_force": "GTC",
+            "post_only": True,
+            "maker_intent": True,
+            "tick_size": "0.01",
+            "min_order_size": 1.0,
+        }
+    )
+
+    native = _final_execution_intent_from_payload(final_intent.payload)
+
+    assert native.size_kind == "shares"
+    assert native.size_value == native.submitted_shares
+    assert native.submitted_shares == Decimal("5.06")
 
 
 def test_execution_command_verifies_without_cap_flag():
@@ -640,11 +686,19 @@ def executor_expressibility_graph(
     return parents, expressibility
 
 
-def builder_chain(final_payload: dict | None = None):
+def builder_chain(
+    final_payload: dict | None = None,
+    actionable_payload: dict | None = None,
+):
     actionable = _cert(
         claims.ACTIONABLE_TRADE,
         "actionable:event-1",
-        {**_actionable_payload(), "live_cap_reserved_notional_usd": 5.0, "neg_risk": False},
+        {
+            **_actionable_payload(),
+            "live_cap_reserved_notional_usd": 5.0,
+            "neg_risk": False,
+            **(actionable_payload or {}),
+        },
     )
     forecast = _cert(
         claims.FORECAST_AUTHORITY,
