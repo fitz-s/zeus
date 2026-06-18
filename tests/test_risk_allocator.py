@@ -548,6 +548,23 @@ def test_uncertain_side_effect_states_are_reduce_only_not_exit_kill_switch(state
     assert exit_decision.reduce_only is True
 
 
+def test_summary_entry_blocks_when_reduce_only_without_kill_switch():
+    allocator = RiskAllocator(CapPolicy(unknown_side_effect_limit=0, reconcile_finding_limit=0))
+    state = _state(unknown_side_effect_count=1)
+    configure_global_allocator(allocator, state)
+    try:
+        snap = risk_allocator_summary()
+    finally:
+        clear_global_allocator()
+
+    assert snap["kill_switch_reason"] is None
+    assert snap["reduce_only"] is True
+    assert snap["entry"] == {
+        "allow_submit": False,
+        "reason": "reduce_only_mode_active",
+    }
+
+
 def test_portfolio_governor_update_state_arms_threshold_kill_switch():
     governor = PortfolioGovernor(CapPolicy(max_drawdown_pct=5.0))
 

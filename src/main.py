@@ -2366,26 +2366,131 @@ def _release_ws_gap_blocked_exit_retries_after_m5_clear(
     position_ids = [str(row[0]) for row in rows if str(row[0] or "")]
     if not position_ids:
         return {"released": 0, "position_ids": []}
-    changed = 0
-    for start in range(0, len(position_ids), 250):
-        chunk = position_ids[start : start + 250]
-        placeholders = ",".join("?" for _ in chunk)
-        cur = conn.execute(
-            f"""
-            UPDATE position_current
-               SET next_exit_retry_at = ?,
-                   updated_at = ?
-             WHERE position_id IN ({placeholders})
-            """,
-            (now_iso, now_iso, *chunk),
-        )
-        changed += int(cur.rowcount or 0)
+    released = _append_exit_retry_release_events_and_update_projection(
+        conn,
+        position_ids,
+        observed_at=observed_at,
+        release_reason="M5_WS_GAP_RECONCILE_CLEARED",
+        release_error="ws_gap_m5_reconcile_cleared",
+    )
+    changed = int(released.get("released", 0) or 0)
+    position_ids = list(released.get("position_ids", []) or [])
     logger.info(
         "M5 cleared WS latch; released %d ws-gap-blocked exit retries: %s",
         changed,
         position_ids,
     )
-    return {"released": changed, "position_ids": position_ids}
+    return released
+
+
+def _append_exit_retry_release_events_and_update_projection(
+    conn,
+    position_ids: list[str],
+    *,
+    observed_at: datetime,
+    release_reason: str,
+    release_error: str,
+) -> dict:
+    """Append retry-release evidence before shortening projection cooldowns."""
+
+    if not position_ids:
+        return {"released": 0, "position_ids": []}
+    now_iso = observed_at.isoformat()
+    placeholders = ",".join("?" for _ in position_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT position_id,
+                   COALESCE(phase, '') AS phase,
+                   COALESCE(strategy_key, '') AS strategy_key,
+                   COALESCE(order_id, '') AS order_id,
+                   COALESCE(exit_retry_count, 0) AS exit_retry_count,
+                   COALESCE(next_exit_retry_at, '') AS next_exit_retry_at
+              FROM position_current
+             WHERE position_id IN ({placeholders})
+             ORDER BY position_id
+            """,
+            tuple(position_ids),
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("exit-retry release projection read failed closed: %s", exc)
+        return {"released": 0, "position_ids": [], "error": str(exc)}
+
+    changed = 0
+    released_ids: list[str] = []
+    for row in rows:
+        position_id = str(row[0] or "")
+        if not position_id:
+            continue
+        try:
+            conn.execute("SAVEPOINT exit_retry_release")
+            sequence_row = conn.execute(
+                "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+            sequence_no = int(sequence_row[0] or 0) + 1
+            payload = {
+                "status": "ready",
+                "exit_reason": release_reason,
+                "error": release_error,
+                "retry_count": int(row[4] or 0),
+                "previous_next_retry_at": str(row[5] or ""),
+                "next_retry_at": now_iso,
+                "release_reason": release_reason,
+            }
+            conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no, event_type,
+                    occurred_at, phase_before, phase_after, strategy_key, decision_id,
+                    snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                    venue_status, source_module, payload_json, env
+                ) VALUES (?, ?, 1, ?, 'EXIT_RETRY_RELEASED',
+                          ?, ?, ?, ?, NULL, NULL, ?, NULL, ?,
+                          ?, 'ready', 'src.main', ?, 'live')
+                """,
+                (
+                    f"{position_id}:exit_retry_released:{sequence_no}",
+                    position_id,
+                    sequence_no,
+                    now_iso,
+                    str(row[1] or "pending_exit"),
+                    str(row[1] or "pending_exit"),
+                    str(row[2] or ""),
+                    str(row[3] or "") or None,
+                    release_reason,
+                    f"{position_id}:exit_retry_released:{sequence_no}",
+                    json.dumps(payload, sort_keys=True),
+                ),
+            )
+            cur = conn.execute(
+                """
+                UPDATE position_current
+                   SET next_exit_retry_at = ?,
+                       updated_at = ?
+                 WHERE position_id = ?
+                """,
+                (now_iso, now_iso, position_id),
+            )
+            if int(cur.rowcount or 0) > 0:
+                changed += int(cur.rowcount or 0)
+                released_ids.append(position_id)
+                conn.execute("RELEASE SAVEPOINT exit_retry_release")
+            else:
+                conn.execute("ROLLBACK TO SAVEPOINT exit_retry_release")
+                conn.execute("RELEASE SAVEPOINT exit_retry_release")
+        except Exception as exc:  # noqa: BLE001
+            try:
+                conn.execute("ROLLBACK TO SAVEPOINT exit_retry_release")
+                conn.execute("RELEASE SAVEPOINT exit_retry_release")
+            except Exception:  # noqa: BLE001
+                pass
+            logger.warning(
+                "exit-retry release append/update failed closed for %s: %s",
+                position_id,
+                exc,
+            )
+    return {"released": changed, "position_ids": released_ids}
 
 
 def _release_allocator_config_blocked_exit_retries_after_refresh(
@@ -2432,20 +2537,15 @@ def _release_allocator_config_blocked_exit_retries_after_refresh(
     position_ids = [str(row[0]) for row in rows if str(row[0] or "")]
     if not position_ids:
         return {"released": 0, "position_ids": []}
-    changed = 0
-    for start in range(0, len(position_ids), 250):
-        chunk = position_ids[start : start + 250]
-        placeholders = ",".join("?" for _ in chunk)
-        cur = conn.execute(
-            f"""
-            UPDATE position_current
-               SET next_exit_retry_at = ?,
-                   updated_at = ?
-             WHERE position_id IN ({placeholders})
-            """,
-            (now_iso, now_iso, *chunk),
-        )
-        changed += int(cur.rowcount or 0)
+    released = _append_exit_retry_release_events_and_update_projection(
+        conn,
+        position_ids,
+        observed_at=observed_at,
+        release_reason="ALLOCATOR_CONFIGURED_AFTER_REFRESH",
+        release_error="allocator_not_configured_released",
+    )
+    changed = int(released.get("released", 0) or 0)
+    position_ids = list(released.get("position_ids", []) or [])
     id_set = set(position_ids)
     for pos in getattr(portfolio, "positions", []) or []:
         if str(getattr(pos, "trade_id", "")) in id_set:
@@ -2455,7 +2555,7 @@ def _release_allocator_config_blocked_exit_retries_after_refresh(
         changed,
         position_ids,
     )
-    return {"released": changed, "position_ids": position_ids}
+    return released
 
 
 def _refresh_reconcile_findings_if_required(

@@ -57,6 +57,15 @@ def load_architecture_kernel_sql() -> str:
     return ARCHITECTURE_KERNEL_SQL_PATH.read_text()
 
 
+def _set_legacy_alter_table(conn: sqlite3.Connection, enabled: bool) -> None:
+    conn.execute(f"PRAGMA legacy_alter_table = {'ON' if enabled else 'OFF'}")
+
+
+def _legacy_alter_table_enabled(conn: sqlite3.Connection) -> bool:
+    row = conn.execute("PRAGMA legacy_alter_table").fetchone()
+    return bool(row and int(row[0] or 0))
+
+
 def assert_canonical_transaction_schema(conn: sqlite3.Connection) -> None:
     event_columns = table_columns(conn, "position_events")
     current_columns = table_columns(conn, "position_current")
@@ -142,23 +151,28 @@ def _ensure_day0_window_entered_event_type(conn: sqlite3.Connection) -> None:
 
     # Rebuild path: copy rows through an identical-schema-plus-new-event-
     # type table, preserving PRIMARY KEY + all columns.
-    with conn:
-        conn.execute("ALTER TABLE position_events RENAME TO position_events_pre_day0_v1")
-        # Re-executing the kernel SQL recreates position_events with the
-        # new CHECK (because the renamed-old table no longer collides).
-        conn.executescript(load_architecture_kernel_sql())
-        old_columns = table_columns(conn, "position_events_pre_day0_v1")
-        new_columns = table_columns(conn, "position_events")
-        shared_columns = [c for c in new_columns if c in old_columns]
-        if shared_columns:
-            conn.execute(
-                f"""
-                INSERT INTO position_events ({", ".join(shared_columns)})
-                SELECT {", ".join(shared_columns)}
-                FROM position_events_pre_day0_v1
-                """
-            )
-        conn.execute("DROP TABLE position_events_pre_day0_v1")
+    _legacy_alter_was_enabled = _legacy_alter_table_enabled(conn)
+    _set_legacy_alter_table(conn, True)
+    try:
+        with conn:
+            conn.execute("ALTER TABLE position_events RENAME TO position_events_pre_day0_v1")
+            # Re-executing the kernel SQL recreates position_events with the
+            # new CHECK (because the renamed-old table no longer collides).
+            conn.executescript(load_architecture_kernel_sql())
+            old_columns = table_columns(conn, "position_events_pre_day0_v1")
+            new_columns = table_columns(conn, "position_events")
+            shared_columns = [c for c in new_columns if c in old_columns]
+            if shared_columns:
+                conn.execute(
+                    f"""
+                    INSERT INTO position_events ({", ".join(shared_columns)})
+                    SELECT {", ".join(shared_columns)}
+                    FROM position_events_pre_day0_v1
+                    """
+                )
+            conn.execute("DROP TABLE position_events_pre_day0_v1")
+    finally:
+        _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
 
 
 def _ensure_position_current_authority_columns(conn: sqlite3.Connection) -> None:
@@ -269,22 +283,27 @@ def _ensure_venue_position_observed_event_type(conn: sqlite3.Connection) -> None
 
     # Rebuild path: identical-schema-plus-new-event-type table, copy rows,
     # preserving PRIMARY KEY + all columns.
-    with conn:
-        conn.execute("ALTER TABLE position_events RENAME TO position_events_pre_d0_v1")
-        conn.executescript(load_architecture_kernel_sql())
-        old_columns = table_columns(conn, "position_events_pre_d0_v1")
-        new_columns = table_columns(conn, "position_events")
-        shared_columns = [c for c in new_columns if c in old_columns]
-        if shared_columns:
-            conn.execute(
-                f"""
-                INSERT INTO position_events ({", ".join(shared_columns)})
-                SELECT {", ".join(shared_columns)}
-                FROM position_events_pre_d0_v1
-                WHERE occurred_at LIKE '____-__-__T%' OR occurred_at = 'QUARANTINE'
-                """
-            )
-        conn.execute("DROP TABLE position_events_pre_d0_v1")
+    _legacy_alter_was_enabled = _legacy_alter_table_enabled(conn)
+    _set_legacy_alter_table(conn, True)
+    try:
+        with conn:
+            conn.execute("ALTER TABLE position_events RENAME TO position_events_pre_d0_v1")
+            conn.executescript(load_architecture_kernel_sql())
+            old_columns = table_columns(conn, "position_events_pre_d0_v1")
+            new_columns = table_columns(conn, "position_events")
+            shared_columns = [c for c in new_columns if c in old_columns]
+            if shared_columns:
+                conn.execute(
+                    f"""
+                    INSERT INTO position_events ({", ".join(shared_columns)})
+                    SELECT {", ".join(shared_columns)}
+                    FROM position_events_pre_d0_v1
+                    WHERE occurred_at LIKE '____-__-__T%' OR occurred_at = 'QUARANTINE'
+                    """
+                )
+            conn.execute("DROP TABLE position_events_pre_d0_v1")
+    finally:
+        _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
 
 
 def _ensure_review_required_event_type(conn: sqlite3.Connection) -> None:
@@ -316,21 +335,66 @@ def _ensure_review_required_event_type(conn: sqlite3.Connection) -> None:
     if not create_sql or "REVIEW_REQUIRED" in create_sql:
         return  # already has the new type
 
-    with conn:
-        conn.execute("ALTER TABLE position_events RENAME TO position_events_pre_f4_v1")
-        conn.executescript(load_architecture_kernel_sql())
-        old_columns = table_columns(conn, "position_events_pre_f4_v1")
-        new_columns = table_columns(conn, "position_events")
-        shared_columns = [c for c in new_columns if c in old_columns]
-        if shared_columns:
-            conn.execute(
-                f"""
-                INSERT INTO position_events ({", ".join(shared_columns)})
-                SELECT {", ".join(shared_columns)}
-                FROM position_events_pre_f4_v1
-                """
-            )
-        conn.execute("DROP TABLE position_events_pre_f4_v1")
+    _legacy_alter_was_enabled = _legacy_alter_table_enabled(conn)
+    _set_legacy_alter_table(conn, True)
+    try:
+        with conn:
+            conn.execute("ALTER TABLE position_events RENAME TO position_events_pre_f4_v1")
+            conn.executescript(load_architecture_kernel_sql())
+            old_columns = table_columns(conn, "position_events_pre_f4_v1")
+            new_columns = table_columns(conn, "position_events")
+            shared_columns = [c for c in new_columns if c in old_columns]
+            if shared_columns:
+                conn.execute(
+                    f"""
+                    INSERT INTO position_events ({", ".join(shared_columns)})
+                    SELECT {", ".join(shared_columns)}
+                    FROM position_events_pre_f4_v1
+                    """
+                )
+            conn.execute("DROP TABLE position_events_pre_f4_v1")
+    finally:
+        _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
+
+
+def _ensure_exit_retry_released_event_type(conn: sqlite3.Connection) -> None:
+    """Add EXIT_RETRY_RELEASED to the position_events event_type CHECK.
+
+    Early exit-retry release is canonical evidence that a previously delayed
+    reduce-only exit can be evaluated immediately. The loader already consumes
+    this event as an exit-state hint; legacy DBs must also allow the wire value
+    so the append-first release path cannot silently fall back to projection-only
+    mutation.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'position_events'"
+    ).fetchone()
+    if row is None:
+        return
+    create_sql = str(row[0] if row and row[0] else "")
+    if not create_sql or "EXIT_RETRY_RELEASED" in create_sql:
+        return
+
+    _legacy_alter_was_enabled = _legacy_alter_table_enabled(conn)
+    _set_legacy_alter_table(conn, True)
+    try:
+        with conn:
+            conn.execute("ALTER TABLE position_events RENAME TO position_events_pre_exit_retry_release_v1")
+            conn.executescript(load_architecture_kernel_sql())
+            old_columns = table_columns(conn, "position_events_pre_exit_retry_release_v1")
+            new_columns = table_columns(conn, "position_events")
+            shared_columns = [c for c in new_columns if c in old_columns]
+            if shared_columns:
+                conn.execute(
+                    f"""
+                    INSERT INTO position_events ({", ".join(shared_columns)})
+                    SELECT {", ".join(shared_columns)}
+                    FROM position_events_pre_exit_retry_release_v1
+                    """
+                )
+            conn.execute("DROP TABLE position_events_pre_exit_retry_release_v1")
+    finally:
+        _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
 
 
 def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
@@ -366,6 +430,7 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
     _ensure_day0_window_entered_event_type(conn)
     _ensure_venue_position_observed_event_type(conn)
     _ensure_review_required_event_type(conn)
+    _ensure_exit_retry_released_event_type(conn)
     _ensure_position_current_authority_columns(conn)
     # Legacy-DB column reconciliation: `CREATE TABLE IF NOT EXISTS` in the
     # kernel SQL no-ops when position_current exists from a pre-kernel

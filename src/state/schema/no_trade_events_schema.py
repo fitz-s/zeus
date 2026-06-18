@@ -235,6 +235,15 @@ def _table_columns(conn: sqlite3.Connection) -> set[str]:
     return {str(row[1]) for row in conn.execute("PRAGMA table_info(no_trade_events)").fetchall()}
 
 
+def _legacy_alter_table_enabled(conn: sqlite3.Connection) -> bool:
+    row = conn.execute("PRAGMA legacy_alter_table").fetchone()
+    return bool(row and int(row[0] or 0))
+
+
+def _set_legacy_alter_table(conn: sqlite3.Connection, enabled: bool) -> None:
+    conn.execute(f"PRAGMA legacy_alter_table = {'ON' if enabled else 'OFF'}")
+
+
 def _schema_version_in_list(table_sql: str) -> set[int]:
     """Parse the schema_version IN (...) values from the table-definition SQL."""
     m = re.search(r"schema_version\s+INTEGER[^C]*CHECK\s*\(schema_version\s+IN\s*\(([^)]+)\)", table_sql)
@@ -355,4 +364,9 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
         )
 
     conn.execute("DROP TABLE no_trade_events")
-    conn.execute("ALTER TABLE no_trade_events_new RENAME TO no_trade_events")
+    _legacy_alter_was_enabled = _legacy_alter_table_enabled(conn)
+    _set_legacy_alter_table(conn, True)
+    try:
+        conn.execute("ALTER TABLE no_trade_events_new RENAME TO no_trade_events")
+    finally:
+        _set_legacy_alter_table(conn, _legacy_alter_was_enabled)

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS position_events (
         'EXIT_ORDER_FILLED',
         'EXIT_ORDER_VOIDED',
         'EXIT_ORDER_REJECTED',
+        'EXIT_RETRY_RELEASED',
         'SETTLED',
         'ADMIN_VOIDED',
         'MANUAL_OVERRIDE_APPLIED',

@@ -5297,6 +5297,24 @@ def test_m5_clear_releases_ws_gap_blocked_exit_retry(conn):
         assert result["exit_retries_released"] == 1
         assert result["exit_retry_position_ids"] == ["exit-ws-gap"]
         assert retry_at == NOW.isoformat()
+        release = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, venue_status, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            ("exit-ws-gap",),
+        ).fetchone()
+        assert release["event_type"] == "EXIT_RETRY_RELEASED"
+        assert release["phase_before"] == "pending_exit"
+        assert release["phase_after"] == "pending_exit"
+        assert release["venue_status"] == "ready"
+        payload = json.loads(release["payload_json"])
+        assert payload["release_reason"] == "M5_WS_GAP_RECONCILE_CLEARED"
+        assert payload["previous_next_retry_at"] > NOW.isoformat()
+        assert payload["next_retry_at"] == NOW.isoformat()
     finally:
         ws_gap_guard.clear_for_test(observed_at=NOW)
 
@@ -5353,6 +5371,24 @@ def test_allocator_refresh_release_updates_db_and_loaded_position(conn):
     assert result == {"released": 1, "position_ids": ["exit-allocator-config"]}
     assert retry_at == NOW.isoformat()
     assert position.next_exit_retry_at == NOW.isoformat()
+    release = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, venue_status, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        ("exit-allocator-config",),
+    ).fetchone()
+    assert release["event_type"] == "EXIT_RETRY_RELEASED"
+    assert release["phase_before"] == "pending_exit"
+    assert release["phase_after"] == "pending_exit"
+    assert release["venue_status"] == "ready"
+    payload = json.loads(release["payload_json"])
+    assert payload["release_reason"] == "ALLOCATOR_CONFIGURED_AFTER_REFRESH"
+    assert payload["previous_next_retry_at"] > NOW.isoformat()
+    assert payload["next_retry_at"] == NOW.isoformat()
 
 
 def test_findings_actuator_loop_resolves_findings_via_operator_decision(conn):

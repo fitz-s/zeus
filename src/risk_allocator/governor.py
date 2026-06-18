@@ -424,12 +424,14 @@ def summary() -> dict[str, Any]:
         }
     allocator = _GLOBAL_ALLOCATOR
     kill_reason = allocator.kill_switch_reason(_GLOBAL_GOVERNOR_STATE)
+    reduce_only = allocator.reduce_only_mode_active(_GLOBAL_GOVERNOR_STATE)
+    entry_reason = kill_reason or ("reduce_only_mode_active" if reduce_only else "ok")
     return {
         "configured": _GLOBAL_ALLOCATOR is not None,
         "state": _GLOBAL_GOVERNOR_STATE.to_dict(),
         "kill_switch_reason": kill_reason,
-        "reduce_only": allocator.reduce_only_mode_active(_GLOBAL_GOVERNOR_STATE),
-        "entry": {"allow_submit": kill_reason is None, "reason": kill_reason or "ok"},
+        "reduce_only": reduce_only,
+        "entry": {"allow_submit": entry_reason == "ok", "reason": entry_reason},
     }
 
 

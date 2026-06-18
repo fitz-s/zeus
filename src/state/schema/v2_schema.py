@@ -1058,10 +1058,22 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             except Exception as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_platt_models_lookup
-                ON platt_models(temperature_metric, cluster, season, data_version, input_space, is_active)
-        """)
+        platt_columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(platt_models)").fetchall()
+        }
+        if {
+            "temperature_metric",
+            "cluster",
+            "season",
+            "data_version",
+            "input_space",
+            "is_active",
+        }.issubset(platt_columns):
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_platt_models_lookup
+                    ON platt_models(temperature_metric, cluster, season, data_version, input_space, is_active)
+            """)
 
         # ----------------------------------------------------------------
         # validated_calibration_transfers

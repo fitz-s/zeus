@@ -3874,6 +3874,15 @@ def _strip_strategy_key_check(sql: str) -> str:
     )
 
 
+def _legacy_alter_table_enabled(conn: sqlite3.Connection) -> bool:
+    row = conn.execute("PRAGMA legacy_alter_table").fetchone()
+    return bool(row and int(row[0] or 0))
+
+
+def _set_legacy_alter_table(conn: sqlite3.Connection, enabled: bool) -> None:
+    conn.execute(f"PRAGMA legacy_alter_table = {'ON' if enabled else 'OFF'}")
+
+
 def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
     """Remove stale hardcoded strategy_key CHECK from telemetry tables.
 
@@ -3907,7 +3916,12 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
         conn.execute(new_create)
         conn.execute(f"INSERT INTO {tname}_new SELECT * FROM {tname}")
         conn.execute(f"DROP TABLE {tname}")
-        conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
+        _legacy_alter_was_enabled = _legacy_alter_table_enabled(conn)
+        _set_legacy_alter_table(conn, True)
+        try:
+            conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
+        finally:
+            _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
         for (idx_sql,) in indexes:
             conn.execute(idx_sql)
 
@@ -3948,7 +3962,12 @@ def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
         conn.execute(new_create)
         conn.execute(f"INSERT INTO {tname}_new SELECT * FROM {tname}")
         conn.execute(f"DROP TABLE {tname}")
-        conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
+        _legacy_alter_was_enabled = _legacy_alter_table_enabled(conn)
+        _set_legacy_alter_table(conn, True)
+        try:
+            conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
+        finally:
+            _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
         for (trg_sql,) in triggers:
             conn.execute(trg_sql)
         for (idx_sql,) in indexes:
@@ -4307,6 +4326,7 @@ CREATE TABLE IF NOT EXISTS position_events (
         'EXIT_ORDER_FILLED',
         'EXIT_ORDER_VOIDED',
         'EXIT_ORDER_REJECTED',
+        'EXIT_RETRY_RELEASED',
         'SETTLED',
         'ADMIN_VOIDED',
         'MANUAL_OVERRIDE_APPLIED',
