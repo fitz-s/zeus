@@ -1461,11 +1461,13 @@ def _active_projection_matches_confirmed_fill(
             continue
         if str(current.get("chain_state") or "") not in {"synced", "chain_present", "exit_pending_missing"}:
             continue
+        chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
+        if chain_shares is not None:
+            if abs(chain_shares - filled) > Decimal("0.02"):
+                continue
+            return True
         shares = _positive_decimal_or_none(current.get("shares"))
         if shares is None or abs(shares - filled) > Decimal("0.01"):
-            continue
-        chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
-        if chain_shares is not None and abs(chain_shares - filled) > Decimal("0.02"):
             continue
         return True
     return False
@@ -7810,7 +7812,6 @@ def _reconcile_passes_inline(
         matched_cancel_review_summary = reconcile_matched_cancel_review_required_entries(conn)
         summary["matched_cancel_review_required_entries"] = matched_cancel_review_summary
         summary["advanced"] += matched_cancel_review_summary["advanced"]
-        summary["stayed"] += matched_cancel_review_summary["stayed"]
         summary["errors"] += matched_cancel_review_summary["errors"]
 
         edli_pre_venue_summary = _reconcile_edli_pre_venue_unknown_thresholds(conn)
@@ -8103,7 +8104,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
              reconcile_completed_partial_order_facts, "completed_partial_order_facts")
     _db_pass("matched_cancel_review_required_entries",
              reconcile_matched_cancel_review_required_entries,
-             "matched_cancel_review_required_entries")
+             "matched_cancel_review_required_entries",
+             fold_stayed=False)
     _db_pass("edli_pre_venue_unknown_thresholds",
              _reconcile_edli_pre_venue_unknown_thresholds, "edli_pre_venue_unknown_thresholds")
     _db_pass("venue_command_absence_sync",

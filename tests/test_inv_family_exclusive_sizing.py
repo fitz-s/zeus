@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-06-18
 # Purpose: Relationship antibody (Fitz §3) — mutually-exclusive weather bins
 #          (one city/date/metric partition) must NOT emit independent live
 #          orders. P0-1 STAGE A single-best entry gate.
@@ -331,12 +331,12 @@ def test_open_pending_active_family_exposure_blocks_fdr_selected_hypothesis_with
     assert "FDR" not in rejected.rejection_stage
 
 
-def test_known_different_market_family_exposure_does_not_block_replacement_market() -> None:
-    """Known venue family identity narrows B2 exposure blocking.
+def test_known_different_market_family_exposure_still_blocks_same_weather_partition() -> None:
+    """Venue family identity must not narrow weather partition blocking.
 
-    City/date/metric remains the conservative fallback, but when both old and
-    new sides carry explicit market-family ids, only the same event family can
-    block replacement/reopened weather markets.
+    Market slugs and condition ids can identify a bin rather than the physical
+    city/date/metric underlying, so live entry gating must block any open same
+    weather partition exposure even when both sides carry different ids.
     """
     bins = {s[2]: s for s in _BIN_SPECS}
     new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
@@ -359,8 +359,9 @@ def test_known_different_market_family_exposure_does_not_block_replacement_marke
         enabled=True,
     )
 
-    assert _count_trades(out) == 1
-    assert out[0].should_trade is True
+    assert _count_trades(out) == 0
+    assert out[0].should_trade is False
+    assert out[0].rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
 
 
 def test_unknown_market_family_exposure_blocks_conservatively() -> None:
@@ -544,6 +545,47 @@ def test_trade_db_family_exposures_include_live_entry_commands(tmp_path) -> None
             bin_label="20-21°F",
             phase="pending_entry",
             position_id="pos-1",
+        )
+    ]
+
+
+def test_trade_db_family_exposures_include_open_position_without_command_row(tmp_path) -> None:
+    """EDLI/chain-bridged holdings must block family siblings even without commands."""
+    import sqlite3
+
+    db_path = tmp_path / "family-exposure-position-only.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            bin_label TEXT,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            cost_basis_usd REAL,
+            chain_cost_basis_usd REAL
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("pos-live", CITY, TARGET_DATE, METRIC, "20-21°F", "active", 0.0, 7.0, 0.0, 5.53),
+    )
+
+    exposures = weather_family_exposures_from_trade_db(conn)
+
+    assert exposures == [
+        WeatherFamilyExposure(
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+            bin_label="20-21°F",
+            phase="active",
+            position_id="pos-live",
         )
     ]
 

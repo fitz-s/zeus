@@ -2284,11 +2284,14 @@ def _actual_review_confirmed_fill_predicates(
                 continue
             if str(row["chain_state"] or "") not in {"synced", "chain_present", "exit_pending_missing"}:
                 continue
+            chain_shares = _decimal_or_none(row["chain_shares"])
+            if chain_shares is not None:
+                if abs(chain_shares - payload_filled) > Decimal("0.02"):
+                    continue
+                active_projection_matches = True
+                break
             shares = _decimal_or_none(row["shares"])
             if shares is None or abs(shares - payload_filled) > Decimal("0.01"):
-                continue
-            chain_shares = _decimal_or_none(row["chain_shares"])
-            if chain_shares is not None and abs(chain_shares - payload_filled) > Decimal("0.02"):
                 continue
             active_projection_matches = True
             break

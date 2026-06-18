@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-06-17
+# Last reused/audited: 2026-06-18
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -2621,6 +2621,72 @@ class TestRecoveryResolutionTable:
         payload = json.loads(events[-1]["payload_json"])
         assert payload["proof_class"] == "matched_cancel_with_confirmed_held_projection"
         assert payload["required_predicates"]["active_projection_matches_confirmed_fill"] is True
+
+    def test_review_required_matched_cancel_uses_chain_shares_over_submitted_shares(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Chain-observed exposure is the fill proof when raw submitted shares drift."""
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.34)
+        _seed_pending_entry_projection(conn)
+        _advance_to_partial(conn, venue_order_id="ord-001")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-001",
+            trade_id="trade-001",
+            state="CONFIRMED",
+            filled_size="4.995",
+            fill_price="0.34",
+        )
+        _append_order_fact(conn, state="PARTIALLY_MATCHED", matched_size="4.995", remaining_size="0.005")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   chain_state = 'synced',
+                   shares = 0.0,
+                   chain_shares = 4.995,
+                   cost_basis_usd = 0.0,
+                   chain_cost_basis_usd = 1.6983,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-001", "source": "maker_rest_escalation"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REPLACE_BLOCKED",
+            occurred_at="2026-04-26T00:08:02Z",
+            payload={
+                "venue_order_id": "ord-001",
+                "reason": "post_cancel_unknown_possible_side_effect",
+                "cancel_outcome": {
+                    "orderID": "ord-001",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": "matched orders can't be canceled",
+                },
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_cancel_review_required_entries"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "FILLED"
 
     def test_partial_entry_does_not_finalize_when_trade_facts_do_not_cover_order_fact(
         self,

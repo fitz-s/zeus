@@ -315,9 +315,10 @@ def _exposure_key(exposure: Any) -> WeatherFamilyKey:
 def _family_keys_conflict(left: WeatherFamilyKey, right: WeatherFamilyKey) -> bool:
     """Return whether two keys should share one exposure budget.
 
-    When both sides know the venue weather family identity, only the same
-    family blocks. If either side is legacy/unknown, fall back to conservative
-    city/date/metric blocking so historical exposure cannot disappear.
+    Weather temperature bins for one city/date/metric are one settlement
+    partition. Venue ids and market slugs are not allowed to narrow this live
+    mutex because they can be per-bin/per-condition identifiers rather than the
+    physical underlying event.
     """
     if (
         left.city,
@@ -329,8 +330,6 @@ def _family_keys_conflict(left: WeatherFamilyKey, right: WeatherFamilyKey) -> bo
         right.temperature_metric,
     ):
         return False
-    if left.market_family_id and right.market_family_id:
-        return left.market_family_id == right.market_family_id
     return True
 
 
@@ -430,6 +429,9 @@ _TRADE_ORDER_BLOCKING_STATES = frozenset(
     }
 )
 _TRADE_FACT_BLOCKING_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "PARTIAL"})
+_TRADE_POSITION_BLOCKING_PHASES = frozenset(
+    {"pending_entry", "active", "day0_window", "pending_exit"}
+)
 
 
 def _table_exists(conn: Any, table_name: str, *, schema: str = "main") -> bool:
@@ -509,17 +511,21 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
 
     The trade DB owns venue command/order/trade facts. Family metadata still
     prefers the canonical position projection when it exists, but projection
-    lag must not erase durable command truth. A blocking exposure is admitted
-    when command/order/trade truth says an ENTRY is live, partially matched,
-    filled, unknown-side-effect, or under review, deriving family identity from
-    submission envelopes/snapshots/market events when ``position_current`` is
-    absent or not yet joined.
+    lag must not erase durable command truth, and command-row absence must not
+    erase a held chain/bridge position. A blocking exposure is admitted directly
+    from open ``position_current`` rows and from command/order/trade truth that
+    says an ENTRY is live, partially matched, filled, unknown-side-effect, or
+    under review.
     """
 
-    if conn is None or not _table_exists(conn, "venue_commands"):
+    if conn is None:
         return []
     schemas = _attached_schemas(conn)
     position_schema = "world" if "world" in schemas and _table_exists(conn, "position_current", schema="world") else "main"
+    has_position_current = _table_exists(conn, "position_current", schema=position_schema)
+    has_venue_commands = _table_exists(conn, "venue_commands")
+    if not has_position_current and not has_venue_commands:
+        return []
     has_order_facts = _table_exists(conn, "venue_order_facts")
     has_trade_facts = _table_exists(conn, "venue_trade_facts")
     order_state_sql = (
@@ -579,7 +585,7 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
         seen.add(dedupe_key)
         exposures.append(exposure)
 
-    if _table_exists(conn, "position_current", schema=position_schema):
+    if has_position_current:
         pc_cols = _table_columns(conn, "position_current", schema=position_schema)
         pc_family_id = _column_expr(
             pc_cols,
@@ -592,15 +598,73 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
                 default=_column_expr(pc_cols, "pc", "market_slug"),
             ),
         )
-        projection_sql = f"""
+        pc_city = _column_expr(pc_cols, "pc", "city")
+        pc_target_date = _column_expr(pc_cols, "pc", "target_date")
+        pc_metric = _column_expr(
+            pc_cols,
+            "pc",
+            "temperature_metric",
+            default=_column_expr(pc_cols, "pc", "metric"),
+        )
+        pc_bin_label = _column_expr(pc_cols, "pc", "bin_label")
+        pc_phase = _column_expr(pc_cols, "pc", "phase", default="'active'")
+        pc_position_id = _column_expr(pc_cols, "pc", "position_id")
+        positive_terms = [
+            f"COALESCE(pc.{name}, 0) > 0"
+            for name in ("chain_shares", "shares", "chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+            if name in pc_cols
+        ]
+        direct_positive_sql = " AND (" + " OR ".join(positive_terms) + ")" if positive_terms else " AND 0"
+        direct_phase_sql = (
+            "LOWER(COALESCE(pc.phase, '')) IN ({})".format(
+                ",".join("?" for _ in _TRADE_POSITION_BLOCKING_PHASES)
+            )
+            if "phase" in pc_cols
+            else "1=1"
+        )
+        direct_position_sql = f"""
         SELECT
-            pc.city,
-            pc.target_date,
-            pc.temperature_metric,
+            {pc_city} AS city,
+            {pc_target_date} AS target_date,
+            {pc_metric} AS temperature_metric,
             {pc_family_id} AS market_family_id,
-            pc.bin_label,
-            pc.phase,
-            pc.position_id,
+            {pc_bin_label} AS bin_label,
+            {pc_phase} AS phase,
+            {pc_position_id} AS position_id
+        FROM {position_schema}.position_current pc
+        WHERE {direct_phase_sql}
+          {direct_positive_sql}
+        """
+        try:
+            rows = conn.execute(
+                direct_position_sql,
+                tuple(sorted(_TRADE_POSITION_BLOCKING_PHASES)) if "phase" in pc_cols else (),
+            ).fetchall()
+        except Exception:
+            logger.warning("[WEATHER_FAMILY_EXPOSURE_POSITION_DB_READ_FAILED]", exc_info=True)
+        else:
+            for row in rows:
+                city, target_date, metric, market_family_id, bin_label, phase, position_id = tuple(row)
+                _append_exposure(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    market_family_id=market_family_id,
+                    bin_label=bin_label,
+                    phase=phase,
+                    position_id=position_id,
+                )
+
+        if has_venue_commands:
+            projection_sql = f"""
+        SELECT
+            {pc_city} AS city,
+            {pc_target_date} AS target_date,
+            {pc_metric} AS temperature_metric,
+            {pc_family_id} AS market_family_id,
+            {pc_bin_label} AS bin_label,
+            {pc_phase} AS phase,
+            {pc_position_id} AS position_id,
             vc.command_id
         FROM venue_commands vc
         JOIN {position_schema}.position_current pc
@@ -612,31 +676,34 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
               OR {trade_state_sql}
           )
         """
-        try:
-            rows = conn.execute(projection_sql, params).fetchall()
-        except Exception:
-            logger.warning("[WEATHER_FAMILY_EXPOSURE_PROJECTION_DB_READ_FAILED]", exc_info=True)
-        else:
-            for row in rows:
-                (
-                    city,
-                    target_date,
-                    metric,
-                    market_family_id,
-                    bin_label,
-                    phase,
-                    position_id,
-                    command_id,
-                ) = tuple(row)
-                _append_exposure(
-                    city=city,
-                    target_date=target_date,
-                    metric=metric,
-                    market_family_id=market_family_id,
-                    bin_label=bin_label,
-                    phase=phase,
-                    position_id=position_id or command_id,
-                )
+            try:
+                rows = conn.execute(projection_sql, params).fetchall()
+            except Exception:
+                logger.warning("[WEATHER_FAMILY_EXPOSURE_PROJECTION_DB_READ_FAILED]", exc_info=True)
+            else:
+                for row in rows:
+                    (
+                        city,
+                        target_date,
+                        metric,
+                        market_family_id,
+                        bin_label,
+                        phase,
+                        position_id,
+                        command_id,
+                    ) = tuple(row)
+                    _append_exposure(
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        market_family_id=market_family_id,
+                        bin_label=bin_label,
+                        phase=phase,
+                        position_id=position_id or command_id,
+                    )
+
+    if not has_venue_commands:
+        return exposures
 
     envelope_table = "venue_submission_envelopes" if _table_exists(conn, "venue_submission_envelopes") else None
     snapshot_table = "executable_market_snapshots" if _table_exists(conn, "executable_market_snapshots") else None

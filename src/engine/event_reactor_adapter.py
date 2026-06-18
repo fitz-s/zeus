@@ -620,7 +620,11 @@ _DURABLE_LIVE_CAP_TERMINAL_COMMAND_STATES = frozenset(
 _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES = frozenset(
     {"active", "day0_window", "pending_exit"}
 )
+_ENTRY_HELD_POSITION_BLOCKING_PHASES = frozenset(
+    {"pending_entry", *_DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES}
+)
 _ENTRY_HELD_POSITION_REASON_BASE = "OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED"
+_ENTRY_HELD_FAMILY_REASON_BASE = "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED"
 
 
 def _durable_live_cap_final_intent_token(final_intent_id: str) -> str:
@@ -766,14 +770,130 @@ def _entry_held_position_same_token_reason(
         ) from exc
 
 
+def _entry_family_metric(value: object) -> str:
+    metric = str(value or "").strip().lower()
+    if metric in {"high", "tmax", "max", "maximum", "highest"}:
+        return "high"
+    if metric in {"low", "tmin", "min", "minimum", "lowest"}:
+        return "low"
+    return metric
+
+
+def _proof_family_fields(proof: "_CandidateProof") -> tuple[str, str, str] | None:
+    candidate = getattr(proof, "candidate", None)
+    if candidate is None:
+        return None
+    city = str(getattr(candidate, "city", "") or "").strip()
+    target_date = str(getattr(candidate, "target_date", "") or "").strip()
+    metric = _entry_family_metric(getattr(candidate, "metric", ""))
+    if not (city and target_date and metric):
+        return None
+    return city, target_date, metric
+
+
+def _entry_held_position_same_family_reason(
+    conn: sqlite3.Connection | None,
+    proof: "_CandidateProof",
+) -> str | None:
+    """Return a selection-exclusion reason when this weather family is held.
+
+    A weather city/date/metric family is a mutually-exclusive partition. Once any
+    bin in the family is held, adding another bin through the new-entry selector
+    is a position-management decision, not a fresh opportunity. Rebalancing or
+    switching belongs in monitor/redecision so it can account for current PnL,
+    exit liquidity, and already-submitted orders.
+    """
+    fields = _proof_family_fields(proof)
+    if conn is None or fields is None:
+        return None
+    city, target_date, metric = fields
+    try:
+        if not _adapter_table_exists(conn, "position_current"):
+            return None
+        columns = _position_current_columns(conn)
+        if "city" not in columns or "target_date" not in columns:
+            return None
+        metric_column = "temperature_metric" if "temperature_metric" in columns else "metric" if "metric" in columns else ""
+        if not metric_column:
+            return None
+        phase_expr = "phase" if "phase" in columns else "''"
+        position_id_expr = "position_id" if "position_id" in columns else "''"
+        bin_label_expr = "bin_label" if "bin_label" in columns else "''"
+        condition_id_expr = "condition_id" if "condition_id" in columns else "''"
+        positive_terms = [
+            f"COALESCE({name}, 0) > 0"
+            for name in ("chain_shares", "shares", "chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+            if name in columns
+        ]
+        if not positive_terms:
+            return None
+        positive_sql = " AND (" + " OR ".join(positive_terms) + ")"
+        order_sql = "ORDER BY updated_at DESC" if "updated_at" in columns else ""
+        phase_sql = (
+            "phase IN ({})".format(
+                ",".join("?" for _ in _ENTRY_HELD_POSITION_BLOCKING_PHASES)
+            )
+            if "phase" in columns
+            else "1=1"
+        )
+        rows = conn.execute(
+            f"""
+            SELECT
+                {position_id_expr} AS position_id,
+                {phase_expr} AS phase,
+                {bin_label_expr} AS bin_label,
+                {condition_id_expr} AS condition_id,
+                {metric_column} AS temperature_metric
+              FROM position_current
+             WHERE {phase_sql}
+               AND city = ?
+               AND target_date = ?
+               {positive_sql}
+             {order_sql}
+            """,
+            (
+                *(
+                    sorted(_ENTRY_HELD_POSITION_BLOCKING_PHASES)
+                    if "phase" in columns
+                    else ()
+                ),
+                city,
+                target_date,
+            ),
+        ).fetchall()
+        for row in rows:
+            row_metric = row["temperature_metric"] if isinstance(row, sqlite3.Row) else row[4]
+            if _entry_family_metric(row_metric) != metric:
+                continue
+            position_id = str(row["position_id"] if isinstance(row, sqlite3.Row) else row[0] or "")
+            phase = str(row["phase"] if isinstance(row, sqlite3.Row) else row[1] or "")
+            bin_label = str(row["bin_label"] if isinstance(row, sqlite3.Row) else row[2] or "")
+            condition_id = str(row["condition_id"] if isinstance(row, sqlite3.Row) else row[3] or "")
+            return (
+                f"{_ENTRY_HELD_FAMILY_REASON_BASE}:"
+                f"position_id={position_id or 'unknown'}:"
+                f"phase={phase or 'unknown'}:"
+                f"bin_label={bin_label or 'unknown'}:"
+                f"condition_id={condition_id or 'unknown'}"
+            )
+    except Exception as exc:  # noqa: BLE001 - fail closed on exposure truth ambiguity.
+        raise RuntimeError(
+            f"OPEN_POSITION_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
+        ) from exc
+    return None
+
+
 def _entry_held_position_reason_for_proof(
     conn: sqlite3.Connection | None,
     proof: "_CandidateProof",
 ) -> str | None:
-    return _entry_held_position_same_token_reason(
+    same_token_reason = _entry_held_position_same_token_reason(
         conn,
         token_id=str(getattr(proof, "token_id", "") or ""),
     )
+    if same_token_reason is not None:
+        return same_token_reason
+    return _entry_held_position_same_family_reason(conn, proof)
 
 
 def _durable_unmaterialized_live_cap_reservations(

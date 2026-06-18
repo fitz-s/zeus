@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-06-18
 # Authority basis: "bin selection.md" §5 submit_candidate pseudocode (recompute not
 #   validate) + §7 re-decision / reversal state machine + §9 Hidden #7/#14/#17 +
 #   §13 no-trade gates (snapshot stale / recapture fails / rank reversed without
@@ -641,6 +641,70 @@ def test_selection_scopes_out_open_position_token_but_keeps_tradeable_sibling():
     )
     held_eval = next(ev for ev in book.evaluations if ev.token_id == "yes-B")
     assert str(held_eval.missing_reason).startswith("OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED:")
+
+
+def test_selection_scopes_out_open_position_family_even_when_token_differs():
+    import sqlite3
+
+    row_a = _snapshot_row(yes_asks=(("0.50", "1000000"),), condition_id="cond-A",
+                          yes_token_id="yes-A", no_token_id="no-A", snapshot_id="snapA")
+    row_b = _snapshot_row(yes_asks=(("0.20", "1000000"),), condition_id="cond-B",
+                          yes_token_id="yes-B", no_token_id="no-B", snapshot_id="snapB")
+    a = _proof_from_row(direction="buy_yes", row=row_a, token_id="yes-A",
+                        q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_X)
+    b = _proof_from_row(direction="buy_yes", row=row_b, token_id="yes-B",
+                        q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_Y)
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT,
+            phase TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            bin_label TEXT,
+            token_id TEXT,
+            no_token_id TEXT,
+            shares REAL,
+            cost_basis_usd REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            condition_id, bin_label, token_id, no_token_id, shares, cost_basis_usd
+        ) VALUES (
+            'pos-held-family', 'active', 'paris', '2026-06-10', 'high',
+            'cond-held', '29C', 'yes-held', '', 7.0, 5.53
+        )
+        """
+    )
+
+    scoped = era._selection_scoped_proofs(proofs=(a, b), held_position_conn=conn)
+    assert scoped == ()
+    selected = era._selected_candidate_proof(
+        {"family_id": "fam", "event_id": "evt"},
+        (a, b),
+        held_position_conn=conn,
+    )
+    assert selected is None
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt",
+        family_id="fam",
+        proofs=(a, b),
+        selected_proof=selected,
+        held_position_conn=conn,
+    )
+    reasons = {str(ev.missing_reason) for ev in book.evaluations}
+    assert len(reasons) == 1
+    reason = next(iter(reasons))
+    assert reason.startswith("OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED:")
+    assert "position_id=pos-held-family" in reason
 
 
 def test_all_open_position_tokens_no_trade_with_honest_monitor_owned_reason():
