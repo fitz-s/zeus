@@ -1,9 +1,12 @@
+# Created: 2026-06-18
+# Last reused/audited: 2026-06-18
+# Authority basis: live redecision repair; non-actuating rotation output must not appear as live action.
 import json
 import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from src.engine.cycle_runtime import _emit_portfolio_rotation_shadow_summary
+from src.engine.cycle_runtime import _emit_portfolio_rotation_live_status
 
 
 class _Logger:
@@ -80,7 +83,7 @@ def _create_world_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def test_portfolio_rotation_shadow_reports_best_replace_candidate(tmp_path) -> None:
+def test_portfolio_rotation_live_status_does_not_emit_shadow_candidate(tmp_path) -> None:
     world_path = tmp_path / "world.db"
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -116,19 +119,15 @@ def test_portfolio_rotation_shadow_reports_best_replace_candidate(tmp_path) -> N
     )
     summary: dict = {}
 
-    _emit_portfolio_rotation_shadow_summary(conn, summary, deps=_deps())
+    _emit_portfolio_rotation_live_status(conn, summary, deps=_deps())
 
-    assert summary["portfolio_rotation_shadow_status"] == "ok"
-    assert summary["portfolio_rotation_shadow_holds"] == 1
-    assert summary["portfolio_rotation_shadow_candidates"] == 1
-    assert summary["portfolio_rotation_shadow_has_replace_candidate"] is True
-    assert summary["portfolio_rotation_shadow_best"]["sell_city"] == "Seoul"
-    assert summary["portfolio_rotation_shadow_best"]["buy_city"] == "Madrid"
+    assert summary["portfolio_rotation_live_status"] == "disabled:no_live_rotation_executor"
+    assert sorted(summary) == ["portfolio_rotation_live_status"]
 
 
-def test_portfolio_rotation_shadow_is_noop_without_connection() -> None:
+def test_portfolio_rotation_live_status_is_noop_without_connection() -> None:
     summary: dict = {}
 
-    _emit_portfolio_rotation_shadow_summary(None, summary, deps=_deps())
+    _emit_portfolio_rotation_live_status(None, summary, deps=_deps())
 
-    assert summary["portfolio_rotation_shadow_status"] == "unavailable:no_connection"
+    assert summary["portfolio_rotation_live_status"] == "unavailable:no_connection"

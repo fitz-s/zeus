@@ -6662,10 +6662,10 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 if key is not None and all(key):
                     rest_pull_families.add(key)
         held_families = _edli_current_held_position_family_keys()
-        family_keys = _edli_reemittable_forecast_family_keys(
+        family_keys = _edli_entry_redecision_family_keys(
             raw_entry_family_keys,
+            held_families,
             decision_time=now,
-            log_context="entry-screen",
         )
         held_reemit_families = _edli_reemittable_held_position_family_keys(
             held_families,
@@ -7178,21 +7178,43 @@ def _edli_reemittable_forecast_family_keys(
     return out
 
 
+def _edli_entry_redecision_family_keys(
+    raw_entry_families: set[tuple[str, str, str]],
+    held_families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+) -> set[tuple[str, str, str]]:
+    """Entry-redecision families after removing already-held exposure.
+
+    A held position is re-evaluated by the monitor/exit lane, where the decision
+    surface is hold/exit with fresh held-side probability and price. Sending the
+    same family back through the entry reactor turns a profitable hold into a
+    misleading duplicate-entry rejection and can keep stale pending rows alive.
+    """
+
+    return _edli_reemittable_forecast_family_keys(
+        set(raw_entry_families or set()) - set(held_families or set()),
+        decision_time=decision_time,
+        log_context="entry-screen",
+    )
+
+
 def _edli_reemittable_held_position_family_keys(
     families: set[tuple[str, str, str]],
     *,
     decision_time: datetime,
 ) -> set[tuple[str, str, str]]:
-    """Held-position families that must keep entering redecision attempts.
+    """Compatibility shim: held exposure no longer enters entry redecision.
 
-    New-entry redecision is forecast-phase gated because it is deciding whether to
-    open fresh risk. Held exposure is already real chain risk; it must continue to
-    re-evaluate through Day0 and settlement-day windows so monitor/exit/shift
-    logic sees current forecast and price evidence instead of being stranded by
-    the entry-only phase predicate.
+    The live held-position decision path is monitor_refresh -> Position.evaluate_exit
+    -> exit_lifecycle. Returning families here would re-emit FSR-shaped entry
+    events for already-owned tokens, which the executor can only reject as a
+    duplicate entry instead of recording a real hold/exit decision.
     """
 
-    return set(families or set())
+    _ = decision_time
+    _ = families
+    return set()
 
 
 def _edli_expire_unadmitted_redecision_pending(
