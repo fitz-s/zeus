@@ -386,6 +386,10 @@ def _ensure_diagnostic_only_trade_authority_check(conn: sqlite3.Connection, tabl
         for name in column_names
     )
     conn.execute(f"ALTER TABLE {table_name} RENAME TO {legacy_table}")
+    create_sql = create_sql.replace(
+        'REFERENCES "deterministic_forecast_anchors__pre_diagnostic_authority_check"',
+        'REFERENCES "deterministic_forecast_anchors"',
+    )
     conn.execute(
         create_sql.replace(old_check, new_check)
         .replace("DEFAULT 'SHADOW_ONLY'", "DEFAULT 'DIAGNOSTIC_ONLY'")
@@ -402,7 +406,8 @@ def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
     """Keep old PR399 shadow DBs fail-closed instead of returning stale rows."""
 
     for table_name in (
-        "raw_forecast_artifacts",
+        # raw_forecast_artifacts is raw evidence and remains SHADOW_ONLY by contract.
+        # Migrating it under active anchor FKs breaks live materialization.
         "deterministic_forecast_anchors",
         "forecast_posteriors",
         "replacement_shadow_decisions",
@@ -432,19 +437,28 @@ def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
             WHERE anchor_identity_hash IS NOT NULL
         """
     )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_topology
-            ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
-        """
-    )
-    conn.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash
-            ON forecast_posteriors(posterior_identity_hash)
-            WHERE posterior_identity_hash IS NOT NULL
-        """
-    )
+    posterior_columns = _table_columns(conn, "forecast_posteriors")
+    if {
+        "city",
+        "target_date",
+        "temperature_metric",
+        "bin_topology_hash",
+        "computed_at",
+    }.issubset(posterior_columns):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_topology
+                ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
+            """
+        )
+    if "posterior_identity_hash" in posterior_columns:
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash
+                ON forecast_posteriors(posterior_identity_hash)
+                WHERE posterior_identity_hash IS NOT NULL
+            """
+        )
 
 
 def _bin_topology_payload(bins: Sequence[AifsTemperatureBin], *, settlement_step_c: float) -> list[dict[str, object]]:
