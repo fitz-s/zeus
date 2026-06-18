@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-06-17
-# Lifecycle: created=2026-04-27; last_reviewed=2026-06-17; last_reused=2026-06-17
+# Last reused/audited: 2026-06-18
+# Lifecycle: created=2026-04-27; last_reviewed=2026-06-18; last_reused=2026-06-18
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml; task.md B1/B3 live-runtime follow-up
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -1555,6 +1555,7 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(exit_lifecycle, "_refresh_exit_collateral_snapshot_for_submit", lambda *args, **kwargs: None)
 
     sibling = {
         "market_id": "condition-test",
@@ -1955,6 +1956,7 @@ def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(mo
     )
 
     monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(exit_lifecycle, "_refresh_exit_collateral_snapshot_for_submit", lambda *args, **kwargs: None)
 
     def fake_execute_exit_order(intent, decision_id=""):
         return exit_lifecycle.OrderResult(
@@ -2149,6 +2151,7 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
     error = "executable_snapshot_gate: size 1.5873 is below snapshot min_order_size 5"
 
     monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(exit_lifecycle, "_refresh_exit_collateral_snapshot_for_submit", lambda *args, **kwargs: None)
     monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", lambda *args, **kwargs: {})
 
     def fake_execute_exit_order(intent, decision_id=""):

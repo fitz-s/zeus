@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Lifecycle: created=2026-05-19; last_reviewed=2026-06-18; last_reused=2026-06-18
 # Purpose: Antibody tests for chain-truth-based exit_lifecycle void sync
 # Reuse: pytest tests/test_exit_lifecycle_chain_truth_void.py
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-06-18
 # Authority basis: PR #189 — chain canonical via balanceOf for pending_exit
 """Antibody tests for ghost pending_exit chain-truth void sync.
 
@@ -66,7 +66,7 @@ def _make_position(**kwargs) -> Position:
         exit_retry_count=0,
         last_exit_error="",
         next_exit_retry_at="",
-        strategy_key="test_strategy",
+        strategy_key="opening_inertia",
         env="live",
         temperature_metric="high",
     )
@@ -243,6 +243,32 @@ class TestChainTruthRetryOnPositiveBalance:
             f"exit_retry_count should be >= 1 after retry, got {pos.exit_retry_count}"
         )
 
+    def test_raw_ctf_dust_balance_enters_dust_hold_not_retry(self, monkeypatch):
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        pos = _make_position(
+            trade_id="london-dust-test",
+            token_id=_ASSET_ID_LONDON,
+            condition_id=_CONDITION_ID_LONDON,
+            city="London",
+            shares=5.06,
+            exit_retry_count=0,
+        )
+        portfolio = _make_portfolio(pos)
+
+        result = handle_exit_pending_missing(
+            portfolio,
+            pos,
+            conn=None,
+            rpc_call=_rpc_returning(10_000),
+        )
+
+        assert result["action"] == "dust_hold"
+        assert pos.exit_state == "backoff_exhausted"
+        assert pos.exit_retry_count == 0
+        assert "chain_balance_units=10000" in pos.last_exit_error
+        assert "chain_balance_shares=0.01" in pos.last_exit_error
+        assert "chain_balance=10000" not in pos.last_exit_error
+
 
 # ---------------------------------------------------------------------------
 # Antibody 3: RPC failure → action == ignore (fail-open, no destructive action)
@@ -332,7 +358,7 @@ class TestNullConditionIdFail:
             "target_date": "2026-05-20",
             "bin_label": "30-31",
             "direction": "buy_yes",
-            "unit": "celsius",
+            "unit": "C",
             "size_usd": 1.21,
             "shares": 12.1,
             "cost_basis_usd": 1.21,
@@ -343,7 +369,7 @@ class TestNullConditionIdFail:
             "last_monitor_market_price": None,
             "decision_snapshot_id": None,
             "entry_method": "live",
-            "strategy_key": "test_strategy",
+            "strategy_key": "opening_inertia",
             "edge_source": None,
             "discovery_mode": None,
             "chain_state": "local_only",
@@ -504,85 +530,10 @@ class TestAbiEncodeBalanceOf:
 # ---------------------------------------------------------------------------
 
 def _build_minimal_db() -> sqlite3.Connection:
-    """Build a minimal in-memory SQLite DB with position_events and position_current tables."""
+    """Build an in-memory DB using the current canonical trade schema."""
+    from src.state.db import init_schema
+
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS position_current (
-            position_id TEXT PRIMARY KEY,
-            phase TEXT,
-            trade_id TEXT,
-            market_id TEXT,
-            city TEXT,
-            cluster TEXT,
-            target_date TEXT,
-            bin_label TEXT,
-            direction TEXT,
-            unit TEXT,
-            size_usd REAL,
-            shares REAL,
-            cost_basis_usd REAL,
-            entry_price REAL,
-            p_posterior REAL,
-            last_monitor_prob REAL,
-            last_monitor_edge REAL,
-            last_monitor_market_price REAL,
-            decision_snapshot_id TEXT,
-            entry_method TEXT,
-            strategy_key TEXT,
-            edge_source TEXT,
-            discovery_mode TEXT,
-            chain_state TEXT,
-            token_id TEXT,
-            no_token_id TEXT,
-            condition_id TEXT,
-            order_id TEXT,
-            order_status TEXT,
-            updated_at TEXT,
-            temperature_metric TEXT,
-            -- PR #352 (Part-3): D0b durable authority columns are now part of
-            -- CANONICAL_POSITION_CURRENT_COLUMNS (asserted by
-            -- assert_canonical_transaction_schema) and read by the positions
-            -- summary query. This minimal fixture predated D0b; without these
-            -- columns the canonical-schema assertion and the fill_authority
-            -- SELECT both fail.
-            fill_authority TEXT,
-            recovery_authority TEXT,
-            chain_shares REAL,
-            -- F1 (docs/findings_2026_05_28.md §F1, 2026-05-28).
-            chain_avg_price REAL,
-            chain_cost_basis_usd REAL,
-            chain_seen_at TEXT,
-            chain_absence_at TEXT,
-            -- BUG #128 (SEV1, 2026-06-02): durable realized-P&L columns now part
-            -- of CANONICAL_POSITION_CURRENT_COLUMNS; the upsert INSERT lists them
-            -- so this minimal fixture must declare them too.
-            realized_pnl_usd REAL,
-            exit_price REAL,
-            settlement_price REAL,
-            settled_at TEXT,
-            exit_reason TEXT
-        );
-        CREATE TABLE IF NOT EXISTS position_events (
-            event_id TEXT PRIMARY KEY,
-            position_id TEXT NOT NULL,
-            event_version INTEGER NOT NULL DEFAULT 1,
-            sequence_no INTEGER NOT NULL,
-            event_type TEXT NOT NULL,
-            occurred_at TEXT NOT NULL,
-            phase_before TEXT,
-            phase_after TEXT,
-            strategy_key TEXT,
-            decision_id TEXT,
-            snapshot_id TEXT,
-            order_id TEXT,
-            command_id TEXT,
-            caused_by TEXT,
-            idempotency_key TEXT,
-            venue_status TEXT,
-            source_module TEXT,
-            env TEXT NOT NULL DEFAULT 'live',
-            payload_json TEXT
-        );
-    """)
+    init_schema(conn)
     return conn

@@ -757,6 +757,8 @@ def is_exit_cooldown_active(position: Position) -> bool:
 # Authority basis: Fix A — ghost pending_exit chain-truth sync
 
 _CTF_BALANCE_OF_SELECTOR = "0x00fdd58e"  # balanceOf(address,uint256) keccak256[:4]
+_CTF_SCALE = Decimal("1000000")
+_CHAIN_BALANCE_DUST_SHARES = Decimal("0.01")
 
 
 def _abi_encode_balance_of(owner: str, token_id: str) -> str:
@@ -816,6 +818,12 @@ def _query_ctf_balance(
         return None
 
 
+def _ctf_units_to_shares(raw_units: int | str | Decimal) -> Decimal:
+    """Convert raw ERC-1155 CTF units to Polymarket share units."""
+
+    return Decimal(str(raw_units)) / _CTF_SCALE
+
+
 def _asset_id_for_position(position: Position) -> str:
     """Return the ERC-1155 token ID (asset_id) the position holds."""
     if getattr(position, "direction", "") == "buy_yes":
@@ -867,6 +875,7 @@ def handle_exit_pending_missing(
             asset_id, safe_address, rpc_call=rpc_call
         )
         if on_chain_balance is not None:
+            chain_balance_shares = _ctf_units_to_shares(on_chain_balance)
             if on_chain_balance == 0:
                 # Chain confirms zero balance: position is closed. Void it.
                 logger.info(
@@ -875,18 +884,44 @@ def handle_exit_pending_missing(
                     asset_id,
                 )
                 return _void_chain_confirmed_zero(portfolio, position, asset_id, conn)
+            if chain_balance_shares <= _CHAIN_BALANCE_DUST_SHARES:
+                dust_reason = "EXIT_CHAIN_DUST_STILL_HELD"
+                dust_error = (
+                    f"chain_balance_units={on_chain_balance};"
+                    f"chain_balance_shares={chain_balance_shares};asset_id={asset_id}"
+                )
+                logger.info(
+                    "CHAIN_TRUTH_DUST_HOLD %s: on-chain balance=%s units "
+                    "(%s shares) for asset_id=%s → hold to settlement",
+                    position.trade_id,
+                    on_chain_balance,
+                    chain_balance_shares,
+                    asset_id,
+                )
+                _mark_exit_dust_hold(
+                    position,
+                    reason=dust_reason,
+                    error=dust_error,
+                    conn=conn,
+                )
+                return {"action": "dust_hold", "position": position}
             else:
                 # Position still held on-chain. Re-queue for sell retry.
                 logger.info(
-                    "CHAIN_TRUTH_RETRY %s: on-chain balance=%s for asset_id=%s → retry exit",
+                    "CHAIN_TRUTH_RETRY %s: on-chain balance=%s units "
+                    "(%s shares) for asset_id=%s → retry exit",
                     position.trade_id,
                     on_chain_balance,
+                    chain_balance_shares,
                     asset_id,
                 )
                 _mark_exit_retry(
                     position,
                     reason="EXIT_CHAIN_MISSING_STILL_HELD",
-                    error=f"chain_balance={on_chain_balance};asset_id={asset_id}",
+                    error=(
+                        f"chain_balance_units={on_chain_balance};"
+                        f"chain_balance_shares={chain_balance_shares};asset_id={asset_id}"
+                    ),
                     conn=conn,
                 )
                 return {"action": "retry", "position": position}
