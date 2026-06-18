@@ -3013,6 +3013,48 @@ def _current_monitor_result_probability_and_edge(pos, edge_ctx=None) -> tuple[fl
     return fresh_prob, fresh_edge
 
 
+def _missing_fields_from_incomplete_exit_reason(exit_reason: str) -> set[str]:
+    prefix = "INCOMPLETE_EXIT_CONTEXT (missing="
+    text = str(exit_reason or "")
+    if not text.startswith(prefix) or not text.endswith(")"):
+        return set()
+    return {part.strip() for part in text[len(prefix):-1].split(",") if part.strip()}
+
+
+def _record_incomplete_exit_context_summary(
+    summary: dict,
+    *,
+    pos,
+    exit_reason: str,
+    hours_to_settlement,
+) -> None:
+    summary["monitor_incomplete_exit_context"] = (
+        summary.get("monitor_incomplete_exit_context", 0) + 1
+    )
+    if hours_to_settlement is None or hours_to_settlement > 6.0:
+        return
+    missing_fields = _missing_fields_from_incomplete_exit_reason(exit_reason)
+    reason = f"incomplete_exit_context:{exit_reason}"
+    if missing_fields & {
+        "current_market_price",
+        "current_market_price_is_fresh",
+        "best_bid",
+    }:
+        summary["monitor_exit_quote_missing"] = (
+            summary.get("monitor_exit_quote_missing", 0) + 1
+        )
+        summary.setdefault("monitor_exit_quote_missing_positions", []).append(pos.trade_id)
+        summary.setdefault("monitor_exit_quote_missing_reasons", []).append(
+            {"position_id": pos.trade_id, "reason": reason}
+        )
+        return
+    summary["monitor_chain_missing"] = summary.get("monitor_chain_missing", 0) + 1
+    summary.setdefault("monitor_chain_missing_positions", []).append(pos.trade_id)
+    summary.setdefault("monitor_chain_missing_reasons", []).append(
+        {"position_id": pos.trade_id, "reason": reason}
+    )
+
+
 def _build_exit_context(
     pos,
     edge_ctx,
@@ -3789,16 +3831,12 @@ def execute_monitoring_phase(
                     should_exit = False
                     exit_reason = gate_reason or "INCOMPLETE_EXIT_EVIDENCE"
             if exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
-                summary["monitor_incomplete_exit_context"] = summary.get("monitor_incomplete_exit_context", 0) + 1
-                if hours_to_settlement is not None and hours_to_settlement <= 6.0:
-                    summary["monitor_chain_missing"] = summary.get("monitor_chain_missing", 0) + 1
-                    summary.setdefault("monitor_chain_missing_positions", []).append(pos.trade_id)
-                    summary.setdefault("monitor_chain_missing_reasons", []).append(
-                        {
-                            "position_id": pos.trade_id,
-                            "reason": f"incomplete_exit_context:{exit_reason}",
-                        }
-                    )
+                _record_incomplete_exit_context_summary(
+                    summary,
+                    pos=pos,
+                    exit_reason=exit_reason,
+                    hours_to_settlement=hours_to_settlement,
+                )
                 deps.logger.warning(
                     "Exit authority incomplete for %s: %s",
                     pos.trade_id,

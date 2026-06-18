@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Lifecycle: created=2026-04-28; last_reviewed=2026-06-18; last_reused=2026-06-18
 # Created: 2026-04-28
-# Last reused/audited: 2026-05-22
+# Last reused/audited: 2026-06-18
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -14146,7 +14146,7 @@ def test_monitor_refresh_failure_far_from_settlement_is_not_chain_missing(monkey
     assert artifact.monitor_results == []
 
 
-def test_incomplete_exit_context_near_settlement_escalates_monitor_chain(monkeypatch):
+def test_incomplete_exit_context_missing_exit_quote_is_not_chain_missing(monkeypatch):
     pos = _position(trade_id="monitor-incomplete", state="day0_window")
     portfolio = PortfolioState(positions=[pos])
     artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
@@ -14174,10 +14174,12 @@ def test_incomplete_exit_context_near_settlement_escalates_monitor_chain(monkeyp
     )
 
     assert summary["monitor_incomplete_exit_context"] == 1
-    assert summary["monitor_chain_missing"] == 1
-    assert summary["monitor_chain_missing_reasons"][0]["reason"].startswith(
+    assert summary["monitor_exit_quote_missing"] == 1
+    assert summary["monitor_exit_quote_missing_positions"] == ["monitor-incomplete"]
+    assert summary["monitor_exit_quote_missing_reasons"][0]["reason"].startswith(
         "incomplete_exit_context:INCOMPLETE_EXIT_CONTEXT"
     )
+    assert "monitor_chain_missing" not in summary
     assert len(artifact.monitor_results) == 1
     assert artifact.monitor_results[0].exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT")
     assert artifact.monitor_results[0].fresh_prob is None
