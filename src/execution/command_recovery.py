@@ -807,6 +807,67 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
     return [_dict_row(row) for row in rows]
 
 
+def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not (
+        _table_exists(conn, "venue_order_facts")
+        and _table_exists(conn, "venue_command_events")
+        and _table_exists(conn, "position_current")
+    ):
+        return []
+    sql = "WITH " + _canonical_order_truth_cte() + """
+        SELECT
+            cmd.command_id AS command_id,
+            cmd.venue_order_id AS venue_order_id,
+            cmd.state AS command_state,
+            cmd.size AS command_size,
+            cmd.position_id AS position_id,
+            terminal_event.occurred_at AS terminal_event_occurred_at,
+            fact.fact_id AS latest_order_fact_id,
+            fact.state AS latest_order_fact_state,
+            fact.remaining_size AS latest_order_fact_remaining_size,
+            fact.matched_size AS latest_order_fact_matched_size,
+            fact.source AS latest_order_fact_source
+          FROM venue_commands cmd
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+          JOIN canonical_order_truth fact
+            ON fact.command_id = cmd.command_id
+           AND fact.venue_order_id = cmd.venue_order_id
+          JOIN (
+                SELECT command_id, MAX(occurred_at) AS occurred_at
+                  FROM venue_command_events
+                 WHERE event_type IN ('CANCEL_ACKED', 'EXPIRED')
+                 GROUP BY command_id
+          ) terminal_event
+            ON terminal_event.command_id = cmd.command_id
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.state IN ('CANCELLED', 'EXPIRED')
+           AND cmd.venue_order_id IS NOT NULL
+           AND cmd.venue_order_id != ''
+           AND pc.phase = 'pending_entry'
+           AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
+           AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+           AND CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM venue_trade_facts trade
+                 WHERE trade.command_id = cmd.command_id
+                   AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM venue_order_facts terminal_fact
+                 WHERE terminal_fact.command_id = cmd.command_id
+                   AND terminal_fact.venue_order_id = cmd.venue_order_id
+                   AND terminal_fact.state IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+                   AND CAST(COALESCE(terminal_fact.matched_size, '0') AS REAL) = 0
+           )
+         ORDER BY terminal_event.occurred_at, cmd.command_id
+        """
+    rows = conn.execute(sql).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
 def _local_orphan_no_fill_candidates(conn: sqlite3.Connection) -> list[dict]:
     if not _table_exists(conn, "exchange_reconcile_findings"):
         return []
@@ -4090,6 +4151,88 @@ def _append_point_order_terminal_no_fill_fact(
         raw_payload_json=payload,
     )
     return fact_id, payload
+
+
+def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dict:
+    """Materialize terminal no-fill order facts from already-acked cancels.
+
+    A CANCEL_ACKED command event is venue-side evidence that the entry order left
+    the book. If the local command has no positive trade facts and its
+    pending_entry projection has zero exposure, the missing terminal order fact is
+    a stale read-model gap. Append that fact so the existing terminal-order-fact
+    reducer can void the pending entry projection.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for row in _cancel_ack_terminal_no_fill_fact_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(row.get("command_id") or "")
+        venue_order_id = str(row.get("venue_order_id") or "")
+        command_state = str(row.get("command_state") or "")
+        fact_state = _terminal_fact_state_for_venue_status(
+            command_state,
+            venue_resp_present=True,
+        )
+        if fact_state is None:
+            summary["stayed"] += 1
+            continue
+        occurred_at = str(row.get("terminal_event_occurred_at") or _now_iso())
+        remaining_size = str(
+            row.get("latest_order_fact_remaining_size")
+            or row.get("command_size")
+            or "0"
+        )
+        payload = {
+            "reason": "cancel_ack_terminal_no_fill",
+            "proof_class": "cancel_ack_plus_zero_pending_projection",
+            "command_id": command_id,
+            "venue_order_id": venue_order_id,
+            "command_state": command_state,
+            "terminal_fact_state": fact_state,
+            "latest_order_fact_id": row.get("latest_order_fact_id"),
+            "latest_order_fact_state": row.get("latest_order_fact_state"),
+            "latest_order_fact_source": row.get("latest_order_fact_source"),
+            "remaining_size": remaining_size,
+            "matched_size": "0",
+            "required_predicates": {
+                "entry_command_terminal": True,
+                "cancel_or_expire_event_observed": True,
+                "latest_order_fact_matches_command_order": True,
+                "latest_order_fact_no_fill": True,
+                "pending_entry_projection_zero_exposure": True,
+                "no_positive_trade_facts": True,
+                "no_existing_terminal_order_fact": True,
+            },
+        }
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+        sp_name = f"sp_cancel_ack_no_fill_fact_{safe_command_id}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            append_order_fact(
+                conn,
+                venue_order_id=venue_order_id,
+                command_id=command_id,
+                state=fact_state,
+                remaining_size=remaining_size,
+                matched_size="0",
+                source="REST",
+                observed_at=occurred_at,
+                venue_timestamp=occurred_at,
+                raw_payload_hash=_payload_hash(payload),
+                raw_payload_json=payload,
+            )
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            summary["advanced"] += 1
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: cancel-ack terminal no-fill fact failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def reconcile_local_orphan_no_fill_findings(conn: sqlite3.Connection, client) -> dict:
@@ -7412,6 +7555,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += terminal_point_summary["stayed"]
         summary["errors"] += terminal_point_summary["errors"]
 
+        cancel_ack_terminal_summary = reconcile_cancel_ack_terminal_no_fill_facts(conn)
+        summary["cancel_ack_terminal_no_fill_facts"] = cancel_ack_terminal_summary
+        summary["advanced"] += cancel_ack_terminal_summary["advanced"]
+        summary["stayed"] += cancel_ack_terminal_summary["stayed"]
+        summary["errors"] += cancel_ack_terminal_summary["errors"]
+
         terminal_summary = reconcile_terminal_order_facts(conn)
         summary["terminal_order_facts"] = terminal_summary
         summary["advanced"] += terminal_summary["advanced"]
@@ -7716,6 +7865,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
                  reconcile_local_orphan_no_fill_findings, "local_orphan_no_fill_findings")
     _client_pass("terminal_point_orders",
                  reconcile_terminal_point_orders, "terminal_point_orders")
+    _db_pass("cancel_ack_terminal_no_fill_facts",
+             reconcile_cancel_ack_terminal_no_fill_facts, "cancel_ack_terminal_no_fill_facts")
     _db_pass("terminal_order_facts", reconcile_terminal_order_facts, "terminal_order_facts")
     _db_pass("stale_terminal_no_fill_findings",
              reconcile_stale_terminal_no_fill_findings, "stale_terminal_no_fill_findings")

@@ -2238,6 +2238,133 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_cancel_acked_zero_fill_without_terminal_fact_voids_pending_entry(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.35, price=0.60)
+        _advance_to_acked(conn, venue_order_id="ord-cancelled")
+        _seed_pending_entry_projection(conn, order_id="ord-cancelled")
+        _append_order_fact(
+            conn,
+            order_id="ord-cancelled",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10.35",
+            source="REST",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={"venue_order_id": "ord-cancelled"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={"venue_order_id": "ord-cancelled", "venue_status": "CANCELED"},
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["cancel_ack_terminal_no_fill_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert summary["terminal_order_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "voided"
+        assert Decimal(str(current["shares"])) == Decimal("0")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
+        assert current["order_status"] == "canceled"
+        terminal_fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert terminal_fact["state"] == "CANCEL_CONFIRMED"
+        assert Decimal(str(terminal_fact["matched_size"])) == Decimal("0")
+        assert Decimal(str(terminal_fact["remaining_size"])) == Decimal("10.35")
+        assert json.loads(terminal_fact["raw_payload_json"])["proof_class"] == (
+            "cancel_ack_plus_zero_pending_projection"
+        )
+
+    def test_cancel_acked_zero_fill_with_positive_trade_fact_stays_pending(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.35, price=0.60)
+        _advance_to_acked(conn, venue_order_id="ord-cancelled")
+        _seed_pending_entry_projection(conn, order_id="ord-cancelled")
+        _append_order_fact(
+            conn,
+            order_id="ord-cancelled",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10.35",
+            source="REST",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-001",
+            order_id="ord-cancelled",
+            filled_size="1.00",
+            fill_price="0.60",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={"venue_order_id": "ord-cancelled"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={"venue_order_id": "ord-cancelled", "venue_status": "CANCELED"},
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["cancel_ack_terminal_no_fill_facts"] == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] != "voided"
+
     def test_acked_live_order_fact_with_point_order_matched_records_fill(
         self,
         conn,
