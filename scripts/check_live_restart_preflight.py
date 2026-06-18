@@ -490,6 +490,9 @@ def _forecast_sidecar_health() -> CheckResult:
         if status == "FAILED":
             risky.append({"job": job_name, "risk": "scheduler_job_failed", **item})
             continue
+        if status != "OK":
+            risky.append({"job": job_name, "risk": "scheduler_job_not_ok", **item})
+            continue
         if last_failure is not None and (last_success is None or last_failure > last_success):
             risky.append({"job": job_name, "risk": "latest_scheduler_outcome_failed", **item})
 
@@ -514,6 +517,18 @@ def _forecast_sidecar_health() -> CheckResult:
                 "risk": "forecast_live_code_head_mismatch",
                 "heartbeat_git_head": heartbeat.get("git_head"),
                 "current_git_head": current_git_head,
+            }
+        )
+    heartbeat_jobs_raw = heartbeat.get("jobs")
+    heartbeat_jobs = set(heartbeat_jobs_raw) if isinstance(heartbeat_jobs_raw, list) else set()
+    missing_heartbeat_jobs = sorted(set(REPLACEMENT_SIDECAR_JOBS) - heartbeat_jobs)
+    if missing_heartbeat_jobs:
+        risky.append(
+            {
+                "job": "forecast-live-heartbeat",
+                "risk": "forecast_live_heartbeat_missing_replacement_jobs",
+                "missing_jobs": missing_heartbeat_jobs,
+                "heartbeat_jobs": sorted(heartbeat_jobs),
             }
         )
 

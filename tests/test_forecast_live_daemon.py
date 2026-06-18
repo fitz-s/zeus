@@ -149,6 +149,67 @@ def test_forecast_live_replacement_cutover_heartbeat_payload_names_active_jobs(m
     assert payload["jobs"] == [FORECAST_LIVE_HEARTBEAT_JOB_ID]
 
 
+def test_forecast_live_heartbeat_payload_uses_registered_scheduler_jobs(monkeypatch, tmp_path) -> None:
+    import src.ingest.forecast_live_daemon as forecast_live_daemon
+    from src.ingest.forecast_live_daemon import (
+        REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID,
+        REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
+        _write_forecast_live_heartbeat,
+    )
+
+    class _Job:
+        def __init__(self, job_id: str) -> None:
+            self.id = job_id
+
+    class _Scheduler:
+        def get_jobs(self):
+            return [
+                _Job("forecast_live_heartbeat"),
+                _Job(REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID),
+                _Job(REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID),
+            ]
+
+    monkeypatch.setattr(forecast_live_daemon, "_scheduler", _Scheduler())
+    heartbeat_path = tmp_path / "forecast-live-heartbeat.json"
+
+    _write_forecast_live_heartbeat(
+        heartbeat_path=heartbeat_path,
+        status="scheduler_ready",
+        now_utc=datetime(2026, 6, 18, 22, 0, tzinfo=timezone.utc),
+    )
+
+    payload = json.loads(heartbeat_path.read_text())
+    assert payload["jobs"] == [
+        "forecast_live_heartbeat",
+        REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID,
+        REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
+    ]
+
+
+def test_scheduler_job_marks_started_before_success(monkeypatch) -> None:
+    import src.observability.scheduler_health as scheduler_health
+    from src.ingest.forecast_live_daemon import _scheduler_job
+
+    writes: list[dict[str, object]] = []
+
+    def _record(job_name: str, **kwargs: object) -> None:
+        writes.append({"job_name": job_name, **kwargs})
+
+    monkeypatch.setattr(scheduler_health, "_write_scheduler_health", _record)
+
+    @_scheduler_job("example_long_job")
+    def _job() -> None:
+        writes.append({"job_name": "example_long_job", "inside_job": True})
+
+    _job()
+
+    assert writes == [
+        {"job_name": "example_long_job", "failed": False, "started": True},
+        {"job_name": "example_long_job", "inside_job": True},
+        {"job_name": "example_long_job", "failed": False, "reason": None},
+    ]
+
+
 def test_replacement_materialize_job_calls_undecorated_production_inner(monkeypatch) -> None:
     """A nested scheduler wrapper must not convert production failure into OK health."""
 

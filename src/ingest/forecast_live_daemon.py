@@ -150,6 +150,18 @@ def _active_forecast_live_job_ids() -> frozenset[str]:
     return FORECAST_LIVE_JOB_IDS
 
 
+def _heartbeat_job_ids() -> frozenset[str]:
+    if _scheduler is not None:
+        try:
+            job_ids = frozenset(str(job.id) for job in _scheduler.get_jobs())
+        except Exception as exc:
+            logger.warning("forecast-live heartbeat scheduler job snapshot failed: %s", exc)
+        else:
+            if job_ids:
+                return job_ids
+    return _active_forecast_live_job_ids()
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -172,7 +184,7 @@ def _write_forecast_live_heartbeat(
         "written_at": now.isoformat(),
         "pid": os.getpid(),
         "git_head": _PROCESS_GIT_HEAD,
-        "jobs": sorted(_active_forecast_live_job_ids()),
+        "jobs": sorted(_heartbeat_job_ids()),
         "cadence_seconds": FORECAST_LIVE_HEARTBEAT_SECONDS,
     }
     try:
@@ -248,9 +260,10 @@ def _scheduler_job(job_name: str):
         @functools.wraps(fn)
         def _wrapper(*args, **kwargs):
             try:
-                result = fn(*args, **kwargs)
                 from src.observability.scheduler_health import _write_scheduler_health
 
+                _write_scheduler_health(job_name, failed=False, started=True)
+                result = fn(*args, **kwargs)
                 failed, reason = _classify_result(result)
                 _write_scheduler_health(job_name, failed=failed, reason=reason)
                 return result
