@@ -2485,6 +2485,108 @@ def _venue_order_id_from_payload(payload: Optional[dict]) -> str | None:
     return None
 
 
+def repair_command_position_link_if_orphaned(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    canonical_position_id: str,
+    occurred_at: str,
+    reason: str,
+) -> bool:
+    """Relink a command journal row to an existing canonical position.
+
+    This is intentionally narrower than a generic position_id edit. It only
+    repairs the EDLI bridge shape where a command still points at a pre-bridge
+    short id that has no ``position_current`` row, while the canonical EDLI
+    ``position_current`` row already exists. If the command already points at a
+    different real position, the function refuses to overwrite it.
+    """
+
+    command_id = _require_nonempty("command_id", command_id)
+    canonical_position_id = _require_nonempty("canonical_position_id", canonical_position_id)
+    occurred_at = _validate_observed_at(occurred_at)
+    reason = _require_nonempty("reason", reason)
+
+    with _row_factory_as(conn, sqlite3.Row):
+        command = conn.execute(
+            """
+            SELECT command_id, position_id, state
+              FROM venue_commands
+             WHERE command_id = ?
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        if command is None:
+            return False
+
+        current_position_id = str(command["position_id"] or "")
+        if current_position_id == canonical_position_id:
+            return False
+
+        canonical_exists = conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = ? LIMIT 1",
+            (canonical_position_id,),
+        ).fetchone()
+        if canonical_exists is None:
+            raise ValueError(
+                "command position-link repair requires canonical position_current row"
+            )
+
+        current_exists = None
+        if current_position_id:
+            current_exists = conn.execute(
+                "SELECT 1 FROM position_current WHERE position_id = ? LIMIT 1",
+                (current_position_id,),
+            ).fetchone()
+        if current_exists is not None:
+            raise ValueError(
+                "command position-link repair refuses to overwrite a command "
+                "that already points at an existing position_current row"
+            )
+
+        updated = conn.execute(
+            """
+            UPDATE venue_commands
+               SET position_id = ?,
+                   updated_at = ?
+             WHERE command_id = ?
+               AND position_id = ?
+            """,
+            (
+                canonical_position_id,
+                occurred_at,
+                command_id,
+                current_position_id,
+            ),
+        ).rowcount
+
+    if not updated:
+        return False
+
+    append_provenance_event(
+        conn,
+        subject_type="command",
+        subject_id=command_id,
+        event_type="POSITION_LINK_REPAIRED",
+        payload_hash=_payload_hash(
+            {
+                "canonical_position_id": canonical_position_id,
+                "previous_position_id": current_position_id,
+                "reason": reason,
+            }
+        ),
+        payload_json={
+            "canonical_position_id": canonical_position_id,
+            "previous_position_id": current_position_id,
+            "reason": reason,
+        },
+        source="WS_USER",
+        observed_at=occurred_at,
+    )
+    return True
+
+
 def _append_command_provenance_event(
     conn: sqlite3.Connection,
     *,

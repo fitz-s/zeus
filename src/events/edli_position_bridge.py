@@ -830,6 +830,89 @@ def _posterior_id_for_final_intent(
         return None
 
 
+def _row_value(row: sqlite3.Row | tuple | None, key: str, index: int) -> Any:
+    if row is None:
+        return None
+    if isinstance(row, sqlite3.Row):
+        return row[key]
+    return row[index]
+
+
+def _venue_command_row_for_execution_command_id(
+    conn: sqlite3.Connection,
+    execution_command_id: str | None,
+) -> sqlite3.Row | tuple | None:
+    """Find the venue command row that corresponds to an EDLI execution command.
+
+    Live EDLI commands have historically stored the EDLI execution command id in
+    ``venue_commands.decision_id`` while ``venue_commands.command_id`` remains
+    the shorter command-journal id. Probe both fields so bridge projection,
+    execution_fact, and command-journal links all converge on the same command.
+    """
+
+    execution_command_id = str(execution_command_id or "").strip()
+    if not execution_command_id:
+        return None
+    try:
+        return conn.execute(
+            """
+            SELECT command_id, position_id, created_at
+              FROM venue_commands
+             WHERE command_id = ?
+                OR decision_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            (execution_command_id, execution_command_id),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+
+
+def sync_venue_command_position_link_for_edli_fill(
+    conn: sqlite3.Connection,
+    aggregate_id: str,
+    *,
+    position_id: str | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Relink an EDLI filled command to its canonical position_current row.
+
+    This does not create positions and does not overwrite a command that already
+    points at another existing position. It only cures the EDLI bridge split
+    where the command journal kept its pre-bridge short ``position_id`` after
+    the confirmed fill was projected under the deterministic EDLI position id.
+    """
+
+    if not aggregate_id:
+        return False
+    events = _aggregate_event_rows(conn, aggregate_id)
+    if not events or not _has_confirmed_fill(events):
+        return False
+    identity = _resolve_identity(events)
+    command_row = _venue_command_row_for_execution_command_id(
+        conn,
+        identity.get("execution_command_id"),
+    )
+    command_id = str(_row_value(command_row, "command_id", 0) or "")
+    if not command_id:
+        return False
+    canonical_position_id = str(position_id or edli_bridge_position_id(aggregate_id)).strip()
+    if not canonical_position_id:
+        return False
+
+    from src.state.venue_command_repo import repair_command_position_link_if_orphaned
+
+    observed_at = (now or datetime.now(timezone.utc)).isoformat()
+    return repair_command_position_link_if_orphaned(
+        conn,
+        command_id=command_id,
+        canonical_position_id=canonical_position_id,
+        occurred_at=observed_at,
+        reason="edli_confirmed_fill_bridge_canonical_position_id",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Settled-market routing + quarantine disposition helpers
 # ---------------------------------------------------------------------------
@@ -1097,17 +1180,12 @@ def materialize_position_current_from_edli_fill(
     # (venue_commands.created_at). If the command row is absent, posted_at stays
     # NULL so latency_seconds computes NULL (honest absence, not synthetic 0.0).
     _cmd_id = identity.get("execution_command_id") or ""
+    _cmd_row = _venue_command_row_for_execution_command_id(conn, _cmd_id)
+    _actual_command_id = str(_row_value(_cmd_row, "command_id", 0) or _cmd_id or "")
     _cmd_created_at: str | None = None
-    if _cmd_id:
-        try:
-            _cmd_row = conn.execute(
-                "SELECT created_at FROM venue_commands WHERE command_id = ? LIMIT 1",
-                (_cmd_id,),
-            ).fetchone()
-            if _cmd_row is not None:
-                _cmd_created_at = str(_cmd_row[0]) if _cmd_row[0] else None
-        except Exception:
-            pass  # Table absent (legacy DB) — posted_at stays NULL
+    if _cmd_row is not None:
+        _created_at = _row_value(_cmd_row, "created_at", 2)
+        _cmd_created_at = str(_created_at) if _created_at else None
 
     pos = _build_bridge_position(
         aggregate_id=aggregate_id,
@@ -1161,6 +1239,13 @@ def materialize_position_current_from_edli_fill(
         upsert_position_current(conn, projection)
         created = False
 
+    sync_venue_command_position_link_for_edli_fill(
+        conn,
+        aggregate_id,
+        position_id=position_id,
+        now=now,
+    )
+
     # H2_E2E: populate execution_fact.posterior_id at the PRIMARY entry-fill
     # reconcile from the actually-written receipt source (edli_no_submit_receipts,
     # joined on the real final_intent_id). Fail-soft: None on any miss, COALESCEd
@@ -1180,7 +1265,7 @@ def materialize_position_current_from_edli_fill(
         position_id=position_id,
         order_role="entry",
         decision_id=identity["final_intent_id"] or None,
-        command_id=identity["execution_command_id"] or None,
+        command_id=_actual_command_id or None,
         strategy_key=str(identity["strategy_key"]),
         # C4 telemetry-truth: posted_at = venue_commands.created_at (real
         # submit-intent time); NULL if command row absent (honest absence, so

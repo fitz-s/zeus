@@ -2916,6 +2916,202 @@ class TestRecoveryResolutionTable:
             "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone() is None
 
+    def test_filled_entry_repair_recovers_from_command_snapshot_market_event(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Filled entry repair can recover when decision_log/EDLI rows are absent.
+
+        Regression for live command rows that had confirmed venue_trade_facts and
+        immutable command envelope/snapshot identity, but no decision_log or EDLI
+        event rows. Recovery must use those persisted command surfaces plus
+        market_events instead of leaving real filled exposure invisible.
+        """
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_events (
+                event_id TEXT,
+                market_slug TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                condition_id TEXT,
+                token_id TEXT,
+                range_label TEXT,
+                range_low REAL,
+                range_high REAL,
+                outcome TEXT,
+                created_at TEXT,
+                recorded_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO market_events (
+                event_id, market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label, outcome, created_at, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "event-shanghai-29c",
+                "highest-temperature-in-shanghai-on-june-19-2026",
+                "Shanghai",
+                "2026-04-27",
+                "high",
+                "condition-test",
+                "tok-001-no",
+                "Will the highest temperature in Shanghai be 29°C on April 27?",
+                "Will the highest temperature in Shanghai be 29°C on April 27?",
+                "2026-04-26T00:00:00Z",
+                "2026-04-26T00:00:00Z",
+            ),
+        )
+        _insert(
+            conn,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+            outcome_label="NO",
+            decision_id="edli_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
+            size=5.0,
+            price=0.34,
+        )
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-001", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+
+        from src.execution.command_recovery import reconcile_filled_entry_projection_repairs
+
+        summary = reconcile_filled_entry_projection_repairs(conn, mock_client)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, city, target_date, direction, token_id, no_token_id,
+                   shares, cost_basis_usd, strategy_key, temperature_metric, unit
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "city": "Shanghai",
+            "target_date": "2026-04-27",
+            "direction": "buy_no",
+            "token_id": "tok-001",
+            "no_token_id": "tok-001-no",
+            "shares": 5.0,
+            "cost_basis_usd": 1.7,
+            "strategy_key": "opening_inertia",
+            "temperature_metric": "high",
+            "unit": "C",
+        }
+        execution = conn.execute(
+            """
+            SELECT command_id, shares, fill_price, terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "command_id": "cmd-001",
+            "shares": 5.0,
+            "fill_price": 0.34,
+            "terminal_exec_status": "filled",
+        }
+
+    def test_filled_entry_position_link_repair_relinks_existing_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Filled command journal rows converge to the existing exposure row."""
+        _insert(
+            conn,
+            position_id="stale-pos-001",
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+            outcome_label="NO",
+            size=5.0,
+            price=0.34,
+        )
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-001", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, last_monitor_prob,
+                last_monitor_edge, last_monitor_market_price, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric
+            ) VALUES (
+                'canonical-pos-001', 'active', 'canonical-pos-001',
+                'condition-test', 'Shanghai', 'Shanghai', '2026-04-27',
+                'Will high be 29°C?', 'buy_no', 'C', 1.7, 5, 1.7, 0.34,
+                0.8, NULL, NULL, NULL, 'snap-1', 'ens_member_counting',
+                'opening_inertia', 'opening_inertia', 'opening_hunt',
+                'synced', 'tok-001', 'tok-001-no', 'condition-test',
+                'ord-001', 'filled', '2026-04-26T00:06:00Z', 'high'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import reconcile_filled_entry_position_link_repairs
+
+        summary = reconcile_filled_entry_position_link_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        command = conn.execute(
+            "SELECT position_id FROM venue_commands WHERE command_id = 'cmd-001'"
+        ).fetchone()
+        assert command["position_id"] == "canonical-pos-001"
+        assert conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 1
+        provenance = conn.execute(
+            """
+            SELECT event_type, payload_json
+              FROM provenance_envelope_events
+             WHERE subject_type = 'command'
+               AND subject_id = 'cmd-001'
+               AND event_type = 'POSITION_LINK_REPAIRED'
+            """
+        ).fetchone()
+        assert provenance is not None
+        assert "stale-pos-001" in provenance["payload_json"]
+        assert "canonical-pos-001" in provenance["payload_json"]
+
     def test_filled_entry_repair_does_not_duplicate_existing_order_token_projection(
         self,
         conn,
