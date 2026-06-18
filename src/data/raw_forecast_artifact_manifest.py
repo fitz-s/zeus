@@ -1,4 +1,4 @@
-"""Raw forecast artifact manifest helpers for shadow replacement research."""
+"""Raw forecast artifact manifest helpers for replacement forecast input provenance."""
 
 from __future__ import annotations
 
@@ -92,7 +92,6 @@ class RawForecastArtifactManifest:
     captured_at: datetime
     request_url: str
     request_params: Mapping[str, Any]
-    trade_authority_status: str = "SHADOW_ONLY"
     training_allowed: bool = False
     product_metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -122,8 +121,6 @@ class RawForecastArtifactManifest:
             raise ValueError("source_available_at cannot precede source_cycle_time")
         if self.captured_at < self.source_available_at:
             raise ValueError("captured_at cannot precede source_available_at")
-        if self.trade_authority_status != "SHADOW_ONLY":
-            raise ValueError("raw forecast artifacts cannot grant trade authority")
         if self.training_allowed:
             raise ValueError("raw forecast artifacts default to training_allowed=false")
 
@@ -337,9 +334,9 @@ def write_manifest_to_db(
 ) -> int:
     """Persist a verified raw forecast artifact manifest into forecast DB.
 
-    The manifest remains shadow-only evidence. The returned artifact_id is the
-    only value downstream materializers should use when linking derived rows to
-    raw files.
+    The manifest is input provenance, not a trade-authority carrier. The returned
+    artifact_id is the only value downstream materializers should use when linking
+    derived rows to raw files.
     """
 
     if not isinstance(manifest, RawForecastArtifactManifest):
@@ -353,8 +350,8 @@ def write_manifest_to_db(
             source_id, product_id, data_version, source_cycle_time,
             source_available_at, captured_at, artifact_path, sha256,
             byte_size, request_url, request_params_json,
-            artifact_metadata_json, trade_authority_status, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            artifact_metadata_json, training_allowed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_id, product_id, data_version, source_cycle_time, sha256)
         DO UPDATE SET
             source_available_at = excluded.source_available_at,
@@ -364,7 +361,6 @@ def write_manifest_to_db(
             request_url = excluded.request_url,
             request_params_json = excluded.request_params_json,
             artifact_metadata_json = excluded.artifact_metadata_json,
-            trade_authority_status = excluded.trade_authority_status,
             training_allowed = excluded.training_allowed
         """,
         (
@@ -380,7 +376,6 @@ def write_manifest_to_db(
             manifest.request_url,
             json.dumps(dict(manifest.request_params), sort_keys=True, separators=(",", ":"), default=str),
             json.dumps(dict(manifest.product_metadata), sort_keys=True, separators=(",", ":"), default=str),
-            manifest.trade_authority_status,
             1 if manifest.training_allowed else 0,
         ),
     )

@@ -65,6 +65,8 @@ def test_replacement_shadow_tables_are_forecast_class_only() -> None:
         forecast_conn,
         "forecast_posteriors",
     )
+    assert "runtime_layer" in _columns(forecast_conn, "forecast_posteriors")
+    assert "trade_authority_status" not in _columns(forecast_conn, "forecast_posteriors")
     assert {"market_snapshot_id", "allowed_direction", "allowed_q_lcb", "allowed_kelly_fraction", "veto_reason"} <= _columns(
         forecast_conn,
         "replacement_shadow_decisions",
@@ -186,8 +188,8 @@ def test_replacement_posteriors_and_decisions_cannot_increase_authority_shape() 
         INSERT INTO forecast_posteriors (
             source_id, product_id, data_version, city, target_date,
             temperature_metric, source_cycle_time, source_available_at,
-            computed_at, q_json, posterior_method, trade_authority_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            computed_at, q_json, posterior_method
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
@@ -201,10 +203,38 @@ def test_replacement_posteriors_and_decisions_cannot_increase_authority_shape() 
             "2026-06-06T02:05:00+00:00",
             '{"warm": 1.0}',
             "openmeteo_ifs9_aifs_sampled_2t_soft_anchor",
-            "SHADOW_VETO_ONLY",
         ),
     )
     posterior_id = conn.execute("SELECT posterior_id FROM forecast_posteriors").fetchone()[0]
+    assert conn.execute(
+        "SELECT runtime_layer FROM forecast_posteriors WHERE posterior_id = ?",
+        (posterior_id,),
+    ).fetchone()[0] == "live"
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO forecast_posteriors (
+                source_id, product_id, data_version, city, target_date,
+                temperature_metric, source_cycle_time, source_available_at,
+                computed_at, q_json, posterior_method, runtime_layer
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
+                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1",
+                "Shanghai",
+                "2026-06-06",
+                "high",
+                "2026-06-06T06:00:00+00:00",
+                "2026-06-06T08:00:00+00:00",
+                "2026-06-06T08:05:00+00:00",
+                '{"warm": 1.0}',
+                "openmeteo_ifs9_aifs_sampled_2t_soft_anchor",
+                "experiment",
+            ),
+        )
 
     conn.execute(
         """
@@ -236,7 +266,7 @@ def test_replacement_posteriors_and_decisions_cannot_increase_authority_shape() 
         ),
     )
 
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(sqlite3.OperationalError):
         conn.execute(
             """
             INSERT INTO replacement_shadow_decisions (

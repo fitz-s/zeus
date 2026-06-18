@@ -57,7 +57,7 @@ def forecasts_db(tmp_path):
             posterior_id TEXT, city TEXT, target_date TEXT,
             temperature_metric TEXT, computed_at TEXT, q_json TEXT,
             source_cycle_time TEXT,
-            trade_authority_status TEXT NOT NULL DEFAULT 'LIVE_AUTHORITY'
+            runtime_layer TEXT
         )
         """
     )
@@ -68,7 +68,7 @@ def forecasts_db(tmp_path):
 
 def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             target_date="2026-06-12", metric="high", source_cycle_time=None,
-            trade_authority_status="LIVE_AUTHORITY"):
+            runtime_layer="live"):
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?)",
@@ -80,7 +80,7 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             computed_at,
             json.dumps(q),
             source_cycle_time,
-            trade_authority_status,
+            runtime_layer,
         ),
     )
     conn.commit()
@@ -127,22 +127,22 @@ class TestLoadReplacementBelief:
         belief = _load(forecasts_db)
         assert belief.posterior_id == "new"
         assert belief.q_yes_bin == pytest.approx(0.30)
-        assert belief.trade_authority_status == "LIVE_AUTHORITY"
+        assert belief.runtime_layer == "live"
 
-    def test_newer_diagnostic_row_cannot_override_live_authority(self, forecasts_db):
+    def test_newer_non_live_row_cannot_override_live_runtime_layer(self, forecasts_db):
         _insert(
             forecasts_db,
             posterior_id="live",
             computed_at=(NOW - timedelta(hours=2)).isoformat(),
             q={BIN: 0.20},
-            trade_authority_status="LIVE_AUTHORITY",
+            runtime_layer="live",
         )
         _insert(
             forecasts_db,
-            posterior_id="diagnostic",
+            posterior_id="non-live",
             computed_at=(NOW - timedelta(minutes=5)).isoformat(),
             q={BIN: 0.80},
-            trade_authority_status="DIAGNOSTIC_ONLY",
+            runtime_layer=None,
         )
 
         belief = _load(forecasts_db)
@@ -151,13 +151,13 @@ class TestLoadReplacementBelief:
         assert belief.posterior_id == "live"
         assert belief.q_yes_bin == pytest.approx(0.20)
 
-    def test_only_diagnostic_rows_fail_closed(self, forecasts_db):
+    def test_only_non_live_rows_fail_closed(self, forecasts_db):
         _insert(
             forecasts_db,
-            posterior_id="diagnostic",
+            posterior_id="non-live",
             computed_at=(NOW - timedelta(minutes=5)).isoformat(),
             q={BIN: 0.80},
-            trade_authority_status="DIAGNOSTIC_ONLY",
+            runtime_layer=None,
         )
 
         assert _load(forecasts_db) is None

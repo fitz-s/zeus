@@ -74,6 +74,28 @@ def _live_switch(policy=None, *, current: bool = True):
     )
 
 
+def test_live_switch_does_not_require_shadow_decision_table() -> None:
+    assert "replacement_shadow_decisions" not in REQUIRED_FORECAST_TABLES
+    tables_without_shadow = tuple(
+        table for table in REQUIRED_FORECAST_TABLES if table != "replacement_shadow_decisions"
+    )
+    report = build_replacement_forecast_live_switch_report(
+        ReplacementForecastLiveSwitchInput(
+            runtime_policy=_policy(),
+            available_files=tuple(REQUIRED_LIVE_READ_FILES),
+            forecast_tables=tables_without_shadow,
+            world_tables=tuple(REQUIRED_WORLD_TABLES),
+            trade_tables=tuple(REQUIRED_TRADE_TABLES),
+            enabled_evidence_gates=tuple(REQUIRED_EVIDENCE_GATES),
+            source_fact_status="CURRENT_FOR_LIVE",
+            data_fact_status="CURRENT_FOR_LIVE",
+        )
+    )
+
+    assert report.live_authority_ready is True
+    assert "REPLACEMENT_SWITCH_MISSING_READ_TABLES" not in report.reason_codes
+
+
 def _readiness(*, ready: bool = True):
     dependencies = (
         ReplacementForecastDependency(

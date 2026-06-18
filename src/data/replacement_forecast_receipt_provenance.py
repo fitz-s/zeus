@@ -10,18 +10,17 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from src.data.replacement_forecast_guardrail_report import ReplacementForecastGuardrailReport
-from src.data.replacement_forecast_readiness import READY_STATUS, ReplacementForecastReadinessDecision
+from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, READY_STATUS, ReplacementForecastReadinessDecision
 
 
-SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
-PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
+SOURCE_ID = "openmeteo_ecmwf_ifs9_bayes_fusion"
+PRODUCT_ID = "openmeteo_ecmwf_ifs9_bayes_fusion_v1"
 STRATEGY_KEY = SOURCE_ID
 RECEIPT_ROLE = "forecast_attribution_only"
 SETTLEMENT_AUTHORITY_STATUS = "NO_SETTLEMENT_AUTHORITY"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
-_ALLOWED_TRADE_AUTHORITY_STATUS = {"DIAGNOSTIC_ONLY", "LIVE_AUTHORITY"}
 _CORE_DEPENDENCY_ROLES = ("baseline_b0", "openmeteo_ifs9_anchor", "soft_anchor_posterior")
-_KNOWN_DEPENDENCY_ROLES = (*_CORE_DEPENDENCY_ROLES, "aifs_sampled_2t")
+_KNOWN_DEPENDENCY_ROLES = _CORE_DEPENDENCY_ROLES
 _FORBIDDEN_SETTLEMENT_KEYS = {
     "settlement_value",
     "settlement_outcome",
@@ -152,8 +151,8 @@ class ReplacementForecastReceiptProvenance:
             raise ValueError("replacement receipt provenance must not enable training")
         if self.payload.get("promotion_allowed") is not False:
             raise ValueError("replacement receipt provenance cannot authorize promotion")
-        if self.payload.get("trade_authority_status") not in _ALLOWED_TRADE_AUTHORITY_STATUS:
-            raise ValueError("replacement receipt provenance trade authority status is invalid")
+        if self.payload.get("runtime_layer") != LIVE_RUNTIME_LAYER:
+            raise ValueError("replacement receipt provenance runtime layer is invalid")
         for key in ("source_id", "product_id", "strategy_key"):
             _require_text(self.payload[key], field_name=key)
 
@@ -179,9 +178,9 @@ def build_replacement_forecast_receipt_provenance(
         raise TypeError("readiness must be ReplacementForecastReadinessDecision")
     if readiness.status != READY_STATUS:
         raise ValueError("replacement receipt provenance requires READY readiness")
-    trade_authority_status = _require_text(_read_attr(veto_decision, "trade_authority_status"), field_name="trade_authority_status")
-    if trade_authority_status not in _ALLOWED_TRADE_AUTHORITY_STATUS:
-        raise ValueError("replacement receipt provenance trade authority status is invalid")
+    runtime_layer = _require_text(_read_attr(veto_decision, "runtime_layer"), field_name="runtime_layer")
+    if runtime_layer != LIVE_RUNTIME_LAYER:
+        raise ValueError("replacement receipt provenance runtime layer is invalid")
     product_id = _require_text(_read_attr(veto_decision, "product_id"), field_name="product_id")
     if product_id != PRODUCT_ID:
         raise ValueError("replacement receipt provenance product identity mismatch")
@@ -199,7 +198,7 @@ def build_replacement_forecast_receipt_provenance(
         "readiness_id": readiness.readiness_id,
         "receipt_role": RECEIPT_ROLE,
         "settlement_authority_status": SETTLEMENT_AUTHORITY_STATUS,
-        "trade_authority_status": trade_authority_status,
+        "runtime_layer": runtime_layer,
         "training_allowed": False,
         "promotion_allowed": False,
         "baseline_source_run_id": str(readiness.dependency_json.get("baseline_source_run_id") or by_role["baseline_b0"].get("source_run_id") or ""),
@@ -221,7 +220,7 @@ def build_replacement_forecast_receipt_provenance(
             "can_increase_q_lcb": False,
             "can_increase_kelly": False,
             "can_flip_direction": False,
-            "can_initiate_trade": trade_authority_status == "LIVE_AUTHORITY",
+            "can_initiate_trade": runtime_layer == LIVE_RUNTIME_LAYER,
             "can_settle_market": False,
             "can_train_model": False,
         },

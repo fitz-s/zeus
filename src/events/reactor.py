@@ -158,7 +158,7 @@ LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({
     "POST_SUBMIT_UNKNOWN",
 })
 EXECUTION_RECEIPT_TERMINAL_STATUSES = DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES | LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES
-EDLI_PROCESSING_REACTOR_MODES = frozenset({"live", "live_no_submit", "submit_disabled_live_bridge"})
+EDLI_PROCESSING_REACTOR_MODES = frozenset({"live", "live_no_submit"})
 # Continuous re-decision resurrection (2026-06-12): the forecast decision lane includes the
 # price-driven re-decision type. Mirrors src.engine.event_reactor_adapter._FORECAST_DECISION_EVENT_TYPES
 # and src.events.continuous_redecision.REDECISION_EVENT_TYPE (literal here to avoid an import cycle:
@@ -384,7 +384,6 @@ class EventSubmissionReceipt:
     #                          full-pass its reason names the degrade cause that drove
     #                          the selector off the live lane (NO_SUBMIT_ADAPTER_LANE:
     #                          <cause>), NEVER the default literal.
-    #   "SHADOW"            — day0 force_shadow path (DAY0_SCOPE_SHADOW_ONLY).
     # This is DECISION provenance (which lane decided), not transport metadata, so it
     # IS serialized into receipt_json. None on legacy / pre-stamp receipts; omit-when-
     # None in receipt_json keeps existing receipt_hash byte-stable, and readers MUST
@@ -450,10 +449,8 @@ class ReactorConfig:
     # admitted ONLY if its honest (q_lcb-based) after-cost EV-per-dollar clears
     # Scope-aware claim tier (2026-06-11 anti-starvation). True (default) =
     # historical behaviour: DAY0_EXTREME_UPDATED ranks at the top claim tier
-    # (realized obs = freshest tradeable alpha). False = day0 is shadow-only
-    # (edli_live_scope='day0_shadow'); the reactor demotes DAY0_EXTREME_UPDATED
-    # below tradeable FORECAST_SNAPSHOT_READY so the shadow flood cannot starve
-    # tradeable forecast families out of the per-cycle proof budget. Derived from
+    # (realized obs = freshest tradeable alpha). False is reserved for tests or
+    # historical replay scopes where Day0 is not a live entry lane. Derived from
     # the scope via src.events.event_priority.day0_is_tradeable_for_scope.
     day0_is_tradeable: bool = True
     # SUBMIT-LANE INVARIANT (silent-trade-kill antibody 2026-06-12). The SAME
@@ -1692,36 +1689,6 @@ class OpportunityEventReactor:
                 receipt=receipt,
                 decision_time=decision_time,
             )
-        # DAY0-SHADOW-RECEIPT DUAL-PERSIST (day0-shadow-receipt-enrichment, 2026-06-10).
-        # A DAY0_SCOPE_SHADOW_ONLY receipt carries the full pipeline decision content
-        # (q_live, q_lcb_5pct, direction, bin_label, trade_score) but proof_accepted=False
-        # so _receipt_money_path_blocker (TRADE_SCORE branch) would route it exclusively to
-        # _write_regret / no_trade_regret_events — bypassing edli_no_submit_receipts.
-        # The shadow comparator (day0_remaining_day_adapter) reads edli_no_submit_receipts,
-        # so it can NEVER see the shadow decision content without this dual-persist.
-        #
-        # Fix: for DAY0_SCOPE_SHADOW_ONLY + NO_SUBMIT, persist to edli_no_submit_receipts
-        # via insert_shadow_idempotent (which skips the proof_accepted guard but enforces
-        # side_effect_status="NO_SUBMIT" + reason="DAY0_SCOPE_SHADOW_ONLY"), then let the
-        # normal money-path blocker route it through _write_regret for no_trade_regret_events.
-        # This is the ONLY place that bypasses proof_accepted; the structural no-submit
-        # guarantee (side_effect_status, reason, proof_accepted=False) is never relaxed.
-        if (
-            receipt.reason == "DAY0_SCOPE_SHADOW_ONLY"
-            and receipt.side_effect_status == "NO_SUBMIT"
-        ):
-            try:
-                self._no_submit_receipt_ledger.insert_shadow_idempotent(
-                    receipt, decision_time=decision_time
-                )
-            except Exception:  # noqa: BLE001 — fail-soft: shadow persist failure never blocks regret write
-                import logging as _logging
-
-                _logging.getLogger("zeus.events.reactor").warning(
-                    "DAY0_SCOPE_SHADOW_ONLY shadow receipt persist to edli_no_submit_receipts "
-                    "failed (fail-soft); regret write continues",
-                    exc_info=True,
-                )
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt, self._config)
         if proof_stage is not None:
             return self._reject_or_retry_post_submit(

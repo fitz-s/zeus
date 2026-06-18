@@ -171,7 +171,7 @@ def test_entry_redecision_requires_spine_members_on_latest_posterior_cycle():
             source_cycle_time TEXT,
             source_available_at TEXT,
             computed_at TEXT,
-            trade_authority_status TEXT NOT NULL DEFAULT 'LIVE_AUTHORITY'
+            runtime_layer TEXT
         )
         """
     )
@@ -192,12 +192,12 @@ def test_entry_redecision_requires_spine_members_on_latest_posterior_cycle():
         """
         INSERT INTO forecast_posteriors (
             posterior_id, city, target_date, temperature_metric,
-            source_cycle_time, source_available_at, computed_at, trade_authority_status
-        ) VALUES (?, 'Wuhan', '2026-06-01', 'high', ?, ?, ?, 'LIVE_AUTHORITY')
+            source_cycle_time, source_available_at, computed_at, runtime_layer
+        ) VALUES (?, 'Wuhan', '2026-06-01', 'high', ?, ?, ?, 'live')
         """,
         [
             (1, "2026-05-30T00:00:00+00:00", "2026-05-30T01:00:00+00:00", "2026-05-30T01:05:00+00:00"),
-            (2, "2026-05-31T00:00:00+00:00", "2026-05-31T01:00:00+00:00", "2026-05-31T01:05:00+00:00"),
+            (2, "2026-05-31T06:00:00+00:00", "2026-05-31T07:00:00+00:00", "2026-05-31T07:05:00+00:00"),
         ],
     )
     forecasts.executemany(
@@ -239,7 +239,45 @@ def test_entry_redecision_requires_spine_members_on_latest_posterior_cycle():
     ) == redecisions
 
 
-def test_entry_redecision_ignores_diagnostic_only_posterior_cycle():
+def test_entry_redecision_reader_treats_18z_runtime_layer_live_as_live():
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            computed_at TEXT,
+            runtime_layer TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, source_available_at, computed_at, runtime_layer
+        ) VALUES (1, 'Wuhan', '2026-06-01', 'high',
+                  '2026-05-31T18:00:00+00:00',
+                  '2026-05-31T19:00:00+00:00',
+                  '2026-05-31T19:05:00+00:00',
+                  'live')
+        """
+    )
+
+    assert cr._latest_posterior_source_cycle_for_family(
+        forecasts,
+        city="Wuhan",
+        target_date="2026-06-01",
+        metric="high",
+        decision_time="2026-05-31T20:00:00+00:00",
+    ) == "2026-05-31T18:00:00+00:00"
+
+
+def test_entry_redecision_ignores_non_live_posterior_cycle():
     conn = _mem_world()
     _cache_yes_belief(conn, p_posterior_yes=0.99, recorded_at="2026-05-31T00:00:00+00:00")
     beliefs = cr._all_latest_beliefs(conn)
@@ -262,7 +300,7 @@ def test_entry_redecision_ignores_diagnostic_only_posterior_cycle():
             source_cycle_time TEXT,
             source_available_at TEXT,
             computed_at TEXT,
-            trade_authority_status TEXT NOT NULL
+            runtime_layer TEXT
         )
         """
     )
@@ -283,12 +321,12 @@ def test_entry_redecision_ignores_diagnostic_only_posterior_cycle():
         """
         INSERT INTO forecast_posteriors (
             posterior_id, city, target_date, temperature_metric,
-            source_cycle_time, source_available_at, computed_at, trade_authority_status
+            source_cycle_time, source_available_at, computed_at, runtime_layer
         ) VALUES (1, 'Wuhan', '2026-06-01', 'high',
                   '2026-05-31T00:00:00+00:00',
                   '2026-05-31T01:00:00+00:00',
                   '2026-05-31T01:05:00+00:00',
-                  'DIAGNOSTIC_ONLY')
+                  NULL)
         """
     )
     forecasts.executemany(

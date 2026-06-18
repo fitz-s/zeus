@@ -12,7 +12,7 @@ import json
 import sqlite3
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -27,11 +27,12 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
 from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
 from src.data.replacement_forecast_materializer import (
     REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
+    REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,
     ReplacementForecastMaterializeRequest,
     _QLCB_BASIS,
     _ensure_forecast_posteriors_live_authority_check,
     _ensure_replacement_identity_columns,
-    _replacement_trade_authority_status,
+    _replacement_is_live_authority,
     materialize_replacement_forecast_shadow,
 )
 from src.state.db import _create_readiness_state
@@ -66,11 +67,12 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def _aifs_extraction() -> AifsSampledLocalDayExtraction:
+def _aifs_extraction(*, source_cycle_time: datetime | None = None) -> AifsSampledLocalDayExtraction:
+    cycle = source_cycle_time or _dt(0)
     return AifsSampledLocalDayExtraction(
         city_timezone="Asia/Shanghai",
         target_local_date=date(2026, 6, 7),
-        source_cycle_time=_dt(0),
+        source_cycle_time=cycle,
         target_window_start_utc=_dt(16),
         target_window_end_utc=datetime(2026, 6, 7, 16, tzinfo=UTC),
         members=(
@@ -81,7 +83,7 @@ def _aifs_extraction() -> AifsSampledLocalDayExtraction:
     )
 
 
-def _anchor() -> OpenMeteoIfs9LocalDayAnchor:
+def _anchor(*, source_cycle_time: datetime | None = None) -> OpenMeteoIfs9LocalDayAnchor:
     return OpenMeteoIfs9LocalDayAnchor(
         city_timezone="Asia/Shanghai",
         target_local_date=date(2026, 6, 7),
@@ -95,7 +97,7 @@ def _anchor() -> OpenMeteoIfs9LocalDayAnchor:
             datetime(2026, 6, 7, 18, tzinfo=timezone.utc),
         ),
         contributing_valid_times_utc=(_dt(16), _dt(22), datetime(2026, 6, 7, 4, tzinfo=UTC), datetime(2026, 6, 7, 10, tzinfo=UTC)),
-        source_cycle_time=_dt(0),
+        source_cycle_time=source_cycle_time or _dt(0),
     )
 
 
@@ -152,6 +154,7 @@ def _request(
     aifs_source_available_at: datetime | None = None,
     openmeteo_source_run_id: str | None = "om9-run",
     openmeteo_source_available_at: datetime | None = None,
+    source_cycle_time: datetime | None = None,
     computed_at: datetime | None = None,
     expires_at: datetime | None = None,
     anchor_artifact_id: int | None = None,
@@ -168,14 +171,14 @@ def _request(
         baseline_source_run_id=baseline_source_run_id,
         baseline_data_version=baseline_data_version,
         baseline_source_available_at=baseline_source_available_at or _dt(2),
-        aifs_extraction=_aifs_extraction(),
+        aifs_extraction=_aifs_extraction(source_cycle_time=source_cycle_time),
         aifs_source_run_id=aifs_source_run_id,
         aifs_source_available_at=aifs_source_available_at or _dt(2, 30),
-        openmeteo_anchor=_anchor(),
+        openmeteo_anchor=_anchor(source_cycle_time=source_cycle_time),
         openmeteo_source_run_id=openmeteo_source_run_id,
         openmeteo_source_available_at=openmeteo_source_available_at or _dt(3),
         bins=_bins(),
-        source_cycle_time=_dt(0),
+        source_cycle_time=source_cycle_time or _dt(0),
         computed_at=computed_at or _dt(4),
         expires_at=expires_at or _dt(6),
         anchor_artifact_id=anchor_artifact_id,
@@ -184,88 +187,91 @@ def _request(
     )
 
 
-def test_materializer_writes_diagnostic_posterior_blocked_by_live_reader() -> None:
+def test_materializer_blocks_non_live_posterior_before_execution_authority_table() -> None:
     conn = _conn()
 
     result = materialize_replacement_forecast_shadow(conn, _request())
 
-    assert result.ok is True
-    assert result.posterior_id is not None
+    assert result.ok is False
+    assert result.reason_codes == (REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,)
+    assert result.posterior_id is None
     assert result.anchor_id is not None
-    readiness_row = conn.execute("SELECT * FROM readiness_state WHERE readiness_id = ?", (result.readiness_id,)).fetchone()
-    assert readiness_row is not None
-    assert readiness_row["status"] == "DIAGNOSTIC_ONLY"
-    posterior_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
-    assert posterior_row is not None
-    assert posterior_row["trade_authority_status"] == "DIAGNOSTIC_ONLY"
-    assert posterior_row["training_allowed"] == 0
+    assert result.readiness_id is None
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
-    from src.engine.replacement_forecast_hook_factory import _latest_replacement_readiness
 
-    readiness = _latest_replacement_readiness(
+def test_materializer_does_not_write_unlicensed_intermediate_cycle_as_live_authority() -> None:
+    conn = _conn()
+
+    result = materialize_replacement_forecast_shadow(
         conn,
-        city="Shanghai",
-        target_date="2026-06-07",
-        temperature_metric="high",
+        replace(
+            _request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12)),
+            aifs_extraction=None,
+            aifs_source_run_id=None,
+            aifs_source_available_at=None,
+        ),
     )
-    assert readiness is not None
-    bundle = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=readiness,
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(4, 30),
-    )
-    assert bundle.ok is False
-    assert bundle.reason_code == "REPLACEMENT_POSTERIOR_LIVE_AUTHORITY_MISSING"
-    assert bundle.bundle is None
+
+    assert result.ok is False
+    assert result.reason_codes == (REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,)
+    assert result.posterior_id is None
+    assert result.anchor_id is not None
+    assert result.readiness_id is None
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
 
 def test_live_authority_status_requires_live_flags_and_bootstrap_bounds() -> None:
-    status = _replacement_trade_authority_status(
+    live_authority = _replacement_is_live_authority(
         replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         q_lcb_map={"cool": 0.1, "warm": 0.6, "hot": 0.05},
         q_ucb_map={"cool": 0.3, "warm": 0.9, "hot": 0.2},
         q_lcb_basis=_QLCB_BASIS,
+        cycle_phase="synoptic",
     )
 
-    assert status == "LIVE_AUTHORITY"
+    assert live_authority is True
 
 
 def test_live_authority_status_rejects_wilson_or_missing_bounds() -> None:
-    assert _replacement_trade_authority_status(
+    assert _replacement_is_live_authority(
         replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         q_lcb_map={"cool": 0.1},
         q_ucb_map={"cool": 0.3},
         q_lcb_basis="wilson_aifs_member_votes",
-    ) == "DIAGNOSTIC_ONLY"
+        cycle_phase="synoptic",
+    ) is False
 
 
-def test_forecast_posteriors_live_authority_check_migration_preserves_rows() -> None:
+def test_forecast_posteriors_live_authority_check_migration_discards_non_live_rows() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
         """
         CREATE TABLE forecast_posteriors (
             posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')),
+            trade_authority_status TEXT NOT NULL DEFAULT 'DIAGNOSTIC_ONLY'
+                CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY')),
             q_json TEXT NOT NULL
         )
         """
     )
     conn.execute(
         "INSERT INTO forecast_posteriors (trade_authority_status, q_json) VALUES (?, ?)",
-        ("SHADOW_ONLY", "{}"),
+        ("DIAGNOSTIC_ONLY", '{"bad":1}'),
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors (trade_authority_status, q_json) VALUES (?, ?)",
+        ("LIVE_AUTHORITY", '{"good":1}'),
     )
 
     _ensure_forecast_posteriors_live_authority_check(conn)
 
     rows = conn.execute("SELECT posterior_id, trade_authority_status, q_json FROM forecast_posteriors").fetchall()
     assert [dict(row) for row in rows] == [
-        {"posterior_id": 1, "trade_authority_status": "DIAGNOSTIC_ONLY", "q_json": "{}"}
+        {"posterior_id": 2, "trade_authority_status": "LIVE_AUTHORITY", "q_json": '{"good":1}'}
     ]
     conn.execute(
         "INSERT INTO forecast_posteriors (trade_authority_status, q_json) VALUES (?, ?)",
@@ -275,13 +281,19 @@ def test_forecast_posteriors_live_authority_check_migration_preserves_rows() -> 
         row["trade_authority_status"]
         for row in conn.execute("SELECT trade_authority_status FROM forecast_posteriors ORDER BY posterior_id")
     ]
-    assert statuses == ["DIAGNOSTIC_ONLY", "LIVE_AUTHORITY"]
-    assert _replacement_trade_authority_status(
+    assert statuses == ["LIVE_AUTHORITY", "LIVE_AUTHORITY"]
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO forecast_posteriors (trade_authority_status, q_json) VALUES (?, ?)",
+            ("DIAGNOSTIC_ONLY", "{}"),
+        )
+    assert _replacement_is_live_authority(
         replacement_q_mode=REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         q_lcb_map={"cool": 0.1},
         q_ucb_map=None,
         q_lcb_basis=_QLCB_BASIS,
-    ) == "DIAGNOSTIC_ONLY"
+        cycle_phase="synoptic",
+    ) is False
 
 
 def test_legacy_anchor_schema_migration_preserves_raw_shadow_parent_fk() -> None:

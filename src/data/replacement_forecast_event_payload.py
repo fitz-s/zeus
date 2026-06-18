@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from src.data.replacement_forecast_bundle_reader import ReplacementForecastPosteriorBundle
-from src.data.replacement_forecast_readiness import READY_STATUS, ReplacementForecastReadinessDecision
+from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, READY_STATUS, ReplacementForecastReadinessDecision
 
 
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
@@ -27,8 +27,8 @@ class ReplacementForecastEventPayload:
                 raise ValueError(f"replacement_forecast.{key} is required")
             if _FORBIDDEN_TRANSCRIPT_ALIAS in value.lower():
                 raise ValueError(f"replacement_forecast.{key} must use full product identity")
-        if replacement.get("trade_authority_status") not in {"DIAGNOSTIC_ONLY", "LIVE_AUTHORITY"}:
-            raise ValueError("replacement forecast event payload has invalid trade authority status")
+        if replacement.get("runtime_layer") != LIVE_RUNTIME_LAYER:
+            raise ValueError("replacement forecast event payload requires live runtime layer")
         if replacement.get("training_allowed") is not False:
             raise ValueError("replacement forecast event payload must not enable training authority")
 
@@ -92,8 +92,8 @@ def build_replacement_forecast_event_payload(
 
     if readiness.status != READY_STATUS:
         raise ValueError("replacement event payload requires READY readiness")
-    if replacement_bundle.trade_authority_status not in {"DIAGNOSTIC_ONLY", "LIVE_AUTHORITY"}:
-        raise ValueError("replacement event payload requires valid bundle authority")
+    if replacement_bundle.runtime_layer != LIVE_RUNTIME_LAYER:
+        raise ValueError("replacement event payload requires live runtime layer bundle")
     if replacement_bundle.source_id != readiness.source_id or replacement_bundle.product_id != readiness.product_id:
         raise ValueError("replacement bundle and readiness product identity mismatch")
 
@@ -107,7 +107,7 @@ def build_replacement_forecast_event_payload(
         "readiness_id": readiness.readiness_id,
         "readiness_status": readiness.status,
         "readiness_reason_codes": list(readiness.reason_codes),
-        "trade_authority_status": replacement_bundle.trade_authority_status,
+        "runtime_layer": replacement_bundle.runtime_layer,
         "training_allowed": False,
         "baseline_source_run_id": replacement_bundle.baseline_source_run_id,
         "dependency_source_run_ids": _dependency_source_run_ids(readiness),
@@ -119,7 +119,7 @@ def build_replacement_forecast_event_payload(
             "can_increase_q_lcb": False,
             "can_increase_kelly": False,
             "can_flip_direction": False,
-            "can_initiate_trade": replacement_bundle.trade_authority_status == "LIVE_AUTHORITY",
+            "can_initiate_trade": replacement_bundle.runtime_layer == LIVE_RUNTIME_LAYER,
         },
     }
     return ReplacementForecastEventPayload(payload)

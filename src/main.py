@@ -130,33 +130,21 @@ _LEGACY_LIVE_EXECUTION_MODE_ALIASES = {
 }
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
-    "edli_shadow_no_submit",
-    "edli_submit_disabled_bridge",
     "edli_live",
     "disabled",
 }
 EDLI_EVENT_DRIVEN_MODES = {
-    "edli_shadow_no_submit",
-    "edli_submit_disabled_bridge",
     "edli_live",
 }
 REACTOR_MODE_BY_LIVE_STAGE = {
     "legacy_cron": "disabled",
     "disabled": "disabled",
-    "edli_shadow_no_submit": "live_no_submit",
-    "edli_submit_disabled_bridge": "submit_disabled_live_bridge",
     "edli_live": "live",
 }
-# Admissible edli_live_scope values. `forecast_only` is the PR-332 scope (day0
-# OUT — day0 flags crash). `day0_shadow` ADMITS day0 (mask runs, shadow certs
-# produced) but carries NO submit authority of its own — it is orthogonal to the
-# arm axis (real_order_submit_enabled), so day0 candidates fall through the same
-# not-armed block as everything else. `forecast_plus_day0` ADMITS day0 AND lets
-# day0-lane events PASS the DAY0_SCOPE_SHADOW_ONLY adapter boundary (real submit
-# is then subject to all other proofs/gates/arm) — operator directive 2026-06-09
-# ('全部打开'): shadow-only strategies never self-promote, so the purgatory gate
-# is opened. Any other value fails closed at boot.
-EDLI_LIVE_SCOPES = frozenset({"forecast_only", "day0_shadow", "forecast_plus_day0"})
+# Live production has one EDLI scope: forecast plus Day0. Forecast-only and
+# day0-shadow were staging scopes; keeping them in the live daemon makes the
+# execution layer understand non-live states.
+EDLI_LIVE_SCOPES = frozenset({"forecast_plus_day0"})
 EDLI_RUNTIME_FLAGS = (
     "enabled",
     "event_writer_enabled",
@@ -175,27 +163,11 @@ EDLI_STAGE_RISK_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
-# Surface-freshness reasons that writers populate AFTER daemon boot.  In shadow
-# mode these are expected-absent at boot-time and must WARN rather than prevent
-# startup — the scheduler refreshes them once the first cycle runs.  All other
-# reason prefixes (LOADED_SHA, UNRESOLVED_SUBMIT, LIVE_CAP_RESERVED) still
-# block shadow boot because they reflect live-money or identity risk.
-_EDLI_SHADOW_DEFERRED_REASON_PREFIXES = (
-    "EDLI_STAGE_SOURCE_HEALTH_STALE",
-    "EDLI_STAGE_SOURCE_HEALTH_MISSING",
-    "EDLI_STAGE_STATUS_SUMMARY_STALE",
-    "EDLI_STAGE_STATUS_SUMMARY_MISSING",
-)
 _EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
 REQUIRED_STAGE_FILES_BY_MODE = {
-    "edli_submit_disabled_bridge": (
-        "edli_stage_loaded_sha_file",
-        "edli_stage_source_health_json",
-        "edli_stage_status_json",
-    ),
     "edli_live": (
         "edli_stage_loaded_sha_file",
         "edli_stage_source_health_json",
@@ -279,8 +251,7 @@ def _harvester_should_register(live_execution_mode: str) -> bool:
     scheduled for this live-execution mode.
 
     守護 blocker (2026-06-03): the harvester was gated to ``legacy_cron`` ONLY, so
-    in EDLI event-driven modes (edli_shadow_no_submit, edli_submit_disabled_bridge,
-    edli_live) a FILLED position that rode to market settlement
+    in EDLI event-driven mode a FILLED position that rode to market settlement
     sat phase=active forever — the redeem pollers (its consumers) had nothing to
     consume, and capital stayed stuck on-chain (memory #56 "settled-target-still-
     active", reproducing on Shanghai cca68b44).
@@ -771,10 +742,6 @@ def evaluate_edli_stage_readiness(
 
     if reasons:
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_FAIL, live_entries_allowed=False, reasons=tuple(reasons))
-    if stage == "edli_submit_disabled_bridge":
-        return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
-    if stage == "edli_shadow_no_submit":
-        return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
     return EdliStageReadiness(
         stage=stage,
         status=EDLI_STAGE_PASS,
@@ -800,31 +767,6 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
         status_json=str(edli_cfg.get("edli_stage_status_json") or ""),
         max_age_seconds=int(edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)),
     )
-    if stage in {"edli_shadow_no_submit", "edli_submit_disabled_bridge"}:
-        if report.live_entries_allowed:
-            raise RuntimeError("EDLI_STAGE_READINESS_FAILED:live_entries_not_allowed_in_shadow")
-        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING}:
-            # Partition reasons: surface-freshness (writers populate after boot,
-            # deferred in shadow) vs hard blockers (identity/risk, always fatal).
-            blocking = [
-                r for r in (report.reasons or ())
-                if not r.startswith(_EDLI_SHADOW_DEFERRED_REASON_PREFIXES)
-            ]
-            deferred = [
-                r for r in (report.reasons or ())
-                if r.startswith(_EDLI_SHADOW_DEFERRED_REASON_PREFIXES)
-            ]
-            if blocking:
-                raise RuntimeError(
-                    "EDLI_STAGE_READINESS_FAILED:" + ",".join(blocking)
-                )
-            if deferred:
-                logger.warning(
-                    "EDLI shadow boot: stage surfaces stale/absent (expected "
-                    "pre-first-cycle); will refresh after scheduler starts: %s",
-                    ", ".join(deferred),
-                )
-        return report
     if stage == "edli_live":
         # Wave-2 item 5: the canary boot-resilience logic (crash-loop antibody +
         # status-summary deferral) is the live-mode readiness path now that canary
@@ -974,25 +916,9 @@ def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int
 
 
 def _assert_edli_live_scope(edli_cfg: dict) -> None:
-    scope = str(edli_cfg.get("edli_live_scope") or "forecast_only")
+    scope = str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
     if scope not in EDLI_LIVE_SCOPES:
         raise RuntimeError(f"UNSUPPORTED_EDLI_LIVE_SCOPE:{scope}")
-    # day0_shadow ADMITS day0 (the absorbing-boundary mask runs and shadow
-    # certificates are produced) but grants NO submit authority of its own:
-    # edli_live_scope is independent of the arm axis (real_order_submit_enabled),
-    # so a day0 candidate routes through the SAME not-armed block as any other
-    # event (reactor.py EDLI_REAL_ORDER_SUBMIT_DISABLED / NO_SUBMIT) unless the
-    # operator separately arms. forecast_plus_day0 ALSO admits day0 (operator
-    # directive 2026-06-09); it additionally lets day0-lane events PASS the
-    # DAY0_SCOPE_SHADOW_ONLY adapter boundary — real submit is then subject to
-    # all other proofs/gates/arm. forecast_only stays byte-identical: day0 flags
-    # on under forecast_only still crash with DAY0_OUT_OF_SCOPE_FOR_PR332.
-    if scope in ("day0_shadow", "forecast_plus_day0"):
-        return
-    if bool(edli_cfg.get("day0_extreme_trigger_enabled", False)) or bool(
-        edli_cfg.get("day0_hard_fact_live_enabled", False)
-    ):
-        raise RuntimeError("DAY0_OUT_OF_SCOPE_FOR_PR332")
 
 
 def _build_edli_status_pulse(
@@ -1075,12 +1001,6 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
         raise RuntimeError("EDLI_RUNTIME_CONFLICTS_WITH_DISABLED_MODE")
     if mode in EDLI_EVENT_DRIVEN_MODES:
         _require_edli_flags(edli_cfg, mode, ("enabled", "event_writer_enabled", "forecast_snapshot_trigger_enabled"))
-    if mode == "edli_shadow_no_submit" and bool(edli_cfg.get("real_order_submit_enabled", False)):
-        raise RuntimeError("EDLI_SHADOW_NO_SUBMIT_FORBIDS_REAL_ORDER_SUBMIT")
-    if mode == "edli_submit_disabled_bridge":
-        _require_edli_flags(edli_cfg, mode, ("market_channel_ingestor_enabled", "edli_user_channel_reconcile_enabled"))
-        if bool(edli_cfg.get("real_order_submit_enabled", False)):
-            raise RuntimeError("EDLI_SUBMIT_DISABLED_BRIDGE_FORBIDS_REAL_ORDER_SUBMIT")
     if mode == "edli_live":
         _require_edli_flags(
             edli_cfg,
@@ -5964,8 +5884,6 @@ from src.data.replacement_forecast_production import (  # noqa: E402
     _replacement_forecast_live_materialization_queue_config,
     _replacement_forecast_live_materialize_cycle,
     _replacement_forecast_runtime_flags_from_settings,
-    _replacement_forecast_shadow_materialization_queue_config,
-    _replacement_forecast_shadow_materialize_cycle,
 )
 
 
@@ -6235,10 +6153,10 @@ def _edli_event_reactor_cycle() -> None:
                         # (_day0_fast_prefetch above, before acquire); this call
                         # is the pure write phase.
                         fast_prefetch=_day0_fast_prefetch,
-                        # 2026-06-11 anti-starvation: stamp the scope-aware emission
-                        # priority so day0_shadow events sub-sort below tradeable FSR.
+                        # Stamp scope-aware emission priority. Production live
+                        # scope makes Day0 tradeable.
                         day0_is_tradeable=day0_is_tradeable_for_scope(
-                            str(edli_cfg.get("edli_live_scope") or "forecast_only")
+                            str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
                         ),
                     )
                 finally:
@@ -6266,11 +6184,11 @@ def _edli_event_reactor_cycle() -> None:
         trade_conn = get_trade_connection_with_world_required(write_class=None)
 
         regret_ledger = NoTradeRegretLedger(conn)
-        reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
-        edli_live_scope = str(edli_cfg.get("edli_live_scope") or "forecast_only")
+        reactor_mode = str(edli_cfg.get("reactor_mode", "live"))
+        edli_live_scope = str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
         real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
         submit_disabled_effective_mode = reactor_mode == "live_no_submit"
-        live_bridge_mode = reactor_mode in {"live", "submit_disabled_live_bridge"}
+        live_bridge_mode = reactor_mode == "live"
         real_submit_effective = real_order_submit_enabled if reactor_mode == "live" else False
         # Configure the process-wide risk allocator/governor BEFORE the submit adapter is
         # built so the live submit path's select_global_order_type does not raise
@@ -6363,8 +6281,7 @@ def _edli_event_reactor_cycle() -> None:
         if operator_arm is None and _live_lane_degrade_cause is None:
             _live_lane_degrade_cause = "operator_arm_none"
         if _live_lane_degrade_cause is None and not _live_lane_selected:
-            # live_submit_effective was False without a tracked degrade (the live lane is
-            # simply not configured for this reactor_mode, e.g. live_no_submit/shadow).
+            # live_submit_effective was False without a tracked degrade.
             _live_lane_degrade_cause = f"live_lane_unselected:reactor_mode={reactor_mode}"
         _no_submit_degrade_cause = _live_lane_degrade_cause or "live_lane_unselected"
         # LOUD cycle-level degrade signal: the live lane is dark THIS cycle while the
@@ -6435,8 +6352,8 @@ def _edli_event_reactor_cycle() -> None:
                     decision_time=process_pending_decision_time,
                 ),
                 operator_arm=operator_arm,
-                # FIX-3 (P1): pass scope so the adapter can enforce
-                # DAY0_SCOPE_SHADOW_ONLY at the final submit boundary.
+                # Production live scope: forecast and Day0 share the same
+                # submit boundary.
                 edli_live_scope=edli_live_scope,
                 family_snapshot_refresher=_decision_family_snapshot_refresher,
             )
@@ -6490,11 +6407,8 @@ def _edli_event_reactor_cycle() -> None:
                 # Task #102 book-wide edge-zone admission. Absent key => default
                 # False => byte-identical legacy money-path (the operator owns
                 # config/settings.json; this reads it without writing it).
-                # Scope-aware claim tier (2026-06-11 anti-starvation): under
-                # day0_shadow a DAY0_EXTREME_UPDATED event can only ever produce a
-                # DAY0_SCOPE_SHADOW_ONLY receipt, so it must NOT outrank tradeable
-                # FORECAST_SNAPSHOT_READY in the reactor claim. day0_is_tradeable
-                # is True ONLY for the forecast_plus_day0 (day0-submittable) lane.
+                # Scope-aware claim tier. Production live scope makes Day0
+                # tradeable and rank as fresh alpha.
                 day0_is_tradeable=day0_is_tradeable_for_scope(edli_live_scope),
                 # SUBMIT-LANE PERSIST-BOUNDARY INVARIANT (silent-trade-kill antibody
                 # 2026-06-12): the SAME operator-arm authority the selector above reads,
@@ -7047,7 +6961,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         return
     # Live-armed condition (replaces the deleted redecision_screen_enabled flag): the reactor
     # must be in live mode. When submit is disabled the screen organ stays dark.
-    if str(edli_cfg.get("reactor_mode", "live_no_submit")) != "live":
+    if str(edli_cfg.get("reactor_mode", "live")) != "live":
         return
     if _defer_for_held_position_monitor("edli_redecision_screen"):
         return
@@ -8314,6 +8228,25 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         )
 
     try:
+        _no_value_refuted_archived = store.archive_recent_no_value_refuted_events(
+            decision_time=decision_time.astimezone(timezone.utc).isoformat(),
+            batch_limit=batch_limit,
+        )
+        if _no_value_refuted_archived:
+            logger.info(
+                "EDLI reactor: expired %d already-queued FSR/Day0 events refuted by "
+                "same-evidence terminal no-trade receipts; reactor proof budget no "
+                "longer replays known no-value families (batch_limit=%d)",
+                _no_value_refuted_archived,
+                batch_limit,
+            )
+    except Exception as _no_value_refutation_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: recent no-value refutation sweep failed (non-fatal): %r",
+            _no_value_refutation_sweep_exc,
+        )
+
+    try:
         _ch_ignored = store.ignore_channel_cache_events(batch_limit=batch_limit)
         if _ch_ignored:
             logger.info(
@@ -9414,10 +9347,7 @@ def _edli_user_channel_reconcile_runtime_enabled(edli_cfg: dict) -> bool:
         return False
     if bool(edli_cfg.get("edli_user_channel_reconcile_enabled", False)):
         return True
-    return (
-        _live_execution_mode(edli_cfg) == "edli_shadow_no_submit"
-        and _truthy_env("ZEUS_USER_CHANNEL_WS_ENABLED")
-    )
+    return False
 
 
 @_scheduler_job("edli_user_channel_reconcile")

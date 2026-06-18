@@ -235,6 +235,13 @@ def test_receipt_provenance_rejects_settlement_truth_and_records_live_trade_auth
     assert provenance["authority_limits"]["can_train_model"] is False
     assert provenance["promotion_allowed"] is False
 
+    diagnostic = {**_veto_decision(), "trade_authority_status": "DIAGNOSTIC_ONLY"}
+    with pytest.raises(ValueError, match="trade authority status"):
+        build_replacement_forecast_receipt_provenance(
+            veto_decision=diagnostic,
+            readiness=_readiness(),
+        )
+
     bad_product = {**_veto_decision(), "product_id": "short_" + "h" + "3_alias"}
     with pytest.raises(ValueError, match="full replacement product identity"):
         build_replacement_forecast_receipt_provenance(

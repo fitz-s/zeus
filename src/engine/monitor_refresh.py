@@ -443,8 +443,9 @@ def _enqueue_single_family_belief_reseed_failsoft(
     fresh same-authority belief next cycle, instead of papering over the fault
     with a cross-era legacy substitution (regime law U1/U2, 2026-06-12).
 
-    Reuses the SAME lane the reactor/poll uses (forecast_db/seed_dir/raw_manifest_dir
-    from the shadow-materialization queue config + the shared idempotency marker),
+    Reuses the SAME live materialization lane the reactor/poll uses
+    (forecast_db/seed_dir/raw_manifest_dir from the live queue config + the
+    shared idempotency marker),
     so a family already enqueued elsewhere never double-enqueues. NEVER raises into
     the monitor: any error (config missing, DB lock, import failure) is logged and
     a status dict (or None) is returned.
@@ -453,13 +454,13 @@ def _enqueue_single_family_belief_reseed_failsoft(
         from pathlib import Path
 
         from src.data.replacement_forecast_production import (
-            _replacement_forecast_shadow_materialization_queue_config,
+            _replacement_forecast_live_materialization_queue_config,
         )
         from src.data.replacement_cycle_advance_trigger import (
             enqueue_single_family_cycle_advance_reseed,
         )
 
-        cfg = _replacement_forecast_shadow_materialization_queue_config()
+        cfg = _replacement_forecast_live_materialization_queue_config()
         forecast_db = cfg.get("forecast_db")
         seed_dir = cfg.get("seed_dir")
         raw_manifest_dir = cfg.get("raw_manifest_dir")

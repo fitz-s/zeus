@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-06-18
 # Authority basis: GOAL #36 continuous trading + PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md.
 #   Proves the continuous re-decision emit: scan_committed_snapshots(source=<per-cycle>) re-emits a
 #   fresh FSR-equivalent each cycle (distinct event_id) instead of deduping to the consumed FSR, so
@@ -488,6 +488,56 @@ def test_fsr_scan_suppresses_recent_same_evidence_no_value_refutation():
     assert second == []
 
 
+def test_fsr_scan_suppresses_recent_redecision_same_evidence_no_value_refutation():
+    fc = _seed_forecasts()
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    trig = _trigger(fc, world)
+    prior_redecision = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key=ENTITY_KEY,
+        source="edli_redecision:screen",
+        observed_at="2026-05-24T04:15:00+00:00",
+        available_at="2026-05-24T04:15:00+00:00",
+        received_at="2026-05-24T04:16:00+00:00",
+        causal_snapshot_id="1",
+        payload=_ready_payload(
+            city="Chicago",
+            target_date="2026-05-24",
+            metric="high",
+            source_run_id="run-1",
+            snapshot_id="1",
+            available_at="2026-05-24T04:15:00+00:00",
+        ),
+        priority=50,
+    )
+    store.insert_or_ignore(prior_redecision)
+    world.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            decision_time, city, target_date, metric, family_id, causal_snapshot_id,
+            created_at, schema_version
+        ) VALUES (?, ?, 'TRADE_SCORE', 'TRADE_SCORE_NON_POSITIVE', 'NO_EDGE',
+                  '2026-05-24T04:18:00+00:00', 'Chicago', '2026-05-24', 'high',
+                  'family-chicago-high', '1', '2026-05-24T04:18:00+00:00', 1)
+        """,
+        ("regret-" + prior_redecision.event_id, prior_redecision.event_id),
+    )
+
+    emitted = trig.scan_committed_snapshots(
+        forecasts_conn=fc,
+        decision_time=datetime(2026, 5, 24, 4, 20, tzinfo=timezone.utc),
+        received_at="2026-05-24T04:20:00+00:00",
+        source="cycle-after-redecision-no-value",
+        suppress_recent_no_value_refutations=True,
+    )
+
+    assert emitted == []
+
+
 def test_redecision_pending_family_keys_parse_only_valid_families():
     assert main._edli_redecision_family_keys_from_entity_keys(
         {
@@ -891,7 +941,7 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
             source_cycle_time TEXT,
             source_available_at TEXT,
             computed_at TEXT,
-            trade_authority_status TEXT NOT NULL DEFAULT 'LIVE_AUTHORITY'
+            runtime_layer TEXT
         )
         """
     )
@@ -919,7 +969,7 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
             '2026-06-18T00:00:00+00:00',
             '2026-06-18T06:39:00+00:00',
             '2026-06-18T07:58:00+00:00',
-            'LIVE_AUTHORITY'
+            'live'
         )
         """
     )

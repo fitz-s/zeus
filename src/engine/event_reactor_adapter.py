@@ -195,7 +195,11 @@ from src.engine.event_bound_final_intent import (
     serialize_event_bound_final_intent_receipt,
     validate_final_intent_cert_for_existing_executor,
 )
-from src.engine.replacement_forecast_reactor_hook import ReplacementForecastReactorHookResult
+from src.engine.replacement_forecast_reactor_hook import (
+    REPLACEMENT_EXECUTION_EXPERIMENT_STATUS,
+    REPLACEMENT_EXECUTION_LIVE_STATUS,
+    ReplacementForecastReactorHookResult,
+)
 from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDecision
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastCapitalObjectiveEvidence
@@ -1344,7 +1348,6 @@ def replacement_forecast_baseline_bundle_provider_from_forecast_conn(
 SUBMIT_LANE_LIVE = "LIVE"
 SUBMIT_LANE_SUBMIT_DISABLED = "SUBMIT_DISABLED"
 SUBMIT_LANE_NO_SUBMIT_ADAPTER = "NO_SUBMIT_ADAPTER"
-SUBMIT_LANE_SHADOW = "SHADOW"
 
 # The default no-submit reason hardcoded by the serializer. Honest ONLY where no
 # degrade drove the lane (shadow / test). On the NO_SUBMIT_ADAPTER lane a full-pass
@@ -1397,21 +1400,13 @@ def _stamp_live_adapter_lane(
 ) -> EventSubmissionReceipt:
     """Stamp the live adapter's lane onto a receipt it produced.
 
-    The day0 force_shadow receipt (reason=DAY0_SCOPE_SHADOW_ONLY) is the SHADOW lane
-    regardless of submit flag — it can NEVER reach a submit/order-build path. Every
-    other receipt is the real submit lane (LIVE) when real_order_submit_enabled, else
-    the submit-disabled-bridge build lane (SUBMIT_DISABLED). Idempotent: a receipt
-    already carrying a lane (defensive — the live adapter builds fresh receipts) is
-    left untouched.
+    Production live receipts have no shadow lane. They are stamped LIVE when real
+    submission is armed, otherwise SUBMIT_DISABLED for non-production tests or
+    explicit adapter-level dry runs.
     """
     if receipt.submit_lane is not None:
         return receipt
-    if receipt.reason == "DAY0_SCOPE_SHADOW_ONLY":
-        lane = SUBMIT_LANE_SHADOW
-    elif real_order_submit_enabled:
-        lane = SUBMIT_LANE_LIVE
-    else:
-        lane = SUBMIT_LANE_SUBMIT_DISABLED
+    lane = SUBMIT_LANE_LIVE if real_order_submit_enabled else SUBMIT_LANE_SUBMIT_DISABLED
     return dataclass_replace(receipt, submit_lane=lane)
 
 
@@ -1555,7 +1550,7 @@ def event_bound_live_adapter_from_trade_conn(
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     durable_submit_outbox_enabled: bool = False,
     operator_arm: "OperatorArm | None" = None,
-    edli_live_scope: str = "forecast_only",
+    edli_live_scope: str = "forecast_plus_day0",
     family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
@@ -1571,19 +1566,9 @@ def event_bound_live_adapter_from_trade_conn(
     adapter instance (== per reactor cycle).
     """
 
-    # FIX-3 (P1): day0_shadow scope → structural no-submit at the FINAL ADAPTER
-    # BOUNDARY for day0-lane events. edli_live_scope="day0_shadow" ADMITS day0
-    # events (the mask and shadow certs run) but the word "shadow" must not lie:
-    # no real submit can ever reach the venue for a day0 event under this scope.
-    # The guard lives here (not at admission) so future admission changes cannot
-    # bypass it. Fail-closed: unknown event_type is treated as day0 (rejected).
-    #
-    # forecast_plus_day0 (operator directive 2026-06-09 '全部打开'): day0-lane
-    # events PASS this boundary (real submit allowed, subject to all OTHER
-    # proofs/gates/arm downstream). The unknown-event-type fail-closed posture is
-    # preserved under both shadow-style scopes — an event type that is neither
-    # the known forecast lane nor the known day0 lane is rejected.
-    # (The set is the module-level _DAY0_LANE_EVENT_TYPES, shared with the qkernel seam.)
+    # Live production scope is forecast_plus_day0 only. Forecast and Day0 events
+    # both use this same execution adapter; unknown events fail closed before the
+    # candidate pipeline. There is no shadow/no-submit scope inside production.
 
     # FIX-4 (P2): per-cycle live submit call counter. Incremented ONLY when
     # executor_submit() is actually called (i.e., real_order_submit_enabled and
@@ -1621,91 +1606,40 @@ def event_bound_live_adapter_from_trade_conn(
     )
 
     def _submit_inner(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
-        # FINAL ADAPTER BOUNDARY SCOPE GATE (PR#404 MAJOR 5 + FIX-3 P1).
-        #
-        # Every scope — including the DEFAULT "forecast_only" — explicitly rejects
-        # event types that are out-of-scope.  No scope relies on the caller passing
-        # only the right event types; the boundary is deterministic and fail-closed.
-        #
-        # Reason taxonomy (separately named by scope, never aliased):
-        #   forecast_only  → DAY0_OUT_OF_SCOPE_AT_BOUNDARY  (day0 or unknown)
-        #   day0_shadow    → DAY0_SCOPE_SHADOW_ONLY          (day0 or unknown)
-        #   forecast_plus_day0 → DAY0_SCOPE_SHADOW_ONLY      (unknown only)
-        #
-        # FIX-3 (P1): day0_shadow / forecast_plus_day0 path (unchanged semantics).
-        # MAJOR 5: forecast_only path — explicit day0 + unknown rejection added here
-        #           so that no downstream probe or adapter change can accidentally
-        #           admit a day0-lane event on the forecast-only scope.
+        # FINAL ADAPTER BOUNDARY SCOPE GATE. Production supports one scope:
+        # forecast_plus_day0. Both forecast and Day0 events continue into the
+        # same candidate proof/submit path; unknown event types are rejected.
         import logging as _logging
 
         event_type = getattr(event, "event_type", None)
         # FINAL ADAPTER BOUNDARY SCOPE GATE forecast-lane set — DELIBERATELY includes
         # EDLI_REDECISION_PENDING (continuous re-decision resurrection 2026-06-12): a price-driven
-        # re-decision of a forecast family is forecast-lane and may submit under forecast_only /
-        # forecast_plus_day0 exactly as an FSR does. Unknown types remain fail-closed below.
+        # re-decision of a forecast family is forecast-lane and may submit under
+        # production scope exactly as an FSR does. Unknown types remain fail-closed below.
         _FORECAST_LANE_EVENT_TYPES: frozenset[str] = _FORECAST_DECISION_EVENT_TYPES
         is_forecast_lane = event_type in _FORECAST_LANE_EVENT_TYPES
         is_day0_lane = event_type in _DAY0_LANE_EVENT_TYPES
 
-        # day0-shadow-receipt-enrichment (operator directive 2026-06-10): in
-        # day0_shadow scope a day0-lane event must NEVER submit, but the shadow
-        # receipt must still carry the FULL candidate decision content (bin_label,
-        # direction, q_live, q_lcb_5pct, trade_score, execution_mode_intent,
-        # maker_limit_price) so the comparator can analyze what day0 WOULD have done.
-        # Instead of an early bare-receipt return, we run the full decision pipeline
-        # and then FORCE a no-submit receipt that dominates ALL submit branches. The
-        # fail-closed contract of the FIX-3 scope gate is FULLY PRESERVED: this flag
-        # forces the no-submit return BEFORE any submit-eligibility branch below.
-        # Unknown event types remain a bare fail-closed rejection (NEVER run the
-        # pipeline for unknown types).
-        force_shadow = False
-        if edli_live_scope == "forecast_only":
-            # MAJOR 5: forecast_only is blind to observation by design
-            # (src/strategy/market_phase.py authority). Any day0-lane or unknown
-            # event type is rejected deterministically here.
-            if not is_forecast_lane:
-                if not is_day0_lane:
-                    _logging.getLogger(__name__).error(
-                        "DAY0_OUT_OF_SCOPE_AT_BOUNDARY: unknown event_type=%r "
-                        "rejected at forecast_only boundary (fail-closed)",
-                        event_type,
-                    )
-                return EventSubmissionReceipt(
-                    False,
-                    event.event_id,
-                    event.causal_snapshot_id,
-                    reason="DAY0_OUT_OF_SCOPE_AT_BOUNDARY",
-                    proof_accepted=False,
-                )
-        elif edli_live_scope in ("day0_shadow", "forecast_plus_day0"):
-            # forecast_plus_day0 admits day0-lane events through this boundary;
-            # day0_shadow rejects them. In BOTH scopes, an event type that is
-            # neither known lane is fail-closed (treated as day0, rejected).
-            day0_lane_blocked_here = edli_live_scope == "day0_shadow"
-            if not is_forecast_lane and not is_day0_lane:
-                _logging.getLogger(__name__).error(
-                    "DAY0_SCOPE_SHADOW_ONLY: unknown event_type=%r treated as day0 (fail-closed) "
-                    "while edli_live_scope=%r",
-                    event_type,
-                    edli_live_scope,
-                )
-            reject_day0_lane = is_day0_lane and day0_lane_blocked_here
-            reject_unknown = not is_forecast_lane and not is_day0_lane
-            if reject_unknown:
-                # Fail-closed: an unknown event type NEVER runs the decision
-                # pipeline. Bare rejection (unchanged) under both shadow-style scopes.
-                return EventSubmissionReceipt(
-                    False,
-                    event.event_id,
-                    event.causal_snapshot_id,
-                    reason="DAY0_SCOPE_SHADOW_ONLY",
-                    proof_accepted=False,
-                )
-            if reject_day0_lane:
-                # day0_shadow + day0-lane: run the full pipeline below to build the
-                # candidate proof, then force the enriched DAY0_SCOPE_SHADOW_ONLY
-                # no-submit receipt. This NEVER reaches any submit/order-build path.
-                force_shadow = True
+        if edli_live_scope != "forecast_plus_day0":
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=f"UNSUPPORTED_EDLI_LIVE_SCOPE:{edli_live_scope}",
+                proof_accepted=False,
+            )
+        if not is_forecast_lane and not is_day0_lane:
+            _logging.getLogger(__name__).error(
+                "EVENT_TYPE_OUT_OF_LIVE_SCOPE: unknown event_type=%r rejected at live boundary",
+                event_type,
+            )
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="EVENT_TYPE_OUT_OF_LIVE_SCOPE",
+                proof_accepted=False,
+            )
         no_submit_receipt = build_event_bound_no_submit_receipt(
             event,
             trade_conn=trade_conn,
@@ -1724,80 +1658,6 @@ def event_bound_live_adapter_from_trade_conn(
             replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
             family_snapshot_refresher=family_snapshot_refresher,
         )
-        if force_shadow:
-            # day0-shadow-receipt-enrichment (operator directive 2026-06-10).
-            # HARD GUARANTEE 1: this return dominates ALL submit-eligibility
-            # branches below — even with real_order_submit_enabled=true and the
-            # live canary on, a day0_shadow day0-lane event can NEVER reach a
-            # submit/order-build path. The forced no-submit receipt carries the
-            # FULL candidate proof content (bin_label/direction/q_live/q_lcb_5pct/
-            # trade_score + execution_mode_intent/maker_limit_price) so the shadow
-            # comparator can analyze what day0 WOULD have done. trade_score_positive
-            # is forced False so the reactor routes this through the rejection /
-            # regret-write path (no_trade_regret_events) — the comparator's source
-            # of truth — NOT the accepted/submit path.
-            #
-            # HARD GUARANTEE 2: build_event_bound_no_submit_receipt PROVISIONALLY
-            # reserved this event's stake (portfolio_reservation.reserve) the moment
-            # the candidate passed Kelly+RiskGuard. A shadow-forced receipt must NOT
-            # consume any durable sizing state or per-cycle headroom, so we roll back
-            # that provisional reservation here. (The durable live_cap is untouched —
-            # the no-submit build never transitions live_cap; that only happens on the
-            # real submit/SUBMIT_DISABLED build paths below, which force_shadow skips.)
-            _rollback = getattr(portfolio_reservation, "rollback", None)
-            if callable(_rollback):
-                _rollback(event.event_id)
-            # DAY0 INPUT-ORDERING CORRECTNESS (critique Blind spot C, re-scoped
-            # 2026-06-12: a correctness check, NOT a cap). The quote that prices
-            # the candidate (captured at decision_time) must be NEWER than the
-            # observation availability that produced its probability. In shadow
-            # the scope rejection still wins (never-submit unchanged); we record
-            # the input-ordering verdict as Stage-1 evidence. Fail-soft: any
-            # evaluation error is logged, never raised, never blocks the receipt.
-            try:
-                from src.strategy.live_inference.day0_input_correctness import (
-                    evaluate_quote_after_observation,
-                )
-
-                _payload = (
-                    json.loads(event.payload_json)
-                    if isinstance(getattr(event, "payload_json", None), str)
-                    else (getattr(event, "payload_json", None) or {})
-                )
-                _ordering = evaluate_quote_after_observation(
-                    quote_captured_at=decision_time,
-                    observation_available_at=(_payload or {}).get("observation_available_at"),
-                )
-                if _ordering.rejection_reason is not None:
-                    _logging.getLogger(__name__).warning(
-                        "DAY0_INPUT_ORDERING_VIOLATED event=%s city=%s reason=%s (%s) "
-                        "[shadow: recorded as evidence; scope rejection still wins]",
-                        event.event_id,
-                        getattr(no_submit_receipt, "city", None),
-                        _ordering.rejection_reason,
-                        _ordering.annotation,
-                    )
-                else:
-                    _logging.getLogger(__name__).debug(
-                        "DAY0_INPUT_ORDERING event=%s %s",
-                        event.event_id,
-                        _ordering.annotation,
-                    )
-            except Exception as _ordering_exc:  # noqa: BLE001 — fail-soft seam
-                _logging.getLogger(__name__).warning(
-                    "DAY0_INPUT_ORDERING_EVAL_ERROR event=%s exc=%s: %s",
-                    getattr(event, "event_id", "?"),
-                    type(_ordering_exc).__name__,
-                    _ordering_exc,
-                )
-            return dataclass_replace(
-                no_submit_receipt,
-                submitted=False,
-                side_effect_status="NO_SUBMIT",
-                reason="DAY0_SCOPE_SHADOW_ONLY",
-                proof_accepted=False,
-                trade_score_positive=False,
-            )
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
         # Wave-1 2026-06-12: the LIVE_CANARY_DISABLED gate (real_order_submit_enabled AND
@@ -2061,13 +1921,11 @@ def event_bound_live_adapter_from_trade_conn(
             receipt = _submit_inner(event, decision_time)
             # SUBMIT-LANE STAMP: the live adapter ran. Every receipt it returns is
             # stamped with the live-adapter lane so the persist boundary can tell a
-            # genuine live-lane decision from a degrade-lane no-submit. The day0
-            # force_shadow return (reason=DAY0_SCOPE_SHADOW_ONLY) is the SHADOW lane;
-            # everything else is LIVE when real submit is enabled, else SUBMIT_DISABLED
-            # (the submit-disabled-bridge build lane). This lane is the operator's
-            # truth: the live adapter never produces a full-pass NO_SUBMIT carrying the
-            # default reason, so a LIVE-stamped proof_accepted NO_SUBMIT is the
-            # silent-kill signature the reactor invariant rejects.
+            # genuine live-lane decision from a degrade-lane no-submit. This lane
+            # is the operator's truth: the live adapter never produces a full-pass
+            # NO_SUBMIT carrying the default reason, so a LIVE-stamped
+            # proof_accepted NO_SUBMIT is the silent-kill signature the reactor
+            # invariant rejects.
             return _stamp_live_adapter_lane(
                 receipt, real_order_submit_enabled=real_order_submit_enabled
             )
@@ -2104,9 +1962,9 @@ def _run_live_order_build_savepoint(
 
 
 # --------------------------------------------------------------------------- #
-# forecast_only market-phase admission gate (#98).
+# Forecast-lane market-phase admission gate (#98).
 #
-# forecast_only is BLIND to observation: the instant a market's target LOCAL
+# The forecast lane is blind to observation: the instant a market's target LOCAL
 # DAY begins, its daily extremum starts realizing and a forecast-only decision
 # can land on the already-observed (losing) side — the Paris 2026-06-01 buy_no
 # on observed low=14°C incident. Category-killing rule (STRONGER than
@@ -2114,7 +1972,7 @@ def _run_live_order_build_savepoint(
 # admit ONLY MarketPhase.PRE_SETTLEMENT_DAY (the whole target local day still
 # in the future). SETTLEMENT_DAY / POST_TRADING / RESOLVED / unknown all reject
 # fail-closed. Same-day edge belongs to the disjoint day0 observation-aware
-# scope, never forecast_only. Authority: src/strategy/market_phase.py.
+# lane, never the forecast lane. Authority: src/strategy/market_phase.py.
 #
 # WAVE-1 W1-T1: the admit-set and the predicate are now the SHARED canonical
 # objects from src.strategy.market_phase (FORECAST_ONLY_ADMIT_PHASES /
@@ -2125,7 +1983,7 @@ def _run_live_order_build_savepoint(
 # --------------------------------------------------------------------------- #
 
 
-def _edli_forecast_only_phase_evidence(
+def _edli_forecast_lane_phase_evidence(
     *,
     city: str,
     target_date: str,
@@ -2133,7 +1991,7 @@ def _edli_forecast_only_phase_evidence(
     selected_market_row: Mapping[str, Any] | None,
     uma_resolved_source: str | None = None,
 ) -> "_market_phase_evidence.MarketPhaseEvidence":
-    """Phase evidence for a forecast_only family at decision_time.
+    """Phase evidence for a forecast-lane family at decision_time.
 
     Fail-closed: when the city has no resolvable timezone the phase is
     undeterminable and the returned evidence carries phase=None (the caller then
@@ -2161,8 +2019,8 @@ def _edli_forecast_only_phase_evidence(
     )
 
 
-def _forecast_only_phase_admits(evidence: "_market_phase_evidence.MarketPhaseEvidence") -> bool:
-    """True iff the family may be admitted in forecast_only scope: ONLY when the
+def _forecast_lane_phase_admits(evidence: "_market_phase_evidence.MarketPhaseEvidence") -> bool:
+    """True iff the family may be admitted in the forecast lane: ONLY when the
     whole target local day is still future (PRE_SETTLEMENT_DAY). Fail-closed."""
     return evidence.phase in _FORECAST_ONLY_ADMIT_PHASES
 
@@ -2495,8 +2353,8 @@ def _build_event_bound_no_submit_receipt_core(
             reason=decision.rejection_reason or "EVENT_BOUND_CANDIDATE_BINDING_FAILED",
         )
     family = decision.candidate_family
-    # forecast_only market-phase admission gate (#98): reject families whose
-    # target local day has begun or whose market has closed — forecast_only is
+    # Forecast-lane market-phase admission gate (#98): reject families whose
+    # target local day has begun or whose market has closed — forecast lane is
     # blind to the already-realizing/observed extremum (wrong-side risk, Paris
     # 2026-06-01). Scoped to the forecast decision lane (FSR + EDLI_REDECISION_PENDING,
     # which re-decides a forecast family); the day0 observation-aware scope owns same-day.
@@ -2504,13 +2362,13 @@ def _build_event_bound_no_submit_receipt_core(
     # obey the SAME phase gate (a redecision into an already-realizing day is the exact
     # wrong-side risk the gate exists to stop).
     if event.event_type in _FORECAST_DECISION_EVENT_TYPES:
-        _phase_evidence = _edli_forecast_only_phase_evidence(
+        _phase_evidence = _edli_forecast_lane_phase_evidence(
             city=family.city,
             target_date=family.target_date,
             decision_time=decision_time,
             selected_market_row=row,
         )
-        if not _forecast_only_phase_admits(_phase_evidence):
+        if not _forecast_lane_phase_admits(_phase_evidence):
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
@@ -2819,9 +2677,7 @@ def _build_event_bound_no_submit_receipt_core(
                     family_complete=True,
                     replacement_forecast=replacement_forecast_receipt_tag,
                 )
-            if replacement_hook_result.status == "SHADOW_VETO_ONLY":
-                pass
-            elif replacement_hook_result.status == "LIVE_AUTHORITY":
+            if replacement_hook_result.status == REPLACEMENT_EXECUTION_LIVE_STATUS:
                 replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
                 effective_proof = _replacement_live_authority_proof_for_direction(
                     proofs=proofs,
@@ -2909,10 +2765,7 @@ def _build_event_bound_no_submit_receipt_core(
                     q_lcb_5pct=effective_q_lcb,
                     trade_score=effective_trade_score,
                 )
-            elif replacement_hook_result.status == "SHADOW_ONLY":
-                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
-            elif replacement_hook_result.status != "DISABLED":
-                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
+            elif replacement_hook_result.status != REPLACEMENT_EXECUTION_EXPERIMENT_STATUS:
                 return EventSubmissionReceipt(
                     False,
                     event.event_id,
@@ -6939,13 +6792,16 @@ def _forecast_authority_payload_from_posterior(
 
 
 def _posterior_horizon_profile(source_cycle_time: str) -> str:
-    """Derive the horizon stratum from the posterior cycle hour (00/12 → 'full', else 'short') —
-    the SAME derivation the ensemble path uses via derive_phase2_keys_from_ens_result."""
+    """Derive the live posterior horizon stratum.
+
+    Replacement posteriors sourced from 00Z/06Z/12Z/18Z are all authorized live
+    cycles. Do not downgrade 06Z/18Z into a short/experimental calibration layer.
+    """
     try:
         hour = int(str(source_cycle_time)[11:13])
     except (ValueError, IndexError):
         return "full"
-    return "full" if hour in (0, 12) else "short"
+    return "full" if hour in (0, 6, 12, 18) else "short"
 
 
 def _forecast_authority_payload_and_clock(
@@ -10934,11 +10790,11 @@ def _replacement_yes_lcb_for_bin(
     q_yes: float,
     settlement_floor_lcb: float | None = None,
 ) -> float:
-    """Raw replacement YES q_lcb (bundle q_lcb map, else Wilson over AIFS votes).
+    """Raw replacement YES q_lcb from the replacement bundle's certified bound.
 
     ``settlement_floor_lcb`` is an optional ONLY-LOWERS ceiling: when supplied the
     returned bound is ``min(raw, settlement_floor_lcb)`` (it can never raise the q_lcb);
-    ``None`` (the default) returns the raw Wilson/bundle value. Wave-2 item 6 (2026-06-12):
+    ``None`` (the default) returns the bundle value. Wave-2 item 6 (2026-06-12):
     the live caller always passes ``None`` — the settlement-σ-grounded q_lcb floor (a
     distinct, never-live correction) was deleted, so this param is currently inert.
     """
@@ -10950,16 +10806,41 @@ def _replacement_yes_lcb_for_bin(
     q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
     if isinstance(q_lcb, Mapping) and bin_id in q_lcb:
         return _apply_floor(min(max(float(q_lcb[bin_id]), 0.0), max(0.0, min(float(q_yes), 1.0))))
-    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
-    aifs_probabilities = provenance.get("aifs_probabilities") if isinstance(provenance, Mapping) else None
-    if isinstance(aifs_probabilities, Mapping) and bin_id in aifs_probabilities:
-        try:
-            member_count = float(provenance.get("aifs_member_count") or 51.0)
-            successes = float(aifs_probabilities[bin_id]) * member_count
-            return _apply_floor(min(max(float(q_yes), 0.0), _wilson_lower_bound(successes, member_count)))
-        except (TypeError, ValueError):
-            return 0.0
     return 0.0
+
+
+def _replacement_yes_bootstrap_samples_for_bin(
+    replacement_bundle: object,
+    *,
+    bin_id: str,
+) -> tuple[float, ...]:
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return ()
+    samples_by_bin = provenance.get("q_bootstrap_samples_by_bin")
+    if not isinstance(samples_by_bin, Mapping):
+        return ()
+    raw_samples = samples_by_bin.get(bin_id)
+    if not isinstance(raw_samples, (list, tuple)):
+        return ()
+    samples: list[float] = []
+    for raw in raw_samples:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return ()
+        if not math.isfinite(value):
+            return ()
+        samples.append(float(min(max(value, 0.0), 1.0)))
+    return tuple(samples)
+
+
+def _finite_sample_false_edge_rate(samples: tuple[float, ...], *, cost: float) -> float | None:
+    if not samples:
+        return None
+    threshold = float(cost)
+    false_edges = sum(1 for sample in samples if sample <= threshold)
+    return float((false_edges + 1) / (len(samples) + 1))
 
 
 def _replacement_no_lcb_for_bin(
@@ -11144,6 +11025,9 @@ def _replacement_authority_probability_and_fdr_proof(
         yes_lcb = _replacement_yes_lcb_for_bin(
             replacement_bundle, bin_id=bin_id, q_yes=q_yes, settlement_floor_lcb=None
         )
+        yes_samples = _replacement_yes_bootstrap_samples_for_bin(
+            replacement_bundle, bin_id=bin_id
+        )
         q_by_condition[condition_id] = q_yes
         _set_qlcb_provenance(
             lcb_by_direction,
@@ -11171,13 +11055,32 @@ def _replacement_authority_probability_and_fdr_proof(
         yes_price = native_costs.get((condition_id, "buy_yes"), (None, None, 0.0, None, None))[1]
         yes_cost = float(yes_price.value) if yes_price is not None else 1.0
         yes_edge_lcb_positive = yes_price is not None and yes_lcb > yes_cost
-        p_values[(condition_id, "buy_yes")] = 0.0 if yes_edge_lcb_positive else 1.0
+        yes_bootstrap_p = (
+            _finite_sample_false_edge_rate(yes_samples, cost=yes_cost)
+            if yes_price is not None
+            else None
+        )
+        p_values[(condition_id, "buy_yes")] = (
+            yes_bootstrap_p
+            if yes_bootstrap_p is not None
+            else (0.0 if yes_edge_lcb_positive else 1.0)
+        )
         prefilter[(condition_id, "buy_yes")] = bool(yes_edge_lcb_positive)
         # FIX (2026-06-10 funnel autopsy):
         no_price = native_costs.get((condition_id, "buy_no"), (None, None, 0.0, None, None))[1]
         no_cost = float(no_price.value) if no_price is not None else 1.0
         no_edge_lcb_positive = no_price is not None and no_lcb > no_cost
-        p_values[(condition_id, "buy_no")] = 0.0 if no_edge_lcb_positive else 1.0
+        no_bootstrap_samples = tuple(1.0 - sample for sample in yes_samples)
+        no_bootstrap_p = (
+            _finite_sample_false_edge_rate(no_bootstrap_samples, cost=no_cost)
+            if no_price is not None
+            else None
+        )
+        p_values[(condition_id, "buy_no")] = (
+            no_bootstrap_p
+            if no_bootstrap_p is not None
+            else (0.0 if no_edge_lcb_positive else 1.0)
+        )
         prefilter[(condition_id, "buy_no")] = bool(no_edge_lcb_positive)
     # ITEM 2 (FIX-B) — wire the EXISTING K3 settlement-backward-coverage shrink into the
     # LIVE replacement path (its sole prior call site was the canonical/EMOS path). SAME

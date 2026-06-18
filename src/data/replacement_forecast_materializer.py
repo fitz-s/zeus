@@ -9,10 +9,10 @@
 #   q_lcb_json/q_ucb_json on the fused path via fused-center parameter-uncertainty bootstrap
 #   (root-cause /tmp/candidate_missing_rootcause.md — NULL bounds force the Wilson-over-AIFS-votes
 #   fallback that under-certifies below ask and discards every candidate). 2026-06-13 (q_ucb
-#   symmetry): the soft-anchor (CAPTURE_MISSING) fallback now emits a GENUINE Wilson UPPER bound
-#   alongside its lower twin (same inputs/z), so EVERY materialized posterior carries BOTH bounds
-#   when possible. Only fused-Normal rows with certified bootstrap bounds and a live runtime policy
-#   are stamped LIVE_AUTHORITY; Wilson/fallback rows remain diagnostic (no fabricated edge).
+#   symmetry): the soft-anchor (CAPTURE_MISSING) fallback can compute a GENUINE Wilson UPPER bound
+#   alongside its lower twin (same inputs/z), but non-live carriers must not enter
+#   forecast_posteriors. Only fused-Normal rows with certified bootstrap bounds and a live runtime
+#   policy are materialized as execution-authority posterior rows.
 """
 
 from __future__ import annotations
@@ -26,12 +26,6 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Mapping, Sequence
 
 from src.data.ecmwf_aifs_sampled_2t_localday import (
-    HIGH_DATA_VERSION as AIFS_HIGH_DATA_VERSION,
-    LOW_DATA_VERSION as AIFS_LOW_DATA_VERSION,
-    PRODUCT_ID as AIFS_PRODUCT_ID,
-    SOURCE_ID as AIFS_SOURCE_ID,
-    EXPECTED_AIFS_MEMBER_COUNT,
-    expected_aifs_sample_steps_for_local_day,
     AifsSampledLocalDayExtraction,
 )
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
@@ -49,8 +43,12 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (
     OpenMeteoIfs9LocalDayAnchor,
 )
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionGuardResult
-from src.data.replacement_forecast_bundle_reader import HIGH_DATA_VERSION, LOW_DATA_VERSION
+from src.data.replacement_forecast_bundle_reader import (
+    HIGH_DATA_VERSION,
+    LOW_DATA_VERSION,
+)
 from src.data.replacement_forecast_readiness import (
+    LIVE_RUNTIME_LAYER,
     PRODUCT_ID,
     READY_STATUS,
     SOURCE_ID,
@@ -59,10 +57,7 @@ from src.data.replacement_forecast_readiness import (
     build_replacement_forecast_readiness,
 )
 from src.data.replacement_forecast_runtime_policy import (
-    DIAGNOSTIC_ONLY_STATUS,
-    LIVE_AUTHORITY_STATUS,
     REQUIRED_FLAGS,
-    resolve_replacement_forecast_runtime_policy,
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.contracts.availability_time import proof_of_possession_available_at
@@ -70,10 +65,7 @@ from src.state.readiness_repo import write_readiness_state
 from src.state.source_run_repo import get_source_run
 from src.strategy.ecmwf_aifs_sampled_2t_probabilities import (
     AifsTemperatureBin,
-    OpenMeteoIfs9AifsSoftAnchorResearchResult,
-    build_openmeteo_ifs9_aifs_soft_anchor_result,
 )
-from src.strategy.openmeteo_ecmwf_ifs9_aifs_soft_anchor import SoftAnchorConfig
 
 
 UTC = timezone.utc
@@ -117,6 +109,7 @@ REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT = "FULL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT = "PARTIAL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY = "STALE_HISTORY_ONLY"
 REPLACEMENT_CAPTURE_STATUS_DB_READ_ERROR = "DB_READ_ERROR"
+REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
 
 
 @dataclass(frozen=True)
@@ -238,14 +231,14 @@ def _data_version(metric: str) -> str:
     return HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
 
 
-def _replacement_trade_authority_status(
+def _replacement_is_live_layer(
     *,
     replacement_q_mode: str,
     q_lcb_map: Mapping[str, float] | None,
     q_ucb_map: Mapping[str, float] | None,
     q_lcb_basis: str | None,
-) -> str:
-    """Return row-level live authority only for the exact live q carrier."""
+) -> bool:
+    """True only for the exact live q carrier."""
     live_q_carrier = (
         replacement_q_mode in {REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL, REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL}
         and q_lcb_map is not None
@@ -253,30 +246,18 @@ def _replacement_trade_authority_status(
         and q_lcb_basis == _QLCB_BASIS
     )
     if not live_q_carrier:
-        return DIAGNOSTIC_ONLY_STATUS
+        return False
     try:
         from src.config import settings  # noqa: PLC0415
 
         feature_flags = settings["feature_flags"]
-        flags = {key: bool(feature_flags.get(key, False)) for key in REQUIRED_FLAGS}
-        policy = resolve_replacement_forecast_runtime_policy(
-            flags,
-            promotion_evidence=None,
-            capital_objective_evidence=None,
-        )
+        return all(bool(feature_flags.get(key, False)) for key in REQUIRED_FLAGS)
     except Exception:
-        return DIAGNOSTIC_ONLY_STATUS
-    if policy.status != LIVE_AUTHORITY_STATUS or not policy.trade_authority_enabled:
-        return DIAGNOSTIC_ONLY_STATUS
-    return LIVE_AUTHORITY_STATUS
+        return False
 
 
 def _anchor_data_version(metric: str) -> str:
     return ANCHOR_HIGH_DATA_VERSION if metric == "high" else ANCHOR_LOW_DATA_VERSION
-
-
-def _aifs_data_version(metric: str) -> str:
-    return AIFS_HIGH_DATA_VERSION if metric == "high" else AIFS_LOW_DATA_VERSION
 
 
 def _json(value: Mapping[str, object] | Sequence[object]) -> str:
@@ -291,56 +272,26 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
-def _ensure_forecast_posteriors_live_authority_check(conn: sqlite3.Connection) -> None:
-    conn.execute("PRAGMA legacy_alter_table=ON")
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'forecast_posteriors'"
-    ).fetchone()
-    if row is None:
+def _ensure_forecast_posteriors_runtime_layer(conn: sqlite3.Connection) -> None:
+    columns = _table_columns(conn, "forecast_posteriors")
+    if not columns:
         return
-    create_sql = str(row[0] if not isinstance(row, sqlite3.Row) else row["sql"])
-    if "LIVE_AUTHORITY" in create_sql:
-        return
-    new_check = "CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY'))"
-    old_checks = (
-        "CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY'))",
-        "CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'LIVE_AUTHORITY'))",
-    )
-    old_check = next((check for check in old_checks if check in create_sql), None)
-    if old_check is None:
-        raise RuntimeError("forecast_posteriors trade_authority_status CHECK shape is not migratable")
-    legacy_table = "forecast_posteriors__pre_live_authority_check"
-    if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (legacy_table,),
-    ).fetchone():
-        raise RuntimeError(f"legacy migration table already exists: {legacy_table}")
-    column_names = [
-        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
-        for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
-    ]
-    if not column_names:
-        return
-    quoted_columns = ", ".join(f'"{name}"' for name in column_names)
-    conn.execute(f"ALTER TABLE forecast_posteriors RENAME TO {legacy_table}")
-    conn.execute(create_sql.replace(old_check, new_check).replace("DEFAULT 'SHADOW_ONLY'", "DEFAULT 'DIAGNOSTIC_ONLY'"))
-    selected_columns = ", ".join(
-        (
-            "CASE WHEN trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY') "
-            "THEN 'DIAGNOSTIC_ONLY' ELSE trade_authority_status END AS trade_authority_status"
-        )
-        if name == "trade_authority_status"
-        else f'"{name}"'
-        for name in column_names
-    )
-    conn.execute(
-        f"INSERT INTO forecast_posteriors ({quoted_columns}) "
-        f"SELECT {selected_columns} FROM {legacy_table}"
-    )
-    conn.execute(f"DROP TABLE {legacy_table}")
+    if "runtime_layer" not in columns:
+        conn.execute("ALTER TABLE forecast_posteriors ADD COLUMN runtime_layer TEXT NOT NULL DEFAULT 'experiment'")
+        if "trade_authority_status" in columns:
+            conn.execute(
+                "UPDATE forecast_posteriors SET runtime_layer = 'live' "
+                "WHERE trade_authority_status = 'LIVE_AUTHORITY'"
+            )
+        else:
+            conn.execute("UPDATE forecast_posteriors SET runtime_layer = 'live'")
+    conn.execute("DELETE FROM forecast_posteriors WHERE runtime_layer != 'live'")
 
 
 def _ensure_diagnostic_only_trade_authority_check(conn: sqlite3.Connection, table_name: str) -> None:
+    if table_name == "forecast_posteriors":
+        _ensure_forecast_posteriors_runtime_layer(conn)
+        return
     conn.execute("PRAGMA legacy_alter_table=ON")
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -361,8 +312,6 @@ def _ensure_diagnostic_only_trade_authority_check(conn: sqlite3.Connection, tabl
     if old_check is None:
         raise RuntimeError(f"{table_name} trade_authority_status CHECK shape is not migratable")
     new_check = "CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY'))"
-    if table_name == "forecast_posteriors" or "LIVE_AUTHORITY" in old_check:
-        new_check = "CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY', 'LIVE_AUTHORITY'))"
     legacy_table = f"{table_name}__pre_diagnostic_authority_check"
     if conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -406,8 +355,6 @@ def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
     """Keep old PR399 shadow DBs fail-closed instead of returning stale rows."""
 
     for table_name in (
-        # raw_forecast_artifacts is raw evidence and remains SHADOW_ONLY by contract.
-        # Migrating it under active anchor FKs breaks live materialization.
         "deterministic_forecast_anchors",
         "forecast_posteriors",
         "replacement_shadow_decisions",
@@ -429,7 +376,7 @@ def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
         if posterior_columns and column not in posterior_columns:
             conn.execute(f"ALTER TABLE forecast_posteriors ADD COLUMN {column} TEXT")
     if posterior_columns:
-        _ensure_forecast_posteriors_live_authority_check(conn)
+        _ensure_forecast_posteriors_runtime_layer(conn)
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_deterministic_forecast_anchors_identity_hash
@@ -513,22 +460,10 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
     request_source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time")
     target_date_value = date.fromisoformat(_date_text(request.target_date))
     reasons: list[str] = []
-    # AIFS DROPPED (operator directive 2026-06-17): AIFS is now OPTIONAL. When the extraction is
-    # absent (None) it contributes NO dependency-time row and NO AIFS_* validation reasons — the
-    # fused path materializes the posterior without it. When it IS present (cross-check provenance),
-    # we STILL validate its integrity so a present-but-corrupt AIFS payload is caught, but those
-    # reasons are recorded the same as before. Either way AIFS is never the cold fallback (see
-    # _insert_posterior). The baseline + openmeteo anchor remain HARD-REQUIRED (the fused center is
-    # bridged from the OM9 anchor; the baseline is the b0 dependency).
-    aifs_present = request.aifs_extraction is not None
     dependency_times = [
         ("baseline_b0", _to_utc(request.baseline_source_available_at, field_name="baseline_source_available_at")),
         ("openmeteo_ifs9_anchor", _to_utc(request.openmeteo_source_available_at, field_name="openmeteo_source_available_at")),
     ]
-    if aifs_present and request.aifs_source_available_at is not None:
-        dependency_times.append(
-            ("aifs_sampled_2t", _to_utc(request.aifs_source_available_at, field_name="aifs_source_available_at"))
-        )
     expected = expected_replacement_dependency_identity_by_role(metric)
     if not str(request.baseline_source_run_id or "").strip():
         reasons.append("REPLACEMENT_MATERIALIZATION_BASELINE_SOURCE_RUN_ID_MISSING")
@@ -536,47 +471,6 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         reasons.append("REPLACEMENT_MATERIALIZATION_OPENMETEO_SOURCE_RUN_ID_MISSING")
     if request.baseline_data_version != expected["baseline_b0"].data_version:
         reasons.append("REPLACEMENT_MATERIALIZATION_BASELINE_DATA_VERSION_MISMATCH")
-    if aifs_present:
-        # Integrity cross-check ONLY (AIFS no longer gates the fused path). A present extraction
-        # missing its source_run_id is still flagged so corrupt provenance is visible; an ABSENT
-        # extraction emits nothing here.
-        if not str(request.aifs_source_run_id or "").strip():
-            reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_SOURCE_RUN_ID_MISSING")
-        if len(request.aifs_extraction.members) != EXPECTED_AIFS_MEMBER_COUNT:
-            reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_MEMBER_COVERAGE_INCOMPLETE")
-        if not request.aifs_extraction.identity_decision_valid:
-            reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_GRIB_IDENTITY_INVALID")
-        if request.aifs_extraction.identity_reason_codes != ("AIFS_GRIB_IDENTITY_VALID",):
-            reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_GRIB_IDENTITY_REASON_MISMATCH")
-        if not str(request.aifs_extraction.artifact_id or "").strip():
-            reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ID_MISSING")
-        elif request.aifs_artifact_id is not None and int(request.aifs_extraction.artifact_id) != int(request.aifs_artifact_id):
-            reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ID_MISMATCH")
-        if not str(request.aifs_extraction.raw_sha256 or "").strip():
-            reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_RAW_SHA256_MISSING")
-        if request.aifs_extraction.source_product_id != AIFS_PRODUCT_ID:
-            reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_PRODUCT_ID_MISMATCH")
-        if request.aifs_extraction.source_cycle_time is None:
-            reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_SOURCE_CYCLE_TIME_MISSING")
-        else:
-            aifs_source_cycle_time = _to_utc(request.aifs_extraction.source_cycle_time, field_name="aifs_source_cycle_time")
-            if aifs_source_cycle_time != request_source_cycle_time:
-                reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_SOURCE_CYCLE_TIME_MISMATCH")
-            expected_steps = expected_aifs_sample_steps_for_local_day(
-                source_cycle_time=request.aifs_extraction.source_cycle_time,
-                city_timezone=request.city_timezone,
-                target_local_date=target_date_value,
-            )
-            for member in request.aifs_extraction.members:
-                observed_steps = tuple(
-                    sorted(
-                        int((valid_time - request.aifs_extraction.source_cycle_time).total_seconds() // 3600)
-                        for valid_time in member.contributing_valid_times_utc
-                    )
-                )
-                if observed_steps != expected_steps:
-                    reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_STEP_COVERAGE_INCOMPLETE")
-                    break
     if request.openmeteo_anchor.source_cycle_time is None:
         reasons.append("REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_MISSING")
     else:
@@ -615,34 +509,6 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
 
 def _artifact_identity_block_reasons(conn: sqlite3.Connection, request: ReplacementForecastMaterializeRequest) -> tuple[str, ...]:
     reasons: list[str] = []
-    # AIFS DROPPED (operator directive 2026-06-17): no AIFS extraction -> no AIFS artifact identity to
-    # cross-check. The fused path does not depend on the AIFS raw artifact, so an absent extraction
-    # is NOT a block (the prewrite gate already skips the AIFS_* reasons). Returns no reasons.
-    if request.aifs_extraction is None:
-        return ()
-    if request.aifs_extraction.artifact_id is None:
-        return ("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ID_MISSING",)
-    request_source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
-    request_aifs_available_at = _to_utc(request.aifs_source_available_at, field_name="aifs_source_available_at").isoformat()
-    row = conn.execute(
-        """
-        SELECT artifact_id, product_id, sha256, source_cycle_time, source_available_at
-        FROM raw_forecast_artifacts
-        WHERE artifact_id = ?
-        """,
-        (int(request.aifs_extraction.artifact_id),),
-    ).fetchone()
-    if row is None:
-        return ("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ROW_MISSING",)
-    row_map = dict(row)
-    if str(row_map.get("product_id") or "") != request.aifs_extraction.source_product_id:
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_PRODUCT_MISMATCH")
-    if str(row_map.get("sha256") or "") != str(request.aifs_extraction.raw_sha256 or ""):
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_SHA256_MISMATCH")
-    if _to_utc(str(row_map.get("source_cycle_time") or ""), field_name="aifs_artifact_source_cycle_time").isoformat() != request_source_cycle_time:
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_SOURCE_CYCLE_TIME_MISMATCH")
-    if _to_utc(str(row_map.get("source_available_at") or ""), field_name="aifs_artifact_source_available_at").isoformat() != request_aifs_available_at:
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_SOURCE_AVAILABLE_AT_MISMATCH")
     return tuple(reasons)
 
 
@@ -737,7 +603,6 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
         "measurement_policy": anchor.measurement_policy,
         "precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
         "role": "soft_spatial_anchor",
-        "trade_authority_status": DIAGNOSTIC_ONLY_STATUS,
         "training_allowed": False,
     }
     # Task #32: honest re-materialization provenance. Recorded ONLY when the trigger set it, so a
@@ -770,8 +635,8 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
             source_available_at, captured_at, artifact_id, model, native_grid,
             delivery_grid_resolution, interpolation_method,
             contributing_times_json, anchor_identity_hash, provenance_json,
-            trade_authority_status, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            training_allowed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ANCHOR_SOURCE_ID,
@@ -792,7 +657,6 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
             _json(contributing_times),
             anchor_identity_hash,
             _json(provenance),
-            DIAGNOSTIC_ONLY_STATUS,
             0,
         ),
     )
@@ -1731,7 +1595,7 @@ def _insert_posterior(
     *,
     metric: str,
     anchor_id: int,
-) -> int:
+) -> int | None:
     # Wave-2 item 7 (2026-06-12): the per-city EB bias-correction of the center was
     # DELETED — settlement-refuted as a wrong-set over-correction (2026-06-09 wiring
     # audit, commit ff7f33dd5b) because it was fit on the thin live single_runs anchor
@@ -1771,40 +1635,7 @@ def _insert_posterior(
     bayes_precision_fusion_override = _replacement_bayes_precision_fusion_override(
         request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c, conn=conn
     )
-    # AIFS DROPPED AS HARD DEPENDENCY (operator directive 2026-06-17). The AIFS soft-anchor result is
-    # built ONLY when an AIFS extraction is present, and even then it is used as a CROSS-CHECK /
-    # provenance carrier and as the q-shape's bin key-set reference — NEVER as the live q (the fused
-    # Normal overrides it) and NEVER as the fail-closed fallback (see the fused-q block below). When
-    # AIFS is absent (None) result stays None and the posterior materializes purely from the
-    # multi-model fused Normal. FAIL-SOFT: if the soft-anchor build itself raises (a corrupt present
-    # AIFS payload), we do NOT abort the fused path — result drops to None and a warning is logged;
-    # the fused Normal still materializes.
     result: OpenMeteoIfs9AifsSoftAnchorResearchResult | None = None
-    if request.aifs_extraction is not None:
-        try:
-            result = build_openmeteo_ifs9_aifs_soft_anchor_result(
-                aifs_extraction=request.aifs_extraction,
-                openmeteo_anchor=request.openmeteo_anchor,
-                metric=metric,
-                bins=request.bins,
-                config=SoftAnchorConfig(anchor_weight=request.anchor_weight, anchor_sigma_c=request.anchor_sigma_c),
-                settlement_step_c=float(request.settlement_step_c),
-                bias_shift_c=bias_shift_c,
-                member_vote_smoothing_alpha=member_vote_smoothing_alpha,
-                anchor_value_override_c=(bayes_precision_fusion_override.anchor_value_c if bayes_precision_fusion_override is not None else None),
-                anchor_sigma_override_c=(bayes_precision_fusion_override.anchor_sigma_c if bayes_precision_fusion_override is not None else None),
-            )
-        except Exception as _sa_exc:
-            result = None
-            try:
-                import logging  # noqa: PLC0415
-                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                    "replacement_0_1 AIFS soft-anchor cross-check build skipped "
-                    "(AIFS is optional; fused Normal materializes without it): %s",
-                    _sa_exc,
-                )
-            except Exception:
-                pass
     target_date = _date_text(request.target_date)
     source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
     # C1-AVAIL-CLOCK (2026-06-16): the posterior's source_available_at is PROOF OF POSSESSION =
@@ -1814,10 +1645,6 @@ def _insert_posterior(
     # constructed before its LAST-arriving input landed — availability is gated by the slowest
     # dependency. The old max(request.*_source_available_at) used the cycle-time nominal-lag GUESS
     # (~8.4h early for the baseline) as each input; this recovers the honest possession time.
-    # AIFS DROPPED (operator directive 2026-06-17): the AIFS role contributes a possession-time row
-    # ONLY when an AIFS extraction is present (it is still a real download that landed). When absent
-    # it is excluded from the max() — the fused posterior's possession time is gated by its REAL
-    # contributing roles (baseline + OM9 anchor), not a phantom AIFS input.
     _possession_candidates = [
         _role_possession_available_at(
             conn,
@@ -1830,14 +1657,6 @@ def _insert_posterior(
             request_source_available_at=request.openmeteo_source_available_at,
         ),
     ]
-    if request.aifs_extraction is not None and request.aifs_source_available_at is not None:
-        _possession_candidates.append(
-            _role_possession_available_at(
-                conn,
-                source_run_id=request.aifs_source_run_id,
-                request_source_available_at=request.aifs_source_available_at,
-            )
-        )
     available_at = max(_possession_candidates).isoformat()
     computed_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
     data_version = _data_version(metric)
@@ -2345,12 +2164,11 @@ def _insert_posterior(
     bin_topology_hash = _json_hash(bin_topology_payload)
     dependency_payload = {
         "baseline_b0": request.baseline_source_run_id,
-        "aifs_sampled_2t": request.aifs_source_run_id,
         "openmeteo_ifs9_anchor": request.openmeteo_source_run_id,
     }
     dependency_hash = _json_hash(dependency_payload)
     posterior_config = {
-        "posterior_method": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        "posterior_method": "openmeteo_ecmwf_ifs9_bayes_fusion",
         "anchor_weight": float(request.anchor_weight),
         "anchor_sigma_c": float(request.anchor_sigma_c),
         "settlement_step_c": float(request.settlement_step_c),
@@ -2390,61 +2208,31 @@ def _insert_posterior(
         capture_status = REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT
     else:
         capture_status = REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT
-    # CYCLE-PHASE PROVENANCE (operator cycle-physics directive 2026-06-10). 00/12Z are the
-    # full synoptic cycles; 06/18Z are intermediate cycles whose skill/bias differ. The
-    # de-bias + fusion weights are trained on ~99% 00Z-cycle history, so an intermediate-cycle
-    # posterior applies a synoptic-fit bias correction across cycle phase. We TAG the phase so
-    # the live bundle reader can hold intermediate-phase posteriors to shadow-only by default
-    # (production stays alive in dead zones; live trading waits for a settlement-graded license).
+    # CYCLE-PHASE PROVENANCE. 00/06/12/18Z are live runtime cycles; this tag is provenance only,
+    # never a live/experiment switch.
     cycle_phase = classify_cycle_phase(_to_utc(request.source_cycle_time, field_name="source_cycle_time"))
-    trade_authority_status = _replacement_trade_authority_status(
+    live_authority = _replacement_is_live_authority(
         replacement_q_mode=replacement_q_mode,
         q_lcb_map=q_lcb_map,
         q_ucb_map=q_ucb_map,
         q_lcb_basis=q_lcb_basis,
     )
-    # AIFS DROPPED (operator directive 2026-06-17): the persisted anchor_value_c is the SERVED center.
-    # With AIFS present it is the soft-anchor result's center; with AIFS absent it is the fused mu*
-    # (the multi-model center the q was actually built on). aifs_identity / aifs_probabilities /
-    # aifs_member_count are recorded ONLY when an AIFS cross-check was present (None / {} / 0 when
-    # absent) — pure provenance, never read by the live gate.
-    if result is not None:
-        _prov_anchor_value_c = result.anchor_value_c
-    elif bayes_precision_fusion_override is not None:
+    if not live_authority:
+        return None
+    runtime_layer = LIVE_STATUS
+    if bayes_precision_fusion_override is not None:
         _prov_anchor_value_c = float(bayes_precision_fusion_override.anchor_value_c)
     else:
         _prov_anchor_value_c = None
-    _aifs_present = request.aifs_extraction is not None
     provenance_payload = {
         "anchor_weight": request.anchor_weight,
         "anchor_sigma_c": request.anchor_sigma_c,
         "anchor_value_c": _prov_anchor_value_c,
-        # Synoptic (00/12Z) vs intermediate (06/18Z) model-cycle phase. The live gate reads
-        # THIS tag (fail-closed to the source_cycle_time hour when absent on legacy rows).
+        "runtime_layer": runtime_layer,
         "cycle_phase": cycle_phase,
-        # AIFS DROPPED: cross-check provenance only. Present block when an AIFS extraction was
-        # supplied; None when AIFS was dropped for this cell (the fused Normal carried the q).
-        "aifs_artifact_id": request.aifs_artifact_id,
-        "aifs_present": _aifs_present,
-        "aifs_identity": (
-            {
-                "identity_decision_valid": request.aifs_extraction.identity_decision_valid,
-                "identity_reason_codes": list(request.aifs_extraction.identity_reason_codes),
-                "identity_decision_hash": request.aifs_extraction.identity_decision_hash,
-                "member_ids_hash": request.aifs_extraction.member_ids_hash,
-                "step_hours_hash": request.aifs_extraction.step_hours_hash,
-                "artifact_id": request.aifs_extraction.artifact_id,
-                "raw_sha256": request.aifs_extraction.raw_sha256,
-                "source_product_id": request.aifs_extraction.source_product_id,
-            }
-            if _aifs_present
-            else None
-        ),
         "openmeteo_anchor_artifact_id": request.anchor_artifact_id,
         "openmeteo_precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
-        "aifs_probabilities": (dict(result.aifs_probabilities.probabilities) if result is not None else {}),
-        "aifs_member_count": (len(result.aifs_probabilities.member_values_c) if result is not None else 0),
-        "q_point_json_role": "shadow_point_probability_only",
+        "q_point_json_role": "live_point_probability",
         "q_shape": q_shape,
         # FIX 1 (2026-06-09): explicit q-mode authority — the live gate reads THIS, not the q_shape
         # string. FUSED_NORMAL_{FULL,PARTIAL} are live-eligible; every other mode is no-submit.
@@ -2477,7 +2265,7 @@ def _insert_posterior(
         "q_lcb_json_role": (
             "fused_center_bootstrap_lcb"
             if q_lcb_basis == _QLCB_BASIS
-            else "wilson_aifs_member_votes_lcb"
+            else "experiment_member_votes_lcb"
             if q_lcb_basis == _QLCB_SOFT_ANCHOR_BASIS
             else "absent_no_calibrated_lcb_available"
         ),
@@ -2488,7 +2276,7 @@ def _insert_posterior(
         "q_ucb_json_role": (
             "fused_center_bootstrap_ucb"
             if (q_ucb_map is not None and q_lcb_basis == _QLCB_BASIS)
-            else "wilson_aifs_member_votes_ucb"
+            else "experiment_member_votes_ucb"
             if (q_ucb_map is not None and q_lcb_basis == _QLCB_SOFT_ANCHOR_BASIS)
             else "absent_no_calibrated_ucb_available"
         ),
@@ -2509,9 +2297,7 @@ def _insert_posterior(
         "dependency_hash": dependency_hash,
         "posterior_config_hash": posterior_config_hash,
         "family_id": family_id,
-        "posterior_authority_status": trade_authority_status,
-        "runtime_policy_status": trade_authority_status,
-        "trade_authority_status": trade_authority_status,
+        "runtime_policy_status": runtime_layer,
         "training_allowed": False,
     }
     # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
@@ -2555,7 +2341,7 @@ def _insert_posterior(
                 if bayes_precision_fusion_override.current_value_serving
                 else None
             ),
-            "fusion_authority": trade_authority_status,
+            "runtime_layer": runtime_layer,
         }
     posterior_identity_hash = _json_hash(
         {
@@ -2575,7 +2361,6 @@ def _insert_posterior(
             "bin_topology_hash": bin_topology_hash,
             "posterior_config_hash": posterior_config_hash,
             "anchor_id": anchor_id,
-            "aifs_artifact_id": request.aifs_artifact_id,
             "anchor_artifact_id": request.anchor_artifact_id,
         }
     )
@@ -2585,12 +2370,12 @@ def _insert_posterior(
             source_id, product_id, data_version, city, target_date,
             temperature_metric, source_cycle_time, source_available_at,
             computed_at, q_json, q_lcb_json, q_ucb_json, posterior_method,
-            aifs_source_run_id, openmeteo_anchor_id,
+            openmeteo_anchor_id,
             dependency_source_run_ids_json, family_id, bin_topology_hash,
             dependency_hash, posterior_config_hash, posterior_identity_hash,
             provenance_json,
-            trade_authority_status, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            runtime_layer, training_allowed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             SOURCE_ID,
@@ -2605,8 +2390,7 @@ def _insert_posterior(
             _json(q),
             (None if q_lcb_map is None else _json(q_lcb_map)),
             (None if q_ucb_map is None else _json(q_ucb_map)),
-            "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
-            request.aifs_source_run_id,
+            "openmeteo_ecmwf_ifs9_bayes_fusion",
             anchor_id,
             _json(dependency_payload),
             family_id,
@@ -2615,7 +2399,7 @@ def _insert_posterior(
             posterior_config_hash,
             posterior_identity_hash,
             _json(provenance_payload),
-            trade_authority_status,
+            runtime_layer,
             0,
         ),
     )
@@ -2654,11 +2438,6 @@ def _build_readiness(
             _to_utc(request.source_cycle_time, field_name="source_cycle_time")
         )
     )
-    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): the AIFS dependency record is emitted
-    # ONLY when an AIFS extraction is actually present (cross-check provenance lineage). When AIFS is
-    # dropped (the live posture) it is omitted entirely — readiness no longer requires the
-    # aifs_sampled_2t role (see build_replacement_forecast_readiness.required_roles), so a posterior
-    # is born with no AIFS dependency at all. baseline + OM9 anchor + posterior remain the lineage.
     dependencies: list[ReplacementForecastDependency] = [
         ReplacementForecastDependency(
             role="baseline_b0",
@@ -2669,18 +2448,6 @@ def _build_readiness(
             source_available_at=request.baseline_source_available_at,  # AVAIL-POSSESSION-EXEMPTED: forwards the request's per-role possession input into the dependency lineage record (passthrough of an already-determined value, not a fresh stamp)
         ),
     ]
-    if request.aifs_extraction is not None and request.aifs_source_available_at is not None:
-        dependencies.append(
-            ReplacementForecastDependency(
-                role="aifs_sampled_2t",
-                source_id=AIFS_SOURCE_ID,
-                product_id=AIFS_PRODUCT_ID,
-                data_version=_aifs_data_version(metric),
-                source_run_id=request.aifs_source_run_id,
-                source_available_at=request.aifs_source_available_at,  # AVAIL-POSSESSION-EXEMPTED: forwards the request's per-role possession input into the dependency lineage record (passthrough of an already-determined value, not a fresh stamp)
-                artifact_id=request.aifs_artifact_id,
-            )
-        )
     dependencies.extend(
         [
             ReplacementForecastDependency(
@@ -2765,6 +2532,14 @@ def materialize_replacement_forecast_live_or_diagnostic(
         )
     anchor_id = _insert_anchor(conn, request, metric=metric)
     posterior_id = _insert_posterior(conn, request, metric=metric, anchor_id=anchor_id)
+    if posterior_id is None:
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=(REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,),
+            posterior_id=None,
+            anchor_id=anchor_id,
+            readiness_id=None,
+        )
     readiness = _build_readiness(request, metric=metric, posterior_id=posterior_id, anchor_id=anchor_id)
     expected = expected_replacement_dependency_identity_by_role(metric)["soft_anchor_posterior"]
     write_readiness_state(

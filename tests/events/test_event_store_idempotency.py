@@ -1,9 +1,10 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-06-18
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
 import dataclasses
+import json
 import sqlite3
 
 import pytest
@@ -106,6 +107,44 @@ def _world_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     return conn
+
+
+def _insert_no_value_regret(
+    conn: sqlite3.Connection,
+    event,
+    *,
+    created_at: str = "2026-05-24T04:18:00+00:00",
+    rejection_reason: str = "TRADE_SCORE_NON_POSITIVE",
+) -> None:
+    payload = json.loads(event.payload_json)
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            decision_time, city, target_date, metric, family_id, causal_snapshot_id,
+            created_at, schema_version
+        ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
+                  ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            "regret-" + event.event_id,
+            event.event_id,
+            rejection_reason,
+            created_at,
+            str(payload.get("city") or ""),
+            str(payload.get("target_date") or ""),
+            str(payload.get("metric") or ""),
+            "|".join(
+                (
+                    str(payload.get("city") or ""),
+                    str(payload.get("target_date") or ""),
+                    str(payload.get("metric") or ""),
+                )
+            ),
+            event.causal_snapshot_id,
+            created_at,
+        ),
+    )
 
 
 def test_insert_or_ignore_duplicate():
@@ -435,6 +474,176 @@ def test_archive_superseded_forecast_snapshot_events_keeps_window_complete_sourc
     )
     assert rows[older_incomplete.event_id] == "expired"
     assert rows[window_complete.event_id] == "pending"
+
+
+def test_archive_recent_no_value_refuted_events_expires_queued_fsr_from_redecision_refutation():
+    conn = _world_conn()
+    store = EventStore(conn)
+    prior_redecision = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Chicago|2026-05-24|high|snap-same",
+        source="edli_redecision:screen",
+        observed_at="2026-05-24T04:10:00+00:00",
+        available_at="2026-05-24T04:10:00+00:00",
+        received_at="2026-05-24T04:11:00+00:00",
+        causal_snapshot_id="snap-same",
+        payload=_payload("snap-same"),
+        priority=50,
+    )
+    queued_fsr = _fsr_entity_event(
+        "Chicago|2026-05-24|high|snap-same",
+        "snap-same",
+        "2026-05-24T04:12:00+00:00",
+        "2026-05-24T04:12:30+00:00",
+    )
+    for event in (prior_redecision, queued_fsr):
+        store.insert_or_ignore(event)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processed'
+         WHERE event_id = ?
+        """,
+        (prior_redecision.event_id,),
+    )
+    _insert_no_value_regret(conn, prior_redecision)
+
+    archived = store.archive_recent_no_value_refuted_events(
+        decision_time="2026-05-24T05:20:00+00:00"
+    )
+
+    assert archived == 1
+    rows = {
+        row[0]: (row[1], row[2])
+        for row in conn.execute(
+            """
+            SELECT event_id, processing_status, last_error
+              FROM opportunity_event_processing
+            """
+        ).fetchall()
+    }
+    assert rows[prior_redecision.event_id][0] == "processed"
+    assert rows[queued_fsr.event_id][0] == "expired"
+    assert rows[queued_fsr.event_id][1].startswith(
+        "RECENT_NO_VALUE_REFUTATION:payload_hash:"
+    )
+
+
+def test_archive_recent_no_value_refuted_events_ignores_future_refutation():
+    conn = _world_conn()
+    store = EventStore(conn)
+    prior_redecision = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Chicago|2026-05-24|high|snap-future",
+        source="edli_redecision:screen",
+        observed_at="2026-05-24T04:10:00+00:00",
+        available_at="2026-05-24T04:10:00+00:00",
+        received_at="2026-05-24T04:11:00+00:00",
+        causal_snapshot_id="snap-future",
+        payload=_payload("snap-future"),
+        priority=50,
+    )
+    queued_fsr = _fsr_entity_event(
+        "Chicago|2026-05-24|high|snap-future",
+        "snap-future",
+        "2026-05-24T04:12:00+00:00",
+        "2026-05-24T04:12:30+00:00",
+    )
+    for event in (prior_redecision, queued_fsr):
+        store.insert_or_ignore(event)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processed'
+         WHERE event_id = ?
+        """,
+        (prior_redecision.event_id,),
+    )
+    _insert_no_value_regret(
+        conn,
+        prior_redecision,
+        created_at="2026-05-24T06:00:00+00:00",
+    )
+
+    archived = store.archive_recent_no_value_refuted_events(
+        decision_time="2026-05-24T05:20:00+00:00"
+    )
+
+    assert archived == 0
+    assert (
+        conn.execute(
+            """
+            SELECT processing_status
+              FROM opportunity_event_processing
+             WHERE event_id = ?
+            """,
+            (queued_fsr.event_id,),
+        ).fetchone()[0]
+        == "pending"
+    )
+
+
+def test_archive_recent_no_value_refuted_events_keeps_day0_separate_from_forecast_refutation():
+    from src.events.opportunity_event import Day0ExtremeUpdatedPayload
+
+    conn = _world_conn()
+    store = EventStore(conn)
+    prior_forecast = _fsr_entity_event(
+        "Chicago|2026-05-24|high|snap-day0",
+        "snap-day0",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:10:30+00:00",
+    )
+    day0 = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Chicago|2026-05-24|high|82",
+        source="day0",
+        observed_at="2026-05-24T04:12:00+00:00",
+        available_at="2026-05-24T04:12:00+00:00",
+        received_at="2026-05-24T04:12:30+00:00",
+        causal_snapshot_id="snap-day0",
+        payload=Day0ExtremeUpdatedPayload(
+            city="Chicago",
+            target_date="2026-05-24",
+            metric="high",
+            settlement_source="wu_icao_history",
+            station_id="KORD",
+            observation_time="2026-05-24T04:00:00+00:00",
+            observation_available_at="2026-05-24T04:12:00+00:00",
+            raw_value=82.0,
+            rounded_value=82,
+            high_so_far=82.0,
+        ),
+        priority=20,
+    )
+    for event in (prior_forecast, day0):
+        store.insert_or_ignore(event)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processed'
+         WHERE event_id = ?
+        """,
+        (prior_forecast.event_id,),
+    )
+    _insert_no_value_regret(conn, prior_forecast)
+
+    archived = store.archive_recent_no_value_refuted_events(
+        decision_time="2026-05-24T04:20:00+00:00"
+    )
+
+    assert archived == 0
+    assert (
+        conn.execute(
+            """
+            SELECT processing_status
+              FROM opportunity_event_processing
+             WHERE event_id = ?
+            """,
+            (day0.event_id,),
+        ).fetchone()[0]
+        == "pending"
+    )
 
 
 def test_fetch_pending_prioritizes_day0_hard_fact_over_complete_forecast_backlog():

@@ -85,10 +85,8 @@ def build_day0_extreme_updated_event(
         payload=payload,
         causal_snapshot_id=str(observation.get("observation_context_id") or ""),
         # Emission-priority half of the 2026-06-11 anti-starvation fix. This is a
-        # WITHIN-TIER sub-sort (the scope-aware claim tier in fetch_pending is the
-        # cross-tier authority); under day0_shadow we still stamp the lower
-        # PRIORITY_DAY0_SHADOW so the two surfaces agree. Single source of truth:
-        # src.events.event_priority.day0_emit_priority.
+        # WITHIN-TIER sub-sort; fetch_pending owns the cross-tier authority.
+        # Single source of truth: src.events.event_priority.day0_emit_priority.
         priority=day0_emit_priority(day0_is_tradeable=day0_is_tradeable),
     )
 
@@ -103,9 +101,7 @@ class Day0ExtremeUpdatedTrigger:
     ) -> None:
         self._writer = writer
         # Stamp the scope-aware emission priority (2026-06-11 anti-starvation).
-        # Default True = historical priority=PRIORITY_DAY0_TRADEABLE. The caller in
-        # main.py passes False under edli_live_scope='day0_shadow' so shadow-only
-        # day0 events sub-sort below tradeable forecast candidates.
+        # Production live uses the default True; False is for tests/replay.
         self._day0_is_tradeable = day0_is_tradeable
         self._suppress_recent_no_value_refutations = suppress_recent_no_value_refutations
 

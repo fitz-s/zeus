@@ -7,23 +7,22 @@ import math
 from typing import Mapping
 
 
-STRATEGY_KEY = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
-TRADE_AUTHORITY_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"
-KELLY_INCREASE_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_kelly_increase_enabled"
-DIRECTION_FLIP_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_direction_flip_enabled"
+STRATEGY_KEY = "openmeteo_ecmwf_ifs9_bayes_fusion"
+TRADE_AUTHORITY_FLAG = "openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"
+KELLY_INCREASE_FLAG = "openmeteo_ecmwf_ifs9_bayes_fusion_kelly_increase_enabled"
+DIRECTION_FLIP_FLAG = "openmeteo_ecmwf_ifs9_bayes_fusion_direction_flip_enabled"
 REQUIRED_FLAGS = (
     TRADE_AUTHORITY_FLAG,
     KELLY_INCREASE_FLAG,
     DIRECTION_FLIP_FLAG,
 )
 SAFE_DEFAULT_STATUS = "DISABLED"
-DIAGNOSTIC_ONLY_STATUS = "DIAGNOSTIC_ONLY"
 BLOCKED_STATUS = "BLOCKED"
-LIVE_AUTHORITY_STATUS = "LIVE_AUTHORITY"
+LIVE_STATUS = "live"
 EXPECTED_ANCHOR_WEIGHT = 0.80
 EXPECTED_ANCHOR_SIGMA_C = 3.00
 MIN_PROMOTION_GUARDRAIL_BUCKET_ROWS = 20
-EXPECTED_CAPITAL_OBJECTIVE_LABEL = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00"
+EXPECTED_CAPITAL_OBJECTIVE_LABEL = "openmeteo_ecmwf_ifs9_bayes_fusion"
 
 
 @dataclass(frozen=True)
@@ -138,11 +137,11 @@ class ReplacementForecastCapitalObjectiveEvidence:
         return not self.blocking_reason_codes()
 
 
-def replacement_live_authority_evidence_gate(
+def replacement_live_evidence_gate(
     promotion_evidence: ReplacementForecastPromotionEvidence | None,
     capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None,
 ) -> tuple[bool, tuple[str, ...]]:
-    """The single shared evidence gate for replacement live (replacement_0_1) authority.
+    """The single shared evidence gate for replacement live (replacement_0_1).
 
     REAUDIT_0_1.md §1.1 (re-pointed FIX-1): ONE pure predicate, co-located with
     the evidence dataclasses (NO new module, NO second loader). It performs NO IO
@@ -165,9 +164,9 @@ def replacement_live_authority_evidence_gate(
     """
 
     if promotion_evidence is None:
-        return (False, ("REPLACEMENT_LIVE_AUTHORITY_PROMOTION_EVIDENCE_REQUIRED",))
+        return (False, ("REPLACEMENT_LIVE_PROMOTION_EVIDENCE_REQUIRED",))
     if capital_objective_evidence is None:
-        return (False, ("REPLACEMENT_LIVE_AUTHORITY_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED",))
+        return (False, ("REPLACEMENT_LIVE_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED",))
     blocking = (
         promotion_evidence.blocking_reason_codes()
         + capital_objective_evidence.blocking_reason_codes()
@@ -196,15 +195,15 @@ class ReplacementForecastRuntimePolicy:
 
     @property
     def can_initiate_trade(self) -> bool:
-        return self.status == LIVE_AUTHORITY_STATUS and self.trade_authority_enabled
+        return self.status == LIVE_STATUS and self.trade_authority_enabled
 
     @property
     def can_increase_kelly(self) -> bool:
-        return self.status == LIVE_AUTHORITY_STATUS and self.kelly_increase_enabled
+        return self.status == LIVE_STATUS and self.kelly_increase_enabled
 
     @property
     def can_flip_direction(self) -> bool:
-        return self.status == LIVE_AUTHORITY_STATUS and self.direction_flip_enabled
+        return self.status == LIVE_STATUS and self.direction_flip_enabled
 
 
 def _strict_bool(flags: Mapping[str, object], key: str) -> bool:
@@ -249,12 +248,12 @@ def resolve_replacement_forecast_runtime_policy(
         status = SAFE_DEFAULT_STATUS
         reason_codes = ("REPLACEMENT_TRADE_AUTHORITY_DISABLED",)
     else:
-        status = LIVE_AUTHORITY_STATUS
-        reason_codes = ("REPLACEMENT_LIVE_AUTHORITY_FLAG_ENABLED",)
+        status = LIVE_STATUS
+        reason_codes = ("REPLACEMENT_LIVE_ENABLED",)
     return ReplacementForecastRuntimePolicy(
         status=status,
         reason_codes=reason_codes,
-        trade_authority_enabled=trade_authority if status == LIVE_AUTHORITY_STATUS else False,
-        kelly_increase_enabled=kelly_increase if status == LIVE_AUTHORITY_STATUS else False,
-        direction_flip_enabled=direction_flip if status == LIVE_AUTHORITY_STATUS else False,
+        trade_authority_enabled=trade_authority if status == LIVE_STATUS else False,
+        kelly_increase_enabled=kelly_increase if status == LIVE_STATUS else False,
+        direction_flip_enabled=direction_flip if status == LIVE_STATUS else False,
     )

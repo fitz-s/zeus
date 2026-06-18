@@ -117,6 +117,9 @@ _TERMINAL_NO_VALUE_SQL = """
         )
     )
 """
+_NO_VALUE_FORECAST_EVENT_TYPES = frozenset(
+    {"FORECAST_SNAPSHOT_READY", REDECISION_EVENT_TYPE}
+)
 
 
 @dataclass(frozen=True)
@@ -187,6 +190,18 @@ class RepriceDecision:
     action: str
     reason: str
     detail: float = 0.0  # |Δbelief| for BELIEF_WORSENING; bid-limit drift for BOOK_MOVED.
+
+
+def _no_value_refutation_event_types_compatible(
+    active_event_type: str, regret_event_type: str
+) -> bool:
+    active = str(active_event_type or "").strip()
+    regret = str(regret_event_type or "").strip()
+    if active in _NO_VALUE_FORECAST_EVENT_TYPES:
+        return not regret or regret in _NO_VALUE_FORECAST_EVENT_TYPES
+    if active == "DAY0_EXTREME_UPDATED":
+        return regret == "DAY0_EXTREME_UPDATED"
+    return bool(active and regret and active == regret)
 
 
 def _parse(ts: str) -> datetime:
@@ -975,9 +990,9 @@ def recent_no_value_event_refutation(
     This is an admission de-duplication guard, not an edge/no-edge cap. It only
     suppresses a newly minted ordinary FSR/DAY0 event when the same
     city/target/metric evidence identity has already reached a terminal
-    full-economics no-trade decision inside the cooldown. A different forecast
-    snapshot, Day0 observation payload, or dedicated EDLI_REDECISION_PENDING
-    bypasses this guard and still reaches the full reactor.
+    full-economics no-trade decision inside the cooldown. Ordinary FSR and
+    ``EDLI_REDECISION_PENDING`` are compatible forecast evidence lanes; Day0 is
+    a separate observation lane and only Day0 no-value can refute Day0.
     """
 
     if event.event_type not in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}:
@@ -1025,7 +1040,7 @@ def recent_no_value_event_refutation(
 
     for row in rows:
         row_event_type = str(row[6] or "").strip()
-        if row_event_type and row_event_type != event.event_type:
+        if not _no_value_refutation_event_types_compatible(event.event_type, row_event_type):
             continue
         prior_payload_hash = str(row[5] or "").strip()
         if payload_digest and prior_payload_hash and payload_digest == prior_payload_hash:

@@ -1,33 +1,21 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
-# Authority basis: operator directive 2026-06-11 ~08:30Z (queue priority starvation —
-#   day0-shadow DAY0_EXTREME_UPDATED events crowding tradeable 2026-06-12 FSR families
-#   out of the reactor claim under edli_live_scope='day0_shadow'). Single shared
-#   location for opportunity-event priority constants — no magic numbers at call sites.
+# Last reused or audited: 2026-06-18
+# Authority basis: live Day0 and forecast events share one production execution
+#   lane. Single shared location for opportunity-event priority constants — no
+#   magic numbers at call sites.
 """Opportunity-event priority constants and the scope-aware claim-tier authority.
 
 THE CATEGORY THIS MODULE MAKES UNCONSTRUCTABLE
 ----------------------------------------------
 A claim-ordering decision encoded as a magic integer at a call site, and a
-"day0 is always the freshest alpha" assumption baked statically into the queue
-tier — which is FALSE the moment ``edli_live_scope='day0_shadow'`` makes a
-DAY0_EXTREME_UPDATED event a pure shadow that can NEVER produce an order.
-
-The live incident (2026-06-11): under ``day0_shadow`` the reactor's
-``fetch_pending`` tier CASE ranked DAY0_EXTREME_UPDATED at Tier 0 (highest),
-ahead of tradeable FORECAST_SNAPSHOT_READY (Tier 1). A flood of day0-scope
-shadow events (which can only ever yield DAY0_SCOPE_SHADOW_ONLY receipts) was
-claimed first every cycle, starving the per-cycle proof budget so tradeable
-06-12 forecast families — including two that had reached the FINAL submit gate —
-sat behind ~98 pending shadow rows with inflow exceeding drain.
+"Day0 is always the freshest alpha" assumption baked statically into the queue
+tier.
 
 THE STRUCTURAL DECISION
 -----------------------
-Day0 is the freshest *tradeable* alpha ONLY when day0 is a tradeable lane
-(scope ``forecast_plus_day0``). Under ``day0_shadow`` it is shadow-only and must
-NOT preempt tradeable forecast families. The claim tier is therefore
-SCOPE-AWARE: ``day0_is_tradeable`` flips DAY0_EXTREME_UPDATED between the
-top tier (tradeable) and a tier strictly below tradeable FSR (shadow).
+Day0 is the freshest *tradeable* alpha only when Day0 is a tradeable lane
+(production scope ``forecast_plus_day0``). The claim tier is therefore
+scope-aware for tests/replay, while production keeps Day0 tradeable.
 
 The integer priority on each event (``opportunity_events.priority``) is a
 SUB-SORT within a tier — it cannot reorder across tiers. Both surfaces (the
@@ -60,31 +48,27 @@ PRIORITY_FORECAST_INCOMPLETE: Final[int] = 0
 # (edli_live_scope='forecast_plus_day0'): realized observation, freshest alpha.
 PRIORITY_DAY0_TRADEABLE: Final[int] = 60
 
-# DAY0_EXTREME_UPDATED emitted while day0 is SHADOW-ONLY
-# (edli_live_scope='day0_shadow'): can only ever produce DAY0_SCOPE_SHADOW_ONLY,
-# so it must sub-sort below every tradeable candidate and never starve them.
+# Reserved low priority for non-tradeable Day0 scopes in tests or historical
+# replay only. Production live scope is forecast_plus_day0.
 PRIORITY_DAY0_SHADOW: Final[int] = 10
 
 
 def day0_emit_priority(*, day0_is_tradeable: bool) -> int:
     """Priority to stamp on a DAY0_EXTREME_UPDATED event at emit time.
 
-    ``day0_is_tradeable`` is derived from ``edli_live_scope``: True for
-    ``forecast_plus_day0`` (day0 can submit), False for ``day0_shadow`` (day0 is
-    shadow-only). The emission-priority half of the anti-starvation fix.
+    ``day0_is_tradeable`` is derived from ``edli_live_scope``. Production live
+    uses ``forecast_plus_day0`` so Day0 can submit through the same live lane.
     """
     return PRIORITY_DAY0_TRADEABLE if day0_is_tradeable else PRIORITY_DAY0_SHADOW
 
 
 def day0_is_tradeable_for_scope(edli_live_scope: str | None) -> bool:
     """True iff a DAY0_EXTREME_UPDATED event could lawfully reach a submit path
-    under ``edli_live_scope`` — i.e. day0 is a TRADEABLE lane, not shadow-only.
+    under ``edli_live_scope``.
 
     Single source of truth for the scope→tradeability mapping shared by the
     emitter (priority stamp) and the reactor (claim-tier selection). Any scope
-    other than the day0-tradeable lane is treated as NON-tradeable for day0
-    (fail-closed: a forecast_only or unknown scope never submits a day0 event,
-    so it must never let day0 preempt tradeable forecast families either).
+    other than the Day0-tradeable lane is treated as non-tradeable for Day0.
     """
     return str(edli_live_scope or "") == "forecast_plus_day0"
 

@@ -72,7 +72,7 @@ class ReplacementBelief:
     source_cycle_time: str | None = None
     source_cycle_age_hours: float | None = None
     freshness_basis: str = "computed_at"
-    trade_authority_status: str = "LIVE_AUTHORITY"
+    runtime_layer: str = "live"
 
     def freshness_validation(self) -> str:
         state = "fresh" if self.fresh else "stale"
@@ -159,10 +159,9 @@ def load_replacement_belief(
     try:
         conn.row_factory = sqlite3.Row
         columns = _table_columns(conn, "forecast_posteriors")
-        if "trade_authority_status" not in columns:
+        if "runtime_layer" not in columns:
             logger.warning(
-                "position_belief: forecast_posteriors missing trade_authority_status; "
-                "no live-authority belief available"
+                "position_belief: forecast_posteriors missing runtime_layer; no live belief available"
             )
             return None
         source_cycle_expr = (
@@ -172,10 +171,10 @@ def load_replacement_belief(
         )
         row = conn.execute(
             f"""
-            SELECT posterior_id, computed_at, q_json, {source_cycle_expr}, trade_authority_status
+            SELECT posterior_id, computed_at, q_json, {source_cycle_expr}, runtime_layer
             FROM forecast_posteriors
             WHERE city = ? AND target_date = ? AND temperature_metric = ?
-              AND trade_authority_status = 'LIVE_AUTHORITY'
+              AND runtime_layer = 'live'
             ORDER BY datetime(computed_at) DESC, posterior_id DESC
             LIMIT 1
             """,
@@ -243,7 +242,7 @@ def load_replacement_belief(
         ),
         source_cycle_age_hours=source_cycle_age_hours,
         freshness_basis=freshness_basis,
-        trade_authority_status=str(row["trade_authority_status"]),
+        runtime_layer=str(row["runtime_layer"]),
     )
 
 

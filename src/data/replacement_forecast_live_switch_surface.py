@@ -40,8 +40,8 @@ REQUIRED_FORECAST_TABLES = (
     "edli_no_submit_receipts",
     "raw_forecast_artifacts",
     "deterministic_forecast_anchors",
+    "raw_model_forecasts",
     "forecast_posteriors",
-    "replacement_shadow_decisions",
 )
 REQUIRED_WORLD_TABLES = (
     "market_events",

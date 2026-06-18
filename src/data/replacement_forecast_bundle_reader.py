@@ -13,7 +13,6 @@ from typing import Any, Mapping
 
 from src.config import cities_by_name
 from src.data.replacement_forecast_cycle_policy import (
-    CYCLE_PHASE_INTERMEDIATE,
     REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT,
     classify_cycle_phase,
     cycle_age_exceeds_bound,
@@ -55,12 +54,6 @@ _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset({"FUSED_NORMAL_FULL", "FUSED_NORMA
 _replacement_source_cycle_max_age_hours = replacement_source_cycle_max_age_hours
 
 
-# Operator cycle-physics directive 2026-06-10: a posterior sourced from an intermediate
-# (06/18Z) model cycle carries provenance_json.cycle_phase == "intermediate". The de-bias
-# + fusion weights were trained on ~99% 00Z-cycle history, so an intermediate-phase
-# posterior is produced + readiness-stamped (keeping production alive in the dead zones)
-# but is held out of LIVE admission by default until a settlement-graded
-# comparison licenses it. Flag default OFF = diagnostic-only (never weaken a gate).
 logger = logging.getLogger("zeus.replacement_forecast_bundle_reader")
 
 _REPLACEMENT_INTERMEDIATE_CYCLE_LIVE_FLAG = "replacement_0_1_intermediate_cycle_live_admission_enabled"
@@ -69,9 +62,9 @@ _REPLACEMENT_INTERMEDIATE_CYCLE_LIVE_FLAG = "replacement_0_1_intermediate_cycle_
 def _replacement_intermediate_cycle_live_admission_enabled() -> bool:
     """Whether intermediate-phase (06/18Z) posteriors may be admitted LIVE. Default FALSE.
 
-    Fail-closed: any config error -> False (intermediate phase stays diagnostic-only). The
-    operator promotes this only after a settlement-graded synoptic-vs-intermediate skill
-    comparison; until then 06/18Z posteriors keep production alive without trading live.
+    Fail-closed: any config error -> False. The operator promotes this only after a
+    settlement-graded synoptic-vs-intermediate skill comparison; until then 06/18Z posteriors
+    are excluded from live authority.
     """
     try:
         from src.config import settings  # noqa: PLC0415
@@ -102,14 +95,14 @@ class ReplacementForecastPosteriorBundle:
     baseline_source_run_id: str
     dependency_json: Mapping[str, Any]
     provenance_json: Mapping[str, Any]
-    trade_authority_status: str
+    runtime_layer: str
 
     def __post_init__(self) -> None:
         for field_name, value in (("source_id", self.source_id), ("product_id", self.product_id), ("data_version", self.data_version)):
             if _FORBIDDEN_TRANSCRIPT_ALIAS in value.lower():
                 raise ValueError(f"{field_name} must use full product identity")
-        if self.trade_authority_status != "LIVE_AUTHORITY":
-            raise ValueError("replacement posterior bundle requires row-level LIVE_AUTHORITY")
+        if self.runtime_layer != "live":
+            raise ValueError("replacement posterior bundle requires runtime_layer=live")
         _normalize_probability_map(self.q, field_name="q")
         if self.q_lcb is not None:
             _normalize_probability_map(self.q_lcb, field_name="q_lcb", require_sum=False)
@@ -244,30 +237,8 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
 
 
 def _row_is_live_authority_grade(row_map: Mapping[str, Any]) -> bool:
-    """A posterior row is live-authority-grade iff row authority, bounds, and q-mode all agree.
-
-    It must have row-level ``trade_authority_status == LIVE_AUTHORITY``, BOTH certified bounds
-    (q_lcb_json AND q_ucb_json non-NULL), and a fused-Normal q-mode. NULL on EITHER bound, a
-    non-fused mode (BAYES_PRECISION_FUSION_CAPTURE_MISSING, FUSED_NORMAL_BOUNDS_MISSING,
-    SOFT_ANCHOR_FALLBACK, ...), or a SHADOW status => diagnostic only, never live.
-
-    This is the read-side mirror of the live gate's eligibility predicate; it is what makes a
-    newer bounds-less or diagnostic row NOT clobber an older live-authority row on the LIVE path.
-
-    TWIN-AUTHORITY KILL (2026-06-13, carrier defect): the live bounds gate
-    (event_reactor_adapter._replacement_authority_probability_and_fdr_proof, the
-    ``_needs_bounds``/``_bounds_ok`` block) requires BOTH ``q_lcb`` AND ``q_ucb`` to be
-    non-empty mappings. This predicate previously required only ``q_lcb_json``, so a row with
-    q_lcb present but ``q_ucb_json`` NULL (a 13:08Z row HAS q_ucb, its 13:09Z sibling MISSING it
-    — the freshest-row twin-authority defect; observed live on Wellington 06-14) was selected as
-    "tradeable-grade" and served. The adapter then either rejected the WHOLE family
-    (FUSED_NORMAL_BOUNDS_MISSING) or silently fail-closed every buy_no to q_lcb_no=0.0
-    (``_replacement_no_lcb_for_bin`` returns 0.0 when ``q_ucb`` is absent). Requiring q_ucb_json
-    here makes the existing live-latest selection serve the freshest row that carries BOTH
-    bounds — automatically, with no new code path — and closes the reader/adapter predicate gap
-    that is the structural root (not just the Wellington instance).
-    """
-    if str(row_map.get("trade_authority_status") or "") != "LIVE_AUTHORITY":
+    """A posterior row is executable iff it is live and has the certified live q carrier."""
+    if str(row_map.get("runtime_layer") or "") != "live":
         return False
     if not row_map.get("q_lcb_json"):
         return False
@@ -564,14 +535,7 @@ def read_replacement_forecast_bundle(
             decision_utc.isoformat(),
         )
 
-    # LIVE-LATEST read semantics. Fetch the scope's posterior rows newest-first, then prefer
-    # the latest LIVE-AUTHORITY-GRADE row over a newer bounds-less or SHADOW row. A newer cycle
-    # that has anchor manifests but no
-    # fusion instruments writes a bounds-less BAYES_PRECISION_FUSION_CAPTURE_MISSING row by design; absolute-latest
-    # selection would serve it and collapse live eligibility. The newer non-live row stays
-    # visible for diagnostics/telemetry (it is still in the table); the LIVE bundle just does
-    # not bind to it. Bound the scan to a small recent window — a healthy scope has 1-3 rows per
-    # cycle, and the staleness gate below caps how far back a served row may sit anyway.
+    # Live read semantics: execution binds only rows explicitly materialized into the live layer.
     candidate_rows = conn.execute(
         """
         SELECT * FROM forecast_posteriors
@@ -582,6 +546,7 @@ def read_replacement_forecast_bundle(
           AND product_id = ?
           AND data_version = ?
           AND training_allowed = 0
+          AND runtime_layer = 'live'
         ORDER BY computed_at DESC, posterior_id DESC
         LIMIT 16
         """,
@@ -597,7 +562,7 @@ def read_replacement_forecast_bundle(
             live_row_map = candidate_map
             break
     if live_row_map is None:
-        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_LIVE_AUTHORITY_MISSING")
+        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_LIVE_MISSING")
     row_map = live_row_map
     # Fallback case: we are serving an OLDER live row because a NEWER non-live
     # row sits on top. The scope readiness (per-scope upsert) now points at that newer diagnostic
@@ -642,25 +607,6 @@ def read_replacement_forecast_bundle(
             metric,
             _source_cycle_utc.isoformat(),
             _age_hours,
-        )
-
-    # Operator cycle-physics directive 2026-06-10 — intermediate-cycle (06/18Z) live gate.
-    # The de-bias + fusion weights were trained on ~99% 00Z-cycle history, so a posterior
-    # built on an intermediate cycle applies a bias correction across cycle phase. Such a
-    # posterior is still PRODUCED + readiness-stamped (production stays alive in dead zones)
-    # but is admitted LIVE only when the operator flag is on (default OFF = diagnostic-only).
-    # We prefer the explicit provenance tag (recorded at materialization), falling back to
-    # the source_cycle_time hour so a pre-tag posterior is still classified fail-closed.
-    _phase_provenance = _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
-    _cycle_phase = str(_phase_provenance.get("cycle_phase") or "").strip().lower()
-    if not _cycle_phase:
-        _cycle_phase = classify_cycle_phase(_source_cycle_utc)
-    if (
-        _cycle_phase == CYCLE_PHASE_INTERMEDIATE
-        and not _replacement_intermediate_cycle_live_admission_enabled()
-    ):
-        return ReplacementForecastBundleReadResult(
-            "BLOCKED", "REPLACEMENT_0_1_LIVE_AUTHORITY_INTERMEDIATE_CYCLE_DIAGNOSTIC_ONLY"
         )
 
     dependency_json = _json_mapping(row_map["dependency_source_run_ids_json"], field_name="dependency_source_run_ids_json")
@@ -751,6 +697,6 @@ def read_replacement_forecast_bundle(
         baseline_source_run_id=baseline_run_id,
         dependency_json=dependency_json,
         provenance_json=provenance,
-        trade_authority_status=str(row_map["trade_authority_status"]),
+        runtime_layer=str(row_map["runtime_layer"]),
     )
     return ReplacementForecastBundleReadResult(READY_STATUS, "REPLACEMENT_POSTERIOR_READY", bundle)

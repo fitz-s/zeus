@@ -171,15 +171,15 @@ def _blocked_result(
     )
 
 
-def _diagnostic_unavailable_result(
+def _replacement_unavailable_result(
     candidate: ReplacementForecastCandidateView,
     *,
     reason_codes: tuple[str, ...],
 ) -> ReplacementForecastReactorHookResult:
-    """Keep baseline values when replacement diagnostic evidence is unavailable."""
+    """Fail closed when replacement live authority is unavailable."""
 
     return ReplacementForecastReactorHookResult(
-        status="DIAGNOSTIC_ONLY",
+        status="BLOCKED",
         reason_codes=reason_codes,
         effective_direction=candidate.baseline_direction,
         effective_q_posterior=candidate.baseline_q_posterior,
@@ -339,8 +339,7 @@ def _replacement_q_lcb_for_candidate(
     # honest fail-soft default: when there is no replacement data for the bin (bundle absent,
     # no bin binding, no q_lcb entry) the candidate falls back to baseline_q_lcb — that is a
     # legacy strategy genuinely running on baseline q, not a cap on the replacement value.
-    # The SHADOW_VETO down-clamp (veto can only lower q_lcb, never raise) stays downstream as
-    # its own honest gate.
+    # Any non-live replacement artifact is unavailable to this execution hook.
     baseline_q_lcb = float(getattr(proof, "q_lcb_5pct"))
     if replacement_bundle is None:
         return baseline_q_lcb
@@ -455,82 +454,14 @@ def _candidate_view_from_proof(
     )
 
 
-def _write_replacement_shadow_decision(
-    conn: sqlite3.Connection,
-    result: ReplacementForecastReactorHookResult,
-) -> None:
-    decision = result.veto_decision
-    if decision is None:
-        return
-    row = decision.as_shadow_decision_row()
-    baseline_source_run_id = None
-    dependencies = row["dependency_source_run_ids_json"]
-    if isinstance(dependencies, Mapping):
-        raw_baseline = dependencies.get("baseline_b0")
-        baseline_source_run_id = str(raw_baseline) if raw_baseline is not None else None
-    conn.execute(
-        """
-        INSERT INTO replacement_shadow_decisions (
-            posterior_id, baseline_source_run_id, market_snapshot_id,
-            condition_id, token_id, decision_time, baseline_direction,
-            candidate_direction, allowed_direction, baseline_q_lcb,
-            candidate_q_lcb, allowed_q_lcb, baseline_kelly_fraction,
-            candidate_kelly_fraction, allowed_kelly_fraction, veto,
-            veto_reason, dependency_source_run_ids_json, provenance_json,
-            trade_authority_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(posterior_id, market_snapshot_id, condition_id, token_id, decision_time)
-        DO UPDATE SET
-            baseline_source_run_id = excluded.baseline_source_run_id,
-            baseline_direction = excluded.baseline_direction,
-            candidate_direction = excluded.candidate_direction,
-            allowed_direction = excluded.allowed_direction,
-            baseline_q_lcb = excluded.baseline_q_lcb,
-            candidate_q_lcb = excluded.candidate_q_lcb,
-            allowed_q_lcb = excluded.allowed_q_lcb,
-            baseline_kelly_fraction = excluded.baseline_kelly_fraction,
-            candidate_kelly_fraction = excluded.candidate_kelly_fraction,
-            allowed_kelly_fraction = excluded.allowed_kelly_fraction,
-            veto = excluded.veto,
-            veto_reason = excluded.veto_reason,
-            dependency_source_run_ids_json = excluded.dependency_source_run_ids_json,
-            provenance_json = excluded.provenance_json,
-            trade_authority_status = excluded.trade_authority_status
-        """,
-        (
-            row["posterior_id"],
-            baseline_source_run_id,
-            row["market_snapshot_id"],
-            row["condition_id"],
-            row["token_id"],
-            row["decision_time"],
-            row["baseline_direction"],
-            row["candidate_direction"],
-            row["allowed_direction"],
-            row["baseline_q_lcb"],
-            row["candidate_q_lcb"],
-            row["allowed_q_lcb"],
-            row["baseline_kelly_fraction"],
-            row["candidate_kelly_fraction"],
-            row["allowed_kelly_fraction"],
-            row["veto"],
-            row["veto_reason"],
-            json.dumps(row["dependency_source_run_ids_json"], sort_keys=True, separators=(",", ":"), default=str),
-            json.dumps(row["provenance_json"], sort_keys=True, separators=(",", ":"), default=str),
-            row["trade_authority_status"],
-        ),
-    )
-
-
 def build_replacement_forecast_event_hook(
     request: ReplacementForecastHookFactoryInput,
 ) -> Callable[[Any, OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None]:
     """Build the DB-backed replacement hook for the real event reactor path.
 
-    The underlying reactor hook is pure. This factory-owned wrapper may persist
-    one ``replacement_shadow_decisions`` audit row after a shadow-veto result.
-    Audit-write failure returns baseline/no-mutation behavior before live
-    authority and blocks under live authority.
+    The underlying reactor hook is pure. This factory wrapper reads only
+    live-authority posterior/readiness rows; non-live replacement artifacts do
+    not write audit rows or participate in execution decisions.
     """
 
     if not isinstance(request, ReplacementForecastHookFactoryInput):
@@ -587,7 +518,7 @@ def build_replacement_forecast_event_hook(
         candidate_view = _candidate_view_from_proof(proof, decision_time)
         if switch_decision.blocked:
             if policy.status != "LIVE_AUTHORITY":
-                return _shadow_unavailable_result(
+                return _replacement_unavailable_result(
                     candidate_view,
                     reason_codes=switch_decision.reason_codes,
                 )
@@ -606,7 +537,7 @@ def build_replacement_forecast_event_hook(
         )
         if baseline_bundle is None:
             if policy.status != "LIVE_AUTHORITY":
-                return _shadow_unavailable_result(
+                return _replacement_unavailable_result(
                     candidate_view,
                     reason_codes=("REPLACEMENT_HOOK_BASELINE_BUNDLE_MISSING",),
                 )
@@ -626,7 +557,7 @@ def build_replacement_forecast_event_hook(
         if bundle_result is None or not bundle_result.ok:
             reason_code = bundle_result.reason_code if bundle_result is not None else "REPLACEMENT_HOOK_READINESS_MISSING"
             if policy.status != "LIVE_AUTHORITY":
-                return _shadow_unavailable_result(
+                return _replacement_unavailable_result(
                     candidate_view,
                     reason_codes=(reason_code,),
                 )
