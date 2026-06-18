@@ -7735,10 +7735,15 @@ def _edli_refresh_continuous_money_path_families(
     }
     if not clean_families:
         return {"status": "no_families", "families_requested": 0}
-    if not _market_substrate_refresh_lock.acquire(blocking=False):
+    lock_timeout_s = max(
+        0.0,
+        float(os.environ.get("ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS", "25.0")),
+    )
+    if not _market_substrate_refresh_lock.acquire(timeout=lock_timeout_s):
         return {
             "status": "skipped_lock_busy",
             "families_requested": len(clean_families),
+            "lock_timeout_seconds": lock_timeout_s,
         }
     from src.state.db import (
         ZEUS_FORECASTS_DB_PATH,
