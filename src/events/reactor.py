@@ -2509,6 +2509,11 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # Genuine intra-cycle execution races (PRICE_MOVED / MODE_FLIPPED) are classified
     # later at the SUBMIT stage under their own transient bases and are unaffected.
     "QKERNEL_SPINE_NO_TRADE",
+    # Structural event-type contract violations are terminal for the event. They
+    # cannot become valuable by re-running the same payload and must not clog
+    # continuous redecision.
+    "unsupported live candidate event type",
+    "unsupported EDLI event type for inference",
 })
 
 

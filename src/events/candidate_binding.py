@@ -27,6 +27,11 @@ MARKET_DATA_EVENT_TYPES = {
     "NEW_MARKET_DISCOVERED",
 }
 
+FORECAST_CANDIDATE_EVENT_TYPES = {
+    "FORECAST_SNAPSHOT_READY",
+    "EDLI_REDECISION_PENDING",
+}
+
 
 @dataclass(frozen=True)
 class MarketTopologyCandidate:
@@ -89,7 +94,7 @@ def bind_event_to_candidate_family(
     metric = _required_payload_text(payload, "metric")
     causal_snapshot_id = _validate_event_causality(event, payload)
 
-    if event.event_type == "FORECAST_SNAPSHOT_READY":
+    if event.event_type in FORECAST_CANDIDATE_EVENT_TYPES:
         _validate_forecast_event(event, payload, causal_snapshot_id)
     elif event.event_type == "DAY0_EXTREME_UPDATED":
         _validate_day0_event(payload)
@@ -195,7 +200,7 @@ def _validate_event_causality(event: OpportunityEvent, payload: dict) -> str:
 
 
 def _validate_forecast_event(event: OpportunityEvent, payload: dict, causal_snapshot_id: str) -> None:
-    if event.event_type != "FORECAST_SNAPSHOT_READY":
+    if event.event_type not in FORECAST_CANDIDATE_EVENT_TYPES:
         raise CandidateBindingError("forecast validator received non-forecast event")
     # Coverage labels are ADVISORY here (serving-authority ruling, incident
     # 2026-06-11T16:33:51Z; THIRD site found live 2026-06-11T19:53Z minutes
