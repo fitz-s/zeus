@@ -329,6 +329,31 @@ class TestChainTruthRetryOnPositiveBalance:
                 """,
                 (first.trade_id,),
             ).fetchone()[0]
+            first_current = conn.execute(
+                """
+                SELECT shares, chain_shares, phase
+                  FROM position_current
+                 WHERE position_id = ?
+                """,
+                (first.trade_id,),
+            ).fetchone()
+            assert first_current["phase"] == "pending_exit"
+            assert first_current["shares"] == pytest.approx(0.01)
+            assert first_current["chain_shares"] == pytest.approx(0.01)
+
+            conn.execute(
+                """
+                UPDATE position_current
+                   SET shares = 5.06,
+                       chain_shares = 0.0,
+                       cost_basis_usd = 3.7444,
+                       size_usd = 3.7444,
+                       chain_cost_basis_usd = NULL,
+                       chain_avg_price = NULL
+                 WHERE position_id = ?
+                """,
+                (first.trade_id,),
+            )
 
             hydrated_without_exit_state = _make_position(
                 trade_id=first.trade_id,
@@ -358,6 +383,31 @@ class TestChainTruthRetryOnPositiveBalance:
             assert before == 1
             assert after == before
             assert hydrated_without_exit_state.exit_state == "backoff_exhausted"
+            current = conn.execute(
+                """
+                SELECT shares, chain_shares, cost_basis_usd, size_usd,
+                       chain_cost_basis_usd, chain_avg_price, phase
+                  FROM position_current
+                 WHERE position_id = ?
+                """,
+                (first.trade_id,),
+            ).fetchone()
+            assert current["phase"] == "pending_exit"
+            assert current["shares"] == pytest.approx(0.01)
+            assert current["chain_shares"] == pytest.approx(0.01)
+            assert current["cost_basis_usd"] < 0.01
+            assert current["size_usd"] < 0.01
+            assert current["chain_cost_basis_usd"] == pytest.approx(0.001)
+            assert current["chain_avg_price"] == pytest.approx(0.10)
+            correction = conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'CHAIN_SIZE_CORRECTED'
+                """,
+                (first.trade_id,),
+            ).fetchone()[0]
+            assert correction == 1
         finally:
             conn.close()
 

@@ -824,6 +824,121 @@ def _ctf_units_to_shares(raw_units: int | str | Decimal) -> Decimal:
     return Decimal(str(raw_units)) / _CTF_SCALE
 
 
+def _decimal_to_float(value: Decimal) -> float:
+    return float(value)
+
+
+def _sync_position_to_chain_dust(
+    position: Position,
+    *,
+    chain_balance_units: int,
+    chain_balance_shares: Decimal,
+    asset_id: str,
+) -> tuple[float | None, bool]:
+    """Shrink a pending-exit dust hold to the actual CTF balance.
+
+    Chain truth is still positive, so the position must remain pending_exit,
+    but local exposure must not continue to show the pre-exit size.
+    """
+
+    old_shares = _positive_decimal(getattr(position, "shares", None))
+    if old_shares is None:
+        old_shares = _positive_decimal(getattr(position, "effective_shares", None))
+    old_chain_shares = _positive_decimal(getattr(position, "chain_shares", None))
+    local_shares_before = float(old_shares) if old_shares is not None else None
+
+    changed = old_shares != chain_balance_shares or old_chain_shares != chain_balance_shares
+    ratio = Decimal("0")
+    if old_shares is not None and old_shares > 0:
+        ratio = chain_balance_shares / old_shares
+
+    for field_name in ("cost_basis_usd", "size_usd", "filled_cost_basis_usd"):
+        old_value = _positive_decimal(getattr(position, field_name, None))
+        if old_value is None:
+            continue
+        new_value = old_value * ratio if ratio > 0 else Decimal("0")
+        if old_value != new_value:
+            setattr(position, field_name, _decimal_to_float(new_value))
+            changed = True
+
+    entry_price = _positive_decimal(getattr(position, "entry_price", None))
+    if entry_price is not None:
+        chain_cost_basis = chain_balance_shares * entry_price
+        if _positive_decimal(getattr(position, "chain_cost_basis_usd", None)) != chain_cost_basis:
+            position.chain_cost_basis_usd = _decimal_to_float(chain_cost_basis)
+            changed = True
+        if _positive_decimal(getattr(position, "chain_avg_price", None)) != entry_price:
+            position.chain_avg_price = _decimal_to_float(entry_price)
+            changed = True
+
+    dust_shares_float = _decimal_to_float(chain_balance_shares)
+    if getattr(position, "shares", None) != dust_shares_float:
+        position.shares = dust_shares_float
+        changed = True
+    if getattr(position, "chain_shares", None) != dust_shares_float:
+        position.chain_shares = dust_shares_float
+        changed = True
+    position.chain_state = "exit_pending_missing"
+    position.chain_verified_at = datetime.now(timezone.utc).isoformat()
+    position.last_exit_error = (
+        f"chain_balance_units={chain_balance_units};"
+        f"chain_balance_shares={chain_balance_shares};asset_id={asset_id}"
+    )[:500]
+    return local_shares_before, changed
+
+
+def _write_chain_dust_projection_correction(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    local_shares_before: float | None,
+    chain_balance_units: int,
+    chain_balance_shares: Decimal,
+    asset_id: str,
+) -> bool:
+    """Write a no-op-phase chain correction when dust event already exists."""
+
+    if conn is None:
+        return False
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        return False
+    try:
+        from src.engine.lifecycle_events import build_chain_size_corrected_canonical_write
+        from src.state.db import append_many_and_project
+
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        events, projection = build_chain_size_corrected_canonical_write(
+            position,
+            local_shares_before=local_shares_before or 0.0,
+            sequence_no=sequence_no,
+            phase_after="pending_exit",
+            source_module="src.execution.exit_lifecycle",
+        )
+        event = events[0]
+        event["caused_by"] = "chain_dust_projection_corrected"
+        payload = json.loads(str(event.get("payload_json") or "{}"))
+        payload.update(
+            {
+                "source": "exit_lifecycle",
+                "reason": "chain_dust_projection_corrected",
+                "chain_balance_units": chain_balance_units,
+                "chain_balance_shares": str(chain_balance_shares),
+                "asset_id": asset_id,
+            }
+        )
+        event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
+        append_many_and_project(conn, events, projection)
+        return True
+    except Exception as exc:  # noqa: BLE001 - fail closed to in-memory dust hold
+        logger.warning(
+            "chain dust projection correction failed for %s: %s",
+            trade_id,
+            exc,
+        )
+        return False
+
+
 def _asset_id_for_position(position: Position) -> str:
     """Return the ERC-1155 token ID (asset_id) the position holds."""
     if getattr(position, "direction", "") == "buy_yes":
@@ -903,6 +1018,9 @@ def handle_exit_pending_missing(
                     reason=dust_reason,
                     error=dust_error,
                     conn=conn,
+                    chain_balance_units=int(on_chain_balance),
+                    chain_balance_shares=chain_balance_shares,
+                    asset_id=asset_id,
                 )
                 return {"action": "dust_hold", "position": position}
             else:
@@ -1097,9 +1215,22 @@ def _mark_exit_dust_hold(
     reason: str,
     error: str = "",
     conn: sqlite3.Connection | None = None,
+    chain_balance_units: int | None = None,
+    chain_balance_shares: Decimal | None = None,
+    asset_id: str = "",
 ) -> None:
     """Hold a non-executable dust exit to settlement instead of retrying."""
     normalized_error = (error or "below_min_order_size")[:500]
+    local_shares_before: float | None = None
+    projection_changed = False
+    if chain_balance_units is not None and chain_balance_shares is not None:
+        local_shares_before, projection_changed = _sync_position_to_chain_dust(
+            position,
+            chain_balance_units=chain_balance_units,
+            chain_balance_shares=chain_balance_shares,
+            asset_id=asset_id,
+        )
+        normalized_error = (getattr(position, "last_exit_error", "") or normalized_error)[:500]
     already_held = (
         str(getattr(position, "exit_state", "") or "") == "backoff_exhausted"
         and str(getattr(position, "exit_reason", "") or "") == str(reason or "")
@@ -1109,7 +1240,17 @@ def _mark_exit_dust_hold(
     position.next_exit_retry_at = ""
     position.exit_reason = reason
     position.last_exit_error = normalized_error
-    if already_held or _dust_hold_event_already_recorded(conn, position, reason=reason):
+    event_already_recorded = _dust_hold_event_already_recorded(conn, position, reason=reason)
+    if already_held or event_already_recorded:
+        if projection_changed and event_already_recorded:
+            _write_chain_dust_projection_correction(
+                conn,
+                position,
+                local_shares_before=local_shares_before,
+                chain_balance_units=chain_balance_units or 0,
+                chain_balance_shares=chain_balance_shares or Decimal("0"),
+                asset_id=asset_id,
+            )
         return
     _dual_write_canonical_pending_exit_if_available(
         conn,
