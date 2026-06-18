@@ -2816,6 +2816,182 @@ def _emit_monitor_refreshed_canonical_if_available(
     return True
 
 
+_FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
+    {
+        "CI_SEPARATED_REVERSAL",
+        "MODEL_DIVERGENCE_PANIC",
+        "FLASH_CRASH_PANIC",
+        "VIG_EXTREME",
+        "EDGE_REVERSAL",
+    }
+)
+
+
+def _family_monitor_key(pos) -> tuple[str, str, str] | None:
+    city = str(getattr(pos, "city", "") or "").strip()
+    target_date = str(getattr(pos, "target_date", "") or "").strip()
+    metric = str(
+        getattr(pos, "temperature_metric", "")
+        or getattr(pos, "metric", "")
+        or ""
+    ).strip()
+    if not (city and target_date and metric):
+        return None
+    return city, target_date, metric
+
+
+def _family_monitor_positions(portfolio, pos) -> list:
+    key = _family_monitor_key(pos)
+    if key is None or portfolio is None:
+        return [pos]
+    out: list = []
+    for other in getattr(portfolio, "positions", None) or ():
+        if _family_monitor_key(other) != key:
+            continue
+        phase = _position_state_value(other)
+        if phase not in {"entered", "holding", "day0_window", "pending_exit"}:
+            continue
+        try:
+            if float(getattr(other, "effective_shares", getattr(other, "shares", 0.0)) or 0.0) <= 0.0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        out.append(other)
+    return out or [pos]
+
+
+def _monitor_value_inputs(position) -> tuple[float, float | None, float | None, str | None]:
+    try:
+        shares = float(getattr(position, "effective_shares", getattr(position, "shares", 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0, None, None, "shares_unavailable"
+    if shares <= 0.0:
+        return 0.0, None, None, "shares_non_positive"
+    if getattr(position, "last_monitor_prob_is_fresh", False) is not True:
+        return shares, None, None, "probability_not_fresh"
+    if getattr(position, "last_monitor_market_price_is_fresh", False) is not True:
+        return shares, None, None, "market_price_not_fresh"
+    try:
+        held_prob = float(getattr(position, "last_monitor_prob"))
+        best_bid = float(getattr(position, "last_monitor_best_bid"))
+    except (TypeError, ValueError):
+        return shares, None, None, "value_inputs_non_numeric"
+    if not (math.isfinite(held_prob) and 0.0 <= held_prob <= 1.0):
+        return shares, None, None, "probability_invalid"
+    if not (math.isfinite(best_bid) and 0.0 <= best_bid <= 1.0):
+        return shares, None, None, "best_bid_invalid"
+    return shares, held_prob, best_bid, None
+
+
+def _is_statistical_single_leg_exit(exit_decision, exit_reason: str) -> bool:
+    trigger = str(getattr(exit_decision, "trigger", "") or exit_reason or "")
+    return any(trigger.startswith(prefix) for prefix in _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS)
+
+
+def _apply_family_monitor_overlay(
+    *,
+    portfolio,
+    pos,
+    exit_decision,
+    should_exit: bool,
+    exit_reason: str,
+    summary: dict,
+) -> tuple[bool, str]:
+    """Require a family value check before a statistical single-leg exit.
+
+    This is live monitor logic over already-refreshed held-side probabilities and
+    held-side bids. It does not read replay/shadow data and it never creates a
+    new entry; it only prevents a single leg from liquidating when the current
+    family vector's hold value dominates its direct-sell value.
+    """
+
+    try:
+        if hasattr(pos, "_monitor_family_redecision"):
+            delattr(pos, "_monitor_family_redecision")
+    except Exception:
+        pass
+
+    family_positions = _family_monitor_positions(portfolio, pos)
+    if len(family_positions) < 2:
+        return should_exit, exit_reason
+
+    key = _family_monitor_key(pos)
+    payload: dict[str, object] = {
+        "family_key": "|".join(key) if key else "",
+        "position_count": len(family_positions),
+        "mode": "live_family_hold_vs_direct_sell",
+    }
+    hold_value = 0.0
+    sell_value = 0.0
+    missing: list[dict[str, str]] = []
+    leg_payloads: list[dict[str, object]] = []
+    for leg in family_positions:
+        shares, held_prob, best_bid, reason = _monitor_value_inputs(leg)
+        leg_payload: dict[str, object] = {
+            "position_id": str(getattr(leg, "trade_id", "") or ""),
+            "direction": str(getattr(leg, "direction", "") or ""),
+            "bin_label": str(getattr(leg, "bin_label", "") or ""),
+            "shares": shares,
+        }
+        if reason is not None:
+            missing.append(
+                {
+                    "position_id": str(getattr(leg, "trade_id", "") or ""),
+                    "reason": reason,
+                }
+            )
+            leg_payload["evidence_status"] = reason
+        else:
+            leg_hold = shares * float(held_prob)
+            leg_sell = shares * float(best_bid)
+            hold_value += leg_hold
+            sell_value += leg_sell
+            leg_payload.update(
+                {
+                    "held_probability": float(held_prob),
+                    "best_bid": float(best_bid),
+                    "hold_value_usd": leg_hold,
+                    "direct_sell_value_usd": leg_sell,
+                    "evidence_status": "complete",
+                }
+            )
+        leg_payloads.append(leg_payload)
+
+    payload["legs"] = leg_payloads
+    if missing:
+        payload["decision"] = "FAMILY_VALUE_EVIDENCE_UNAVAILABLE"
+        payload["missing"] = missing
+        setattr(pos, "_monitor_family_redecision", payload)
+        summary["family_redecision_evidence_unavailable"] = (
+            summary.get("family_redecision_evidence_unavailable", 0) + 1
+        )
+        return should_exit, exit_reason
+
+    payload["family_hold_value_usd"] = hold_value
+    payload["family_direct_sell_value_usd"] = sell_value
+    payload["family_value_edge_usd"] = hold_value - sell_value
+
+    if should_exit and _is_statistical_single_leg_exit(exit_decision, exit_reason):
+        if hold_value + 1e-9 >= sell_value:
+            payload["decision"] = "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
+            payload["suppressed_exit_reason"] = exit_reason
+            setattr(pos, "_monitor_family_redecision", payload)
+            validations = list(getattr(pos, "applied_validations", []) or [])
+            validations.append("family_hold_dominates_single_leg_exit")
+            pos.applied_validations = list(dict.fromkeys(validations))
+            summary["family_redecision_single_leg_exits_suppressed"] = (
+                summary.get("family_redecision_single_leg_exits_suppressed", 0) + 1
+            )
+            return False, "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
+
+    payload["decision"] = "FAMILY_OVERLAY_NO_OVERRIDE"
+    setattr(pos, "_monitor_family_redecision", payload)
+    summary["family_redecision_overlay_evaluated"] = (
+        summary.get("family_redecision_overlay_evaluated", 0) + 1
+    )
+    return should_exit, exit_reason
+
+
 def _dual_write_canonical_entry_if_available(
     conn,
     pos,
@@ -3891,6 +4067,18 @@ def execute_monitoring_phase(
                 exit_decision = orange_decision
             should_exit = exit_decision.should_exit
             exit_reason = exit_decision.reason
+            if not (
+                _hard_fact is not None
+                and _hard_fact.action in {"EXIT_DEAD_BIN", "HOLD_STRUCTURAL_WIN"}
+            ):
+                should_exit, exit_reason = _apply_family_monitor_overlay(
+                    portfolio=portfolio,
+                    pos=pos,
+                    exit_decision=exit_decision,
+                    should_exit=should_exit,
+                    exit_reason=exit_reason,
+                    summary=summary,
+                )
 
             if should_exit:
                 exit_trigger = exit_decision.trigger or exit_reason

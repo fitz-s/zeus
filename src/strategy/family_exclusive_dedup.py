@@ -922,7 +922,12 @@ def _edge_cost(edge: Any) -> float:
 
 def _edge_posterior(edge: Any) -> float:
     try:
-        posterior = float(getattr(edge, "p_posterior", 0.0) or getattr(edge, "p_model", 0.0) or 0.0)
+        q_lcb = getattr(edge, "q_lcb_5pct", None)
+        posterior = float(
+            q_lcb
+            if q_lcb is not None
+            else getattr(edge, "p_posterior", 0.0) or getattr(edge, "p_model", 0.0) or 0.0
+        )
     except (TypeError, ValueError):
         posterior = 0.0
     return max(0.0, min(1.0, posterior))
@@ -1063,6 +1068,13 @@ def optimize_exclusive_outcome_portfolio(
 
     if not edges:
         return None
+    executable_edges = [
+        edge
+        for edge in edges
+        if _edge_family_candidate_rejection_reason(edge) is None
+    ]
+    if not executable_edges:
+        return None
     legs = sorted(
         [
             FamilyPortfolioLeg(
@@ -1073,7 +1085,7 @@ def optimize_exclusive_outcome_portfolio(
                 posterior=_edge_posterior(edge),
                 direction=str(getattr(edge, "direction", "") or ""),
             )
-            for idx, edge in enumerate(edges)
+            for idx, edge in enumerate(executable_edges)
         ],
         key=lambda leg: (leg.support_index, leg.bin_label),
     )
@@ -1211,7 +1223,7 @@ def optimize_exclusive_outcome_portfolio(
         family_key=_family_key(city, target_date, temperature_metric, market_family_id),
         selected_leg=selected_leg,
         selected_legs=selected_legs,
-        candidate_legs=tuple(edges),
+        candidate_legs=tuple(executable_edges),
         candidate_leg_descriptors=tuple(legs),
         selection_score=edge_selection_utility,
         expected_net_profit_usd=expected_net_profit,
@@ -1277,6 +1289,9 @@ def buy_no_native_quote_evidence_submit_enabled() -> bool:
 def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
     """Return structural live-execution reason before a leg consumes fallback rank."""
 
+    structural = _edge_family_candidate_rejection_reason(edge)
+    if structural:
+        return structural
     if get_mode() != "live":
         return None
     if str(getattr(edge, "direction", "") or "") != "buy_no":
@@ -1285,6 +1300,17 @@ def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
         return _native_buy_no_live_rejection_reason()
     except ValueError as exc:
         return f"BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID:{exc}"
+
+
+def _edge_family_candidate_rejection_reason(edge: Any) -> str | None:
+    """Return the upstream candidate blocker the family optimizer must honor."""
+
+    missing_reason = str(getattr(edge, "missing_reason", "") or "").strip()
+    if missing_reason:
+        return missing_reason
+    if getattr(edge, "admitted", None) is False:
+        return "FAMILY_CANDIDATE_NOT_ADMITTED"
+    return None
 
 
 def preselect_single_family_edge_before_kelly(

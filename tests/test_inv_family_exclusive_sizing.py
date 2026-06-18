@@ -1103,6 +1103,68 @@ def test_family_optimizer_rejects_capital_dominated_no_basket_for_center_yes() -
 
     assert portfolio is not None
     assert portfolio.selected_legs == (yes_30,)
+
+
+def test_family_optimizer_honors_live_admission_and_qlcb_before_payoff_selection() -> None:
+    """Rejected tail lottery legs must not re-enter through family optimization."""
+
+    def edge(label: str, idx: int, direction: str, price: float, q: float, q_lcb: float, *, admitted: bool, reason: str = ""):
+        return SimpleNamespace(
+            bin=Bin(low=idx, high=idx, unit="C", label=label),
+            support_index=idx,
+            direction=direction,
+            entry_price=price,
+            p_posterior=q,
+            q_lcb_5pct=q_lcb,
+            forward_edge=q_lcb - price,
+            admitted=admitted,
+            missing_reason=reason,
+        )
+
+    rejected_tail_yes = edge(
+        "34C+",
+        0,
+        "buy_yes",
+        0.006,
+        0.014,
+        0.014,
+        admitted=False,
+        reason="DIRECTION_LAW_BIN_FORECAST_MISMATCH",
+    )
+    rejected_tiny_tail_yes = edge(
+        "24C or below",
+        1,
+        "buy_yes",
+        0.004,
+        0.001,
+        0.001,
+        admitted=False,
+        reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+    )
+    live_yes = edge(
+        "30C",
+        2,
+        "buy_yes",
+        0.27,
+        0.80,
+        0.35,
+        admitted=True,
+    )
+
+    portfolio = optimize_exclusive_outcome_portfolio(
+        [rejected_tail_yes, rejected_tiny_tail_yes, live_yes],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        min_legs=1,
+        max_legs=2,
+    )
+
+    assert portfolio is not None
+    assert portfolio.selected_legs == (live_yes,)
+    assert rejected_tail_yes not in portfolio.candidate_legs
+    assert rejected_tiny_tail_yes not in portfolio.candidate_legs
+    assert portfolio.posterior_vector == (pytest.approx(1.0),)
     assert portfolio.cost_vector == (0.27,)
     assert portfolio.capital_cost_usd == pytest.approx(0.27)
     assert portfolio.capital_efficiency > 0.0

@@ -3836,6 +3836,89 @@ def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monke
     conn.close()
 
 
+def test_family_monitor_overlay_suppresses_single_leg_statistical_exit_and_persists_payload():
+    """Same-family holdings must not liquidate one leg before family value is checked."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos_a = _make_position(
+        trade_id="family-monitor-a",
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        bin_label="29C",
+        direction="buy_no",
+        shares=7.0,
+        entry_price=0.79,
+        p_posterior=0.84,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos_b = _make_position(
+        trade_id="family-monitor-b",
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        bin_label="31C",
+        direction="buy_no",
+        shares=5.55,
+        entry_price=0.80,
+        p_posterior=0.85,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    for pos, prob, bid in ((pos_a, 0.86, 0.71), (pos_b, 0.83, 0.75)):
+        pos.last_monitor_at = "2026-06-18T23:25:00+00:00"
+        pos.last_monitor_prob = prob
+        pos.last_monitor_prob_is_fresh = True
+        pos.last_monitor_market_price = bid
+        pos.last_monitor_market_price_is_fresh = True
+        pos.last_monitor_best_bid = bid
+        pos.last_monitor_best_ask = min(0.99, bid + 0.02)
+        pos.last_monitor_edge = prob - bid
+        pos.applied_validations = ["replacement_posterior", "ci_separated_reversal"]
+
+    portfolio = _make_portfolio(pos_a, pos_b)
+    single_leg_exit = ExitDecision(
+        True,
+        reason="CI_SEPARATED_REVERSAL (entry=0.8900, current=0.8600)",
+        trigger="CI_SEPARATED_REVERSAL",
+        selected_method="replacement_posterior",
+        applied_validations=["replacement_posterior", "ci_separated_reversal"],
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=portfolio,
+        pos=pos_a,
+        exit_decision=single_leg_exit,
+        should_exit=True,
+        exit_reason=single_leg_exit.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
+    assert summary["family_redecision_single_leg_exits_suppressed"] == 1
+    assert "family_hold_dominates_single_leg_exit" in pos_a.applied_validations
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos_a,
+        sequence_no=4,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        source_module="tests/test_family_monitor_overlay",
+        exit_decision=single_leg_exit,
+        final_should_exit=should_exit,
+        final_exit_reason=reason,
+    )
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["exit_decision_should_exit"] is False
+    assert payload["exit_decision_reason"] == "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
+    assert payload["family_redecision"]["decision"] == "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
+    assert payload["family_redecision"]["family_hold_value_usd"] > payload["family_redecision"]["family_direct_sell_value_usd"]
+
+
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     """A same-cycle `<6h` crossing must not refresh through the old non-Day0 path.
 
