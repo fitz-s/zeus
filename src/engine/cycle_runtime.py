@@ -2774,7 +2774,15 @@ def _monitor_refreshed_phase_for_position(pos) -> str:
     return LifecyclePhase.ACTIVE.value
 
 
-def _emit_monitor_refreshed_canonical_if_available(conn, pos, *, deps) -> bool:
+def _emit_monitor_refreshed_canonical_if_available(
+    conn,
+    pos,
+    *,
+    deps,
+    exit_decision=None,
+    final_should_exit: bool | None = None,
+    final_exit_reason: str | None = None,
+) -> bool:
     if conn is None:
         return True
 
@@ -2792,6 +2800,9 @@ def _emit_monitor_refreshed_canonical_if_available(conn, pos, *, deps) -> bool:
             sequence_no=next_seq,
             phase_after=_monitor_refreshed_phase_for_position(pos),
             source_module="src.engine.cycle_runtime",
+            exit_decision=exit_decision,
+            final_should_exit=final_should_exit,
+            final_exit_reason=final_exit_reason,
         )
         append_many_and_project(conn, events, projection)
     except Exception as exc:
@@ -3767,11 +3778,11 @@ def execute_monitoring_phase(
                 continue
 
             edge_ctx = refresh_position(conn, clob, pos)
-            # === DAY0 HARD-FACT verdict — computed BEFORE the canonical-write
-            # failure branch (PR#404 operator review P0-4): the hard-fact exit
-            # is settlement-authority evidence and must NOT depend on monitor
-            # telemetry/canonical-event writes succeeding. A deterministic dead
-            # bin exits even when the canonical MONITOR_REFRESHED write fails.
+            # === DAY0 HARD-FACT verdict — computed before the exit decision.
+            # Settlement-authority hard facts must not depend on estimator
+            # evidence, but the final MONITOR_REFRESHED event is written after
+            # hold/exit evaluation so the canonical row carries the actual
+            # decision for this monitor tick.
             _hard_fact = None
             if _position_state_value(pos) == "day0_window" and city is not None:
                 try:
@@ -3786,43 +3797,6 @@ def execute_monitoring_phase(
                     deps.logger.warning(
                         "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
                     )
-            monitor_canonical_written = _emit_monitor_refreshed_canonical_if_available(
-                conn,
-                pos,
-                deps=deps,
-            )
-            if not monitor_canonical_written:
-                summary["monitor_canonical_write_failed"] = (
-                    summary.get("monitor_canonical_write_failed", 0) + 1
-                )
-                if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
-                    # P0-4: telemetry failure must not hold a structurally dead
-                    # leg — fall through to the hard-fact exit below. The later
-                    # add_monitor_result records the exit decision.
-                    summary["day0_hard_fact_exit_despite_canonical_write_failure"] = (
-                        summary.get("day0_hard_fact_exit_despite_canonical_write_failure", 0) + 1
-                    )
-                    deps.logger.error(
-                        "MONITOR_CANONICAL_WRITE_FAILED for %s but day0 hard-fact bin death "
-                        "present — proceeding to exit (telemetry failure does not gate "
-                        "settlement-authority exits)",
-                        pos.trade_id,
-                    )
-                else:
-                    monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
-                    artifact.add_monitor_result(
-                        deps.MonitorResult(
-                            position_id=pos.trade_id,
-                            fresh_prob=monitor_fresh_prob,
-                            fresh_edge=monitor_fresh_edge,
-                            should_exit=False,
-                            exit_reason="MONITOR_CANONICAL_WRITE_FAILED",
-                            neg_edge_count=pos.neg_edge_count,
-                        )
-                    )
-                    monitor_result_written = True
-                    summary["monitors"] += 1
-                    continue
             exit_context = _build_exit_context(
                 pos,
                 edge_ctx,
@@ -3942,6 +3916,47 @@ def execute_monitoring_phase(
                     pos.trade_id,
                     exit_reason,
                 )
+
+            monitor_canonical_written = _emit_monitor_refreshed_canonical_if_available(
+                conn,
+                pos,
+                deps=deps,
+                exit_decision=exit_decision,
+                final_should_exit=should_exit,
+                final_exit_reason=exit_reason,
+            )
+            if not monitor_canonical_written:
+                summary["monitor_canonical_write_failed"] = (
+                    summary.get("monitor_canonical_write_failed", 0) + 1
+                )
+                if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
+                    # P0-4: telemetry failure must not hold a structurally dead
+                    # leg. The monitor result below records the exit decision;
+                    # settlement-authority exits may still actuate.
+                    summary["day0_hard_fact_exit_despite_canonical_write_failure"] = (
+                        summary.get("day0_hard_fact_exit_despite_canonical_write_failure", 0) + 1
+                    )
+                    deps.logger.error(
+                        "MONITOR_CANONICAL_WRITE_FAILED for %s but day0 hard-fact bin death "
+                        "present — proceeding to exit (telemetry failure does not gate "
+                        "settlement-authority exits)",
+                        pos.trade_id,
+                    )
+                else:
+                    monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
+                    artifact.add_monitor_result(
+                        deps.MonitorResult(
+                            position_id=pos.trade_id,
+                            fresh_prob=monitor_fresh_prob,
+                            fresh_edge=monitor_fresh_edge,
+                            should_exit=False,
+                            exit_reason="MONITOR_CANONICAL_WRITE_FAILED",
+                            neg_edge_count=pos.neg_edge_count,
+                        )
+                    )
+                    monitor_result_written = True
+                    summary["monitors"] += 1
+                    continue
 
             monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
             artifact.add_monitor_result(

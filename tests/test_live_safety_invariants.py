@@ -3595,6 +3595,7 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
     assert payload["last_monitor_market_price"] == pytest.approx(0.44)
     assert payload["selected_method"] == "emos"
     assert payload["applied_validations"] == ["identity_one_calibrator"]
+    assert payload["exit_decision_available"] is False
 
     current = conn.execute(
         """
@@ -3700,8 +3701,8 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     conn.close()
 
 
-def test_monitoring_phase_persists_monitor_evidence_before_exit_evaluation(tmp_path, monkeypatch):
-    """Exit evaluation must not consume monitor evidence that was never projected."""
+def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monkeypatch):
+    """Monitor refresh canonical evidence must include the final hold/exit decision."""
     from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime
     from src.engine.lifecycle_events import build_entry_canonical_write
@@ -3756,19 +3757,18 @@ def test_monitoring_phase_persists_monitor_evidence_before_exit_evaluation(tmp_p
         )
 
     def fake_evaluate_exit(self, exit_context):
-        row = conn.execute(
-            """
-            SELECT last_monitor_prob, last_monitor_market_price, updated_at
-              FROM position_current
-             WHERE position_id = ?
-            """,
+        prior_monitor_events = conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'",
             (self.trade_id,),
-        ).fetchone()
-        assert row is not None
-        assert row["last_monitor_prob"] == pytest.approx(0.62)
-        assert row["last_monitor_market_price"] == pytest.approx(0.44)
-        assert row["updated_at"] == "2026-04-01T05:00:00+00:00"
-        return ExitDecision(False, reason="HOLD", selected_method=self.selected_method or self.entry_method)
+        ).fetchone()[0]
+        assert prior_monitor_events == 0
+        return ExitDecision(
+            False,
+            reason="CI_OVERLAP_HOLD",
+            trigger="CI_OVERLAP_HOLD",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["replacement_posterior", "ci_overlap_hold"],
+        )
 
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
     monkeypatch.setattr(Position, "evaluate_exit", fake_evaluate_exit)
@@ -3814,6 +3814,25 @@ def test_monitoring_phase_persists_monitor_evidence_before_exit_evaluation(tmp_p
         ).fetchone()[0]
         == 1
     )
+    event = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+        """,
+        ("monitor-before-exit-1",),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert payload["last_monitor_prob"] == pytest.approx(0.62)
+    assert payload["last_monitor_market_price"] == pytest.approx(0.44)
+    assert payload["exit_decision_available"] is True
+    assert payload["exit_decision_should_exit"] is False
+    assert payload["exit_decision_reason"] == "CI_OVERLAP_HOLD"
+    assert payload["exit_decision_trigger"] == "CI_OVERLAP_HOLD"
+    assert payload["exit_decision_applied_validations"] == [
+        "replacement_posterior",
+        "ci_overlap_hold",
+    ]
     conn.close()
 
 
