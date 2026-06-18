@@ -30,12 +30,12 @@ from src.data.bayes_precision_fusion_download import (
     _persist_rows,
     _bayes_precision_fusion_product_identity,
 )
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     return conn
 
 

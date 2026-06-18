@@ -76,7 +76,7 @@ _INTERMEDIATE_CYCLE_HOURS = frozenset()
 # Authority basis: /tmp/qlcb_coverage_fix_report.md. When the no-fusion path began
 #   carrying a promoted legacy q_lcb instead of
 #   NULL, the three mask-and-starve antibody sites that proxied "tradeable-grade coverage" as
-#   `q_lcb_json IS NOT NULL` (shadow_materialization_queue / seed_discovery / current_target_plan)
+#   `q_lcb_json IS NOT NULL` (live_materialization_queue / seed_discovery / current_target_plan)
 #   would have WRONGLY counted a soft-anchor row as covered — re-introducing the exact mask-and-
 #   starve disease they were built to prevent (an untradeable, no-current-capture row marking its
 #   scope "done forever" and blocking its own fusion repair). The proxy was only ever valid because
@@ -102,12 +102,18 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     table alias with a trailing dot already applied by the caller's existing convention (e.g. "p.").
     """
     cols = set(posterior_columns)
+    fragments: list[str] = []
+    if "q_lcb_json" in cols:
+        fragments.append(f"AND {alias}q_lcb_json IS NOT NULL")
+    if "q_ucb_json" in cols:
+        fragments.append(f"AND {alias}q_ucb_json IS NOT NULL")
     if "provenance_json" not in cols:
-        return ""
-    return (
+        return "\n              ".join(fragments)
+    fragments.append(
         f"AND json_extract({alias}provenance_json, '$.q_lcb_basis') = "
         f"'{TRADEABLE_GRADE_QLCB_BASIS}'"
     )
+    return "\n              ".join(fragments)
 
 
 def replacement_source_cycle_max_age_hours() -> float:

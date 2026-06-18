@@ -4239,14 +4239,14 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # Persisted source-time frontier authority; forecasts-only static helper (not in world_src).
     _create_source_time_frontier(conn)
 
-    # Replacement forecast shadow/live-authority provenance (2026-06-07).
+    # Replacement forecast live-support provenance (2026-06-07).
     # Forecasts-only static helper; never copied from world_src and never
     # created on world/trade DBs. Keeps boot-time registry equality aligned
     # with apply_canonical_schema(forecast_tables=True).
     from src.state.schema.v2_schema import (
-        _create_replacement_forecast_shadow_tables as _create_replacement_shadow,
+        _create_replacement_forecast_live_tables as _create_replacement_live,
     )
-    _create_replacement_shadow(conn)
+    _create_replacement_live(conn)
 
     conn.commit()
 

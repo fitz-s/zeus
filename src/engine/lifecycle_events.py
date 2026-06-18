@@ -195,6 +195,15 @@ def _nullable_bool_int(value: Any) -> int | None:
 
 def build_position_current_projection(position: Any) -> dict:
     _position_metric = resolve_position_metric(position)
+    order_status = getattr(position, "order_status", "")
+    exit_state = str(getattr(position, "exit_state", "") or "")
+    exit_reason = str(getattr(position, "exit_reason", "") or "")
+    if exit_state == "backoff_exhausted" and exit_reason:
+        # position_current does not have a dedicated exit_state column. Persist
+        # the terminal non-executable exit state through order_status so a
+        # restarted monitor reloads the same hold-to-settlement state instead
+        # of treating dust as a fresh pending exit.
+        order_status = "backoff_exhausted"
     return {
         "position_id": getattr(position, "trade_id"),
         "phase": canonical_phase_for_position(position),
@@ -236,7 +245,7 @@ def build_position_current_projection(position: Any) -> dict:
         "no_token_id": _nullable(getattr(position, "no_token_id", "")),
         "condition_id": _nullable(getattr(position, "condition_id", "")),
         "order_id": _nullable(getattr(position, "order_id", "")),
-        "order_status": _nullable(getattr(position, "order_status", "")),
+        "order_status": _nullable(order_status),
         "updated_at": projection_updated_at(position),
         # Slice P2-C2 (PR #19 phase 2, 2026-04-26) + P2-fix2 (post-review
         # BLOCKER #1, 2026-04-26): route via resolver for audit trail

@@ -10,7 +10,7 @@ from typing import Literal
 
 PASS_STATUS = "PASS"
 BLOCK_STATUS = "BLOCK"
-SHADOW_ONLY_STATUS = "SHADOW_ONLY"
+REVIEW_REQUIRED_STATUS = "REVIEW_REQUIRED"
 EndpointMode = Literal["hourly_zeus_aggregated", "daily_vendor_aggregated"]
 
 
@@ -79,8 +79,8 @@ class OpenMeteoIfs9PrecisionGuardResult:
     high_risk_bucket: str
 
     @property
-    def passable_for_shadow_veto(self) -> bool:
-        return self.status in {PASS_STATUS, SHADOW_ONLY_STATUS}
+    def passable_for_live_materialization(self) -> bool:
+        return self.status == PASS_STATUS
 
 
 def _to_utc(value: datetime | str, *, field_name: str) -> datetime:
@@ -105,7 +105,7 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata: OpenMeteoIfs9PrecisionMetadata) -> OpenMeteoIfs9PrecisionGuardResult:
-    """Evaluate whether OM9 anchor metadata is safe enough for shadow/veto use."""
+    """Evaluate whether OM9 anchor metadata is safe enough for live materialization."""
 
     reasons: list[str] = []
     interpolation = _normalized(metadata.interpolation_method)
@@ -177,7 +177,7 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(metadata: OpenMeteoIfs9Precisi
     elif any(reason in blocking_reasons for reason in reason_tuple):
         status = BLOCK_STATUS
     else:
-        status = SHADOW_ONLY_STATUS
+        status = REVIEW_REQUIRED_STATUS
     return OpenMeteoIfs9PrecisionGuardResult(
         status=status,
         reason_codes=reason_tuple,

@@ -33,7 +33,7 @@ from src.data.replacement_forecast_materializer import (
     _ensure_forecast_posteriors_runtime_layer,
     _ensure_replacement_identity_columns,
     _replacement_is_live_layer,
-    materialize_replacement_forecast_shadow,
+    materialize_replacement_forecast_live,
 )
 import src.data.replacement_forecast_materializer as materializer_mod
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, STRATEGY_KEY
@@ -198,7 +198,7 @@ def _request(
 def test_materializer_blocks_non_live_posterior_before_execution_authority_table() -> None:
     conn = _conn()
 
-    result = materialize_replacement_forecast_shadow(conn, _request())
+    result = materialize_replacement_forecast_live(conn, _request())
 
     assert result.ok is False
     assert result.reason_codes == (REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,)
@@ -213,7 +213,7 @@ def test_materializer_writes_authorized_06z_cycle_as_live_layer(monkeypatch: pyt
     conn = _conn()
     _install_live_fusion(monkeypatch)
 
-    result = materialize_replacement_forecast_shadow(
+    result = materialize_replacement_forecast_live(
         conn,
         _request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12)),
     )
@@ -279,19 +279,18 @@ def test_forecast_posteriors_runtime_layer_migration_preserves_legacy_live_rows(
     assert [dict(row) for row in rows] == [
         {"posterior_id": 2, "runtime_layer": LIVE_RUNTIME_LAYER, "q_json": '{"good":1}'}
     ]
+    assert "trade_authority_status" not in {
+        row["name"] for row in conn.execute("PRAGMA table_info(forecast_posteriors)")
+    }
     conn.execute(
-        "INSERT INTO forecast_posteriors (trade_authority_status, runtime_layer, q_json) VALUES (?, ?, ?)",
-        ("LIVE_AUTHORITY", LIVE_RUNTIME_LAYER, "{}"),
+        "INSERT INTO forecast_posteriors (runtime_layer, q_json) VALUES (?, ?)",
+        (LIVE_RUNTIME_LAYER, "{}"),
     )
     statuses = [
         row["runtime_layer"]
         for row in conn.execute("SELECT runtime_layer FROM forecast_posteriors ORDER BY posterior_id")
     ]
     assert statuses == [LIVE_RUNTIME_LAYER, LIVE_RUNTIME_LAYER]
-    conn.execute(
-        "INSERT INTO forecast_posteriors (trade_authority_status, q_json) VALUES (?, ?)",
-        ("DIAGNOSTIC_ONLY", "{}"),
-    )
     _ensure_forecast_posteriors_runtime_layer(conn)
     assert [
         row["runtime_layer"]
@@ -303,6 +302,43 @@ def test_forecast_posteriors_runtime_layer_migration_preserves_legacy_live_rows(
         q_ucb_map=None,
         q_lcb_basis=_QLCB_BASIS,
     ) is False
+
+
+def test_forecast_posteriors_runtime_layer_migration_repairs_invalid_observation_view() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE observation_instants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            running_max REAL
+        );
+        CREATE VIEW observation_hourly_extrema AS
+            SELECT o.*, o.running_max AS hour_bucket_max, o.running_min AS hour_bucket_min
+            FROM observation_instants o;
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_authority_status TEXT NOT NULL DEFAULT 'DIAGNOSTIC_ONLY'
+                CHECK (trade_authority_status IN ('LIVE_AUTHORITY')),
+            runtime_layer TEXT,
+            q_json TEXT NOT NULL
+        );
+        INSERT INTO forecast_posteriors (trade_authority_status, runtime_layer, q_json)
+        VALUES ('LIVE_AUTHORITY', 'live', '{}');
+        """
+    )
+
+    _ensure_forecast_posteriors_runtime_layer(conn)
+
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(observation_instants)")}
+    posterior_cols = {row["name"] for row in conn.execute("PRAGMA table_info(forecast_posteriors)")}
+    assert "running_min" in cols
+    assert "trade_authority_status" not in posterior_cols
+    conn.execute("SELECT * FROM observation_hourly_extrema").fetchall()
+    conn.execute(
+        "INSERT INTO forecast_posteriors (runtime_layer, q_json) VALUES (?, ?)",
+        (LIVE_RUNTIME_LAYER, "{}"),
+    )
 
 
 def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns() -> None:
@@ -384,9 +420,12 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
     anchor_status = conn.execute(
         "SELECT trade_authority_status FROM deterministic_forecast_anchors WHERE anchor_id = 1"
     ).fetchone()["trade_authority_status"]
+    assert "trade_authority_status" not in {
+        row["name"] for row in conn.execute("PRAGMA table_info(forecast_posteriors)")
+    }
     conn.execute(
-        "INSERT INTO forecast_posteriors (openmeteo_anchor_id, trade_authority_status, runtime_layer) VALUES (?, ?, ?)",
-        (1, "SHADOW_ONLY", LIVE_RUNTIME_LAYER),
+        "INSERT INTO forecast_posteriors (openmeteo_anchor_id, runtime_layer) VALUES (?, ?)",
+        (1, LIVE_RUNTIME_LAYER),
     )
 
     assert raw_status == "SHADOW_ONLY"
@@ -398,7 +437,7 @@ def test_materializer_keeps_readiness_separate_by_baseline_source_run(monkeypatc
     conn = _conn()
     _install_live_fusion(monkeypatch)
 
-    first = materialize_replacement_forecast_shadow(
+    first = materialize_replacement_forecast_live(
         conn,
         _request(
             baseline_source_run_id="ecmwf_open_data:mx2t6_high:2026-06-06T12Z",
@@ -407,7 +446,7 @@ def test_materializer_keeps_readiness_separate_by_baseline_source_run(monkeypatc
             expires_at=_dt(6),
         ),
     )
-    second = materialize_replacement_forecast_shadow(
+    second = materialize_replacement_forecast_live(
         conn,
         _request(
             baseline_source_run_id="ecmwf_open_data:mx2t6_high:2026-06-07T00Z",
@@ -440,7 +479,7 @@ def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.Monk
     conn = _conn()
     _install_live_fusion(monkeypatch)
 
-    result = materialize_replacement_forecast_shadow(conn, _request())
+    result = materialize_replacement_forecast_live(conn, _request())
 
     assert result.ok is True
     posterior_row = conn.execute("SELECT q_json, q_lcb_json, q_ucb_json, provenance_json, runtime_layer FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
@@ -459,7 +498,7 @@ def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.Monk
 def test_materializer_blocks_readiness_when_baseline_identity_is_wrong() -> None:
     conn = _conn()
 
-    result = materialize_replacement_forecast_shadow(
+    result = materialize_replacement_forecast_live(
         conn,
         _request(baseline_data_version="wrong_baseline_data_version"),
     )
@@ -478,7 +517,7 @@ def test_materializer_preserves_openmeteo_artifact_lineage_without_aifs(monkeypa
     conn = _conn()
     _install_live_fusion(monkeypatch)
 
-    result = materialize_replacement_forecast_shadow(conn, _request(anchor_artifact_id=11))
+    result = materialize_replacement_forecast_live(conn, _request(anchor_artifact_id=11))
 
     assert result.ok is True
     anchor_row = conn.execute("SELECT artifact_id FROM deterministic_forecast_anchors WHERE anchor_id = ?", (result.anchor_id,)).fetchone()
@@ -495,9 +534,9 @@ def test_materializer_records_precision_guard_in_anchor_and_posterior_provenance
     conn = _conn()
     _install_live_fusion(monkeypatch)
 
-    result = materialize_replacement_forecast_shadow(
+    result = materialize_replacement_forecast_live(
         conn,
-        _request(openmeteo_precision_guard=_precision_guard(city_class="coastal", land_sea_mask="sea")),
+        _request(openmeteo_precision_guard=_precision_guard()),
     )
 
     assert result.ok is True
@@ -505,15 +544,15 @@ def test_materializer_records_precision_guard_in_anchor_and_posterior_provenance
     posterior_row = conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
     anchor_provenance = json.loads(anchor_row["provenance_json"])
     posterior_provenance = json.loads(posterior_row["provenance_json"])
-    assert anchor_provenance["precision_guard"]["status"] == "SHADOW_ONLY"
-    assert anchor_provenance["precision_guard"]["high_risk_bucket"] == "coastal"
-    assert posterior_provenance["openmeteo_precision_guard"]["reason_codes"] == ["OM9_LAND_SEA_HIGH_RISK_FOR_CITY_CLASS"]
+    assert anchor_provenance["precision_guard"]["status"] == "PASS"
+    assert anchor_provenance["precision_guard"]["high_risk_bucket"] == "standard"
+    assert posterior_provenance["openmeteo_precision_guard"]["reason_codes"] == ["OM9_PRECISION_METADATA_PASS"]
 
 
 def test_materializer_blocks_when_precision_guard_missing_or_blocked() -> None:
     conn = _conn()
 
-    missing = materialize_replacement_forecast_shadow(
+    missing = materialize_replacement_forecast_live(
         conn,
         _request(openmeteo_precision_guard=None),
     )
@@ -522,13 +561,13 @@ def test_materializer_blocks_when_precision_guard_missing_or_blocked() -> None:
     assert missing.reason_codes == ("OM9_PRECISION_GUARD_REQUIRED_FOR_MATERIALIZATION",)
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
 
-    blocked = materialize_replacement_forecast_shadow(
+    blocked = materialize_replacement_forecast_live(
         conn,
         _request(openmeteo_precision_guard=_precision_guard(endpoint_mode="daily_vendor_aggregated")),
     )
 
     assert blocked.ok is False
-    assert "OM9_PRECISION_GUARD_BLOCKED_MATERIALIZATION" in blocked.reason_codes
+    assert "OM9_PRECISION_GUARD_NOT_LIVE_PASS" in blocked.reason_codes
     assert "OM9_ENDPOINT_MUST_BE_HOURLY_ZEUS_AGGREGATED" in blocked.reason_codes
     assert conn.execute("SELECT COUNT(*) FROM deterministic_forecast_anchors").fetchone()[0] == 0
 
@@ -536,7 +575,7 @@ def test_materializer_blocks_when_precision_guard_missing_or_blocked() -> None:
 def test_materializer_blocks_future_dependency_before_writing_shadow_rows() -> None:
     conn = _conn()
 
-    result = materialize_replacement_forecast_shadow(
+    result = materialize_replacement_forecast_live(
         conn,
         _request(openmeteo_source_available_at=_dt(5)),
     )
@@ -554,7 +593,7 @@ def test_materializer_blocks_future_dependency_before_writing_shadow_rows() -> N
 def test_materializer_requires_dependency_source_run_ids_before_writing_shadow_rows() -> None:
     conn = _conn()
 
-    result = materialize_replacement_forecast_shadow(
+    result = materialize_replacement_forecast_live(
         conn,
         _request(openmeteo_source_run_id=""),
     )
@@ -570,7 +609,7 @@ def test_materializer_posterior_available_at_includes_baseline_dependency(monkey
     conn = _conn()
     _install_live_fusion(monkeypatch)
 
-    result = materialize_replacement_forecast_shadow(
+    result = materialize_replacement_forecast_live(
         conn,
         _request(baseline_source_available_at=_dt(3, 30), openmeteo_source_available_at=_dt(3)),
     )
@@ -583,7 +622,7 @@ def test_materializer_posterior_available_at_includes_baseline_dependency(monkey
 def test_materializer_blocks_expired_request_before_writing_shadow_rows() -> None:
     conn = _conn()
 
-    result = materialize_replacement_forecast_shadow(
+    result = materialize_replacement_forecast_live(
         conn,
         _request(expires_at=_dt(4)),
     )
@@ -596,7 +635,7 @@ def test_materializer_blocks_expired_request_before_writing_shadow_rows() -> Non
 
 def test_materialize_script_template_requires_precision_metadata() -> None:
     result = subprocess.run(
-        [sys.executable, "scripts/materialize_replacement_forecast_shadow.py", "--print-template"],
+        [sys.executable, "scripts/materialize_replacement_forecast_live.py", "--print-template"],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
@@ -641,7 +680,7 @@ def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) ->
     input_json.write_text(json.dumps(request), encoding="utf-8")
 
     result = subprocess.run(
-        [sys.executable, "scripts/materialize_replacement_forecast_shadow.py", "--input-json", str(input_json)],
+        [sys.executable, "scripts/materialize_replacement_forecast_live.py", "--input-json", str(input_json)],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

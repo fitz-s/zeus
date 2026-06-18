@@ -2,9 +2,9 @@
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
 # Purpose: Protect replacement forecast live-support tables from contaminating raw ensemble snapshots.
-# Reuse: Run before changing replacement forecast artifact/posterior/shadow-decision schema.
+# Reuse: Run before changing replacement forecast artifact/posterior/live-support schema.
 # Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + Bayes fusion integration.
-"""Replacement forecast shadow schema tests."""
+"""Replacement forecast live-support schema tests."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ import sqlite3
 import pytest
 
 from src.state.schema.v2_schema import apply_canonical_schema
-from scripts.init_replacement_forecast_shadow_schema import (
-    REPLACEMENT_SHADOW_TABLES,
-    initialize_replacement_forecast_shadow_schema,
+from scripts.init_replacement_forecast_live_schema import (
+    REPLACEMENT_LIVE_TABLES,
+    initialize_replacement_forecast_live_schema,
 )
 
 
@@ -40,7 +40,7 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
-def test_replacement_shadow_tables_are_forecast_class_only() -> None:
+def test_replacement_live_support_tables_are_forecast_class_only() -> None:
     forecast_conn = sqlite3.connect(":memory:")
     apply_canonical_schema(forecast_conn, forecast_tables=True)
 
@@ -76,27 +76,27 @@ def test_replacement_shadow_tables_are_forecast_class_only() -> None:
     assert REPLACEMENT_TABLES.isdisjoint(_tables(world_conn))
 
 
-def test_targeted_replacement_shadow_schema_initializer_dry_run_rolls_back(tmp_path) -> None:
+def test_targeted_replacement_live_schema_initializer_dry_run_rolls_back(tmp_path) -> None:
     db_path = tmp_path / "zeus-forecasts.db"
     with sqlite3.connect(db_path) as conn:
         conn.execute("CREATE TABLE ensemble_snapshots (id INTEGER PRIMARY KEY)")
         conn.commit()
 
-    report = initialize_replacement_forecast_shadow_schema(db_path, commit=False)
+    report = initialize_replacement_forecast_live_schema(db_path, commit=False)
 
     assert report["status"] == "READY"
-    assert set(report["created_tables"]) == set(REPLACEMENT_SHADOW_TABLES)
+    assert set(report["created_tables"]) == set(REPLACEMENT_LIVE_TABLES)
     with sqlite3.connect(db_path) as conn:
         assert REPLACEMENT_TABLES.isdisjoint(_tables(conn))
 
 
-def test_targeted_replacement_shadow_schema_initializer_commit_creates_only_shadow_tables(tmp_path) -> None:
+def test_targeted_replacement_live_schema_initializer_commit_creates_only_live_support_tables(tmp_path) -> None:
     db_path = tmp_path / "zeus-forecasts.db"
     with sqlite3.connect(db_path) as conn:
         conn.execute("CREATE TABLE ensemble_snapshots (id INTEGER PRIMARY KEY)")
         conn.commit()
 
-    report = initialize_replacement_forecast_shadow_schema(db_path, commit=True)
+    report = initialize_replacement_forecast_live_schema(db_path, commit=True)
 
     assert report["status"] == "READY"
     with sqlite3.connect(db_path) as conn:
@@ -177,13 +177,14 @@ def test_legacy_forecast_posteriors_live_status_migrates_to_runtime_layer() -> N
     apply_canonical_schema(conn, forecast_tables=True)
 
     assert "runtime_layer" in _columns(conn, "forecast_posteriors")
+    assert "trade_authority_status" not in _columns(conn, "forecast_posteriors")
     rows = conn.execute(
         "SELECT posterior_id, runtime_layer FROM forecast_posteriors ORDER BY posterior_id"
     ).fetchall()
     assert [tuple(row) for row in rows] == [(1, "live")]
 
 
-def test_replacement_raw_artifacts_are_shadow_only_and_not_training_authority() -> None:
+def test_replacement_raw_artifacts_are_not_training_authority() -> None:
     conn = sqlite3.connect(":memory:")
     apply_canonical_schema(conn, forecast_tables=True)
 

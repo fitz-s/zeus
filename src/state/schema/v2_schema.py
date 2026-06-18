@@ -317,6 +317,9 @@ def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connec
          WHERE runtime_layer IS NULL
             OR runtime_layer != 'live'
     """)
+    if "trade_authority_status" in columns:
+        conn.execute("ALTER TABLE forecast_posteriors DROP COLUMN trade_authority_status")
+        columns.remove("trade_authority_status")
     if {"runtime_layer", "city", "target_date", "temperature_metric", "computed_at"}.issubset(columns):
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_runtime_layer_target
@@ -324,8 +327,31 @@ def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connec
         """)
 
 
-def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None:
-    """Create replacement forecast shadow/provenance tables."""
+def _ensure_observation_hourly_extrema_compatibility(conn: sqlite3.Connection) -> None:
+    """Repair legacy observation extrema schema so later ALTER TABLE can run."""
+
+    columns = _table_columns(conn, "observation_instants")
+    if not columns:
+        return
+    if "running_min" not in columns:
+        conn.execute("ALTER TABLE observation_instants ADD COLUMN running_min REAL")
+        columns.add("running_min")
+    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
+    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema")
+    conn.execute("""
+        CREATE VIEW observation_hourly_extrema AS
+            SELECT
+                o.*,
+                o.running_max AS hour_bucket_max,
+                o.running_min AS hour_bucket_min
+            FROM observation_instants o
+    """)
+
+
+def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
+    """Create replacement forecast live-support/provenance tables."""
+
+    _ensure_observation_hourly_extrema_compatibility(conn)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS raw_forecast_artifacts (
@@ -857,7 +883,7 @@ def _create_settlement_capture_verifications(conn: sqlite3.Connection) -> None:
     """)
 
 
-def ensure_replacement_forecast_shadow_schema(conn: sqlite3.Connection) -> None:
+def ensure_replacement_forecast_live_schema(conn: sqlite3.Connection) -> None:
     """Create only the replacement forecast live-support tables on a forecast DB.
 
     This is the targeted simple-switch initializer for the Open-Meteo ECMWF IFS
@@ -867,31 +893,25 @@ def ensure_replacement_forecast_shadow_schema(conn: sqlite3.Connection) -> None:
 
     nested_transaction = conn.in_transaction
     if nested_transaction:
-        conn.execute("SAVEPOINT replacement_forecast_shadow_schema")
+        conn.execute("SAVEPOINT replacement_forecast_live_schema")
     else:
         conn.execute("BEGIN")
     try:
-        _create_replacement_forecast_shadow_tables(conn)
+        _create_replacement_forecast_live_tables(conn)
         if nested_transaction:
-            conn.execute("RELEASE SAVEPOINT replacement_forecast_shadow_schema")
+            conn.execute("RELEASE SAVEPOINT replacement_forecast_live_schema")
         else:
             conn.execute("COMMIT")
     except Exception:
         try:
             if nested_transaction:
-                conn.execute("ROLLBACK TO SAVEPOINT replacement_forecast_shadow_schema")
-                conn.execute("RELEASE SAVEPOINT replacement_forecast_shadow_schema")
+                conn.execute("ROLLBACK TO SAVEPOINT replacement_forecast_live_schema")
+                conn.execute("RELEASE SAVEPOINT replacement_forecast_live_schema")
             else:
                 conn.execute("ROLLBACK")
         except Exception:
             pass
         raise
-
-
-def ensure_replacement_forecast_live_schema(conn: sqlite3.Connection) -> None:
-    """Compatibility-safe live name for replacement forecast support tables."""
-
-    ensure_replacement_forecast_shadow_schema(conn)
 
 
 def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -> None:
@@ -1026,10 +1046,9 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             _create_ensemble_snapshots(conn)
 
             # ----------------------------------------------------------------
-            # Replacement forecast shadow provenance tables. These are forecast-
-            # class research surfaces only; they do not grant entry authority.
+            # Replacement forecast live-support provenance tables.
             # ----------------------------------------------------------------
-            _create_replacement_forecast_shadow_tables(conn)
+            _create_replacement_forecast_live_tables(conn)
 
             # ----------------------------------------------------------------
             # calibration_pairs  (K1 forecast-class: moves to zeus-forecasts.db)
@@ -1271,6 +1290,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             "ALTER TABLE observation_instants ADD COLUMN authority TEXT NOT NULL DEFAULT 'UNVERIFIED'",
             "ALTER TABLE observation_instants ADD COLUMN data_version TEXT NOT NULL DEFAULT 'v1'",
             "ALTER TABLE observation_instants ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE observation_instants ADD COLUMN running_min REAL",
             "ALTER TABLE observation_instants ADD COLUMN temperature_metric TEXT",
             "ALTER TABLE observation_instants ADD COLUMN physical_quantity TEXT",
             "ALTER TABLE observation_instants ADD COLUMN observation_field TEXT",
@@ -1342,16 +1362,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
         # Consolidation 2026-05-29: dropped the legacy _v2-suffixed alias view
         # too, so no stale view points at the now-renamed table.
         # ----------------------------------------------------------------
-        conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
-        conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema")
-        conn.execute("""
-            CREATE VIEW observation_hourly_extrema AS
-                SELECT
-                    o.*,
-                    o.running_max AS hour_bucket_max,
-                    o.running_min AS hour_bucket_min
-                FROM observation_instants o
-        """)
+        _ensure_observation_hourly_extrema_compatibility(conn)
 
         # ----------------------------------------------------------------
         # historical_forecasts — DROPPED in B3 (PR3).

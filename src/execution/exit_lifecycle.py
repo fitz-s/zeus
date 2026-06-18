@@ -1180,34 +1180,46 @@ def _dust_hold_event_already_recorded(
     *,
     reason: str,
 ) -> bool:
+    """Return True when this dust hold was already durably recorded.
+
+    The latest position event may be a later chain-size correction, fill check,
+    or status pulse.  Looking only at the newest EXIT_ORDER_REJECTED lets the
+    same dust hold append again after any intervening event, which is exactly
+    what makes a 0.01-share residue look like a live retry loop after restart.
+    """
     if conn is None:
         return False
     try:
-        row = conn.execute(
+        rows = conn.execute(
             """
             SELECT payload_json
               FROM position_events
              WHERE position_id = ?
                AND event_type = 'EXIT_ORDER_REJECTED'
+               AND json_extract(payload_json, '$.status') = 'backoff_exhausted'
+               AND json_extract(payload_json, '$.exit_reason') = ?
              ORDER BY sequence_no DESC
-             LIMIT 1
+             LIMIT 20
             """,
-            (position.trade_id,),
-        ).fetchone()
+            (position.trade_id, str(reason or "")),
+        ).fetchall()
     except sqlite3.Error:
         return False
-    if row is None:
+    if not rows:
         return False
-    try:
-        payload = json.loads(str(row["payload_json"] or "{}"))
-    except (TypeError, ValueError, IndexError, KeyError):
-        return False
-    if not isinstance(payload, dict):
-        return False
-    return (
-        str(payload.get("status") or "") == "backoff_exhausted"
-        and str(payload.get("exit_reason") or "") == str(reason or "")
-    )
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if (
+            str(payload.get("status") or "") == "backoff_exhausted"
+            and str(payload.get("exit_reason") or "") == str(reason or "")
+        ):
+            return True
+    return False
 
 
 def _mark_exit_dust_hold(
@@ -1236,7 +1248,11 @@ def _mark_exit_dust_hold(
         and str(getattr(position, "exit_reason", "") or "") == str(reason or "")
     )
     _mark_pending_exit(position)
+    old_order_status = str(getattr(position, "order_status", "") or "")
     position.exit_state = "backoff_exhausted"
+    position.order_status = "backoff_exhausted"
+    if old_order_status != "backoff_exhausted":
+        projection_changed = True
     position.next_exit_retry_at = ""
     position.exit_reason = reason
     position.last_exit_error = normalized_error

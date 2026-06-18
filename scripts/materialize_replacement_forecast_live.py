@@ -26,7 +26,7 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (  # noqa: E402
 )
 from src.data.replacement_forecast_materializer import (  # noqa: E402
     ReplacementForecastMaterializeRequest,
-    materialize_replacement_forecast_live_or_diagnostic,
+    materialize_replacement_forecast_live,
 )
 from src.data.raw_forecast_artifact_manifest import read_manifest, write_manifest_to_db  # noqa: E402
 
@@ -228,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if anchor_artifact_id is not None:
                 request = replace(request, anchor_artifact_id=anchor_artifact_id)
-            result = materialize_replacement_forecast_live_or_diagnostic(conn, request)
+            result = materialize_replacement_forecast_live(conn, request)
             if args.commit:
                 conn.commit()
             else:

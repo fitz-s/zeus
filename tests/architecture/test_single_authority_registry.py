@@ -57,12 +57,15 @@ def test_member_staleness_single_authority() -> None:
 #    marked their own scopes covered and blocked their own repair.)
 # ---------------------------------------------------------------------------------
 def test_tradeable_grade_clause_present_at_all_three_coverage_sites() -> None:
-    queue = _read("src/data/replacement_forecast_shadow_materialization_queue.py")
+    queue = _read("src/data/replacement_forecast_live_materialization_queue.py")
     plan = _read("src/data/replacement_forecast_current_target_plan.py")
     discovery = _read("src/data/replacement_forecast_seed_discovery.py")
-    assert "q_lcb_json IS NOT NULL" in queue, "coverage site 1 (queue) lost the clause"
-    assert "q_lcb_json IS NOT NULL" in plan, "coverage site 2 (plan builder) lost the clause"
-    assert "q_lcb_json IS NOT NULL" in discovery, "coverage site 3 (seed discovery) lost the clause"
+    assert "tradeable_grade_coverage_sql" in queue, "coverage site 1 (queue) lost the single-authority helper"
+    assert "tradeable_grade_coverage_sql" in plan, "coverage site 2 (plan builder) lost the single-authority helper"
+    assert "tradeable_grade_coverage_sql" in discovery, "coverage site 3 (seed discovery) lost the single-authority helper"
+    policy = _read("src/data/replacement_forecast_cycle_policy.py")
+    assert "q_lcb_json IS NOT NULL" in policy, "single authority lost q_lcb coverage requirement"
+    assert "q_ucb_json IS NOT NULL" in policy, "single authority lost q_ucb coverage requirement"
 
 
 # ---------------------------------------------------------------------------------

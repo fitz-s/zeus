@@ -69,7 +69,19 @@ EPS: float = 0.02
 # The q_lcb bucket edges (probability units). A served q_lcb falls into the bucket whose
 # [lo, hi) it lands in; the bucket's FLOOR is its lower edge — the minimum realized hit-rate the
 # bucket claims to support. These are the SERVING buckets the OOF table is keyed by.
-QLCB_BUCKET_EDGES: tuple[float, ...] = (0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+#
+# 2026-06-18 REFINE: uniform 0.05-width buckets across [0, 1]. The prior (0.0, 0.5, 0.6, ...)
+# scheme had a single [0, 0.5) bucket that swallowed the ENTIRE live q_lcb mass — under 1°-wide
+# settlement bins the band 5th-percentile q_lcb effectively never exceeds 0.5 even on the modal
+# bin (a 1°-bin captures the settlement < ~0.30 of the time), so the buckets ≥ 0.5 were empty and
+# the guard degenerated to a single flat ceiling (deflate-to-pooled-Wilson, no confidence
+# resolution). The 0.05 grid resolves the [0, 0.5) region into 10 calibration cells: an
+# over-confident bin (high band q_lcb but low realized rate) now lands in a high-floor bucket and
+# ABSTAINS (over-claim rejected), while a genuinely-low q_lcb in a low-floor bucket is licensed
+# and only deflated to its realized Wilson LB. Sparse high buckets simply fail N_MIN -> INERT
+# (no false haircut where there is no evidence). The OOF builder imports THIS tuple (single
+# source) so the table cells are keyed by the same grid the live guard buckets into.
+QLCB_BUCKET_EDGES: tuple[float, ...] = tuple(round(0.05 * i, 2) for i in range(21))
 
 # Wilson interval z for a one-sided 95% lower bound (z_{0.95}).
 _WILSON_Z_95: float = 1.6448536269514722

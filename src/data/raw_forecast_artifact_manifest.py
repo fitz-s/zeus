@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -16,6 +16,7 @@ from src.data.forecast_source_registry import REPLACEMENT_FORECAST_PRODUCTS
 
 UTC = timezone.utc
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
+_RETIRED_TOP_LEVEL_MANIFEST_FIELDS = frozenset({"trade_authority_status"})
 
 
 def _parse_utc(value: datetime | str, *, field_name: str) -> datetime:
@@ -322,6 +323,14 @@ def write_manifest(manifest: RawForecastArtifactManifest, target_path: Path | st
 
 def read_manifest(path: Path | str) -> RawForecastArtifactManifest:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("raw forecast artifact manifest must decode to an object")
+    known = {item.name for item in fields(RawForecastArtifactManifest)}
+    unknown = set(raw) - known
+    unsupported = unknown - _RETIRED_TOP_LEVEL_MANIFEST_FIELDS
+    if unsupported:
+        raise ValueError(f"raw forecast artifact manifest has unsupported fields: {sorted(unsupported)}")
+    raw = {key: value for key, value in raw.items() if key in known}
     return RawForecastArtifactManifest(**raw)
 
 

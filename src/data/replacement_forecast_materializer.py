@@ -253,10 +253,31 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
+def _ensure_observation_hourly_extrema_compatibility(conn: sqlite3.Connection) -> None:
+    """Repair a legacy invalid view that blocks SQLite schema ALTERs."""
+
+    columns = _table_columns(conn, "observation_instants")
+    if not columns:
+        return
+    if "running_min" not in columns:
+        conn.execute("ALTER TABLE observation_instants ADD COLUMN running_min REAL")
+    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
+    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema")
+    conn.execute("""
+        CREATE VIEW observation_hourly_extrema AS
+            SELECT
+                o.*,
+                o.running_max AS hour_bucket_max,
+                o.running_min AS hour_bucket_min
+            FROM observation_instants o
+    """)
+
+
 def _ensure_forecast_posteriors_runtime_layer(conn: sqlite3.Connection) -> None:
     columns = _table_columns(conn, "forecast_posteriors")
     if not columns:
         return
+    _ensure_observation_hourly_extrema_compatibility(conn)
     if "runtime_layer" not in columns:
         conn.execute(
             """
@@ -284,6 +305,8 @@ def _ensure_forecast_posteriors_runtime_layer(conn: sqlite3.Connection) -> None:
         """,
         (LIVE_RUNTIME_LAYER,),
     )
+    if "trade_authority_status" in columns:
+        conn.execute("ALTER TABLE forecast_posteriors DROP COLUMN trade_authority_status")
 
 
 def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
@@ -378,8 +401,8 @@ def _precision_guard_block_reason(
     guard = request.openmeteo_precision_guard
     if guard is None:
         return ("OM9_PRECISION_GUARD_REQUIRED_FOR_MATERIALIZATION",)
-    if not guard.passable_for_shadow_veto:
-        return ("OM9_PRECISION_GUARD_BLOCKED_MATERIALIZATION", *guard.reason_codes)
+    if not guard.passable_for_live_materialization:
+        return ("OM9_PRECISION_GUARD_NOT_LIVE_PASS", *guard.reason_codes)
     return ()
 
 
@@ -790,13 +813,13 @@ class _BayesPrecisionFusionFusionOverride:
     # substrate is too thin AND no conservative default applies.
     predictive_sigma_c: float | None = None
     # FIX 1 (2026-06-09): the K3 decorrelated-provider completeness verdict computed INSIDE the
-    # fusion (the same "served %d/5" determination the materializer already logs). True =
-    # all 5 declared decorrelated providers served (-> FUSED_NORMAL_FULL); False = INCOMPLETE
+    # fusion (the same served/expected determination the materializer already logs). True =
+    # all domain/lead-servable decorrelated providers served (-> FUSED_NORMAL_FULL); False = INCOMPLETE
     # (-> FUSED_NORMAL_PARTIAL). The materializer REUSES this; it never re-derives a parallel
     # provider check (single-builder).
     decorrelated_providers_complete: bool = False
-    # FIX 5 (2026-06-09): capture-status provenance. count of the 5 decorrelated providers whose
-    # CURRENT value entered the fused set for this cell, and the count expected (5). Recording only.
+    # FIX 5 (2026-06-09): capture-status provenance. Count of the domain/lead-servable
+    # decorrelated providers whose CURRENT value entered the fused set for this cell.
     decorrelated_providers_served: int = 0
     decorrelated_providers_expected: int = 5
     # Task #32 follow-up (brand law): per-instrument serving provenance for every model that
@@ -1104,32 +1127,34 @@ def _replacement_bayes_precision_fusion_override(
         # so each family is served when ANY of its members is in used_models.
         from src.data.replacement_fusion_upgrade_trigger import (  # noqa: PLC0415
             DECORRELATED_PROVIDER_FAMILIES,
-            EXPECTED_DECORRELATED_PROVIDER_COUNT,
             decorrelated_provider_families_of,
+            expected_provider_families_for_city,
         )
 
         _served_families = decorrelated_provider_families_of(set(used_models))
+        _expected_families = expected_provider_families_for_city(lat, lon, lead_days)
         _missing_providers = [
             f"{fam}/{'|'.join(DECORRELATED_PROVIDER_FAMILIES[fam])}"
-            for fam in DECORRELATED_PROVIDER_FAMILIES
+            for fam in sorted(_expected_families)
             if fam not in _served_families
         ]
         # FIX 1/FIX 5 (2026-06-09): the SINGLE K3 completeness verdict reused by the q-mode +
-        # capture-status provenance. 5 declared decorrelated providers; served = 5 - missing.
+        # capture-status provenance. Expected providers are domain/lead-aware: nest-only families
+        # that cannot serve this city/lead are not phantom requirements.
         # This is the ONLY provider-count determination — the q-mode FULL/PARTIAL split and the
         # FIX-5 capture_status both read it (no parallel re-derivation).
-        _decorrelated_expected = EXPECTED_DECORRELATED_PROVIDER_COUNT
-        _decorrelated_served = _decorrelated_expected - len(_missing_providers)
+        _decorrelated_expected = len(_expected_families)
+        _decorrelated_served = len(_served_families & _expected_families)
         _decorrelated_complete = not _missing_providers
         if _missing_providers:
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
                     "replacement_0_1 BAYES_PRECISION_FUSION fusion decorrelated-provider INCOMPLETE for %s %s: served "
-                    "%d/5, missing %s (used=%s). A structurally-unservable provider (e.g. gem 12h-"
-                    "cadence single_runs) must be resolved explicitly, not silently dropped.",
-                    request.city, metric, _decorrelated_served, _missing_providers,
-                    list(used_models),
+                    "%d/%d, missing %s (expected=%s used=%s). A servable provider that is absent "
+                    "must be resolved explicitly, not silently dropped.",
+                    request.city, metric, _decorrelated_served, _decorrelated_expected,
+                    _missing_providers, sorted(_expected_families), list(used_models),
                 )
             except Exception:
                 pass
@@ -2089,45 +2114,57 @@ def _insert_posterior(
             "anchor_artifact_id": request.anchor_artifact_id,
         }
     )
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO forecast_posteriors (
-            source_id, product_id, data_version, city, target_date,
-            temperature_metric, source_cycle_time, source_available_at,
-            computed_at, q_json, q_lcb_json, q_ucb_json, posterior_method,
-            openmeteo_anchor_id,
-            dependency_source_run_ids_json, family_id, bin_topology_hash,
-            dependency_hash, posterior_config_hash, posterior_identity_hash,
-            provenance_json,
-            runtime_layer, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            SOURCE_ID,
-            PRODUCT_ID,
-            data_version,
-            request.city,
-            target_date,
-            metric,
-            source_cycle_time,
-            available_at,
-            computed_at,
-            _json(q),
-            (None if q_lcb_map is None else _json(q_lcb_map)),
-            (None if q_ucb_map is None else _json(q_ucb_map)),
-            "openmeteo_ecmwf_ifs9_bayes_fusion",
-            anchor_id,
-            _json(dependency_payload),
-            family_id,
-            bin_topology_hash,
-            dependency_hash,
-            posterior_config_hash,
-            posterior_identity_hash,
-            _json(provenance_payload),
-            runtime_layer,
-            0,
-        ),
-    )
+    try:
+        conn.execute(
+            """
+            INSERT INTO forecast_posteriors (
+                source_id, product_id, data_version, city, target_date,
+                temperature_metric, source_cycle_time, source_available_at,
+                computed_at, q_json, q_lcb_json, q_ucb_json, posterior_method,
+                openmeteo_anchor_id,
+                dependency_source_run_ids_json, family_id, bin_topology_hash,
+                dependency_hash, posterior_config_hash, posterior_identity_hash,
+                provenance_json,
+                runtime_layer, training_allowed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                SOURCE_ID,
+                PRODUCT_ID,
+                data_version,
+                request.city,
+                target_date,
+                metric,
+                source_cycle_time,
+                available_at,
+                computed_at,
+                _json(q),
+                (None if q_lcb_map is None else _json(q_lcb_map)),
+                (None if q_ucb_map is None else _json(q_ucb_map)),
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
+                anchor_id,
+                _json(dependency_payload),
+                family_id,
+                bin_topology_hash,
+                dependency_hash,
+                posterior_config_hash,
+                posterior_identity_hash,
+                _json(provenance_payload),
+                runtime_layer,
+                0,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        row = conn.execute(
+            """
+            SELECT posterior_id FROM forecast_posteriors
+            WHERE posterior_identity_hash = ?
+            """,
+            (posterior_identity_hash,),
+        ).fetchone()
+        if row is not None:
+            return int(row[0] if not isinstance(row, sqlite3.Row) else row["posterior_id"])
+        raise RuntimeError(f"forecast_posteriors insert rejected: {exc}") from exc
     row = conn.execute(
         """
         SELECT posterior_id FROM forecast_posteriors
@@ -2136,7 +2173,10 @@ def _insert_posterior(
         (posterior_identity_hash,),
     ).fetchone()
     if row is None:
-        raise RuntimeError("replacement posterior materialization failed")
+        raise RuntimeError(
+            "forecast_posteriors insert returned no row for posterior_identity_hash="
+            f"{posterior_identity_hash}"
+        )
     return int(row[0] if not isinstance(row, sqlite3.Row) else row["posterior_id"])
 
 
@@ -2207,11 +2247,11 @@ def _build_readiness(
     )
 
 
-def materialize_replacement_forecast_live_or_diagnostic(
+def materialize_replacement_forecast_live(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
 ) -> ReplacementForecastMaterializeResult:
-    """Write anchor, posterior, and readiness rows for replacement live/diagnostic use."""
+    """Write anchor, posterior, and readiness rows for replacement live use."""
 
     metric = _metric(request.temperature_metric)
     _ensure_replacement_identity_columns(conn)
@@ -2298,12 +2338,3 @@ def materialize_replacement_forecast_live_or_diagnostic(
         anchor_id=anchor_id,
         readiness_id=readiness.readiness_id,
     )
-
-
-def materialize_replacement_forecast_shadow(
-    conn: sqlite3.Connection,
-    request: ReplacementForecastMaterializeRequest,
-) -> ReplacementForecastMaterializeResult:
-    """Compatibility wrapper for older callers; writes live/diagnostic rows."""
-
-    return materialize_replacement_forecast_live_or_diagnostic(conn, request)

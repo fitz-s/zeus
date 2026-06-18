@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.init_replacement_forecast_shadow_schema import initialize_replacement_forecast_shadow_schema  # noqa: E402
+from scripts.init_replacement_forecast_live_schema import initialize_replacement_forecast_live_schema  # noqa: E402
 from scripts.plan_replacement_forecast_current_fact_patch import _write_patch_files  # noqa: E402
 from src.data.replacement_forecast_config_switch import apply_replacement_forecast_config_switch  # noqa: E402
 from src.data.replacement_forecast_current_fact_patch import (  # noqa: E402
@@ -156,7 +156,7 @@ def rehearse_replacement_forecast_simple_switch(
     )
     settings_path = rehearsal_root / "config" / "settings.json"
     config_plan = apply_replacement_forecast_config_switch(settings_path)
-    schema_report = initialize_replacement_forecast_shadow_schema(
+    schema_report = initialize_replacement_forecast_live_schema(
         rehearsal_root / "state" / "zeus-forecasts.db",
         commit=True,
     )

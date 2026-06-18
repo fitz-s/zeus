@@ -137,11 +137,11 @@ def test_download_no_longer_fetches_dropped_globals(tmp_path) -> None:
         BayesPrecisionFusionDownloadTarget,
         download_bayes_precision_fusion_extra_raw_inputs,
     )
-    from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
     db = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db))
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     conn.close()
 
     single_calls: list[str] = []

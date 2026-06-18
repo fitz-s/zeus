@@ -135,8 +135,8 @@ def _precision_ready(path: Path) -> tuple[Mapping[str, object], tuple[str, ...]]
     guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         OpenMeteoIfs9PrecisionMetadata(**dict(metadata_payload))
     )
-    if not guard.passable_for_shadow_veto:
-        return metadata_payload, ("OM9_PRECISION_GUARD_BLOCKED_REQUEST_BUILD", *guard.reason_codes)
+    if not guard.passable_for_live_materialization:
+        return metadata_payload, ("OM9_PRECISION_GUARD_NOT_LIVE_PASS_REQUEST_BUILD", *guard.reason_codes)
     return metadata_payload, ()
 
 

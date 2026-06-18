@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-06-11
 # Authority basis: Task #32 (operator 2026-06-11) — PARTIAL fusions never upgrade when late
 #   instruments publish. The materializer reads CURRENT values from the persisted single_runs
-#   capture (gem via previous_runs exception) at the AIFS/anchor cycle; a provider whose
+#   capture (gem via previous_runs exception) at the OM9 anchor cycle; a provider whose
 #   single_runs row was not yet persisted at materialize time is dropped, and the resulting
 #   served<5 posterior is then marked "covered" (q_lcb NOT NULL) by all three coverage gates —
 #   which key coverage on the baseline_b0 (ecmwf_open_data) run, BLIND to the bayes_precision_fusion decorrelated
@@ -40,11 +40,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
+from src.data.replacement_forecast_readiness import SOURCE_ID
+
 _LOG = logging.getLogger("zeus.replacement_fusion_upgrade_trigger")
 
 UTC = timezone.utc
-
-SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
 
 # THE single authority mapping model -> decorrelated provider family. Mirrors exactly the
 # materializer's per-provider check (replacement_forecast_materializer lines ~1012-1024): the
@@ -400,7 +400,7 @@ def enqueue_fusion_upgrade_reseeds(
     )
     from src.state.db import _connect  # noqa: PLC0415
     from src.state.schema.v2_schema import (  # noqa: PLC0415
-        ensure_replacement_forecast_shadow_schema,
+        ensure_replacement_forecast_live_schema,
     )
 
     now = (computed_at or datetime.now(tz=UTC)).astimezone(UTC)
@@ -438,7 +438,7 @@ def enqueue_fusion_upgrade_reseeds(
     conn = _connect(forecast_db, write_class="live")
     conn.row_factory = sqlite3.Row
     try:
-        ensure_replacement_forecast_shadow_schema(conn)
+        ensure_replacement_forecast_live_schema(conn)
         enqueued = 0
         # NEAREST-TARGET-FIRST (mirrors the seed-budget K-decision, registry member #6): the
         # plan's native order is target_date DESC, which would spend the per-tick enqueue budget
@@ -590,13 +590,6 @@ def _build_and_write_upgrade_seed(
     absent (the scope's raw inputs are not on disk — recorded as manifest_missing, retried next
     tick once they land). Kept separate so the enqueue loop stays readable."""
     expected = expected_identity(metric)
-    aifs = latest_manifest(
-        manifests,
-        source_id=expected["aifs_sampled_2t"].source_id,
-        data_version=expected["aifs_sampled_2t"].data_version,
-        city=city,
-        target_date=target_date,
-    )
     openmeteo = latest_manifest(
         manifests,
         source_id=expected["openmeteo_ifs9_anchor"].source_id,
@@ -604,19 +597,16 @@ def _build_and_write_upgrade_seed(
         city=city,
         target_date=target_date,
     )
-    if aifs is None or openmeteo is None:
+    if openmeteo is None:
         return None
-    aifs_samples = manifest_path_value(aifs, "aifs_samples_json") or manifest_path_value(aifs, "sample_points_json")
-    aifs_grib = None if aifs_samples else aifs.artifact_path
     openmeteo_payload = manifest_path_value(openmeteo, "openmeteo_payload_json") or openmeteo.artifact_path
     precision_metadata = manifest_path_value(openmeteo, "precision_metadata_json")
-    if not (aifs_samples or aifs_grib) or not openmeteo_payload or not precision_metadata:
+    if not openmeteo_payload or not precision_metadata:
         return None
     coverage = latest_baseline_coverage(conn, city=city, target_date=target_date, temperature_metric=metric)
     bins = market_bins(conn, city=city, target_date=target_date, temperature_metric=metric)
     if coverage is None or not bins:
         return None
-    aifs_base_dir = manifest_base_dir(aifs, fallback=raw_dir)
     openmeteo_base_dir = manifest_base_dir(openmeteo, fallback=raw_dir)
     seed_result = build_seed(
         city=city,
@@ -624,14 +614,11 @@ def _build_and_write_upgrade_seed(
         temperature_metric=metric,
         market_bins=bins,
         baseline_coverage=coverage,
-        aifs_manifest=aifs,
         openmeteo_manifest=openmeteo,
         openmeteo_payload_json=resolve_path(openmeteo_payload, base_dir=openmeteo_base_dir),
         precision_metadata_json=resolve_path(precision_metadata, base_dir=openmeteo_base_dir),
         computed_at=computed_at,
         base_dir=seed_path,
-        aifs_samples_json=None if aifs_samples is None else resolve_path(aifs_samples, base_dir=aifs_base_dir),
-        aifs_grib_path=None if aifs_grib is None else resolve_path(aifs_grib, base_dir=aifs_base_dir),
     )
     if not seed_result.ok or seed_result.seed is None:
         return None

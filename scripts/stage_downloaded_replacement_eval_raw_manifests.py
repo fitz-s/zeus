@@ -23,7 +23,7 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION as OPENMETEO_
 from src.data.openmeteo_ecmwf_ifs9_anchor import LOW_DATA_VERSION as OPENMETEO_LOW_DATA_VERSION  # noqa: E402
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, write_manifest, write_manifest_to_db  # noqa: E402
 from src.state.db import _connect  # noqa: E402
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema  # noqa: E402
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema  # noqa: E402
 
 
 OPENMETEO_RE = re.compile(r"^(?P<city>.+)_(?P<stamp>20\d{6}T\d{2})Z\.json$")
@@ -259,7 +259,7 @@ def stage_downloaded_replacement_eval_raw_manifests(
         if forecast_db is None:
             raise ValueError("forecast_db is required with write_db")
         conn = _connect(forecast_db, write_class="live")
-        ensure_replacement_forecast_shadow_schema(conn)
+        ensure_replacement_forecast_live_schema(conn)
         conn.execute("BEGIN")
     try:
         for manifest in manifests:

@@ -35,7 +35,7 @@ from src.data.bayes_precision_fusion_download import (
     RawModelForecastRequestConflict,
     _persist_rows,
 )
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 
 def _row(*, request_url_hash: str, product_id: str, value: float, cell_selection: str = "nearest") -> dict:
@@ -72,7 +72,7 @@ def _row(*, request_url_hash: str, product_id: str, value: float, cell_selection
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     return conn
 
 

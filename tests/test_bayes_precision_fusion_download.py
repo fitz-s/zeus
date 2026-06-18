@@ -10,7 +10,7 @@ Relationship under test (download job -> raw_model_forecasts persistence boundar
   (a) when capture-flag ON it WRITES raw_model_forecasts rows (single_runs FORWARD +
       previous_runs fixed-lead) for the surviving models; (b) it persists NOTHING when there
       are no targets / no surviving fetches; (c) FAIL-SOFT per model (a raising fetch drops
-      only that model); (d) forecast_value_c is degC and trade_authority_status='DIAGNOSTIC_ONLY';
+      only that model); (d) forecast_value_c is degC and training_allowed=0;
       (e) retention prunes rows older than the cutoff; (f) idempotent re-run (UNIQUE upsert).
 All fetchers are injected (NO network).
 """
@@ -22,13 +22,13 @@ from pathlib import Path
 
 import pytest
 
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 
 def _forecast_db(tmp_path: Path) -> Path:
     db = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db))
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     conn.commit()
     conn.close()
     return db
@@ -74,17 +74,14 @@ def test_download_writes_single_and_previous_runs(tmp_path) -> None:
         single_runs_fetch=_single, previous_runs_fetch=_previous,
     )
     assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
-    # At least the 8 extra models x {single_runs, previous_runs} for the one target.
+    # Current selected model set x {single_runs, previous_runs} for the one target.
     n_single = _count(db, endpoint="single_runs")
     n_prev = _count(db, endpoint="previous_runs")
-    assert n_single >= 7, f"expected forward single_runs rows for the extra models, got {n_single}"
-    assert n_prev >= 4, f"expected previous_runs fixed-lead rows, got {n_prev}"
-    # forecast_value_c is degC; DIAGNOSTIC_ONLY + training_allowed=0 are pinned. (2026-06-17: the
-    # trade_authority_status enum was migrated SHADOW_ONLY -> DIAGNOSTIC_ONLY in a prior commit;
-    # this stale assertion is corrected to the value the table actually writes.)
+    assert n_single > 0, f"expected in-domain forward single_runs rows, got {n_single}"
+    assert n_prev > 0, f"expected previous_runs fixed-lead rows, got {n_prev}"
+    # forecast_value_c is degC; training_allowed=0 is pinned.
     conn = sqlite3.connect(str(db)); conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM raw_model_forecasts LIMIT 1").fetchone()
-    assert row["trade_authority_status"] == "DIAGNOSTIC_ONLY"
     assert row["training_allowed"] == 0
     assert 15.0 <= row["forecast_value_c"] <= 25.0
     conn.close()

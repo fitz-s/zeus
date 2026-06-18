@@ -62,7 +62,7 @@ def test_openmeteo_ifs9_precision_guard_passes_complete_hourly_station_metadata(
     assert result.reason_codes == ("OM9_PRECISION_METADATA_PASS",)
     assert result.elevation_delta_m == pytest.approx(1.0)
     assert result.high_risk_bucket == "standard"
-    assert result.passable_for_shadow_veto is True
+    assert result.passable_for_live_materialization is True
 
 
 def test_openmeteo_ifs9_precision_guard_blocks_vendor_daily_or_unknown_interpolation() -> None:
@@ -117,15 +117,15 @@ def test_openmeteo_ifs9_precision_guard_blocks_missing_elevation_landsea_or_far_
 
 def test_openmeteo_ifs9_precision_guard_demotes_high_risk_coastal_and_terrain_buckets() -> None:
     coastal = evaluate_openmeteo_ecmwf_ifs9_precision_guard(_metadata(city_class="coastal", land_sea_mask="sea"))
-    assert coastal.status == "SHADOW_ONLY"
+    assert coastal.status == "REVIEW_REQUIRED"
     assert coastal.high_risk_bucket == "coastal"
     assert "OM9_LAND_SEA_HIGH_RISK_FOR_CITY_CLASS" in coastal.reason_codes
-    assert coastal.passable_for_shadow_veto is True
+    assert coastal.passable_for_live_materialization is False
 
     mountain = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         _metadata(city_class="mountain", grid_elevation_m=300.0, station_elevation_m=120.0)
     )
-    assert mountain.status == "SHADOW_ONLY"
+    assert mountain.status == "REVIEW_REQUIRED"
     assert mountain.high_risk_bucket == "mountain"
     assert "OM9_TERRAIN_ELEVATION_REVIEW_REQUIRED" in mountain.reason_codes
 

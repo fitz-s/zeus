@@ -411,6 +411,116 @@ class TestChainTruthRetryOnPositiveBalance:
         finally:
             conn.close()
 
+    def test_raw_ctf_dust_balance_is_idempotent_after_chain_correction_event(self, monkeypatch):
+        from src.engine.lifecycle_events import build_chain_size_corrected_canonical_write
+        from src.state.db import append_many_and_project, init_schema
+
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        try:
+            pos = _make_position(
+                trade_id="london-dust-db-correction-repeat-test",
+                token_id=_ASSET_ID_LONDON,
+                condition_id=_CONDITION_ID_LONDON,
+                city="London",
+                shares=5.06,
+            )
+            portfolio = _make_portfolio(pos)
+
+            handle_exit_pending_missing(
+                portfolio,
+                pos,
+                conn=conn,
+                rpc_call=_rpc_returning(10_000),
+            )
+            events, projection = build_chain_size_corrected_canonical_write(
+                pos,
+                local_shares_before=5.06,
+                sequence_no=3,
+                phase_after="pending_exit",
+                source_module="test",
+            )
+            append_many_and_project(conn, events, projection)
+            before = conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_REJECTED'
+                """,
+                (pos.trade_id,),
+            ).fetchone()[0]
+
+            reloaded = _make_position(
+                trade_id=pos.trade_id,
+                token_id=_ASSET_ID_LONDON,
+                condition_id=_CONDITION_ID_LONDON,
+                city="London",
+                shares=0.01,
+                chain_shares=0.01,
+                exit_state="",
+                exit_reason="",
+                exit_retry_count=7,
+            )
+            result = handle_exit_pending_missing(
+                portfolio,
+                reloaded,
+                conn=conn,
+                rpc_call=_rpc_returning(10_000),
+            )
+            after = conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_REJECTED'
+                """,
+                (pos.trade_id,),
+            ).fetchone()[0]
+
+            assert result["action"] == "dust_hold"
+            assert before == 1
+            assert after == before
+            assert reloaded.exit_state == "backoff_exhausted"
+            assert reloaded.order_status == "backoff_exhausted"
+        finally:
+            conn.close()
+
+    def test_dust_hold_projection_reloads_backoff_exhausted(self, monkeypatch):
+        from src.state.db import init_schema
+        from src.state.portfolio import _position_from_projection_row
+
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        try:
+            pos = _make_position(
+                trade_id="london-dust-reload-test",
+                token_id=_ASSET_ID_LONDON,
+                condition_id=_CONDITION_ID_LONDON,
+                city="London",
+                shares=5.06,
+                order_status="filled",
+            )
+            handle_exit_pending_missing(
+                _make_portfolio(pos),
+                pos,
+                conn=conn,
+                rpc_call=_rpc_returning(10_000),
+            )
+            row = conn.execute(
+                "SELECT * FROM position_current WHERE position_id = ?",
+                (pos.trade_id,),
+            ).fetchone()
+
+            assert row["order_status"] == "backoff_exhausted"
+            reloaded = _position_from_projection_row(dict(row), current_mode="live")
+            assert reloaded.exit_state == "backoff_exhausted"
+            assert reloaded.order_status == "backoff_exhausted"
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Antibody 3: RPC failure → action == ignore (fail-open, no destructive action)

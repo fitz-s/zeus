@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.init_replacement_forecast_shadow_schema import initialize_replacement_forecast_shadow_schema  # noqa: E402
+from scripts.init_replacement_forecast_live_schema import initialize_replacement_forecast_live_schema  # noqa: E402
 from src.data.replacement_forecast_config_switch import TARGET_LIVE_MATERIALIZATION_CONFIG, apply_replacement_forecast_config_switch, read_replacement_forecast_config_switch_plan  # noqa: E402
 from src.data.replacement_forecast_current_fact_patch import read_replacement_forecast_current_fact_patch_plan  # noqa: E402
 from src.data.replacement_forecast_live_dry_run import ReplacementForecastLiveDryRunInput, build_replacement_forecast_live_dry_run_report  # noqa: E402
@@ -161,7 +161,7 @@ def apply_replacement_forecast_live_authority_switch(
         applied_steps.append("config_live_authority_flags")
         materialization_dirs = _ensure_live_materialization_dirs(root)
         applied_steps.append("live_materialization_dirs")
-        schema_report = initialize_replacement_forecast_shadow_schema(forecast_db, commit=True)
+        schema_report = initialize_replacement_forecast_live_schema(forecast_db, commit=True)
         applied_steps.append("replacement_live_schema")
         refit_apply = plan_replacement_forecast_refit_handoff_install(
             live_root=root,

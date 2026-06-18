@@ -21,13 +21,13 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 
 def _forecast_db(tmp_path: Path) -> Path:
     db = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db))
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     conn.commit()
     conn.close()
     return db

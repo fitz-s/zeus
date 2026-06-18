@@ -21,7 +21,7 @@ from src.data.replacement_fusion_upgrade_trigger import (
     decorrelated_provider_families_of,
     scope_capture_offers_larger_provider_set,
 )
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 UTC = timezone.utc
 
@@ -41,7 +41,7 @@ _UKMO = "ukmo_global_deterministic_10km"
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     return conn
 
 
@@ -62,8 +62,8 @@ def _insert_posterior(
             (source_id, product_id, data_version, city, target_date, temperature_metric,
              source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
              posterior_method, dependency_source_run_ids_json, provenance_json,
-             trade_authority_status, training_allowed)
-        VALUES (?, 'pid', 'dv', ?, ?, ?, ?, ?, ?, '{}', '{}', ?, '{}', ?, 'DIAGNOSTIC_ONLY', 0)
+             runtime_layer, training_allowed)
+        VALUES (?, 'pid', 'dv', ?, ?, ?, ?, ?, ?, '{}', '{}', ?, '{}', ?, 'live', 0)
         """,
         (
             SOURCE_ID, city, target_date, metric, cycle_iso, cycle_iso, computed_at,

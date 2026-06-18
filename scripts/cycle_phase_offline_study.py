@@ -19,10 +19,10 @@ Stages (sub-commands):
                 artifact_id + raw_model_forecast natural keys against these rows).
   materialize - for each (settled target x phase x lead-1 cycle x city x metric) with all inputs
                 present, build the materialize request from the on-disk AIFS GRIB + OM9 anchor
-                payload and call materialize_replacement_forecast_shadow(scratch_conn, request).
+                payload and call materialize_replacement_forecast_live(scratch_conn, request).
   grade       - join scratch posteriors to VERIFIED settlement truth and emit per-phase metrics.
 
-WHY SCRATCH-FAITHFUL: materialize_replacement_forecast_shadow(conn, request) consumes raw_model_
+WHY SCRATCH-FAITHFUL: materialize_replacement_forecast_live(conn, request) consumes raw_model_
 forecasts + settlement history from the PASSED conn for bayes_precision_fusion; the scratch DB carries those
 rows verbatim, and the flags read from config are the live flags, so a scratch posterior is
 byte-faithful to what live would have produced from the same cycle. EB-bias + sigma-floor lookups
@@ -126,9 +126,9 @@ def hydrate(scratch_db: Path, *, live_db: Path, force: bool) -> dict[str, object
         # Initialise the replacement-forecast write schema (posteriors / anchors / readiness)
         # on the scratch DB so materialization has a place to write.
         from src.state.db import _create_readiness_state  # noqa: PLC0415
-        from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema  # noqa: PLC0415
+        from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema  # noqa: PLC0415
 
-        ensure_replacement_forecast_shadow_schema(conn)
+        ensure_replacement_forecast_live_schema(conn)
         _create_readiness_state(conn)
         conn.commit()
     finally:
@@ -297,7 +297,7 @@ def _materialize_one(
     )
     from src.data.replacement_forecast_materializer import (  # noqa: PLC0415
         ReplacementForecastMaterializeRequest,
-        materialize_replacement_forecast_shadow,
+        materialize_replacement_forecast_live,
     )
     from src.data.replacement_forecast_source_run_identity import (  # noqa: PLC0415
         expected_replacement_dependency_identity_by_role,
@@ -405,7 +405,7 @@ def _materialize_one(
         anchor_sigma_c=3.00,
         settlement_step_c=settlement_step_c,
     )
-    result = materialize_replacement_forecast_shadow(conn, request)
+    result = materialize_replacement_forecast_live(conn, request)
     return {
         "status": result.status,
         "reason_codes": list(result.reason_codes),

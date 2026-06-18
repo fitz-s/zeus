@@ -20,10 +20,9 @@ expansion at the SAME cycle; this trigger fires on a NEWER cycle becoming materi
 
 THE single comparison (`scope_needs_cycle_advance`): a scope needs re-materialization iff its latest
 posterior consumed a model cycle STRICTLY OLDER than the freshest in-universe cycle that is now
-materializable (both raw legs — AIFS + OM9 anchor — present in raw_forecast_artifacts at that
-cycle). The freshest materializable cycle is MIN over both legs of MAX(source_cycle_time): a
-half-published cycle (one leg lagging) is NOT yet materializable, exactly as the downloader's
-high-water mark treats it.
+materializable under the current live dependency identity. After the AIFS removal, that live
+materialization leg is the OM9 anchor; the previous two-leg AIFS+OM9 high-water mark is not allowed
+to gate live redecision.
 
 Prioritization (operator directive 2026-06-12): (i) families with HELD positions (zeus_trades
 position_current, read-only) first, then (ii) families with markets in their active trading window
@@ -43,18 +42,12 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.data.replacement_forecast_readiness import SOURCE_ID
+
 _LOG = logging.getLogger("zeus.replacement_cycle_advance_trigger")
 
 UTC = timezone.utc
 
-SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
-
-# The two raw-artifact legs the materialization manifests are built from. The freshest
-# MATERIALIZABLE cycle is the MIN over both legs of MAX(source_cycle_time): a cycle with only one
-# leg published cannot be fused (the seed builder requires BOTH manifests), so it is not yet a
-# materialization opportunity. Mirrors _max_downloaded_current_target_cycle in
-# replacement_forecast_production (single high-water-mark definition).
-_AIFS_LEG_SOURCE_ID = "ecmwf_aifs_ens"
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
 
 
@@ -92,18 +85,9 @@ def _per_leg_max_cycle(conn: sqlite3.Connection, source_id: str) -> datetime | N
 
 
 def freshest_materializable_cycle(conn: sqlite3.Connection) -> datetime | None:
-    """The freshest in-universe cycle for which BOTH legs' raw artifacts are ingested.
+    """The freshest in-universe cycle for which the current live raw artifact leg is ingested."""
 
-    = MIN(MAX(aifs cycle), MAX(anchor cycle)). None when either leg is empty (nothing to advance
-    onto). This is the universe-wide ceiling; per-scope manifest presence is still checked when the
-    seed is built (a scope whose city/date lacks a manifest at this cycle is recorded
-    manifest_missing and retried next tick, never enqueued blindly).
-    """
-    aifs = _per_leg_max_cycle(conn, _AIFS_LEG_SOURCE_ID)
-    anchor = _per_leg_max_cycle(conn, _ANCHOR_LEG_SOURCE_ID)
-    if aifs is None or anchor is None:
-        return None
-    return min(aifs, anchor)
+    return _per_leg_max_cycle(conn, _ANCHOR_LEG_SOURCE_ID)
 
 
 def family_materializable_cycle(
@@ -117,27 +101,14 @@ def family_materializable_cycle(
 ) -> tuple[datetime | None, tuple[tuple[str, str], ...]]:
     """FINDING 2 (external review 2026-06-12) — the materializable cycle AT FAMILY SCOPE.
 
-    ``freshest_materializable_cycle`` is a UNIVERSE-wide ceiling: MIN over both legs of the GLOBAL
-    MAX(source_cycle_time). That global max can claim a cycle is materializable when, for a SPECIFIC
-    (city, target_date, metric), only ONE leg's raw artifact exists at that cycle (AIFS 12Z for city
-    A while OM9 12Z exists only for city B). Acting on the global ceiling produces a FALSE advance
-    signal for the family that lacks a leg, then the seed build silently fails (manifest_missing).
-
     This is the SAME authority, narrowed to a scope: a cycle is materializable for THIS family iff
-    BOTH required legs (AIFS-sampled + OM9 anchor) have a manifest for THIS (city, target_date). The
-    family-scoped cycle = MIN(latest_manifest(aifs).cycle, latest_manifest(anchor).cycle). It does
-    NOT create a second cycle-selection authority — the verdict still compares the consumed cycle to
-    this family cycle, exactly as the universe variant does, just with per-family leg presence.
-
-    Returns (cycle, missing_legs). cycle is None when EITHER leg's manifest is absent for the
-    family; missing_legs is the tuple of (role, source_id) legs that were absent (empty on success),
-    so the caller can record a typed CYCLE_LEG_ARTIFACT_MISSING reason naming the exact gap.
+    the current live dependency identity's raw artifact leg has a manifest for THIS
+    (city, target_date). After the AIFS removal, that is the OM9 anchor leg. Returns
+    (cycle, missing_legs). cycle is None when the live leg's manifest is absent for the family;
+    missing_legs is the tuple of (role, source_id) legs that were absent.
     """
     expected = expected_identity(metric)
-    legs = (
-        ("aifs_sampled_2t", expected["aifs_sampled_2t"]),
-        ("openmeteo_ifs9_anchor", expected["openmeteo_ifs9_anchor"]),
-    )
+    legs = (("openmeteo_ifs9_anchor", expected["openmeteo_ifs9_anchor"]),)
     leg_cycles: list[datetime] = []
     missing: list[tuple[str, str]] = []
     for role, identity in legs:
@@ -381,7 +352,7 @@ def enqueue_cycle_advance_reseeds(
     )
     from src.state.db import _connect  # noqa: PLC0415
     from src.state.schema.v2_schema import (  # noqa: PLC0415
-        ensure_replacement_forecast_shadow_schema,
+        ensure_replacement_forecast_live_schema,
     )
 
     now = (computed_at or datetime.now(tz=UTC)).astimezone(UTC)
@@ -435,7 +406,7 @@ def enqueue_cycle_advance_reseeds(
     conn = _connect(forecast_db, write_class="live")
     conn.row_factory = sqlite3.Row
     try:
-        ensure_replacement_forecast_shadow_schema(conn)
+        ensure_replacement_forecast_live_schema(conn)
         freshest = freshest_materializable_cycle(conn)
         if freshest is None:
             report["status"] = "CYCLE_ADVANCE_NO_MATERIALIZABLE_CYCLE"
@@ -632,7 +603,7 @@ def enqueue_single_family_cycle_advance_reseed(
     )
     from src.state.db import _connect  # noqa: PLC0415
     from src.state.schema.v2_schema import (  # noqa: PLC0415
-        ensure_replacement_forecast_shadow_schema,
+        ensure_replacement_forecast_live_schema,
     )
 
     now = (computed_at or datetime.now(tz=UTC)).astimezone(UTC)
@@ -660,7 +631,7 @@ def enqueue_single_family_cycle_advance_reseed(
     conn = _connect(forecast_db, write_class="live")
     conn.row_factory = sqlite3.Row
     try:
-        ensure_replacement_forecast_shadow_schema(conn)
+        ensure_replacement_forecast_live_schema(conn)
         freshest = freshest_materializable_cycle(conn)
         if freshest is None:
             report["status"] = "CYCLE_ADVANCE_NO_MATERIALIZABLE_CYCLE"
@@ -804,13 +775,6 @@ def _build_and_write_advance_seed(
     materializer's monotone guard admits it (request cycle >= current posterior cycle). Mirrors the
     fusion-upgrade trigger's _build_and_write_upgrade_seed (single seed-build shape)."""
     expected = expected_identity(metric)
-    aifs = latest_manifest(
-        manifests,
-        source_id=expected["aifs_sampled_2t"].source_id,
-        data_version=expected["aifs_sampled_2t"].data_version,
-        city=city,
-        target_date=target_date,
-    )
     openmeteo = latest_manifest(
         manifests,
         source_id=expected["openmeteo_ifs9_anchor"].source_id,
@@ -818,19 +782,16 @@ def _build_and_write_advance_seed(
         city=city,
         target_date=target_date,
     )
-    if aifs is None or openmeteo is None:
+    if openmeteo is None:
         return None
-    aifs_samples = manifest_path_value(aifs, "aifs_samples_json") or manifest_path_value(aifs, "sample_points_json")
-    aifs_grib = None if aifs_samples else aifs.artifact_path
     openmeteo_payload = manifest_path_value(openmeteo, "openmeteo_payload_json") or openmeteo.artifact_path
     precision_metadata = manifest_path_value(openmeteo, "precision_metadata_json")
-    if not (aifs_samples or aifs_grib) or not openmeteo_payload or not precision_metadata:
+    if not openmeteo_payload or not precision_metadata:
         return None
     coverage = latest_baseline_coverage(conn, city=city, target_date=target_date, temperature_metric=metric)
     bins = market_bins(conn, city=city, target_date=target_date, temperature_metric=metric)
     if coverage is None or not bins:
         return None
-    aifs_base_dir = manifest_base_dir(aifs, fallback=raw_dir)
     openmeteo_base_dir = manifest_base_dir(openmeteo, fallback=raw_dir)
     seed_result = build_seed(
         city=city,
@@ -838,14 +799,11 @@ def _build_and_write_advance_seed(
         temperature_metric=metric,
         market_bins=bins,
         baseline_coverage=coverage,
-        aifs_manifest=aifs,
         openmeteo_manifest=openmeteo,
         openmeteo_payload_json=resolve_path(openmeteo_payload, base_dir=openmeteo_base_dir),
         precision_metadata_json=resolve_path(precision_metadata, base_dir=openmeteo_base_dir),
         computed_at=computed_at,
         base_dir=seed_path,
-        aifs_samples_json=None if aifs_samples is None else resolve_path(aifs_samples, base_dir=aifs_base_dir),
-        aifs_grib_path=None if aifs_grib is None else resolve_path(aifs_grib, base_dir=aifs_base_dir),
     )
     if not seed_result.ok or seed_result.seed is None:
         return None

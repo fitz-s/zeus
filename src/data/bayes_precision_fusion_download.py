@@ -852,7 +852,7 @@ def _persist_chunk_with_lock_retry(
     """
     from src.state.db import _connect  # noqa: PLC0415
     from src.state.schema.v2_schema import (  # noqa: PLC0415
-        ensure_replacement_forecast_shadow_schema,
+        ensure_replacement_forecast_live_schema,
     )
 
     written = 0
@@ -860,7 +860,7 @@ def _persist_chunk_with_lock_retry(
     for _attempt in range(attempts):
         conn = _connect(Path(forecast_db), write_class="live")
         try:
-            ensure_replacement_forecast_shadow_schema(conn)
+            ensure_replacement_forecast_live_schema(conn)
             if rows:
                 _scan_and_audit_request_conflicts(conn, rows)
             # BEGIN IMMEDIATE: take the write lock up front so busy_timeout WAITS for it,

@@ -122,11 +122,11 @@ def test_candidate_domain_gates() -> None:
 
 
 def test_download_fetches_promoted_models_domain_gated(tmp_path) -> None:
-    from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
     db = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db))
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     conn.close()
 
     single_calls: list[str] = []
@@ -164,11 +164,11 @@ def test_download_row_level_skip_only_missing_fetches(tmp_path) -> None:
     # persisted is not re-fetched; anything missing IS fetched regardless of coverage.
     from datetime import UTC, datetime
 
-    from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
     db = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db))
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     cycle_iso = "2026-06-09T00:00:00+00:00"
     # Pre-persist gfs single_runs for this exact cell+cycle.
     conn.execute(

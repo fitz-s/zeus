@@ -35,7 +35,7 @@ from src.data.replacement_forecast_materializer import (
     SOURCE_ID as MAT_SOURCE_ID,
     _cycle_monotone_block_reasons,
 )
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 UTC = timezone.utc
 
@@ -59,7 +59,7 @@ class _Req:
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     return conn
 
 
@@ -71,8 +71,8 @@ def _insert_posterior(conn: sqlite3.Connection, *, city: str, target_date: str, 
             (source_id, product_id, data_version, city, target_date, temperature_metric,
              source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
              posterior_method, dependency_source_run_ids_json, provenance_json,
-             trade_authority_status, training_allowed)
-        VALUES (?, 'pid', 'dv', ?, ?, ?, ?, ?, ?, '{}', '{}', 'm', '{}', '{}', 'SHADOW_ONLY', 0)
+             runtime_layer, training_allowed)
+        VALUES (?, 'pid', 'dv', ?, ?, ?, ?, ?, ?, '{}', '{}', 'm', '{}', '{}', 'live', 0)
         """,
         (MAT_SOURCE_ID, city, target_date, metric, cycle_iso, cycle_iso, computed_at),
     )
@@ -97,8 +97,8 @@ def _insert_artifact(conn: sqlite3.Connection, *, source_id: str, cycle_iso: str
                 values[name] = "{}"
             elif name in ("byte_size", "training_allowed"):
                 values[name] = 0
-            elif name == "trade_authority_status":
-                values[name] = "SHADOW_ONLY"  # CHECK-constrained enum
+            elif name == "runtime_layer":
+                values[name] = "live"
             elif name.endswith("_at") or name.endswith("_time"):
                 values[name] = cycle_iso
             else:
@@ -211,22 +211,19 @@ def test_trigger_does_not_fire_on_older_freshest_than_consumed() -> None:
     assert verdict["needs_advance"] is False
 
 
-def test_freshest_materializable_cycle_is_min_over_both_legs() -> None:
-    """A cycle is materializable only when BOTH legs (AIFS + OM9 anchor) are ingested: the freshest
-    materializable cycle = MIN(MAX(aifs), MAX(anchor)). A half-published newer cycle (only one leg)
-    is NOT yet a re-mat opportunity (mirrors the downloader high-water mark)."""
+def test_freshest_materializable_cycle_uses_live_anchor_leg() -> None:
+    """After AIFS removal, the freshest materializable cycle follows the live OM9 anchor leg."""
     conn = _conn()
-    # Anchor reached 12Z; AIFS only reached 06Z => freshest materializable = 06Z (the lagging leg).
     _insert_artifact(conn, source_id="openmeteo_ecmwf_ifs_9km", cycle_iso="2026-06-12T12:00:00+00:00")
     _insert_artifact(conn, source_id="ecmwf_aifs_ens", cycle_iso="2026-06-12T06:00:00+00:00")
     got = freshest_materializable_cycle(conn)
-    assert got == datetime(2026, 6, 12, 6, tzinfo=UTC)
+    assert got == datetime(2026, 6, 12, 12, tzinfo=UTC)
 
 
-def test_freshest_materializable_cycle_none_when_a_leg_missing() -> None:
+def test_freshest_materializable_cycle_none_when_anchor_missing() -> None:
     conn = _conn()
     _insert_artifact(conn, source_id="ecmwf_aifs_ens", cycle_iso="2026-06-12T06:00:00+00:00")
-    # No anchor leg at all => nothing is materializable.
+    # Retired AIFS artifacts alone cannot make a cycle materializable.
     assert freshest_materializable_cycle(conn) is None
 
 
@@ -294,18 +291,16 @@ def _fake_latest_manifest(manifests, *, source_id, data_version, city, target_da
 def _legs_for(metric: str, *, city: str, target_date: str, cycle: datetime,
               include_anchor: bool = True) -> list[_FakeManifest]:
     ident = expected_replacement_dependency_identity_by_role(metric)
-    aifs = ident["aifs_sampled_2t"]
     anchor = ident["openmeteo_ifs9_anchor"]
-    out = [_FakeManifest(source_id=aifs.source_id, data_version=aifs.data_version,
-                         cycle=cycle, city=city, target_date=target_date)]
+    out: list[_FakeManifest] = []
     if include_anchor:
         out.append(_FakeManifest(source_id=anchor.source_id, data_version=anchor.data_version,
                                  cycle=cycle, city=city, target_date=target_date))
     return out
 
 
-def test_family_materializable_cycle_both_legs_present_returns_min() -> None:
-    """Both legs present for the family -> the family-scoped cycle is MIN over the legs, no gap."""
+def test_family_materializable_cycle_anchor_present_returns_cycle() -> None:
+    """Current live leg present for the family -> the family-scoped cycle is materializable."""
     cyc = datetime(2026, 6, 12, 12, tzinfo=UTC)
     manifests = _legs_for("high", city="CityA", target_date="2026-06-13", cycle=cyc)
     got, missing = family_materializable_cycle(
@@ -317,13 +312,12 @@ def test_family_materializable_cycle_both_legs_present_returns_min() -> None:
     assert missing == ()
 
 
-def test_family_materializable_cycle_missing_leg_blocks_and_names_gap() -> None:
-    """THE FINDING: AIFS 12Z exists for CityB but OM9 12Z exists only for CityA. The universe-wide
-    freshest cycle says 12Z is materializable — but family_materializable_cycle for CityB MUST
-    return None (not materializable) and name the missing OM9 leg, so the trigger records a typed
-    gap instead of a false advance + silent manifest_missing skip."""
+def test_family_materializable_cycle_missing_anchor_blocks_and_names_gap() -> None:
+    """THE FINDING after AIFS removal: OM9 12Z exists only for CityA. The universe-wide freshest
+    cycle says 12Z is materializable, but family_materializable_cycle for CityB MUST return None
+    and name the missing OM9 leg."""
     cyc = datetime(2026, 6, 12, 12, tzinfo=UTC)
-    # Universe: CityA has BOTH legs at 12Z; CityB has ONLY the AIFS leg at 12Z (anchor missing).
+    # Universe: CityA has the live OM9 leg at 12Z; CityB lacks it.
     manifests = (
         _legs_for("high", city="CityA", target_date="2026-06-13", cycle=cyc)
         + _legs_for("high", city="CityB", target_date="2026-06-13", cycle=cyc, include_anchor=False)

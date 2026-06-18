@@ -1,8 +1,8 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-06-10
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (bounded re-materialization
-#   staleness gate at materialization, fail-closed; cycle-phase provenance tagging 00/12Z synoptic
-#   vs 06/18Z intermediate).
+#   staleness gate at materialization, fail-closed; cycle-phase provenance treats all standard
+#   00Z/06Z/12Z/18Z cycles as live-eligible synoptic).
 """Relationship tests across the materializer's input->DB-write boundary for cycle policy.
 
 Two cross-module invariants are pinned here (Fitz: relationship tests, not function tests):
@@ -13,22 +13,19 @@ Two cross-module invariants are pinned here (Fitz: relationship tests, not funct
      This is the fail-closed gate at materialization that complements the live-admission gate;
      the same constant (replacement_forecast_cycle_policy) drives both so they cannot drift.
 
-  2. CYCLE-PHASE TAG — a posterior built on a 06/18Z intermediate cycle must carry
-     provenance_json.cycle_phase == "intermediate"; a 00/12Z synoptic cycle == "synoptic".
-     The live bundle reader keys its shadow-only admission off this tag.
+  2. CYCLE-PHASE TAG — all standard 00Z/06Z/12Z/18Z cycles carry
+     provenance_json.cycle_phase == "synoptic"; phase is provenance and must not downgrade
+     06Z/18Z rows.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from src.data.ecmwf_aifs_sampled_2t_localday import (
-    AifsMemberLocalDayExtrema,
-    AifsSampledLocalDayExtraction,
-)
 from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoIfs9LocalDayAnchor
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
@@ -41,15 +38,25 @@ from src.data.replacement_forecast_cycle_policy import (
 from src.data.replacement_forecast_materializer import (
     ReplacementForecastMaterializeRequest,
     _prewrite_block_reasons,
-    materialize_replacement_forecast_shadow,
+    materialize_replacement_forecast_live,
 )
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
-from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin
 
 
 UTC = timezone.utc
 _STALE_REASON = "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_TOO_STALE"
+
+
+@dataclass(frozen=True)
+class _TemperatureBin:
+    bin_id: str
+    lower_c: float | None = None
+    upper_c: float | None = None
+    center_c: float | None = None
+    display_unit: str = "C"
+    settlement_unit: str = "C"
+    rounding_rule: str = "wmo_half_up"
 
 
 def _conn() -> sqlite3.Connection:
@@ -58,27 +65,6 @@ def _conn() -> sqlite3.Connection:
     apply_canonical_schema(conn, forecast_tables=True)
     _create_readiness_state(conn)
     return conn
-
-
-def _aifs_extraction(*, cycle: datetime) -> AifsSampledLocalDayExtraction:
-    steps = tuple(cycle + timedelta(hours=h) for h in (18, 24, 30, 36))
-    return AifsSampledLocalDayExtraction(
-        city_timezone="Asia/Shanghai",
-        target_local_date=date(2026, 6, 7),
-        source_cycle_time=cycle,
-        target_window_start_utc=datetime(2026, 6, 6, 16, tzinfo=UTC),
-        target_window_end_utc=datetime(2026, 6, 7, 16, tzinfo=UTC),
-        members=tuple(
-            AifsMemberLocalDayExtrema(
-                f"pf-{i:03d}",
-                high_c=24.0 + i,
-                low_c=18.0 + i,
-                sample_count=4,
-                contributing_valid_times_utc=steps,
-            )
-            for i in (1, 2, 3)
-        ),
-    )
 
 
 def _anchor(*, cycle: datetime) -> OpenMeteoIfs9LocalDayAnchor:
@@ -138,11 +124,11 @@ def _precision_guard():
     )
 
 
-def _bins() -> tuple[AifsTemperatureBin, ...]:
+def _bins() -> tuple[_TemperatureBin, ...]:
     return (
-        AifsTemperatureBin("cool", upper_c=20.0, center_c=19.0),
-        AifsTemperatureBin("warm", lower_c=21.0, upper_c=30.0),
-        AifsTemperatureBin("hot", lower_c=31.0, center_c=32.0),
+        _TemperatureBin("cool", upper_c=20.0, center_c=19.0),
+        _TemperatureBin("warm", lower_c=21.0, upper_c=30.0),
+        _TemperatureBin("hot", lower_c=31.0, center_c=32.0),
     )
 
 
@@ -156,9 +142,6 @@ def _request(*, cycle: datetime, computed_at: datetime) -> ReplacementForecastMa
         baseline_source_run_id="b0-run",
         baseline_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
         baseline_source_available_at=computed_at - timedelta(hours=2),
-        aifs_extraction=_aifs_extraction(cycle=cycle),
-        aifs_source_run_id="aifs-run",
-        aifs_source_available_at=computed_at - timedelta(hours=1, minutes=30),
         openmeteo_anchor=_anchor(cycle=cycle),
         openmeteo_source_run_id="om9-run",
         openmeteo_source_available_at=computed_at - timedelta(hours=1),
@@ -195,7 +178,7 @@ def test_materialize_refuses_too_stale_cycle_blocks_all_writes() -> None:
     conn = _conn()
     cycle = datetime(2026, 6, 5, 0, tzinfo=UTC)  # 00Z so the staleness reason is isolated
     computed_at = cycle + timedelta(hours=REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT + 2)
-    result = materialize_replacement_forecast_shadow(conn, _request(cycle=cycle, computed_at=computed_at))
+    result = materialize_replacement_forecast_live(conn, _request(cycle=cycle, computed_at=computed_at))
     assert result.ok is False
     assert _STALE_REASON in result.reason_codes
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
@@ -205,18 +188,15 @@ def test_materialize_refuses_too_stale_cycle_blocks_all_writes() -> None:
 
 @pytest.mark.parametrize(
     "cycle_hour, expected_phase",
-    [(0, "synoptic"), (6, "intermediate"), (12, "synoptic"), (18, "intermediate")],
+    [(0, "synoptic"), (6, "synoptic"), (12, "synoptic"), (18, "synoptic")],
 )
 def test_request_cycle_classifies_to_provenance_phase(cycle_hour: int, expected_phase: str) -> None:
     """Producer contract: the phase tag the materializer writes is classify_cycle_phase(source_cycle_time).
 
     The materializer derives provenance_json.cycle_phase from the request's source_cycle_time via
     classify_cycle_phase (src.data.replacement_forecast_materializer._insert_posterior). This pins
-    the producer half of the producer->bundle-reader relationship: a 06/18Z request is tagged
-    intermediate (which the live gate then holds shadow-only), a 00/12Z request is tagged synoptic.
-    (End-to-end DB-write coverage of the tag is gated by the pre-existing 51-member AIFS fixture
-    debt in test_replacement_forecast_materializer.py; the consumer half is pinned in
-    test_replacement_forecast_cycle_phase_admission.py.)
+    the producer half of the producer->bundle-reader relationship: 06/18Z requests must not be
+    downgraded by phase provenance.
     """
     cycle = datetime(2026, 6, 6, cycle_hour, tzinfo=UTC)
     request = _request(cycle=cycle, computed_at=cycle + timedelta(hours=4))

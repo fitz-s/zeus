@@ -2191,6 +2191,12 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
     if (
         not runtime_exit_state
         and state == "pending_exit"
+        and str(row.get("order_status") or "") == "backoff_exhausted"
+    ):
+        runtime_exit_state = "backoff_exhausted"
+    if (
+        not runtime_exit_state
+        and state == "pending_exit"
         and exit_retry_count > 0
         and next_exit_retry_at
     ):

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: Seed raw_model_forecasts (endpoint=previous_runs, SHADOW_ONLY) from the proven B0 fixed-lead multi-model dataset so BayesPrecisionFusionHistoryProvider has walk-forward history immediately.
+# Purpose: Seed raw_model_forecasts (endpoint=previous_runs, training_allowed=0) from the proven B0 fixed-lead multi-model dataset so BayesPrecisionFusionHistoryProvider has walk-forward history immediately.
 # Reuse: --b0 and --db are both REQUIRED; --b0 must point at B0_multilead_dataset.json; --db must point at target zeus-forecasts.db. Use --dry-run first. Never run against live DB without operator intent.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
@@ -15,9 +15,9 @@ its walk-forward training history IMMEDIATELY (no 25-day forward wait). Fusion t
 reaches T2_BAYES instead of EQUAL_WEIGHT on the very next materialize cycle.
 
 PROVENANCE / SAFETY:
-  * Writes ONLY the SHADOW-ONLY research-accrual table raw_model_forecasts
-    (trade_authority_status='SHADOW_ONLY', training_allowed=0) — NOT a money-path
-    or order/training-truth table. It changes NO posterior until
+  * Writes ONLY raw_model_forecasts training-history rows
+    (training_allowed=0) — NOT a posterior/readiness, order, or training-truth table.
+    It changes NO posterior until
     replacement_0_1_bayes_precision_fusion_enabled is flipped AND the BayesPrecisionFusionHistoryProvider reads it.
   * --db is REQUIRED and never defaults to the live path: the operator points it at
     the target zeus-forecasts.db explicitly. NEVER run against a DB you must not write.

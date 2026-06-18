@@ -226,7 +226,7 @@ def _minimal_seed(upgrade: bool) -> dict[str, object]:
 
 
 def test_queue_does_not_coverage_skip_an_upgrade_reseed(tmp_path, monkeypatch) -> None:
-    import src.data.replacement_forecast_shadow_materialization_queue as queue_mod
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
     # Coverage says EVERYTHING is covered (the exact live state an upgrade seed supersedes:
     # the served=4 posterior has q_lcb NOT NULL).
