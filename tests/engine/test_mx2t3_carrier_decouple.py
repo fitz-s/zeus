@@ -98,6 +98,24 @@ def test_a_posterior_lane_emits_complete_fsr_with_neutral_snapshot_id():
     )
 
 
+def test_a2_posterior_lane_requires_same_cycle_raw_model_spine_members():
+    con = _posteriors_only_conn()
+    con.execute("DELETE FROM raw_model_forecasts WHERE date(source_cycle_time) = '2026-06-17'")
+    con.commit()
+
+    class _W:
+        def write(self, ev):  # noqa: ANN001
+            raise AssertionError(f"must not emit without q-kernel raw-model members: {ev!r}")
+
+    with mock.patch.object(fsr, "_replacement_trade_authority_enabled", return_value=True):
+        trig = fsr.ForecastSnapshotReadyTrigger(_W())
+        results = trig.scan_committed_snapshots(
+            forecasts_conn=con, decision_time=_DT, received_at=_DT.isoformat(), limit=10,
+        )
+
+    assert results == []
+
+
 # ---------------------------------------------------------------------------
 # (B) The spine causal cycle is parsed from the neutral id — no ensemble row needed.
 # ---------------------------------------------------------------------------

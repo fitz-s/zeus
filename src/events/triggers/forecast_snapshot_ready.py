@@ -33,6 +33,15 @@ REPLACEMENT_0_1_TRACK_LABEL = "replacement_0_1_aifs_openmeteo_soft_anchor"
 # authority, not a relaxed gate). The legacy ensemble path is untouched for flag-OFF.
 POSTERIOR_BACKED_DATA_VERSION = "forecast_posteriors.replacement_0_1_neutral_carrier"
 _POSTERIOR_SNAPSHOT_ID_PREFIX = "rmf-"
+_POSTERIOR_RAW_MODEL_REQUIRED_COLUMNS = {
+    "model",
+    "city",
+    "target_date",
+    "metric",
+    "source_cycle_time",
+    "source_available_at",
+    "forecast_value_c",
+}
 
 
 def _target_local_day_strictly_past(
@@ -571,6 +580,12 @@ class ForecastSnapshotReadyTrigger:
         if _posterior_lane:
             if not _table_exists(forecasts_conn, "forecast_posteriors"):
                 return []
+            if not _table_exists(forecasts_conn, "raw_model_forecasts"):
+                return []
+            if not _POSTERIOR_RAW_MODEL_REQUIRED_COLUMNS.issubset(
+                _table_columns(forecasts_conn, "raw_model_forecasts")
+            ):
+                return []
         elif not all(_table_exists(forecasts_conn, table) for table in _FORECAST_TABLES):
             return []
         # Decision-first emission: a family with no Polymarket market (no market_events row)
@@ -682,13 +697,25 @@ class ForecastSnapshotReadyTrigger:
                 FROM ranked_posterior p
                 WHERE p._family_rank = 1
                   AND (p.source_available_at IS NULL OR p.source_available_at <= ?)
-                  AND (p.computed_at IS NULL OR p.computed_at <= ?){_posterior_market_filter}
+                  AND (p.computed_at IS NULL OR p.computed_at <= ?)
+                  AND EXISTS (
+                        SELECT 1
+                          FROM raw_model_forecasts rmf
+                         WHERE rmf.city = p.city
+                           AND rmf.target_date = p.target_date
+                           AND rmf.metric = p.temperature_metric
+                           AND date(rmf.source_cycle_time) = date(p.source_cycle_time)
+                           AND rmf.source_available_at <= ?
+                           AND rmf.forecast_value_c IS NOT NULL
+                         GROUP BY rmf.city, rmf.target_date, rmf.metric, date(rmf.source_cycle_time)
+                        HAVING COUNT(DISTINCT rmf.model) >= 3
+                  ){_posterior_market_filter}
                 ORDER BY p.source_cycle_time DESC, p.computed_at DESC
                 """
             rows = _dict_rows(
                 forecasts_conn,
                 _select_sql_base,
-                (_decision_iso, _decision_iso, _decision_iso, _decision_iso),
+                (_decision_iso, _decision_iso, _decision_iso, _decision_iso, _decision_iso),
             )
         else:
             replacement_filter = ""
@@ -1038,6 +1065,13 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
         ).fetchone()
         is not None
     )
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    except sqlite3.Error:
+        return set()
 
 
 def _dict_rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:

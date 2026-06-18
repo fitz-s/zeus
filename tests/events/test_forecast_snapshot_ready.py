@@ -573,9 +573,37 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
             '2026-05-24T04:16:00+00:00',
             '{"bin:28":0.42}', NULL, NULL,
             'aifs_openmeteo_soft_anchor',
-            '[]', '{}', 'SHADOW_ONLY', 0
+            '[]', '{}', 'DIAGNOSTIC_ONLY', 0
         )
         """
+    )
+    forecasts_conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS raw_model_forecasts (
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            forecast_value_c REAL
+        )
+        """
+    )
+    forecasts_conn.execute(
+        "DELETE FROM raw_model_forecasts WHERE city='Chicago' AND target_date='2026-05-24' AND metric='high'"
+    )
+    forecasts_conn.executemany(
+        """
+        INSERT INTO raw_model_forecasts (
+            model, city, target_date, metric, source_cycle_time,
+            source_available_at, captured_at, lead_days, forecast_value_c, endpoint
+        ) VALUES (?, 'Chicago', '2026-05-24', 'high',
+                  '2026-05-24T00:00:00+00:00',
+                  '2026-05-24T04:15:00+00:00',
+                  '2026-05-24T04:16:00+00:00', 0, ?, 'single_runs')
+        """,
+        [("ecmwf_ifs", 22.0), ("gfs_global", 22.5), ("icon_global", 21.8)],
     )
 
     with_posterior = trigger.scan_committed_snapshots(

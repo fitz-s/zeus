@@ -781,6 +781,105 @@ def test_unvalued_pending_redecision_expires_even_when_family_is_held():
     )
 
 
+def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    event = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Cape Town|2026-06-19|high|rmf-2026-06-18",
+        source="cycle-test",
+        observed_at="2026-06-18T07:58:00+00:00",
+        available_at="2026-06-18T07:58:00+00:00",
+        received_at="2026-06-18T07:58:00+00:00",
+        causal_snapshot_id="rmf-Cape Town|2026-06-19|high|2026-06-18",
+        payload={
+            "city": "Cape Town",
+            "target_date": "2026-06-19",
+            "metric": "high",
+            "track": "replacement_0_1_aifs_openmeteo_soft_anchor",
+            "snapshot_id": "rmf-Cape Town|2026-06-19|high|2026-06-18",
+        },
+        priority=50,
+    )
+    store.insert_or_ignore(event)
+
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            product_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            computed_at TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            forecast_value_c REAL
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors VALUES (
+            1,
+            'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
+            'Cape Town',
+            '2026-06-19',
+            'high',
+            '2026-06-18T00:00:00+00:00',
+            '2026-06-18T06:39:00+00:00',
+            '2026-06-18T07:58:00+00:00'
+        )
+        """
+    )
+    forecasts.executemany(
+        """
+        INSERT INTO raw_model_forecasts VALUES (
+            ?, 'Cape Town', '2026-06-19', 'high',
+            '2026-06-17T18:00:00+00:00',
+            '2026-06-17T19:00:00+00:00',
+            ?
+        )
+        """,
+        [("old-a", 18.0), ("old-b", 18.5), ("old-c", 19.0)],
+    )
+
+    expired = main._edli_expire_unready_forecast_snapshot_pending(
+        world,
+        forecasts,
+        decision_time="2026-06-18T08:00:00+00:00",
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert expired == 1
+    assert tuple(row) == (
+        "expired",
+        "FORECAST_ADMISSION_EXPIRED:latest_posterior_spine_unavailable",
+    )
+
+
 def test_held_position_family_provider_excludes_closed_phases():
     conn = sqlite3.connect(":memory:")
     conn.execute(

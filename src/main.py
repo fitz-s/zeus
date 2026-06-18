@@ -7035,6 +7035,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         from datetime import datetime, timezone
         from src.events.continuous_redecision import (
             _all_latest_beliefs,
+            filter_redecisions_with_spine_members,
             screen_entry_redecisions,
             screened_family_keys,
             screen_resting_orders,
@@ -7068,7 +7069,25 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 acted_state=_edli_redecision_acted_state,
                 beliefs=beliefs,
             )
-            raw_entry_family_keys = screened_family_keys(world_ro, redecisions, beliefs=beliefs)
+            try:
+                forecasts_filter_ro = get_forecasts_connection_read_only()
+                try:
+                    entry_redecisions = filter_redecisions_with_spine_members(
+                        forecasts_filter_ro,
+                        redecisions,
+                        beliefs=beliefs,
+                        decision_time=received_at,
+                    )
+                finally:
+                    forecasts_filter_ro.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "edli_redecision_screen: spine availability read failed; "
+                    "entry redecisions not admitted this tick: %r",
+                    exc,
+                )
+                entry_redecisions = []
+            raw_entry_family_keys = screened_family_keys(world_ro, entry_redecisions, beliefs=beliefs)
             open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)
             rest_pulls = screen_resting_orders(
                 world_ro,
@@ -7126,10 +7145,12 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 except Exception:  # noqa: BLE001
                     pass
             logger.info(
-                "edli_redecision_screen: entry_candidates=%d entry_families=0 rest_pulls=%d "
+                "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
+                "entry_families=0 rest_pulls=%d "
                 "held_monitor_families=%d families_reemitted=0 "
                 "events_emitted=0 rests_cancelled=0 expired_unadmitted=%d reason=no_screened_families",
                 len(redecisions),
+                len(entry_redecisions),
                 len(rest_pulls),
                 len(held_families),
                 expired_unadmitted,
@@ -7212,11 +7233,12 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             cancelled = cstats.get("cancelled", 0)
 
         logger.info(
-            "edli_redecision_screen: entry_candidates=%d entry_families=%d rest_pulls=%d "
+            "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
+            "entry_families=%d rest_pulls=%d "
             "held_monitor_families=%d families_reemitted=%d "
             "pending_redecision_families=%d suppressed_existing_pending=%d "
             "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d",
-            len(redecisions), len(family_keys), len(rest_pulls), len(held_families),
+            len(redecisions), len(entry_redecisions), len(family_keys), len(rest_pulls), len(held_families),
             len(all_families),
             len(pending_families),
             len(set(all_families) & pending_families),
@@ -7717,6 +7739,124 @@ def _edli_expire_unadmitted_redecision_pending(
     return changed
 
 
+def _edli_expire_unready_forecast_snapshot_pending(
+    world_conn,
+    forecasts_conn,
+    *,
+    decision_time: str,
+) -> int:
+    """Expire replacement FSR rows whose current latest posterior is not spine-ready.
+
+    Pending FSR rows are admission work, not durable facts. Under the replacement lane an
+    ``rmf-...`` event is consumable only when the family's latest posterior still matches that
+    neutral id and has at least three same-cycle raw_model_forecasts members. If the latest
+    posterior has advanced to a cycle without raw-model members, keeping the old pending row
+    alive only burns reactor budget and produces MU_SIGMA_NOT_STASHED no-trades.
+    """
+
+    try:
+        from src.events.triggers.forecast_snapshot_ready import REPLACEMENT_0_1_PRODUCT_ID
+    except Exception:  # noqa: BLE001
+        return 0
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT e.event_id,
+                   e.causal_snapshot_id,
+                   json_extract(e.payload_json, '$.city') AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date,
+                   json_extract(e.payload_json, '$.metric') AS metric
+              FROM opportunity_event_processing p
+              JOIN opportunity_events e ON e.event_id = p.event_id
+             WHERE p.consumer_name = 'edli_reactor_v1'
+               AND p.processing_status = 'pending'
+               AND e.event_type = 'FORECAST_SNAPSHOT_READY'
+               AND e.causal_snapshot_id LIKE 'rmf-%'
+            """
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return 0
+    expire_ids: list[str] = []
+    for row in rows:
+        try:
+            event_id = str(row[0] or "")
+            causal_snapshot_id = str(row[1] or "")
+            city = str(row[2] or "").strip()
+            target_date = str(row[3] or "").strip()
+            metric = str(row[4] or "").strip()
+        except Exception:  # noqa: BLE001
+            continue
+        if not (event_id and causal_snapshot_id and city and target_date and metric):
+            continue
+        try:
+            latest = forecasts_conn.execute(
+                """
+                SELECT source_cycle_time
+                  FROM forecast_posteriors
+                 WHERE product_id = ?
+                   AND city = ?
+                   AND target_date = ?
+                   AND temperature_metric = ?
+                   AND (source_available_at IS NULL OR source_available_at <= ?)
+                   AND (computed_at IS NULL OR computed_at <= ?)
+                 ORDER BY source_cycle_time DESC, computed_at DESC, posterior_id DESC
+                 LIMIT 1
+                """,
+                (REPLACEMENT_0_1_PRODUCT_ID, city, target_date, metric, decision_time, decision_time),
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            continue
+        if latest is None or latest[0] is None:
+            expire_ids.append(event_id)
+            continue
+        cycle_date = str(latest[0] or "")[:10]
+        current_causal = f"rmf-{city}|{target_date}|{metric}|{cycle_date}"
+        if len(cycle_date) != 10 or causal_snapshot_id != current_causal:
+            expire_ids.append(event_id)
+            continue
+        try:
+            count_row = forecasts_conn.execute(
+                """
+                SELECT COUNT(DISTINCT model)
+                  FROM raw_model_forecasts
+                 WHERE city = ?
+                   AND target_date = ?
+                   AND metric = ?
+                   AND date(source_cycle_time) = ?
+                   AND source_available_at <= ?
+                   AND forecast_value_c IS NOT NULL
+                """,
+                (city, target_date, metric, cycle_date, decision_time),
+            ).fetchone()
+            member_count = int(count_row[0] or 0) if count_row is not None else 0
+        except Exception:  # noqa: BLE001
+            member_count = 0
+        if member_count < 3:
+            expire_ids.append(event_id)
+    if not expire_ids:
+        return 0
+    now = str(decision_time)
+    changed = 0
+    for start in range(0, len(expire_ids), 250):
+        chunk = expire_ids[start : start + 250]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = world_conn.execute(
+            f"""
+            UPDATE opportunity_event_processing
+               SET processing_status = 'expired',
+                   processed_at = ?,
+                   updated_at = ?,
+                   last_error = 'FORECAST_ADMISSION_EXPIRED:latest_posterior_spine_unavailable'
+             WHERE consumer_name = 'edli_reactor_v1'
+               AND processing_status = 'pending'
+               AND event_id IN ({placeholders})
+            """,
+            (now, now, *chunk),
+        )
+        changed += int(cur.rowcount or 0)
+    return changed
+
+
 def _edli_pending_entity_keys(
     world_conn,
     *,
@@ -7918,6 +8058,31 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         logger.warning(
             "EDLI reactor: archive_superseded_day0_events sweep failed (non-fatal): %r",
             _d0_sweep_exc,
+        )
+
+    try:
+        from src.state.db import get_forecasts_connection_read_only as _get_forecasts_ro
+
+        _forecasts_ro = _get_forecasts_ro()
+        try:
+            _unready_fsr_archived = _edli_expire_unready_forecast_snapshot_pending(
+                store.conn,
+                _forecasts_ro,
+                decision_time=decision_time.astimezone(timezone.utc).isoformat(),
+            )
+        finally:
+            _forecasts_ro.close()
+        if _unready_fsr_archived:
+            logger.info(
+                "EDLI reactor: expired %d forecast-snapshot pending rows whose latest "
+                "posterior lacks same-cycle raw-model spine members; reactor will not "
+                "spend proof budget on MU_SIGMA_NOT_STASHED candidates",
+                _unready_fsr_archived,
+            )
+    except Exception as _spine_ready_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: replacement FSR spine-readiness sweep failed (non-fatal): %r",
+            _spine_ready_sweep_exc,
         )
 
     try:

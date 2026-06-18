@@ -146,6 +146,98 @@ def test_R1_fresh_price_positive_edge_enqueues_redecision():
     assert all(e.event_type == "EDLI_REDECISION_PENDING" for e in enqueued)
 
 
+def test_entry_redecision_requires_spine_members_on_latest_posterior_cycle():
+    """Cheap q/price edge is not enough; the full q-kernel needs same-cycle raw-model members."""
+
+    conn = _mem_world()
+    _cache_yes_belief(conn, p_posterior_yes=0.99, recorded_at="2026-05-31T00:00:00+00:00")
+    beliefs = cr._all_latest_beliefs(conn)
+    redecisions = [
+        cr.EnqueuedRedecision(
+            family_id="Wuhan|2026-06-01|high",
+            bin_label="b30",
+            direction="buy_yes",
+            edge=0.20,
+        )
+    ]
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            computed_at TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            forecast_value_c REAL
+        )
+        """
+    )
+    forecasts.executemany(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, source_available_at, computed_at
+        ) VALUES (?, 'Wuhan', '2026-06-01', 'high', ?, ?, ?)
+        """,
+        [
+            (1, "2026-05-30T00:00:00+00:00", "2026-05-30T01:00:00+00:00", "2026-05-30T01:05:00+00:00"),
+            (2, "2026-05-31T00:00:00+00:00", "2026-05-31T01:00:00+00:00", "2026-05-31T01:05:00+00:00"),
+        ],
+    )
+    forecasts.executemany(
+        """
+        INSERT INTO raw_model_forecasts (
+            model, city, target_date, metric, source_cycle_time, source_available_at, forecast_value_c
+        ) VALUES (?, 'Wuhan', '2026-06-01', 'high', ?, ?, ?)
+        """,
+        [
+            ("older-a", "2026-05-30T00:00:00+00:00", "2026-05-30T01:00:00+00:00", 31.0),
+            ("older-b", "2026-05-30T06:00:00+00:00", "2026-05-30T07:00:00+00:00", 32.0),
+            ("older-c", "2026-05-30T12:00:00+00:00", "2026-05-30T13:00:00+00:00", 33.0),
+            ("latest-a", "2026-05-31T00:00:00+00:00", "2026-05-31T01:00:00+00:00", 31.0),
+            ("latest-b", "2026-05-31T06:00:00+00:00", "2026-05-31T07:00:00+00:00", 32.0),
+        ],
+    )
+
+    assert cr.filter_redecisions_with_spine_members(
+        forecasts,
+        redecisions,
+        beliefs=beliefs,
+        decision_time="2026-05-31T08:00:00+00:00",
+    ) == []
+
+    forecasts.execute(
+        """
+        INSERT INTO raw_model_forecasts (
+            model, city, target_date, metric, source_cycle_time, source_available_at, forecast_value_c
+        ) VALUES ('latest-c', 'Wuhan', '2026-06-01', 'high',
+                  '2026-05-31T12:00:00+00:00', '2026-05-31T07:30:00+00:00', 33.0)
+        """
+    )
+
+    assert cr.filter_redecisions_with_spine_members(
+        forecasts,
+        redecisions,
+        beliefs=beliefs,
+        decision_time="2026-05-31T08:00:00+00:00",
+    ) == redecisions
+
+
 def test_R1b_buy_no_positive_edge_enqueues_redecision():
     conn = _mem_world()
     _cache_yes_belief(conn, p_posterior_yes=0.05, recorded_at="2026-05-31T00:00:00+00:00")

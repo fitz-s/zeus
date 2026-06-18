@@ -206,6 +206,13 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         return False
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
 def _belief_decision_id(family_id: str, snapshot_id: str, calibrator_model_hash: str) -> str:
     # family_id is pipe-separated (no ':'); snapshot_id / calib hashes carry no ':'. Encode all three
     # so the read can recover provenance. Parsed via rsplit(':', 2) below.
@@ -1391,6 +1398,156 @@ def screen_entry_redecisions(
         recent_full_economics_rejections=recent_rejections,
         beliefs=beliefs,
     )
+
+
+def _latest_posterior_source_cycle_for_family(
+    forecasts_conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    decision_time: str,
+) -> str | None:
+    if not _table_exists(forecasts_conn, "forecast_posteriors"):
+        return None
+    columns = _table_columns(forecasts_conn, "forecast_posteriors")
+    required = {"city", "target_date", "temperature_metric", "source_cycle_time"}
+    if not required.issubset(columns):
+        return None
+    predicates = ["city = ?", "target_date = ?", "temperature_metric = ?"]
+    params: list[object] = [city, target_date, metric]
+    if "source_available_at" in columns:
+        predicates.append("source_available_at <= ?")
+        params.append(decision_time)
+    if "computed_at" in columns:
+        predicates.append("computed_at <= ?")
+        params.append(decision_time)
+    order_fields = ["source_cycle_time DESC"]
+    if "computed_at" in columns:
+        order_fields.append("computed_at DESC")
+    if "posterior_id" in columns:
+        order_fields.append("posterior_id DESC")
+    try:
+        row = forecasts_conn.execute(
+            f"""
+            SELECT source_cycle_time
+              FROM forecast_posteriors
+             WHERE {' AND '.join(predicates)}
+             ORDER BY {', '.join(order_fields)}
+             LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None or row[0] is None:
+        return None
+    cycle = str(row[0]).strip()
+    return cycle or None
+
+
+def _raw_model_member_count_for_cycle(
+    forecasts_conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    source_cycle_time: str,
+    decision_time: str,
+) -> int:
+    if not _table_exists(forecasts_conn, "raw_model_forecasts"):
+        return 0
+    columns = _table_columns(forecasts_conn, "raw_model_forecasts")
+    required = {"model", "city", "target_date", "metric", "source_cycle_time", "forecast_value_c"}
+    if not required.issubset(columns):
+        return 0
+    cycle_date = str(source_cycle_time or "")[:10]
+    if len(cycle_date) != 10:
+        return 0
+    predicates = [
+        "city = ?",
+        "target_date = ?",
+        "metric = ?",
+        "date(source_cycle_time) = ?",
+        "forecast_value_c IS NOT NULL",
+    ]
+    params: list[object] = [city, target_date, metric, cycle_date]
+    if "source_available_at" in columns:
+        predicates.append("source_available_at <= ?")
+        params.append(decision_time)
+    try:
+        row = forecasts_conn.execute(
+            f"""
+            SELECT COUNT(DISTINCT model)
+              FROM raw_model_forecasts
+             WHERE {' AND '.join(predicates)}
+            """,
+            tuple(params),
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    try:
+        return int(row[0] or 0) if row is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def filter_redecisions_with_spine_members(
+    forecasts_conn: sqlite3.Connection,
+    redecisions: list[EnqueuedRedecision],
+    *,
+    beliefs: list[CachedBelief],
+    decision_time: str,
+    min_members: int = 3,
+) -> list[EnqueuedRedecision]:
+    """Keep only entry redecisions whose full q-kernel spine inputs can be served.
+
+    The cheap entry screen proves fresh price plus conservative q_lcb edge; the downstream
+    q-kernel also requires at least three raw_model_forecasts provider members on the same
+    posterior source-cycle date. Without that second proof, the reactor only emits
+    SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED and clogs the live lane. Held positions
+    are intentionally outside this entry filter; monitor/exit owns hold/exit/shift.
+    """
+    if not redecisions:
+        return []
+    by_family = {belief.family_id: belief for belief in beliefs}
+    availability: dict[tuple[str, str, str], bool] = {}
+    out: list[EnqueuedRedecision] = []
+    for rd in redecisions:
+        belief = by_family.get(rd.family_id)
+        if belief is None:
+            continue
+        family = _stable_family_screen_key(belief)
+        if family is None:
+            continue
+        _, city, target_date, metric = family
+        key = (city, target_date, metric)
+        ok = availability.get(key)
+        if ok is None:
+            cycle = _latest_posterior_source_cycle_for_family(
+                forecasts_conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_time=decision_time,
+            )
+            count = (
+                _raw_model_member_count_for_cycle(
+                    forecasts_conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    source_cycle_time=cycle,
+                    decision_time=decision_time,
+                )
+                if cycle
+                else 0
+            )
+            ok = count >= int(min_members)
+            availability[key] = ok
+        if ok:
+            out.append(rd)
+    return out
 
 
 def screened_family_keys(
