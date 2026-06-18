@@ -2250,6 +2250,221 @@ tables:
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
 
+  # 2026-06-18 live boot recovery: additional residual world-class ghosts observed
+  # on state/zeus_trades.db after the registry boot assertion was re-enabled. These
+  # entries keep the boot gate honest about existing disk drift without promoting
+  # any of the tables below to trade authority. Canonical ownership remains with
+  # their world-class entries; these trade copies are excluded from set-equality
+  # until the existing PR-S4b ghost cleanup/drop window.
+
+  - name: db_chunk_boundary_events
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: decision_certificate_edges
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: decision_certificate_supersessions
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: decision_certificates
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: decision_compile_failures
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: decision_events
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: edli_fill_bridge_dispositions
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: edli_live_cap_day_slots
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: edli_live_cap_rate_window
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: edli_live_cap_usage
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: edli_live_profit_audit
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: edli_no_submit_receipts
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: event_dead_letters
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: evidence_tier_assignments
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: execution_feasibility_evidence
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: model_bias_ens
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: no_trade_events
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: no_trade_regret_events
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: opportunity_event_processing
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: opportunity_events
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: regime_correlation_cache
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: regret_decompositions
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: settlement_attribution
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: shadow_experiments
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: shoulder_exposure_ledger
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
+  - name: tail_stress_scenarios
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b_residual
+    pk_col: null
+    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+
   - name: diurnal_curves
     db: trade
     schema_class: legacy_archived
