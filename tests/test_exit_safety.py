@@ -658,6 +658,7 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
         target_date="2026-04-27",
         bin_label="50-51°F",
         direction="buy_yes",
+        strategy_key="center_buy",
         size_usd=10.0,
         entry_price=0.50,
         shares=20.0,
@@ -667,6 +668,7 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
         last_exit_order_id="ord-partial-exit",
         token_id=YES_TOKEN,
         no_token_id=NO_TOKEN,
+        condition_id="condition-partial-exit",
         last_monitor_market_price=0.45,
         last_monitor_best_bid=0.44,
     )
@@ -711,6 +713,32 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
     assert facts[0]["fill_price"] == pytest.approx(0.44)
     assert facts[0]["shares"] == pytest.approx(8.0)
     assert facts[0]["command_id"] == "cmd-partial-exit"
+    current = conn.execute(
+        """
+        SELECT shares, size_usd, cost_basis_usd, phase
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert current is not None
+    assert current["shares"] == pytest.approx(12.0)
+    assert current["size_usd"] == pytest.approx(6.0)
+    assert current["cost_basis_usd"] == pytest.approx(6.0)
+    assert current["phase"] == "pending_exit"
+    event = conn.execute(
+        """
+        SELECT event_type, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert event is not None
+    assert event["event_type"] == "MONITOR_REFRESHED"
+    assert json.loads(event["payload_json"])["semantic_event"] == "EXIT_ORDER_PARTIAL_FILL_OBSERVED"
 
 
 def test_exit_lifecycle_skips_inactive_position_before_order_status_check(conn):

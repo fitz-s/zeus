@@ -2389,6 +2389,74 @@ def _log_partial_exit_execution_fact(
     )
 
 
+def _dual_write_partial_exit_projection_if_available(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    filled_shares: float,
+    remaining_shares: float,
+    fill_price: float,
+    order_id: str,
+    status: str,
+) -> bool:
+    """Persist the reduced open exposure after a partial exit fill."""
+
+    if conn is None:
+        return False
+    try:
+        import json as _json
+
+        from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+        from src.state.db import append_many_and_project
+
+        trade_id = str(getattr(position, "trade_id", "") or "")
+        if not trade_id:
+            return False
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        occurred_at = _utcnow().isoformat()
+        if not str(getattr(position, "last_monitor_at", "") or "").strip():
+            position.last_monitor_at = occurred_at
+        env = str(getattr(position, "env", "") or "live")
+        if env not in {"live", "test", "replay", "backtest"}:
+            position.env = "live"
+        events, projection = build_monitor_refreshed_canonical_write(
+            position,
+            sequence_no=sequence_no,
+            phase_after="pending_exit",
+            source_module="src.execution.exit_lifecycle",
+        )
+        if not events:
+            return False
+        event = dict(events[0])
+        payload = _json.loads(str(event.get("payload_json") or "{}"))
+        payload.update(
+            {
+                "semantic_event": "EXIT_ORDER_PARTIAL_FILL_OBSERVED",
+                "order_id": order_id,
+                "venue_status": status or "PARTIAL",
+                "filled_shares": filled_shares,
+                "remaining_shares": remaining_shares,
+                "fill_price": fill_price,
+            }
+        )
+        event["event_id"] = f"{trade_id}:partial_exit_fill:{sequence_no}"
+        event["caused_by"] = "partial_exit_fill"
+        event["occurred_at"] = occurred_at
+        event["order_id"] = order_id or None
+        event["venue_status"] = status or "PARTIAL"
+        event["payload_json"] = _json.dumps(payload, default=str, sort_keys=True)
+        projection["updated_at"] = occurred_at
+        append_many_and_project(conn, [event], projection)
+        return True
+    except Exception:  # noqa: BLE001 - partial-fill projection must not hide venue facts
+        logger.exception(
+            "PARTIAL_EXIT_PROJECTION_WRITE_FAILED position_id=%s order_id=%s",
+            getattr(position, "trade_id", ""),
+            order_id,
+        )
+        return False
+
+
 def _exit_command_id_for_order(
     conn: sqlite3.Connection,
     position: Position,
@@ -2610,6 +2678,15 @@ def check_pending_exits(
                             "remaining_shares": remaining_shares,
                             "fill_price": actual_price,
                         },
+                    )
+                    _dual_write_partial_exit_projection_if_available(
+                        conn,
+                        pos,
+                        filled_shares=filled_shares,
+                        remaining_shares=remaining_shares,
+                        fill_price=actual_price,
+                        order_id=exit_order_id,
+                        status=status or "PARTIAL",
                     )
                     if status not in VOID_STATUSES:
                         _log_partial_exit_execution_fact(

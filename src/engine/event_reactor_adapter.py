@@ -4713,6 +4713,14 @@ def _build_live_execution_command_certificates(
             condition_id=str(final_intent.payload["condition_id"]),
             token_id=str(final_intent.payload["token_id"]),
             direction=str(final_intent.payload["direction"]),
+            family_id=str(actionable.payload.get("family_id") or ""),
+            city=str(actionable.payload.get("city") or ""),
+            target_date=str(actionable.payload.get("target_date") or ""),
+            metric=str(
+                actionable.payload.get("metric")
+                or actionable.payload.get("temperature_metric")
+                or ""
+            ),
             side=str(final_intent.payload.get("side") or "BUY"),
             limit_price=_optional_float(final_intent.payload.get("limit_price")),
         )
@@ -4748,6 +4756,10 @@ def _build_live_execution_command_certificates(
                 "condition_id": final_intent.payload["condition_id"],
                 "token_id": final_intent.payload["token_id"],
                 "direction": final_intent.payload["direction"],
+                "family_id": actionable.payload.get("family_id"),
+                "city": actionable.payload.get("city"),
+                "target_date": actionable.payload.get("target_date"),
+                "metric": actionable.payload.get("metric") or actionable.payload.get("temperature_metric"),
                 "order_type": final_intent.payload["order_type"],
                 "time_in_force": final_intent.payload["time_in_force"],
                 "post_only": final_intent.payload["post_only"],
@@ -5239,6 +5251,10 @@ def _locked_live_opportunity_active_order_reason(
     condition_id: str,
     token_id: str,
     direction: str,
+    family_id: str | None = None,
+    city: str | None = None,
+    target_date: str | None = None,
+    metric: str | None = None,
     side: str | None = None,
     limit_price: float | None = None,
 ) -> str | None:
@@ -5248,13 +5264,15 @@ def _locked_live_opportunity_active_order_reason(
     ``edli_live_order_events`` aggregate lifecycle (the live-order-state
     projection), NOT from "any historical command that is not a SubmitRejected".
 
-    For the given (condition_id, token_id, direction) we find every order
-    aggregate (keyed off its ``SubmitPlanBuilt`` event, which carries those three
-    identity fields) and classify the LATEST aggregate's lifecycle:
+    For the given weather family we find every order aggregate keyed off its
+    ``SubmitPlanBuilt`` event. New SubmitPlanBuilt payloads carry
+    ``family_id`` and ``(city,target_date,metric)`` so sibling bins share one
+    mutex. Older payloads fall back to the exact ``condition_id/token_id/direction``
+    key.
 
       * TERMINAL (cancel/expiry/reject/reconcile/cap-release, or a fill) -> the
-        order is closed, NOT an active duplicate -> RELEASE (return None): the
-        family re-enters the pipeline and re-decides at the fresh price.
+        order is closed, NOT an active duplicate -> keep scanning older
+        aggregates. A newer terminal row must not hide an older active row.
       * ACTIVE (any state up to and including an acknowledged resting order, an
         in-flight submit, or a pending-reconcile) -> a real live order exists ->
         SUPPRESS (return a reason) so we never double-submit.
@@ -5268,22 +5286,70 @@ def _locked_live_opportunity_active_order_reason(
 
     if live_cap_conn is None or not condition_id or not token_id or not direction:
         return None
+    family_id = str(family_id or "").strip()
+    city = str(city or "").strip()
+    target_date = str(target_date or "").strip()
+    metric = str(metric or "").strip()
+    family_key_available = bool(family_id or (city and target_date and metric))
     try:
         LiveOrderAggregateLedger(live_cap_conn)
-        # Latest aggregate for this exact family key, by its SubmitPlanBuilt event.
-        plan_rows = live_cap_conn.execute(
-            """
-            SELECT plan.aggregate_id, plan.occurred_at
-            FROM edli_live_order_events AS plan
-            WHERE plan.event_type = 'SubmitPlanBuilt'
-              AND json_extract(plan.payload_json, '$.condition_id') = ?
-              AND json_extract(plan.payload_json, '$.token_id') = ?
-              AND json_extract(plan.payload_json, '$.direction') = ?
-            ORDER BY plan.occurred_at DESC, plan.event_sequence DESC
-            LIMIT 64
-            """,
-            (condition_id, token_id, direction),
-        ).fetchall()
+        if family_key_available:
+            plan_rows = live_cap_conn.execute(
+                """
+                SELECT plan.aggregate_id, plan.occurred_at, plan.payload_json
+                FROM edli_live_order_events AS plan
+                WHERE plan.event_type = 'SubmitPlanBuilt'
+                  AND (
+                    (? != '' AND json_extract(plan.payload_json, '$.family_id') = ?)
+                    OR (
+                      ? != '' AND ? != '' AND ? != ''
+                      AND json_extract(plan.payload_json, '$.city') = ?
+                      AND json_extract(plan.payload_json, '$.target_date') = ?
+                      AND COALESCE(
+                        json_extract(plan.payload_json, '$.metric'),
+                        json_extract(plan.payload_json, '$.temperature_metric')
+                      ) = ?
+                    )
+                    OR (
+                      json_extract(plan.payload_json, '$.family_id') IS NULL
+                      AND json_extract(plan.payload_json, '$.city') IS NULL
+                      AND json_extract(plan.payload_json, '$.target_date') IS NULL
+                      AND json_extract(plan.payload_json, '$.condition_id') = ?
+                      AND json_extract(plan.payload_json, '$.token_id') = ?
+                      AND json_extract(plan.payload_json, '$.direction') = ?
+                    )
+                  )
+                ORDER BY plan.occurred_at DESC, plan.event_sequence DESC
+                LIMIT 128
+                """,
+                (
+                    family_id,
+                    family_id,
+                    city,
+                    target_date,
+                    metric,
+                    city,
+                    target_date,
+                    metric,
+                    condition_id,
+                    token_id,
+                    direction,
+                ),
+            ).fetchall()
+        else:
+            plan_rows = live_cap_conn.execute(
+                """
+                SELECT plan.aggregate_id, plan.occurred_at, plan.payload_json
+                FROM edli_live_order_events AS plan
+                WHERE plan.event_type = 'SubmitPlanBuilt'
+                  AND json_extract(plan.payload_json, '$.condition_id') = ?
+                  AND json_extract(plan.payload_json, '$.token_id') = ?
+                  AND json_extract(plan.payload_json, '$.direction') = ?
+                ORDER BY plan.occurred_at DESC, plan.event_sequence DESC
+                LIMIT 64
+                """,
+                (condition_id, token_id, direction),
+            ).fetchall()
     except Exception as exc:  # noqa: BLE001 - dedup must fail CLOSED (suppress).
         return (
             "EDLI_LIVE_ORDER_STATE_UNREADABLE_FAIL_CLOSED:"
@@ -5295,49 +5361,46 @@ def _locked_live_opportunity_active_order_reason(
         # duplicate -> the family is free to submit.
         return None
 
-    # Inspect ONLY the most-recent aggregate for the family: an earlier, already
-    # terminal order must not keep the family locked, and a newer active order is
-    # the only thing that can be a duplicate of the fresh submit.
-    aggregate_id = str(plan_rows[0][0])
-    try:
-        terminal_row = live_cap_conn.execute(
-            _TERMINAL_EVENT_SQL,
-            (aggregate_id,),
-        ).fetchone()
-    except Exception as exc:  # noqa: BLE001 - fail CLOSED on a read error.
+    for row in plan_rows:
+        aggregate_id = str(row[0])
+        try:
+            terminal_row = live_cap_conn.execute(
+                _TERMINAL_EVENT_SQL,
+                (aggregate_id,),
+            ).fetchone()
+        except Exception as exc:  # noqa: BLE001 - fail CLOSED on a read error.
+            return (
+                "EDLI_LIVE_ORDER_STATE_UNREADABLE_FAIL_CLOSED:"
+                f"condition_id={condition_id}:token_id={token_id}:direction={direction}:"
+                f"aggregate_id={aggregate_id}:error={type(exc).__name__}"
+            )
+
+        if terminal_row is not None:
+            # A qualifying terminal event (RELEASED cap, SubmitRejected,
+            # UserTradeObserved, or a fully-settled Reconcile) was found. Keep
+            # scanning older aggregates; a newer terminal order must not hide an
+            # older active/ambiguous order for the same weather family.
+            continue
+
+        if _aggregate_terminal_venue_command_releases_lock(
+            live_cap_conn,
+            aggregate_id=aggregate_id,
+        ):
+            continue
+
+        # No qualifying terminal event found. This covers ACTIVE states
+        # (command-created, submit-attempted, acknowledged-resting,
+        # cap-CONSUMED-resting-live, submit-unknown, user-order-observed with no
+        # fill, PENDING_RECONCILE) and indeterminate states. All are treated as
+        # ACTIVE: suppress the potential duplicate.
         return (
-            "EDLI_LIVE_ORDER_STATE_UNREADABLE_FAIL_CLOSED:"
+            "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
             f"condition_id={condition_id}:token_id={token_id}:direction={direction}:"
-            f"aggregate_id={aggregate_id}:error={type(exc).__name__}"
+            f"family_id={family_id}:city={city}:target_date={target_date}:metric={metric}:"
+            f"aggregate_id={aggregate_id}"
         )
 
-    if terminal_row is not None:
-        # A qualifying terminal event (RELEASED cap, SubmitRejected,
-        # UserTradeObserved, or a fully-settled Reconcile) was found.  The order
-        # is no longer resting/pending.  RELEASE — re-decide at fresh price.
-        # NOTE: CapTransitioned(to_status=CONSUMED) does NOT match this query —
-        # CONSUMED is the cap-commit of a SUBMITTED order resting LIVE (no fill
-        # yet), so it is correctly kept as ACTIVE (suppress).  PENDING_RECONCILE
-        # likewise does not match — kept ACTIVE (suppress, fail-closed).
-        return None
-
-    if _aggregate_terminal_venue_command_releases_lock(
-        live_cap_conn,
-        aggregate_id=aggregate_id,
-    ):
-        return None
-
-    # No qualifying terminal event found for the latest aggregate.  This covers:
-    #   - ACTIVE states (command-created, submit-attempted, acknowledged-resting,
-    #     cap-CONSUMED-resting-live, submit-unknown, user-order-observed with no
-    #     fill, PENDING_RECONCILE)
-    #   - Indeterminate / not-yet-landed states
-    # All treated as ACTIVE: suppress the potential duplicate.
-    return (
-        "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
-        f"condition_id={condition_id}:token_id={token_id}:direction={direction}:"
-        f"aggregate_id={aggregate_id}"
-    )
+    return None
 
 
 # Back-compat alias: the historical-command predicate name is retained as a thin
@@ -5359,6 +5422,10 @@ def _locked_live_opportunity_no_price_improvement_reason(
         condition_id=condition_id,
         token_id=token_id,
         direction=direction,
+        family_id=None,
+        city=None,
+        target_date=None,
+        metric=None,
         side=side,
         limit_price=limit_price,
     )
@@ -10187,6 +10254,14 @@ def _locked_candidate_no_price_improvement_reason(
         condition_id=str(getattr(getattr(proof, "candidate", None), "condition_id", "") or ""),
         token_id=str(getattr(proof, "token_id", "") or ""),
         direction=str(getattr(proof, "direction", "") or ""),
+        family_id=str(getattr(getattr(proof, "candidate", None), "family_id", "") or ""),
+        city=str(getattr(getattr(proof, "candidate", None), "city", "") or ""),
+        target_date=str(getattr(getattr(proof, "candidate", None), "target_date", "") or ""),
+        metric=str(
+            getattr(getattr(proof, "candidate", None), "metric", "")
+            or getattr(getattr(proof, "candidate", None), "temperature_metric", "")
+            or ""
+        ),
         side="SELL" if str(getattr(proof, "direction", "") or "").startswith("sell_") else "BUY",
         limit_price=limit_price,
     )

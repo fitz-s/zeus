@@ -417,21 +417,23 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
     assert projection["current_state"] == "CAP_TRANSITIONED"
 
 
-def _seed_active_family_order(conn, *, aggregate_id="aggregate-1"):
+def _seed_active_family_order(conn, *, aggregate_id="aggregate-1", plan_updates=None):
     """An OPEN/in-flight order for (condition-1, token-no-1, buy_no): no terminal event."""
+    payload = {
+        "event_id": "event-1",
+        "final_intent_id": "intent-1",
+        "condition_id": "condition-1",
+        "token_id": "token-no-1",
+        "direction": "buy_no",
+        "limit_price": 0.70,
+    }
+    payload.update(plan_updates or {})
     _insert_live_order_event(
         conn,
         aggregate_id=aggregate_id,
         sequence=1,
         event_type="SubmitPlanBuilt",
-        payload={
-            "event_id": "event-1",
-            "final_intent_id": "intent-1",
-            "condition_id": "condition-1",
-            "token_id": "token-no-1",
-            "direction": "buy_no",
-            "limit_price": 0.70,
-        },
+        payload=payload,
     )
     _insert_live_order_event(
         conn,
@@ -446,14 +448,29 @@ def _seed_active_family_order(conn, *, aggregate_id="aggregate-1"):
     )
 
 
-def _lock_reason(conn, *, limit_price=0.70):
+def _lock_reason(
+    conn,
+    *,
+    condition_id="condition-1",
+    token_id="token-no-1",
+    direction="buy_no",
+    family_id=None,
+    city=None,
+    target_date=None,
+    metric=None,
+    limit_price=0.70,
+):
     from src.engine import event_reactor_adapter as adapter
 
     return adapter._locked_live_opportunity_active_order_reason(
         conn,
-        condition_id="condition-1",
-        token_id="token-no-1",
-        direction="buy_no",
+        condition_id=condition_id,
+        token_id=token_id,
+        direction=direction,
+        family_id=family_id,
+        city=city,
+        target_date=target_date,
+        metric=metric,
         side="BUY",
         limit_price=limit_price,
     )
@@ -474,6 +491,59 @@ def test_fixA_active_live_order_suppresses_new_submit():
     assert same_price is not None
     assert same_price.startswith("EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED")
     assert much_better is not None  # no price-improvement escape while order is live
+
+
+def test_fixA_family_sibling_active_order_suppresses_new_submit():
+    """A live resting order on one weather-family bin blocks sibling-bin entry."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(
+        conn,
+        plan_updates={
+            "family_id": "weather-family-chicago-2026-06-19-high",
+            "city": "Chicago",
+            "target_date": "2026-06-19",
+            "metric": "high",
+        },
+    )
+
+    reason = _lock_reason(
+        conn,
+        condition_id="condition-sibling",
+        token_id="token-no-sibling",
+        direction="buy_no",
+        family_id="weather-family-chicago-2026-06-19-high",
+        city="Chicago",
+        target_date="2026-06-19",
+        metric="high",
+        limit_price=0.68,
+    )
+
+    assert reason is not None
+    assert reason.startswith("EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED")
+    assert "family_id=weather-family-chicago-2026-06-19-high" in reason
+
+
+def test_fixA_newer_terminal_aggregate_does_not_hide_older_active_order():
+    """Scan every matching aggregate; newest terminal cannot unlock older active."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn, aggregate_id="aggregate-active-old")
+    _seed_active_family_order(conn, aggregate_id="aggregate-terminal-new")
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-terminal-new",
+        sequence=3,
+        event_type="SubmitRejected",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "reason": "venue_rejected",
+        },
+    )
+
+    reason = _lock_reason(conn, limit_price=0.70)
+
+    assert reason is not None
+    assert "aggregate_id=aggregate-active-old" in reason
 
 
 def test_fixA_terminal_cancel_releases_lock_for_rebid():

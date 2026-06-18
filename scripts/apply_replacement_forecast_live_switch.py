@@ -187,7 +187,7 @@ def apply_replacement_forecast_live_switch(
             optional_dependencies=optional_dependencies,
             source_fact_status_override=None if apply else "CURRENT_FOR_LIVE",
             data_fact_status_override=None if apply else "CURRENT_FOR_LIVE",
-            assume_replacement_shadow_schema_initialized=not apply,
+            assume_replacement_live_schema_initialized=not apply,
             assume_refit_handoff_available=not apply,
         )
     )

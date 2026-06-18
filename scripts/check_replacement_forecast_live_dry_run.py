@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stdout", action="store_true", help="Print JSON report")
     parser.add_argument("--assume-live-flags", action="store_true", help="Preview live feature flags without editing config")
     parser.add_argument("--assume-current-facts", action="store_true", help="Preview current source/data fact status without editing docs")
-    parser.add_argument("--assume-shadow-schema", action="store_true", help="Preview replacement shadow schema after targeted initializer")
+    parser.add_argument("--assume-live-schema", action="store_true", help="Preview replacement live schema after targeted initializer")
     parser.add_argument("--assume-refit-handoff", action="store_true", help="Preview a ready refit handoff file without editing live root")
     args = parser.parse_args(argv)
     try:
@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_flags=flags,
                 source_fact_status_override="CURRENT_FOR_LIVE" if args.assume_current_facts else None,
                 data_fact_status_override="CURRENT_FOR_LIVE" if args.assume_current_facts else None,
-                assume_replacement_shadow_schema_initialized=bool(args.assume_shadow_schema),
+                assume_replacement_live_schema_initialized=bool(args.assume_live_schema),
                 assume_refit_handoff_available=bool(args.assume_refit_handoff),
             )
         )

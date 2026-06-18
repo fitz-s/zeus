@@ -34,7 +34,7 @@ class ReplacementForecastLiveDryRunInput:
     optional_dependencies: tuple[str, ...] = OPTIONAL_DEPENDENCIES
     source_fact_status_override: str | None = None
     data_fact_status_override: str | None = None
-    assume_replacement_shadow_schema_initialized: bool = False
+    assume_replacement_live_schema_initialized: bool = False
     assume_refit_handoff_available: bool = False
     assume_raw_artifact_lineage_available: bool = False
 
@@ -56,9 +56,9 @@ class ReplacementForecastLiveDryRunReport:
     trade_tables: tuple[str, ...]
     refit_handoff_status: str
     materialized_posterior_count: int
-    shadow_decision_count: int
+    legacy_decision_count: int
     latest_materialized_posterior: Mapping[str, object] | None
-    latest_shadow_decision: Mapping[str, object] | None
+    latest_legacy_decision: Mapping[str, object] | None
     configured_refit_handoff_path: str
     configured_refit_handoff_status: str
     raw_artifact_lineage_status: str
@@ -90,9 +90,9 @@ class ReplacementForecastLiveDryRunReport:
             "trade_tables": list(self.trade_tables),
             "refit_handoff_status": self.refit_handoff_status,
             "materialized_posterior_count": self.materialized_posterior_count,
-            "shadow_decision_count": self.shadow_decision_count,
+            "legacy_decision_count": self.legacy_decision_count,
             "latest_materialized_posterior": dict(self.latest_materialized_posterior) if self.latest_materialized_posterior is not None else None,
-            "latest_shadow_decision": dict(self.latest_shadow_decision) if self.latest_shadow_decision is not None else None,
+            "latest_legacy_decision": dict(self.latest_legacy_decision) if self.latest_legacy_decision is not None else None,
             "configured_refit_handoff_path": self.configured_refit_handoff_path,
             "configured_refit_handoff_status": self.configured_refit_handoff_status,
             "raw_artifact_lineage_status": self.raw_artifact_lineage_status,
@@ -183,35 +183,6 @@ def _replacement_materialization_inventory(forecast_db: Path) -> tuple[int, int,
                     """
                 ).fetchone()
                 latest_posterior = dict(row) if row is not None else None
-            if "replacement_shadow_decisions" in tables:
-                decision_count = int(conn.execute("SELECT COUNT(*) FROM replacement_shadow_decisions").fetchone()[0])
-                decision_columns = {
-                    str(row["name"])
-                    for row in conn.execute("PRAGMA table_info(replacement_shadow_decisions)").fetchall()
-                }
-                select_columns = [
-                    column
-                    for column in (
-                        "decision_id",
-                        "posterior_id",
-                        "city",
-                        "target_date",
-                        "temperature_metric",
-                        "baseline_direction",
-                        "allowed_direction",
-                        "recorded_at",
-                    )
-                    if column in decision_columns
-                ]
-                row = conn.execute(
-                    f"""
-                    SELECT {", ".join(select_columns)}
-                    FROM replacement_shadow_decisions
-                    ORDER BY recorded_at DESC, decision_id DESC
-                    LIMIT 1
-                    """
-                ).fetchone()
-                latest_decision = dict(row) if row is not None else None
             return posterior_count, decision_count, latest_posterior, latest_decision
         finally:
             conn.close()
@@ -525,7 +496,7 @@ def build_replacement_forecast_live_dry_run_report(
     trade_db = root / "state" / "zeus_trades.db"
     forecast_tables = _tables(forecast_db)
     actual_forecast_tables = forecast_tables
-    if request.assume_replacement_shadow_schema_initialized:
+    if request.assume_replacement_live_schema_initialized:
         forecast_tables = tuple(sorted(set(forecast_tables).union(REQUIRED_FORECAST_TABLES)))
     world_tables = _tables(world_db)
     trade_tables = _tables(trade_db)
@@ -590,7 +561,7 @@ def build_replacement_forecast_live_dry_run_report(
         reasons.append("REPLACEMENT_DRY_RUN_LATEST_READINESS_ARTIFACTS_NOT_READY")
     if (
         policy.can_initiate_trade
-        and not request.assume_replacement_shadow_schema_initialized
+        and not request.assume_replacement_live_schema_initialized
         and current_target_coverage_status not in {"READY", "NO_CURRENT_TARGETS"}
     ):
         reasons.append("REPLACEMENT_DRY_RUN_CURRENT_TARGET_COVERAGE_NOT_READY")
@@ -613,9 +584,9 @@ def build_replacement_forecast_live_dry_run_report(
         trade_tables=trade_tables,
         refit_handoff_status=refit_handoff_status,
         materialized_posterior_count=posterior_count,
-        shadow_decision_count=decision_count,
+        legacy_decision_count=decision_count,
         latest_materialized_posterior=latest_posterior,
-        latest_shadow_decision=latest_decision,
+        latest_legacy_decision=latest_decision,
         configured_refit_handoff_path=str(configured_refit_handoff_path),
         configured_refit_handoff_status=configured_refit_handoff_status,
         raw_artifact_lineage_status=raw_artifact_lineage_status,
@@ -628,7 +599,7 @@ def build_replacement_forecast_live_dry_run_report(
         assumptions={
             "source_fact_status_override": request.source_fact_status_override,
             "data_fact_status_override": request.data_fact_status_override,
-            "assume_replacement_shadow_schema_initialized": request.assume_replacement_shadow_schema_initialized,
+            "assume_replacement_live_schema_initialized": request.assume_replacement_live_schema_initialized,
             "assume_refit_handoff_available": request.assume_refit_handoff_available,
             "assume_raw_artifact_lineage_available": request.assume_raw_artifact_lineage_available,
             "actual_missing_forecast_tables": [
