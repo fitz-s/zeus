@@ -6450,17 +6450,23 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
 
     now = datetime.now(timezone.utc)
     placeholders = ",".join("?" for _ in OPEN_REST_FACT_STATES)
+    try:
+        fact_cols = {str(row[1]) for row in trade_conn.execute("PRAGMA table_info(venue_order_facts)").fetchall()}
+    except Exception:  # noqa: BLE001
+        fact_cols = set()
+    matched_select = "matched_size" if "matched_size" in fact_cols else "NULL AS matched_size"
     rows = trade_conn.execute(
         f"""
         WITH latest_facts AS (
-            SELECT venue_order_id, state,
+            SELECT venue_order_id, state, {matched_select},
                    ROW_NUMBER() OVER (
                        PARTITION BY venue_order_id ORDER BY local_sequence DESC
                    ) AS rn
             FROM venue_order_facts
         )
         SELECT vc.command_id, vc.venue_order_id, vc.token_id, vc.market_id,
-               vc.side, vc.price, vc.snapshot_id, vc.created_at
+               vc.side, vc.price, vc.snapshot_id, vc.created_at,
+               lf.state AS fact_state, lf.matched_size
         FROM venue_commands vc
         JOIN latest_facts lf
           ON lf.venue_order_id = vc.venue_order_id AND lf.rn = 1
@@ -6520,9 +6526,9 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
                     bin_by_cond[str(conds[idx])] = (belief, label, float(belief.p_posterior_vec[idx]))
     out = []
     for r in rows:
-        command_id, venue_order_id, token_id, market_id, side, price, snap_id, created_at = (
+        command_id, venue_order_id, token_id, market_id, side, price, snap_id, created_at, fact_state, matched_size = (
             str(r[0] or ""), str(r[1] or ""), str(r[2] or ""), str(r[3] or ""),
-            str(r[4] or ""), r[5], str(r[6] or ""), str(r[7] or ""),
+            str(r[4] or ""), r[5], str(r[6] or ""), str(r[7] or ""), str(r[8] or ""), r[9],
         )
         cond = cond_by_token.get(token_id, "")
         belief_hit = bin_by_cond.get(cond)
@@ -6551,6 +6557,9 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn) -> "list":
                 resting_snapshot_id=snap_id,
                 limit_price=float(price) if price is not None else 0.0,
                 quote_age_ms=age_ms,
+                created_at=created_at,
+                fact_state=fact_state,
+                matched_size=None if matched_size is None else float(matched_size),
             )
         )
     return out
@@ -6760,8 +6769,10 @@ def _edli_continuous_redecision_screen_cycle() -> None:
 
             to_cancel = [
                 {"command_id": rest.command_id, "venue_order_id": rest.venue_order_id,
-                 "created_at": "", "fact_state": "", "matched_size": None}
-                for rest, _decision in rest_pulls
+                 "created_at": rest.created_at, "fact_state": rest.fact_state,
+                 "matched_size": rest.matched_size, "cancel_reason": decision.reason,
+                 "cancel_action": decision.action, "cancel_detail": decision.detail}
+                for rest, decision in rest_pulls
             ]
             cstats = run_cancels_for_expired_rests(to_cancel, PolymarketClient())
             cancelled = cstats.get("cancelled", 0)

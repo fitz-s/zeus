@@ -372,6 +372,22 @@ def test_rest_pull_holds_on_same_snapshot_price_wiggle():
     assert pulls == [], "a bare wiggle on the same snapshot must never pull a rest (anti-twitch)"
 
 
+def test_rest_pull_does_not_cancel_by_order_age_alone():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=120_000.0,
+    )
+
+    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+
+    assert pulls == [], "resting order age alone is not confirmed trading value or cancel evidence"
+
+
 def test_rest_pull_does_not_treat_normal_spread_as_book_moved():
     world = _mem_world()
     trade = _mem_trade()
@@ -475,6 +491,9 @@ def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
     assert len(rests) == 1
     assert rests[0].side == "buy_no"
     assert rests[0].resting_posterior == pytest.approx(0.80)
+    assert rests[0].created_at == "2026-06-12T00:00:00+00:00"
+    assert rests[0].fact_state == "LIVE"
+    assert rests[0].matched_size is None
 
 
 # ───────────────────────────────────────────────────────────────────────────────────────────────

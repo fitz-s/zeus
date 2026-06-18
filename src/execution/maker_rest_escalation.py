@@ -158,17 +158,32 @@ def run_cancels_for_expired_rests(
             # path above — `continue` skips it): the re-decision lane must fire only
             # for families whose rest was actually pulled at the venue.
             collect_cancelled.append(entry)
-        logger.info(
-            "maker_rest_escalation: cancelled expired rest command=%s order=%s "
-            "rested_since=%s fact_state=%s matched=%s (deadline=%.0fmin; the next "
-            "certified decision for this family may cross as TAKER_ESCALATED_AFTER_REST)",
-            entry.get("command_id"),
-            order_id,
-            entry.get("created_at"),
-            entry.get("fact_state"),
-            entry.get("matched_size"),
-            float(deadline_minutes if deadline_minutes is not None else _deadline_minutes()),
-        )
+        cancel_reason = str(entry.get("cancel_reason") or "").strip()
+        if cancel_reason:
+            logger.info(
+                "maker_rest_escalation: cancelled screened rest command=%s order=%s "
+                "reason=%s action=%s detail=%s rested_since=%s fact_state=%s matched=%s",
+                entry.get("command_id"),
+                order_id,
+                cancel_reason,
+                entry.get("cancel_action"),
+                entry.get("cancel_detail"),
+                entry.get("created_at"),
+                entry.get("fact_state"),
+                entry.get("matched_size"),
+            )
+        else:
+            logger.info(
+                "maker_rest_escalation: cancelled expired rest command=%s order=%s "
+                "rested_since=%s fact_state=%s matched=%s (deadline=%.0fmin; the next "
+                "certified decision for this family may cross as TAKER_ESCALATED_AFTER_REST)",
+                entry.get("command_id"),
+                order_id,
+                entry.get("created_at"),
+                entry.get("fact_state"),
+                entry.get("matched_size"),
+                float(deadline_minutes if deadline_minutes is not None else _deadline_minutes()),
+            )
     return stats
 
 

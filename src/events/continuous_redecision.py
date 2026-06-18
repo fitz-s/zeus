@@ -8,7 +8,7 @@
 #   DEADLOCK-FREE — the belief is buffered in-process by the kernel (no DB write there) and
 #   persisted by the reactor through its EXISTING world conn inside the open SAVEPOINT (NOT a second
 #   connection, NOT a separate commit). P2 screen wired to a scheduler job + the reactor now CONSUMES
-#   EDLI_REDECISION_PENDING. §4.5 resting-order management wired (belief-decay / stale-quote / moved-book
+#   EDLI_REDECISION_PENDING. §4.5 resting-order management wired (belief-decay / moved-book
 #   pulls reuse the maker_rest_escalation cancel machinery). Flat constants replaced by the canonical
 #   price-dependent fee model + documented economic bases.
 #   2026-06-17: entry admission cooldown keys use stable market identity
@@ -67,8 +67,8 @@ IMPROVE_DELTA: float = 2.0 * TICK_SIZE
 # hysteresis (3*tick = 0.03) so a single-tick belief flutter against a fresh-snapshot rest does not
 # thrash the order. This REPLACES the prior bare 0.03 magic number.
 BELIEF_REPRICE_DELTA: float = 3.0 * TICK_SIZE
-# §4.5 stale-quote cancel: a resting order priced off a book older than this (ms) is on a dead book
-# and must be cancelled (re-decide next cycle on a fresh price). Mirrors config pre_submit_max_quote_age_ms.
+# Submit-side quote freshness bound. Resting GTC orders are not cancelled by age alone here;
+# the rest screen requires new evidence or book drift, and deadline ownership stays in execution.
 PRE_SUBMIT_MAX_QUOTE_AGE_MS: float = 1000.0
 # §4.5 moved-book pull: a resting maker quote whose limit is no longer within this many ticks of the
 # current best bid is on a stale book that has walked away — pull and re-quote at the fresh price.
@@ -137,14 +137,14 @@ class FullEconomicsReject:
 @dataclass(frozen=True)
 class RepriceDecision:
     """§4.5 (Dimension 3) cancel/re-place decision for a RESTING order. ``action`` is one of
-    {CANCEL_REPLACE, CANCEL_STALE, CANCEL_EXIT}; ``reason`` is the evidence class. SHADOW-safe — the
+    {CANCEL_REPLACE, CANCEL_EXIT}; ``reason`` is the evidence class. SHADOW-safe — the
     reactor routes this back through the existing cert path; this module never submits."""
     family_id: str
     bin_label: str
     side: str
     action: str
     reason: str
-    detail: float = 0.0  # |Δbelief| for BELIEF_WORSENING; quote_age_ms for QUOTE_STALE.
+    detail: float = 0.0  # |Δbelief| for BELIEF_WORSENING; bid-limit drift for BOOK_MOVED.
 
 
 def _parse(ts: str) -> datetime:
@@ -911,27 +911,6 @@ def screen_reprice(
     return None
 
 
-def screen_stale_quote_cancel(
-    *,
-    family_id: str,
-    bin_label: str,
-    side: str,
-    quote_age_ms: float,
-    pre_submit_max_quote_age_ms: float = PRE_SUBMIT_MAX_QUOTE_AGE_MS,
-) -> RepriceDecision | None:
-    """§4.5 stale-quote cancel: a resting order whose backing quote is older than
-    ``pre_submit_max_quote_age_ms`` is priced off a DEAD book → cancel (re-decide next cycle on a
-    fresh price). This is NOT a belief move and NOT a price-driven exit — it is a "this order's price
-    is meaningless now" pull. A fresh quote (within max age) is never cancelled (anti-twitch).
-    """
-    if float(quote_age_ms) > float(pre_submit_max_quote_age_ms) + _EPS:
-        return RepriceDecision(
-            family_id=family_id, bin_label=bin_label, side=side,
-            action="CANCEL_STALE", reason="QUOTE_STALE", detail=float(quote_age_ms),
-        )
-    return None
-
-
 _OPPOSITE_SIDE: dict[str, str] = {"buy_yes": "buy_no", "buy_no": "buy_yes"}
 
 
@@ -1169,6 +1148,9 @@ class OpenRest:
     resting_snapshot_id: str
     limit_price: float
     quote_age_ms: float
+    created_at: str = ""
+    fact_state: str = ""
+    matched_size: float | None = None
 
 
 def screen_resting_orders(
@@ -1177,13 +1159,12 @@ def screen_resting_orders(
     *,
     open_rests: list[OpenRest],
 ) -> list[tuple[OpenRest, RepriceDecision]]:
-    """§4.5 resting-order management: for each OPEN maker rest, fire a PULL (cancel+re-decide) when
-    EITHER its belief has decayed past BELIEF_REPRICE_DELTA on NEW evidence (screen_reprice), OR its
-    backing quote is stale (screen_stale_quote_cancel), OR the live book has walked away from our
-    limit by more than REST_BOOK_DRIFT_TICKS (moved-book pull). Evidence-keyed, anti-twitch: a bare
-    price wiggle on the SAME snapshot never reaches a cancel. Pure read; returns decisions only — the
-    scheduler job enqueues the redecision and the reactor performs the actual cancel via the existing
-    maker_rest_escalation cancel path (never a new venue call site)."""
+    """§4.5 resting-order management: for each OPEN maker rest, fire a PULL (cancel+re-decide) only
+    when its belief decayed past BELIEF_REPRICE_DELTA on NEW evidence (screen_reprice), or the live
+    book has walked away from our limit by more than REST_BOOK_DRIFT_TICKS. Order age alone is not
+    trading value and not dead-book proof for an already-resting GTC order; the maker-rest deadline
+    owner remains src.execution.maker_rest_escalation. Pure read; returns decisions only — the
+    scheduler job enqueues the redecision and performs cancellation through the existing cancel path."""
     bid_by_cid = read_freshest_resting_best_bids(
         trade_conn, condition_ids={r.condition_id for r in open_rests if r.condition_id}
     )
@@ -1199,15 +1180,7 @@ def screen_resting_orders(
             resting_snapshot_id=rest.resting_snapshot_id,
         )
         if decision is None:
-            # 2) Stale-quote pull (the order's backing book is too old to be meaningful).
-            decision = screen_stale_quote_cancel(
-                family_id=rest.family_id,
-                bin_label=rest.bin_label,
-                side=rest.side,
-                quote_age_ms=rest.quote_age_ms,
-            )
-        if decision is None:
-            # 3) Moved-book pull: our limit has fallen >1 tick behind the live best bid for our side.
+            # 2) Moved-book pull: our limit has fallen >1 tick behind the live best bid for our side.
             bid = bid_by_cid.get((rest.condition_id, rest.side))
             if bid is not None:
                 drift = float(bid.price) - float(rest.limit_price)
