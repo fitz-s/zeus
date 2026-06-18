@@ -18,7 +18,7 @@ from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_oppo
 from src.events.reactor import EventSubmissionReceipt
 
 
-def _event():
+def _event(event_type: str = "FORECAST_SNAPSHOT_READY"):
     payload = ForecastSnapshotReadyPayload(
         city="Chicago",
         target_date="2026-05-25",
@@ -45,7 +45,7 @@ def _event():
         coverage_readiness_status="LIVE_ELIGIBLE",
     )
     return make_opportunity_event(
-        event_type="FORECAST_SNAPSHOT_READY",
+        event_type=event_type,
         entity_key="Chicago|2026-05-25|high",
         source="forecast_live",
         observed_at="2026-05-25T10:00:00+00:00",
@@ -111,6 +111,20 @@ def test_forecast_event_compiles_to_no_submit_decision_certificate():
         claims.RISK_LEVEL,
         claims.NO_SUBMIT_DECISION,
     }
+
+
+def test_redecision_event_compiles_to_no_submit_decision_certificate():
+    event = _event(event_type="EDLI_REDECISION_PENDING")
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    receipt = _receipt(event.event_id)
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=build_test_no_submit_proof_bundle(event, receipt, decision_time=decision_time),
+    )
+
+    assert result.status == "VERIFIED"
+    assert result.no_submit_certificate is not None
 
 
 def test_no_submit_decision_certificate_generated_time_semantics():

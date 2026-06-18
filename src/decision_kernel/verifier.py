@@ -14,6 +14,9 @@ from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.modes import ALLOWED_MODES, is_live_like
 
 FORECAST_LIVE_ELIGIBLE_STATUS = "LIVE_ELIGIBLE"
+FORECAST_ACTIONABLE_EVENT_TYPES = frozenset(
+    {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}
+)
 # mx2t3 carrier-decouple (GATE-1 C): the members_json_source value a posterior-provenance
 # FORECAST_AUTHORITY carries when belief is sourced from the multi-model raw_model_forecasts
 # fusion (via forecast_posteriors) instead of the cold ensemble_snapshots daily extrema. A cert
@@ -154,7 +157,7 @@ def verify_actionable_trade(cert: DecisionCertificate, parents: Iterable[Decisio
     if missing:
         raise CertificateVerificationError(f"actionable trade missing parents: {sorted(missing)}")
     event_type = cert.payload.get("event_type")
-    if event_type == "FORECAST_SNAPSHOT_READY":
+    if event_type in FORECAST_ACTIONABLE_EVENT_TYPES:
         source_required = {claims.FORECAST_AUTHORITY, claims.CALIBRATION}
     elif event_type == "DAY0_EXTREME_UPDATED":
         source_required = {claims.DAY0_AUTHORITY, claims.ABSORBING_BOUNDARY}

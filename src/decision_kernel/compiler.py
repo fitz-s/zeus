@@ -17,6 +17,7 @@ from src.decision_kernel.verifier import (
     ALT_CREDENTIAL_CALIBRATION_AUTHORITIES,
     APPROVED_CALIBRATION_AUTHORITIES,
     ENSEMBLE_MEMBERS_JSON_SOURCE,
+    FORECAST_ACTIONABLE_EVENT_TYPES,
     POSTERIOR_MEMBERS_JSON_SOURCE,
     POSTERIOR_MIN_DECORRELATED_MODELS,
     REQUIRED_POSTERIOR_FORECAST_VALIDATIONS,
@@ -395,7 +396,7 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
         #                            belief.forecast_snapshot_id == forecast.snapshot_id (later).
         _require_equal("source_truth.causal_snapshot_id", source.get("causal_snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
         _require_equal("source_truth.snapshot_id", source.get("snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
-    if event.event_type == "FORECAST_SNAPSHOT_READY":
+    if event.event_type in FORECAST_ACTIONABLE_EVENT_TYPES:
         _validate_source_truth_payload(source)
         _require_equal("source_truth.completeness_status", source.get("completeness_status"), "COMPLETE", "COMPLETE")
         if source.get("required_fields_present") is not True:

@@ -25,6 +25,14 @@ def test_actionable_requires_live_mode():
         verify_actionable_trade(action, parents)
 
 
+def test_actionable_accepts_redecision_as_forecast_lane():
+    parents, action = actionable_graph(
+        action_payload={"event_type": "EDLI_REDECISION_PENDING"}
+    )
+
+    verify_actionable_trade(action, parents)
+
+
 def test_actionable_requires_positive_action_score():
     parents, action = actionable_graph(action_payload={"action_score": 0.0})
 
