@@ -7878,9 +7878,22 @@ def _edli_expire_unadmitted_redecision_pending(
     *,
     decision_time: str,
 ) -> int:
-    """Expire pending redecision rows no longer backed by entry edge or rest reprice value."""
+    """Expire redecision rows no longer backed by entry edge or rest reprice value.
+
+    Pending rows are always safe to expire. Processing rows are eligible only
+    after the EventStore claim lease has expired; an in-flight reactor event
+    must not be terminalized by the screen job that emitted it.
+    """
 
     from src.events.continuous_redecision import REDECISION_EVENT_TYPE as _REDECISION_EVENT_TYPE
+
+    try:
+        decision_dt = datetime.fromisoformat(str(decision_time).replace("Z", "+00:00"))
+        if decision_dt.tzinfo is None:
+            decision_dt = decision_dt.replace(tzinfo=timezone.utc)
+        stale_processing_cutoff = (decision_dt - timedelta(seconds=300)).isoformat()
+    except Exception:  # noqa: BLE001
+        stale_processing_cutoff = ""
 
     try:
         rows = world_conn.execute(
@@ -7892,10 +7905,18 @@ def _edli_expire_unadmitted_redecision_pending(
               FROM opportunity_event_processing p
               JOIN opportunity_events e ON e.event_id = p.event_id
              WHERE p.consumer_name = 'edli_reactor_v1'
-               AND p.processing_status = 'pending'
+               AND (
+                    p.processing_status = 'pending'
+                 OR (
+                    p.processing_status = 'processing'
+                    AND p.claimed_at IS NOT NULL
+                    AND ? != ''
+                    AND p.claimed_at <= ?
+                 )
+               )
                AND e.event_type = ?
             """,
-            (_REDECISION_EVENT_TYPE,),
+            (stale_processing_cutoff, stale_processing_cutoff, _REDECISION_EVENT_TYPE),
         ).fetchall()
     except Exception:  # noqa: BLE001
         return 0
@@ -7929,10 +7950,18 @@ def _edli_expire_unadmitted_redecision_pending(
                    updated_at = ?,
                    last_error = 'REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value'
              WHERE consumer_name = 'edli_reactor_v1'
-               AND processing_status = 'pending'
+               AND (
+                    processing_status = 'pending'
+                 OR (
+                    processing_status = 'processing'
+                    AND claimed_at IS NOT NULL
+                    AND ? != ''
+                    AND claimed_at <= ?
+                 )
+               )
                AND event_id IN ({placeholders})
             """,
-            (now, now, *chunk),
+            (now, now, stale_processing_cutoff, stale_processing_cutoff, *chunk),
         )
         changed += int(cur.rowcount or 0)
     return changed

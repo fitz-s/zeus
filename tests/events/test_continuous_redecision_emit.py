@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -598,6 +598,81 @@ def test_unadmitted_redecision_pending_is_expired():
     assert statuses[stale.entity_key] == "expired"
     assert statuses[admitted.entity_key] == "pending"
     assert statuses[fsr.entity_key] == "pending"
+
+
+def test_unadmitted_stale_processing_redecision_is_expired_after_claim_lease():
+    """Stale processing redecisions must not survive admission expiry forever."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    decision_time = datetime(2026, 6, 18, 10, 15, tzinfo=timezone.utc)
+    stale_processing = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Munich|2026-06-19|high|run-stale-processing",
+        source="cycle-stale-processing",
+        observed_at="2026-06-18T09:12:39+00:00",
+        available_at="2026-06-18T09:12:39+00:00",
+        received_at="2026-06-18T09:12:39+00:00",
+        causal_snapshot_id="snap-stale-processing",
+        payload=_ready_payload(
+            city="Munich",
+            target_date="2026-06-19",
+            metric="high",
+            source_run_id="run-stale-processing",
+            snapshot_id="snap-stale-processing",
+        ),
+        priority=50,
+    )
+    fresh_processing = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Paris|2026-06-19|high|run-fresh-processing",
+        source="cycle-fresh-processing",
+        observed_at="2026-06-18T10:14:30+00:00",
+        available_at="2026-06-18T10:14:30+00:00",
+        received_at="2026-06-18T10:14:30+00:00",
+        causal_snapshot_id="snap-fresh-processing",
+        payload=_ready_payload(
+            city="Paris",
+            target_date="2026-06-19",
+            metric="high",
+            source_run_id="run-fresh-processing",
+            snapshot_id="snap-fresh-processing",
+        ),
+        priority=50,
+    )
+    for event in (stale_processing, fresh_processing):
+        store.insert_or_ignore(event)
+    assert store.claim(
+        stale_processing.event_id,
+        claimed_at=(decision_time - timedelta(seconds=301)).isoformat(),
+    )
+    assert store.claim(
+        fresh_processing.event_id,
+        claimed_at=(decision_time - timedelta(seconds=299)).isoformat(),
+    )
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        set(),
+        decision_time=decision_time.isoformat(),
+    )
+
+    statuses = dict(
+        world.execute(
+            """
+            SELECT e.entity_key, p.processing_status
+              FROM opportunity_events e
+              JOIN opportunity_event_processing p ON p.event_id = e.event_id
+             WHERE p.consumer_name = ?
+            """,
+            (store.consumer_name,),
+        ).fetchall()
+    )
+    assert expired == 1
+    assert statuses[stale_processing.entity_key] == "expired"
+    assert statuses[fresh_processing.entity_key] == "processing"
 
 
 def test_redecision_admission_is_screen_job_only():
