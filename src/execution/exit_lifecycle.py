@@ -2431,7 +2431,7 @@ def _dual_write_partial_exit_projection_if_available(
         payload = _json.loads(str(event.get("payload_json") or "{}"))
         payload.update(
             {
-                "semantic_event": "EXIT_ORDER_PARTIAL_FILL_OBSERVED",
+                "semantic_event": "PARTIAL_FILL_OBSERVED",
                 "order_id": order_id,
                 "venue_status": status or "PARTIAL",
                 "filled_shares": filled_shares,
@@ -2673,7 +2673,7 @@ def check_pending_exits(
                         best_bid=getattr(pos, "last_monitor_best_bid", None),
                         shares=filled_shares,
                         details={
-                            "semantic_event": "EXIT_ORDER_PARTIAL_FILL_OBSERVED",
+                            "semantic_event": "PARTIAL_FILL_OBSERVED",
                             "filled_shares": filled_shares,
                             "remaining_shares": remaining_shares,
                             "fill_price": actual_price,

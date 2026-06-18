@@ -738,7 +738,7 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
     ).fetchone()
     assert event is not None
     assert event["event_type"] == "MONITOR_REFRESHED"
-    assert json.loads(event["payload_json"])["semantic_event"] == "EXIT_ORDER_PARTIAL_FILL_OBSERVED"
+    assert json.loads(event["payload_json"])["semantic_event"] == "PARTIAL_FILL_OBSERVED"
 
 
 def test_exit_lifecycle_skips_inactive_position_before_order_status_check(conn):
