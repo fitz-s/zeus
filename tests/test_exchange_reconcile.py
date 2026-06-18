@@ -514,6 +514,104 @@ def test_init_schema_creates_exchange_reconcile_findings(conn):
     } <= cols
 
 
+def test_day0_chain_confirmed_holding_clears_position_drift_without_journal(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "day0-chain-token"
+    seed_position_baseline(conn, position_id="pos-day0-chain", order_id="ord-day0-chain")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'day0_window',
+               chain_state = 'synced',
+               chain_shares = 5.13,
+               shares = 5.13,
+               token_id = ?,
+               order_id = 'ord-day0-chain',
+               updated_at = ?
+         WHERE position_id = 'pos-day0-chain'
+        """,
+        (token, NOW.isoformat()),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="5.13")]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert result == []
+    assert findings(conn) == []
+
+
+def test_exact_trade_split_replaces_point_order_aggregate_without_drift(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+    from src.state.venue_command_repo import append_trade_fact as append_venue_trade_fact
+
+    seed_command(
+        conn,
+        command_id="cmd-split",
+        venue_order_id="ord-split",
+        state="FILLED",
+        token_id=YES_TOKEN,
+        size=5.13,
+        price=0.72,
+    )
+    append_venue_trade_fact(
+        conn,
+        trade_id="trade-split-a",
+        venue_order_id="ord-split",
+        command_id="cmd-split",
+        state="MATCHED",
+        filled_size="5.13",
+        fill_price="0.72",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(b"point-order-aggregate").hexdigest(),
+        raw_payload_json={
+            "proof_class": "point_order_matched_fill",
+            "reason": "acked_order_point_order_matched",
+            "matched_size": "5.13",
+            "trade_id": "trade-split-a",
+        },
+    )
+
+    exact = trade(
+        trade_id="trade-split-a",
+        order_id="external-taker",
+        size="3.75",
+        price="0.28",
+        status="CONFIRMED",
+        maker_orders=[
+            {
+                "order_id": "ord-split",
+                "matched_amount": "3.75",
+                "price": "0.72",
+                "side": "BUY",
+            }
+        ],
+    )
+    result = run_reconcile_sweep(
+        FakeM5Adapter(trades=[exact], positions=[position(token_id=YES_TOKEN, size="3.75")]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW + timedelta(minutes=1),
+    )
+
+    assert [finding.kind for finding in result] == []
+    fact = conn.execute(
+        """
+        SELECT state, filled_size, fill_price
+          FROM venue_trade_facts
+         WHERE trade_id = 'trade-split-a'
+         ORDER BY local_sequence DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert dict(fact) == {"state": "CONFIRMED", "filled_size": "3.75", "fill_price": "0.72"}
+
+
 def test_open_order_at_exchange_absent_locally_becomes_finding_not_command(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

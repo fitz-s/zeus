@@ -107,6 +107,7 @@ _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
 _POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
 _POSITION_API_VISIBILITY_FLOOR = Decimal("0.01")
 _ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_window"})
+_CHAIN_CONFIRMED_HELD_PHASES = frozenset({"active", "day0_window"})
 _EXIT_FILL_PROJECTION_PHASES = frozenset({"active", "day0_window", "pending_exit", "economically_closed"})
 _TERMINAL_ORDER_FACT_STATES = frozenset({"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"})
 _PENDING_EXIT_NON_CURRENT_ORDER_STATUSES = frozenset({"filled", "sell_filled"})
@@ -3603,7 +3604,15 @@ def _append_linkable_trade_fact_if_missing(
                 context=context,
             )
         if state in {"MATCHED", "MINED", "CONFIRMED"} and not same_fill_economics:
-            if not _confirmed_price_revision_has_authority(
+            point_order_split = _point_order_aggregate_exact_trade_split_has_authority(
+                latest_fact,
+                raw=raw,
+                venue_order_id=order_id,
+                state=state,
+                filled_size=filled_size,
+                fill_price=fill_price,
+            )
+            if not point_order_split and not _confirmed_price_revision_has_authority(
                 latest_fact,
                 raw=raw,
                 venue_order_id=order_id,
@@ -4515,6 +4524,42 @@ def _confirmed_price_revision_has_authority(
     )
 
 
+def _point_order_aggregate_exact_trade_split_has_authority(
+    fact: Mapping[str, Any],
+    *,
+    raw: Mapping[str, Any],
+    venue_order_id: str | None,
+    state: str,
+    filled_size: str,
+    fill_price: str,
+) -> bool:
+    """Allow exact venue-trade rows to replace an earlier point-order aggregate.
+
+    A matched point-order proof can only say "this order matched N shares"; CLOB
+    trade history can later split that fill across multiple trade ids. The
+    exact child row is authoritative only when it is the same order, same price,
+    and no larger than the prior aggregate.
+    """
+
+    if state not in {"MATCHED", "MINED", "CONFIRMED"}:
+        return False
+    raw_payload = _json_mapping(fact.get("raw_payload_json"))
+    proof_class = str(raw_payload.get("proof_class") or "")
+    reason = str(raw_payload.get("reason") or "")
+    if proof_class != "point_order_matched_fill" and reason != "acked_order_point_order_matched":
+        return False
+    if _selected_maker_order(raw, venue_order_id) is None and not _taker_order_price_applies(raw, venue_order_id):
+        return False
+    if not _same_decimal_value(fact.get("fill_price"), fill_price):
+        return False
+    try:
+        prior_size = _decimal(fact.get("filled_size"))
+        incoming_size = _decimal(filled_size)
+    except (InvalidOperation, ValueError):
+        return False
+    return incoming_size > Decimal("0") and incoming_size <= prior_size
+
+
 def _trade_lifecycle_transition_allowed(previous: str, current: str) -> bool:
     if previous == current:
         return False
@@ -4860,13 +4905,14 @@ def _chain_confirmed_active_holdings_by_token(conn: sqlite3.Connection) -> dict[
     if not _table_exists(conn, "position_current"):
         return {}
     rows = conn.execute(
-        """
+        f"""
         SELECT position_id, token_id, no_token_id, direction, chain_shares, order_id
           FROM position_current
-         WHERE phase = 'active'
+         WHERE phase IN ({", ".join("?" for _ in _CHAIN_CONFIRMED_HELD_PHASES)})
            AND chain_state = 'synced'
            AND COALESCE(chain_shares, 0) > 0
-        """
+        """,
+        tuple(sorted(_CHAIN_CONFIRMED_HELD_PHASES)),
     ).fetchall()
     holdings_by_order: dict[str, dict[str, Decimal]] = {}
     for row in rows:
