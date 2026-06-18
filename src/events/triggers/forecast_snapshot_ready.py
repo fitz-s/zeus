@@ -549,6 +549,7 @@ class ForecastSnapshotReadyTrigger:
         event_type: str = "FORECAST_SNAPSHOT_READY",
         restrict_to_families: set[tuple[str, str, str]] | None = None,
         phase_filter_exempt_families: set[tuple[str, str, str]] | None = None,
+        suppress_recent_no_value_refutations: bool = False,
     ) -> list[EventWriteResult]:
         """Catch up from committed source_run/source_run_coverage/snapshot rows.
 
@@ -875,17 +876,27 @@ class ForecastSnapshotReadyTrigger:
                 ):
                     # Phase-closed family: emit ZERO FSR for it this cycle.
                     continue
-            results.append(
-                self.emit_from_rows(
-                    source_run=source_run,
-                    coverage=coverage,
-                    snapshot=snapshot,
-                    decision_time=decision_time,
-                    received_at=received_at,
-                    source=source,
-                    event_type=event_type,
-                )
+            event = build_forecast_snapshot_ready_event(
+                source_run=source_run,
+                coverage=coverage,
+                snapshot=snapshot,
+                decision_time=decision_time,
+                received_at=received_at,
+                min_members_floor=self._min_members_floor,
+                live_eligibility_reader=self._live_eligibility_reader,
+                source=source,
+                event_type=event_type,
             )
+            if suppress_recent_no_value_refutations:
+                from src.events.continuous_redecision import recent_no_value_event_refutation
+
+                if recent_no_value_event_refutation(
+                    self._writer.conn,
+                    event,
+                    decision_time=decision_time,
+                ) is not None:
+                    continue
+            results.append(self._writer.write(event))
         return results
 
 

@@ -20,8 +20,13 @@ src.events.continuous_redecision is authored.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 
 import pytest
+
+from src.events.event_store import EventStore
+from src.events.opportunity_event import make_opportunity_event
+from src.state.db import init_schema
 
 # Intentionally import the not-yet-authored module: RED until P1+P2 land.
 cr = pytest.importorskip(
@@ -36,6 +41,70 @@ def _mem_world() -> sqlite3.Connection:
     # The cache uses the canonical probability_trace_fact columns the screen reads.
     cr.ensure_belief_cache_schema(conn)
     return conn
+
+
+def _event_for_refutation(*, causal_snapshot_id: str = "snap-1", price_marker: str = "same"):
+    return make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Shanghai|2026-06-19|low|run-1",
+        source="cycle-test",
+        observed_at="2026-06-18T00:00:00+00:00",
+        available_at="2026-06-18T00:00:00+00:00",
+        received_at="2026-06-18T00:00:01+00:00",
+        causal_snapshot_id=causal_snapshot_id,
+        payload={
+            "city": "Shanghai",
+            "target_date": "2026-06-19",
+            "metric": "low",
+            "source_run_id": "run-1",
+            "price_marker": price_marker,
+        },
+        priority=50,
+    )
+
+
+def _insert_terminal_no_value_regret(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    causal_snapshot_id: str = "snap-1",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            decision_time, city, target_date, metric, family_id, causal_snapshot_id,
+            created_at, schema_version
+        ) VALUES (?, ?, 'TRADE_SCORE', 'TRADE_SCORE_NON_POSITIVE', 'NO_EDGE',
+                  '2026-06-18T00:00:10+00:00', 'Shanghai', '2026-06-19', 'low',
+                  'family-shanghai-low', ?, '2026-06-18T00:00:10+00:00', 1)
+        """,
+        ("regret-" + event_id, event_id, causal_snapshot_id),
+    )
+
+
+def test_recent_no_value_refutation_suppresses_same_evidence_only():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn)
+    prior = _event_for_refutation()
+    store.insert_or_ignore(prior)
+    _insert_terminal_no_value_regret(conn, event_id=prior.event_id)
+
+    same = _event_for_refutation()
+    assert cr.recent_no_value_event_refutation(
+        conn,
+        same,
+        decision_time=datetime.fromisoformat("2026-06-18T00:05:00+00:00"),
+    ) is not None
+
+    fresh_payload = _event_for_refutation(causal_snapshot_id="snap-2", price_marker="changed")
+    assert cr.recent_no_value_event_refutation(
+        conn,
+        fresh_payload,
+        decision_time=datetime.fromisoformat("2026-06-18T00:05:00+00:00"),
+    ) is None
 
 
 def _cache_yes_belief(conn, *, p_posterior_yes: float, recorded_at: str, snapshot_id: str = "snap1"):

@@ -7100,6 +7100,7 @@ def _edli_emit_forecast_snapshot_events(
                 limit=limit,
                 source=source,
                 already_pending_keys=already_pending_keys,
+                suppress_recent_no_value_refutations=True,
             )
         )
     finally:
@@ -7621,7 +7622,9 @@ def _edli_emit_day0_extreme_events(
             )
 
     trigger = Day0ExtremeUpdatedTrigger(
-        EventWriter(world_conn), day0_is_tradeable=day0_is_tradeable
+        EventWriter(world_conn),
+        day0_is_tradeable=day0_is_tradeable,
+        suppress_recent_no_value_refutations=True,
     )
     authority_results = trigger.scan_authority_rows(
         observation_conn=trade_conn,

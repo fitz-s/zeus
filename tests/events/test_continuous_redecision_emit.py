@@ -449,6 +449,45 @@ def test_redecision_skip_set_is_event_type_scoped():
     ) == {redecision.entity_key}
 
 
+def test_fsr_scan_suppresses_recent_same_evidence_no_value_refutation():
+    fc = _seed_forecasts()
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    trig = _trigger(fc, world)
+
+    first = trig.scan_committed_snapshots(
+        forecasts_conn=fc,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+        source="cycle-1",
+    )
+    assert len(first) == 1
+    event_id = first[0].event_id
+    world.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            decision_time, city, target_date, metric, family_id, causal_snapshot_id,
+            created_at, schema_version
+        ) VALUES (?, ?, 'TRADE_SCORE', 'TRADE_SCORE_NON_POSITIVE', 'NO_EDGE',
+                  '2026-05-24T04:18:00+00:00', 'Chicago', '2026-05-24', 'high',
+                  'family-chicago-high', '1', '2026-05-24T04:18:00+00:00', 1)
+        """,
+        ("regret-" + event_id, event_id),
+    )
+
+    second = trig.scan_committed_snapshots(
+        forecasts_conn=fc,
+        decision_time=datetime(2026, 5, 24, 4, 20, tzinfo=timezone.utc),
+        received_at="2026-05-24T04:20:00+00:00",
+        source="cycle-2",
+        suppress_recent_no_value_refutations=True,
+    )
+
+    assert second == []
+
+
 def test_redecision_pending_family_keys_parse_only_valid_families():
     assert main._edli_redecision_family_keys_from_entity_keys(
         {

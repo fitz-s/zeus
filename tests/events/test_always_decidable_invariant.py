@@ -213,6 +213,30 @@ def test_debounce_two_blocks_same_family_within_window_one_refresh_call():
     assert calls == [("Chicago", "2026-05-24", "high")]
 
 
+def test_gate_positive_event_does_not_call_family_refresher_before_decision():
+    """A gate-positive event must not pay the full-family refresh cost before decision.
+
+    Presence/family-identity freshness is proven by the executable snapshot gate. If the
+    selected row later proves price-stale, the adapter owns the targeted refresh at the
+    stale-price boundary. True gate misses refresh through the blocked-event drain.
+    """
+
+    conn, store = _store()
+    event = _forecast_event(target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    calls: list[tuple] = []
+
+    def _refresher(*, city, target_date, metric, **_kw):
+        calls.append((city, target_date, metric))
+        return True
+
+    reactor = _reactor(store, snapshot_present={"v": True}, refresher=_refresher)
+
+    reactor.process_pending(decision_time=_DT)
+
+    assert calls == []
+
+
 def test_fanout_no_drop_cap_all_recorded_families_refreshed_in_one_drain():
     """FAN-OUT — NO DROP-CAP: when MANY families are recorded as blocked in a single cycle, the
     end-of-cycle drain refreshes EVERY one of them (no numeric cap on the candidate set). We drive

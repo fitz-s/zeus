@@ -94,13 +94,20 @@ def build_day0_extreme_updated_event(
 
 
 class Day0ExtremeUpdatedTrigger:
-    def __init__(self, writer: EventWriter, *, day0_is_tradeable: bool = True) -> None:
+    def __init__(
+        self,
+        writer: EventWriter,
+        *,
+        day0_is_tradeable: bool = True,
+        suppress_recent_no_value_refutations: bool = False,
+    ) -> None:
         self._writer = writer
         # Stamp the scope-aware emission priority (2026-06-11 anti-starvation).
         # Default True = historical priority=PRIORITY_DAY0_TRADEABLE. The caller in
         # main.py passes False under edli_live_scope='day0_shadow' so shadow-only
         # day0 events sub-sort below tradeable forecast candidates.
         self._day0_is_tradeable = day0_is_tradeable
+        self._suppress_recent_no_value_refutations = suppress_recent_no_value_refutations
 
     def emit_from_observation(
         self,
@@ -117,6 +124,32 @@ class Day0ExtremeUpdatedTrigger:
             received_at=received_at,
             day0_is_tradeable=self._day0_is_tradeable,
         )
+        return self._writer.write(event)
+
+    def _write_observation_if_admitted(
+        self,
+        *,
+        observation: dict[str, Any],
+        settlement_semantics: Any,
+        decision_time: datetime,
+        received_at: str,
+    ) -> EventWriteResult | None:
+        event = build_day0_extreme_updated_event(
+            observation=observation,
+            settlement_semantics=settlement_semantics,
+            decision_time=decision_time,
+            received_at=received_at,
+            day0_is_tradeable=self._day0_is_tradeable,
+        )
+        if self._suppress_recent_no_value_refutations:
+            from src.events.continuous_redecision import recent_no_value_event_refutation
+
+            if recent_no_value_event_refutation(
+                self._writer.conn,
+                event,
+                decision_time=decision_time,
+            ) is not None:
+                return None
         return self._writer.write(event)
 
     def scan_authority_rows(
@@ -168,14 +201,14 @@ class Day0ExtremeUpdatedTrigger:
                 should_emit = True
             if should_emit:
                 semantics = settlement_semantics(observation) if callable(settlement_semantics) else settlement_semantics
-                results.append(
-                    self.emit_from_observation(
-                        observation=observation,
-                        settlement_semantics=semantics,
-                        decision_time=decision_time,
-                        received_at=received_at,
-                    )
+                result = self._write_observation_if_admitted(
+                    observation=observation,
+                    settlement_semantics=semantics,
+                    decision_time=decision_time,
+                    received_at=received_at,
                 )
+                if result is not None:
+                    results.append(result)
         return results
 
     def scan_observation_instants_rows(
@@ -303,14 +336,14 @@ class Day0ExtremeUpdatedTrigger:
                     if cur is None or (prior is not None and float(cur) >= prior):
                         continue
                 semantics = settlement_semantics(observation) if callable(settlement_semantics) else settlement_semantics
-                results.append(
-                    self.emit_from_observation(
-                        observation=observation,
-                        settlement_semantics=semantics,
-                        decision_time=decision_time,
-                        received_at=received_at,
-                    )
+                result = self._write_observation_if_admitted(
+                    observation=observation,
+                    settlement_semantics=semantics,
+                    decision_time=decision_time,
+                    received_at=received_at,
                 )
+                if result is not None:
+                    results.append(result)
                 if metric == "high":
                     high_water[key] = float(cur)
                 else:

@@ -778,6 +778,44 @@ def test_scan_observation_instants_change_gate_emits_on_extreme_advance():
     assert sum('"high_so_far":16.0' in p for p in payloads) == 1
 
 
+def test_day0_write_suppresses_recent_same_payload_no_value_refutation():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    base_trigger = Day0ExtremeUpdatedTrigger(EventWriter(conn))
+    obs = _observation()
+    prior = base_trigger.emit_from_observation(
+        observation=obs,
+        settlement_semantics=FakeSettlementSemantics(74),
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+        received_at="2026-05-24T18:10:00+00:00",
+    )
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            decision_time, city, target_date, metric, family_id, causal_snapshot_id,
+            created_at, schema_version
+        ) VALUES (?, ?, 'TRADE_SCORE', 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:none', 'NO_EDGE',
+                  '2026-05-24T18:11:00+00:00', 'Chicago', '2026-05-24', 'high',
+                  'family-chicago-high', 'obsctx-1', '2026-05-24T18:11:00+00:00', 1)
+        """,
+        ("regret-" + prior.event_id, prior.event_id),
+    )
+
+    suppressing_trigger = Day0ExtremeUpdatedTrigger(
+        EventWriter(conn),
+        suppress_recent_no_value_refutations=True,
+    )
+    result = suppressing_trigger._write_observation_if_admitted(
+        observation=obs,
+        settlement_semantics=FakeSettlementSemantics(74),
+        decision_time=datetime(2026, 5, 24, 18, 15, tzinfo=timezone.utc),
+        received_at="2026-05-24T18:15:00+00:00",
+    )
+
+    assert result is None
+
+
 def test_scan_observation_instants_rows_skips_fallback_evidence_rows():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)

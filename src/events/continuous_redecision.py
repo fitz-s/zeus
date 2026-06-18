@@ -29,9 +29,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from src.contracts.probability_arithmetic import one_minus
+from src.events.opportunity_event import OpportunityEvent
 
 
 def _fee_at(price: float) -> float:
@@ -84,6 +85,27 @@ FamilyRedecisionScreenKey = tuple[str, str, str, str]
 RedecisionScreenKey = EntryScreenKey | StableEntryScreenKey | FamilyRedecisionScreenKey
 FULL_DECISION_FAMILY_REFUTATION_COOLDOWN_SECONDS: float = 30.0 * 60.0
 
+_TERMINAL_NO_VALUE_SQL = """
+    (
+        rejection_stage = 'TRADE_SCORE'
+        AND (
+            rejection_reason IN ('TRADE_SCORE_NON_POSITIVE', 'TRADE_SCORE_BLOCKED')
+         OR rejection_reason LIKE 'TRADE_SCORE_NON_POSITIVE:%'
+         OR rejection_reason LIKE 'TRADE_SCORE_BLOCKED:%'
+         OR rejection_reason = 'FDR_REJECTED'
+         OR rejection_reason LIKE 'FDR_REJECTED:%'
+         OR rejection_reason LIKE 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:%'
+        )
+    )
+ OR (
+        rejection_stage = 'EXECUTION_RECEIPT'
+        AND (
+            rejection_reason LIKE 'TAKER_QUALITY_PROOF_NOT_PASSED:%'
+         OR rejection_reason LIKE 'entry_taker_quality:%'
+        )
+    )
+"""
+
 
 @dataclass(frozen=True)
 class PriceQuote:
@@ -135,6 +157,14 @@ class FullEconomicsReject:
 
 
 @dataclass(frozen=True)
+class RecentNoValueEventRefutation:
+    event_id: str
+    rejection_reason: str
+    created_at: str
+    evidence_match: str
+
+
+@dataclass(frozen=True)
 class RepriceDecision:
     """§4.5 (Dimension 3) cancel/re-place decision for a RESTING order. ``action`` is one of
     {CANCEL_REPLACE, CANCEL_EXIT}; ``reason`` is the evidence class. SHADOW-safe — the
@@ -149,6 +179,19 @@ class RepriceDecision:
 
 def _parse(ts: str) -> datetime:
     return datetime.fromisoformat(ts)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    try:
+        return (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            is not None
+        )
+    except sqlite3.Error:
+        return False
 
 
 def _belief_decision_id(family_id: str, snapshot_id: str, calibrator_model_hash: str) -> str:
@@ -789,13 +832,7 @@ def read_recent_full_economics_rejections(
     This is live evidence backoff, not a strategy cap. A cheaper fresh price or a
     higher q_lcb clears it and sends the pair through the full reactor again.
     """
-    try:
-        has_table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='no_trade_regret_events'"
-        ).fetchone()
-    except sqlite3.Error:
-        return {}
-    if not has_table:
+    if not _table_exists(conn, "no_trade_regret_events"):
         return {}
     try:
         cols = {
@@ -821,26 +858,7 @@ def read_recent_full_economics_rejections(
                    c_fee_adjusted, q_lcb_5pct, trade_score, created_at, rejection_reason
                    {q_live_select}
              FROM no_trade_regret_events
-             WHERE (
-                    (
-                        rejection_stage = 'TRADE_SCORE'
-                        AND (
-                            rejection_reason IN ('TRADE_SCORE_NON_POSITIVE', 'TRADE_SCORE_BLOCKED')
-                         OR rejection_reason LIKE 'TRADE_SCORE_NON_POSITIVE:%'
-                         OR rejection_reason LIKE 'TRADE_SCORE_BLOCKED:%'
-                         OR rejection_reason = 'FDR_REJECTED'
-                         OR rejection_reason LIKE 'FDR_REJECTED:%'
-                         OR rejection_reason LIKE 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:%'
-                        )
-                    )
-                 OR (
-                        rejection_stage = 'EXECUTION_RECEIPT'
-                        AND (
-                            rejection_reason LIKE 'TAKER_QUALITY_PROOF_NOT_PASSED:%'
-                         OR rejection_reason LIKE 'entry_taker_quality:%'
-                        )
-                    )
-               )
+             WHERE ({_TERMINAL_NO_VALUE_SQL})
                AND family_id IS NOT NULL AND family_id != ''
                AND (
                     (
@@ -891,6 +909,89 @@ def read_recent_full_economics_rejections(
             if family_key not in out:
                 out[family_key] = rejection
     return out
+
+
+def recent_no_value_event_refutation(
+    conn: sqlite3.Connection,
+    event: OpportunityEvent,
+    *,
+    decision_time: datetime | None = None,
+    cooldown_seconds: float = FULL_DECISION_FAMILY_REFUTATION_COOLDOWN_SECONDS,
+) -> RecentNoValueEventRefutation | None:
+    """Return a same-evidence terminal no-value refutation for ordinary intake events.
+
+    This is an admission de-duplication guard, not an edge/no-edge cap. It only
+    suppresses a newly minted ordinary FSR/DAY0 event when the same
+    city/target/metric evidence identity has already reached a terminal
+    full-economics no-trade decision inside the cooldown. A different forecast
+    snapshot, Day0 observation payload, or dedicated EDLI_REDECISION_PENDING
+    bypasses this guard and still reaches the full reactor.
+    """
+
+    if event.event_type not in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}:
+        return None
+    if not _table_exists(conn, "no_trade_regret_events") or not _table_exists(conn, "opportunity_events"):
+        return None
+    try:
+        payload = json.loads(event.payload_json)
+    except (TypeError, ValueError):
+        return None
+    city = str(payload.get("city") or "").strip()
+    target_date = str(payload.get("target_date") or "").strip()
+    metric = str(payload.get("metric") or "").strip()
+    if not (city and target_date and metric):
+        return None
+
+    now = decision_time.astimezone(timezone.utc) if decision_time is not None else datetime.now(timezone.utc)
+    cutoff = (now - timedelta(seconds=max(0.0, float(cooldown_seconds)))).isoformat()
+    causal_snapshot_id = str(event.causal_snapshot_id or "").strip()
+    payload_digest = str(event.payload_hash or "").strip()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT n.event_id,
+                   n.rejection_reason,
+                   n.created_at,
+                   n.causal_snapshot_id AS regret_causal_snapshot_id,
+                   e.causal_snapshot_id AS event_causal_snapshot_id,
+                   e.payload_hash,
+                   e.event_type
+              FROM no_trade_regret_events n
+              LEFT JOIN opportunity_events e ON e.event_id = n.event_id
+             WHERE n.city = ?
+               AND n.target_date = ?
+               AND n.metric = ?
+               AND n.created_at >= ?
+               AND ({_TERMINAL_NO_VALUE_SQL})
+             ORDER BY n.created_at DESC
+             LIMIT 25
+            """,
+            (city, target_date, metric, cutoff),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+
+    for row in rows:
+        row_event_type = str(row[6] or "").strip()
+        if row_event_type and row_event_type != event.event_type:
+            continue
+        prior_payload_hash = str(row[5] or "").strip()
+        if payload_digest and prior_payload_hash and payload_digest == prior_payload_hash:
+            return RecentNoValueEventRefutation(
+                event_id=str(row[0] or ""),
+                rejection_reason=str(row[1] or ""),
+                created_at=str(row[2] or ""),
+                evidence_match="payload_hash",
+            )
+        prior_causal = str(row[4] or row[3] or "").strip()
+        if causal_snapshot_id and prior_causal and causal_snapshot_id == prior_causal:
+            return RecentNoValueEventRefutation(
+                event_id=str(row[0] or ""),
+                rejection_reason=str(row[1] or ""),
+                created_at=str(row[2] or ""),
+                evidence_match="causal_snapshot_id",
+            )
+    return None
 
 
 def screen_reprice(
