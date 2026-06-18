@@ -32,7 +32,7 @@ Field sources of truth (derived from the ACTUAL consumers, not invented):
   Authority: the request dict assembled by
   ``src.data.replacement_forecast_materialization_request_builder``
   ``.build_replacement_forecast_materialization_request`` (its output is the
-  exact JSON ``scripts/materialize_replacement_forecast_shadow.py`` consumes),
+  exact JSON ``scripts/materialize_replacement_forecast_live.py`` consumes),
 	  combined with the queue's pre-spawn poison-pill gate
 	  (``temperature_metric``, ``target_date``, ``source_cycle_time`` are
 	  accessed immediately by the subprocess).
@@ -375,7 +375,7 @@ MATERIALIZATION_REQUEST_SCHEMA_VERSION = "1"
 # sets. Conflating them is the trap (it over-rejects runnable requests):
 #
 #   * CONSUMER gate (the queue, pre-spawn): the materializer subprocess
-#     (scripts/materialize_replacement_forecast_shadow.py:163-165, then
+#     (scripts/materialize_replacement_forecast_live.py:163-165, then
 #     173/178/197) accesses ONLY these keys as a hard, immediate top-level
     #     read before any work: temperature_metric, target_date, source_cycle_time. A file
 #     carrying those is RUNNABLE; a file missing any of them KeyError-crashes

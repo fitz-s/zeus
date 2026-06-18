@@ -79,9 +79,6 @@ def test_probe_resolved_authority_returns_newest_pair_complete_cycle(monkeypatch
     # 00Z is 3.2h old at probe time — far younger than any release-lag model would
     # admit; the probes say it is published, so it MUST be selected.
     monkeypatch.setattr(
-        availability, "probe_aifs_cycle_available", lambda c, **kw: c in published
-    )
-    monkeypatch.setattr(
         availability, "probe_anchor_available_any", lambda c, **kw: c in published
     )
 
@@ -97,7 +94,7 @@ def test_probe_resolved_authority_returns_newest_pair_complete_cycle(monkeypatch
 
 
 def test_download_job_skips_with_receipt_when_probes_unresolved(monkeypatch, tmp_path) -> None:
-    """No pair-complete cycle provable -> the job returns a skip receipt and the
+    """No anchor-complete cycle provable -> the job returns a skip receipt and the
     downloader is NEVER invoked with a guessed cycle."""
     import scripts.download_replacement_forecast_current_targets as dl
     import src.data.replacement_forecast_production as production
@@ -109,7 +106,7 @@ def test_download_job_skips_with_receipt_when_probes_unresolved(monkeypatch, tmp
             f"downloader invoked without a probe-confirmed cycle: {kwargs.get('cycle')}"
         )
 
-    monkeypatch.setattr(dl, "download_current_target_raw_inputs", _must_not_run)
+    monkeypatch.setattr(dl, "download_current_target_openmeteo_inputs", _must_not_run)
     report = production._download_replacement_forecast_current_targets_if_needed(
         {
             "download_current_targets_enabled": True,
@@ -191,15 +188,12 @@ def test_manifest_availability_is_proof_of_possession_bounded() -> None:
 
 def test_availability_poll_also_feeds_the_extras_lane(monkeypatch, tmp_path) -> None:
     """Relationship pin: the probe-driven poll tick invokes the bayes_precision_fusion extras lane so
-    fusion's same-cycle multimodel rows (the q_lcb substrate) arrive with the legs —
+    fusion's same-cycle multimodel rows (the q_lcb substrate) arrive with the anchor —
     never hours later on a lag-modeled cron."""
     import src.data.replacement_cycle_availability as availability
     import src.data.replacement_forecast_production as production
 
     cycle = datetime(2026, 6, 11, 0, 0, tzinfo=UTC)
-    monkeypatch.setattr(
-        availability, "probe_aifs_cycle_available", lambda c, **kw: c <= cycle
-    )
     monkeypatch.setattr(
         availability, "probe_anchor_available_any", lambda c, **kw: c <= cycle
     )

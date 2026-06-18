@@ -13,18 +13,14 @@ for a cycle that has long been published. 2026-06-10 the 12Z anchor leg was simp
 published at the provider when the single cron fire ran, and the engine then starved for
 hours on stale bounds (RULE-1 audit, docs/evidence/rule1_audits/).
 
-This module replaces the guess with PROBES:
+This module replaces the guess with Open-Meteo anchor PROBES:
 
-- ``probe_aifs_cycle_available``: asks the ECMWF open-data index (Client.latest, with the
-  same mirror failover order as the artifact retriever) whether the AIFS-ENS cycle is
-  published. A few KB of index traffic — no GRIB download.
 - ``probe_openmeteo_single_run_available``: one minimal single-runs API request
   (one probe city, forecast_hours=1) — their API answers 400 "model run is not available"
   until the run is published, 200 after.
-- ``resolve_cycle_leg_availability``: pure logic — walk candidate cycles newest→oldest from
-  wall clock (NO lag constant anywhere in the decision) and report each leg's published
-  state, so the caller can fetch every published leg the moment it appears and keep
-  re-polling only for the missing ones.
+- ``resolve_anchor_cycle_availability``: pure logic — walk candidate cycles newest→oldest
+  from wall clock (NO lag constant anywhere in the decision) and report the anchor
+  leg's published state.
 
 Observed publication lags are MEASURED for free as a by-product: each leg's source_run /
 raw_forecast_artifacts row carries captured_at, and (captured_at − source_cycle_time) under
@@ -160,54 +156,6 @@ def probe_anchor_available_any(
     return probe_bucket_run_declared(cycle)
 
 
-def probe_aifs_cycle_available(
-    cycle: datetime,
-    *,
-    client_factory: Callable[..., object] | None = None,
-) -> bool:
-    """True iff the ECMWF open-data index reports the AIFS-ENS cycle as published.
-
-    Uses Client.latest() (index lookup, no artifact download) with the same mirror
-    failover order as the retriever. Any per-mirror error fails over; all-mirror
-    failure → False (poll retries).
-    """
-    if client_factory is None:
-        try:
-            from ecmwf.opendata import Client  # type: ignore[import-not-found]
-        except ImportError:
-            logger.warning("ecmwf.opendata unavailable; AIFS probe reports unavailable")
-            return False
-        client_factory = Client
-    cycle_utc = cycle.astimezone(UTC)
-    for source in ("azure", "ecmwf", "aws"):
-        try:
-            client = client_factory(source=source, model="aifs-ens")
-            latest = client.latest(  # type: ignore[attr-defined]
-                type="pf", stream="enfo", step=6, param="2t"
-            )
-            latest_utc = (
-                latest if latest.tzinfo is not None else latest.replace(tzinfo=UTC)
-            )
-            return latest_utc >= cycle_utc
-        except Exception as exc:  # noqa: BLE001 — mirror failover
-            logger.debug("AIFS probe via %s failed: %s", source, exc)
-            continue
-    return False
-
-
-@dataclass(frozen=True)
-class CycleLegAvailability:
-    """Published state of one candidate cycle's raw-input legs."""
-
-    cycle: datetime
-    aifs_available: bool
-    anchor_available: bool
-
-    @property
-    def complete(self) -> bool:
-        return self.aifs_available and self.anchor_available
-
-
 @dataclass(frozen=True)
 class AnchorCycleAvailability:
     """Published state of one candidate cycle's Open-Meteo anchor leg."""
@@ -218,47 +166,6 @@ class AnchorCycleAvailability:
     @property
     def complete(self) -> bool:
         return self.anchor_available
-
-
-def resolve_cycle_leg_availability(
-    now: datetime,
-    *,
-    probe_aifs: Callable[[datetime], bool],
-    probe_anchor: Callable[[datetime], bool],
-    max_lookback_cycles: int = DEFAULT_MAX_LOOKBACK_CYCLES,
-) -> tuple[CycleLegAvailability, ...]:
-    """Per-leg published state for candidate cycles, newest→oldest.
-
-    PURE selection logic: callers inject the probes; NO release-lag constant may enter
-    this decision (the no-guess antibody test pins this by feeding probes that contradict
-    any lag-derived expectation and asserting the probes win).
-
-    Probe-call economy: legs are probed newest→oldest and each leg stops at its first
-    available cycle (an older cycle of the same product is published whenever a newer one
-    is — the provider publishes monotonically).
-    """
-    out: list[CycleLegAvailability] = []
-    aifs_known_available_from: datetime | None = None
-    anchor_known_available_from: datetime | None = None
-    for cycle in candidate_cycles(now, max_lookback_cycles=max_lookback_cycles):
-        if aifs_known_available_from is not None and cycle <= aifs_known_available_from:
-            aifs_ok = True
-        else:
-            aifs_ok = bool(probe_aifs(cycle))
-            if aifs_ok:
-                aifs_known_available_from = cycle
-        if anchor_known_available_from is not None and cycle <= anchor_known_available_from:
-            anchor_ok = True
-        else:
-            anchor_ok = bool(probe_anchor(cycle))
-            if anchor_ok:
-                anchor_known_available_from = cycle
-        out.append(
-            CycleLegAvailability(
-                cycle=cycle, aifs_available=aifs_ok, anchor_available=anchor_ok
-            )
-        )
-    return tuple(out)
 
 
 def resolve_anchor_cycle_availability(
@@ -283,7 +190,7 @@ def resolve_anchor_cycle_availability(
 
 
 def newest_complete_cycle(
-    availability: tuple[CycleLegAvailability, ...] | tuple[AnchorCycleAvailability, ...],
+    availability: tuple[AnchorCycleAvailability, ...],
 ) -> datetime | None:
     for leg in availability:  # newest→oldest order preserved
         if leg.complete:

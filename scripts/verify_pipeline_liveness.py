@@ -98,28 +98,24 @@ def check() -> tuple[int, dict]:
     if not ready_ok:
         failures.append(f"readiness READY scopes {ready_n} < {MIN_READY_SCOPES}")
 
-    # DOWNLOAD-LEG PROBES (operator 2026-06-11): real provider round-trips proving each
-    # source CAN be downloaded right now, plus published-vs-journaled gap per leg. A leg
+    # DOWNLOAD-LEG PROBES (operator 2026-06-18): real provider round-trips proving the
+    # live anchor CAN be downloaded right now, plus published-vs-journaled gap. The leg
     # fails when the provider has a newer cycle than the journal AND the journal copy is
     # older than one cycle interval + slack — that is exactly the silent-starvation shape
     # of 2026-06-10 (provider moved on, we never noticed we couldn't/didn't download).
     out["download_legs"] = {}
     try:
         from src.data.replacement_cycle_availability import (
-            probe_aifs_cycle_available,
             probe_anchor_available_any,
-            resolve_cycle_leg_availability,
+            resolve_anchor_cycle_availability,
         )
 
-        availability = resolve_cycle_leg_availability(
+        availability = resolve_anchor_cycle_availability(
             now,
-            probe_aifs=probe_aifs_cycle_available,
             probe_anchor=probe_anchor_available_any,
         )
-        newest_aifs_pub = next((a.cycle for a in availability if a.aifs_available), None)
         newest_anchor_pub = next((a.cycle for a in availability if a.anchor_available), None)
         for leg, source_id, newest_pub in (
-            ("aifs", "ecmwf_aifs_ens", newest_aifs_pub),
             ("anchor", "openmeteo_ecmwf_ifs_9km", newest_anchor_pub),
         ):
             have = f.execute(

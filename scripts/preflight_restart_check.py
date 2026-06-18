@@ -74,7 +74,7 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg_p = os.path.join(args.root, "config", "settings.json")
-    pe_p = os.path.join(args.root, "state", "replacement_forecast_shadow", "promotion_evidence.json")
+    pe_p = os.path.join(args.root, "state", "replacement_forecast_live", "promotion_evidence.json")
     cfg = json.load(open(cfg_p)) if os.path.exists(cfg_p) else {}
     pe_doc = json.load(open(pe_p)) if os.path.exists(pe_p) else {}
     pe = (pe_doc.get("promotion_evidence") or {}) if isinstance(pe_doc, dict) else {}

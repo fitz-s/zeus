@@ -40,7 +40,6 @@ POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS = frozenset(
         "last_monitor_market_price_is_fresh",
     }
 )
-FORECAST_POSTERIORS_LIVE_AUTHORITY_STATUS = "LIVE_AUTHORITY"
 
 # WAVE-4 F91+F99+F100 — daemon heartbeat staleness budgets, per
 # docs/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md
@@ -624,8 +623,8 @@ def _position_current_schema_status() -> dict:
             pass
 
 
-def _forecast_posteriors_live_authority_schema_status() -> dict:
-    """Ensure replacement forecast live authority can be represented in forecasts DB."""
+def _forecast_posteriors_runtime_layer_schema_status() -> dict:
+    """Ensure replacement forecast live rows can be represented in forecasts DB."""
 
     db_path = _forecast_db_path()
     if not db_path.exists():
@@ -633,7 +632,7 @@ def _forecast_posteriors_live_authority_schema_status() -> dict:
             "ok": False,
             "path": str(db_path),
             "issue": "FORECAST_POSTERIORS_SCHEMA_DB_MISSING",
-            "live_authority_status_supported": False,
+            "runtime_layer_supported": False,
         }
     conn = None
     try:
@@ -647,26 +646,29 @@ def _forecast_posteriors_live_authority_schema_status() -> dict:
                 "ok": False,
                 "path": str(db_path),
                 "issue": "FORECAST_POSTERIORS_TABLE_MISSING",
-                "live_authority_status_supported": False,
+                "runtime_layer_supported": False,
             }
-        create_sql = str(row["sql"] or "")
-        supports_live_authority = FORECAST_POSTERIORS_LIVE_AUTHORITY_STATUS in create_sql
+        cols = {
+            str(col["name"])
+            for col in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
+        }
+        supports_runtime_layer = "runtime_layer" in cols
         return {
-            "ok": supports_live_authority,
+            "ok": supports_runtime_layer,
             "path": str(db_path),
             "issue": (
                 None
-                if supports_live_authority
-                else "FORECAST_POSTERIORS_LIVE_AUTHORITY_SCHEMA_DRIFT"
+                if supports_runtime_layer
+                else "FORECAST_POSTERIORS_RUNTIME_LAYER_SCHEMA_DRIFT"
             ),
-            "live_authority_status_supported": supports_live_authority,
+            "runtime_layer_supported": supports_runtime_layer,
         }
     except Exception as exc:
         return {
             "ok": False,
             "path": str(db_path),
             "issue": f"FORECAST_POSTERIORS_SCHEMA_UNAVAILABLE:{type(exc).__name__}",
-            "live_authority_status_supported": False,
+            "runtime_layer_supported": False,
         }
     finally:
         try:
@@ -1561,7 +1563,7 @@ def check() -> dict:
             result["position_current_schema"].get("issue")
             or "POSITION_CURRENT_SCHEMA_DRIFT"
         )
-    result["forecast_posteriors_schema"] = _forecast_posteriors_live_authority_schema_status()
+    result["forecast_posteriors_schema"] = _forecast_posteriors_runtime_layer_schema_status()
     result["forecast_posteriors_schema_ok"] = bool(
         result["forecast_posteriors_schema"].get("ok", True)
     )

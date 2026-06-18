@@ -930,7 +930,7 @@ def _harvester_truth_writer_tick():
 
 @_scheduler_job("ingest_replacement_availability_poll")
 def _replacement_availability_poll_tick():
-    """Probe-resolved replacement raw-input fetch (anchor + AIFS legs + bayes_precision_fusion extras).
+    """Probe-resolved replacement raw-input fetch (OpenMeteo anchor + bayes_precision_fusion extras).
 
     OPERATOR DIRECTIVE 2026-06-11 ("下载有自己的daemon"): weather downloading lives in
     the data-ingest daemon — ITS OWN download daemon — decoupled from forecast-live /

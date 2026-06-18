@@ -81,8 +81,6 @@ def _feature_flags(settings_payload: Mapping[str, Any]) -> Mapping[str, Any]:
 def _materialization_config(settings_payload: Mapping[str, Any]) -> Mapping[str, Any]:
     raw = settings_payload.get("replacement_forecast_live")
     if raw is None:
-        raw = settings_payload.get("replacement_forecast_shadow")
-    if raw is None:
         return {}
     if not isinstance(raw, Mapping):
         raise ValueError("settings payload replacement_forecast_live must be an object")

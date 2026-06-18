@@ -145,7 +145,7 @@ def build_replacement_forecast_materialization_request(
     *,
     base_dir: Path | str,
 ) -> ReplacementForecastMaterializationRequestBuildResult:
-    """Build the exact JSON consumed by materialize_replacement_forecast_shadow.py."""
+    """Build the exact JSON consumed by materialize_replacement_forecast_live.py."""
 
     base_path = Path(base_dir)
     city = _required_text(payload, "city")

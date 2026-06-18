@@ -87,8 +87,6 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
     from src.config import PROJECT_ROOT
 
     cfg = _settings_section("replacement_forecast_live", {}) or {}
-    if not cfg:
-        cfg = _settings_section("replacement_forecast_shadow", {}) or {}
     base_dir = PROJECT_ROOT / "state" / "replacement_forecast_live"
     raw_manifest_dir = cfg.get("raw_manifest_dir")
     forecast_db = cfg.get("forecast_db")
@@ -118,12 +116,6 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
         "download_release_lag_hours": float(cfg.get("download_release_lag_hours") or 14.0),
         "download_anchor_sigma_c": float(cfg.get("download_anchor_sigma_c") or 3.0),
     }
-
-
-def _replacement_forecast_shadow_materialization_queue_config() -> dict[str, object]:
-    """Compatibility wrapper for callers not yet renamed; returns live config."""
-
-    return _replacement_forecast_live_materialization_queue_config()
 
 
 def _replacement_forecast_live_materialization_enabled() -> bool:
@@ -264,14 +256,15 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
 
 
 def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
-    """THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model SHADOW capture/accrual (CONTINUITY_AND_WIRING.md §4 step 2,
-    BAYES_PRECISION_FUSION_SPEC.md §6 F1). Gated by the NEW capture flag
+    """BAYES_PRECISION_FUSION multi-model live-input capture/accrual.
+
+    Gated by the capture flag
     ``settings['edli']['replacement_0_1_bayes_precision_fusion_capture_enabled']`` (default FALSE),
     SEPARATE from replacement_0_1_bayes_precision_fusion_enabled: when ON it downloads + persists the 8 extra
     OM models (single_runs FORWARD + previous_runs fixed-lead) into raw_model_forecasts on
     zeus-forecasts.db. It writes NOTHING into forecast_posteriors and touches NO posterior/q/
     center/spread/order -> the money path is byte-identical whether or not this runs. Forward,
-    daily, fail-soft (it NEVER raises into the shadow cycle). Returns None when the flag is OFF or
+    daily, fail-soft (it NEVER raises into the live materialization cycle). Returns None when the flag is OFF or
     there is no forecast_db / no targets."""
     try:
         if not bool(settings["edli"].get("replacement_0_1_bayes_precision_fusion_capture_enabled", False)):
@@ -336,8 +329,8 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
             targets=targets,
             release_lag_hours=release_lag_hours,
         )
-    except Exception as exc:  # noqa: BLE001 - fail-soft: shadow accrual never breaks the cycle
-        logger.warning("BAYES_PRECISION_FUSION extra-model shadow capture skipped (fail-soft): %s", exc)
+    except Exception as exc:  # noqa: BLE001 - fail-soft: extras accrual never breaks the cycle
+        logger.warning("BAYES_PRECISION_FUSION extra-model capture skipped (fail-soft): %s", exc)
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
@@ -547,10 +540,10 @@ def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = No
 
 
 def _per_leg_downloaded_cycle(forecast_db: Path, source_id: str) -> datetime | None:
-    """Per-leg high-water mark of downloaded raw-input cycles (None = unknown → fetch).
+    """Per-source high-water mark of downloaded raw-input cycles (None = unknown → fetch).
 
-    Same fail-open contract as _max_downloaded_current_target_cycle, but for ONE leg, so
-    the availability poll can complete a cycle as the provider publishes."""
+    Same fail-open contract as _max_downloaded_current_target_cycle, but scoped to the
+    live OpenMeteo anchor source."""
     from src.state.db import _connect  # noqa: PLC0415
 
     try:
@@ -575,13 +568,12 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     need, no guessed numbers — K4.0b(a) availability-poll organ).
 
     Every poll tick:
-      1. Resolve per-leg published state of the recent cycles by PROBING the providers
+      1. Resolve anchor published state of the recent cycles by PROBING the provider
          (src/data/replacement_cycle_availability.py). The release-lag constant takes NO
          part in this decision; it remains only the legacy cron's backstop schedule.
-      2. Fetch any published leg the journal does not yet hold, newest cycle first —
-         per leg, so one provider lagging (the 12Z-anchor case) never delays the other.
-    Idempotent: per-leg high-water marks short-circuit; the underlying downloader also
-    skips already-present manifests. Fail-soft per leg: a failed leg is retried on the
+      2. Fetch the published anchor cycle when the journal does not yet hold it.
+    Idempotent: source high-water marks short-circuit; the underlying downloader also
+    skips already-present manifests. Fail-soft: a failed anchor fetch is retried on the
     next tick. Returns a compact report dict (None when the feature flag is off)."""
     if not bool(cfg.get("download_current_targets_enabled", False)):
         return None
@@ -646,7 +638,7 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
                 include_covered=True,
             )
             report["legs_fetched"].append({"leg": leg, "cycle": cycle.isoformat()})  # type: ignore[union-attr]
-        except Exception as exc:  # noqa: BLE001 — per-leg fail-soft; next tick retries
+        except Exception as exc:  # noqa: BLE001 — anchor fail-soft; next tick retries
             logger.warning(
                 "availability-poll %s leg fetch failed for cycle %s (retry next tick): %s",
                 leg,
@@ -721,7 +713,7 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
             }
     # U5 step 2a — NEWER-CYCLE re-materialization TRIGGER (sister of the fusion-upgrade trigger).
     # This availability-poll lane already KNOWS the moment a fresher cycle's raw legs land (the
-    # per-leg fetches above), so the cycle-advance re-seed rides the SAME tick (operator law:
+    # anchor fetch above), so the cycle-advance re-seed rides the SAME tick (operator law:
     # 下载有自己的daemon — no new daemon, no parallel materialization path). It enqueues ONE seed per
     # active-window family whose latest posterior consumed a STRICTLY older cycle than the freshest
     # materializable one, HELD positions first, idempotent per (scope, target-cycle). Fail-soft.
@@ -917,14 +909,14 @@ def _replacement_forecast_download_cycle() -> None:
 def _replacement_forecast_live_materialize_cycle() -> None:
     if not _replacement_forecast_live_materialization_enabled():
         return
-    from src.data.replacement_forecast_shadow_materialization_queue import (
-        process_replacement_forecast_shadow_materialization_queue,
+    from src.data.replacement_forecast_live_materialization_queue import (
+        process_replacement_forecast_live_materialization_queue,
     )
 
     # Raw-input download is now a SEPARATE job (_replacement_forecast_download_cycle)
     # so it can never block this seed->materialize cycle (see that function's note).
     cfg = _replacement_forecast_live_materialization_queue_config()
-    report = process_replacement_forecast_shadow_materialization_queue(
+    report = process_replacement_forecast_live_materialization_queue(
         request_dir=cfg["request_dir"],
         processed_dir=cfg["processed_dir"],
         failed_dir=cfg["failed_dir"],
@@ -941,9 +933,3 @@ def _replacement_forecast_live_materialize_cycle() -> None:
         logger.warning("replacement forecast live materialization queue failures: %s", report.as_dict())
     elif report.processed_count:
         logger.info("replacement forecast live materialization queue processed: %s", report.as_dict())
-
-
-def _replacement_forecast_shadow_materialize_cycle() -> None:
-    """Compatibility wrapper for by-name imports; delegates to the live cycle."""
-
-    _replacement_forecast_live_materialize_cycle()

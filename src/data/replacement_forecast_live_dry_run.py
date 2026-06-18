@@ -481,9 +481,9 @@ def _configured_refit_handoff(root: Path, *, assume_available: bool) -> tuple[Pa
     try:
         settings_payload = json.loads(settings_path.read_text(encoding="utf-8"))
         if isinstance(settings_payload, Mapping):
-            shadow_cfg = settings_payload.get("replacement_forecast_shadow")
-            if isinstance(shadow_cfg, Mapping):
-                raw_path = shadow_cfg.get("refit_handoff_path") or REFIT_HANDOFF_FILE
+            live_cfg = settings_payload.get("replacement_forecast_live")
+            if isinstance(live_cfg, Mapping):
+                raw_path = live_cfg.get("refit_handoff_path") or REFIT_HANDOFF_FILE
     except FileNotFoundError:
         return root / REFIT_HANDOFF_FILE, "MISSING_SETTINGS"
     except Exception as exc:  # noqa: BLE001 - diagnostic fail-closed status

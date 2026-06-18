@@ -4730,7 +4730,7 @@ def _new_listing_scout_cycle() -> None:
         # CONTRACT FIX (2026-06-10): scout intents are condition_id-only stubs
         # {source, condition_id, enqueued_at, reason}. They are NOT fully-resolved
         # materialization request payloads (which require city, temperature_metric,
-        # target_date, source_cycle_time, aifs input, ...). Writing stubs directly into
+        # target_date and source_cycle_time). Writing stubs directly into
         # the materializer requests/ dir crashed the subprocess (KeyError) on every cycle
         # and starved ALL legitimate posterior production (772 stubs / 4 posteriors/h on
         # 2026-06-10 — see /tmp/materializer_collapse_report.md). Stage intents in the
@@ -4747,7 +4747,7 @@ def _new_listing_scout_cycle() -> None:
             from src.data.replacement_forecast_production import (
                 _replacement_forecast_live_materialization_queue_config,
             )
-            from src.data.replacement_forecast_shadow_materialization_queue import _write_request
+            from src.data.replacement_forecast_live_materialization_queue import _write_request
             from src.contracts.replacement_pipeline_files import validate_scout_intent
             from pathlib import Path
 
@@ -5870,10 +5870,10 @@ def _refresh_global_allocator_for_held_position_monitor(conn, portfolio) -> dict
 
 
 # WIRING FIX (operator Point-1 directive 2026-06-08): the BAYES_PRECISION_FUSION/replacement forecast
-# PRODUCTION functions (raw-input download + light shadow materialization) were moved
+# PRODUCTION functions (raw-input download + light live materialization) were moved
 # VERBATIM to src/data/replacement_forecast_production.py and are now SCHEDULED on the
-# forecast-live (data) daemon, NOT here. The ~365MB AIFS ensemble fetch must never run
-# inside the live-trading process (it monopolized disk I/O -> DATA_DEGRADED flap). They
+# forecast-live (data) daemon, NOT here. Heavy forecast fetches must never run
+# inside the live-trading process (they monopolized disk I/O -> DATA_DEGRADED flap). They
 # are imported back into this module ONLY so the in-cycle runtime-flags read below and
 # existing by-name references (tests, runtime-wiring-audit anchors) keep resolving — the
 # live-trading scheduler no longer registers the download/materialize jobs.
@@ -5892,8 +5892,6 @@ def _replacement_forecast_refit_decision_from_settings():
     from src.data.replacement_forecast_refit_handoff import refit_decision_from_handoff_payload
 
     cfg = _settings_section("replacement_forecast_live", {}) or {}
-    if not cfg:
-        cfg = _settings_section("replacement_forecast_shadow", {}) or {}
     raw_path = cfg.get("refit_handoff_path") or "state/replacement_forecast_live/refit_handoff.json"
     path = Path(str(raw_path))
     if not path.is_absolute():
@@ -5918,9 +5916,9 @@ def _replacement_forecast_refit_decision_from_settings():
 # DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the promotion / capital-objective
 # evidence parsers (_replacement_forecast_{promotion,capital_objective}_evidence_from_
 # settings) were REMOVED. They imported the deleted go_live_report verdict module and
-# fed the runtime-policy resolver / switch-decision evaluator — both of which IGNORE
-# these objects post-operator-severance (commits b646f99339 + 54a53334a9: LIVE_AUTHORITY
-# is FLAG-ONLY). The two live-adapter call sites now pass None (the adapter default),
+# fed the runtime-policy resolver / switch-decision evaluator — both of which ignore
+# these objects after the live runtime flag path moved to runtime_layer='live'. The two
+# live-adapter call sites now pass None (the adapter default),
 # which is behavior-identical. See docs/evidence/timing_audit/.
 def _sqlite_table_names(conn) -> tuple[str, ...]:
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
@@ -6250,8 +6248,8 @@ def _edli_event_reactor_cycle() -> None:
         replacement_forecast_runtime_flags = _replacement_forecast_runtime_flags_from_settings()
         replacement_forecast_refit_decision = _replacement_forecast_refit_decision_from_settings()
         # DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the runtime-policy resolver and
-        # switch-decision evaluator IGNORE these evidence objects post-severance
-        # (LIVE_AUTHORITY is FLAG-ONLY). None is behavior-identical to the deleted parsers.
+        # switch-decision evaluator ignore these evidence objects after the live runtime
+        # flag path moved to runtime_layer='live'. None is behavior-identical to the deleted parsers.
         replacement_forecast_promotion_evidence = None
         replacement_forecast_capital_objective_evidence = None
         replacement_forecast_baseline_bundle_provider = replacement_forecast_baseline_bundle_provider_from_forecast_conn(
@@ -6569,7 +6567,7 @@ def _escalation_families_from_cancelled(
     """Recover the ``(city, target_date, metric)`` family key for each just-cancelled
     escalation rest, from VENUE TRUTH (no cached-belief dependency).
 
-    Path (both legs are the canonical, already-proven joins):
+    Path (both joins are canonical and already proven):
       1. ``venue_commands.token_id`` -> ``condition_id`` via the freshest
          ``executable_market_snapshots.selected_outcome_token_id`` row (the SAME
          token->condition resolution the continuous-redecision rest screen uses,
@@ -8642,7 +8640,7 @@ def _edli_reactor_cycle_advance_enqueuer():
     replacement posterior. Reuses the SAME cycle-advance re-materialization lane (seed builder +
     seed_dir the materialize cycle drains + idempotency marker) scoped to ONE family.
 
-    Reads forecast_db / seed_dir / raw_manifest_dir from the shadow-materialization queue config
+    Reads forecast_db / seed_dir / raw_manifest_dir from the live materialization queue config
     (the same source the poll-lane batch trigger uses). Returns None when the lane is not
     configured (no seed_dir) so the reactor simply skips the enqueue (fail-soft). The callable is
     fail-soft itself: any error returns a status dict, never raises into the reactor cycle.
@@ -10705,9 +10703,9 @@ def main():
             coalesce=True,
         )
         # WIRING FIX (operator Point-1 directive 2026-06-08): the replacement-forecast
-        # download + shadow-materialize jobs were REMOVED from this live-trading scheduler
-        # and moved to the forecast-live (data) daemon. The ~365MB AIFS ensemble fetch
-        # (~11.5 min) monopolized disk I/O on the trading process, starving the reactor +
+        # download + live-materialize jobs were REMOVED from this live-trading scheduler
+        # and moved to the forecast-live (data) daemon. Heavy forecast fetches
+        # monopolized disk I/O on the trading process, starving the reactor +
         # market_scanner and locking riskguard dependency reads -> DATA_DEGRADED flap that
         # blocked all trades. They now run on the forecast-live daemon's lane, download
         # cron-driven at publish time (00Z/12Z + release_lag) — see

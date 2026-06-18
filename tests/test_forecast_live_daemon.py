@@ -34,9 +34,9 @@ def test_forecast_live_scheduler_registers_only_opendata_jobs_and_heartbeat(monk
     )
     from src.config import settings
 
-    cfg = dict(settings._data.get("replacement_forecast_shadow", {}))
+    cfg = dict(settings._data.get("replacement_forecast_live", {}))
     cfg["disable_legacy_opendata_forecast_live_jobs"] = False
-    monkeypatch.setitem(settings._data, "replacement_forecast_shadow", cfg)
+    monkeypatch.setitem(settings._data, "replacement_forecast_live", cfg)
 
     specs = forecast_live_job_specs(
         startup_run_date=datetime(2026, 5, 14, 8, 0, tzinfo=timezone.utc)
@@ -1011,12 +1011,12 @@ def test_replacement_publish_cron_gaps_never_exceed_cycle_cadence() -> None:
 
     for lag in range(24):
         monkey_cfg = {"download_release_lag_hours": float(lag)}
-        original = forecast_live_daemon._replacement_forecast_shadow_cfg
-        forecast_live_daemon._replacement_forecast_shadow_cfg = lambda: monkey_cfg  # type: ignore[assignment]
+        original = forecast_live_daemon._replacement_forecast_live_cfg
+        forecast_live_daemon._replacement_forecast_live_cfg = lambda: monkey_cfg  # type: ignore[assignment]
         try:
             hours = forecast_live_daemon._replacement_forecast_publish_cron_hours()
         finally:
-            forecast_live_daemon._replacement_forecast_shadow_cfg = original  # type: ignore[assignment]
+            forecast_live_daemon._replacement_forecast_live_cfg = original  # type: ignore[assignment]
         ordered = sorted(hours)
         # Gaps between consecutive fire times on a 24h wraparound clock.
         gaps = [
@@ -1034,7 +1034,7 @@ def test_replacement_publish_cron_applies_release_lag(monkeypatch) -> None:
 
     monkeypatch.setattr(
         forecast_live_daemon,
-        "_replacement_forecast_shadow_cfg",
+        "_replacement_forecast_live_cfg",
         lambda: {"download_release_lag_hours": 9.0},
     )
     hours = forecast_live_daemon._replacement_forecast_publish_cron_hours()
@@ -1069,18 +1069,17 @@ def test_premature_cron_fire_cannot_request_a_guessed_cycle() -> None:
     assert explicit == datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)
 
     # The production resolver is the probe authority: it returns exactly the newest
-    # cycle whose BOTH legs the injected probes confirm, independent of any lag.
+    # cycle whose anchor probe confirms, independent of any lag.
     import src.data.replacement_forecast_production as production
     from src.data.replacement_cycle_availability import (
         newest_complete_cycle,
-        resolve_cycle_leg_availability,
+        resolve_anchor_cycle_availability,
     )
 
     published = {datetime(2026, 6, 10, 0, 0, tzinfo=timezone.utc),
                  datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)}
-    availability = resolve_cycle_leg_availability(
+    availability = resolve_anchor_cycle_availability(
         datetime(2026, 6, 10, 20, 10, tzinfo=timezone.utc),
-        probe_aifs=lambda c: c in published,
         probe_anchor=lambda c: c in published,
     )
     assert newest_complete_cycle(availability) == datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)

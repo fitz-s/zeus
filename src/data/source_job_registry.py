@@ -132,7 +132,7 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   misfire_grace_time=240,
                   notes="operator directive 2026-06-11: weather downloading lives in ITS OWN "
                         "daemon (data-ingest), decoupled from forecast-live/trading restarts. "
-                        "Probe-resolved per-leg raw-input fetch + bayes_precision_fusion extras; first fire "
+                        "Probe-resolved anchor raw-input fetch + bayes_precision_fusion extras; first fire "
                         "IMMEDIATE at boot (next_run_time=now), then every 5min."),
     SourceJobSpec("ingest_opendata_daily_mx2t6", "ingest_main", "live", "default", True,
                   source_id="ecmwf_open_data", callable_ref="_opendata_mx2t6_cycle", owner_gated=True,
@@ -211,13 +211,13 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
     # registry, so they must not enter the boot-assert expected set. Registered here for
     # the inventory mirror (--check) + frontier/singleton coverage only.
     SourceJobSpec("replacement_forecast_download", "forecast_live_daemon", "live", "default", False,
-                  source_ids=("ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km"),
+                  source_ids=("openmeteo_ecmwf_ifs_9km",),
                   callable_ref="_replacement_forecast_download_job",
                   misfire_grace_time=3600, family="forecast", registry_built=False,
-                  notes="probe-resolved AIFS+OM raw-input pre-fetch; cron at publish times; "
+                  notes="probe-resolved OpenMeteo anchor raw-input pre-fetch; cron at publish times; "
                         "runs on dedicated replacement_download executor lane"),
     SourceJobSpec("replacement_forecast_download_startup_catch_up", "forecast_live_daemon", "backfill", "default", False,
-                  source_ids=("ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km"),
+                  source_ids=("openmeteo_ecmwf_ifs_9km",),
                   callable_ref="_replacement_forecast_download_job",
                   dispatch_kind="startup", family="forecast", registry_built=False,
                   notes="one-shot date trigger 90s after boot; same download job as cron path"),
@@ -318,7 +318,7 @@ def live_producing_jobs() -> list[SourceJobSpec]:
 _ACKNOWLEDGED_SAFE_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {
     # ingest_main.ingest_replacement_availability_poll probes provider publication state and
     # triggers lightweight extras fetches; forecast_live_daemon.replacement_forecast_download
-    # does the heavy AIFS+OM raw-input pre-fetch.  Both touch openmeteo_ecmwf_ifs_9km as a
+    # does the OpenMeteo anchor raw-input pre-fetch.  Both touch openmeteo_ecmwf_ifs_9km as a
     # source, but they are complementary operations on a shared source — not a competing
     # authority conflict.  The poll runs in the data-ingest daemon (independent of trading
     # restarts); the download runs in the forecast-live daemon on a dedicated lane.  Verified

@@ -16,8 +16,8 @@ probes / bundle reader, printing one row per stage with PASS/WARN/FAIL + the exa
 reason, and finishes with the FIRST FAILING STAGE — the answer to "卡在哪里".
 
 Stages:
-   1 provider_probes      cycle availability per leg (AIFS index / anchor ladder)
-   2 raw_artifacts        anchor+AIFS journal rows for the newest cycle (age, transport)
+   1 provider_probes      OpenMeteo anchor cycle availability
+   2 raw_artifacts        anchor journal rows for the newest cycle (age, transport)
    3 instruments          raw_model_forecasts rows for the cycle (models present)
    4 posterior            freshest tradeable posterior (mode, q_lcb, cycle age, brand)
    5 readiness            readiness_state row (status, expiry, staleness brand expected)
@@ -68,25 +68,22 @@ class Walker:
         try:
             from src.data.replacement_cycle_availability import (
                 newest_complete_cycle,
-                probe_aifs_cycle_available,
                 probe_anchor_available_any,
-                resolve_cycle_leg_availability,
+                resolve_anchor_cycle_availability,
             )
 
-            availability = resolve_cycle_leg_availability(
+            availability = resolve_anchor_cycle_availability(
                 self.now,
-                probe_aifs=probe_aifs_cycle_available,
                 probe_anchor=probe_anchor_available_any,
             )
             newest = newest_complete_cycle(availability)
-            aifs = next((a.cycle for a in availability if a.aifs_available), None)
             anchor = next((a.cycle for a in availability if a.anchor_available), None)
             if newest is None:
                 self.add("1 provider_probes", "FAIL",
-                         f"no pair-complete cycle provable (aifs={aifs} anchor={anchor})")
+                         f"no anchor-complete cycle provable (anchor={anchor})")
             else:
                 self.add("1 provider_probes", "PASS",
-                         f"newest_complete={newest.isoformat()} aifs={aifs} anchor={anchor}")
+                         f"newest_complete={newest.isoformat()} anchor={anchor}")
             self.cycle = newest
         except Exception as exc:  # noqa: BLE001
             self.add("1 provider_probes", "FAIL", f"probe machinery error: {exc}")
@@ -99,10 +96,10 @@ class Walker:
             row = conn.execute(
                 """SELECT source_id, MAX(source_cycle_time) AS cyc, MAX(captured_at) AS cap
                    FROM raw_forecast_artifacts GROUP BY source_id
-                   HAVING source_id IN ('ecmwf_aifs_ens','openmeteo_ecmwf_ifs_9km')"""
+                   HAVING source_id IN ('openmeteo_ecmwf_ifs_9km')"""
             ).fetchall()
             legs = {r["source_id"]: (r["cyc"], r["cap"]) for r in row}
-            missing = {"ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km"} - set(legs)
+            missing = {"openmeteo_ecmwf_ifs_9km"} - set(legs)
             anchor_city = conn.execute(
                 """SELECT MAX(source_cycle_time) FROM raw_forecast_artifacts
                    WHERE source_id='openmeteo_ecmwf_ifs_9km'
@@ -119,16 +116,16 @@ class Walker:
                 self.add("2 raw_artifacts", "PASS", detail)
                 # PROBE-BLIND RECONCILIATION: stage 1 probes the PROVIDERS (network +
                 # optional ecmwf.opendata lib); an environment where the probe machinery
-                # is blind (lib missing / egress blocked) reports "no pair-complete
-                # cycle provable" even while capture already POSSESSES both legs.
+                # is blind (egress blocked) reports "no anchor-complete cycle
+                # provable" even while capture already POSSESSES the live anchor.
                 # Possession is the stronger evidence (authority order: artifacts >
-                # probes), so a stage-1 FAIL with both legs present downgrades to WARN
+                # probes), so a stage-1 FAIL with the anchor present downgrades to WARN
                 # and must not be the first-failing-stage verdict — that verdict misled
                 # a live diagnosis on 2026-06-11 (probes blind, data flowing, walker
                 # still said the funnel was stuck at stage 1).
                 for i, (stage, verdict, d) in enumerate(self.rows):
-                    if stage == "1 provider_probes" and verdict == "FAIL" and "no pair-complete cycle provable" in d:
-                        self.rows[i] = (stage, "WARN", d + " | DOWNGRADED: both legs possessed (stage 2)")
+                    if stage == "1 provider_probes" and verdict == "FAIL" and "no anchor-complete cycle provable" in d:
+                        self.rows[i] = (stage, "WARN", d + " | DOWNGRADED: anchor possessed (stage 2)")
                         if self.first_fail == stage:
                             self.first_fail = None
         finally:
@@ -171,7 +168,7 @@ class Walker:
                    FROM forecast_posteriors
                    WHERE city=? AND target_date=? AND temperature_metric=?
                      AND training_allowed=0
-                     AND trade_authority_status = 'LIVE_AUTHORITY'
+                     AND runtime_layer = 'live'
                      AND q_lcb_json IS NOT NULL
                    ORDER BY computed_at DESC LIMIT 1""",
                 (self.city, self.target_date, self.metric),

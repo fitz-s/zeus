@@ -874,6 +874,12 @@ def ensure_replacement_forecast_shadow_schema(conn: sqlite3.Connection) -> None:
         raise
 
 
+def ensure_replacement_forecast_live_schema(conn: sqlite3.Connection) -> None:
+    """Compatibility-safe live name for replacement forecast support tables."""
+
+    ensure_replacement_forecast_shadow_schema(conn)
+
+
 def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -> None:
     """Apply the Zeus World DB v2 schema to *conn*.
 

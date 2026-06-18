@@ -300,6 +300,17 @@ files:
     - src/ingest/harvester_truth_writer.py
     - src/state/uma_resolution_listener.py
     - scripts/etl_forecast_skill_from_forecasts.py
+  src/data/replacement_forecast_live_materialization_queue.py:
+    zone: K2_runtime
+    authority_role: replacement_live_materialization_queue
+    why: Live replacement forecast queue runner; drains live seed/request files into the materializer on the forecast DB using runtime_layer='live' semantics. Renamed from the old shadow queue so live production no longer imports a shadow-labeled implementation.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/data/replacement_forecast_production.py
+    - scripts/materialize_replacement_forecast_live.py
+    - tests/data/test_replacement_cycle_availability.py
   src/runtime/bankroll_provider.py:
     zone: K2_runtime
     authority_role: wallet_bankroll_provider
