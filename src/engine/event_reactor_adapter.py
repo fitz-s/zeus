@@ -1093,7 +1093,7 @@ def edli_source_truth_gate(event: OpportunityEvent) -> bool:
         # in src/events/reactor.py): the bundle the money path trades on is
         # chosen by the SERVING AUTHORITY keyed by (city, target_date, metric),
         # never pinned to this trigger event's run, and the adapter rejects
-        # honestly (REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED) when nothing
+        # honestly (REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED) when nothing
         # eligible is servable. Binding the event's own completeness label here
         # was the same serve-freshest rule re-implemented (wrongly) at a second
         # site: live 2026-06-11T18:20Z+ all six live-eligible cities' low
@@ -10920,7 +10920,7 @@ def _replacement_authority_probability_and_fdr_proof(
         temperature_metric=str(family.metric),
     )
     if readiness is None:
-        raise ValueError("REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING")
+        raise ValueError("REPLACEMENT_0_1_LIVE_READINESS_MISSING")
     bundle_result = read_replacement_forecast_bundle(
         conn,
         baseline_bundle=None,
@@ -10932,7 +10932,7 @@ def _replacement_authority_probability_and_fdr_proof(
         require_baseline_bundle=False,
     )
     if not bundle_result.ok or bundle_result.bundle is None:
-        raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED:{bundle_result.reason_code}")
+        raise ValueError(f"REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED:{bundle_result.reason_code}")
     replacement_bundle = bundle_result.bundle
     # DecisionProvenanceEnvelope (operator law 2026-06-11): record the SERVED bundle the moment it
     # is bound — BEFORE the q-mode / bounds gates below — so every rejection raised after the read
@@ -11003,7 +11003,7 @@ def _replacement_authority_probability_and_fdr_proof(
     # builder: it is reached after `_replacement_authority_enabled()` (TRADE_AUTHORITY flag)
     # ALONE. NOTE (operator directive 2026-06-08): the settlement-evidence promotion gate
     # `replacement_live_authority_evidence_gate` was REMOVED and NO LONGER gates this path
-    # (zero call-sites; flag-only LIVE_AUTHORITY — see replacement_forecast_runtime_policy).
+    # (zero call-sites; flag-only live — see replacement_forecast_runtime_policy).
     # The q_lcb it returns is stamped probability_authority="replacement_0_1" and sizes REAL
     # capital. So the missing-floor mode here is unconditionally live/authority/capital.
     # A missing floor input must therefore BLOCK (never degrade to the raw, overconfident
@@ -11020,7 +11020,7 @@ def _replacement_authority_probability_and_fdr_proof(
         condition_id = str(candidate.condition_id or "")
         bin_id = _candidate_replacement_bin_id(candidate, replacement_bundle)
         if not bin_id or bin_id not in q_map:
-            raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BIN_BINDING_MISSING:{condition_id}")
+            raise ValueError(f"REPLACEMENT_0_1_LIVE_BIN_BINDING_MISSING:{condition_id}")
         q_yes = min(max(float(q_map[bin_id]), 0.0), 1.0)
         yes_lcb = _replacement_yes_lcb_for_bin(
             replacement_bundle, bin_id=bin_id, q_yes=q_yes, settlement_floor_lcb=None

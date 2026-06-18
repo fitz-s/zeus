@@ -1635,7 +1635,6 @@ def _insert_posterior(
     bayes_precision_fusion_override = _replacement_bayes_precision_fusion_override(
         request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c, conn=conn
     )
-    result: OpenMeteoIfs9AifsSoftAnchorResearchResult | None = None
     target_date = _date_text(request.target_date)
     source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
     # C1-AVAIL-CLOCK (2026-06-16): the posterior's source_available_at is PROOF OF POSSESSION =
@@ -1660,27 +1659,9 @@ def _insert_posterior(
     available_at = max(_possession_candidates).isoformat()
     computed_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
     data_version = _data_version(metric)
-    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): the q SEED depends on whether a
-    # multi-model fused override is being attempted.
-    #   * Fused override PRESENT (the live posture): seed UNIFORM (max-entropy, honest, non-tradeable)
-    #     so that if BOTH the certified fused-q shape AND the fused-center-only Normal fail to build,
-    #     the row carries an honest uniform q — NEVER the cold 0.8-AIFS soft-anchor pull. The fused
-    #     Normal (or the fused-center-only Normal) overrides this seed on every healthy/degraded path.
-    #   * No fused override at all (legacy CAPTURE_MISSING — no current multi-model capture): seed the
-    #     AIFS soft-anchor q when present (the legacy member-vote shape), else uniform. This path is
-    #     already non-live-eligible by q_mode, and it does NOT introduce the cold soft-anchor as a
-    #     fused-path FALLBACK — it is the legacy shape for cells with no fused inputs.
     _n_bins_seed = len(request.bins) or 1
-    _uniform_seed = {b.bin_id: 1.0 / _n_bins_seed for b in request.bins}
-    if bayes_precision_fusion_override is not None:
-        q = dict(_uniform_seed)
-        q_shape = "uniform_placeholder_pending_fused"
-    elif result is not None:
-        q = {key: float(value) for key, value in result.posterior.probabilities.items()}
-        q_shape = "aifs_member_votes_soft_anchor"
-    else:
-        q = dict(_uniform_seed)
-        q_shape = "uniform_placeholder_pending_fused"
+    q = {b.bin_id: 1.0 / _n_bins_seed for b in request.bins}
+    q_shape = "uniform_placeholder_pending_fused"
     # FUSED-Q SHAPE (2026-06-09, flag-gated): build q DIRECTLY from N(mu*, sigma_pred) over the
     # SAME settlement bins, replacing the AIFS member-vote shape. The experiment showed the AIFS
     # shape assigns EXACTLY ZERO to the winning bin on 28% of settled cells (vote-support
@@ -2091,75 +2072,6 @@ def _insert_posterior(
                 )
             except Exception:
                 pass
-    # SOFT-ANCHOR Q_LCB/Q_UCB FALLBACK (2026-06-12; q_ucb added 2026-06-13) — PROMOTE the
-    # Wilson-over-AIFS-votes BOUNDS into the materializer so NO posterior is born with a NULL bound.
-    # Reached ONLY when the fused-center bootstrap did not produce a bound (q_lcb_map is None):
-    # flag-off, no BAYES_PRECISION_FUSION override (CAPTURE_MISSING — the persisted current capture
-    # was absent), predictive_sigma None, or a fused-q build failure. The bounds are the SAME
-    # estimator the live decision path computed at read time (single-authority law) — built from the
-    # AIFS member-vote probabilities the soft-anchor posterior already carries — now computed ONCE
-    # here with their OWN basis.
-    #
-    # Q_UCB ROOT FIX (2026-06-13): the soft-anchor path used to build ONLY the one-sided q_lcb and
-    # leave q_ucb NULL, so 100% of CAPTURE_MISSING rows (the entire q_ucb-less population on the
-    # 06-14 surface: 158/158, fingerprinted by replacement_q_mode=CAPTURE_MISSING +
-    # q_lcb_basis=wilson_aifs_member_votes) were born HALF-BOUNDED. A fused row never exists on this
-    # path (the fused inputs mu*/center_sigma are genuinely absent — no honest FUSED upper band can
-    # be built), so the operator's "input genuinely missing -> mark non-tradeable, do NOT serve a
-    # half-bound" rule governs: the row carries BOTH genuine Wilson bounds (the upper is the exact
-    # symmetric counterpart of the lower, same inputs/z) and STAYS non-tradeable by basis + q_mode.
-    # The bounds are built ATOMICALLY (both-or-neither): a half-bound is never written.
-    #
-    # FAIL-SOFT: any error leaves q_lcb_map AND q_ucb_map None (NULL written, status-quo Wilson
-    # read-time fallback) — never WORSE. The DISTINCT basis means the calibration credential reader
-    # does NOT treat this as the certified bootstrap basis, so a CAPTURE_MISSING / SOFT_ANCHOR row is
-    # STILL not live-eligible (correct: n=21<min_n=30 settled CAPTURE_MISSING cells → insufficient
-    # coverage to license).
-    # AIFS DROPPED (operator directive 2026-06-17): the Wilson-over-AIFS-member-votes carrier bounds
-    # exist ONLY when an AIFS soft-anchor result is present (they read its member-vote support). When
-    # AIFS is absent (result is None) there is no member-vote substrate, so the bounds stay NULL and
-    # the row is non-tradeable by basis — the correct honest posture for a fused-center-only shadow
-    # row (the live gate licenses only the certified fused bootstrap basis anyway).
-    #
-    # AIFS DROPPED FROM THE FUSED FALLBACK (operator directive 2026-06-17): the Wilson-over-AIFS-votes
-    # carrier bounds attach ONLY to the LEGACY no-fused-override path (bayes_precision_fusion_override
-    # is None — a genuine CAPTURE_MISSING cell with no multi-model inputs, where the AIFS member-vote
-    # support is the only honest bound substrate). On a FUSED path (override present) where the
-    # certified bootstrap did not run (fused-center-only / fused-q build failed), bounds stay NULL —
-    # we never decorate a fused-center row with cold-AIFS bounds. Non-tradeable either way.
-    if q_lcb_map is None and result is not None and bayes_precision_fusion_override is None:
-        try:
-            _aifs_probs = dict(result.aifs_probabilities.probabilities)
-            _member_count = float(len(result.aifs_probabilities.member_values_c)) or 51.0
-            _soft_lcb = _build_soft_anchor_wilson_lcb(
-                aifs_probabilities=_aifs_probs,
-                member_count=_member_count,
-                q_point=q,
-            )
-            _soft_ucb = _build_soft_anchor_wilson_ucb(
-                aifs_probabilities=_aifs_probs,
-                member_count=_member_count,
-                q_point=q,
-            )
-            # Atomic both-or-neither: only publish once BOTH bounds built (q_ucb is the genuine
-            # symmetric Wilson upper, never a half-bound). The bundle reader's both-bounds
-            # tradeable-grade predicate then sees a consistent carrier shape on every row.
-            q_lcb_map = _soft_lcb
-            q_ucb_map = _soft_ucb
-            q_lcb_basis = _QLCB_SOFT_ANCHOR_BASIS
-        except Exception as _wexc:
-            q_lcb_map = None
-            q_ucb_map = None
-            q_lcb_basis = None
-            try:
-                import logging  # noqa: PLC0415
-                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                    "replacement_0_1 soft-anchor Wilson q_lcb/q_ucb fallback skipped "
-                    "(fail-soft to NULL bounds, read-time Wilson unchanged): %s",
-                    _wexc,
-                )
-            except Exception:
-                pass
     bin_topology_payload = _bin_topology_payload(request.bins, settlement_step_c=float(request.settlement_step_c))
     bin_topology_hash = _json_hash(bin_topology_payload)
     dependency_payload = {
@@ -2211,15 +2123,15 @@ def _insert_posterior(
     # CYCLE-PHASE PROVENANCE. 00/06/12/18Z are live runtime cycles; this tag is provenance only,
     # never a live/experiment switch.
     cycle_phase = classify_cycle_phase(_to_utc(request.source_cycle_time, field_name="source_cycle_time"))
-    live_authority = _replacement_is_live_authority(
+    live_layer = _replacement_is_live_layer(
         replacement_q_mode=replacement_q_mode,
         q_lcb_map=q_lcb_map,
         q_ucb_map=q_ucb_map,
         q_lcb_basis=q_lcb_basis,
     )
-    if not live_authority:
+    if not live_layer:
         return None
-    runtime_layer = LIVE_STATUS
+    runtime_layer = LIVE_RUNTIME_LAYER
     if bayes_precision_fusion_override is not None:
         _prov_anchor_value_c = float(bayes_precision_fusion_override.anchor_value_c)
     else:
