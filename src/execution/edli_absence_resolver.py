@@ -232,11 +232,17 @@ def _pre_submit_orphan_proofs(conn: sqlite3.Connection, aggregate_id: str | None
     for row in rows:
         command = _latest_payload(conn, str(row["aggregate_id"]), "ExecutionCommandCreated")
         plan = _latest_payload(conn, str(row["aggregate_id"]), "SubmitPlanBuilt")
+        legacy_failure_reason = row["rejection_reason"]
         proof = {
             "schema_version": 1,
             "source": "local_edli_event_ledger",
             "recovery_reason": PRE_SUBMIT_ORPHAN_REASON,
-            "legacy_failure_reason": str(row["rejection_reason"]),
+            "orphan_class": (
+                "legacy_certificate_build_failure"
+                if legacy_failure_reason
+                else "pre_submit_command_created_without_side_effect"
+            ),
+            "legacy_failure_reason": str(legacy_failure_reason or ""),
             "observed_at": datetime.now(timezone.utc).isoformat(),
             "aggregate_id": str(row["aggregate_id"]),
             "event_id": str(row["event_id"]),
@@ -271,11 +277,24 @@ JOIN edli_live_cap_usage usage
   ON usage.event_id = proj.event_id
  AND usage.final_intent_id = proj.final_intent_id
  AND usage.reservation_status = 'RESERVED'
-JOIN no_trade_regret_events regret
+LEFT JOIN no_trade_regret_events regret
   ON regret.event_id = proj.event_id
  AND regret.rejection_reason LIKE ?
 WHERE proj.current_state = 'EXECUTION_COMMAND_CREATED'
   AND COALESCE(proj.pending_reconcile, 0) = 0
+  AND NOT EXISTS (
+      SELECT 1 FROM venue_commands command
+      WHERE command.command_id = usage.execution_command_id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM venue_command_events command_event
+      WHERE command_event.command_id = usage.execution_command_id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM collateral_reservations collateral
+      WHERE collateral.command_id = usage.execution_command_id
+        AND collateral.released_at IS NULL
+  )
 """
 
 _PRE_SUBMIT_ORPHAN_SQL_TAIL = """
@@ -289,7 +308,8 @@ _PRE_SUBMIT_ORPHAN_SQL_TAIL = """
       WHERE terminal.aggregate_id = proj.aggregate_id
         AND terminal.event_type IN (
             'VenueSubmitAcknowledged', 'SubmitRejected', 'SubmitUnknown',
-            'Reconciled', 'CapTransitioned'
+            'Reconciled', 'CapTransitioned', 'UserOrderObserved',
+            'UserTradeObserved'
         )
   )
 ORDER BY usage.created_at ASC

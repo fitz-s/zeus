@@ -260,6 +260,188 @@ def test_pre_submit_orphan_resolver_releases_legacy_certificate_build_orphan(tmp
         check.close()
 
 
+def test_pre_submit_orphan_resolver_releases_command_created_without_side_effect(tmp_path, monkeypatch):
+    seeded = _seed_pre_submit_orphan(tmp_path / "world.db", include_regret=False)
+
+    monkeypatch.setattr(resolver_mod, "get_world_connection_read_only", lambda: _connect(seeded["db_path"]))
+    monkeypatch.setattr(resolver_mod, "get_world_connection", lambda **kw: _connect(seeded["db_path"]))
+    monkeypatch.setattr(resolver_mod, "world_write_lock", _no_world_lock)
+
+    rc = resolver_mod.resolve_pre_submit_orphans(aggregate_id=None, apply=True, log=lambda msg: None)
+
+    assert rc == 0
+    check = _connect(seeded["db_path"])
+    try:
+        assert check.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
+            (seeded["usage_id"],),
+        ).fetchone()["reservation_status"] == "RELEASED"
+        rejected = check.execute(
+            """
+            SELECT payload_json
+            FROM edli_live_order_events
+            WHERE aggregate_id = ? AND event_type = 'SubmitRejected'
+            """,
+            (seeded["aggregate_id"],),
+        ).fetchone()
+        assert rejected is not None
+        assert '"orphan_class":"pre_submit_command_created_without_side_effect"' in rejected["payload_json"]
+    finally:
+        check.close()
+
+
+def test_pre_submit_orphan_resolver_refuses_when_venue_command_exists(tmp_path, monkeypatch):
+    seeded = _seed_pre_submit_orphan(tmp_path / "world.db", include_regret=False)
+    conn = _connect(seeded["db_path"])
+    try:
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                snapshot_id, envelope_id,
+                command_id, position_id, decision_id, idempotency_key, intent_kind,
+                market_id, token_id, side, size, price, state, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "snapshot-1",
+                "envelope-1",
+                seeded["execution_command_id"],
+                "position-1",
+                "decision-1",
+                "idem-1",
+                "ENTRY",
+                "market-1",
+                "token-yes",
+                "BUY",
+                5.0,
+                0.40,
+                "CREATED",
+                NOW.isoformat(),
+                NOW.isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(resolver_mod, "get_world_connection_read_only", lambda: _connect(seeded["db_path"]))
+    monkeypatch.setattr(resolver_mod, "get_world_connection", lambda **kw: _connect(seeded["db_path"]))
+    monkeypatch.setattr(resolver_mod, "world_write_lock", _no_world_lock)
+
+    rc = resolver_mod.resolve_pre_submit_orphans(aggregate_id=None, apply=True, log=lambda msg: None)
+
+    assert rc == 1
+    check = _connect(seeded["db_path"])
+    try:
+        assert check.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
+            (seeded["usage_id"],),
+        ).fetchone()["reservation_status"] == "RESERVED"
+    finally:
+        check.close()
+
+
+def _seed_pre_submit_orphan(db_path, *, include_regret: bool) -> dict[str, str]:
+    conn = _connect(db_path)
+    try:
+        init_schema(conn)
+        ledger = LiveOrderAggregateLedger(conn)
+        cap_ledger = LiveCapLedger(conn)
+        event_id = "event-pre-submit-orphan"
+        final_intent_id = "intent-pre-submit-orphan"
+        aggregate_id = f"{event_id}:{final_intent_id}"
+        execution_command_id = "cmd-pre-submit-orphan"
+        ledger.append_event(
+            aggregate_id=aggregate_id,
+            event_type="DecisionProofAccepted",
+            payload={"event_id": event_id, "final_intent_id": final_intent_id},
+            occurred_at=NOW,
+            source_authority="decision_kernel",
+        )
+        ledger.append_event(
+            aggregate_id=aggregate_id,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-1",
+                "token_id": "token-yes",
+                "direction": "buy_no",
+                "limit_price": 0.44,
+                "size": 25,
+            },
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+        pre_submit = ledger.append_event(
+            aggregate_id=aggregate_id,
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(event_id=event_id, final_intent_id=final_intent_id),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+        reservation = cap_ledger.reserve(
+            event_id=event_id,
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=11.0,
+            final_intent_id=final_intent_id,
+            execution_command_id=execution_command_id,
+        )
+        live_cap = ledger.append_event(
+            aggregate_id=aggregate_id,
+            event_type="LiveCapReserved",
+            payload={
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "usage_id": reservation.usage_id,
+            },
+            occurred_at=NOW,
+            source_authority="live_cap_ledger",
+        )
+        ledger.append_event(
+            aggregate_id=aggregate_id,
+            event_type="ExecutionCommandCreated",
+            payload={
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "execution_command_id": execution_command_id,
+                "pre_submit_event_hash": pre_submit.event_hash,
+                "live_cap_reserved_event_hash": live_cap.event_hash,
+            },
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+        if include_regret:
+            conn.execute(
+                """
+                INSERT INTO no_trade_regret_events (
+                    regret_event_id, event_id, rejection_stage, rejection_reason,
+                    regret_bucket, created_at, schema_version
+                ) VALUES (?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    "regret-1",
+                    event_id,
+                    "EXECUTOR_EXPRESSIBILITY",
+                    "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:SubmitRejected requires preceding VenueSubmitAttempted",
+                    "UNKNOWN_REVIEW_REQUIRED",
+                    NOW.isoformat(),
+                ),
+            )
+        conn.commit()
+        return {
+            "db_path": str(db_path),
+            "aggregate_id": aggregate_id,
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "execution_command_id": execution_command_id,
+            "usage_id": reservation.usage_id,
+        }
+    finally:
+        conn.close()
+
+
 def _connect(path):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
