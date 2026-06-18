@@ -1492,11 +1492,13 @@ def _reprice_decision_from_executable_snapshot(
 
     selected_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
     final_order_type = selected_order_type
-    taker_quality_required = allow_taker_upgrade or selected_order_type in {"FOK", "FAK"}
+    immediate_order_requested = selected_order_type in {"FOK", "FAK"}
+    taker_quality_required = allow_taker_upgrade or immediate_order_requested
     taker_order_type_upgraded = False
     taker_quality_proof = None
     taker_quality_passed = False
-    if final_best_ask is not None and taker_quality_required:
+    taker_candidate_present = final_best_ask is not None or immediate_order_requested
+    if taker_candidate_present and taker_quality_required:
         taker_edge_dec = Decimal(str(best_ask_fee_adjusted_edge))
         taker_price_dec = Decimal(str(corrected_candidate_expected_fill or final_price))
         taker_notional_dec = Decimal(str(corrected_candidate_size))
@@ -1589,7 +1591,9 @@ def _reprice_decision_from_executable_snapshot(
     if final_best_ask is not None and taker_quality_passed:
         final_order_type = "FOK" if final_order_type in {"GTC", "GTD", "FOK"} else "FAK"
         taker_order_type_upgraded = selected_order_type in {"GTC", "GTD"}
-    elif final_best_ask is not None and taker_quality_required:
+    elif taker_quality_required and (
+        final_best_ask is not None or final_order_type in {"FOK", "FAK"}
+    ):
         if final_order_type in {"FOK", "FAK"}:
             final_order_type = "GTC"
         final_best_ask = None

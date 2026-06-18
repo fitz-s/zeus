@@ -5217,6 +5217,67 @@ def test_executable_snapshot_repricing_falls_back_to_maker_when_taker_quality_fa
     assert float(decision.final_execution_intent.final_limit_price) < 0.41
 
 
+def test_executable_snapshot_repricing_fok_without_taker_edge_becomes_maker(tmp_path):
+    """RELATIONSHIP: immediate order selection cannot bypass taker-quality proof."""
+    conn = get_connection(tmp_path / "snapshot-reprice-fok-no-taker-edge.db")
+    init_schema(conn)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="snap-reprice-fok-no-taker-edge",
+        selected_outcome_token_id="yes1",
+        outcome_label="YES",
+        yes_token_id="yes1",
+        no_token_id="no1",
+        top_bid="0.40",
+        top_ask="0.49",
+        fee_details={"feeRate": "0.03", "source": "test_snapshot_taker_fee"},
+    )
+    edge = _edge()
+    decision = EdgeDecision(
+        should_trade=True,
+        edge=edge,
+        tokens={"token_id": "yes1", "no_token_id": "no1"},
+        size_usd=5.0,
+        applied_validations=[],
+        edge_context=types.SimpleNamespace(p_posterior=edge.p_posterior),
+        decision_snapshot_id="decision-snap-fok-no-taker-edge",
+        sizing_bankroll=400.0,
+        kelly_multiplier_used=0.25,
+        execution_fee_rate=0.03,
+    )
+
+    best_ask = cycle_runtime._reprice_decision_from_executable_snapshot(
+        conn,
+        decision,
+        {"executable_snapshot_id": "snap-reprice-fok-no-taker-edge"},
+        {
+            "order_type": "FOK",
+            "allow_taker_upgrade": True,
+            "cancel_after": datetime(2026, 4, 3, 1, tzinfo=timezone.utc),
+            "resolution_window": "2026-04-03",
+            "correlation_key": "NYC:2026-04-03",
+            "passive_fill_probability": "0.40",
+        },
+    )
+    conn.close()
+
+    reprice = decision.tokens["executable_snapshot_reprice"]
+    shadow = reprice["corrected_pricing_shadow"]
+    assert best_ask is None
+    assert reprice["selected_order_type"] == "FOK"
+    assert reprice["final_order_type"] == "GTC"
+    assert reprice["taker_order_type_upgraded"] is False
+    assert reprice["taker_quality_proof"]["passed"] is False
+    assert float(reprice["taker_quality_proof"]["taker_fee_adjusted_edge"]) < float(
+        reprice["taker_quality_proof"]["min_taker_fee_adjusted_edge"]
+    )
+    assert shadow["order_policy"] == "post_only_passive_limit"
+    assert shadow["live_submit_authority"] is True
+    assert decision.final_execution_intent.order_type == "GTC"
+    assert decision.final_execution_intent.post_only is True
+    assert decision.final_execution_intent.taker_quality_proof is not None
+
+
 def test_executable_snapshot_repricing_keeps_low_notional_marketable_buy_passive(tmp_path):
     """RELATIONSHIP: venue marketability floor -> submit-safe order semantics.
 
