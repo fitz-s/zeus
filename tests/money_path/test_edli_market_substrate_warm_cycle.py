@@ -189,6 +189,28 @@ def test_warm_lane_money_risk_priority_stays_ahead_of_pending_rotation():
     assert "ordinary_families[start_offset:] + ordinary_families[:start_offset]" in src
 
 
+def test_continuous_redecision_confirms_money_path_before_emit():
+    """Continuous redecision must not enqueue from an unconfirmed first-pass screen.
+
+    The first screen only identifies candidate families to refresh. The second
+    screen, after the explicit money-path substrate refresh, is the one allowed
+    to mutate acted_state and emit EDLI_REDECISION_PENDING.
+    """
+
+    screen_src = inspect.getsource(main_module._edli_continuous_redecision_screen_cycle)
+    confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+
+    assert "probe_acted_state = dict(_edli_redecision_acted_state)" in screen_src
+    assert "acted_state=probe_acted_state" in screen_src
+    assert "_edli_refresh_continuous_money_path_families(" in screen_src
+    assert "skipping emit this tick rather than queueing stale redecision" in screen_src
+    assert "confirmed_entry_scope = set(family_keys)" in screen_src
+    assert "family_keys &= confirmed_entry_scope" in screen_src
+    assert "rest_pull_families &= confirmed_rest_scope" in screen_src
+    assert "include_pending_families=False" in confirm_src
+    assert "extra_priority_families=clean_families" in confirm_src
+
+
 def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatch):
     """Late topology selection must leave both /books prefetch and capture time."""
 

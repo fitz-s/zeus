@@ -35,7 +35,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 # Live-hang diagnostics (2026-05-31): SIGUSR1 dumps ALL thread stacks to stderr
@@ -3577,6 +3577,8 @@ def _refresh_pending_family_snapshots(
     *,
     consumer_name: str = "edli_reactor_v1",
     now_utc: datetime | None = None,
+    extra_priority_families: Iterable[tuple[str, str, str]] | None = None,
+    include_pending_families: bool = True,
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
 
@@ -3613,13 +3615,16 @@ def _refresh_pending_family_snapshots(
     now_iso = now_utc.isoformat()
 
     # Step 1: Collect distinct (city, target_date, metric) for pending events.
-    try:
-        pending_rows = _pending_family_rows_for_refresh(
-            world_conn, consumer_name=consumer_name
-        )
-    except Exception as exc:
-        logger.warning("refresh_pending_family_snapshots: pending-event query failed: %s", exc)
-        return {"status": "error", "reason": str(exc)}
+    if include_pending_families:
+        try:
+            pending_rows = _pending_family_rows_for_refresh(
+                world_conn, consumer_name=consumer_name
+            )
+        except Exception as exc:
+            logger.warning("refresh_pending_family_snapshots: pending-event query failed: %s", exc)
+            return {"status": "error", "reason": str(exc)}
+    else:
+        pending_rows = []
 
     from src.config import cities_by_name as _refresh_cities_by_name
 
@@ -3686,7 +3691,12 @@ def _refresh_pending_family_snapshots(
     # starve active risk.
     priority_families: list[tuple[str, str, str]] = []
     priority_keys: set[tuple[str, str, str]] = set()
-    for family in list(open_rest_priority_families) + list(held_position_priority_families):
+    explicit_priority_families = list(extra_priority_families or ())
+    for family in (
+        explicit_priority_families
+        + list(open_rest_priority_families)
+        + list(held_position_priority_families)
+    ):
         key = _refresh_family_key(*family)
         if key and key not in priority_keys:
             priority_families.append(family)
@@ -3701,6 +3711,8 @@ def _refresh_pending_family_snapshots(
             "status": "no_pending_open_rest_or_held_families",
             "open_rest_priority_families": 0,
             "held_position_priority_families": 0,
+            "explicit_priority_families": 0,
+            "include_pending_families": bool(include_pending_families),
         }
 
     # FUNNEL-STARVATION FIX (2026-06-09): rotate the per-cycle starting offset so
@@ -3975,6 +3987,8 @@ def _refresh_pending_family_snapshots(
             return {
                 "status": "all_fresh",
                 "families_checked": len(families),
+                "explicit_priority_families": len(explicit_priority_families),
+                "include_pending_families": bool(include_pending_families),
                 "open_rest_priority_families": len(open_rest_priority_families),
                 "held_position_priority_families": len(held_position_priority_families),
                 "fresh_skipped": fresh_skipped,
@@ -4374,6 +4388,8 @@ def _refresh_pending_family_snapshots(
             return {
                 "status": "all_fresh",
                 "families_checked": len(families),
+                "explicit_priority_families": len(explicit_priority_families),
+                "include_pending_families": bool(include_pending_families),
                 "open_rest_priority_families": len(open_rest_priority_families),
                 "held_position_priority_families": len(held_position_priority_families),
                 "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
@@ -4418,6 +4434,8 @@ def _refresh_pending_family_snapshots(
     result = {
         "status": "refreshed",
         "families_checked": len(families),
+        "explicit_priority_families": len(explicit_priority_families),
+        "include_pending_families": bool(include_pending_families),
         "open_rest_priority_families": len(open_rest_priority_families),
         "held_position_priority_families": len(held_position_priority_families),
         "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
@@ -7065,12 +7083,13 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         trade_ro = get_trade_connection_read_only()
         try:
             beliefs = _all_latest_beliefs(world_ro)
+            probe_acted_state = dict(_edli_redecision_acted_state)
             redecisions = screen_entry_redecisions(
                 world_ro,
                 trade_ro,
                 decision_time=received_at,
                 min_edge=min_edge,
-                acted_state=_edli_redecision_acted_state,
+                acted_state=probe_acted_state,
                 beliefs=beliefs,
             )
             try:
@@ -7128,6 +7147,96 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             decision_time=now,
         )
         all_families = set(family_keys) | rest_pull_families
+        confirmed_entry_scope = set(family_keys)
+        confirmed_rest_scope = set(rest_pull_families)
+        confirm_families = set(all_families) | set(held_families)
+        confirm_refresh_summary: dict = {}
+        if confirm_families:
+            confirm_refresh_summary = _edli_refresh_continuous_money_path_families(
+                confirm_families,
+                now_utc=now,
+            )
+            confirm_status = str(confirm_refresh_summary.get("status") or "")
+            if confirm_status == "skipped_lock_busy" or confirm_status.startswith("error"):
+                logger.info(
+                    "edli_redecision_screen: confirmation refresh not available; "
+                    "skipping emit this tick rather than queueing stale redecision "
+                    "families=%d status=%s summary=%r",
+                    len(confirm_families),
+                    confirm_status,
+                    confirm_refresh_summary,
+                )
+                return
+
+            # Re-run the screen against the freshly refreshed money-path
+            # substrate. The initial pass only chooses the confirmation scope;
+            # this second pass is the value authority for emitted redecision rows.
+            world_ro = get_world_connection_read_only()
+            trade_ro = get_trade_connection_read_only()
+            try:
+                beliefs = _all_latest_beliefs(world_ro)
+                redecisions = screen_entry_redecisions(
+                    world_ro,
+                    trade_ro,
+                    decision_time=received_at,
+                    min_edge=min_edge,
+                    acted_state=_edli_redecision_acted_state,
+                    beliefs=beliefs,
+                )
+                try:
+                    forecasts_filter_ro = get_forecasts_connection_read_only()
+                    try:
+                        entry_redecisions = filter_redecisions_with_spine_members(
+                            forecasts_filter_ro,
+                            redecisions,
+                            beliefs=beliefs,
+                            decision_time=received_at,
+                        )
+                    finally:
+                        forecasts_filter_ro.close()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "edli_redecision_screen: post-confirm spine availability read failed; "
+                        "entry redecisions not admitted this tick: %r",
+                        exc,
+                    )
+                    entry_redecisions = []
+                raw_entry_family_keys = screened_family_keys(world_ro, entry_redecisions, beliefs=beliefs)
+                open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)
+                rest_pulls = screen_resting_orders(
+                    world_ro,
+                    trade_ro,
+                    open_rests=open_rests,
+                    decision_time=received_at,
+                )
+            finally:
+                try:
+                    world_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    trade_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            rest_pull_families = set()
+            if rest_pulls:
+                by_family = {
+                    b.family_id: (b.city, b.target_date, b.metric) for b in beliefs
+                }
+                for rest, _decision in rest_pulls:
+                    key = by_family.get(rest.family_id)
+                    if key is not None and all(key):
+                        rest_pull_families.add(key)
+            rest_pull_families &= confirmed_rest_scope
+            held_families = _edli_current_held_position_family_keys()
+            family_keys = _edli_entry_redecision_family_keys(
+                raw_entry_family_keys,
+                held_families,
+                decision_time=now,
+            )
+            family_keys &= confirmed_entry_scope
+            all_families = set(family_keys) | rest_pull_families
         expired_unadmitted = 0
         if not all_families:
             from src.state.db import world_write_mutex as _world_write_mutex
@@ -7253,6 +7362,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             len(set(all_families) & pending_families),
             len(emitted), cancelled, expired_unadmitted,
         )
+        if confirm_refresh_summary:
+            logger.info(
+                "edli_redecision_screen: confirmation_refresh_summary=%r",
+                confirm_refresh_summary,
+            )
     finally:
         _edli_redecision_screen_lock.release()
 
@@ -7596,6 +7710,75 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
         if all(key):
             out.add(key)
     return out
+
+
+def _edli_refresh_continuous_money_path_families(
+    families: set[tuple[str, str, str]],
+    *,
+    now_utc: datetime,
+) -> dict:
+    """Refresh only current continuous-money-path families before redecision emit.
+
+    This is not the broad pending-event warmer. It exists so continuous
+    redecision confirms fresh executable prices for families that already have
+    cheap-screen value, a live rest needing reprice, or chain-confirmed exposure.
+    If the shared substrate lock is busy, the caller must skip emit this tick
+    rather than queueing decisions from stale prices.
+    """
+
+    clean_families = {
+        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        for city, target_date, metric in families or set()
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
+    if not clean_families:
+        return {"status": "no_families", "families_requested": 0}
+    if not _market_substrate_refresh_lock.acquire(blocking=False):
+        return {
+            "status": "skipped_lock_busy",
+            "families_requested": len(clean_families),
+        }
+    from src.state.db import (
+        ZEUS_FORECASTS_DB_PATH,
+        get_forecasts_connection_read_only,
+        get_world_connection,
+    )
+
+    world = get_world_connection()
+    forecasts_ro = get_forecasts_connection_read_only()
+    try:
+        try:
+            attached = {row[1] for row in world.execute("PRAGMA database_list").fetchall()}
+            if "forecasts" not in attached:
+                world.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "edli_redecision_screen: confirm-refresh ATTACH forecasts failed (non-fatal): %r",
+                exc,
+            )
+        return _refresh_pending_family_snapshots(
+            world,
+            forecasts_ro,
+            consumer_name="edli_redecision_confirm",
+            now_utc=now_utc,
+            extra_priority_families=clean_families,
+            include_pending_families=False,
+        )
+    finally:
+        try:
+            forecasts_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            world.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _market_substrate_refresh_lock.release()
+        except RuntimeError:
+            pass
 
 
 def _edli_reemittable_forecast_family_keys(
