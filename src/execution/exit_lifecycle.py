@@ -1063,15 +1063,23 @@ def _mark_exit_dust_hold(
     conn: sqlite3.Connection | None = None,
 ) -> None:
     """Hold a non-executable dust exit to settlement instead of retrying."""
+    normalized_error = (error or "below_min_order_size")[:500]
+    already_held = (
+        str(getattr(position, "exit_state", "") or "") == "backoff_exhausted"
+        and str(getattr(position, "exit_reason", "") or "") == str(reason or "")
+    )
     _mark_pending_exit(position)
     position.exit_state = "backoff_exhausted"
     position.next_exit_retry_at = ""
-    position.last_exit_error = (error or "below_min_order_size")[:500]
+    position.exit_reason = reason
+    position.last_exit_error = normalized_error
+    if already_held:
+        return
     _dual_write_canonical_pending_exit_if_available(
         conn,
         position,
         reason=reason,
-        error=error or "below_min_order_size",
+        error=normalized_error,
         event_type="EXIT_ORDER_REJECTED",
     )
     logger.warning(

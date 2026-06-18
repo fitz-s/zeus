@@ -269,6 +269,34 @@ class TestChainTruthRetryOnPositiveBalance:
         assert "chain_balance_shares=0.01" in pos.last_exit_error
         assert "chain_balance=10000" not in pos.last_exit_error
 
+    def test_raw_ctf_dust_balance_is_idempotent_when_already_held(self, monkeypatch):
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        pos = _make_position(
+            trade_id="london-dust-repeat-test",
+            token_id=_ASSET_ID_LONDON,
+            condition_id=_CONDITION_ID_LONDON,
+            city="London",
+            shares=5.06,
+            exit_state="backoff_exhausted",
+            exit_reason="EXIT_CHAIN_DUST_STILL_HELD",
+            exit_retry_count=7,
+            last_exit_error="",
+        )
+        portfolio = _make_portfolio(pos)
+
+        result = handle_exit_pending_missing(
+            portfolio,
+            pos,
+            conn=None,
+            rpc_call=_rpc_returning(10_000),
+        )
+
+        assert result["action"] == "dust_hold"
+        assert pos.exit_state == "backoff_exhausted"
+        assert pos.exit_retry_count == 7
+        assert pos.next_exit_retry_at == ""
+        assert pos.last_exit_error.startswith("chain_balance_units=10000;")
+
 
 # ---------------------------------------------------------------------------
 # Antibody 3: RPC failure → action == ignore (fail-open, no destructive action)
