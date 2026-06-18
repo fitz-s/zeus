@@ -742,6 +742,14 @@ def evaluate_edli_stage_readiness(
 
     if reasons:
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_FAIL, live_entries_allowed=False, reasons=tuple(reasons))
+    if stage == "edli_submit_disabled_bridge":
+        return EdliStageReadiness(
+            stage=stage,
+            status=EDLI_STAGE_PASS,
+            live_entries_allowed=False,
+            submit_allowed=False,
+            scaleout_allowed=False,
+        )
     return EdliStageReadiness(
         stage=stage,
         status=EDLI_STAGE_PASS,

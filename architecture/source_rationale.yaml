@@ -168,6 +168,14 @@ providers:
       Compares Polymarket market resolution URLs against config/cities.json::wu_station;
       writes alerts when they diverge. Operator-only tooling — not on any live daemon
       hot-path and never a forecast/settlement/calibration source.
+  price_channel:
+    role: venue_clob_fact_stream
+    client: src/ingest/price_channel_ingest.py
+    why: >
+      P3 live price/user channel ingest lane for Polymarket CLOB/user-channel
+      facts. Produces execution_feasibility_evidence and durable fill bridge
+      rows for the order daemon to read; it is venue fact input only, not a
+      forecast, settlement, or calibration authority.
 package_defaults:
   src/contracts:
     zone: K0_frozen_kernel
