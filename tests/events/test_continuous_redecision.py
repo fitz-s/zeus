@@ -467,6 +467,99 @@ def test_recent_full_economics_rejections_skip_impossible_q_lcb_rows():
     assert rejections == {}
 
 
+def test_execution_quality_rejection_cools_entry_until_economics_improve():
+    conn = _mem_world()
+    label = "Will the highest temperature in Shenzhen be 35°C on June 19?"
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_shenzhen_hash",
+        city="Shenzhen",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        snapshot_id="snap-shenzhen",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.12],
+        q_lcb_yes_vec=[0.08],
+        q_lcb_no_vec=[0.867],
+        recorded_at="2026-06-17T22:32:00+00:00",
+    )
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            rejection_stage TEXT,
+            rejection_reason TEXT,
+            c_fee_adjusted REAL,
+            q_live REAL,
+            q_lcb_5pct REAL,
+            trade_score REAL,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            family_id, city, target_date, metric, bin_label, direction,
+            rejection_stage, rejection_reason, c_fee_adjusted, q_live,
+            q_lcb_5pct, trade_score, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "edli_family_shenzhen_hash",
+            "Shenzhen",
+            "2026-06-19",
+            "high",
+            label,
+            "buy_no",
+            "EXECUTION_RECEIPT",
+            "TAKER_QUALITY_PROOF_NOT_PASSED:edge=0.01:incremental_profit=0:confidence=0.99",
+            0.75,
+            0.869,
+            0.867,
+            0.116,
+            "2026-06-17T22:31:00+00:00",
+        ),
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+    stable_key = ("Shenzhen", "2026-06-19", "high", label, "buy_no")
+    assert stable_key in rejections
+    same_economics = {
+        ("edli_family_shenzhen_hash", label, "buy_no"): cr.PriceQuote(
+            price=0.74,
+            freshness_deadline="2026-06-17T23:00:00+00:00",
+        ),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-17T22:32:30+00:00",
+        price_lookup=same_economics,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejections,
+    ) == []
+
+    improved_price = {
+        ("edli_family_shenzhen_hash", label, "buy_no"): cr.PriceQuote(
+            price=0.70,
+            freshness_deadline="2026-06-17T23:00:00+00:00",
+        ),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-17T22:32:30+00:00",
+        price_lookup=improved_price,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejections,
+    )
+
+
 def test_entry_screen_blocks_fdr_refuted_candidate_despite_positive_trade_score():
     conn = _mem_world()
     label = "Will the lowest temperature in Paris be 22°C on June 19?"

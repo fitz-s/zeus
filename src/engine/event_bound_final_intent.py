@@ -290,6 +290,9 @@ def _final_execution_intent_from_payload(final_payload: dict):
         correlation_key=str(final_payload["final_intent_id"]),
         decision_source_context=decision_source_context,
         passive_maker_context=passive_maker_context,
+        taker_quality_proof=(
+            final_payload.get("taker_quality_proof") if is_taker else None
+        ),
     )
 
 

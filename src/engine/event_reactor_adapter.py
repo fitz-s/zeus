@@ -4038,6 +4038,96 @@ def _validate_final_order_mode_or_abort(
     return _proof
 
 
+def _build_event_bound_taker_quality_proof(
+    *,
+    actionable_payload: Mapping[str, Any],
+    order_mode: str,
+    fresh_best_bid: float | None,
+    fresh_best_ask: float | None,
+) -> dict[str, object] | None:
+    """Build the executor-required taker proof for event-bound final intents."""
+
+    if str(order_mode or "").strip().upper() != "TAKER":
+        return None
+    direction = str(actionable_payload.get("direction") or "")
+    touch = fresh_best_ask if direction.startswith("buy_") else fresh_best_bid
+    q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
+    q_live = _optional_float(actionable_payload.get("q_live"))
+    notional = _optional_float(
+        actionable_payload.get("live_cap_reserved_notional_usd")
+        or actionable_payload.get("kelly_size_usd")
+    )
+    if touch is None or q_lcb is None or notional is None:
+        return {
+            "schema_version": 1,
+            "passed": False,
+            "reason": "missing_taker_quality_inputs",
+            "model_confidence": "0",
+            "taker_fee_adjusted_edge": "0",
+            "taker_expected_profit_usd": "0",
+            "maker_expected_profit_usd": "0",
+            "incremental_expected_profit_usd": "0",
+        }
+    touch_dec = Decimal(str(touch))
+    q_lcb_dec = Decimal(str(q_lcb))
+    notional_dec = Decimal(str(max(float(notional), 0.0)))
+    fee_dec = Decimal("0.05") * touch_dec * (Decimal("1") - touch_dec)
+    taker_edge_dec = q_lcb_dec - touch_dec - fee_dec
+    taker_expected_profit_usd = (
+        max(Decimal("0"), taker_edge_dec)
+        * notional_dec
+        / max(touch_dec, Decimal("0.000001"))
+    )
+
+    maker_limit = _optional_float(actionable_payload.get("proof_maker_limit_price"))
+    proof_ev_maker = _optional_float(actionable_payload.get("proof_ev_maker"))
+    maker_expected_profit_usd = Decimal("0")
+    if maker_limit is not None and proof_ev_maker is not None and maker_limit > 0:
+        maker_expected_profit_usd = (
+            max(Decimal("0"), Decimal(str(proof_ev_maker)))
+            * notional_dec
+            / Decimal(str(maker_limit))
+        )
+    incremental_expected_profit_usd = taker_expected_profit_usd - maker_expected_profit_usd
+    confidence_gap = Decimal("1")
+    if q_live is not None:
+        confidence_gap = Decimal("1") - abs(Decimal(str(q_live)) - q_lcb_dec)
+    model_confidence = max(Decimal("0"), min(Decimal("1"), confidence_gap))
+
+    min_taker_edge = Decimal(str(actionable_payload.get("min_taker_fee_adjusted_edge") or "0.03"))
+    min_incremental_profit = Decimal(str(actionable_payload.get("min_taker_incremental_profit_usd") or "0.05"))
+    min_model_confidence = Decimal(str(actionable_payload.get("min_taker_model_confidence") or "0.60"))
+    min_profit_ratio = Decimal(str(actionable_payload.get("min_taker_profit_ratio") or "1.20"))
+    required_profit = max(
+        maker_expected_profit_usd * min_profit_ratio,
+        maker_expected_profit_usd + min_incremental_profit,
+    )
+    passed = (
+        taker_edge_dec >= min_taker_edge
+        and incremental_expected_profit_usd >= min_incremental_profit
+        and taker_expected_profit_usd >= required_profit
+        and model_confidence >= min_model_confidence
+    )
+    return {
+        "schema_version": 1,
+        "passed": bool(passed),
+        "taker_fee_adjusted_edge": str(taker_edge_dec),
+        "taker_expected_profit_usd": str(taker_expected_profit_usd),
+        "maker_expected_profit_usd": str(maker_expected_profit_usd),
+        "incremental_expected_profit_usd": str(incremental_expected_profit_usd),
+        "model_confidence": str(model_confidence),
+        "model_confidence_source": "q_live_minus_q_lcb_gap",
+        "min_taker_fee_adjusted_edge": str(min_taker_edge),
+        "min_taker_incremental_profit_usd": str(min_incremental_profit),
+        "min_taker_model_confidence": str(min_model_confidence),
+        "min_taker_profit_ratio": str(min_profit_ratio),
+        "fresh_touch_price": str(touch_dec),
+        "fresh_touch_fee": str(fee_dec),
+        "notional_usd": str(notional_dec),
+        "maker_context_source": "proof_mode_ev",
+    }
+
+
 def _build_live_execution_command_certificates(
     *,
     event: OpportunityEvent,
@@ -4434,6 +4524,25 @@ def _build_live_execution_command_certificates(
                         if _venue_quantized_sweep.average_price is not None else None
                     )
         executable_market_context = _executable_market_context_from_snapshot(_snap_for_context)
+        taker_quality_proof = _build_event_bound_taker_quality_proof(
+            actionable_payload=actionable.payload,
+            order_mode=order_mode,
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
+        )
+        if (
+            str(order_mode).strip().upper() == "TAKER"
+            and (
+                not isinstance(taker_quality_proof, dict)
+                or taker_quality_proof.get("passed") is not True
+            )
+        ):
+            raise ValueError(
+                "TAKER_QUALITY_PROOF_NOT_PASSED:"
+                f"edge={None if not isinstance(taker_quality_proof, dict) else taker_quality_proof.get('taker_fee_adjusted_edge')}:"
+                f"incremental_profit={None if not isinstance(taker_quality_proof, dict) else taker_quality_proof.get('incremental_expected_profit_usd')}:"
+                f"confidence={None if not isinstance(taker_quality_proof, dict) else taker_quality_proof.get('model_confidence')}"
+            )
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,
@@ -4466,6 +4575,7 @@ def _build_live_execution_command_certificates(
             available_crossable_shares=available_crossable_shares,
             sweep_expected_fill_price=sweep_expected_fill_price,
             executable_market_context=executable_market_context,
+            taker_quality_proof=taker_quality_proof,
         )
         # P0 mode-authority (operator review 2026-06-10, fix requirement #2): the former
         # late maker->taker EV-override RE-BUILD lived HERE and unconditionally re-built the

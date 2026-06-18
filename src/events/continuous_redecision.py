@@ -655,9 +655,11 @@ def _full_economics_reject_still_blocks(
     current_q_lcb: float,
 ) -> bool:
     reason = str(rejection.rejection_reason or "")
+    execution_quality_reject = _is_execution_quality_rejection_reason(reason)
     if (
         rejection.trade_score is not None
         and rejection.trade_score > 0.0
+        and not execution_quality_reject
         and not reason.startswith("FDR_REJECTED")
     ):
         return False
@@ -670,6 +672,20 @@ def _full_economics_reject_still_blocks(
         and current_q_lcb >= float(rejection.q_lcb_5pct) + IMPROVE_DELTA - _EPS
     )
     return not (price_improved or belief_improved)
+
+
+def _is_execution_quality_rejection_reason(reason: str) -> bool:
+    """Final-submit quality failures are redecision backoff evidence.
+
+    These rows can have a positive cheap-screen trade_score, but they still prove the
+    current executable path is not a confirmed trading-value candidate. They should
+    re-enter only after the price or q_lcb has materially improved.
+    """
+
+    return (
+        reason.startswith("TAKER_QUALITY_PROOF_NOT_PASSED")
+        or reason.startswith("entry_taker_quality:")
+    )
 
 
 def _full_decision_family_refutation_still_blocks(
@@ -805,14 +821,25 @@ def read_recent_full_economics_rejections(
                    c_fee_adjusted, q_lcb_5pct, trade_score, created_at, rejection_reason
                    {q_live_select}
              FROM no_trade_regret_events
-             WHERE rejection_stage = 'TRADE_SCORE'
-               AND (
-                    rejection_reason IN ('TRADE_SCORE_NON_POSITIVE', 'TRADE_SCORE_BLOCKED')
-                 OR rejection_reason LIKE 'TRADE_SCORE_NON_POSITIVE:%'
-                 OR rejection_reason LIKE 'TRADE_SCORE_BLOCKED:%'
-                 OR rejection_reason = 'FDR_REJECTED'
-                 OR rejection_reason LIKE 'FDR_REJECTED:%'
-                 OR rejection_reason LIKE 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:%'
+             WHERE (
+                    (
+                        rejection_stage = 'TRADE_SCORE'
+                        AND (
+                            rejection_reason IN ('TRADE_SCORE_NON_POSITIVE', 'TRADE_SCORE_BLOCKED')
+                         OR rejection_reason LIKE 'TRADE_SCORE_NON_POSITIVE:%'
+                         OR rejection_reason LIKE 'TRADE_SCORE_BLOCKED:%'
+                         OR rejection_reason = 'FDR_REJECTED'
+                         OR rejection_reason LIKE 'FDR_REJECTED:%'
+                         OR rejection_reason LIKE 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:%'
+                        )
+                    )
+                 OR (
+                        rejection_stage = 'EXECUTION_RECEIPT'
+                        AND (
+                            rejection_reason LIKE 'TAKER_QUALITY_PROOF_NOT_PASSED:%'
+                         OR rejection_reason LIKE 'entry_taker_quality:%'
+                        )
+                    )
                )
                AND family_id IS NOT NULL AND family_id != ''
                AND bin_label IS NOT NULL AND bin_label != ''
