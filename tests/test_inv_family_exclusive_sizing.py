@@ -868,9 +868,9 @@ def test_weather_family_decision_is_first_class_single_leg_intent() -> None:
     assert family_decision is not None
     assert family_decision.family_portfolio_intent is True
     assert family_decision.portfolio.family_key == WeatherFamilyKey(CITY, TARGET_DATE, METRIC)
-    assert family_decision.portfolio.selected_leg is mid_bin
-    assert family_decision.portfolio.selected_legs == (mid_bin,)
-    assert family_decision.portfolio.fallback_candidate_legs == (mid_bin, low_price_tail)
+    assert family_decision.portfolio.selected_leg is low_price_tail
+    assert family_decision.portfolio.selected_legs == (low_price_tail,)
+    assert family_decision.portfolio.fallback_candidate_legs == (low_price_tail, mid_bin)
     assert family_decision.portfolio.objective.startswith("expected_log_growth_payoff_vector")
     assert family_decision.portfolio.payoff_matrix
     assert family_decision.dropped == ()
@@ -894,11 +894,11 @@ def test_family_decision_retains_ranked_fallback_candidates_before_execution_via
     )
 
     assert family_decision is not None
-    assert family_decision.portfolio.selected_leg is mid_bin
+    assert family_decision.portfolio.selected_leg is low_price_tail
     assert family_decision.portfolio.fallback_candidate_legs == (
+        low_price_tail,
         mid_bin,
         side_bin,
-        low_price_tail,
     )
     assert [d.dropped_bin for d in family_decision.dropped] == ["19°F or below"]
 
@@ -928,10 +928,10 @@ def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monke
     )
 
     assert family_decision is not None
-    assert family_decision.portfolio.selected_leg is best_buy_yes
+    assert family_decision.portfolio.selected_leg is fallback_buy_yes
     assert family_decision.portfolio.fallback_candidate_legs == (
-        best_buy_yes,
         fallback_buy_yes,
+        best_buy_yes,
     )
     assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
     assert family_decision.dropped[0].rejection_reason == "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"

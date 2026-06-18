@@ -86,12 +86,8 @@ def _family_portfolio_max_legs() -> int:
     matching env var. Defaults to 1 on both tiers (Stage A behaviour). Unknown
     or invalid values fall back to 1 (fail-safe).
 
-    K4 fix (PR #348 operator review, P0-5, 2026-05-27): the live tier is
-    HARD-CAPPED to 1 regardless of env, until ``optimize_exclusive_outcome_portfolio``
-    ships a true full-family expected-log-growth optimiser (current
-    implementation normalises posterior over candidate legs only and uses
-    an average-edge proxy for ELG, not the proper sum over outcomes).
-    Shadow tier remains uncapped so the optimiser can run for observation.
+    The live tier now honors the live max-leg env after ``optimize_exclusive_outcome_portfolio``
+    moved from an average-edge proxy to candidate-outcome expected log growth.
     """
     mode = get_mode()
     if mode == "shadow":
@@ -99,20 +95,10 @@ def _family_portfolio_max_legs() -> int:
             return max(1, int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, "1")))
         except (TypeError, ValueError):
             return 1
-    # Live tier — refuse multi-leg until full-outcome ELG ships.
     try:
-        env_legs = int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "1"))
+        return max(1, int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "1")))
     except (TypeError, ValueError):
-        env_legs = 1
-    if env_legs > 1:
-        logger.warning(
-            "%s=%d refused in live mode — Stage B family optimiser is not yet "
-            "full-family ELG (P0-5 blocker, PR #348 review). Capping to 1 until "
-            "src.strategy.family_exclusive_dedup.optimize_exclusive_outcome_portfolio "
-            "ships a true full-outcome expected-log-growth solver.",
-            ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, env_legs,
-        )
-    return 1
+        return 1
 
 
 def _family_portfolio_max_loss_usd() -> float | None:
@@ -1025,14 +1011,17 @@ def _score_portfolio_combo(
         payoff_rows.append(row)
         outcome_returns.append(sum(weight * payoff for weight, payoff in zip(leg_weights, row)))
 
-    expected_net_profit = (
-        sum(_edge_family_selection_score(leg.edge) for leg in selected)
-        / float(len(selected))
+    expected_net_profit = sum(
+        probability * outcome_return
+        for probability, outcome_return in zip(posterior_vector, outcome_returns)
     )
-    growth = 1.0 + log_growth_fraction * expected_net_profit
-    if growth <= 0.0:
-        return (-math.inf, expected_net_profit, min(outcome_returns), tuple(payoff_rows), posterior_vector, leg_weights)
-    expected_log_growth = math.log(growth)
+    expected_log_growth = 0.0
+    for probability, outcome_return in zip(posterior_vector, outcome_returns):
+        growth = 1.0 + log_growth_fraction * outcome_return
+        if growth <= 0.0:
+            expected_log_growth = -math.inf
+            break
+        expected_log_growth += probability * math.log(growth)
     return (
         expected_log_growth,
         expected_net_profit,

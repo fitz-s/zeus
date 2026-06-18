@@ -83,16 +83,11 @@ class TestMaxLegsHelper:
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
             assert _family_portfolio_max_legs() == 1
 
-    def test_live_env_capped_to_1_until_full_optimizer(self, monkeypatch):
-        # K4 fix (PR #348 P0-5): live tier is HARD-CAPPED to 1 regardless of
-        # env until the Stage B optimizer ships full-family ELG. Shadow tier
-        # still honours the env value for observation.
+    def test_live_env_activates_after_candidate_outcome_elg(self, monkeypatch):
         monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "2")
         monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, raising=False)
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
-            assert _family_portfolio_max_legs() == 1, (
-                "K4: live max_legs must be capped to 1 until full-outcome ELG ships"
-            )
+            assert _family_portfolio_max_legs() == 2
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="shadow"):
             assert _family_portfolio_max_legs() == 1
 
@@ -222,6 +217,26 @@ class TestLossCapRejection:
 # ---------------------------------------------------------------------------
 
 class TestOptimizerELGDominance:
+    def test_candidate_outcome_elg_beats_forward_edge_proxy(self):
+        bad_high_proxy = _edge("bin_a", posterior=0.05, entry=0.30, direction="buy_yes")
+        good_lower_proxy = _edge("bin_b", posterior=0.75, entry=0.50, direction="buy_yes")
+        object.__setattr__(bad_high_proxy, "forward_edge", 0.90)
+        object.__setattr__(bad_high_proxy, "edge", 0.90)
+        object.__setattr__(good_lower_proxy, "forward_edge", 0.10)
+        object.__setattr__(good_lower_proxy, "edge", 0.10)
+
+        portfolio = optimize_exclusive_outcome_portfolio(
+            [bad_high_proxy, good_lower_proxy],
+            city="Tokyo",
+            target_date="2026-05-30",
+            temperature_metric="high",
+            max_legs=1,
+        )
+
+        assert portfolio is not None
+        assert portfolio.selected_leg is good_lower_proxy
+        assert portfolio.expected_net_profit_usd > 0.0
+
     def test_two_leg_elg_not_worse_than_one_leg_on_favourable_partition(self):
         edges = [
             _edge("bin_a", posterior=0.55, entry=0.30, direction="buy_yes"),
