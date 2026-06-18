@@ -2928,30 +2928,116 @@ def _market_info_value(info, *keys):
     return None
 
 
-def _closed_non_accepting_market_info(clob, pos) -> dict | None:
+def _parse_market_timestamp(value) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _closed_by_static_market_end_info(conn, pos, *, decision_time: datetime | None) -> dict | None:
+    """Return closed-market evidence from stable market end timestamps.
+
+    Live CLOB market-info can disappear or fail after close. The persisted
+    market_end/close timestamp from executable snapshots is contract topology,
+    not a stale tradability quote, so it can prove that further live exit
+    attempts are no longer actionable.
+    """
+
+    if conn is None:
+        return None
+    condition_id = str(
+        getattr(pos, "condition_id", None)
+        or getattr(pos, "market_id", None)
+        or ""
+    ).strip()
+    if not condition_id:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT snapshot_id,
+                   condition_id,
+                   market_end_at,
+                   market_close_at,
+                   captured_at
+              FROM executable_market_snapshots
+             WHERE condition_id = ?
+             ORDER BY captured_at DESC
+             LIMIT 1
+            """,
+            (condition_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+
+    def _row_get(key: str):
+        try:
+            return row[key]
+        except (TypeError, KeyError, IndexError):
+            idx = {
+                "snapshot_id": 0,
+                "condition_id": 1,
+                "market_end_at": 2,
+                "market_close_at": 3,
+                "captured_at": 4,
+            }[key]
+            return row[idx]
+
+    close_at = (
+        _parse_market_timestamp(_row_get("market_close_at"))
+        or _parse_market_timestamp(_row_get("market_end_at"))
+    )
+    now_utc = decision_time or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    now_utc = now_utc.astimezone(timezone.utc)
+    if close_at is None or close_at > now_utc:
+        return None
+    return {
+        "condition_id": condition_id,
+        "closed": True,
+        "accepting_orders": False,
+        "enable_orderbook": None,
+        "source": "executable_snapshot_market_end",
+        "snapshot_id": _row_get("snapshot_id"),
+        "market_close_at": close_at.isoformat(),
+        "captured_at": _row_get("captured_at"),
+    }
+
+
+def _closed_non_accepting_market_info(clob, pos, conn=None, *, decision_time: datetime | None = None) -> dict | None:
     condition_id = str(
         getattr(pos, "condition_id", None)
         or getattr(pos, "market_id", None)
         or ""
     ).strip()
     get_market_info = getattr(clob, "get_clob_market_info", None)
-    if not condition_id or not callable(get_market_info):
-        return None
-    try:
-        info = get_market_info(condition_id)
-    except Exception:
-        return None
-    closed = _market_info_value(info, "closed")
-    accepting_orders = _market_info_value(info, "accepting_orders", "acceptingOrders")
-    enable_orderbook = _market_info_value(info, "enable_order_book", "enable_orderbook", "enableOrderBook")
-    if closed is True and accepting_orders is False:
-        return {
-            "condition_id": condition_id,
-            "closed": closed,
-            "accepting_orders": accepting_orders,
-            "enable_orderbook": enable_orderbook,
-        }
-    return None
+    if condition_id and callable(get_market_info):
+        try:
+            info = get_market_info(condition_id)
+        except Exception:
+            info = None
+        if info is not None:
+            closed = _market_info_value(info, "closed")
+            accepting_orders = _market_info_value(info, "accepting_orders", "acceptingOrders")
+            enable_orderbook = _market_info_value(info, "enable_order_book", "enable_orderbook", "enableOrderBook")
+            if closed is True and accepting_orders is False:
+                return {
+                    "condition_id": condition_id,
+                    "closed": closed,
+                    "accepting_orders": accepting_orders,
+                    "enable_orderbook": enable_orderbook,
+                    "source": "clob_market_info",
+                }
+    return _closed_by_static_market_end_info(conn, pos, decision_time=decision_time)
 
 
 def _is_open_crowding_exposure(pos) -> bool:
@@ -3640,8 +3726,22 @@ def execute_monitoring_phase(
 
             closed_market_info = None
             if _position_state_value(pos) == "day0_window":
-                closed_market_info = _closed_non_accepting_market_info(clob, pos)
+                closed_market_info = _closed_non_accepting_market_info(
+                    clob,
+                    pos,
+                    conn,
+                    decision_time=deps._utcnow(),
+                )
             if closed_market_info is not None:
+                from src.execution.exit_lifecycle import mark_market_closed_awaiting_settlement
+
+                mark_market_closed_awaiting_settlement(
+                    pos,
+                    reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+                    error=str(closed_market_info.get("source") or "market_closed_non_accepting_orders"),
+                    conn=conn,
+                )
+                portfolio_dirty = True
                 artifact.add_monitor_result(
                     deps.MonitorResult(
                         position_id=pos.trade_id,

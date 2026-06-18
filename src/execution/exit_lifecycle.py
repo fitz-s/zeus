@@ -537,6 +537,34 @@ def _mark_pending_exit(position: Position) -> None:
     )
 
 
+def mark_market_closed_awaiting_settlement(
+    position: Position,
+    *,
+    reason: str = "MARKET_CLOSED_AWAITING_SETTLEMENT",
+    error: str = "market_closed_non_accepting_orders",
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """Stop live exit retry for a market that can no longer accept orders.
+
+    Once the market is closed, quote freshness is no longer a solvable exit
+    precondition. The position must remain in the settlement lane instead of
+    re-entering stale-price retry loops.
+    """
+
+    _mark_pending_exit(position)
+    position.exit_state = "backoff_exhausted"
+    position.next_exit_retry_at = ""
+    position.exit_reason = reason
+    position.last_exit_error = error[:500]
+    _dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=reason,
+        error=error,
+        event_type="EXIT_ORDER_REJECTED",
+    )
+
+
 def _release_pending_exit(position: Position) -> None:
     if position.state == "pending_exit":
         position.state = release_pending_exit_runtime_state(

@@ -3104,8 +3104,11 @@ def test_day0_closed_non_accepting_market_skips_exit_monitor_chain_missing(monke
         deps=deps,
     )
 
-    assert portfolio_dirty is False
+    assert portfolio_dirty is True
     assert tracker_dirty is False
+    assert pos.state == "pending_exit"
+    assert pos.exit_state == "backoff_exhausted"
+    assert pos.exit_reason == "MARKET_CLOSED_AWAITING_SETTLEMENT"
     assert summary["monitor_skipped_closed_market_pending_settlement"] == 1
     assert "monitor_chain_missing" not in summary
     assert "monitor_incomplete_exit_context" not in summary
@@ -3113,6 +3116,59 @@ def test_day0_closed_non_accepting_market_skips_exit_monitor_chain_missing(monke
     assert monitor_results[0].exit_reason == "MARKET_CLOSED_AWAITING_SETTLEMENT"
     assert monitor_results[0].fresh_prob is None
     assert monitor_results[0].fresh_edge is None
+
+
+def test_day0_closed_market_detection_uses_static_market_end_when_clob_info_missing():
+    """Missing post-close CLOB info must not send held positions into stale quote retry."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="snapshot-closed-day0-001",
+        state="day0_window",
+        chain_state="synced",
+        city="Chicago",
+        target_date="2026-04-01",
+        market_id="0xsnapshotclosed",
+        condition_id="0xsnapshotclosed",
+    )
+
+    class Row(dict):
+        def __getitem__(self, key):
+            if isinstance(key, int):
+                return list(self.values())[key]
+            return super().__getitem__(key)
+
+    class SnapshotConn:
+        def execute(self, sql, params=()):
+            assert params == ("0xsnapshotclosed",)
+
+            class Cursor:
+                def fetchone(self):
+                    return Row(
+                        snapshot_id="snap-market-ended",
+                        condition_id="0xsnapshotclosed",
+                        market_end_at="2026-04-01T12:00:00+00:00",
+                        market_close_at=None,
+                        captured_at="2026-04-01T11:45:00+00:00",
+                    )
+
+            return Cursor()
+
+    class MissingMarketInfoClob:
+        def get_clob_market_info(self, condition_id):
+            raise RuntimeError("post-close market info unavailable")
+
+    info = cycle_runtime._closed_non_accepting_market_info(
+        MissingMarketInfoClob(),
+        pos,
+        SnapshotConn(),
+        decision_time=datetime(2026, 4, 1, 18, 30, tzinfo=timezone.utc),
+    )
+
+    assert info is not None
+    assert info["source"] == "executable_snapshot_market_end"
+    assert info["condition_id"] == "0xsnapshotclosed"
+    assert info["accepting_orders"] is False
 
 
 def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
