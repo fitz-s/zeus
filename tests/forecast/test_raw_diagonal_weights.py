@@ -27,7 +27,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from src.forecast.bayes_precision_fusion import MIN_TRAIN, SIGMA_FLOOR
+from src.forecast.bayes_precision_fusion import KAPPA, LOWN_INFLATE, MIN_TRAIN, SIGMA_FLOOR
 from src.forecast.center import walk_forward_model_weights
 
 # Reuse the Tokyo fixtures from the envelope test (one fixture vocabulary).
@@ -118,3 +118,38 @@ def test_floor_caps_precision_of_a_subfloor_raw_m2():
     assert np.allclose(w, np.full(2, 0.5)), (
         f"sub-floor raw_m2 not capped at 1/floor^2 (got {w}); the certainty cap was removed"
     )
+
+
+def test_f_city_floor_and_shrink_scaled_to_native_unit():
+    """Critic HIGH (2026-06-18): ``walk_forward_raw_m2_native`` is in the member NATIVE unit²
+    (the spine producer scales degC²->°F² by ``(9/5)²`` for F-cities). The degC-defined
+    ``SIGMA_FLOOR`` / ``LOWN_INFLATE`` floor + low-n shrink TARGET must be scaled to native² too,
+    else an F-city thin-history member is blended/floored against a 3.24× too-small target and
+    OVER-weighted (intent inverted). RED on the pre-fix degC²-constant code."""
+    f_case = replace(_case(), unit="F")
+    # thin precise member (n=10 < MIN_TRAIN) + deep noisy counterweight; raw_m2 in °F² (native).
+    thin = _member_m2("thin", 70.0, raw_m2=2.0, n=10)
+    deep = _member_m2("deep", 74.0, raw_m2=20.0, n=MIN_TRAIN + 100)
+    w = walk_forward_model_weights(f_case, [thin, deep])
+
+    u = (9.0 / 5.0) ** 2
+    equal_m2 = ((SIGMA_FLOOR * LOWN_INFLATE) ** 2) * u  # native²-consistent (the FIX)
+    floor_m2 = (SIGMA_FLOOR * SIGMA_FLOOR) * u
+    lam = 10.0 / (10.0 + KAPPA)
+    m2_thin = lam * 2.0 + (1.0 - lam) * equal_m2
+    p_thin = 1.0 / max(m2_thin, floor_m2)
+    p_deep = 1.0 / max(20.0, floor_m2)
+    exp = np.array([p_thin, p_deep]); exp = exp / exp.sum()
+    assert np.allclose(w, exp, atol=1e-9), f"F-city weights {w} != native-scaled expected {exp}"
+
+    # Must DIFFER from the buggy degC²-constant computation -> RED if the unit fix is reverted.
+    equal_bug = (SIGMA_FLOOR * LOWN_INFLATE) ** 2          # degC², un-scaled (the bug)
+    m2_thin_bug = lam * 2.0 + (1.0 - lam) * equal_bug
+    p_thin_bug = 1.0 / max(m2_thin_bug, SIGMA_FLOOR * SIGMA_FLOOR)
+    exp_bug = np.array([p_thin_bug, p_deep]); exp_bug = exp_bug / exp_bug.sum()
+    assert not np.allclose(w, exp_bug, atol=1e-3), (
+        "F-city weights match the degC²-constant computation — the native-unit floor/shrink fix "
+        "was reverted (the thin member is over-weighted)"
+    )
+    # The fix REDUCES the thin member's over-weight vs the bug (intent: shrink harder at low n).
+    assert w[0] < exp_bug[0], f"fix did not reduce the thin-member over-weight: {w[0]} vs bug {exp_bug[0]}"

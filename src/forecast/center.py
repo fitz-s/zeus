@@ -174,8 +174,15 @@ def walk_forward_model_weights(
     if n == 0:
         return np.asarray([], dtype=float)
 
-    floor_m2 = SIGMA_FLOOR * SIGMA_FLOOR
-    equal_m2 = (SIGMA_FLOOR * LOWN_INFLATE) ** 2  # the pooled-equal low-trust floor
+    # UNIT CONSISTENCY (critic HIGH 2026-06-18): ``walk_forward_raw_m2_native`` is in
+    # the member NATIVE unit² — the spine producer scales degC²->°F² by ``(9/5)²`` for
+    # F-cities. ``SIGMA_FLOOR`` / ``LOWN_INFLATE`` are defined in degC, so the floor and
+    # the low-n shrink TARGET must be scaled to the same native² unit; otherwise an F-city
+    # thin-history member is blended/floored against a 3.24× too-small target and over-
+    # weighted (intent-inverted at low n). C-cities: ``_u == 1.0`` (unchanged).
+    _u = (9.0 / 5.0) ** 2 if case.unit == "F" else 1.0
+    floor_m2 = (SIGMA_FLOOR * SIGMA_FLOOR) * _u
+    equal_m2 = ((SIGMA_FLOOR * LOWN_INFLATE) ** 2) * _u  # pooled-equal low-trust floor, native²
 
     precisions = np.empty(n, dtype=float)
     have_any_signal = False
