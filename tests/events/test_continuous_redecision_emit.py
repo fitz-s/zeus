@@ -626,11 +626,36 @@ def test_held_position_forecast_reemit_uses_forecast_phase_gate(monkeypatch):
     }
 
 
+def test_entry_redecision_families_use_forecast_phase_gate(monkeypatch):
+    """New-entry redecision families must not count phase-dropped markets as admitted."""
+
+    def _fake_market_phase_admits(*, city, target_date, metric, decision_time, market_row):
+        assert decision_time == datetime(2026, 6, 18, 0, 5, tzinfo=timezone.utc)
+        assert market_row == {}
+        return city == "Shenzhen"
+
+    monkeypatch.setattr(
+        "src.strategy.market_phase.market_phase_admits",
+        _fake_market_phase_admits,
+    )
+
+    assert main._edli_reemittable_forecast_family_keys(
+        {
+            ("Wellington", "2026-06-18", "high"),
+            ("Shenzhen", "2026-06-19", "high"),
+        },
+        decision_time=datetime(2026, 6, 18, 0, 5, tzinfo=timezone.utc),
+        log_context="entry-screen",
+    ) == {("Shenzhen", "2026-06-19", "high")}
+
+
 def test_redecision_screen_separates_held_monitor_from_forecast_reemit():
     """The screen must not count every held monitor family as forecast re-emitted."""
 
     screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
 
+    assert "raw_entry_family_keys = screened_family_keys" in screen_src
+    assert "family_keys = _edli_reemittable_forecast_family_keys" in screen_src
     assert (
         "held_reemit_families = _edli_reemittable_held_position_family_keys"
         in screen_src

@@ -6619,7 +6619,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 min_edge=min_edge,
                 acted_state=_edli_redecision_acted_state,
             )
-            family_keys = screened_family_keys(world_ro, redecisions)
+            raw_entry_family_keys = screened_family_keys(world_ro, redecisions)
             open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro)
             rest_pulls = screen_resting_orders(world_ro, trade_ro, open_rests=open_rests)
         finally:
@@ -6653,6 +6653,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 if key is not None and all(key):
                     rest_pull_families.add(key)
         held_families = _edli_current_held_position_family_keys()
+        family_keys = _edli_reemittable_forecast_family_keys(
+            raw_entry_family_keys,
+            decision_time=now,
+            log_context="entry-screen",
+        )
         held_reemit_families = _edli_reemittable_held_position_family_keys(
             held_families,
             decision_time=now,
@@ -7107,17 +7112,19 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
     return out
 
 
-def _edli_reemittable_held_position_family_keys(
+def _edli_reemittable_forecast_family_keys(
     families: set[tuple[str, str, str]],
     *,
     decision_time: datetime,
+    log_context: str,
 ) -> set[tuple[str, str, str]]:
-    """Held-position families that may enter forecast redecision this tick.
+    """Families that may enter forecast redecision this tick.
 
-    Day0 / post-trading held positions are still managed by the chain-sync and exit
-    monitor lanes. They must not be logged as forecast re-emitted or keep stale
-    EDLI_REDECISION_PENDING rows alive, because the FSR trigger will drop them with
-    the same forecast-only phase predicate.
+    Day0 / post-trading families may still be managed by their owning lanes
+    (held positions by chain-sync/exit monitor, new entry discovery by ordinary
+    FSR when phase-admissible). They must not be logged as forecast re-emitted
+    or keep stale EDLI_REDECISION_PENDING rows alive, because the FSR trigger
+    will drop them with the same forecast-only phase predicate.
     """
 
     if not families:
@@ -7136,8 +7143,9 @@ def _edli_reemittable_held_position_family_keys(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "edli_redecision_screen: held-position phase read failed; "
+                "edli_redecision_screen: %s phase read failed; "
                 "family not forecast-reemitted this tick: city=%r target_date=%r metric=%r error=%r",
+                log_context,
                 city,
                 target_date,
                 metric,
@@ -7147,6 +7155,20 @@ def _edli_reemittable_held_position_family_keys(
         if admitted:
             out.add((city, target_date, metric))
     return out
+
+
+def _edli_reemittable_held_position_family_keys(
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+) -> set[tuple[str, str, str]]:
+    """Held-position families that may enter forecast redecision this tick."""
+
+    return _edli_reemittable_forecast_family_keys(
+        families,
+        decision_time=decision_time,
+        log_context="held-position",
+    )
 
 
 def _edli_expire_unadmitted_redecision_pending(
