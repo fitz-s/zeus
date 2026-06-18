@@ -208,6 +208,8 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "family_keys &= confirmed_entry_scope" in screen_src
     assert "rest_pull_families &= confirmed_rest_scope" in screen_src
     assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS" in confirm_src
+    assert "_edli_redecision_confirm_refresh_lock" in confirm_src
+    assert "_market_substrate_refresh_lock" not in confirm_src
     assert "include_pending_families=False" in confirm_src
     assert "extra_priority_families=clean_families" in confirm_src
 

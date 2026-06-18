@@ -74,6 +74,7 @@ _market_discovery_lock = threading.Lock()
 _market_substrate_refresh_lock = threading.Lock()
 _held_position_monitor_active = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
+_edli_redecision_confirm_refresh_lock = threading.Lock()
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
         "market_discovery",
@@ -7739,11 +7740,12 @@ def _edli_refresh_continuous_money_path_families(
         0.0,
         float(os.environ.get("ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS", "25.0")),
     )
-    if not _market_substrate_refresh_lock.acquire(timeout=lock_timeout_s):
+    if not _edli_redecision_confirm_refresh_lock.acquire(timeout=lock_timeout_s):
         return {
             "status": "skipped_lock_busy",
             "families_requested": len(clean_families),
             "lock_timeout_seconds": lock_timeout_s,
+            "lock": "edli_redecision_confirm_refresh",
         }
     from src.state.db import (
         ZEUS_FORECASTS_DB_PATH,
@@ -7781,7 +7783,7 @@ def _edli_refresh_continuous_money_path_families(
         except Exception:  # noqa: BLE001
             pass
         try:
-            _market_substrate_refresh_lock.release()
+            _edli_redecision_confirm_refresh_lock.release()
         except RuntimeError:
             pass
 
