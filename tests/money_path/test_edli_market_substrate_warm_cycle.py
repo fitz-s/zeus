@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-06-13
+# Last reused/audited: 2026-06-19
 # Authority basis (2026-06-13 add): docs/operations/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (inline _refresh_pending_family_snapshots
@@ -217,6 +217,7 @@ def test_continuous_redecision_confirms_money_path_before_emit():
 
     screen_src = inspect.getsource(main_module._edli_continuous_redecision_screen_cycle)
     confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+    retry_src = inspect.getsource(main_module._edli_confirmation_refresh_lock_retry_delays)
 
     assert "probe_acted_state = dict(_edli_redecision_acted_state)" in screen_src
     assert "acted_state=probe_acted_state" in screen_src
@@ -226,10 +227,97 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "family_keys &= confirmed_entry_scope" in screen_src
     assert "rest_pull_families &= confirmed_rest_scope" in screen_src
     assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS" in confirm_src
+    assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS" in retry_src
     assert "_edli_redecision_confirm_refresh_lock" in confirm_src
     assert "_market_substrate_refresh_lock" not in confirm_src
     assert "include_pending_families=False" in confirm_src
     assert "extra_priority_families=clean_families" in confirm_src
+    assert "_edli_confirmation_refresh_unavailable(confirm_refresh_summary)" in screen_src
+
+
+def test_continuous_redecision_confirm_refresh_retries_locked_summary(monkeypatch):
+    """A transient trade-DB lock in confirmation refresh must not become a false
+    no-evidence tick when a fresh connection retry can still capture prices."""
+
+    import src.state.db as state_db
+
+    class _TrackedConn(_FakeConn):
+        def __init__(self, name: str):
+            self.name = name
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    worlds: list[_TrackedConn] = []
+    forecasts: list[_TrackedConn] = []
+
+    def _world_conn():
+        conn = _TrackedConn(f"world-{len(worlds)}")
+        worlds.append(conn)
+        return conn
+
+    def _forecast_conn():
+        conn = _TrackedConn(f"forecasts-{len(forecasts)}")
+        forecasts.append(conn)
+        return conn
+
+    summaries = [
+        {
+            "status": "refreshed",
+            "executable_substrate_coverage_status": "NONE",
+            "failed": 1,
+            "failure_samples": [{"condition_id": "0xlock", "error": "database is locked"}],
+        },
+        {
+            "status": "refreshed",
+            "executable_substrate_coverage_status": "FULL",
+            "failed": 0,
+            "inserted": 1,
+        },
+    ]
+    calls: list[dict] = []
+    sleeps: list[float] = []
+
+    def _refresh(*_args, **kwargs):
+        calls.append(kwargs)
+        return summaries.pop(0)
+
+    monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", _forecast_conn)
+    monkeypatch.setattr(main_module, "_refresh_pending_family_snapshots", _refresh)
+    monkeypatch.setattr(main_module.time, "sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS", "0.01")
+
+    result = main_module._edli_refresh_continuous_money_path_families(
+        {("Paris", "2026-06-20", "low")},
+        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["executable_substrate_coverage_status"] == "FULL"
+    assert len(calls) == 2
+    assert sleeps == [0.01]
+    assert len(worlds) == 2 and all(conn.closed for conn in worlds)
+    assert len(forecasts) == 2 and all(conn.closed for conn in forecasts)
+
+
+def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_summary():
+    """The emit gate must fail closed when confirmation refresh did not prove
+    full executable-price coverage for the current money-path families."""
+
+    assert main_module._edli_confirmation_refresh_unavailable(
+        {
+            "status": "refreshed",
+            "executable_substrate_coverage_status": "NONE",
+            "failure_samples": [{"error": "database is locked"}],
+        }
+    )
+    assert main_module._edli_confirmation_refresh_unavailable(
+        {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
+    )
+    assert not main_module._edli_confirmation_refresh_unavailable(
+        {"status": "refreshed", "executable_substrate_coverage_status": "FULL"}
+    )
 
 
 def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatch):

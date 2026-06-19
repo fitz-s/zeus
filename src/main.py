@@ -6108,13 +6108,14 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 now_utc=now,
             )
             confirm_status = str(confirm_refresh_summary.get("status") or "")
-            if confirm_status == "skipped_lock_busy" or confirm_status.startswith("error"):
+            if _edli_confirmation_refresh_unavailable(confirm_refresh_summary):
                 logger.info(
                     "edli_redecision_screen: confirmation refresh not available; "
                     "skipping emit this tick rather than queueing stale redecision "
-                    "families=%d status=%s summary=%r",
+                    "families=%d status=%s coverage=%s summary=%r",
                     len(confirm_families),
                     confirm_status,
+                    confirm_refresh_summary.get("executable_substrate_coverage_status"),
                     confirm_refresh_summary,
                 )
                 return
@@ -6616,39 +6617,98 @@ def _edli_refresh_continuous_money_path_families(
         get_world_connection,
     )
 
-    world = get_world_connection()
-    forecasts_ro = get_forecasts_connection_read_only()
     try:
-        try:
-            attached = {row[1] for row in world.execute("PRAGMA database_list").fetchall()}
-            if "forecasts" not in attached:
-                world.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
-        except Exception as exc:  # noqa: BLE001
+        retry_delays = _edli_confirmation_refresh_lock_retry_delays()
+        for attempt in range(len(retry_delays) + 1):
+            world = get_world_connection()
+            forecasts_ro = get_forecasts_connection_read_only()
+            try:
+                try:
+                    attached = {row[1] for row in world.execute("PRAGMA database_list").fetchall()}
+                    if "forecasts" not in attached:
+                        world.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "edli_redecision_screen: confirm-refresh ATTACH forecasts failed (non-fatal): %r",
+                        exc,
+                    )
+                summary = _refresh_pending_family_snapshots(
+                    world,
+                    forecasts_ro,
+                    consumer_name="edli_redecision_confirm",
+                    now_utc=now_utc,
+                    extra_priority_families=clean_families,
+                    include_pending_families=False,
+                )
+            finally:
+                try:
+                    forecasts_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    world.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            if not _edli_refresh_summary_has_sqlite_lock_failures(summary) or attempt >= len(retry_delays):
+                return summary
+            delay_s = retry_delays[attempt]
             logger.warning(
-                "edli_redecision_screen: confirm-refresh ATTACH forecasts failed (non-fatal): %r",
-                exc,
+                "edli_redecision_screen: confirm-refresh hit sqlite lock; "
+                "retrying with fresh connections in %.1fs (attempt %d/%d) summary=%r",
+                delay_s,
+                attempt + 1,
+                len(retry_delays) + 1,
+                summary,
             )
-        return _refresh_pending_family_snapshots(
-            world,
-            forecasts_ro,
-            consumer_name="edli_redecision_confirm",
-            now_utc=now_utc,
-            extra_priority_families=clean_families,
-            include_pending_families=False,
-        )
+            time.sleep(delay_s)
+        return summary
     finally:
-        try:
-            forecasts_ro.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            world.close()
-        except Exception:  # noqa: BLE001
-            pass
         try:
             _edli_redecision_confirm_refresh_lock.release()
         except RuntimeError:
             pass
+
+
+def _edli_confirmation_refresh_lock_retry_delays() -> tuple[float, ...]:
+    raw = os.environ.get("ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS", "2.0,5.0")
+    delays: list[float] = []
+    for piece in raw.split(","):
+        text = piece.strip()
+        if not text:
+            continue
+        try:
+            delay_s = float(text)
+        except ValueError:
+            continue
+        if delay_s > 0:
+            delays.append(delay_s)
+    return tuple(delays)
+
+
+def _edli_refresh_summary_has_sqlite_lock_failures(summary: dict | None) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    fields: list[object] = [summary.get("reason"), summary.get("error")]
+    for sample in summary.get("failure_samples") or ():
+        if isinstance(sample, dict):
+            fields.append(sample.get("error"))
+        else:
+            fields.append(sample)
+    return any("database is locked" in str(field or "").lower() for field in fields)
+
+
+def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:
+    if not isinstance(summary, dict):
+        return True
+    status = str(summary.get("status") or "")
+    if status == "skipped_lock_busy" or status.startswith("error"):
+        return True
+    if _edli_refresh_summary_has_sqlite_lock_failures(summary):
+        return True
+    coverage = str(summary.get("executable_substrate_coverage_status") or "")
+    if coverage in {"NONE", "PARTIAL"}:
+        return True
+    return False
 
 
 def _edli_reemittable_forecast_family_keys(
