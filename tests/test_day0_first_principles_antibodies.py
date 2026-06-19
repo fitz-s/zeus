@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-17
 # Authority basis: day0 first-principles review 2026-06-10
 #   (/tmp/day0_first_principles_review.md); panic-sell incident evidence:
 #   zeus_trades.db position_events b5d966a9-990 (Seoul 2026-06-07T15:08Z,
@@ -164,7 +164,7 @@ class TestAbsorbingBoundary:
         # Renormalization preserves relative forecast mass among alive bins.
         assert masked[2] > masked[3] > masked[4]
 
-    def test_masked_generated_q_zero_and_no_buy_yes_license_on_dead_bins(self):
+    def test_masked_generated_q_zero_and_structural_buy_no_license_on_dead_bins(self):
         fam = _seoul_high_family()
         q, lcb = _apply_day0_mask_to_generated_probabilities(
             payload=_payload("high", 25.0, obs_age_minutes=10.0),
@@ -176,9 +176,189 @@ class TestAbsorbingBoundary:
         assert q["cond0"] < 1e-6 and q["cond1"] < 1e-6
         assert _qlcb_float(lcb[("cond0", "buy_yes")]) == 0.0
         assert _qlcb_float(lcb[("cond1", "buy_yes")]) == 0.0
-        # buy_no on the day0 lane carries no submit license at all (pinned invariant).
-        for i in range(5):
+        # Dead YES bins are deterministic buy-NO wins; unresolved/alive bins are not.
+        assert _qlcb_float(lcb[("cond0", "buy_no")]) == pytest.approx(1.0)
+        assert _qlcb_float(lcb[("cond1", "buy_no")]) == pytest.approx(1.0)
+        for i in range(2, 5):
             assert _qlcb_float(lcb[(f"cond{i}", "buy_no")]) == 0.0
+
+
+# ===========================================================================
+# R1B — pre-Day0 LOW carryover is a soft entry signal, not a hard fact
+# ===========================================================================
+
+class TestPreDay0LowCarryover:
+    @staticmethod
+    def _london_city():
+        return SimpleNamespace(
+            name="London",
+            timezone="Europe/London",
+            settlement_unit="C",
+            settlement_source_type="wu_icao",
+            wu_station="EGLL",
+            instrument_noise_override=0.28,
+            lat=51.47,
+        )
+
+    @staticmethod
+    def _metar(ts: str, temp_c: float, station: str = "EGLL"):
+        from src.data.day0_fast_obs import MetarReport
+
+        return MetarReport(
+            station_id=station,
+            obs_time=datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc),
+            receipt_time=datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc),
+            temp_c=temp_c,
+            metar_type="METAR",
+            raw=f"{station} 172230Z AUTO T01200080",
+        )
+
+    def test_pre_day0_low_window_ignores_prior_day_morning_low(self):
+        from src.data.day0_fast_obs import pre_day0_low_window_for_target
+
+        city = self._london_city()
+        window = pre_day0_low_window_for_target(
+            [
+                self._metar("2026-06-17T05:00:00Z", 5.0),    # previous-day low, outside late window
+                self._metar("2026-06-17T20:30:00Z", 13.0),   # 21:30 BST
+                self._metar("2026-06-17T22:30:00Z", 12.0),   # 23:30 BST
+                self._metar("2026-06-17T22:35:00Z", 3.0, "EGSS"),  # wrong station
+            ],
+            city=city,
+            target_date="2026-06-18",
+            as_of=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
+            lookback_hours=3.0,
+            max_lead_hours=4.0,
+        )
+        assert window is not None
+        assert window.window_low == pytest.approx(12.0)
+        assert window.current_temp == pytest.approx(12.0)
+        assert window.sample_count == 2
+
+    def test_pre_day0_low_carryover_moves_probability_without_certainty(self):
+        import numpy as np
+
+        from src.contracts import SettlementSemantics
+        from src.signal.day0_low_distribution import (
+            PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            build_pre_day0_low_empirical_conditioning,
+        )
+        from src.signal.ensemble_signal import analytic_p_raw_vector_from_maxes
+        from src.types.market import Bin
+
+        city = self._london_city()
+        sem = SettlementSemantics.for_city(city)
+        bins = [
+            Bin(None, 11.0, "C", "11°C or below"),
+            Bin(12.0, 12.0, "C", "12°C"),
+            Bin(13.0, 13.0, "C", "13°C"),
+            Bin(14.0, None, "C", "14°C or higher"),
+        ]
+        member_mins = np.full(51, 15.0)
+        base = analytic_p_raw_vector_from_maxes(member_mins, city, sem, bins)
+        model = {
+            "model_version": PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            "source_table": "test_observation_instants",
+            "live_policy": {
+                "max_lead_hours": 4.0,
+                "trailing_lookback_hours": 1.0,
+                "basis": "test",
+            },
+            "by_city": {
+                "London": {
+                    "lead_buckets": {
+                        "1": {
+                            "n": 240,
+                            "residual_quantiles": [-0.2, 0.0, 0.4, 0.8, 1.0],
+                        }
+                    }
+                }
+            },
+            "by_unit": {},
+        }
+        conditioning = build_pre_day0_low_empirical_conditioning(
+            member_mins=member_mins,
+            window_low=12.0,
+            lead_hours_to_target_start=0.25,
+            unit="C",
+            city_name="London",
+            model=model,
+        )
+        assert conditioning is not None
+        empirical = analytic_p_raw_vector_from_maxes(
+            conditioning.conditioned_member_mins, city, sem, bins
+        )
+        assert base[3] > 0.95
+        assert empirical[1] + empirical[2] > 0.50
+        assert empirical[1] + empirical[2] < 0.999
+        assert conditioning.residual_scope == "city:London"
+        assert conditioning.residual_sample_count == 240
+
+    def test_pre_day0_low_carryover_requires_empirical_model_for_live_q(self):
+        import numpy as np
+        from src.signal.day0_low_distribution import build_pre_day0_low_empirical_conditioning
+
+        assert build_pre_day0_low_empirical_conditioning(
+            member_mins=np.full(51, 15.0),
+            window_low=12.0,
+            lead_hours_to_target_start=1.0,
+            unit="C",
+            city_name="London",
+            model=None,
+        ) is None
+        source = (ROOT / "src" / "engine" / "evaluator.py").read_text(encoding="utf-8")
+        assert "EMPIRICAL_RESIDUAL_MODEL_VERIFIED" in source
+        assert "UNCALIBRATED_HEURISTIC_SHADOW_ONLY" not in source
+
+    def test_pre_day0_low_carryover_not_active_after_start_or_too_early(self):
+        import numpy as np
+
+        from src.signal.day0_low_distribution import (
+            PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            build_pre_day0_low_empirical_conditioning,
+        )
+        model = {
+            "model_version": PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            "source_table": "test_observation_instants",
+            "live_policy": {
+                "max_lead_hours": 4.0,
+                "trailing_lookback_hours": 1.0,
+                "basis": "test",
+            },
+            "by_city": {
+                "London": {
+                    "lead_buckets": {
+                        "3": {"n": 240, "residual_quantiles": [-1.0, 0.0, 1.0]},
+                        "4": {"n": 240, "residual_quantiles": [-1.5, -0.5, 0.5]},
+                    }
+                }
+            },
+            "by_unit": {},
+        }
+
+        kwargs = dict(
+            member_mins=np.full(51, 15.0),
+            window_low=12.0,
+            unit="C",
+            city_name="London",
+            model=model,
+        )
+        assert build_pre_day0_low_empirical_conditioning(
+            **kwargs,
+            lead_hours_to_target_start=-0.10,
+        ) is None
+        assert build_pre_day0_low_empirical_conditioning(
+            **kwargs,
+            lead_hours_to_target_start=4.50,
+        ) is None
+        assert build_pre_day0_low_empirical_conditioning(
+            **kwargs,
+            lead_hours_to_target_start=3.00,
+        ) is not None
+        assert build_pre_day0_low_empirical_conditioning(
+            **kwargs,
+            lead_hours_to_target_start=4.00,
+        ) is not None
 
 
 # ===========================================================================
@@ -442,12 +622,36 @@ class TestDay0TransitionMonotonicity:
         assert 'trigger="DAY0_OBSERVATION_REVERSAL"' not in source
         assert 'trigger="DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE"' in source
 
-    def test_buy_no_day0_monitor_probability_stays_independent(self):
-        """Static antibody: the monitor day0 lane must keep refusing to feed a
-        buy_no position a fresh day0 'model probability' derived from YES-side
-        math (the estimator-switch artifact source for buy_no)."""
+    def test_buy_no_day0_monitor_probability_uses_explicit_held_side_conversion(self):
+        """Static antibody: buy_no monitor probability must be explicitly held-side.
+
+        The Day0 signal estimates the YES outcome for the bin. A buy_no held
+        position needs the complementary outcome probability, but not a NO-token
+        executable price or confidence-bound shortcut.
+        """
         source = (ROOT / "src" / "engine" / "monitor_refresh.py").read_text(encoding="utf-8")
-        assert "buy_no_independent_monitor_probability_missing" in source
+        assert "_held_side_probability_from_yes_bin_probability" in source
+        assert "buy_no_independent_monitor_probability_missing" not in source
+
+    def test_buy_no_day0_monitor_probability_converts_direction_enum(self):
+        """Position normalizes direction to Direction; enum inputs still need NO space."""
+        from src.contracts.semantic_types import Direction
+        from src.engine.monitor_refresh import _held_side_probability_from_yes_bin_probability
+
+        actual = _held_side_probability_from_yes_bin_probability(
+            0.004831941161402871,
+            Direction.NO,
+        )
+        assert actual == pytest.approx(0.9951680588385971)
+
+    def test_day0_monitor_does_not_reintroduce_legacy_platt(self):
+        """Day0 monitor evidence must not resurrect the retired ENS+Platt era."""
+        source = (ROOT / "src" / "engine" / "monitor_refresh.py").read_text(encoding="utf-8")
+        start = source.index("def _refresh_day0_observation(")
+        end = source.index("def _day0_extreme_authority_rejection_reason(")
+        body = source[start:end]
+        assert "_monitor_calibrator_for_ens_result" not in body
+        assert "platt_recalibration" not in body
 
 
 # ===========================================================================

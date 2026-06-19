@@ -2,7 +2,7 @@ from dataclasses import replace
 
 from tests.test_replacement_forecast_materializer import _conn, _request
 
-from src.data.replacement_forecast_materializer import materialize_replacement_forecast_shadow
+from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
 
 
 def test_materialization_blocks_om9_anchor_without_full_local_day_hourly_coverage() -> None:
@@ -14,7 +14,7 @@ def test_materialization_blocks_om9_anchor_without_full_local_day_hourly_coverag
         contributing_valid_times_utc=request.openmeteo_anchor.contributing_valid_times_utc[:-1],
     )
 
-    result = materialize_replacement_forecast_shadow(_conn(), replace(request, openmeteo_anchor=anchor))
+    result = materialize_replacement_forecast_live(_conn(), replace(request, openmeteo_anchor=anchor))
 
     assert result.ok is False
     assert "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE" in result.reason_codes

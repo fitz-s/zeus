@@ -13,9 +13,12 @@ from src.data.replacement_forecast_source_run_identity import (
 )
 
 
-STRATEGY_KEY = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
-PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
-SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
+STRATEGY_KEY = "openmeteo_ecmwf_ifs9_bayes_fusion"
+PRODUCT_ID = "openmeteo_ecmwf_ifs9_bayes_fusion_v1"
+SOURCE_ID = "openmeteo_ecmwf_ifs9_bayes_fusion"
+HIGH_DATA_VERSION = "openmeteo_ecmwf_ifs9_bayes_fusion_high_v1"
+LOW_DATA_VERSION = "openmeteo_ecmwf_ifs9_bayes_fusion_low_v1"
+LIVE_RUNTIME_LAYER = "live"
 READY_STATUS = "READY"
 LEGACY_READY_STATUS = "SHADOW_ONLY"
 BLOCKED_STATUS = "BLOCKED"
@@ -52,6 +55,10 @@ def _date_text(value: date | str) -> str:
 def _reject_alias(value: str, *, field_name: str) -> None:
     if _FORBIDDEN_TRANSCRIPT_ALIAS in value.lower():
         raise ValueError(f"{field_name} must use the full product identity")
+
+
+def _posterior_data_version(metric: str) -> str:
+    return HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
 
 
 @dataclass(frozen=True)
@@ -132,7 +139,7 @@ def build_replacement_forecast_readiness(
     computed_at: datetime | str,
     expires_at: datetime | str | None,
     dependencies: Sequence[ReplacementForecastDependency],
-    required_roles: Sequence[str] = ("baseline_b0", "aifs_sampled_2t", "openmeteo_ifs9_anchor", "soft_anchor_posterior"),
+    required_roles: Sequence[str] = ("baseline_b0", "openmeteo_ifs9_anchor", "soft_anchor_posterior"),
 ) -> ReplacementForecastReadinessDecision:
     if not city:
         raise ValueError("city must be set")
@@ -175,7 +182,14 @@ def build_replacement_forecast_readiness(
     for role in required:
         dependency = by_role[role]
         expected = expected_identity.get(role)
-        if expected is not None:
+        if role == "soft_anchor_posterior":
+            if (
+                dependency.source_id != SOURCE_ID
+                or dependency.product_id != PRODUCT_ID
+                or dependency.data_version != _posterior_data_version(temperature_metric)
+            ):
+                identity_mismatch_roles.append(role)
+        elif expected is not None:
             if (
                 dependency.source_id != expected.source_id
                 or dependency.product_id != expected.product_id
@@ -227,9 +241,8 @@ def build_replacement_forecast_readiness(
         "computed_at": computed_utc.isoformat(),
         "role": "soft_anchor_readiness_dependency_builder",
         "readiness_status": final_status,
-        "posterior_authority_status": "SHADOW_ONLY",
-        "runtime_policy_status": "SHADOW_VETO_ONLY",
-        "trade_authority_status": "SHADOW_ONLY",
+        "runtime_layer": LIVE_RUNTIME_LAYER if final_status == READY_STATUS else "blocked",
+        "runtime_policy_status": LIVE_RUNTIME_LAYER if final_status == READY_STATUS else "blocked",
         "training_allowed": False,
     }
     identity_payload = {

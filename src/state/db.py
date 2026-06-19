@@ -551,7 +551,7 @@ def world_write_lock(
 
 
 def checkpoint_world_wal() -> tuple[int, int, int]:
-    """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` on zeus-world.db; return its triple.
+    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus-world.db; return its triple.
 
     THE BACKSTOP (2026-06-04 WAL checkpoint-starvation fix, part 2).
 
@@ -566,11 +566,11 @@ def checkpoint_world_wal() -> tuple[int, int, int]:
     function is the periodic backstop that actually reclaims the freed frames.
 
     Returns the ``(busy, log_frames, checkpointed_frames)`` triple from
-    ``wal_checkpoint(TRUNCATE)``:
-      * ``busy == 0`` → checkpoint completed; the WAL was truncated.
-      * ``busy == 1`` → a reader still pinned the floor (TRUNCATE could not run);
-        a CHRONIC busy is the loud signal that a reader is not releasing — it is
-        NOT silenced. The caller logs the triple so this is observable.
+    ``wal_checkpoint(PASSIVE)``. PASSIVE checkpoints copy all currently safe WAL
+    frames without waiting for readers/writers or trying to truncate the file.
+    That preserves live writer priority: a checkpoint must never sit in SQLite's
+    busy handler while held-position monitor/redecision work is waiting to write.
+    A chronic non-zero ``busy`` result is still observable in caller logs.
 
     Lock discipline: a checkpoint is NOT a write transaction. SQLite serializes
     checkpoints internally (the checkpoint lock), so this MUST NOT take the
@@ -581,7 +581,7 @@ def checkpoint_world_wal() -> tuple[int, int, int]:
     """
     conn = _connect(ZEUS_WORLD_DB_PATH, write_class=None)
     try:
-        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         # Row is (busy, log, checkpointed). Normalise to ints for callers/logs.
         busy = int(row[0]) if row is not None else 1
         log_frames = int(row[1]) if row is not None else -1
@@ -592,7 +592,7 @@ def checkpoint_world_wal() -> tuple[int, int, int]:
 
 
 def checkpoint_trades_wal() -> tuple[int, int, int]:
-    """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` on zeus_trades.db; return its triple.
+    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on zeus_trades.db; return its triple.
 
     THE BACKSTOP (2026-06-16) — the zeus_trades.db twin of ``checkpoint_world_wal``.
 
@@ -607,13 +607,13 @@ def checkpoint_trades_wal() -> tuple[int, int, int]:
     write mutex (a checkpoint is not a write txn; SQLite serializes checkpoints
     internally), closed immediately so it never itself becomes a floor-pinning reader.
 
-    Returns the ``(busy, log_frames, checkpointed_frames)`` triple:
-      * ``busy == 0`` → checkpoint completed; the WAL was truncated.
-      * ``busy == 1`` → a reader still pinned the floor (loud signal; not silenced).
+    Returns the ``(busy, log_frames, checkpointed_frames)`` triple. PASSIVE mode
+    is intentional for live: reclaim safe frames without waiting behind active
+    monitor writers or blocking the next held-position redecision tick.
     """
     conn = _connect(_zeus_trade_db_path(), write_class=None)
     try:
-        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         busy = int(row[0]) if row is not None else 1
         log_frames = int(row[1]) if row is not None else -1
         ckpt_frames = int(row[2]) if row is not None else -1
@@ -996,7 +996,9 @@ OPEN_EXPOSURE_PHASES = (
 )
 ENTRY_ECONOMICS_LEGACY_UNKNOWN = "legacy_unknown"
 ENTRY_ECONOMICS_AVG_FILL_PRICE = "avg_fill_price"
+ENTRY_ECONOMICS_CORRECTED_COST_BASIS = "corrected_executable_cost_basis"
 FILL_AUTHORITY_NONE = "none"
+FILL_AUTHORITY_VENUE_POSITION_OBSERVED = "venue_position_observed"
 FILL_AUTHORITY_VENUE_CONFIRMED_FULL = "venue_confirmed_full"
 TERMINAL_TRADE_DECISION_STATUSES = frozenset(
     {
@@ -1363,11 +1365,14 @@ def get_connection(
     return conn
 
 
-# B2 (2026-05-28): SCHEMA_VERSION counter cancelled. Schema drift is now detected via
-# content-hash fingerprint in scripts/check_schema_fingerprint.py + architecture/_schema_fingerprint.txt.
-# Row-level provenance columns (decision_events.schema_version etc.) retain their current
-# CHECK constraints and new rows write the last-frozen value (55, post-#358) permanently.
-# Per-table schema constants in src/state/schema/* are B2-followup (out of scope here).
+# Last reused or audited: 2026-05-11
+# Authority basis: PLAN docs/operations/task_2026-05-11_init_schema_boot_invariant/PLAN.md
+# Schema currency sentinel. Bump on EVERY DDL change in this file OR in
+# init_provenance_projection_schema (:1729) OR apply_v2_schema (:2222).
+# CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
+# a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
+# the PR if SCHEMA_VERSION did not change in lockstep.
+SCHEMA_VERSION = 42  # 2026-05-28 F1 (docs/findings_2026_05_28.md §F1): position_current gains chain_avg_price + chain_cost_basis_usd so balance-only rescue persists chain-observed economics without overwriting submitted entry_price/cost_basis_usd/size_usd. Prior: 41 = merge #349+#352.
 
 
 def init_schema(
@@ -1633,6 +1638,7 @@ def init_schema(
             candidate_id TEXT,
             city TEXT,
             target_date TEXT,
+            temperature_metric TEXT,
             range_label TEXT,
             direction TEXT CHECK (direction IN ('buy_yes', 'buy_no', 'unknown')),
             mode TEXT,
@@ -1692,6 +1698,10 @@ def init_schema(
             -- condition_id (parallel to bin_labels_json) for the synthesized 'edli_belief:' rows.
             -- NULL for every non-belief / legacy row.
             condition_ids_json TEXT,
+            -- Continuous re-decision conservative screen: per-bin q_lcb for YES and NO sides,
+            -- parallel to bin_labels_json. NULL means no live entry-admission proof.
+            q_lcb_yes_json TEXT,
+            q_lcb_no_json TEXT,
             recorded_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_probability_trace_city_target
@@ -1828,7 +1838,7 @@ def init_schema(
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
@@ -2526,6 +2536,18 @@ def init_schema(
         conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN condition_ids_json TEXT;")
     except sqlite3.OperationalError:
         pass
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN temperature_metric TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN q_lcb_yes_json TEXT;")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE probability_trace_fact ADD COLUMN q_lcb_no_json TEXT;")
+    except sqlite3.OperationalError:
+        pass
 
     # LIVE-PROB-P0 (SCHEMA_VERSION 34, 2026-05-23): probability_trace_fact gains
     # three tail-evidence columns for the cumulative tail-mass discrepancy gate.
@@ -3128,7 +3150,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             finality_confirmed_time    TEXT,
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
-            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)),
+            schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
             source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
@@ -3164,7 +3186,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             first_inclusion_block_time, finality_confirmed_time,
             clock_skew_estimate_ms_at_submit, raw_orderbook_hash_transition_delta_ms,
             CASE
-                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)
+                WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)
                     THEN schema_version
                 ELSE 36
             END,
@@ -3855,6 +3877,15 @@ def _strip_strategy_key_check(sql: str) -> str:
     )
 
 
+def _legacy_alter_table_enabled(conn: sqlite3.Connection) -> bool:
+    row = conn.execute("PRAGMA legacy_alter_table").fetchone()
+    return bool(row and int(row[0] or 0))
+
+
+def _set_legacy_alter_table(conn: sqlite3.Connection, enabled: bool) -> None:
+    conn.execute(f"PRAGMA legacy_alter_table = {'ON' if enabled else 'OFF'}")
+
+
 def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
     """Remove stale hardcoded strategy_key CHECK from telemetry tables.
 
@@ -3888,7 +3919,12 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
         conn.execute(new_create)
         conn.execute(f"INSERT INTO {tname}_new SELECT * FROM {tname}")
         conn.execute(f"DROP TABLE {tname}")
-        conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
+        _legacy_alter_was_enabled = _legacy_alter_table_enabled(conn)
+        _set_legacy_alter_table(conn, True)
+        try:
+            conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
+        finally:
+            _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
         for (idx_sql,) in indexes:
             conn.execute(idx_sql)
 
@@ -3929,7 +3965,12 @@ def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
         conn.execute(new_create)
         conn.execute(f"INSERT INTO {tname}_new SELECT * FROM {tname}")
         conn.execute(f"DROP TABLE {tname}")
-        conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
+        _legacy_alter_was_enabled = _legacy_alter_table_enabled(conn)
+        _set_legacy_alter_table(conn, True)
+        try:
+            conn.execute(f"ALTER TABLE {tname}_new RENAME TO {tname}")
+        finally:
+            _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
         for (trg_sql,) in triggers:
             conn.execute(trg_sql)
         for (idx_sql,) in indexes:
@@ -4201,14 +4242,14 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # Persisted source-time frontier authority; forecasts-only static helper (not in world_src).
     _create_source_time_frontier(conn)
 
-    # Replacement forecast shadow/live-authority provenance (2026-06-07).
+    # Replacement forecast live-support provenance (2026-06-07).
     # Forecasts-only static helper; never copied from world_src and never
     # created on world/trade DBs. Keeps boot-time registry equality aligned
     # with apply_canonical_schema(forecast_tables=True).
     from src.state.schema.v2_schema import (
-        _create_replacement_forecast_shadow_tables as _create_replacement_shadow,
+        _create_replacement_forecast_live_tables as _create_replacement_live,
     )
-    _create_replacement_shadow(conn)
+    _create_replacement_live(conn)
 
     conn.commit()
 
@@ -4288,6 +4329,7 @@ CREATE TABLE IF NOT EXISTS position_events (
         'EXIT_ORDER_FILLED',
         'EXIT_ORDER_VOIDED',
         'EXIT_ORDER_REJECTED',
+        'EXIT_RETRY_RELEASED',
         'SETTLED',
         'ADMIN_VOIDED',
         'MANUAL_OVERRIDE_APPLIED',
@@ -4356,8 +4398,14 @@ CREATE TABLE IF NOT EXISTS position_current (
     p_posterior REAL,
     entry_ci_width REAL,
     last_monitor_prob REAL,
+    last_monitor_prob_is_fresh INTEGER CHECK (
+        last_monitor_prob_is_fresh IS NULL OR last_monitor_prob_is_fresh IN (0,1)
+    ),
     last_monitor_edge REAL,
     last_monitor_market_price REAL,
+    last_monitor_market_price_is_fresh INTEGER CHECK (
+        last_monitor_market_price_is_fresh IS NULL OR last_monitor_market_price_is_fresh IN (0,1)
+    ),
     decision_snapshot_id TEXT,
     entry_method TEXT,
     strategy_key TEXT NOT NULL,
@@ -9531,7 +9579,8 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
                strategy_key, chain_state, order_status,
                decision_snapshot_id, last_monitor_market_price,
                token_id, no_token_id, condition_id,
-               fill_authority
+               fill_authority,
+               chain_shares, chain_avg_price, chain_cost_basis_usd
         FROM position_current
         ORDER BY updated_at DESC, position_id
         """
@@ -9727,9 +9776,6 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         "chain_cost_basis_usd",
         "chain_seen_at",
         "chain_absence_at",
-        "entry_ci_width",
-        "exit_retry_count",
-        "next_exit_retry_at",
     )
     authority_select_expr = ", ".join(
         c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
@@ -9803,8 +9849,12 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "exit_retry_count": row["exit_retry_count"],
                 "next_exit_retry_at": row["next_exit_retry_at"],
                 "last_monitor_prob": _finite_float_or_none(row["last_monitor_prob"]),
+                "last_monitor_prob_is_fresh": bool(row["last_monitor_prob_is_fresh"] or False),
                 "last_monitor_edge": _finite_float_or_none(row["last_monitor_edge"]),
                 "last_monitor_market_price": row["last_monitor_market_price"],
+                "last_monitor_market_price_is_fresh": bool(
+                    row["last_monitor_market_price_is_fresh"] or False
+                ),
                 "decision_snapshot_id": str(row["decision_snapshot_id"] or ""),
                 "entry_method": str(row["entry_method"] or ""),
                 "strategy_key": str(row["strategy_key"] or ""),
@@ -10409,16 +10459,57 @@ def _query_entry_execution_fill_hints(
 def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> dict:
     from src.state.portfolio import fill_authority_effective_open_cost_basis
 
+    def _row_optional(key: str, default: object = None) -> object:
+        try:
+            return row[key]
+        except (IndexError, KeyError):
+            return default
+
     submitted_size_usd = _finite_float_or_zero(row["size_usd"])
     projection_shares = _finite_float_or_zero(row["shares"])
     projection_cost_basis_usd = _finite_float_or_zero(row["cost_basis_usd"])
     projection_entry_price = _finite_float_or_zero(row["entry_price"])
+    chain_shares = _finite_float_or_zero(_row_optional("chain_shares"))
+    chain_cost_basis_usd = _finite_float_or_zero(_row_optional("chain_cost_basis_usd"))
+    chain_avg_price = _finite_float_or_zero(_row_optional("chain_avg_price"))
     phase = str(row["phase"] or "")
 
     if fill_hint:
         filled_cost_basis_usd = _finite_float_or_zero(fill_hint.get("filled_cost_basis_usd"))
         filled_shares = _finite_float_or_zero(fill_hint.get("shares_filled"))
         avg_fill_price = _finite_float_or_zero(fill_hint.get("entry_price_avg_fill"))
+        row_fill_authority = str(_row_optional("fill_authority") or "").strip()
+        if (
+            projection_shares > filled_shares + 1e-9
+            and projection_cost_basis_usd > filled_cost_basis_usd + 1e-9
+            and chain_shares >= projection_shares - 1e-9
+            and chain_cost_basis_usd >= projection_cost_basis_usd - 1e-9
+        ):
+            effective_entry_price = chain_avg_price or projection_entry_price
+            if effective_entry_price <= 0.0 and projection_cost_basis_usd > 0.0 and projection_shares > 0.0:
+                effective_entry_price = projection_cost_basis_usd / projection_shares
+            return {
+                "submitted_size_usd": submitted_size_usd,
+                "projection_cost_basis_usd": projection_cost_basis_usd,
+                "effective_cost_basis_usd": projection_cost_basis_usd,
+                "effective_shares": projection_shares,
+                "pnl_cost_basis_usd": projection_cost_basis_usd,
+                "effective_entry_price": effective_entry_price,
+                "entry_price_avg_fill": effective_entry_price,
+                "shares_filled": projection_shares,
+                "filled_cost_basis_usd": projection_cost_basis_usd,
+                "entry_economics_authority": ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+                "fill_authority": (
+                    row_fill_authority
+                    if row_fill_authority and row_fill_authority != FILL_AUTHORITY_NONE
+                    else FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+                ),
+                "entry_economics_source": "position_current_chain_corrected",
+                "entry_fill_verified": True,
+                "execution_fact_intent_id": str(fill_hint.get("execution_fact_intent_id") or ""),
+                "execution_fact_filled_at": str(fill_hint.get("execution_fact_filled_at") or ""),
+                "execution_fact_venue_status": str(fill_hint.get("execution_fact_venue_status") or ""),
+            }
         effective_cost_basis_usd = fill_authority_effective_open_cost_basis(
             current_open_cost=projection_cost_basis_usd,
             current_open_shares=projection_shares,

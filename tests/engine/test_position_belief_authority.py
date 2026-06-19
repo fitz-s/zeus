@@ -16,12 +16,12 @@ permanently-stale belief and the exit gate could never fire. These tests pin:
 
 1. ``load_replacement_belief`` reads the freshest posterior row, indexes the
    held bin by its venue range-label, converts to held-side space exactly once,
-   and brands freshness from an explicit age budget — stale is returned as
-   information, absence and unparseable timestamps fail closed.
+   and brands freshness from the live source-cycle clock when available —
+   stale is returned as information, absence and unparseable timestamps fail closed.
 2. ``monitor_probability_refresh`` treats the replacement belief as PRIMARY:
    a fresh row attests freshness without consulting the legacy chain; a stale
-   or missing row falls through to legacy with an honest annotation and can
-   never borrow freshness.
+   or missing row cannot borrow freshness from the legacy ENS chain. Non-day0
+   positions fault/reseed; day0 observation remains a separate authority.
 3. The belief-dead watchdog escalates after N consecutive stale-belief cycles
    while the market price stays fresh (719 silent cycles can never recur).
 """
@@ -30,9 +30,11 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from src.contracts import EntryMethod
 from src.engine.position_belief import (
     DEFAULT_MAX_AGE_HOURS,
     SELECTED_METHOD_REPLACEMENT_POSTERIOR,
@@ -53,7 +55,9 @@ def forecasts_db(tmp_path):
         """
         CREATE TABLE forecast_posteriors (
             posterior_id TEXT, city TEXT, target_date TEXT,
-            temperature_metric TEXT, computed_at TEXT, q_json TEXT
+            temperature_metric TEXT, computed_at TEXT, q_json TEXT,
+            source_cycle_time TEXT,
+            runtime_layer TEXT
         )
         """
     )
@@ -63,11 +67,21 @@ def forecasts_db(tmp_path):
 
 
 def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
-            target_date="2026-06-12", metric="high"):
+            target_date="2026-06-12", metric="high", source_cycle_time=None,
+            runtime_layer="live"):
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?)",
-        (posterior_id, city, target_date, metric, computed_at, json.dumps(q)),
+        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?)",
+        (
+            posterior_id,
+            city,
+            target_date,
+            metric,
+            computed_at,
+            json.dumps(q),
+            source_cycle_time,
+            runtime_layer,
+        ),
     )
     conn.commit()
     conn.close()
@@ -113,13 +127,75 @@ class TestLoadReplacementBelief:
         belief = _load(forecasts_db)
         assert belief.posterior_id == "new"
         assert belief.q_yes_bin == pytest.approx(0.30)
+        assert belief.runtime_layer == "live"
+
+    def test_newer_non_live_row_cannot_override_live_runtime_layer(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="live",
+            computed_at=(NOW - timedelta(hours=2)).isoformat(),
+            q={BIN: 0.20},
+            runtime_layer="live",
+        )
+        _insert(
+            forecasts_db,
+            posterior_id="non-live",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.80},
+            runtime_layer=None,
+        )
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.posterior_id == "live"
+        assert belief.q_yes_bin == pytest.approx(0.20)
+
+    def test_only_non_live_rows_fail_closed(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="non-live",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.80},
+            runtime_layer=None,
+        )
+
+        assert _load(forecasts_db) is None
 
     def test_stale_row_returned_with_fresh_false(self, forecasts_db):
         """Staleness is information, absence is not — the caller annotates and
-        falls through to legacy telemetry, but never brands this fresh."""
+        must never brand this fresh."""
         _insert(forecasts_db, posterior_id="p1",
                 computed_at=(NOW - timedelta(hours=DEFAULT_MAX_AGE_HOURS + 5)).isoformat(),
                 q={BIN: 0.242})
+        belief = _load(forecasts_db)
+        assert belief is not None
+        assert belief.fresh is False
+
+    def test_source_cycle_clock_controls_live_schema_freshness(self, forecasts_db):
+        """Live posteriors stay lawful by the shared source-cycle horizon, not
+        the old 9h computed_at monitor clock."""
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=14)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=24)).isoformat(),
+            q={BIN: 0.242},
+        )
+        belief = _load(forecasts_db)
+        assert belief is not None
+        assert belief.fresh is True
+        assert belief.freshness_basis == "source_cycle_time"
+        assert belief.source_cycle_age_hours == pytest.approx(24.0)
+
+    def test_source_cycle_clock_still_fails_closed_after_bound(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=14)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=36)).isoformat(),
+            q={BIN: 0.242},
+        )
         belief = _load(forecasts_db)
         assert belief is not None
         assert belief.fresh is False
@@ -185,6 +261,18 @@ class TestMonitorPrimaryAuthority:
             p_posterior=0.855,
         )
 
+    def test_day0_yes_bin_probability_converts_to_held_side_for_buy_no(self):
+        import src.engine.monitor_refresh as mr
+
+        assert mr._held_side_probability_from_yes_bin_probability(
+            0.23,
+            "buy_yes",
+        ) == pytest.approx(0.23)
+        assert mr._held_side_probability_from_yes_bin_probability(
+            0.23,
+            "buy_no",
+        ) == pytest.approx(0.77)
+
     def test_fresh_belief_attests_without_legacy_chain(self, monkeypatch):
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb
@@ -242,6 +330,146 @@ class TestMonitorPrimaryAuthority:
             for v in pos.applied_validations
         )
 
+    def test_stale_belief_on_target_local_day_uses_day0_observation_lane(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        belief = ReplacementBelief(
+            held_side_prob=0.758, q_yes_bin=0.242, posterior_id="p9",
+            computed_at="2026-06-12T00:00:00+00:00", age_hours=99.0,
+            fresh=False, bin_key=BIN, direction="buy_no",
+        )
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: belief)
+        observed = []
+
+        def fake_day0_refresh(**kw):
+            observed.append(kw["position"].entry_method)
+            mr._set_monitor_probability_fresh(kw["position"], True)
+            return 0.64, ["day0_observation"]
+
+        monkeypatch.setattr(
+            mr,
+            "_refresh_day0_observation",
+            fake_day0_refresh,
+        )
+        monkeypatch.setattr(
+            mr,
+            "_refresh_ens_member_counting",
+            lambda **kw: (_ for _ in ()).throw(AssertionError("ENS fallback must not run")),
+        )
+        pos = self._pos()
+        pos.state = "active"
+        pos.target_date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        city = type(
+            "City",
+            (),
+            {"timezone": "Asia/Shanghai", "settlement_source_type": "wu_icao"},
+        )()
+
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos,
+            conn=None,
+            city=city,
+            target_d=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+        )
+
+        assert observed == [EntryMethod.DAY0_OBSERVATION.value]
+        assert prob == pytest.approx(0.64)
+        assert (
+            refresh_pos.selected_method
+            == mr.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+        )
+        assert "day0_observation_remaining_window" in refresh_pos.applied_validations
+        assert is_fresh is True
+
+    def test_hko_day0_window_uses_day0_observation_lane(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        belief = ReplacementBelief(
+            held_side_prob=0.758, q_yes_bin=0.242, posterior_id="p9",
+            computed_at="2026-06-12T00:00:00+00:00", age_hours=99.0,
+            fresh=False, bin_key=BIN, direction="buy_no",
+        )
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: belief)
+        observed = []
+
+        def fake_day0_refresh(**kw):
+            observed.append(kw["position"].entry_method)
+            mr._set_monitor_probability_fresh(kw["position"], True)
+            return 0.71, ["day0_observation"]
+
+        monkeypatch.setattr(mr, "_refresh_day0_observation", fake_day0_refresh)
+        monkeypatch.setattr(
+            mr,
+            "_refresh_ens_member_counting",
+            lambda **kw: (_ for _ in ()).throw(AssertionError("ENS fallback must not run")),
+        )
+        pos = self._pos()
+        pos.city = "Hong Kong"
+        pos.state = "day0_window"
+        pos.target_date = datetime.now(ZoneInfo("Asia/Hong_Kong")).date().isoformat()
+        city = type(
+            "City",
+            (),
+            {"timezone": "Asia/Hong_Kong", "settlement_source_type": "hko"},
+        )()
+
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos,
+            conn=None,
+            city=city,
+            target_d=datetime.now(ZoneInfo("Asia/Hong_Kong")).date(),
+        )
+
+        assert observed == [EntryMethod.DAY0_OBSERVATION.value]
+        assert prob == pytest.approx(0.71)
+        assert (
+            refresh_pos.selected_method
+            == mr.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+        )
+        assert "day0_observation_remaining_window" in refresh_pos.applied_validations
+        assert is_fresh is True
+
+    def test_day0_monitor_accepts_incomplete_window_only_as_bound(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+
+        pos = self._pos()
+        obs = {
+            "observation_time": NOW.isoformat(),
+            "coverage_status": "WINDOW_INCOMPLETE",
+        }
+        monkeypatch.setattr(mr, "_fetch_day0_observation", lambda city, target_d: obs)
+        monkeypatch.setattr(
+            mr,
+            "_day0_observation_source_rejection_reason",
+            lambda *args, **kwargs: None,
+        )
+        allow_flags = []
+
+        def fake_quality(*args, allow_incomplete_window_bound=False, **kwargs):
+            allow_flags.append(allow_incomplete_window_bound)
+            return "stop_after_quality_assertion"
+
+        monkeypatch.setattr(
+            mr,
+            "_day0_observation_quality_rejection_reason",
+            fake_quality,
+        )
+
+        prob, validations = mr._refresh_day0_observation(
+            position=pos,
+            current_p_market=0.12,
+            conn=None,
+            city=type("City", (), {"name": "Chengdu"})(),
+            target_d=NOW.date(),
+        )
+
+        assert allow_flags == [True]
+        assert prob == pytest.approx(pos.p_posterior)
+        assert "day0_observation_bound_only:coverage_window_incomplete" in validations
+        assert "observation_quality_gate" in validations
+
     def test_missing_belief_annotates_and_falls_through(self, monkeypatch):
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb
@@ -259,11 +487,11 @@ class TestMonitorPrimaryAuthority:
 
 
 class TestReplacementAuthorityFaultSuppressesLegacy:
-    """Regime law U1/U2 (2026-06-12) + Denver incident: a REPLACEMENT-authority
-    held position (edli trade_id) whose replacement belief is stale/missing must
-    NOT be papered over by the legacy ENS forecast belief. Instead: not-fresh +
-    BELIEF_AUTHORITY_FAULT + a fail-soft single-family reseed. A LEGACY-entered
-    (non-edli) position still gets the legacy path, clearly branded."""
+    """Regime law U1/U2 (2026-06-12), Denver incident, and 2026-06-16 source
+    parity widening: a non-day0 held position whose replacement belief is
+    stale/missing must NOT be papered over by legacy ENS forecast belief.
+    Instead: not-fresh + BELIEF_AUTHORITY_FAULT + fail-soft single-family reseed.
+    The day0 observation lane remains separately authorized."""
 
     def _edli_pos(self, trade_id="edli-belief-1", entry_method="ens_member_counting"):
         from src.state.portfolio import Position
@@ -354,7 +582,7 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
         # try/except absorbs it. Here we patch the inner trigger via the wrapper's
         # fail-soft contract by making the config lookup raise.
         monkeypatch.setattr(
-            "src.data.replacement_forecast_production._replacement_forecast_shadow_materialization_queue_config",
+            "src.data.replacement_forecast_production._replacement_forecast_live_materialization_queue_config",
             _boom,
         )
         monkeypatch.setattr(mr, "_refresh_ens_member_counting", lambda **kw: (0.5, []))
@@ -377,10 +605,9 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
         MUST NOT run; belief is marked not-fresh + BELIEF_AUTHORITY_FAULT + a
         same-family reseed re-materializes the SAME authority next cycle.
 
-        RED-on-revert: restoring the edli-only guard
-        (``_position_is_replacement_authority(pos) and not _would_use_day0_lane``)
-        re-enables the ensemble substitution for legacy positions → ``legacy_called``
-        becomes ``["ens"]`` → this test fails."""
+        RED-on-revert: restoring an edli-only guard re-enables ensemble
+        substitution for legacy positions -> ``legacy_called`` becomes
+        ``["ens"]`` -> this test fails."""
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb
 

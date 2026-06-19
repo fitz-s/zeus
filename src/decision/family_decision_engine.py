@@ -166,7 +166,7 @@ DRIFT RESOLVED (recorded per operator law; see docs/rebuild/impl_w4_family_decis
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import (
     Mapping,
@@ -204,6 +204,7 @@ from src.forecast.day0_conditioner import Day0ObservationState
 from src.forecast.predictive_distribution_builder import PredictiveDistribution
 from src.forecast.types import ForecastCase, FreshModelSet
 from src.probability.instruments import Instrument, InstrumentError
+from src.decision.qlcb_reliability_guard import apply_guard as _apply_qlcb_guard
 from src.probability.joint_q import JointQ, build_joint_q
 from src.probability.joint_q_band import JointQBand, build_joint_q_band
 from src.probability.outcome_space import OutcomeSpace
@@ -221,6 +222,9 @@ NO_TRADE_NO_EXECUTABLE_ROUTE = "NO_EXECUTABLE_ROUTE_CANDIDATE"
 NO_TRADE_NO_DIRECTION_LAW = "NO_DIRECTION_LAW_CANDIDATE"
 NO_TRADE_MARKET_INCOHERENT = "MARKET_INCOHERENT_BLOCK_LIVE"
 NO_TRADE_NO_POSITIVE_EDGE = "NO_POSITIVE_EDGE_CANDIDATE"
+# q_lcb empirical reliability guard (FINAL no-shadow execution flow §6): every candidate's
+# served q_lcb was deflated to 0 (abstain) because its reliability cell is thin / below floor.
+NO_TRADE_QLCB_RELIABILITY_ABSTAIN = "QLCB_RELIABILITY_GUARD_ABSTAIN"
 
 
 class FamilyDecisionError(ValueError):
@@ -687,6 +691,18 @@ class FamilyDecisionEngine:
             for d in enumerated
         )
 
+        # --- (6b) q_lcb EMPIRICAL RELIABILITY GUARD (FINAL no-shadow flow §6) -----
+        # The RAW-honest serving rule: deflate each candidate's served q_lcb to
+        # q_safe = min(band_q_lcb, L_g) and ABSTAIN (force a non-positive edge) when the
+        # candidate's reliability cell (metric, lead_bucket, bin_position, q_lcb_bucket)
+        # is thin (N_g < N_MIN) or its OOF realized frequency does not support the bucket
+        # (L_g < bucket_floor − EPS). Applied here, where the decision layer consumes the
+        # q_lcb (between scoring and selection). INERT when the OOF reliability artifact is
+        # absent (current live state) -> scored is byte-identical (no abstain). Moves NO μ.
+        scored = self._apply_qlcb_reliability_guard(
+            scored=scored, case=case, joint_q=joint_q, forecast_bin=forecast_bin
+        )
+
         # --- (7) the filter chain (spec lines 896-898) — ORDER IS THE CONTRACT ----
         #   direction_law_ok -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)
         # The scalar robust_trade_score is NOT one of the conditions.
@@ -884,6 +900,78 @@ class FamilyDecisionEngine:
             route_id=route.route_cost.route_id,
         )
 
+    # ------------------------------------------------ q_lcb reliability guard
+    def _apply_qlcb_reliability_guard(
+        self,
+        *,
+        scored: tuple[CandidateDecision, ...],
+        case: ForecastCase,
+        joint_q: JointQ,
+        forecast_bin: str,
+    ) -> tuple[CandidateDecision, ...]:
+        """Deflate each candidate's served q_lcb by the empirical OOF reliability guard.
+
+        FINAL no-shadow execution flow §6. The candidate's served q_lcb (the route's robust
+        lower bound) is ``q_lcb_route = economics.edge_lcb + cost`` (because
+        ``edge_lcb = quantile(samples @ payoff) − cost``). The guard resolves the cell
+        ``(metric, lead_bucket, bin_position, q_lcb_bucket)`` — ``bin_position`` is "modal"
+        for the forecast (modal) bin, "nonmodal" otherwise (a stable, NON-per-city position
+        label) — and returns ``q_safe = min(q_lcb_route, L_g)`` plus a trade/abstain verdict.
+
+        On ABSTAIN (thin cell or below floor) the candidate's economics are re-stamped with a
+        non-positive ``edge_lcb`` (and ``optimal_delta_u``) so the existing ``edge_lcb > 0``
+        filter rejects it — the candidate publishes its point prob but never trades. On a
+        licensed deflation (``q_safe < q_lcb_route``) the edge is lowered to
+        ``q_safe − cost`` so the after-cost edge the selector reads is the GUARDED edge. INERT
+        (artifact absent) -> every verdict is pass-through and ``scored`` is returned unchanged.
+
+        Read-only on μ. FAIL-SOFT: any guard error leaves the candidate untouched (the
+        conservative edge_lcb>0 gate is still the trade authority).
+        """
+        lead_days = float(getattr(case, "lead_hours", 0.0) or 0.0) / 24.0
+        metric = str(getattr(case, "metric", "")).lower()
+        out: list[CandidateDecision] = []
+        for d in scored:
+            try:
+                econ = d.economics
+                cost = float(econ.cost.value)
+                edge_lcb = float(econ.edge_lcb)
+                # The route's served q_lcb lower bound (payoff-space, pre-deflation).
+                q_lcb_route = edge_lcb + cost
+                bin_position = "modal" if d.route.bin_id == forecast_bin else "nonmodal"
+                verdict = _apply_qlcb_guard(
+                    band_q_lcb=q_lcb_route,
+                    metric=metric,
+                    lead_days=lead_days,
+                    bin_position=bin_position,
+                )
+                if verdict.basis == "INERT" and not verdict.abstained:
+                    out.append(d)  # pass-through (no OOF evidence for this cell)
+                    continue
+                if verdict.abstained:
+                    # ABSTAIN: deflate the edge to a non-positive value so edge_lcb>0 rejects
+                    # it. q_safe = 0 -> guarded edge = 0 − cost = −cost (< 0 for any real cost).
+                    new_edge = verdict.q_safe - cost
+                    new_econ = replace(
+                        econ,
+                        edge_lcb=float(new_edge),
+                        optimal_delta_u=min(float(econ.optimal_delta_u), 0.0),
+                    )
+                    out.append(replace(d, economics=new_econ))
+                    continue
+                # Licensed deflation: lower the edge to q_safe − cost (>= the abstain edge,
+                # <= the original). q_safe = min(q_lcb_route, L_g), so when L_g >= q_lcb_route
+                # this is the original edge (no-op); when L_g < q_lcb_route it tightens it.
+                guarded_edge = verdict.q_safe - cost
+                if guarded_edge < edge_lcb:
+                    new_econ = replace(econ, edge_lcb=float(guarded_edge))
+                    out.append(replace(d, economics=new_econ))
+                else:
+                    out.append(d)
+            except Exception:  # noqa: BLE001 — fail-soft: leave the candidate untouched.
+                out.append(d)
+        return tuple(out)
+
     # --------------------------------------------------------------- selection
     def _select(
         self, scored: Sequence[CandidateDecision]
@@ -1017,14 +1105,19 @@ class FamilyDecisionEngine:
                 pass
             return None, NO_TRADE_NO_POSITIVE_EDGE
 
+        def _capital_efficiency(d: CandidateDecision) -> float:
+            cost = max(float(d.economics.cost.value), 1e-9)
+            return float(d.economics.optimal_delta_u) / cost
+
         # SELECT: argmax optimal_delta_u over the survivors. The scalar trade score is NOT
-        # the key — only the vector ΔU. Ties resolve to the higher edge_lcb then the lower
-        # cost (deterministic), still never on the scalar.
+        # the key. Capital efficiency is a deterministic tie-break before lower raw cost, so
+        # equal-utility routes prefer the same expected growth with less capital tied up.
         selected = max(
             survivors,
             key=lambda d: (
                 d.economics.optimal_delta_u,
                 d.economics.edge_lcb,
+                _capital_efficiency(d),
                 -float(d.economics.cost.value),
             ),
         )

@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-06-04
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-06-04
+# Last reused/audited: 2026-06-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-06-17
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -531,6 +531,266 @@ def test_open_order_at_exchange_absent_locally_becomes_finding_not_command(conn)
     assert conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0] == 0
 
 
+def test_live_partial_ghost_sell_against_known_position_rebuilds_exit_journal(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "known-no-token"
+    seed_command(
+        conn,
+        command_id="cmd-entry-known",
+        venue_order_id="ord-entry-known",
+        position_id="pos-known",
+        token_id=token,
+        side="BUY",
+        size=18.682141,
+        price=0.72,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-entry-known",
+        venue_order_id="ord-entry-known",
+        token_id=token,
+        trade_id="trade-entry-known",
+        size="18.682141",
+        fill_price="0.72",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-known", order_id="ord-entry-known")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               token_id = 'opposite-yes-token',
+               no_token_id = ?,
+               condition_id = 'condition-m5',
+               market_id = 'condition-m5',
+               direction = 'buy_no',
+               shares = 18.682141,
+               chain_shares = 18.682141,
+               cost_basis_usd = 13.45114152,
+               entry_price = 0.72,
+               chain_state = 'synced',
+               order_status = 'partial',
+               updated_at = ?
+         WHERE position_id = 'pos-known'
+        """,
+        (token, NOW.isoformat()),
+    )
+    ghost_order_id = "ord-live-ghost-sell"
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            open_orders=[
+                order(
+                    order_id=ghost_order_id,
+                    status="LIVE",
+                    asset_id=token,
+                    side="SELL",
+                    original_size="18.68",
+                    size_matched="5.06",
+                    price="0.048",
+                    market="condition-m5",
+                )
+            ],
+            trades=[
+                trade(
+                    trade_id="trade-live-ghost-sell",
+                    order_id=ghost_order_id,
+                    size="5.06",
+                    price="0.048",
+                    fill_price="0.048",
+                    status="CONFIRMED",
+                    asset_id=token,
+                    side="BUY",
+                    maker_orders=[
+                        {
+                            "order_id": ghost_order_id,
+                            "asset_id": token,
+                            "matched_amount": "5.06",
+                            "price": "0.048",
+                            "side": "SELL",
+                        }
+                    ],
+                )
+            ],
+            positions=[position(token_id=token, size="13.622141")],
+        ),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert not any(f.kind == "exchange_ghost_order" for f in result)
+    recovered = conn.execute(
+        """
+        SELECT command_id, intent_kind, side, state, venue_order_id, token_id
+          FROM venue_commands
+         WHERE venue_order_id = ?
+        """,
+        (ghost_order_id,),
+    ).fetchone()
+    assert recovered is not None
+    assert recovered["command_id"].startswith("recovered_exit:")
+    assert dict(recovered) | {"command_id": recovered["command_id"]} == {
+        "command_id": recovered["command_id"],
+        "intent_kind": "EXIT",
+        "side": "SELL",
+        "state": "PARTIAL",
+        "venue_order_id": ghost_order_id,
+        "token_id": token,
+    }
+    trade_fact = conn.execute(
+        """
+        SELECT state, filled_size, fill_price
+          FROM venue_trade_facts
+         WHERE trade_id = 'trade-live-ghost-sell'
+        """
+    ).fetchone()
+    assert dict(trade_fact) == {
+        "state": "CONFIRMED",
+        "filled_size": "5.06",
+        "fill_price": "0.048",
+    }
+    current = conn.execute(
+        """
+        SELECT phase, shares, chain_shares, order_id, order_status, exit_reason
+          FROM position_current
+         WHERE position_id = 'pos-known'
+        """
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["order_id"] == ghost_order_id
+    assert current["order_status"] == "sell_pending_confirmation"
+    assert current["exit_reason"] == "M5_LIVE_GHOST_SELL_RECOVERY"
+    assert abs(float(current["shares"]) - 13.622141) < 0.0001
+    assert abs(float(current["chain_shares"]) - 13.622141) < 0.0001
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, order_id, command_id
+          FROM position_events
+         WHERE position_id = 'pos-known'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert event["event_type"] == "EXIT_INTENT"
+    assert event["phase_before"] == "voided"
+    assert event["phase_after"] == "pending_exit"
+    assert event["order_id"] == ghost_order_id
+    assert event["command_id"] == recovered["command_id"]
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM exchange_reconcile_findings
+         WHERE subject_id = ?
+           AND kind = 'exchange_ghost_order'
+           AND resolved_at IS NULL
+        """,
+        (ghost_order_id,),
+    ).fetchone()[0] == 0
+
+
+def test_live_partial_ghost_sell_stays_finding_when_position_conservation_fails(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "mismatched-known-token"
+    seed_command(
+        conn,
+        command_id="cmd-entry-mismatched",
+        venue_order_id="ord-entry-mismatched",
+        position_id="pos-mismatched",
+        token_id=token,
+        side="BUY",
+        size=18.682141,
+        price=0.72,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-entry-mismatched",
+        venue_order_id="ord-entry-mismatched",
+        token_id=token,
+        trade_id="trade-entry-mismatched",
+        size="18.682141",
+        fill_price="0.72",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-mismatched", order_id="ord-entry-mismatched")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               token_id = ?,
+               shares = 18.682141,
+               chain_shares = 18.682141,
+               entry_price = 0.72,
+               chain_state = 'synced',
+               updated_at = ?
+         WHERE position_id = 'pos-mismatched'
+        """,
+        (token, NOW.isoformat()),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            open_orders=[
+                order(
+                    order_id="ord-mismatched-ghost-sell",
+                    status="LIVE",
+                    asset_id=token,
+                    side="SELL",
+                    original_size="18.68",
+                    size_matched="5.06",
+                    price="0.048",
+                    market="condition-m5",
+                )
+            ],
+            trades=[],
+            positions=[position(token_id=token, size="7.0")],
+        ),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert any(f.kind == "exchange_ghost_order" for f in result)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE command_id LIKE 'recovered_exit:%'"
+    ).fetchone()[0] == 0
+
+
+def test_ws_gap_ignores_account_wide_unlinked_trade_noise(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    unrelated = trade(
+        trade_id="trade-unrelated-account-wide",
+        order_id="ord-not-local",
+        size="3.0",
+        price="0.42",
+        status="CONFIRMED",
+    )
+
+    ws_gap_result = run_reconcile_sweep(
+        FakeM5Adapter(trades=[unrelated], positions=[]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+    assert ws_gap_result == []
+    assert conn.execute(
+        "SELECT COUNT(*) FROM exchange_reconcile_findings WHERE kind='unrecorded_trade'"
+    ).fetchone()[0] == 0
+
+    periodic_result = run_reconcile_sweep(
+        FakeM5Adapter(trades=[unrelated], positions=[]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+    assert any(f.kind == "unrecorded_trade" for f in periodic_result)
+
+
 def test_local_RESTING_absent_at_exchange_with_no_trade_marks_canceled_or_wiped_or_suspect(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
@@ -776,6 +1036,159 @@ def test_maker_fill_economics_repair_uses_canonical_trade_fact_over_later_weaker
         "terminal_exec_status": "partial",
         "command_id": "cmd-m5",
     }
+
+
+def test_maker_fill_projection_uses_canonical_position_when_old_command_position_voided(conn):
+    """A repaired maker fill must not reopen an old voided command position.
+
+    Regression for the 2026-06-17 Houston repair loop: the command still pointed
+    at a voided short id, while the same order/token had a canonical open EDLI
+    position. The repair must project against the canonical position_current row.
+    """
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.venue_command_repo import append_trade_fact as append
+
+    shared_order = "ord-houston-shared"
+    no_token = "houston-no-token"
+    seed_command(
+        conn,
+        command_id="cmd-old-voided",
+        venue_order_id=shared_order,
+        position_id="pos-old-voided",
+        token_id=no_token,
+        size=5.078125,
+        price=0.64,
+    )
+    seed_position_baseline(conn, position_id="pos-old-voided", order_id=shared_order)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               direction = 'buy_no',
+               token_id = '',
+               no_token_id = ?,
+               order_status = 'partial',
+               shares = 0,
+               entry_price = 0,
+               updated_at = ?
+         WHERE position_id = 'pos-old-voided'
+        """,
+        (no_token, (NOW + timedelta(minutes=1)).isoformat()),
+    )
+    seed_position_baseline(conn, position_id="pos-canonical-open", order_id=shared_order)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'day0_window',
+               direction = 'buy_no',
+               token_id = '',
+               no_token_id = ?,
+               order_status = 'filled',
+               shares = 5.07,
+               entry_price = 0.64,
+               updated_at = ?
+         WHERE position_id = 'pos-canonical-open'
+        """,
+        (no_token, (NOW + timedelta(minutes=2)).isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, caused_by, idempotency_key,
+            venue_status, source_module, payload_json, env
+        )
+        VALUES (?, ?, 1, 3, 'ENTRY_ORDER_FILLED', ?, 'active', 'active',
+                'opening_inertia', 'dec-canonical', 'snap-m5', ?, ?,
+                NULL, ?, 'FILLED', 'tests/test_exchange_reconcile', '{}', 'live')
+        """,
+        (
+            "evt-canonical-entry-filled",
+            "pos-canonical-open",
+            (NOW + timedelta(minutes=3)).isoformat(),
+            shared_order,
+            "cmd-old-voided",
+            "idem-canonical-entry-filled",
+        ),
+    )
+    raw = {
+        "id": "trade-houston-maker",
+        "taker_order_id": "ord-taker",
+        "status": "CONFIRMED",
+        "size": "5.07",
+        "price": "0.36",
+        "transaction_hash": "0xabc",
+        "maker_orders": [
+            {
+                "order_id": shared_order,
+                "matched_amount": "5.07",
+                "price": "0.64",
+                "asset_id": no_token,
+                "side": "BUY",
+            }
+        ],
+    }
+    append(
+        conn,
+        trade_id="trade-houston-maker",
+        venue_order_id=shared_order,
+        command_id="cmd-old-voided",
+        state="CONFIRMED",
+        filled_size="5.07",
+        fill_price="0.36",
+        source="REST",
+        observed_at=NOW + timedelta(minutes=4),
+        raw_payload_hash=hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
+        raw_payload_json=raw,
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=NOW + timedelta(minutes=5),
+    )
+
+    assert summary["errors"] == 0
+    assert summary["projected"] == 1
+    old_row = conn.execute(
+        "SELECT phase, shares FROM position_current WHERE position_id = 'pos-old-voided'"
+    ).fetchone()
+    assert dict(old_row) == {"phase": "voided", "shares": 0.0}
+    canonical = conn.execute(
+        """
+        SELECT phase, order_status, shares, entry_price
+          FROM position_current
+         WHERE position_id = 'pos-canonical-open'
+        """
+    ).fetchone()
+    assert dict(canonical) == {
+        "phase": "day0_window",
+        "order_status": "partial",
+        "shares": 5.07,
+        "entry_price": 0.64,
+    }
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-old-voided'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-canonical-open'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """
+        ).fetchone()[0]
+        == 1
+    )
 
 
 def test_entry_fill_economics_uses_canonical_trade_fact_over_later_weaker_fact(conn):
@@ -4829,6 +5242,153 @@ def test_live_heartbeat_runs_ws_gap_m5_sweep_without_closing_external_test_conn(
         conn.execute("SELECT 1").fetchone()
     finally:
         ws_gap_guard.clear_for_test(observed_at=NOW)
+
+
+def test_m5_clear_releases_ws_gap_blocked_exit_retry(conn):
+    import src.main as main_module
+    from src.control import ws_gap_guard
+
+    seed_command(conn, size=5)
+    conn.execute("UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = 'cmd-m5'")
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, bin_label, direction,
+            shares, chain_shares, chain_state, strategy_key, updated_at,
+            temperature_metric, exit_retry_count, next_exit_retry_at
+        ) VALUES (?, 'pending_exit', 'Hong Kong', '2026-06-19', '21C', 'buy_no',
+                  12.0, 12.0, 'synced', 'opening_inertia', ?, 'low', 4, ?)
+        """,
+        (
+            "exit-ws-gap",
+            (NOW - timedelta(minutes=1)).isoformat(),
+            (NOW + timedelta(minutes=40)).isoformat(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, source_module, payload_json, env
+        ) VALUES (?, ?, 1, 'EXIT_ORDER_REJECTED', ?, 'active', 'pending_exit',
+                  'opening_inertia', 'src.execution.exit_lifecycle', ?, 'live')
+        """,
+        (
+            "exit-ws-gap-rejected",
+            "exit-ws-gap",
+            (NOW - timedelta(seconds=30)).isoformat(),
+            json.dumps({"error": "ws_gap=SUBSCRIBED:message_received; m5_reconcile_required=True"}),
+        ),
+    )
+    configure_subscribed_m5_latch()
+
+    try:
+        result = main_module._run_ws_gap_reconcile_if_required(
+            FakeM5Adapter(open_orders=[order(order_id="ord-m5")], trades=[], positions=[]),
+            conn_factory=lambda: conn,
+            now=NOW,
+        )
+
+        retry_at = conn.execute(
+            "SELECT next_exit_retry_at FROM position_current WHERE position_id = ?",
+            ("exit-ws-gap",),
+        ).fetchone()[0]
+        assert result["status"] == "cleared"
+        assert result["exit_retries_released"] == 1
+        assert result["exit_retry_position_ids"] == ["exit-ws-gap"]
+        assert retry_at == NOW.isoformat()
+        release = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, venue_status, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            ("exit-ws-gap",),
+        ).fetchone()
+        assert release["event_type"] == "EXIT_RETRY_RELEASED"
+        assert release["phase_before"] == "pending_exit"
+        assert release["phase_after"] == "pending_exit"
+        assert release["venue_status"] == "ready"
+        payload = json.loads(release["payload_json"])
+        assert payload["release_reason"] == "M5_WS_GAP_RECONCILE_CLEARED"
+        assert payload["previous_next_retry_at"] > NOW.isoformat()
+        assert payload["next_retry_at"] == NOW.isoformat()
+    finally:
+        ws_gap_guard.clear_for_test(observed_at=NOW)
+
+
+def test_allocator_refresh_release_updates_db_and_loaded_position(conn):
+    import src.main as main_module
+
+    position = SimpleNamespace(
+        trade_id="exit-allocator-config",
+        next_exit_retry_at=(NOW + timedelta(minutes=40)).isoformat(),
+    )
+    portfolio = SimpleNamespace(positions=[position])
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, bin_label, direction,
+            shares, chain_shares, chain_state, strategy_key, updated_at,
+            temperature_metric, exit_retry_count, next_exit_retry_at
+        ) VALUES (?, 'pending_exit', 'Chengdu', '2026-06-19', '33C', 'buy_no',
+                  15.25, 15.25, 'synced', 'opening_inertia', ?, 'high', 5, ?)
+        """,
+        (
+            "exit-allocator-config",
+            (NOW - timedelta(minutes=1)).isoformat(),
+            (NOW + timedelta(minutes=40)).isoformat(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, source_module, payload_json, env
+        ) VALUES (?, ?, 1, 'EXIT_ORDER_REJECTED', ?, 'active', 'pending_exit',
+                  'opening_inertia', 'src.execution.exit_lifecycle', ?, 'live')
+        """,
+        (
+            "exit-allocator-config-rejected",
+            "exit-allocator-config",
+            (NOW - timedelta(seconds=30)).isoformat(),
+            json.dumps({"error": "allocator_not_configured"}),
+        ),
+    )
+
+    result = main_module._release_allocator_config_blocked_exit_retries_after_refresh(
+        conn,
+        portfolio,
+        observed_at=NOW,
+    )
+
+    retry_at = conn.execute(
+        "SELECT next_exit_retry_at FROM position_current WHERE position_id = ?",
+        ("exit-allocator-config",),
+    ).fetchone()[0]
+    assert result == {"released": 1, "position_ids": ["exit-allocator-config"]}
+    assert retry_at == NOW.isoformat()
+    assert position.next_exit_retry_at == NOW.isoformat()
+    release = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, venue_status, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        ("exit-allocator-config",),
+    ).fetchone()
+    assert release["event_type"] == "EXIT_RETRY_RELEASED"
+    assert release["phase_before"] == "pending_exit"
+    assert release["phase_after"] == "pending_exit"
+    assert release["venue_status"] == "ready"
+    payload = json.loads(release["payload_json"])
+    assert payload["release_reason"] == "ALLOCATOR_CONFIGURED_AFTER_REFRESH"
+    assert payload["previous_next_retry_at"] > NOW.isoformat()
+    assert payload["next_retry_at"] == NOW.isoformat()
 
 
 def test_findings_actuator_loop_resolves_findings_via_operator_decision(conn):

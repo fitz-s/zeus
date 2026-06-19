@@ -18,7 +18,7 @@ from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_oppo
 from src.events.reactor import EventSubmissionReceipt
 
 
-def _event():
+def _event(event_type: str = "FORECAST_SNAPSHOT_READY"):
     payload = ForecastSnapshotReadyPayload(
         city="Chicago",
         target_date="2026-05-25",
@@ -45,7 +45,7 @@ def _event():
         coverage_readiness_status="LIVE_ELIGIBLE",
     )
     return make_opportunity_event(
-        event_type="FORECAST_SNAPSHOT_READY",
+        event_type=event_type,
         entity_key="Chicago|2026-05-25|high",
         source="forecast_live",
         observed_at="2026-05-25T10:00:00+00:00",
@@ -111,6 +111,20 @@ def test_forecast_event_compiles_to_no_submit_decision_certificate():
         claims.RISK_LEVEL,
         claims.NO_SUBMIT_DECISION,
     }
+
+
+def test_redecision_event_compiles_to_no_submit_decision_certificate():
+    event = _event(event_type="EDLI_REDECISION_PENDING")
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    receipt = _receipt(event.event_id)
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=build_test_no_submit_proof_bundle(event, receipt, decision_time=decision_time),
+    )
+
+    assert result.status == "VERIFIED"
+    assert result.no_submit_certificate is not None
 
 
 def test_no_submit_decision_certificate_generated_time_semantics():
@@ -579,7 +593,7 @@ def test_source_truth_certificate_not_hardcoded_match():
     bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
 
     assert bundle.source_truth.payload["source_status"] == bundle.forecast_authority.payload["reader_status"]
-    assert bundle.source_truth.payload["source_authority_id"] == "read_executable_forecast"
+    assert bundle.source_truth.payload["source_authority_id"] == bundle.forecast_authority.payload["reader_authority"]
     assert bundle.source_truth.payload["derived_from_certificate_type"] == claims.FORECAST_AUTHORITY
     assert bundle.source_truth.payload["derived_from_snapshot_id"] == bundle.forecast_authority.payload["snapshot_id"]
     assert bundle.source_truth.payload["derived_from_reader_status"] == bundle.forecast_authority.payload["reader_status"]
@@ -887,6 +901,33 @@ def test_forecast_certificate_records_unit_authority():
     forecast = next(cert for cert in result.certificates if cert.certificate_type == claims.FORECAST_AUTHORITY)
     assert forecast.payload["unit"] == "F"
     assert forecast.payload["unit_authority_source"] == "ensemble_snapshots.settlement_unit"
+
+
+def test_replacement_forecast_city_config_unit_authority_is_valid():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    source = "city_config.settlement_unit"
+    forecast = replace(
+        bundle.forecast_authority,
+        payload={**bundle.forecast_authority.payload, "unit_authority_source": source},
+    )
+    belief = replace(
+        bundle.belief,
+        payload={**bundle.belief.payload, "unit_authority_source": source},
+    )
+
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=replace(bundle, forecast_authority=forecast, belief=belief),
+    )
+
+    assert result.status == "VERIFIED"
+    forecast_cert = next(
+        cert for cert in result.certificates if cert.certificate_type == claims.FORECAST_AUTHORITY
+    )
+    assert forecast_cert.payload["unit_authority_source"] == source
 
 
 def test_belief_certificate_unit_matches_family_bins():

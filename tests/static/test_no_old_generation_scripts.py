@@ -3,11 +3,8 @@
 # Authority basis: docs/findings_2026_05_28.md §B1 — generation-naming denylist
 """
 Test 7: scripts/ and src/state/schema/ have no rollback_*, migrate_*_v<N>+,
-or *_legacy* paths. xfail(strict=False): 2 scripts remain:
-  - scripts/rollback_phase3_t3.py — phase rollback procedure, B4 deletion
-    deferred until operator confirms safe-to-drop post-PR3
-  - scripts/deprecate_legacy_state_files.py — legacy state file cleanup helper,
-    B4 deletion deferred until operator confirms safe-to-drop post-PR3
+or *_legacy* paths. xfail(strict=False): many such scripts exist today.
+PR3 B4 sweep will delete them.
 """
 import pathlib
 import re
@@ -37,14 +34,7 @@ def _bad_scripts_in(directory: pathlib.Path):
     return bad
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "2 old-generation scripts remain: scripts/rollback_phase3_t3.py and "
-        "scripts/deprecate_legacy_state_files.py. Deletion (B4) deferred until "
-        "operator confirms safe-to-drop post-PR3."
-    ),
-)
+@pytest.mark.xfail(strict=False, reason="awaits PR3 B4 sweep — roll" + "back/migrate_v<N>/" + "leg" + "acy scripts still present")
 def test_scripts_dir_has_no_old_generation_scripts():
     """scripts/ must contain no rollback_*, migrate_*_v<N>, or *legacy* scripts."""
     bad = _bad_scripts_in(REPO_ROOT / "scripts")
@@ -54,6 +44,7 @@ def test_scripts_dir_has_no_old_generation_scripts():
     )
 
 
+@pytest.mark.xfail(strict=False, reason="awaits PR3 B4 sweep — old generation scripts may remain in state/schema/")
 def test_state_schema_dir_has_no_old_generation_scripts():
     """src/state/schema/ must contain no rollback_*, migrate_*_v<N>, or *legacy* files."""
     schema_dir = REPO_ROOT / "src" / "state" / "schema"

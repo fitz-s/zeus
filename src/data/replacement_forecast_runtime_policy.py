@@ -1,4 +1,4 @@
-"""Runtime policy resolver for the replacement forecast shadow/veto path."""
+"""Runtime policy resolver for the live replacement forecast path."""
 
 from __future__ import annotations
 
@@ -7,28 +7,22 @@ import math
 from typing import Mapping
 
 
-STRATEGY_KEY = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
-SHADOW_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled"
-VETO_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_veto_enabled"
-TRADE_AUTHORITY_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"
-KELLY_INCREASE_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_kelly_increase_enabled"
-DIRECTION_FLIP_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_direction_flip_enabled"
+STRATEGY_KEY = "openmeteo_ecmwf_ifs9_bayes_fusion"
+LIVE_FLAG = "openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"
+KELLY_INCREASE_FLAG = "openmeteo_ecmwf_ifs9_bayes_fusion_kelly_increase_enabled"
+DIRECTION_FLIP_FLAG = "openmeteo_ecmwf_ifs9_bayes_fusion_direction_flip_enabled"
 REQUIRED_FLAGS = (
-    SHADOW_FLAG,
-    VETO_FLAG,
-    TRADE_AUTHORITY_FLAG,
+    LIVE_FLAG,
     KELLY_INCREASE_FLAG,
     DIRECTION_FLIP_FLAG,
 )
 SAFE_DEFAULT_STATUS = "DISABLED"
-SHADOW_ONLY_STATUS = "SHADOW_ONLY"
-SHADOW_VETO_ONLY_STATUS = "SHADOW_VETO_ONLY"
 BLOCKED_STATUS = "BLOCKED"
-LIVE_AUTHORITY_STATUS = "LIVE_AUTHORITY"
+LIVE_STATUS = "live"
 EXPECTED_ANCHOR_WEIGHT = 0.80
 EXPECTED_ANCHOR_SIGMA_C = 3.00
 MIN_PROMOTION_GUARDRAIL_BUCKET_ROWS = 20
-EXPECTED_CAPITAL_OBJECTIVE_LABEL = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00"
+EXPECTED_CAPITAL_OBJECTIVE_LABEL = "openmeteo_ecmwf_ifs9_bayes_fusion"
 
 
 @dataclass(frozen=True)
@@ -143,11 +137,11 @@ class ReplacementForecastCapitalObjectiveEvidence:
         return not self.blocking_reason_codes()
 
 
-def replacement_live_authority_evidence_gate(
+def replacement_live_evidence_gate(
     promotion_evidence: ReplacementForecastPromotionEvidence | None,
     capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None,
 ) -> tuple[bool, tuple[str, ...]]:
-    """The single shared evidence gate for replacement live (replacement_0_1) authority.
+    """The single shared evidence gate for replacement live (replacement_0_1).
 
     REAUDIT_0_1.md §1.1 (re-pointed FIX-1): ONE pure predicate, co-located with
     the evidence dataclasses (NO new module, NO second loader). It performs NO IO
@@ -170,9 +164,9 @@ def replacement_live_authority_evidence_gate(
     """
 
     if promotion_evidence is None:
-        return (False, ("REPLACEMENT_LIVE_AUTHORITY_PROMOTION_EVIDENCE_REQUIRED",))
+        return (False, ("REPLACEMENT_LIVE_PROMOTION_EVIDENCE_REQUIRED",))
     if capital_objective_evidence is None:
-        return (False, ("REPLACEMENT_LIVE_AUTHORITY_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED",))
+        return (False, ("REPLACEMENT_LIVE_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED",))
     blocking = (
         promotion_evidence.blocking_reason_codes()
         + capital_objective_evidence.blocking_reason_codes()
@@ -194,32 +188,22 @@ def _matches_expected(value: float | None, expected: float) -> bool:
 class ReplacementForecastRuntimePolicy:
     status: str
     reason_codes: tuple[str, ...]
-    shadow_enabled: bool
-    veto_enabled: bool
-    trade_authority_enabled: bool
+    live_enabled: bool
     kelly_increase_enabled: bool
     direction_flip_enabled: bool
     strategy_key: str = STRATEGY_KEY
 
     @property
-    def can_read_shadow_posterior(self) -> bool:
-        return self.status in {SHADOW_ONLY_STATUS, SHADOW_VETO_ONLY_STATUS, LIVE_AUTHORITY_STATUS}
-
-    @property
-    def can_apply_veto(self) -> bool:
-        return self.status in {SHADOW_VETO_ONLY_STATUS, LIVE_AUTHORITY_STATUS}
-
-    @property
     def can_initiate_trade(self) -> bool:
-        return self.status == LIVE_AUTHORITY_STATUS and self.trade_authority_enabled
+        return self.status == LIVE_STATUS and self.live_enabled
 
     @property
     def can_increase_kelly(self) -> bool:
-        return self.status == LIVE_AUTHORITY_STATUS and self.kelly_increase_enabled
+        return self.status == LIVE_STATUS and self.kelly_increase_enabled
 
     @property
     def can_flip_direction(self) -> bool:
-        return self.status == LIVE_AUTHORITY_STATUS and self.direction_flip_enabled
+        return self.status == LIVE_STATUS and self.direction_flip_enabled
 
 
 def _strict_bool(flags: Mapping[str, object], key: str) -> bool:
@@ -239,73 +223,37 @@ def resolve_replacement_forecast_runtime_policy(
 ) -> ReplacementForecastRuntimePolicy:
     """Resolve the only allowed runtime authority state from strict feature flags."""
 
-    shadow = _strict_bool(flags, SHADOW_FLAG)
-    veto = _strict_bool(flags, VETO_FLAG)
-    trade_authority = _strict_bool(flags, TRADE_AUTHORITY_FLAG)
+    live_enabled = _strict_bool(flags, LIVE_FLAG)
     kelly_increase = _strict_bool(flags, KELLY_INCREASE_FLAG)
     direction_flip = _strict_bool(flags, DIRECTION_FLIP_FLAG)
 
     reasons: list[str] = []
-    if not shadow and (veto or trade_authority or kelly_increase or direction_flip):
-        reasons.append("REPLACEMENT_SHADOW_FLAG_REQUIRED")
-    if not veto and (trade_authority or kelly_increase or direction_flip):
-        reasons.append("REPLACEMENT_VETO_FLAG_REQUIRED_BEFORE_AUTHORITY")
-    if not trade_authority and (kelly_increase or direction_flip):
-        reasons.append("REPLACEMENT_TRADE_AUTHORITY_REQUIRED_FOR_DANGEROUS_FLAGS")
+    if not live_enabled and (kelly_increase or direction_flip):
+        reasons.append("REPLACEMENT_LIVE_REQUIRED_FOR_DANGEROUS_FLAGS")
     if direction_flip and not kelly_increase:
         reasons.append("REPLACEMENT_DIRECTION_FLIP_REQUIRES_KELLY_AUTHORITY")
 
-    # OPERATOR DIRECTIVE 2026-06-08 — the promotion / capital-objective EVIDENCE GATE
-    # is REMOVED permanently. It was a circular pre-trade bureaucracy: it demanded
-    # after-cost-PnL / same-CLOB-replay / nested-walk-forward proof BEFORE any live
-    # trade, but after-cost proof can only be earned by trading. LIVE_AUTHORITY is now
-    # granted from the strict flag ladder alone (shadow -> veto -> trade_authority).
-    #
-    # The REAL risk controls are NOT here and are untouched: runtime q_lcb (the
-    # settlement-sigma conservative lower bound used in sizing), fractional Kelly, the
-    # after-cost cost floor, the direction law (buy_yes <=> bin≈forecast, never
-    # inverted), and RiskGuard all remain enforced downstream in the economic/sizing
-    # gate. Overconfidence is bounded FORWARD by q_lcb + fractional Kelly and judged by
-    # SETTLEMENT (the only truth), not by a pre-trade evidence checklist. The evidence
-    # dataclasses + replacement_live_authority_evidence_gate remain defined for shadow
-    # observability/receipts but no longer gate live authority.
+    # Runtime policy is live-or-blocked. Diagnostic production may exist for
+    # observability, but it is not an intermediate trading state and cannot
+    # authorize reader or reactor admission.
     if reasons:
         return ReplacementForecastRuntimePolicy(
             status=BLOCKED_STATUS,
             reason_codes=tuple(reasons),
-            shadow_enabled=shadow,
-            veto_enabled=veto,
-            trade_authority_enabled=False,
+            live_enabled=False,
             kelly_increase_enabled=False,
             direction_flip_enabled=False,
         )
-    if not shadow:
+    if not live_enabled:
         status = SAFE_DEFAULT_STATUS
-        reason_codes = ("REPLACEMENT_DISABLED_BY_FLAG",)
-    elif not veto:
-        status = SHADOW_ONLY_STATUS
-        reason_codes = ("REPLACEMENT_SHADOW_ONLY",)
-    elif not trade_authority:
-        status = SHADOW_VETO_ONLY_STATUS
-        reason_codes = ("REPLACEMENT_SHADOW_VETO_ONLY",)
+        reason_codes = ("REPLACEMENT_LIVE_DISABLED",)
     else:
-        # Reachable when the flag ladder shadow->veto->trade_authority is fully ON.
-        # NOTE (operator directive 2026-06-08): the settlement-evidence promotion gate
-        # `replacement_live_authority_evidence_gate` was REMOVED and is NO LONGER a
-        # precondition here — LIVE_AUTHORITY is now FLAG-ONLY. There is NO promotion /
-        # capital-objective proof guarding this branch; forward real-capital risk is
-        # bounded ONLY by the downstream q_lcb settlement-σ floor + fractional Kelly +
-        # RiskGuard, NOT by an evidence proof. The reason_code string below is a LEGACY
-        # name retained for consumer stability and no longer implies an evidence proof.
-        # (Pinned: tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py.)
-        status = LIVE_AUTHORITY_STATUS
-        reason_codes = ("REPLACEMENT_PROMOTED_WITH_EVIDENCE",)
+        status = LIVE_STATUS
+        reason_codes = ("REPLACEMENT_LIVE_ENABLED",)
     return ReplacementForecastRuntimePolicy(
         status=status,
         reason_codes=reason_codes,
-        shadow_enabled=shadow,
-        veto_enabled=veto,
-        trade_authority_enabled=trade_authority if status == LIVE_AUTHORITY_STATUS else False,
-        kelly_increase_enabled=kelly_increase if status == LIVE_AUTHORITY_STATUS else False,
-        direction_flip_enabled=direction_flip if status == LIVE_AUTHORITY_STATUS else False,
+        live_enabled=live_enabled if status == LIVE_STATUS else False,
+        kelly_increase_enabled=kelly_increase if status == LIVE_STATUS else False,
+        direction_flip_enabled=direction_flip if status == LIVE_STATUS else False,
     )

@@ -8,8 +8,8 @@
 #   rebuilt-spine trigger), which all expired unprocessed → the spine never ran → zero
 #   forecast orders. This antibody pins: (1) day0 past-local-day rows expire via the
 #   now-day0-aware archive_expired_candidates; (2) FSR expiry is unbroken by the
-#   generalization; (3) archive_superseded_day0_events keeps only the latest day0 per
-#   (city, target_date, metric) family.
+#   generalization; (3) archive_superseded_day0_events keeps only the absorbing
+#   extreme day0 per (city, target_date, metric) family.
 """RED→GREEN relationship antibody for the day0 queue-drain sweeps.
 
 Companion to tests/events/test_archive_expired_sweep.py (FSR per-city-tz sweep) and
@@ -63,6 +63,7 @@ def _day0_event(
     available_at: str,
     seq: int = 0,
 ):
+    value = 30 + seq if metric == "high" else 30 - seq
     payload = Day0ExtremeUpdatedPayload(
         city=city,
         target_date=target_date,
@@ -71,9 +72,10 @@ def _day0_event(
         station_id="STN",
         observation_time=available_at,
         observation_available_at=available_at,
-        raw_value=30.0 + seq,
-        rounded_value=30 + seq,
-        high_so_far=30.0 + seq,
+        raw_value=float(value),
+        rounded_value=int(value),
+        high_so_far=float(value) if metric == "high" else None,
+        low_so_far=float(value) if metric == "low" else None,
     )
     return make_opportunity_event(
         event_type="DAY0_EXTREME_UPDATED",
@@ -259,10 +261,8 @@ def test_both_types_swept_in_one_pass():
 # ---------------------------------------------------------------------------
 
 
-def test_day0_superseded_keep_latest_per_family():
-    """N day0 readings for one family → only the latest available_at survives 'pending';
-    the N-1 older readings are 'expired' (the running extreme only advances, so only the
-    latest observation is actionable)."""
+def test_day0_superseded_keep_absorbing_extreme_per_family():
+    """N day0 readings for one family -> only the absorbing extreme survives pending."""
     conn = _world_conn()
     store = EventStore(conn)
     events = [
@@ -275,7 +275,7 @@ def test_day0_superseded_keep_latest_per_family():
     archived = store.archive_superseded_day0_events()
 
     assert archived == 5, f"5 superseded day0 readings should be archived; got {archived}"
-    assert _status_of(conn, events[5].event_id) == "pending", "latest reading must survive"
+    assert _status_of(conn, events[5].event_id) == "pending", "highest reading must survive"
     for i in range(5):
         assert _status_of(conn, events[i].event_id) == "expired", f"reading {i} must be superseded"
 
@@ -289,7 +289,7 @@ def test_day0_families_independent():
         ("London", "2026-06-15", "low"),
         ("Tokyo", "2026-06-16", "high"),
     ]
-    latest_ids = []
+    keeper_ids = []
     for city, td, metric in families:
         evs = [
             _day0_event(city, td, metric, available_at=f"2026-06-15T{10+j:02d}:00:00+00:00", seq=j)
@@ -297,12 +297,12 @@ def test_day0_families_independent():
         ]
         for ev in evs:
             store.insert_or_ignore(ev)
-        latest_ids.append(evs[-1].event_id)
+        keeper_ids.append(evs[-1].event_id)
 
     archived = store.archive_superseded_day0_events()
     assert archived == 6, "2 older × 3 families = 6 archived"
-    for eid in latest_ids:
-        assert _status_of(conn, eid) == "pending", "each family's latest must survive"
+    for eid in keeper_ids:
+        assert _status_of(conn, eid) == "pending", "each family's absorbing extreme must survive"
 
 
 def test_day0_same_city_date_distinct_metric_independent():
@@ -339,6 +339,34 @@ def test_day0_supersession_idempotent():
     second = store.archive_superseded_day0_events()
     assert first == 4
     assert second == 0, "second pass must be a no-op (idempotent)"
+
+
+def test_day0_supersession_expires_later_regressed_high():
+    """A shorter source window must not make a lower later high supersede the true daily high."""
+    conn = _world_conn()
+    store = EventStore(conn)
+    true_high = _day0_event(
+        "Chengdu",
+        "2026-06-17",
+        "high",
+        available_at="2026-06-17T05:06:18+00:00",
+        seq=5,
+    )
+    regressed_later = _day0_event(
+        "Chengdu",
+        "2026-06-17",
+        "high",
+        available_at="2026-06-17T11:06:18+00:00",
+        seq=4,
+    )
+    store.insert_or_ignore(true_high)
+    store.insert_or_ignore(regressed_later)
+
+    archived = store.archive_superseded_day0_events()
+
+    assert archived == 1
+    assert _status_of(conn, true_high.event_id) == "pending"
+    assert _status_of(conn, regressed_later.event_id) == "expired"
 
 
 def test_day0_supersession_batch_preserves_keeper_outside_batch():
@@ -402,12 +430,12 @@ def test_day0_supersession_failclosed_missing_metric():
 
 
 def test_day0_supersession_tied_latest_all_kept():
-    """Distinct readings sharing the max available_at are all kept (no arbitrary archive)."""
+    """Distinct readings sharing the absorbing extreme are all kept (no arbitrary archive)."""
     conn = _world_conn()
     store = EventStore(conn)
     older = _day0_event("Seoul", "2026-06-15", "low", available_at="2026-06-15T10:00:00+00:00", seq=0)
-    tie_a = _day0_event("Seoul", "2026-06-15", "low", available_at="2026-06-15T11:00:00+00:00", seq=1)
-    tie_b = _day0_event("Seoul", "2026-06-15", "low", available_at="2026-06-15T11:00:00+00:00", seq=2)
+    tie_a = _day0_event("Seoul", "2026-06-15", "low", available_at="2026-06-15T11:00:00+00:00", seq=2)
+    tie_b = _day0_event("Seoul", "2026-06-15", "low", available_at="2026-06-15T11:30:00+00:00", seq=2)
     for ev in (older, tie_a, tie_b):
         store.insert_or_ignore(ev)
 

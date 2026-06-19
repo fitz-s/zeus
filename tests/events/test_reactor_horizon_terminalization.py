@@ -398,6 +398,13 @@ def test_known_terminal_reason_stays_terminal_no_log(caplog):
             _is_transient_money_path_reason("ADMISSION_CAPITAL_EFFICIENCY:inputs=missing")
             is False
         )
+        assert (
+            _is_transient_money_path_reason(
+                "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
+                "condition_id=0xabc:token_id=123:direction=buy_no"
+            )
+            is False
+        )
     assert not any("UNKNOWN money-path reason" in r.message for r in caplog.records)
 
 

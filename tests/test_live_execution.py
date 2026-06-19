@@ -265,7 +265,11 @@ class TestLiveOrderErrorModes:
 
 
 def test_redeem_submitter_row_failure_raises_for_scheduler_health(monkeypatch):
-    from src import main as main_mod
+    # P4 lift (system_decomposition_plan §8 Step 2): _redeem_submitter_cycle moved from
+    # src.main to the P4 post-trade-capital module, where it is UN-decorated (the daemon
+    # applies the _scheduler_job health wrapper at registration). So the bare function raises
+    # directly on row failure — no .__wrapped__ unwrap needed.
+    from src.execution import post_trade_capital as main_mod
     from src.contracts.fx_classification import FXClassificationPending
 
     class _FakeAdapter:
@@ -296,7 +300,7 @@ def test_redeem_submitter_row_failure_raises_for_scheduler_health(monkeypatch):
         mock_lock.return_value.__exit__.return_value = False
 
         with pytest.raises(RuntimeError, match="redeem_submitter: submitted=0 failed=1"):
-            main_mod._redeem_submitter_cycle.__wrapped__()
+            main_mod._redeem_submitter_cycle()
 
     fake_conn.rollback.assert_called_once()
     fake_conn.close.assert_called_once()

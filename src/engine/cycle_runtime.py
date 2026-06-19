@@ -548,6 +548,7 @@ def _attach_corrected_pricing_authority(
     resolution_window: str = "default",
     correlation_key: str = "",
     passive_maker_context=None,
+    taker_quality_proof: dict | None = None,
 ) -> dict:
     """Attach corrected pricing evidence and the frozen final submit intent."""
     # Provenance context required by H3 semantic linter rule (p_posterior access).
@@ -726,11 +727,12 @@ def _attach_corrected_pricing_authority(
                 if isinstance(passive_maker_context, PassiveMakerExecutionContext)
                 else None
             ),
+            taker_quality_proof=taker_quality_proof,
         )
         setattr(decision, "final_execution_intent", final_intent)
     payload = {
         "pricing_semantics_id": cost_basis.pricing_semantics_id,
-        "shadow_only": final_intent is None,
+        "submit_authority_absent": final_intent is None,
         "live_submit_authority": final_intent is not None,
         "field_semantics": (
             "final_execution_intent_submit_authority"
@@ -815,12 +817,12 @@ def _attach_corrected_pricing_authority(
             or "PASSIVE_LIMIT_REQUIRES_POST_ONLY_OR_MAKER_ONLY_SUBMIT"
         )
     payload.update(sweep_payload)
-    tokens["corrected_pricing_shadow"] = payload
+    tokens["corrected_pricing_evidence"] = payload
     decision.tokens = tokens
     validation = (
         "final_execution_intent_built"
         if final_intent is not None
-        else "corrected_pricing_shadow_built"
+        else "corrected_pricing_evidence_built"
     )
     if validation not in decision.applied_validations:
         decision.applied_validations.append(validation)
@@ -1394,7 +1396,7 @@ def _reprice_decision_from_executable_snapshot(
         "passive_fill_probability",
         final_intent_context.get("expected_fill_probability"),
     )
-    if final_best_ask is None and passive_fill_probability in (None, ""):
+    if passive_fill_probability in (None, ""):
         try:
             from src.analysis.market_analysis_vnext import estimate_passive_maker_execution
 
@@ -1445,7 +1447,7 @@ def _reprice_decision_from_executable_snapshot(
                     fill_adjusted_profit_usd
                 )
     passive_maker_context = None
-    if final_best_ask is None and passive_fill_probability not in (None, ""):
+    if passive_fill_probability not in (None, ""):
         from src.contracts.execution_intent import PassiveMakerExecutionContext
 
         captured_at = getattr(snapshot, "captured_at", None)
@@ -1490,15 +1492,138 @@ def _reprice_decision_from_executable_snapshot(
 
     selected_order_type = str(final_intent_context.get("order_type") or "GTC").strip().upper()
     final_order_type = selected_order_type
+    immediate_order_requested = selected_order_type in {"FOK", "FAK"}
+    taker_quality_required = allow_taker_upgrade or immediate_order_requested
     taker_order_type_upgraded = False
-    if (
-        final_best_ask is not None
-        and final_order_type in {"GTC", "GTD"}
-        and bool(final_intent_context.get("allow_taker_upgrade"))
+    taker_quality_proof = None
+    taker_quality_passed = False
+    taker_candidate_present = final_best_ask is not None or immediate_order_requested
+    if taker_candidate_present and taker_quality_required:
+        taker_edge_dec = Decimal(str(best_ask_fee_adjusted_edge))
+        taker_price_dec = Decimal(str(corrected_candidate_expected_fill or final_price))
+        taker_notional_dec = Decimal(str(corrected_candidate_size))
+        taker_expected_profit_usd = (
+            max(Decimal("0"), taker_edge_dec)
+            * taker_notional_dec
+            / max(taker_price_dec, Decimal("0.000001"))
+        )
+        maker_context_source = "passive_maker_context"
+        if passive_maker_context is None:
+            maker_expected_profit_usd = Decimal("0")
+            maker_expected_fill_probability = Decimal("0")
+            maker_context_source = "maker_unavailable_or_unmodeled"
+        else:
+            maker_price_dec = min(
+                Decimal(str(snapshot_limit_price)),
+                Decimal(str(best_ask_float)) - tick_size_decimal,
+                positive_edge_cap_decimal,
+            )
+            if (
+                best_bid is not None
+                and maker_price_dec < best_bid < Decimal(str(best_ask_float))
+                and best_bid <= positive_edge_cap_decimal
+            ):
+                maker_price_dec = best_bid
+            maker_notional_dec = max(
+                Decimal(str(repriced_size_at_snapshot_vwmp)),
+                maker_price_dec * Decimal(str(snapshot.min_order_size)),
+            )
+            maker_edge_dec = max(Decimal("0"), p_posterior_decimal - maker_price_dec)
+            maker_expected_profit_usd = (
+                passive_maker_context.expected_fill_probability
+                * maker_edge_dec
+                * maker_notional_dec
+                / max(maker_price_dec, Decimal("0.000001"))
+            )
+            if passive_maker_context.adverse_selection_score is not None:
+                maker_expected_profit_usd -= (
+                    passive_maker_context.adverse_selection_score * maker_notional_dec
+                )
+            maker_expected_fill_probability = passive_maker_context.expected_fill_probability
+        incremental_expected_profit_usd = (
+            taker_expected_profit_usd - maker_expected_profit_usd
+        )
+        min_taker_edge = Decimal(str(final_intent_context.get("min_taker_fee_adjusted_edge", "0.03")))
+        min_incremental_profit = Decimal(str(final_intent_context.get("min_taker_incremental_profit_usd", "0.05")))
+        min_model_confidence = Decimal(str(final_intent_context.get("min_taker_model_confidence", "0.60")))
+        min_profit_ratio = Decimal(str(final_intent_context.get("min_taker_profit_ratio", "1.20")))
+        required_profit = max(
+            maker_expected_profit_usd * min_profit_ratio,
+            maker_expected_profit_usd + min_incremental_profit,
+        )
+        try:
+            ci_lower = float(getattr(decision.edge, "ci_lower"))
+            ci_upper = float(getattr(decision.edge, "ci_upper"))
+        except (TypeError, ValueError):
+            ci_lower = float("nan")
+            ci_upper = float("nan")
+        if math.isfinite(ci_lower) and math.isfinite(ci_upper) and ci_upper >= ci_lower:
+            model_confidence = max(
+                Decimal("0"),
+                min(Decimal("1"), Decimal("1") - Decimal(str(ci_upper - ci_lower))),
+            )
+            model_confidence_source = "edge_ci_width_confidence"
+        else:
+            model_confidence = Decimal("0")
+            model_confidence_source = "missing_edge_ci_width"
+        taker_quality_passed = (
+            taker_edge_dec >= min_taker_edge
+            and incremental_expected_profit_usd >= min_incremental_profit
+            and taker_expected_profit_usd >= required_profit
+            and model_confidence >= min_model_confidence
+        )
+        taker_quality_proof = {
+            "schema_version": 1,
+            "passed": taker_quality_passed,
+            "taker_fee_adjusted_edge": str(taker_edge_dec),
+            "taker_expected_profit_usd": str(taker_expected_profit_usd),
+            "maker_expected_profit_usd": str(maker_expected_profit_usd),
+            "incremental_expected_profit_usd": str(incremental_expected_profit_usd),
+            "model_confidence": str(model_confidence),
+            "model_confidence_source": model_confidence_source,
+            "min_taker_fee_adjusted_edge": str(min_taker_edge),
+            "min_taker_incremental_profit_usd": str(min_incremental_profit),
+            "min_taker_model_confidence": str(min_model_confidence),
+            "min_taker_profit_ratio": str(min_profit_ratio),
+            "maker_expected_fill_probability": str(maker_expected_fill_probability),
+            "maker_context_source": maker_context_source,
+        }
+    if final_best_ask is not None and taker_quality_passed:
+        final_order_type = "FOK" if final_order_type in {"GTC", "GTD", "FOK"} else "FAK"
+        taker_order_type_upgraded = selected_order_type in {"GTC", "GTD"}
+    elif taker_quality_required and (
+        final_best_ask is not None or final_order_type in {"FOK", "FAK"}
     ):
-        final_order_type = "FOK"
-        taker_order_type_upgraded = True
-    corrected_pricing_shadow = _attach_corrected_pricing_authority(
+        if final_order_type in {"FOK", "FAK"}:
+            final_order_type = "GTC"
+        final_best_ask = None
+        tick = Decimal(str(getattr(snapshot, "min_tick_size", "0.01") or "0.01"))
+        direction_text = str(getattr(getattr(decision, "edge", None), "direction", "") or "")
+        if direction_text.startswith("buy_"):
+            passive_ceiling = Decimal(str(best_ask_float)) - tick
+            if passive_ceiling <= Decimal("0"):
+                raise ValueError("ENTRY_TAKER_QUALITY_FALLBACK_NO_PASSIVE_BID_BELOW_ASK")
+            if Decimal(str(corrected_candidate_price)) >= passive_ceiling:
+                corrected_candidate_price = float(passive_ceiling)
+                corrected_candidate_expected_fill = float(passive_ceiling)
+                final_price = float(passive_ceiling)
+                corrected_candidate_size = max(
+                    float(corrected_candidate_size),
+                    float(passive_ceiling * Decimal(str(snapshot.min_order_size))),
+                )
+        elif direction_text.startswith("sell_"):
+            best_bid = getattr(snapshot, "orderbook_top_bid", None)
+            if best_bid is not None:
+                passive_floor = Decimal(str(best_bid)) + tick
+                if Decimal(str(corrected_candidate_price)) <= passive_floor:
+                    corrected_candidate_price = float(passive_floor)
+                    corrected_candidate_expected_fill = float(passive_floor)
+                    final_price = float(passive_floor)
+                    corrected_candidate_size = max(
+                        float(corrected_candidate_size),
+                        float(passive_floor * Decimal(str(snapshot.min_order_size))),
+                    )
+    corrected_pricing_evidence = _attach_corrected_pricing_authority(
         decision=decision,
         snapshot=snapshot,
         candidate_limit_price=float(corrected_candidate_price),
@@ -1509,13 +1634,14 @@ def _reprice_decision_from_executable_snapshot(
         resolution_window=str(final_intent_context.get("resolution_window") or "default"),
         correlation_key=str(final_intent_context.get("correlation_key") or ""),
         passive_maker_context=passive_maker_context,
+        taker_quality_proof=taker_quality_proof,
     )
     if (
-        isinstance(corrected_pricing_shadow, dict)
-        and corrected_pricing_shadow.get("live_submit_authority") is True
+        isinstance(corrected_pricing_evidence, dict)
+        and corrected_pricing_evidence.get("live_submit_authority") is True
     ):
         corrected_candidate_size = float(
-            Decimal(str(corrected_pricing_shadow["candidate_size_usd"]))
+            Decimal(str(corrected_pricing_evidence["candidate_size_usd"]))
         )
         repriced_size = corrected_candidate_size
     if strategy_key_for_live_quality:
@@ -1633,6 +1759,7 @@ def _reprice_decision_from_executable_snapshot(
         "selected_order_type": selected_order_type,
         "final_order_type": final_order_type,
         "taker_order_type_upgraded": taker_order_type_upgraded,
+        "taker_quality_proof": taker_quality_proof,
         "passive_maker_expected_fill_probability": (
             None
             if passive_maker_context is None
@@ -1649,15 +1776,15 @@ def _reprice_decision_from_executable_snapshot(
         "corrected_candidate_size_usd": float(corrected_candidate_size),
         "repriced_edge": repriced_edge,
         "repriced_size_usd": float(repriced_size),
-        "live_submit_authority": bool(corrected_pricing_shadow.get("live_submit_authority"))
-        if isinstance(corrected_pricing_shadow, dict)
+        "live_submit_authority": bool(corrected_pricing_evidence.get("live_submit_authority"))
+        if isinstance(corrected_pricing_evidence, dict)
         else False,
-        "final_execution_intent_id": corrected_pricing_shadow.get("final_execution_intent_id")
-        if isinstance(corrected_pricing_shadow, dict)
+        "final_execution_intent_id": corrected_pricing_evidence.get("final_execution_intent_id")
+        if isinstance(corrected_pricing_evidence, dict)
         else None,
     }
-    if corrected_pricing_shadow is not None:
-        tokens["executable_snapshot_reprice"]["corrected_pricing_shadow"] = corrected_pricing_shadow
+    if corrected_pricing_evidence is not None:
+        tokens["executable_snapshot_reprice"]["corrected_pricing_evidence"] = corrected_pricing_evidence
     decision.tokens = tokens
     return final_best_ask
 
@@ -2238,7 +2365,7 @@ def _record_final_intent_frontier(
         maybe_reprice = tokens.get("executable_snapshot_reprice")
         if isinstance(maybe_reprice, dict):
             reprice_payload = maybe_reprice
-    snapshot_shadow = reprice_payload.get("corrected_pricing_shadow")
+    snapshot_shadow = reprice_payload.get("corrected_pricing_evidence")
     if not isinstance(snapshot_shadow, dict):
         snapshot_shadow = {}
     fields = snapshot_fields or {}
@@ -2415,7 +2542,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
     try:
         corrected_shadow = (
             decision.tokens.get("executable_snapshot_reprice", {})
-            .get("corrected_pricing_shadow", {})
+            .get("corrected_pricing_evidence", {})
         )
     except AttributeError:
         corrected_shadow = {}
@@ -2647,7 +2774,15 @@ def _monitor_refreshed_phase_for_position(pos) -> str:
     return LifecyclePhase.ACTIVE.value
 
 
-def _emit_monitor_refreshed_canonical_if_available(conn, pos, *, deps) -> bool:
+def _emit_monitor_refreshed_canonical_if_available(
+    conn,
+    pos,
+    *,
+    deps,
+    exit_decision=None,
+    final_should_exit: bool | None = None,
+    final_exit_reason: str | None = None,
+) -> bool:
     if conn is None:
         return True
 
@@ -2665,6 +2800,9 @@ def _emit_monitor_refreshed_canonical_if_available(conn, pos, *, deps) -> bool:
             sequence_no=next_seq,
             phase_after=_monitor_refreshed_phase_for_position(pos),
             source_module="src.engine.cycle_runtime",
+            exit_decision=exit_decision,
+            final_should_exit=final_should_exit,
+            final_exit_reason=final_exit_reason,
         )
         append_many_and_project(conn, events, projection)
     except Exception as exc:
@@ -2801,30 +2939,116 @@ def _market_info_value(info, *keys):
     return None
 
 
-def _closed_non_accepting_market_info(clob, pos) -> dict | None:
+def _parse_market_timestamp(value) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _closed_by_static_market_end_info(conn, pos, *, decision_time: datetime | None) -> dict | None:
+    """Return closed-market evidence from stable market end timestamps.
+
+    Live CLOB market-info can disappear or fail after close. The persisted
+    market_end/close timestamp from executable snapshots is contract topology,
+    not a stale tradability quote, so it can prove that further live exit
+    attempts are no longer actionable.
+    """
+
+    if conn is None:
+        return None
+    condition_id = str(
+        getattr(pos, "condition_id", None)
+        or getattr(pos, "market_id", None)
+        or ""
+    ).strip()
+    if not condition_id:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT snapshot_id,
+                   condition_id,
+                   market_end_at,
+                   market_close_at,
+                   captured_at
+              FROM executable_market_snapshots
+             WHERE condition_id = ?
+             ORDER BY captured_at DESC
+             LIMIT 1
+            """,
+            (condition_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+
+    def _row_get(key: str):
+        try:
+            return row[key]
+        except (TypeError, KeyError, IndexError):
+            idx = {
+                "snapshot_id": 0,
+                "condition_id": 1,
+                "market_end_at": 2,
+                "market_close_at": 3,
+                "captured_at": 4,
+            }[key]
+            return row[idx]
+
+    close_at = (
+        _parse_market_timestamp(_row_get("market_close_at"))
+        or _parse_market_timestamp(_row_get("market_end_at"))
+    )
+    now_utc = decision_time or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    now_utc = now_utc.astimezone(timezone.utc)
+    if close_at is None or close_at > now_utc:
+        return None
+    return {
+        "condition_id": condition_id,
+        "closed": True,
+        "accepting_orders": False,
+        "enable_orderbook": None,
+        "source": "executable_snapshot_market_end",
+        "snapshot_id": _row_get("snapshot_id"),
+        "market_close_at": close_at.isoformat(),
+        "captured_at": _row_get("captured_at"),
+    }
+
+
+def _closed_non_accepting_market_info(clob, pos, conn=None, *, decision_time: datetime | None = None) -> dict | None:
     condition_id = str(
         getattr(pos, "condition_id", None)
         or getattr(pos, "market_id", None)
         or ""
     ).strip()
     get_market_info = getattr(clob, "get_clob_market_info", None)
-    if not condition_id or not callable(get_market_info):
-        return None
-    try:
-        info = get_market_info(condition_id)
-    except Exception:
-        return None
-    closed = _market_info_value(info, "closed")
-    accepting_orders = _market_info_value(info, "accepting_orders", "acceptingOrders")
-    enable_orderbook = _market_info_value(info, "enable_order_book", "enable_orderbook", "enableOrderBook")
-    if closed is True and accepting_orders is False:
-        return {
-            "condition_id": condition_id,
-            "closed": closed,
-            "accepting_orders": accepting_orders,
-            "enable_orderbook": enable_orderbook,
-        }
-    return None
+    if condition_id and callable(get_market_info):
+        try:
+            info = get_market_info(condition_id)
+        except Exception:
+            info = None
+        if info is not None:
+            closed = _market_info_value(info, "closed")
+            accepting_orders = _market_info_value(info, "accepting_orders", "acceptingOrders")
+            enable_orderbook = _market_info_value(info, "enable_order_book", "enable_orderbook", "enableOrderBook")
+            if closed is True and accepting_orders is False:
+                return {
+                    "condition_id": condition_id,
+                    "closed": closed,
+                    "accepting_orders": accepting_orders,
+                    "enable_orderbook": enable_orderbook,
+                    "source": "clob_market_info",
+                }
+    return _closed_by_static_market_end_info(conn, pos, decision_time=decision_time)
 
 
 def _is_open_crowding_exposure(pos) -> bool:
@@ -2884,6 +3108,48 @@ def _current_monitor_result_probability_and_edge(pos, edge_ctx=None) -> tuple[fl
     if fresh_prob is None:
         return None, None
     return fresh_prob, fresh_edge
+
+
+def _missing_fields_from_incomplete_exit_reason(exit_reason: str) -> set[str]:
+    prefix = "INCOMPLETE_EXIT_CONTEXT (missing="
+    text = str(exit_reason or "")
+    if not text.startswith(prefix) or not text.endswith(")"):
+        return set()
+    return {part.strip() for part in text[len(prefix):-1].split(",") if part.strip()}
+
+
+def _record_incomplete_exit_context_summary(
+    summary: dict,
+    *,
+    pos,
+    exit_reason: str,
+    hours_to_settlement,
+) -> None:
+    summary["monitor_incomplete_exit_context"] = (
+        summary.get("monitor_incomplete_exit_context", 0) + 1
+    )
+    if hours_to_settlement is None or hours_to_settlement > 6.0:
+        return
+    missing_fields = _missing_fields_from_incomplete_exit_reason(exit_reason)
+    reason = f"incomplete_exit_context:{exit_reason}"
+    if missing_fields & {
+        "current_market_price",
+        "current_market_price_is_fresh",
+        "best_bid",
+    }:
+        summary["monitor_exit_quote_missing"] = (
+            summary.get("monitor_exit_quote_missing", 0) + 1
+        )
+        summary.setdefault("monitor_exit_quote_missing_positions", []).append(pos.trade_id)
+        summary.setdefault("monitor_exit_quote_missing_reasons", []).append(
+            {"position_id": pos.trade_id, "reason": reason}
+        )
+        return
+    summary["monitor_chain_missing"] = summary.get("monitor_chain_missing", 0) + 1
+    summary.setdefault("monitor_chain_missing_positions", []).append(pos.trade_id)
+    summary.setdefault("monitor_chain_missing_reasons", []).append(
+        {"position_id": pos.trade_id, "reason": reason}
+    )
 
 
 def _build_exit_context(
@@ -3172,8 +3438,44 @@ def _execution_stub(candidate, decision, result, city, mode, *, deps):
     )
 
 
+def _release_monitor_write_lock_boundary(conn, summary: dict, deps, *, boundary: str) -> None:
+    """Commit monitor writes at bounded points so live price/decision writers can run."""
 
-def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: dict, *, deps, exit_order_submit_enabled: bool = True):
+    if conn is None:
+        return
+    try:
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        summary["monitor_write_lock_release_failed"] = (
+            summary.get("monitor_write_lock_release_failed", 0) + 1
+        )
+        summary.setdefault("monitor_write_lock_release_failures", []).append(
+            {"boundary": boundary, "error": str(exc)[:500]}
+        )
+        deps.logger.warning(
+            "monitor write-lock release failed at %s: %s",
+            boundary,
+            exc,
+        )
+    else:
+        summary["monitor_write_lock_releases"] = (
+            summary.get("monitor_write_lock_releases", 0) + 1
+        )
+
+
+
+def execute_monitoring_phase(
+    conn,
+    clob,
+    portfolio,
+    artifact,
+    tracker,
+    summary: dict,
+    *,
+    deps,
+    exit_order_submit_enabled: bool = True,
+    run_exit_preflight: bool = True,
+):
     from src.engine.monitor_refresh import refresh_position
     from src.execution.exit_lifecycle import (
         ExitContext,
@@ -3186,30 +3488,41 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
     )
     from src.state.chain_reconciliation import quarantine_resolution_reason
 
-    portfolio_dirty = _apply_acknowledged_quarantine_clears(
-        portfolio,
-        summary,
-        deps=deps,
-        conn=conn,
-    )
+    portfolio_dirty = False
     tracker_dirty = False
 
-    exit_stats = check_pending_exits(portfolio, clob, conn=conn)
-    if exit_stats["filled"] or exit_stats["retried"]:
-        portfolio_dirty = True
-
-    for filled_pos in exit_stats.get("filled_positions", []):
-        artifact.add_exit(
-            filled_pos.trade_id,
-            filled_pos.exit_reason or "DEFERRED_SELL_FILL",
-            filled_pos.exit_price or 0.0,
-            "sell_filled",
+    if run_exit_preflight:
+        portfolio_dirty = _apply_acknowledged_quarantine_clears(
+            portfolio,
+            summary,
+            deps=deps,
+            conn=conn,
         )
-        tracker.record_exit(filled_pos)
-        tracker_dirty = True
 
-    summary["pending_exits_filled"] = exit_stats["filled"]
-    summary["pending_exits_retried"] = exit_stats["retried"]
+        exit_stats = check_pending_exits(portfolio, clob, conn=conn)
+        if exit_stats["filled"] or exit_stats["retried"]:
+            portfolio_dirty = True
+
+        for filled_pos in exit_stats.get("filled_positions", []):
+            artifact.add_exit(
+                filled_pos.trade_id,
+                filled_pos.exit_reason or "DEFERRED_SELL_FILL",
+                filled_pos.exit_price or 0.0,
+                "sell_filled",
+            )
+            tracker.record_exit(filled_pos)
+            tracker_dirty = True
+
+        summary["pending_exits_filled"] = exit_stats["filled"]
+        summary["pending_exits_retried"] = exit_stats["retried"]
+        _release_monitor_write_lock_boundary(
+            conn,
+            summary,
+            deps,
+            boundary="exit_preflight",
+        )
+    else:
+        summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
     for pos in list(portfolio.positions):
         if pos.state == "pending_tracked":
@@ -3224,21 +3537,23 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
         if False:
             _ = pos.entry_method
             _ = pos.selected_method
-        pending_exit_resolution = handle_exit_pending_missing(portfolio, pos, conn=conn)
-        if pending_exit_resolution["action"] == "closed":
-            closed = pending_exit_resolution["position"]
-            if closed is not None:
-                tracker.record_exit(closed)
-                tracker_dirty = True
-                portfolio_dirty = True
-                summary["exit_chain_missing_closed"] = summary.get("exit_chain_missing_closed", 0) + 1
-            continue
-        if pending_exit_resolution["action"] == "skip":
-            summary["monitor_skipped_exit_pending_missing"] = summary.get("monitor_skipped_exit_pending_missing", 0) + 1
-            continue
+        if run_exit_preflight:
+            pending_exit_resolution = handle_exit_pending_missing(portfolio, pos, conn=conn)
+            if pending_exit_resolution["action"] == "closed":
+                closed = pending_exit_resolution["position"]
+                if closed is not None:
+                    tracker.record_exit(closed)
+                    tracker_dirty = True
+                    portfolio_dirty = True
+                    summary["exit_chain_missing_closed"] = summary.get("exit_chain_missing_closed", 0) + 1
+                continue
+            if pending_exit_resolution["action"] == "skip":
+                summary["monitor_skipped_exit_pending_missing"] = summary.get("monitor_skipped_exit_pending_missing", 0) + 1
+                continue
         if pos.state == "admin_closed":
             summary["monitor_skipped_admin_close"] = summary.get("monitor_skipped_admin_close", 0) + 1
             continue
+        pending_exit_monitor_only = False
         pending_exit_retry_identity_seed_allowed = (
             pos.state == "pending_exit"
             and getattr(pos, "exit_state", "") == "retry_pending"
@@ -3251,18 +3566,22 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             if is_exit_cooldown_active(pos):
                 summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
                 continue
-            check_pending_retries(pos, conn=conn)
+            if run_exit_preflight:
+                check_pending_retries(pos, conn=conn)
             if pos.state == "pending_exit":
-                summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
-                continue
-        if pos.exit_state in ("sell_placed", "sell_pending"):
+                pending_exit_monitor_only = True
+                summary["monitor_pending_exit_phase_evaluated"] = (
+                    summary.get("monitor_pending_exit_phase_evaluated", 0) + 1
+                )
+        if pos.exit_state in ("sell_placed", "sell_pending") and not pending_exit_monitor_only:
             continue
         if pos.exit_state == "backoff_exhausted":
             continue
         if is_exit_cooldown_active(pos):
             continue
 
-        check_pending_retries(pos, conn=conn)
+        if run_exit_preflight:
+            check_pending_retries(pos, conn=conn)
 
         if (
             _position_state_value(pos) == "quarantined"
@@ -3409,11 +3728,31 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                         previous_phase=previous_phase_str,
                         deps=deps,
                     )
+                    _release_monitor_write_lock_boundary(
+                        conn,
+                        summary,
+                        deps,
+                        boundary="day0_window_entered",
+                    )
 
             closed_market_info = None
             if _position_state_value(pos) == "day0_window":
-                closed_market_info = _closed_non_accepting_market_info(clob, pos)
+                closed_market_info = _closed_non_accepting_market_info(
+                    clob,
+                    pos,
+                    conn,
+                    decision_time=deps._utcnow(),
+                )
             if closed_market_info is not None:
+                from src.execution.exit_lifecycle import mark_market_closed_awaiting_settlement
+
+                mark_market_closed_awaiting_settlement(
+                    pos,
+                    reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+                    error=str(closed_market_info.get("source") or "market_closed_non_accepting_orders"),
+                    conn=conn,
+                )
+                portfolio_dirty = True
                 artifact.add_monitor_result(
                     deps.MonitorResult(
                         position_id=pos.trade_id,
@@ -3439,11 +3778,11 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 continue
 
             edge_ctx = refresh_position(conn, clob, pos)
-            # === DAY0 HARD-FACT verdict — computed BEFORE the canonical-write
-            # failure branch (PR#404 operator review P0-4): the hard-fact exit
-            # is settlement-authority evidence and must NOT depend on monitor
-            # telemetry/canonical-event writes succeeding. A deterministic dead
-            # bin exits even when the canonical MONITOR_REFRESHED write fails.
+            # === DAY0 HARD-FACT verdict — computed before the exit decision.
+            # Settlement-authority hard facts must not depend on estimator
+            # evidence, but the final MONITOR_REFRESHED event is written after
+            # hold/exit evaluation so the canonical row carries the actual
+            # decision for this monitor tick.
             _hard_fact = None
             if _position_state_value(pos) == "day0_window" and city is not None:
                 try:
@@ -3458,43 +3797,6 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     deps.logger.warning(
                         "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
                     )
-            monitor_canonical_written = _emit_monitor_refreshed_canonical_if_available(
-                conn,
-                pos,
-                deps=deps,
-            )
-            if not monitor_canonical_written:
-                summary["monitor_canonical_write_failed"] = (
-                    summary.get("monitor_canonical_write_failed", 0) + 1
-                )
-                if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
-                    # P0-4: telemetry failure must not hold a structurally dead
-                    # leg — fall through to the hard-fact exit below. The later
-                    # add_monitor_result records the exit decision.
-                    summary["day0_hard_fact_exit_despite_canonical_write_failure"] = (
-                        summary.get("day0_hard_fact_exit_despite_canonical_write_failure", 0) + 1
-                    )
-                    deps.logger.error(
-                        "MONITOR_CANONICAL_WRITE_FAILED for %s but day0 hard-fact bin death "
-                        "present — proceeding to exit (telemetry failure does not gate "
-                        "settlement-authority exits)",
-                        pos.trade_id,
-                    )
-                else:
-                    monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
-                    artifact.add_monitor_result(
-                        deps.MonitorResult(
-                            position_id=pos.trade_id,
-                            fresh_prob=monitor_fresh_prob,
-                            fresh_edge=monitor_fresh_edge,
-                            should_exit=False,
-                            exit_reason="MONITOR_CANONICAL_WRITE_FAILED",
-                            neg_edge_count=pos.neg_edge_count,
-                        )
-                    )
-                    monitor_result_written = True
-                    summary["monitors"] += 1
-                    continue
             exit_context = _build_exit_context(
                 pos,
                 edge_ctx,
@@ -3502,17 +3804,18 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 ExitContext=ExitContext,
                 portfolio=portfolio,
             )
-            exit_context, refreshed_retry_quote = _refresh_pending_exit_retry_quote_from_current_clob(
-                conn=conn,
-                clob=clob,
-                pos=pos,
-                exit_context=exit_context,
-                identity_seed_allowed=pending_exit_retry_identity_seed_allowed,
-            )
-            if refreshed_retry_quote:
-                summary["pending_exit_retry_current_clob_quote_refreshed"] = (
-                    summary.get("pending_exit_retry_current_clob_quote_refreshed", 0) + 1
+            if run_exit_preflight:
+                exit_context, refreshed_retry_quote = _refresh_pending_exit_retry_quote_from_current_clob(
+                    conn=conn,
+                    clob=clob,
+                    pos=pos,
+                    exit_context=exit_context,
+                    identity_seed_allowed=pending_exit_retry_identity_seed_allowed,
                 )
+                if refreshed_retry_quote:
+                    summary["pending_exit_retry_current_clob_quote_refreshed"] = (
+                        summary.get("pending_exit_retry_current_clob_quote_refreshed", 0) + 1
+                    )
             p_market = exit_context.current_market_price
             portfolio_dirty = True
             # === DAY0 HARD-FACT EXIT LANE (adversarial review 2026-06-10 fix 1) ===
@@ -3602,21 +3905,58 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     should_exit = False
                     exit_reason = gate_reason or "INCOMPLETE_EXIT_EVIDENCE"
             if exit_reason.startswith("INCOMPLETE_EXIT_CONTEXT"):
-                summary["monitor_incomplete_exit_context"] = summary.get("monitor_incomplete_exit_context", 0) + 1
-                if hours_to_settlement is not None and hours_to_settlement <= 6.0:
-                    summary["monitor_chain_missing"] = summary.get("monitor_chain_missing", 0) + 1
-                    summary.setdefault("monitor_chain_missing_positions", []).append(pos.trade_id)
-                    summary.setdefault("monitor_chain_missing_reasons", []).append(
-                        {
-                            "position_id": pos.trade_id,
-                            "reason": f"incomplete_exit_context:{exit_reason}",
-                        }
-                    )
+                _record_incomplete_exit_context_summary(
+                    summary,
+                    pos=pos,
+                    exit_reason=exit_reason,
+                    hours_to_settlement=hours_to_settlement,
+                )
                 deps.logger.warning(
                     "Exit authority incomplete for %s: %s",
                     pos.trade_id,
                     exit_reason,
                 )
+
+            monitor_canonical_written = _emit_monitor_refreshed_canonical_if_available(
+                conn,
+                pos,
+                deps=deps,
+                exit_decision=exit_decision,
+                final_should_exit=should_exit,
+                final_exit_reason=exit_reason,
+            )
+            if not monitor_canonical_written:
+                summary["monitor_canonical_write_failed"] = (
+                    summary.get("monitor_canonical_write_failed", 0) + 1
+                )
+                if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
+                    # P0-4: telemetry failure must not hold a structurally dead
+                    # leg. The monitor result below records the exit decision;
+                    # settlement-authority exits may still actuate.
+                    summary["day0_hard_fact_exit_despite_canonical_write_failure"] = (
+                        summary.get("day0_hard_fact_exit_despite_canonical_write_failure", 0) + 1
+                    )
+                    deps.logger.error(
+                        "MONITOR_CANONICAL_WRITE_FAILED for %s but day0 hard-fact bin death "
+                        "present — proceeding to exit (telemetry failure does not gate "
+                        "settlement-authority exits)",
+                        pos.trade_id,
+                    )
+                else:
+                    monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
+                    artifact.add_monitor_result(
+                        deps.MonitorResult(
+                            position_id=pos.trade_id,
+                            fresh_prob=monitor_fresh_prob,
+                            fresh_edge=monitor_fresh_edge,
+                            should_exit=False,
+                            exit_reason="MONITOR_CANONICAL_WRITE_FAILED",
+                            neg_edge_count=pos.neg_edge_count,
+                        )
+                    )
+                    monitor_result_written = True
+                    summary["monitors"] += 1
+                    continue
 
             monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
             artifact.add_monitor_result(
@@ -3638,16 +3978,19 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 pos.exit_divergence_score = edge_ctx.divergence_score
                 pos.exit_market_velocity_1h = edge_ctx.market_velocity_1h
                 pos.exit_forward_edge = edge_ctx.forward_edge
+                if pending_exit_monitor_only:
+                    summary["pending_exit_exit_signal_already_in_flight"] = (
+                        summary.get("pending_exit_exit_signal_already_in_flight", 0) + 1
+                    )
+                    portfolio_dirty = True
+                    continue
                 exit_intent = build_exit_intent(
                     pos,
                     replace(exit_context, exit_reason=exit_reason),
                 )
                 if not exit_order_submit_enabled:
-                    # Shadow/no-submit mode: record the exit decision in
-                    # summary for observability but do NOT place the sell order.
-                    # chain_sync_and_exit_monitor standalone job runs with this
-                    # flag=False so EDLI shadow mode never submits real orders
-                    # through the monitoring phase.
+                    # Live submit-gate disabled: record the exit decision for
+                    # operator visibility but do not place a venue sell order.
                     summary["exits_suppressed_no_submit"] = summary.get("exits_suppressed_no_submit", 0) + 1
                     summary["exits"] += 1
                     portfolio_dirty = True
@@ -3697,8 +4040,21 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                         neg_edge_count=pos.neg_edge_count,
                     )
                 )
+        finally:
+            _release_monitor_write_lock_boundary(
+                conn,
+                summary,
+                deps,
+                boundary="position_monitor",
+            )
 
-    _emit_portfolio_rotation_shadow_summary(conn, summary, deps=deps)
+    _emit_portfolio_rotation_live_status(conn, summary, deps=deps)
+    _release_monitor_write_lock_boundary(
+        conn,
+        summary,
+        deps,
+        boundary="portfolio_rotation_live_status",
+    )
     return portfolio_dirty, tracker_dirty
 
 
@@ -3742,174 +4098,14 @@ def _table_exists_in_schema(conn, schema_name: str, table_name: str) -> bool:
         return False
 
 
-def _emit_portfolio_rotation_shadow_summary(conn, summary: dict, *, deps) -> None:
-    """Shadow-only global capital-rotation evidence.
+def _emit_portfolio_rotation_live_status(conn, summary: dict, *, deps) -> None:
+    """Report live rotation posture without emitting non-actuating decisions."""
 
-    This does not submit exits or entries. It joins current held positions from
-    the trade DB with recent budget-rejected candidates from world DB and records
-    whether a universal after-fee replacement candidate exists.
-    """
+    _ = deps
     if conn is None:
-        summary["portfolio_rotation_shadow_status"] = "unavailable:no_connection"
+        summary["portfolio_rotation_live_status"] = "unavailable:no_connection"
         return
-    try:
-        if not _is_attached_schema(conn, "world"):
-            conn.execute("ATTACH DATABASE ? AS world", (str(state_path("zeus-world.db")),))
-        if not _table_exists_in_schema(conn, "main", "position_current"):
-            summary["portfolio_rotation_shadow_status"] = "unavailable:no_position_current"
-            return
-        if not _table_exists_in_schema(conn, "main", "position_events"):
-            summary["portfolio_rotation_shadow_status"] = "unavailable:no_position_events"
-            return
-        if not _table_exists_in_schema(conn, "world", "no_trade_regret_events"):
-            summary["portfolio_rotation_shadow_status"] = "unavailable:no_regret_events"
-            return
-
-        from src.config import exit_fee_rate
-        from src.strategy.portfolio_rotation import (
-            RotationCandidate,
-            RotationHold,
-            best_rotation,
-        )
-
-        now = deps._utcnow() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc)
-        cutoff = (now - timedelta(minutes=30)).isoformat()
-        pos_rows = conn.execute(
-            """
-            SELECT pc.position_id, pc.city, pc.target_date,
-                   COALESCE(pc.temperature_metric, 'high') AS metric,
-                   pc.bin_label, pc.direction, pc.shares,
-                   pc.last_monitor_prob, pc.last_monitor_market_price,
-                   pc.token_id, pc.no_token_id, pc.condition_id,
-                   pe.payload_json
-              FROM position_current pc
-              JOIN (
-                    SELECT position_id, MAX(occurred_at) AS max_at
-                      FROM position_events
-                     WHERE event_type = 'MONITOR_REFRESHED'
-                     GROUP BY position_id
-                   ) latest ON latest.position_id = pc.position_id
-              JOIN position_events pe
-                ON pe.position_id = latest.position_id
-               AND pe.occurred_at = latest.max_at
-               AND pe.event_type = 'MONITOR_REFRESHED'
-             WHERE lower(COALESCE(pc.phase, '')) IN ('active', 'day0_window')
-            """
-        ).fetchall()
-        holds: list[RotationHold] = []
-        for row in pos_rows:
-            try:
-                payload = json.loads(row["payload_json"] or "{}")
-                best_bid = payload.get("last_monitor_best_bid")
-                if best_bid is None:
-                    best_bid = row["last_monitor_market_price"]
-                token_id = row["token_id"] or row["no_token_id"] or ""
-                holds.append(
-                    RotationHold(
-                        position_id=str(row["position_id"] or ""),
-                        city=str(row["city"] or ""),
-                        target_date=str(row["target_date"] or ""),
-                        metric=str(row["metric"] or ""),
-                        bin_label=str(row["bin_label"] or ""),
-                        direction=str(row["direction"] or ""),
-                        shares=float(row["shares"] or 0.0),
-                        held_probability=float(row["last_monitor_prob"] or 0.0),
-                        held_side_best_bid=float(best_bid),
-                        token_id=str(token_id),
-                        condition_id=str(row["condition_id"] or ""),
-                    )
-                )
-            except Exception:
-                continue
-
-        cand_rows = conn.execute(
-            """
-            WITH latest AS (
-                SELECT token_id, MAX(created_at) AS max_created_at
-                  FROM world.no_trade_regret_events
-                 WHERE created_at >= ?
-                   AND rejection_reason LIKE 'KELLY_REJECTED:%'
-                   AND trade_score > 0
-                   AND q_lcb_5pct IS NOT NULL
-                   AND c_fee_adjusted IS NOT NULL
-                   AND token_id IS NOT NULL
-                 GROUP BY token_id
-            )
-            SELECT n.*
-              FROM world.no_trade_regret_events n
-              JOIN latest l
-                ON l.token_id = n.token_id
-               AND l.max_created_at = n.created_at
-             ORDER BY n.trade_score DESC
-             LIMIT 200
-            """,
-            (cutoff,),
-        ).fetchall()
-        candidates: list[RotationCandidate] = []
-        for row in cand_rows:
-            try:
-                candidates.append(
-                    RotationCandidate(
-                        event_id=str(row["event_id"] or ""),
-                        city=str(row["city"] or ""),
-                        target_date=str(row["target_date"] or ""),
-                        metric=str(row["metric"] or ""),
-                        bin_label=str(row["bin_label"] or ""),
-                        direction=str(row["direction"] or ""),
-                        q_lcb=float(row["q_lcb_5pct"]),
-                        fee_adjusted_cost=float(row["c_fee_adjusted"]),
-                        trade_score=float(row["trade_score"]),
-                        p_fill_lcb=(
-                            None if row["p_fill_lcb"] is None else float(row["p_fill_lcb"])
-                        ),
-                        token_id=str(row["token_id"] or ""),
-                        condition_id=str(row["condition_id"] or ""),
-                        rejection_reason=str(row["rejection_reason"] or ""),
-                    )
-                )
-            except Exception:
-                continue
-
-        decision = best_rotation(
-            holds,
-            candidates,
-            fee_rate=exit_fee_rate(),
-            min_net_improvement_usd=0.0,
-            min_net_improvement_ratio=0.0,
-            require_fill_lcb=True,
-        )
-        summary["portfolio_rotation_shadow_status"] = "ok"
-        summary["portfolio_rotation_shadow_holds"] = len(holds)
-        summary["portfolio_rotation_shadow_candidates"] = len(candidates)
-        summary["portfolio_rotation_shadow_has_replace_candidate"] = decision is not None
-        if decision is not None:
-            summary["portfolio_rotation_shadow_best"] = {
-                "reason": decision.reason,
-                "net_improvement_usd": round(decision.net_improvement_usd, 6),
-                "net_improvement_ratio": round(decision.net_improvement_ratio, 6),
-                "sell_position_id": decision.hold.position_id,
-                "sell_city": decision.hold.city,
-                "sell_target_date": decision.hold.target_date,
-                "sell_metric": decision.hold.metric,
-                "sell_bin_label": decision.hold.bin_label,
-                "buy_city": decision.candidate.city,
-                "buy_target_date": decision.candidate.target_date,
-                "buy_metric": decision.candidate.metric,
-                "buy_bin_label": decision.candidate.bin_label,
-                "buy_direction": decision.candidate.direction,
-                "buy_trade_score": round(decision.candidate.trade_score, 6),
-                "buy_q_lcb": round(decision.candidate.q_lcb, 6),
-                "buy_cost": round(decision.candidate.fee_adjusted_cost, 6),
-                "buy_p_fill_lcb": round(decision.fill_lcb_used, 6),
-            }
-            deps.logger.info(
-                "PORTFOLIO_ROTATION_SHADOW best=%s",
-                summary["portfolio_rotation_shadow_best"],
-            )
-    except Exception as exc:
-        summary["portfolio_rotation_shadow_status"] = "error"
-        summary["portfolio_rotation_shadow_error"] = f"{exc.__class__.__name__}: {exc}"
-        deps.logger.warning("Portfolio rotation shadow probe failed: %s", exc, exc_info=True)
+    summary["portfolio_rotation_live_status"] = "disabled:no_live_rotation_executor"
 
 
 def _observation_time_to_local_date(observation_time, timezone_name: str):
@@ -5462,7 +5658,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         }
                         for d in decisions
                     ]
-                    shadow_payload = {
+                    evidence_payload = {
                         "city": city.name,
                         "target_date": candidate.target_date,
                         "timestamp": decision_time.isoformat(),
@@ -5473,7 +5669,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         "lead_hours": float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
                     }
 
-                    def _write_shadow_signal(payload=shadow_payload) -> None:
+                    def _write_shadow_signal(payload=evidence_payload) -> None:
                         from src.state.db import log_shadow_signal
 
                         log_shadow_signal(conn, **payload)
@@ -5693,10 +5889,12 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         and d.edge is not None
                         and d.edge.direction == "buy_no"
                     ):
-                        from src.engine.evaluator import native_multibin_buy_no_live_enabled
+                        from src.strategy.family_exclusive_dedup import (
+                            buy_no_native_quote_evidence_submit_enabled,
+                        )
 
                         try:
-                            native_buy_no_live_enabled = native_multibin_buy_no_live_enabled()
+                            native_buy_no_live_enabled = buy_no_native_quote_evidence_submit_enabled()
                             live_flag_error = ""
                         except ValueError as exc:
                             native_buy_no_live_enabled = False
@@ -5704,7 +5902,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         if not native_buy_no_live_enabled:
                             buy_no_live_rejection_reason = (
                                 live_flag_error
-                                or "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+                                or "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED"
                             )
                         else:
                             buy_no_live_rejection_reason = _native_buy_no_live_authorization_rejection_reason(
@@ -5996,18 +6194,18 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             if not isinstance(reprice_payload, dict):
                                 raise ValueError("FINAL_EXECUTION_INTENT_MISSING: reprice payload unavailable")
                             final_intent = getattr(d, "final_execution_intent", None)
-                            shadow_payload = reprice_payload.get("corrected_pricing_shadow")
+                            evidence_payload = reprice_payload.get("corrected_pricing_evidence")
                             if reprice_payload.get("live_submit_authority") is not True:
                                 unsupported_reason = None
-                                if isinstance(shadow_payload, dict):
-                                    unsupported_reason = shadow_payload.get("unsupported_reason")
+                                if isinstance(evidence_payload, dict):
+                                    unsupported_reason = evidence_payload.get("unsupported_reason")
                                 raise ValueError(
                                     "FINAL_EXECUTION_INTENT_UNAVAILABLE:"
                                     f"{unsupported_reason or 'live_submit_authority_false'}"
                                 )
                             if final_intent is None:
                                 raise ValueError("FINAL_EXECUTION_INTENT_MISSING")
-                            sweep_payload = reprice_payload.get("corrected_pricing_shadow")
+                            sweep_payload = reprice_payload.get("corrected_pricing_evidence")
                             if not isinstance(sweep_payload, dict):
                                 sweep_payload = reprice_payload
                             if getattr(final_intent, "order_policy", "") == "post_only_passive_limit":
@@ -6130,23 +6328,23 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     "reason",
                                     None,
                                 )
-                            if isinstance(shadow_payload, dict):
-                                shadow_payload["execution_path"] = "final_execution_intent"
-                                shadow_payload["submitted_limit_price"] = (
+                            if isinstance(evidence_payload, dict):
+                                evidence_payload["execution_path"] = "final_execution_intent"
+                                evidence_payload["submitted_limit_price"] = (
                                     None
                                     if submit_rejected
                                     else _decimal_payload(final_limit_decimal)
                                 )
-                                shadow_payload["submit_path"] = (
+                                evidence_payload["submit_path"] = (
                                     None if submit_rejected else "final_execution_intent"
                                 )
-                                shadow_payload["submitted_matches_corrected_candidate"] = (
+                                evidence_payload["submitted_matches_corrected_candidate"] = (
                                     False
                                     if submit_rejected
                                     else abs(final_limit_decimal - corrected_candidate_limit) <= tick_tolerance
                                 )
                                 if submit_rejected:
-                                    shadow_payload["submit_rejected_reason"] = getattr(
+                                    evidence_payload["submit_rejected_reason"] = getattr(
                                         result,
                                         "reason",
                                         None,

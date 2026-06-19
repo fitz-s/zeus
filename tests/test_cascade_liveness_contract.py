@@ -1,4 +1,7 @@
-# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=2026-05-20
+# Lifecycle: created=2026-05-16; last_reviewed=2026-05-16; last_reused=2026-06-08
+# Last reused or audited: 2026-06-08 (P4 fix: orphan check -> positive identification of
+#   state-machine pollers by the contract's own naming convention, replacing the stale
+#   NON_STATE_MACHINE_JOB_IDS denylist). Authority basis: docs/architecture/system_decomposition_plan.md §8 Step 2.
 # Purpose: Antibody test for architecture/cascade_liveness_contract.yaml; enforces
 #   that every state-machine table with *_INTENT_CREATED rows has a registered
 #   APScheduler poller in src/main.py, and that every terminal_states_with_operator_action
@@ -30,48 +33,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CONTRACT_PATH = REPO_ROOT / "architecture" / "cascade_liveness_contract.yaml"
 SETTLEMENT_COMMANDS_SRC = REPO_ROOT / "src" / "execution" / "settlement_commands.py"
 
-# Non-state-machine scheduler jobs that may exist in src/main.py and are not
-# required to appear in the cascade_liveness_contract registry. These are
-# operational/scheduling jobs unrelated to *_INTENT_CREATED state machines.
-NON_STATE_MACHINE_JOB_IDS = frozenset({
-    "opening_hunt",
-    "day0_capture",
-    "imminent_open_capture",
-    "market_discovery",
-    "harvester",
-    "heartbeat",
-    "venue_heartbeat",
-    # deployment_freshness + wu_daily + imminent_open_capture are operational,
-    # not state-machine pollers.
-    "deployment_freshness",
-    "wu_daily",
-    "imminent_open_capture",
-    # world_wal_checkpoint is pure infrastructure (periodic
-    # PRAGMA wal_checkpoint(TRUNCATE) on zeus-world.db, 2026-06-04 WAL
-    # checkpoint-starvation backstop). It polls NO state-machine table and owns
-    # no cascade-liveness obligation — classed with heartbeat/deployment_freshness.
-    "world_wal_checkpoint",
-    # arm_gate_emit is pure infrastructure (2026-06-04 iron-rule-4 antibody): it
-    # re-emits the settlement-grounded ARM-gate FILE artifact
-    # (state/edli_arm_gate_artifact.json) on startup + every 6h. It polls NO
-    # state-machine table and owns no cascade-liveness obligation — classed with
-    # world_wal_checkpoint / heartbeat / deployment_freshness.
-    "arm_gate_emit",
-    # settlement_guard_report is the daily 守護 settlement scorecard (2026-06-09):
-    # a read-only reporting pass that grades executed fills against VERIFIED
-    # settlement truth and writes state/settlement_guard_report.json + a dated
-    # markdown. It polls NO state-machine table (no *_INTENT_CREATED /
-    # *_REQUESTED rows) and owns no cascade-liveness obligation — classed with
-    # wu_daily / arm_gate_emit / world_wal_checkpoint.
-    "settlement_guard_report",
-    # settlement_skill_attribution is the daily skill-vs-luck grader (2026-06-12):
-    # a read-only pass (its only write is the settlement_attribution audit row, its
-    # own sanctioned table) that grades settled positions into SKILL_WIN / LUCKY_WIN
-    # / SKILL_LOSS / MISCALIBRATED_LOSS / STALE_DECISION. It polls NO state-machine
-    # table (no *_INTENT_CREATED / *_REQUESTED rows) and owns no cascade-liveness
-    # obligation — classed with settlement_guard_report / wu_daily / arm_gate_emit.
-    "settlement_skill_attribution",
-})
+# NOTE (2026-06-08 P4 fix): the former NON_STATE_MACHINE_JOB_IDS denylist was REMOVED.
+# The orphan check (test_every_scheduler_poller_for_state_machines_is_listed_in_contract)
+# now POSITIVELY identifies state-machine pollers by the contract's own naming convention
+# (`harvester`/`redeem_*`/`wrap_*`/`transfer_*` — derived from the contract, not hardcoded),
+# so it never needs to enumerate every non-state-machine job (reactor / bankroll warm /
+# mainstream warm / channel ingestor / exit_monitor / heartbeat / wal-checkpoint …). The
+# denylist had gone stale (it never listed the EDLI reactor/warmer/channel jobs), which is
+# exactly the class of rot positive identification eliminates.
 
 
 def _load_contract() -> dict:
@@ -79,48 +48,28 @@ def _load_contract() -> dict:
         return yaml.safe_load(f)
 
 
-def _scheduler_job_ids_at_boot() -> set[str]:
-    """Boot src.main with a recording scheduler and return registered job IDs.
+# PROCESS-TOPOLOGY REFACTOR P4 (2026-06-08, system_decomposition_plan §8 Step 2): the
+# cascade-liveness pollers no longer all live in src/main.py — the redeem/wrap/harvester
+# pollers were lifted to the P4 post-trade-capital daemon. The contract carries an
+# owner_daemon field; this map resolves each owner_daemon to the daemon's SCHEDULER source
+# file so the boot-id scan reads the RIGHT process's registrations for each poller.
+_OWNER_DAEMON_SCHEDULER_FILES: dict[str, Path] = {
+    "main": REPO_ROOT / "src" / "main.py",
+    "post_trade_capital": REPO_ROOT / "src" / "ingest" / "post_trade_capital_daemon.py",
+}
 
-    Mirrors the fake-scheduler pattern used elsewhere in tests/. We do not
-    invoke main(); we directly inspect what main.py would register.
+
+def _scheduled_add_job_ids_in(source_path: Path) -> set[str]:
+    """Extract every literal add_job(..., id="X") id from a scheduler source file via AST.
+
+    We do not invoke main(); we regression-extract the scheduler.add_job(...) call list via
+    AST (avoids cycle_runner side effects + cutover guard timing).
     """
-    from apscheduler.schedulers.background import BackgroundScheduler
-    from unittest.mock import patch
-
-    recorded: list[str] = []
-
-    class _RecordingScheduler(BackgroundScheduler):
-        def add_job(self, *args, **kwargs):  # type: ignore[override]
-            jid = kwargs.get("id") or (args[2] if len(args) > 2 else None)
-            if jid:
-                # update_reaction_<HH:MM> is parameterized at runtime; collapse
-                # to a generic prefix for the registry check.
-                if jid.startswith("update_reaction_"):
-                    recorded.append("update_reaction")
-                else:
-                    recorded.append(jid)
-            return None
-
-        def start(self, *args, **kwargs):  # type: ignore[override]
-            return None
-
-        def get_jobs(self):  # type: ignore[override]
-            class _Stub:
-                def __init__(self, jid):
-                    self.id = jid
-            return [_Stub(j) for j in recorded]
-
-    # We don't need to actually call main(); regression-extract the
-    # scheduler.add_job(...) call list from src/main.py via AST. This avoids
-    # cycle_runner side effects + cutover guard timing.
-    src = SETTLEMENT_COMMANDS_SRC.parent.parent / "main.py"
-    tree = ast.parse(src.read_text())
+    tree = ast.parse(source_path.read_text())
     job_ids: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
-            # match `scheduler.add_job(...)` calls
             if isinstance(func, ast.Attribute) and func.attr == "add_job":
                 for kw in node.keywords:
                     if kw.arg == "id" and isinstance(kw.value, ast.Constant):
@@ -130,6 +79,27 @@ def _scheduler_job_ids_at_boot() -> set[str]:
                         else:
                             job_ids.add(jid)
     return job_ids
+
+
+def _scheduler_job_ids_at_boot() -> set[str]:
+    """Return registered job IDs across ALL daemons that own cascade-liveness pollers.
+
+    After the P4 lift the pollers are distributed: harvester/redeem/wrap live in the P4
+    post-trade-capital daemon; everything else in src/main.py. The contract's required-poller
+    check must see the union of all owning daemons' registrations — a poller is 'live' if it
+    is registered in WHICHEVER daemon owns it.
+    """
+    job_ids: set[str] = set()
+    for daemon_file in set(_OWNER_DAEMON_SCHEDULER_FILES.values()):
+        if daemon_file.exists():
+            job_ids |= _scheduled_add_job_ids_in(daemon_file)
+    return job_ids
+
+
+def _src_main_scheduler_job_ids() -> set[str]:
+    """Job ids registered specifically in src/main.py (order daemon) — for the inverse
+    orphan check, which is scoped to the order-daemon scheduler."""
+    return _scheduled_add_job_ids_in(REPO_ROOT / "src" / "main.py")
 
 
 def _state_transitions_in_module(module_path: Path) -> Iterable[str]:
@@ -199,20 +169,52 @@ def test_every_state_machine_in_contract_has_a_registered_poller():
     )
 
 
+def _contract_state_machine_poller_prefixes(contract: dict) -> set[str]:
+    """The naming convention of state-machine pollers, DERIVED from the contract.
+
+    Every contract poller id is `<machine>_<role>` (or the bare producer `harvester`);
+    its first underscore-segment names the state machine it drives (redeem_*, wrap_*,
+    harvester, and a future transfer_* etc.). We use this set to POSITIVELY identify
+    which scheduler jobs are state-machine pollers — rather than maintaining a denylist
+    of every non-state-machine job, which rots the moment a reactor/warmer/channel job
+    is added (the failure mode this rewrite removes)."""
+    return {
+        p["id"].split("_", 1)[0]
+        for sm in contract["state_machines"]
+        for p in sm["required_pollers"]
+    }
+
+
 def test_every_scheduler_poller_for_state_machines_is_listed_in_contract():
-    """Inverse drift guard: a poller registered in src/main.py whose ID
-    starts with redeem_/wrap_unwrap_/transfer_ etc. must appear in the
-    contract — prevents orphan pollers polling untracked tables."""
+    """Inverse drift guard: a poller registered in src/main.py whose ID matches the
+    contract's state-machine naming convention (harvester/redeem_*/wrap_*/transfer_* …)
+    MUST appear in the contract — prevents orphan pollers polling untracked tables.
+
+    POSITIVE IDENTIFICATION (2026-06-08 P4 fix): we flag a job ONLY when its id matches a
+    state-machine poller prefix DERIVED FROM THE CONTRACT. We do NOT subtract a
+    hand-maintained allowlist of every non-state-machine job — that denylist-by-omission
+    silently went stale (edli_event_reactor / edli_bankroll_warm / edli_mainstream_warm /
+    edli_market_channel_ingestor / edli_user_channel_reconcile were never listed, so they
+    were mis-flagged as orphans). A reactor/warmer/channel job is structurally not a
+    `redeem_`/`wrap_`/`harvester` poller, so positive identification never mis-classes it,
+    and a genuinely-orphaned `redeem_foo` (no contract entry) is still caught.
+    """
     contract = _load_contract()
     contract_poller_ids = {
         p["id"]
         for sm in contract["state_machines"]
         for p in sm["required_pollers"]
     }
-    scheduler_ids = _scheduler_job_ids_at_boot()
+    prefixes = _contract_state_machine_poller_prefixes(contract)
+    # The inverse orphan check is scoped to the ORDER daemon's scheduler (src/main.py)
+    # — a state-machine poller registered there without a contract entry is the orphan we
+    # guard against. The P4 daemon's pollers are all contract-listed (forward test covers
+    # them). Post-P4 the order daemon registers ZERO state-machine pollers (all lifted to
+    # P4), so this set is empty.
+    scheduler_ids = _src_main_scheduler_job_ids()
     state_machine_pollers = {
         jid for jid in scheduler_ids
-        if jid not in NON_STATE_MACHINE_JOB_IDS
+        if jid.split("_", 1)[0] in prefixes
         and jid != "update_reaction"
     }
     orphans = state_machine_pollers - contract_poller_ids

@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-03
+# Last reused or audited: 2026-06-17
 # Authority basis: DEFECT-1 capital-recoverability bridge. An EDLI FILL_CONFIRMED
 #   must materialise a canonical position_current row (the seam audited as
 #   missing), idempotently, chain-reconcilable by token, summing partial fills.
@@ -245,7 +245,7 @@ def test_green_bridge_buy_yes_places_token_on_token_id(conn):
     assert row["strategy_key"] == "center_buy"
 
 
-def test_bridge_rejects_day0_buy_no_as_settlement_capture(conn):
+def test_bridge_allows_day0_buy_no_settlement_capture(conn):
     aggregate_id = "agg-edli-day0-buyno-1"
     pre_submit = {
         "event_id": EVENT_ID,
@@ -290,8 +290,12 @@ def test_bridge_rejects_day0_buy_no_as_settlement_capture(conn):
         source_authority="user_channel",
     )
 
-    with pytest.raises(EdliPositionBridgeError, match="EDLI_BRIDGE_STRATEGY_DIRECTION_BLOCKED:settlement_capture"):
-        materialize_position_current_from_edli_fill(conn, aggregate_id)
+    result = materialize_position_current_from_edli_fill(conn, aggregate_id)
+
+    assert result is not None
+    row = _position_current_rows(conn)[0]
+    assert row["strategy_key"] == "settlement_capture"
+    assert row["direction"] == "buy_no"
 
 
 # --------------------------------------------------------------------------- #
@@ -313,6 +317,54 @@ def test_idempotent_replay_keeps_one_row(conn):
         (rows[0]["position_id"],),
     ).fetchone()[0]
     assert ev == 1, "POSITION_OPEN_INTENT must exist exactly once after replay"
+
+
+def test_same_order_duplicate_aggregate_absorbs_existing_open_row(conn):
+    first_aggregate = _seed_confirmed_buy_no_aggregate(conn, aggregate_id="agg-edli-same-order-a")
+    first = materialize_position_current_from_edli_fill(conn, first_aggregate)
+    assert first["created"] is True
+
+    second_aggregate = _seed_confirmed_buy_no_aggregate(conn, aggregate_id="agg-edli-same-order-b")
+    second = materialize_position_current_from_edli_fill(conn, second_aggregate)
+
+    assert second["created"] is False
+    assert second["position_id"] == first["position_id"]
+    rows = _position_current_rows(conn)
+    assert len(rows) == 1
+    assert rows[0]["position_id"] == first["position_id"]
+    assert rows[0]["shares"] == pytest.approx(16.75)
+    audit = conn.execute(
+        "SELECT event_type, payload_json FROM position_events "
+        "WHERE position_id = ? ORDER BY sequence_no DESC LIMIT 1",
+        (first["position_id"],),
+    ).fetchone()
+    assert audit["event_type"] == "MANUAL_OVERRIDE_APPLIED"
+    assert "agg-edli-same-order-b" not in audit["payload_json"]
+
+    before_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MANUAL_OVERRIDE_APPLIED'
+           AND source_module = 'src.events.edli_position_bridge'
+        """,
+        (first["position_id"],),
+    ).fetchone()[0]
+
+    replay = materialize_position_current_from_edli_fill(conn, second_aggregate)
+    after_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MANUAL_OVERRIDE_APPLIED'
+           AND source_module = 'src.events.edli_position_bridge'
+        """,
+        (first["position_id"],),
+    ).fetchone()[0]
+
+    assert replay["created"] is False
+    assert replay["position_id"] == first["position_id"]
+    assert after_count == before_count
 
 
 # --------------------------------------------------------------------------- #

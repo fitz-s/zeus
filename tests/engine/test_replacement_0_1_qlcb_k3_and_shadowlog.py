@@ -1,10 +1,8 @@
 # Created: 2026-06-07
 # Last reused or audited: 2026-06-07
 # Authority basis: docs/the_path/QLCB_HONESTY.md FIX-B (wire the existing K3
-#   settlement_backward_coverage shrink into the LIVE replacement_0_1 path; the
-#   helper's sole call site was the canonical path ~5755) + Item 3 (shadow-log
-#   claimed -> floored -> coverage-shrunk on every replacement q_lcb decision).
-"""TDD for ITEM 2 (K3 wiring into the replacement path) + ITEM 3 (shadow-log).
+#   settlement_backward_coverage shrink into the LIVE replacement_0_1 path.
+"""TDD for ITEM 2 (K3 wiring into the replacement path).
 
   ITEM 2: _replacement_authority_probability_and_fdr_proof must call the EXISTING
           _maybe_apply_settlement_coverage_to_lcb on its lcb_by_direction, under the
@@ -12,12 +10,9 @@
           duplicate helper. Flag OFF -> no-op; the wired call is present for when
           settled data accrues.
 
-  ITEM 3: every replacement q_lcb decision logs claimed -> floored -> (coverage-shrunk)
-          to a queryable surface so live before/after validation data accrues.
 """
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -45,16 +40,19 @@ def _family() -> SimpleNamespace:
 
 
 def _replacement_bundle() -> SimpleNamespace:
+    wilson_28 = adapter._wilson_lower_bound(41.0, 51.0)
     return SimpleNamespace(
         posterior_id=123,
         product_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
         q={"bin-28": 0.80},
-        q_lcb=None,
+        q_lcb={"bin-28": wilson_28},
+        q_ucb={"bin-28": 0.90},
         provenance_json={
-            # FIX 1 (2026-06-09): live-eligible q-mode so this fixture reaches the K3 coverage /
-            # shadow-log relationship it tests (the gate itself is covered separately).
+            # FIX 1 (2026-06-09): live-eligible q-mode so this fixture reaches the K3
+            # coverage relationship it tests (the gate itself is covered separately).
             "replacement_q_mode": "FUSED_NORMAL_FULL",
             "q_shape": "fused_normal_direct",
+            "q_lcb_basis": "fused_center_bootstrap_p05",
             "anchor_value_c": 28.0,
             "aifs_member_count": 51,
             "aifs_probabilities": {"bin-28": 41 / 51},
@@ -70,7 +68,7 @@ def _native_costs() -> dict:
     }
 
 
-def _setup(monkeypatch, *, coverage_flag: bool, floor_flag: bool):
+def _setup(monkeypatch, *, coverage_flag: bool):
     from src.config import settings
     from src.data import replacement_forecast_bundle_reader as reader
     from src.engine import replacement_forecast_hook_factory as hook_factory
@@ -81,7 +79,6 @@ def _setup(monkeypatch, *, coverage_flag: bool, floor_flag: bool):
 
     edli = dict(settings._data["edli"])
     edli["q_lcb_settlement_coverage_gate_enabled"] = coverage_flag
-    edli["replacement_qlcb_settlement_sigma_floor_enabled"] = floor_flag
     monkeypatch.setitem(settings._data, "edli", edli)
 
     monkeypatch.setattr(hook_factory, "_latest_replacement_readiness", lambda *a, **k: object())
@@ -94,11 +91,6 @@ def _setup(monkeypatch, *, coverage_flag: bool, floor_flag: bool):
 
 
 def _run(monkeypatch):
-    from tests.test_replacement_forecast_runtime_policy import (
-        _capital_objective_evidence,
-        _passing_evidence,
-    )
-
     return adapter._replacement_authority_probability_and_fdr_proof(
         event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
         payload={},
@@ -106,15 +98,15 @@ def _run(monkeypatch):
         conn=object(),
         native_costs=_native_costs(),
         decision_time=datetime(2026, 6, 7, tzinfo=timezone.utc),
-        promotion_evidence=_passing_evidence(),
-        capital_objective_evidence=_capital_objective_evidence(),
+        promotion_evidence=None,
+        capital_objective_evidence=None,
     )
 
 
 def test_replacement_path_calls_k3_coverage_helper(monkeypatch) -> None:
     """ITEM 2: the replacement path invokes the EXISTING coverage helper (same helper,
     no duplicate) on its lcb_by_direction, threading the forecast_conn."""
-    _setup(monkeypatch, coverage_flag=False, floor_flag=False)
+    _setup(monkeypatch, coverage_flag=False)
     calls: list = []
 
     real_helper = adapter._maybe_apply_settlement_coverage_to_lcb
@@ -134,26 +126,12 @@ def test_replacement_path_calls_k3_coverage_helper(monkeypatch) -> None:
 
 def test_replacement_path_coverage_flag_off_is_noop(monkeypatch) -> None:
     """ITEM 2: with the coverage flag OFF the wired K3 call is a no-op — the q_lcb is
-    the (unfloored, floor flag also off) Wilson value, byte-identical to pre-wiring."""
-    _setup(monkeypatch, coverage_flag=False, floor_flag=False)
+    the bundle's bootstrap/Wilson value, byte-identical to pre-wiring."""
+    _setup(monkeypatch, coverage_flag=False)
     from src.calibration.qlcb_provenance import _qlcb_float
 
     _q, lcb, _p, _pf, _ev = _run(monkeypatch)
     wilson_28 = adapter._wilson_lower_bound(41.0, 51.0)
     assert _qlcb_float(lcb[("cond-28", "buy_yes")]) == pytest.approx(wilson_28)
-    # No SETTLEMENT_ISOTONIC re-grounding when the gate is off.
+    # No SETTLEMENT_ISOTONIC shrink when the gate is off.
     assert lcb[("cond-28", "buy_yes")].calibration_source != "SETTLEMENT_ISOTONIC"
-
-
-def test_replacement_qlcb_shadow_log_emitted(monkeypatch, caplog) -> None:
-    """ITEM 3: every replacement q_lcb decision emits a queryable claimed->floored
-    shadow record (so live before/after data accrues from the next daemon run)."""
-    _setup(monkeypatch, coverage_flag=False, floor_flag=True)
-    with caplog.at_level(logging.INFO, logger="zeus.replacement_qlcb_shadow"):
-        _run(monkeypatch)
-    records = [r for r in caplog.records if r.name == "zeus.replacement_qlcb_shadow"]
-    assert records, "expected a replacement q_lcb shadow log record"
-    msg = records[0].getMessage()
-    # The shadow record carries the city, the bin, claimed and floored values.
-    assert "Testopolis" in msg
-    assert "claimed" in msg and "floored" in msg

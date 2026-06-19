@@ -1,11 +1,14 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-01
+# Last reused/audited: 2026-06-08
 # Authority basis: live alpha capture directive 2026-05-01 — replace hardcoded
 #                  POLYMARKET_USER_WS_CONDITION_IDS with auto-derivation from
 #                  the canonical market scanner, so the daemon subscribes only
 #                  to markets it can trade and the subscription list cannot
 #                  drift from on-chain truth as markets rotate.
 #                  2026-05-01 live-blocker fixes: proxy bypass + adapter-sourced creds
+#                  2026-06-08 (system_decomposition_plan §8 Step 3): the user-channel WS
+#                  ingestor was LIFTED out of src.main into src.ingest.price_channel_ingest
+#                  (P3). These invariants are unchanged; the host module is repointed.
 """Antibody tests for user-channel WS condition_ids auto-derive (2026-05-01).
 
 Pins seven cross-module invariants:
@@ -36,7 +39,11 @@ from typing import Any
 
 import pytest
 
-from src import main as zeus_main
+# P3 lift (system_decomposition_plan §8 Step 3): the user-channel WS ingestor starter +
+# its auto-derive helpers moved from src.main to src.ingest.price_channel_ingest. The
+# module alias is kept as `zeus_main` so the test bodies (which call
+# zeus_main._start_user_channel_ingestor_if_enabled) repoint with a single import change.
+from src.ingest import price_channel_ingest as zeus_main
 from src.control import ws_gap_guard
 
 
@@ -126,7 +133,7 @@ def _stub_ingestor(monkeypatch):
         def is_alive(self) -> bool:
             return False
 
-    monkeypatch.setattr("src.main.threading.Thread", _StubThread)
+    monkeypatch.setattr("src.ingest.price_channel_ingest.threading.Thread", _StubThread)
 
     return started
 

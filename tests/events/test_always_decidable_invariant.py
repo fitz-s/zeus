@@ -213,6 +213,30 @@ def test_debounce_two_blocks_same_family_within_window_one_refresh_call():
     assert calls == [("Chicago", "2026-05-24", "high")]
 
 
+def test_gate_positive_event_does_not_call_family_refresher_before_decision():
+    """A gate-positive event must not pay the full-family refresh cost before decision.
+
+    Presence/family-identity freshness is proven by the executable snapshot gate. If the
+    selected row later proves price-stale, the adapter owns the targeted refresh at the
+    stale-price boundary. True gate misses refresh through the blocked-event drain.
+    """
+
+    conn, store = _store()
+    event = _forecast_event(target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    calls: list[tuple] = []
+
+    def _refresher(*, city, target_date, metric, **_kw):
+        calls.append((city, target_date, metric))
+        return True
+
+    reactor = _reactor(store, snapshot_present={"v": True}, refresher=_refresher)
+
+    reactor.process_pending(decision_time=_DT)
+
+    assert calls == []
+
+
 def test_fanout_no_drop_cap_all_recorded_families_refreshed_in_one_drain():
     """FAN-OUT — NO DROP-CAP: when MANY families are recorded as blocked in a single cycle, the
     end-of-cycle drain refreshes EVERY one of them (no numeric cap on the candidate set). We drive
@@ -361,7 +385,7 @@ def test_held_provider_failsoft_absent_or_raising_yields_pure_rotation():
 # ---------------------------------------------------------------------------
 def test_posterior_stale_block_enqueues_single_family_cycle_advance():
     """A family blocked because its replacement posterior is STALE/absent (the adapter raises
-    REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED) records a SINGLE-FAMILY cycle-advance enqueue
+    REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED) records a SINGLE-FAMILY cycle-advance enqueue
     for THAT family — the belief substrate gets re-materialized rather than requeueing forever
     against an unchanging posterior."""
     payload = json.loads(_forecast_event().payload_json)
@@ -380,7 +404,7 @@ def test_posterior_stale_block_enqueues_single_family_cycle_advance():
             metric=payload.get("metric"),
             trade_score_positive=False,
             side_effect_status="NO_SUBMIT",
-            reason="REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED:READINESS_STALE",
+            reason="REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED:READINESS_STALE",
         )
 
     def _enqueuer(*, city, target_date, metric):
@@ -417,7 +441,7 @@ def test_posterior_readiness_missing_also_enqueues_cycle_advance():
             metric=payload.get("metric"),
             trade_score_positive=False,
             side_effect_status="NO_SUBMIT",
-            reason="REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
+            reason="REPLACEMENT_0_1_LIVE_READINESS_MISSING",
         )
 
     def _enqueuer(*, city, target_date, metric):
@@ -425,6 +449,41 @@ def test_posterior_readiness_missing_also_enqueues_cycle_advance():
         return True
 
     conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    reactor = _reactor(
+        store,
+        snapshot_present={"v": True},
+        cycle_advance_enqueuer=_enqueuer,
+        submit=_submit,
+    )
+    reactor.process_pending(decision_time=_DT)
+    assert enqueues == [("Chicago", "2026-05-24", "high")]
+
+
+def test_pre_cutover_posterior_staleness_reason_alias_enqueues_cycle_advance():
+    payload = json.loads(_forecast_event().payload_json)
+    enqueues: list[tuple] = []
+
+    def _submit(event, _dt):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=False,
+            side_effect_status="NO_SUBMIT",
+            reason="REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
+        )
+
+    def _enqueuer(*, city, target_date, metric):
+        enqueues.append((city, target_date, metric))
+        return True
+
+    _conn, store = _store()
     event = _forecast_event()
     store.insert_or_ignore(event)
     reactor = _reactor(

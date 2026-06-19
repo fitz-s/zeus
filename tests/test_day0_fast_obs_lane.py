@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-17
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -82,6 +82,13 @@ def _tokyo():
     return SimpleNamespace(
         name="Tokyo", timezone="Asia/Tokyo", settlement_unit="C",
         wu_station="RJTT", settlement_source_type="wu_icao",
+    )
+
+
+def _london():
+    return SimpleNamespace(
+        name="London", timezone="Europe/London", settlement_unit="C",
+        wu_station="EGLC", settlement_source_type="wu_icao",
     )
 
 
@@ -181,6 +188,50 @@ class TestRunningExtremes:
         assert ex.low_so_far == pytest.approx(19.0)
         assert ex.current_temp == pytest.approx(19.0)
 
+    def test_europe_low_boundary_excludes_tminus1_23_and_includes_target_00_01_23(self):
+        london = _london()
+        reports = [
+            # 2026-06-17T22:00Z = Jun 17 23:00 BST, previous local day.
+            _report("EGLC", datetime(2026, 6, 17, 22, 0, tzinfo=UTC), 10.0, t_group=False),
+            # Target local day starts at 2026-06-17T23:00Z.
+            _report("EGLC", datetime(2026, 6, 17, 23, 0, tzinfo=UTC), 16.0, t_group=False),
+            _report("EGLC", datetime(2026, 6, 18, 0, 0, tzinfo=UTC), 14.0, t_group=False),
+            _report("EGLC", datetime(2026, 6, 18, 22, 0, tzinfo=UTC), 12.0, t_group=False),
+        ]
+
+        before_midnight = running_extremes_for_local_day(
+            reports,
+            city=london,
+            target_date="2026-06-18",
+            as_of=datetime(2026, 6, 17, 22, 30, tzinfo=UTC),
+        )
+        at_00 = running_extremes_for_local_day(
+            reports,
+            city=london,
+            target_date="2026-06-18",
+            as_of=datetime(2026, 6, 17, 23, 30, tzinfo=UTC),
+        )
+        at_01 = running_extremes_for_local_day(
+            reports,
+            city=london,
+            target_date="2026-06-18",
+            as_of=datetime(2026, 6, 18, 0, 30, tzinfo=UTC),
+        )
+        late_day = running_extremes_for_local_day(
+            reports,
+            city=london,
+            target_date="2026-06-18",
+            as_of=datetime(2026, 6, 18, 22, 30, tzinfo=UTC),
+        )
+
+        assert before_midnight.sample_count == 0
+        assert at_00.sample_count == 1
+        assert at_00.low_so_far == pytest.approx(16.0)
+        assert at_01.sample_count == 2
+        assert at_01.low_so_far == pytest.approx(14.0)
+        assert late_day.sample_count == 3
+        assert late_day.low_so_far == pytest.approx(12.0)
+
     def test_as_of_truncation_excludes_later_reports(self):
         seoul = _seoul()
         reports = [
@@ -225,7 +276,7 @@ class TestObservationStatuses:
         obs = fast_obs_to_day0_observation(
             city=nyc, extremes=self._extremes(nyc), metric="high", source=source
         )
-        assert obs["live_authority_status"] == "LIVE_AUTHORITY"
+        assert obs["live_authority_status"] == "live"
         assert obs["source_authorized_status"] == "AUTHORIZED"
         assert obs["dst_status"] == "UNAMBIGUOUS"
         # available_at is the feed receiptTime, not our wall clock
@@ -241,7 +292,7 @@ class TestObservationStatuses:
                 "metric_match_status": "MATCH",
                 "rounding_status": "MATCH",
                 "source_authorized_status": "AUTHORIZED",
-                "live_authority_status": "LIVE_AUTHORITY",
+                "live_authority_status": "live",
             }.items()
         )
 
@@ -257,7 +308,7 @@ class TestObservationStatuses:
             source=source,
         )
         assert obs["local_date_status"] == "MISMATCH"
-        assert obs["live_authority_status"] == "NON_LIVE_AUTHORITY"
+        assert obs["live_authority_status"] == "blocked"
 
     def test_non_wu_icao_city_has_no_fast_source(self):
         hko = SimpleNamespace(
@@ -314,7 +365,46 @@ class TestEmitterMonotone:
 
         payloads = [_json.loads(r["payload_json"]) for r in rows]
         assert all(p["settlement_source"] == "aviationweather_metar" for p in payloads)
-        assert all(p["live_authority_status"] == "LIVE_AUTHORITY" for p in payloads)
+        assert all(p["live_authority_status"] == "live" for p in payloads)
+
+    def test_restart_short_window_cannot_emit_regressed_high(self):
+        conn = _world_conn()
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)  # Jun 10 01:00 JST
+
+        first_reports = [_report("RJTT", t0, 25.0, t_group=False)]
+        first = Day0FastObsEmitter(
+            fetcher=lambda stations, **kw: first_reports,
+            min_fetch_interval_s=0.0,
+        )
+        assert self._emit(first, conn, first_reports, t0 + timedelta(minutes=10)) == 2
+
+        short_window_reports = [_report("RJTT", t0 + timedelta(hours=1), 24.0, t_group=False)]
+        restarted = Day0FastObsEmitter(
+            fetcher=lambda stations, **kw: short_window_reports,
+            min_fetch_interval_s=0.0,
+        )
+        restarted.emit_events(
+            world_conn=conn,
+            cities=[_tokyo()],
+            decision_time=t0 + timedelta(hours=1, minutes=10),
+            received_at=(t0 + timedelta(hours=1, minutes=10)).isoformat(),
+            limit=20,
+        )
+
+        high_values = [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT CAST(json_extract(payload_json, '$.rounded_value') AS INTEGER)
+                  FROM opportunity_events
+                 WHERE event_type='DAY0_EXTREME_UPDATED'
+                   AND json_extract(payload_json, '$.city') = 'Tokyo'
+                   AND json_extract(payload_json, '$.metric') = 'high'
+                 ORDER BY created_at
+                """
+            ).fetchall()
+        ]
+        assert high_values == [25], "restart recovery must suppress lower later high=24"
 
     def test_emitted_event_passes_reactor_hard_fact_gate(self):
         conn = _world_conn()
@@ -692,7 +782,7 @@ class TestMutexNoHttpSplit:
 
     def test_publication_clock_missing_denies_live_authority(self):
         """PR#404 P2: receiptTime absent -> available_at falls back to the obs
-        valid time (never our wall clock) AND live authority is denied."""
+        valid time (never our wall clock) AND live status is blocked."""
         from src.data.day0_fast_obs import (
             fast_obs_source_for_city,
             fast_obs_to_day0_observation,
@@ -711,7 +801,7 @@ class TestMutexNoHttpSplit:
             city=city, extremes=ex, metric="high", source=fast_obs_source_for_city(city),
         )
         assert obs["observation_available_at"] == obs["observation_time"]
-        assert obs["live_authority_status"] == "NON_LIVE_AUTHORITY"
+        assert obs["live_authority_status"] == "blocked"
 
 
 # ===========================================================================

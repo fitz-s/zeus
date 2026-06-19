@@ -16,6 +16,11 @@ from src.decision_kernel.ledger import CompileFailure
 from src.decision_kernel.verifier import (
     ALT_CREDENTIAL_CALIBRATION_AUTHORITIES,
     APPROVED_CALIBRATION_AUTHORITIES,
+    ENSEMBLE_MEMBERS_JSON_SOURCE,
+    FORECAST_ACTIONABLE_EVENT_TYPES,
+    POSTERIOR_MEMBERS_JSON_SOURCE,
+    POSTERIOR_MIN_DECORRELATED_MODELS,
+    REQUIRED_POSTERIOR_FORECAST_VALIDATIONS,
     calibration_maturity_too_low,
 )
 from src.events.opportunity_event import OpportunityEvent
@@ -391,7 +396,7 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
         #                            belief.forecast_snapshot_id == forecast.snapshot_id (later).
         _require_equal("source_truth.causal_snapshot_id", source.get("causal_snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
         _require_equal("source_truth.snapshot_id", source.get("snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
-    if event.event_type == "FORECAST_SNAPSHOT_READY":
+    if event.event_type in FORECAST_ACTIONABLE_EVENT_TYPES:
         _validate_source_truth_payload(source)
         _require_equal("source_truth.completeness_status", source.get("completeness_status"), "COMPLETE", "COMPLETE")
         if source.get("required_fields_present") is not True:
@@ -522,6 +527,51 @@ def _validate_source_truth_payload(source: dict[str, Any]) -> None:
             raise ValueError(f"source_truth.{field} missing")
 
 
+def _validate_posterior_forecast_authority_payload(forecast: dict[str, Any]) -> None:
+    """EQUALLY-STRICT compiler validation for a posterior-provenance FORECAST_AUTHORITY
+    (mx2t3 carrier-decouple GATE-1 C). Mirrors verifier._validate_posterior_forecast_authority_payload:
+    coverage COMPLETE/LIVE_ELIGIBLE, posterior identity + members hash present, the decorrelated
+    model-count floor (>= the spine's own >=3-member floor), and the posterior applied-validations
+    set. Reads a DIFFERENT certified completeness authority; does NOT weaken the ensemble gates."""
+    for field in (
+        "coverage_readiness_status",
+        "coverage_completeness_status",
+        "temperature_metric",
+        "members_json_source",
+        "members_json_hash",
+        "posterior_identity_hash",
+        "source_cycle_time",
+        "source_run_id",
+        "forecast_source_id",
+    ):
+        if forecast.get(field) in (None, ""):
+            raise ValueError(f"forecast.{field} missing (posterior)")
+    if forecast.get("coverage_readiness_status") != "LIVE_ELIGIBLE":
+        raise ValueError("forecast.coverage_readiness_status must be LIVE_ELIGIBLE")
+    if forecast.get("coverage_completeness_status") != "COMPLETE":
+        raise ValueError("forecast.coverage_completeness_status must be COMPLETE")
+    try:
+        expected_models = int(forecast.get("expected_members"))
+        observed_models = int(forecast.get("observed_members"))
+    except (TypeError, ValueError):
+        raise ValueError("forecast.expected/observed decorrelated model count missing")
+    if observed_models < expected_models:
+        raise ValueError("forecast.observed_members below expected_members (posterior)")
+    if observed_models < POSTERIOR_MIN_DECORRELATED_MODELS:
+        raise ValueError(
+            f"forecast.observed_members below posterior decorrelated-model floor "
+            f"({POSTERIOR_MIN_DECORRELATED_MODELS})"
+        )
+    applied_validations = {str(item) for item in tuple(forecast.get("applied_validations") or ())}
+    if not applied_validations:
+        raise ValueError("forecast.applied_validations missing (posterior)")
+    missing = REQUIRED_POSTERIOR_FORECAST_VALIDATIONS - applied_validations
+    if missing:
+        raise ValueError(
+            f"forecast.applied_validations missing required posterior validations: {sorted(missing)}"
+        )
+
+
 def _validate_forecast_authority_payload(forecast: dict[str, Any]) -> None:
     status = normalize_forecast_reader_status(forecast.get("reader_status"))
     if status != FORECAST_LIVE_ELIGIBLE_STATUS:
@@ -529,6 +579,12 @@ def _validate_forecast_authority_payload(forecast: dict[str, Any]) -> None:
     reason = forecast.get("reader_reason_code")
     if reason not in (None, "", "OK"):
         raise ValueError("forecast.reader_reason_code must be empty for verified no-submit")
+    # mx2t3 carrier-decouple (GATE-1 C): posterior-provenance authority is validated by the
+    # equally-strict posterior invariant set (model-count completeness, not ensemble member/step
+    # floors); the ensemble branch below is UNCHANGED for ensemble provenance.
+    if forecast.get("members_json_source") == POSTERIOR_MEMBERS_JSON_SOURCE:
+        _validate_posterior_forecast_authority_payload(forecast)
+        return
     if forecast.get("coverage_readiness_status") != "LIVE_ELIGIBLE":
         raise ValueError("forecast.coverage_readiness_status must be LIVE_ELIGIBLE")
     if forecast.get("coverage_completeness_status") != "COMPLETE":
@@ -622,7 +678,11 @@ def _validate_unit_authority(forecast: dict[str, Any], belief: dict[str, Any], f
     unit = forecast.get("unit")
     if unit not in {"F", "C"}:
         raise ValueError("forecast.unit missing or unsupported")
-    if forecast.get("unit_authority_source") not in {"ensemble_snapshots.settlement_unit", "ensemble_snapshots.members_unit"}:
+    if forecast.get("unit_authority_source") not in {
+        "ensemble_snapshots.settlement_unit",
+        "ensemble_snapshots.members_unit",
+        "city_config.settlement_unit",
+    }:
         raise ValueError("forecast.unit_authority_source missing")
     bin_units = tuple(str(item) for item in (family.get("bin_units") or ()))
     if not bin_units:

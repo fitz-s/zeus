@@ -126,6 +126,24 @@ def test_live_adapter_exposes_live_submit_count_attribute() -> None:
     assert count_ref[0] == 0, "Counter must start at 0"
 
 
+def test_live_submit_counter_increments_only_after_venue_call_started() -> None:
+    """Executor pre-submit rejects must not look like real venue attempts."""
+
+    import inspect
+    from src.engine import event_reactor_adapter as adapter
+
+    source = inspect.getsource(adapter.event_bound_live_adapter_from_trade_conn)
+    venue_guard = "if submit_result.venue_call_started:"
+    counter_line = "_live_submit_count[0] += 1"
+    attempted_event = "_append_venue_submit_attempted_aggregate_event("
+
+    assert venue_guard in source
+    counter_pos = source.index(counter_line)
+    attempted_pos = source.index(attempted_event)
+    assert source.rindex(venue_guard, 0, counter_pos) < counter_pos
+    assert source.rindex(venue_guard, 0, attempted_pos) < attempted_pos
+
+
 def test_no_submit_adapter_missing_count_attribute_gives_zero_default() -> None:
     """The no-submit adapter does NOT carry _live_submit_count.
     The getattr fallback in main.py must yield [0] → live_submit_attempts=0."""

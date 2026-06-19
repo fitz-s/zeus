@@ -1,9 +1,10 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-17
 # Authority basis: Operator mission 2026-06-09 — the ONE standing shadow-vs-live
-#   comparator (K<<N: one comparator, N promotions). Immediate customer:
-#   day0_remaining_day_q_enabled (flag-gated OFF in 6737536d6f; receipts carry
-#   _edli_day0_q_mode). Past customers each rolled their own ad-hoc harness
+#   comparator (K<<N: one comparator, N promotions). Historical immediate customer:
+#   day0_remaining_day_q_enabled. That Day0 path is now live under
+#   forecast_plus_day0; this module is offline evidence only and does not gate
+#   live submit authority. Past customers each rolled their own ad-hoc harness
 #   (EMOS sole-calibrator shadow-prove, bias-correction promotion, fused-q-shape
 #   promotion, opening_inertia_relaxation cohort). This module replaces all of
 #   them with ONE reader.
@@ -498,7 +499,7 @@ def day0_remaining_day_adapter(
     *,
     since: Optional[str] = None,
 ) -> list[CohortObservation]:
-    """Adapter (a): day0 remaining-day q (shadow) vs legacy masked q (live).
+    """Adapter (a): historical day0 remaining-day q comparison.
 
     Reads ``edli_no_submit_receipts`` (WORLD DB — the table the reactor writes,
     same source the settlement-attribution loader uses) LEFT-JOINed to
@@ -508,23 +509,17 @@ def day0_remaining_day_adapter(
     is the direction-adjusted posterior (P(traded outcome WINS)) actually used;
     city/metric/date/bin_label/direction come from ``receipt_json``.
 
-    TWO shadow sources, in priority order:
+    TWO comparison sources, in priority order:
       1. An explicit shadow-cert field ``q_remaining_day`` in ``receipt_json``
-         (the SPEC'd one-line addition — the remaining-day q computed ALONGSIDE
-         the live q on the SAME decision while the flag is OFF). This is the
-         only source that yields a TRUE paired cell while the promotion is OFF.
+         (the remaining-day q computed ALONGSIDE the live q on the SAME
+         decision while the flag was OFF). This was the true paired source
+         during the original promotion window.
       2. The receipt's own ``q_live`` when its event is tagged
-         ``_edli_day0_q_mode='remaining_day'`` (i.e. the flag is ON for that
-         decision) — used to pair against a legacy receipt for the SAME cell if
-         both modes coexist in the window (e.g. a flag flip mid-window).
+         ``_edli_day0_q_mode='remaining_day'`` — used to pair against a legacy
+         receipt for the SAME cell if both modes coexist in the window.
 
-    HONEST ABSENCE (current state, 2026-06-09): live WORLD DB has 3,063 day0
-    events and ZERO ``remaining_day``-tagged events — the shadow q is not
-    persisted anywhere yet. This adapter therefore yields cells with
-    ``shadow_q=None`` and the comparator returns an honest INSUFFICIENT_N with
-    ``missing_shadow`` surfaced. The fix is the one-line shadow-cert SPEC'd in
-    the report: the day0 owner writes ``q_remaining_day`` into the receipt
-    alongside ``q_live`` while the flag is OFF.
+    This adapter is retrospective reporting only. It must not be read as a
+    current live gate for ``day0_remaining_day_q_enabled``.
     """
     rows = world_conn.execute(
         """
@@ -667,8 +662,8 @@ def default_registry() -> list[ShadowCandidate]:
             adapter=day0_remaining_day_adapter,
             include_bin_in_key=True,
             description=(
-                "day0 remaining-day q (shadow) vs legacy masked full-day q (live) "
-                "from _edli_day0_q_mode receipts — gates day0_remaining_day_q_enabled."
+                "historical day0 remaining-day q comparison from "
+                "_edli_day0_q_mode receipts; offline evidence only."
             ),
         ),
     ]

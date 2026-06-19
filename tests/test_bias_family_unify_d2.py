@@ -2,11 +2,11 @@
 # Last audited: 2026-06-03
 # Authority basis: D2 bias-family unify / wiring verdict 2026-06-03
 # Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
-# Purpose: Relationship tests for the D2 bias-family entry/exit unify shadow flag.
+# Purpose: Relationship tests for the D2 bias-family entry/exit live unify gate.
 # Reuse: Inspect monitor_refresh._resolve_unified_exit_bias_native +
 #        evaluator._resolve_unified_entry_bias_native + event_reactor_adapter._EDLI_BIAS_FAMILY
 #        before reuse; requires an in-memory fixture DB (no live DB dependency).
-"""Relationship tests for the D2 bias-family entry/exit unify (shadow flag).
+"""Relationship tests for the D2 bias-family entry/exit live unify gate.
 
 The defect (D2): the LIVE EDLI reactor ENTRY bias-corrects p_raw from
 ``error_model_family='edli_per_city_v1'`` (71 VERIFIED rows — the populated family),
@@ -14,8 +14,8 @@ but the cycle evaluator FT path and the EXIT monitor read ``error_model_family=
 'full_transport_v1'`` (ZERO rows), gated by ``full_transport_live_enabled``. Net: entry
 corrected, exit/monitor uncorrected AND the exit FT route is permanently 0-row-dead.
 
-The fix: a new shadow flag ``feature_flags.exit_bias_family_unify_enabled`` (default OFF).
-When ON, the evaluator + monitor read the SAME populated VERIFIED family the reactor entry
+The fix: ``feature_flags.exit_bias_family_unify_enabled`` lets evaluator + monitor read
+the SAME populated VERIFIED family the reactor entry
 uses, with the reactor's EXACT read shape, and apply the A4 lockstep (bias-shift only +
 identity-Platt) so EXIT belief matches ENTRY belief.
 

@@ -526,6 +526,13 @@ def run_reconcile_sweep(
     open_orders = _call_required(adapter, "get_open_orders")
     open_order_ids = {_order_id(item) for item in open_orders if _order_id(item)}
     local_by_order = _local_commands_by_order(conn)
+    positions_available = callable(getattr(adapter, "get_positions", None))
+    if positions_available:
+        _assert_adapter_read_fresh(adapter, "positions", observed)
+        positions = adapter.get_positions()
+    else:
+        positions = []
+    exchange_positions = _exchange_positions_by_token(positions)
 
     for order in open_orders:
         order_id = _order_id(order)
@@ -533,6 +540,15 @@ def run_reconcile_sweep(
             continue
         if order_id not in local_by_order:
             raw = _raw(order)
+            recovered = _recover_live_ghost_sell_order_for_known_position(
+                conn,
+                raw,
+                exchange_positions=exchange_positions,
+                observed_at=observed,
+            )
+            if recovered is not None:
+                local_by_order[order_id] = recovered
+                continue
             if _is_foreign_wallet_resting_order(conn, raw):
                 _record_foreign_wallet_ghost(
                     conn,
@@ -603,6 +619,8 @@ def run_reconcile_sweep(
             if filled.is_finite() and filled > Decimal("0"):
                 trade_fills_by_order_id[order_id] = trade_fills_by_order_id.get(order_id, Decimal("0")) + filled
         if command is None:
+            if context == "ws_gap" and not (set(candidate_order_ids) & set(local_by_order)):
+                continue
             findings.append(
                 record_finding(
                     conn,
@@ -682,10 +700,7 @@ def run_reconcile_sweep(
             )
         )
 
-    positions_available = callable(getattr(adapter, "get_positions", None))
     if positions_available:
-        _assert_adapter_read_fresh(adapter, "positions", observed)
-        positions = adapter.get_positions()
         findings.extend(
             _record_position_drift_findings(
                 conn,
@@ -1033,6 +1048,395 @@ def _resolve_operator_acknowledged_ghost_findings(
         )
         resolved += 1
     return resolved
+
+
+def _recover_live_ghost_sell_order_for_known_position(
+    conn: sqlite3.Connection,
+    raw: Mapping[str, Any],
+    *,
+    exchange_positions: Mapping[str, Decimal],
+    observed_at: datetime,
+) -> dict[str, Any] | None:
+    """Reconstruct a missing EXIT command for a live reducing SELL order.
+
+    This is not a generic ghost-order suppressor. It only fires when the venue
+    order is a live SELL for a token Zeus already owns, has positive matched
+    size, and the live positions surface proves conservation:
+
+        current_exchange_position + matched_sell_size == known_position_shares
+
+    If any predicate is absent or contradictory, the caller records the normal
+    ``exchange_ghost_order`` finding and the submit latch stays closed.
+    """
+
+    order_id = _order_id(raw)
+    if not order_id:
+        return None
+    side = str(_first_present(raw, "side", default="")).upper()
+    if side != "SELL":
+        return None
+    token_id = str(
+        _first_present(raw, "asset_id", "asset", "token_id", "tokenId", default="")
+        or ""
+    ).strip()
+    if not token_id:
+        return None
+    matched_size = _order_matched_size(raw)
+    if matched_size <= Decimal("0"):
+        return None
+    exchange_size = exchange_positions.get(token_id)
+    if exchange_size is None:
+        return None
+    original_size = _positive_decimal_or_none(
+        _first_present(raw, "original_size", "size", default=None)
+    )
+    price = _positive_decimal_or_none(_first_present(raw, "price", default=None))
+    if original_size is None or price is None:
+        return None
+
+    position = _known_position_for_reducing_ghost_sell(
+        conn,
+        token_id=token_id,
+        exchange_size=exchange_size,
+        matched_size=matched_size,
+    )
+    if position is None:
+        return None
+    position_map = dict(position)
+    entry = _entry_command_for_reducing_ghost_sell(
+        conn,
+        token_id=token_id,
+        position_id=str(position_map["position_id"]),
+    )
+    if entry is None:
+        return None
+
+    command_id = "recovered_exit:" + sha256(order_id.encode()).hexdigest()[:24]
+    existing = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ? OR venue_order_id = ? LIMIT 1",
+        (command_id, order_id),
+    ).fetchone()
+    if existing is not None:
+        return dict(existing)
+
+    observed_text = observed_at.isoformat()
+    decision_id = str(entry["decision_id"] or f"m5_recovered_exit:{order_id}")
+    recovery_payload = {
+        "schema_version": 1,
+        "reason": "m5_live_ghost_sell_order_recovered_for_known_position",
+        "source_module": "src.execution.exchange_reconcile",
+        "venue_order_id": order_id,
+        "token_id": token_id,
+        "position_id": position_map["position_id"],
+        "exchange_position_size": _decimal_text(exchange_size),
+        "matched_sell_size": _decimal_text(matched_size),
+        "known_position_shares": _decimal_text(_position_shares_for_recovery(position_map)),
+        "source_entry_command_id": entry["command_id"],
+    }
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, created_at, updated_at, review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, ?, ?, 'INTENT_CREATED', ?, ?, ?)
+        """,
+        (
+            command_id,
+            str(entry["snapshot_id"]),
+            str(entry["envelope_id"]),
+            str(position_map["position_id"]),
+            decision_id,
+            command_id,
+            str(entry["market_id"] or raw.get("market") or token_id),
+            token_id,
+            float(original_size),
+            float(price),
+            order_id,
+            observed_text,
+            observed_text,
+            "m5_live_ghost_sell_recovery",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_command_events (
+            event_id, command_id, sequence_no, event_type, occurred_at, payload_json, state_after
+        ) VALUES (?, ?, 1, 'INTENT_CREATED', ?, ?, 'INTENT_CREATED')
+        """,
+        (
+            uuid.uuid4().hex[:16],
+            command_id,
+            observed_text,
+            json.dumps(recovery_payload, sort_keys=True),
+        ),
+    )
+
+    from src.state.venue_command_repo import append_event, append_order_fact
+
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at=observed_text,
+        payload=recovery_payload,
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_ACKED",
+        occurred_at=observed_text,
+        payload={"venue_order_id": order_id, **recovery_payload},
+    )
+    remaining_size = max(original_size - matched_size, Decimal("0"))
+    append_order_fact(
+        conn,
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="PARTIALLY_MATCHED",
+        remaining_size=_decimal_text(remaining_size),
+        matched_size=_decimal_text(matched_size),
+        source="REST",
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        raw_payload_hash=_hash_payload({"exchange_order": dict(raw), **recovery_payload}),
+        raw_payload_json={"exchange_order": dict(raw), **recovery_payload},
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="PARTIAL_FILL_OBSERVED",
+        occurred_at=observed_text,
+        payload={
+            "venue_order_id": order_id,
+            "matched_size": _decimal_text(matched_size),
+            "remaining_size": _decimal_text(remaining_size),
+            **recovery_payload,
+        },
+    )
+    _restore_position_to_pending_exit_for_recovered_sell(
+        conn,
+        position=position_map,
+        venue_order_id=order_id,
+        token_id=token_id,
+        exchange_size=exchange_size,
+        matched_size=matched_size,
+        fill_price=price,
+        observed_at=observed_at,
+        command_id=command_id,
+    )
+    _resolve_open_ghost_order_findings_for_recovered_exit(
+        conn,
+        order_id=order_id,
+        observed_at=observed_at,
+    )
+    logger.warning(
+        "m5_recovered_live_ghost_sell_order: order=%s token=%s position=%s matched=%s exchange_size=%s",
+        order_id,
+        token_id,
+        position_map["position_id"],
+        matched_size,
+        exchange_size,
+    )
+    row = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _resolve_open_ghost_order_findings_for_recovered_exit(
+    conn: sqlite3.Connection,
+    *,
+    order_id: str,
+    observed_at: datetime,
+) -> int:
+    rows = conn.execute(
+        """
+        SELECT finding_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
+           AND subject_id = ?
+           AND resolved_at IS NULL
+        """,
+        (order_id,),
+    ).fetchall()
+    for row in rows:
+        resolve_finding(
+            conn,
+            str(row["finding_id"]),
+            resolution="exchange_ghost_order_recovered_as_exit_command",
+            resolved_by="src.execution.exchange_reconcile",
+            resolved_at=observed_at,
+        )
+    return len(rows)
+
+
+def _position_shares_for_recovery(position: Mapping[str, Any]) -> Decimal:
+    for key in ("chain_shares", "shares"):
+        value = _positive_decimal_or_none(position.get(key))
+        if value is not None:
+            return value
+    return Decimal("0")
+
+
+def _known_position_for_reducing_ghost_sell(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    exchange_size: Decimal,
+    matched_size: Decimal,
+) -> sqlite3.Row | None:
+    if not _table_exists(conn, "position_current"):
+        return None
+    rows = conn.execute(
+        """
+        SELECT *
+          FROM position_current
+         WHERE (token_id = ? OR no_token_id = ?)
+           AND phase IN ('active', 'day0_window', 'pending_exit', 'voided')
+           AND COALESCE(shares, 0) > 0
+         ORDER BY
+           CASE phase
+             WHEN 'pending_exit' THEN 0
+             WHEN 'day0_window' THEN 1
+             WHEN 'active' THEN 2
+             WHEN 'voided' THEN 3
+             ELSE 9
+           END,
+           updated_at DESC
+        """,
+        (token_id, token_id),
+    ).fetchall()
+    for row in rows:
+        shares = _position_shares_for_recovery(dict(row))
+        if shares <= Decimal("0"):
+            continue
+        if _position_size_matches(exchange_size + matched_size, shares):
+            return row
+    return None
+
+
+def _entry_command_for_reducing_ghost_sell(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    position_id: str,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT c.*
+          FROM venue_commands c
+         WHERE c.token_id = ?
+           AND c.position_id = ?
+           AND UPPER(COALESCE(c.intent_kind, '')) = 'ENTRY'
+           AND UPPER(COALESCE(c.side, '')) = 'BUY'
+           AND EXISTS (
+                SELECT 1
+                  FROM venue_trade_facts tf
+                 WHERE tf.command_id = c.command_id
+                   AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                   AND CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
+           )
+         ORDER BY c.created_at DESC
+         LIMIT 1
+        """,
+        (token_id, position_id),
+    ).fetchone()
+
+
+def _restore_position_to_pending_exit_for_recovered_sell(
+    conn: sqlite3.Connection,
+    *,
+    position: Mapping[str, Any],
+    venue_order_id: str,
+    token_id: str,
+    exchange_size: Decimal,
+    matched_size: Decimal,
+    fill_price: Decimal,
+    observed_at: datetime,
+    command_id: str,
+) -> None:
+    position_id = str(position["position_id"])
+    phase_before = str(position.get("phase") or "")
+    entry_price = _positive_decimal_or_none(position.get("entry_price")) or Decimal("0")
+    remaining_cost_basis = exchange_size * entry_price
+    realized_pnl = matched_size * (fill_price - entry_price)
+    observed_text = observed_at.isoformat()
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               shares = ?,
+               chain_shares = ?,
+               cost_basis_usd = ?,
+               realized_pnl_usd = COALESCE(realized_pnl_usd, 0) + ?,
+               exit_price = ?,
+               exit_reason = ?,
+               order_id = ?,
+               order_status = 'sell_pending_confirmation',
+               chain_state = 'synced',
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (
+            float(exchange_size),
+            float(exchange_size),
+            float(remaining_cost_basis),
+            float(realized_pnl),
+            float(fill_price),
+            "M5_LIVE_GHOST_SELL_RECOVERY",
+            venue_order_id,
+            observed_text,
+            position_id,
+        ),
+    )
+    seq_row = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    sequence_no = int((seq_row[0] if seq_row else 1) or 1)
+    payload = {
+        "schema_version": 1,
+        "reason": "m5_live_ghost_sell_order_recovered_for_known_position",
+        "token_id": token_id,
+        "venue_order_id": venue_order_id,
+        "command_id": command_id,
+        "exchange_position_size": _decimal_text(exchange_size),
+        "matched_sell_size": _decimal_text(matched_size),
+        "fill_price": _decimal_text(fill_price),
+        "phase_before": phase_before,
+        "phase_after": "pending_exit",
+        "source_module": "src.execution.exchange_reconcile",
+    }
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, caused_by, idempotency_key,
+            venue_status, source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'EXIT_INTENT', ?, ?, 'pending_exit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f"{position_id}:m5_recovered_exit:{sequence_no}",
+            position_id,
+            sequence_no,
+            observed_text,
+            phase_before,
+            str(position.get("strategy_key") or "opening_inertia"),
+            str(position.get("decision_id") or ""),
+            str(position.get("decision_snapshot_id") or ""),
+            venue_order_id,
+            command_id,
+            "m5_live_ghost_sell_recovery",
+            f"{position_id}:m5_recovered_exit:{sequence_no}",
+            "sell_pending_confirmation",
+            "src.execution.exchange_reconcile",
+            json.dumps(payload, sort_keys=True),
+            str(position.get("env") or "live"),
+        ),
+    )
 
 
 # ---- Operator external-close absorption (the variant-3 antibody) ----------------------
@@ -3411,6 +3815,9 @@ def _ensure_entry_fill_position_event(
         return
 
     current = dict(row)
+    projection_position_id = str(current.get("position_id") or position_id).strip()
+    if projection_position_id:
+        position_id = projection_position_id
     phase = str(current.get("phase") or "")
     if phase not in _ENTRY_FILL_PROJECTION_PHASES:
         logger.info(

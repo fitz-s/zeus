@@ -1,9 +1,9 @@
 """Live switch surface report for replacement forecast integration.
 
-This module is intentionally a read-model. It describes what a simple runtime
+This module is intentionally a read-model. It describes what the live runtime
 switch is allowed to read, what it must not write, and which evidence gates must
-be satisfied before the Open-Meteo ECMWF IFS 9km + AIFS sampled-2t path can move
-past shadow/veto use.
+be satisfied before the Open-Meteo ECMWF IFS 9km + Bayes fusion path can run
+in the live layer.
 """
 
 from __future__ import annotations
@@ -18,14 +18,13 @@ from src.state.db import list_sqlite_tables_and_views_read_only
 
 CURRENT_SOURCE_FACT_FILE = "docs/operations/current_source_validity.md"
 CURRENT_DATA_FACT_FILE = "docs/operations/current_data_state.md"
-REFIT_HANDOFF_FILE = "state/replacement_forecast_shadow/refit_handoff.json"
+REFIT_HANDOFF_FILE = "state/replacement_forecast_live/refit_handoff.json"
 REQUIRED_LIVE_READ_FILES = (
     "config/settings.json",
     "config/cities.json",
     "config/source_release_calendar.yaml",
     CURRENT_SOURCE_FACT_FILE,
     CURRENT_DATA_FACT_FILE,
-    REFIT_HANDOFF_FILE,
     "state/zeus-forecasts.db",
     "state/zeus-world.db",
     "state/zeus_trades.db",
@@ -41,8 +40,8 @@ REQUIRED_FORECAST_TABLES = (
     "edli_no_submit_receipts",
     "raw_forecast_artifacts",
     "deterministic_forecast_anchors",
+    "raw_model_forecasts",
     "forecast_posteriors",
-    "replacement_shadow_decisions",
 )
 REQUIRED_WORLD_TABLES = (
     "market_events",
@@ -62,9 +61,8 @@ PROHIBITED_SIMPLE_SWITCH_WRITES = (
     "venue_commands",
 )
 REQUIRED_EVIDENCE_GATES = (
-    "runtime_policy_allows_shadow_or_veto",
+    "runtime_policy_allows_live",
     "baseline_executable_reader_ready",
-    "aifs_sampled_2t_source_run_ready",
     "openmeteo_ecmwf_ifs9_anchor_ready",
     "derived_posterior_available_before_decision",
     "same_clob_market_snapshot_bound",
@@ -130,15 +128,15 @@ class ReplacementForecastLiveSwitchReport:
     missing_evidence_gates: tuple[str, ...]
     proposed_forbidden_writes: tuple[str, ...]
     reversible: bool
-    live_trade_authority: bool
+    live_trade_enabled: bool
 
     @property
     def simple_switch_ready(self) -> bool:
         return self.status == "SIMPLE_SWITCH_READY"
 
     @property
-    def live_authority_ready(self) -> bool:
-        return self.status == "LIVE_AUTHORITY_READY"
+    def live_ready(self) -> bool:
+        return self.status == "live"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -155,8 +153,8 @@ class ReplacementForecastLiveSwitchReport:
             "proposed_forbidden_writes": list(self.proposed_forbidden_writes),
             "reversible": self.reversible,
             "simple_switch_ready": self.simple_switch_ready,
-            "live_authority_ready": self.live_authority_ready,
-            "live_trade_authority": self.live_trade_authority,
+            "live_ready": self.live_ready,
+            "live_trade_enabled": self.live_trade_enabled,
         }
 
 
@@ -207,7 +205,7 @@ def build_replacement_forecast_live_switch_report(
         table for table in request.proposed_write_tables if table in PROHIBITED_SIMPLE_SWITCH_WRITES
     )
     reasons: list[str] = []
-    if not request.runtime_policy.can_read_shadow_posterior:
+    if not request.runtime_policy.can_initiate_trade:
         reasons.append("REPLACEMENT_SWITCH_POLICY_NOT_READABLE")
     if request.source_fact_status != "CURRENT_FOR_LIVE":
         reasons.append("REPLACEMENT_SWITCH_SOURCE_FACTS_STALE")
@@ -224,7 +222,7 @@ def build_replacement_forecast_live_switch_report(
     if reasons:
         status = "BLOCKED"
     elif request.runtime_policy.can_initiate_trade:
-        status = "LIVE_AUTHORITY_READY"
+        status = "live"
     else:
         status = "SIMPLE_SWITCH_READY"
     return ReplacementForecastLiveSwitchReport(
@@ -232,7 +230,7 @@ def build_replacement_forecast_live_switch_report(
         reason_codes=tuple(
             reasons
             or (
-                ("REPLACEMENT_SWITCH_LIVE_AUTHORITY_READY",)
+                ("REPLACEMENT_SWITCH_LIVE_READY",)
                 if request.runtime_policy.can_initiate_trade
                 else ("REPLACEMENT_SWITCH_READ_ONLY_REVERSIBLE_READY",)
             )
@@ -247,7 +245,7 @@ def build_replacement_forecast_live_switch_report(
         missing_evidence_gates=missing_evidence,
         proposed_forbidden_writes=forbidden_writes,
         reversible=not forbidden_writes,
-        live_trade_authority=request.runtime_policy.can_initiate_trade,
+        live_trade_enabled=request.runtime_policy.can_initiate_trade,
     )
 
 

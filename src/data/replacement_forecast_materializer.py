@@ -1,4 +1,4 @@
-"""Materialize replacement forecast shadow posterior rows into forecast DB.
+"""Materialize replacement forecast posterior rows into forecast DB.
 
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-13
@@ -7,12 +7,12 @@
 #   2026-06-09): explicit replacement_q_mode authority, settlement-sigma-floor coherence in the
 #   fused-q path, and capture-status provenance. 2026-06-09 (q_lcb materialization): real per-bin
 #   q_lcb_json/q_ucb_json on the fused path via fused-center parameter-uncertainty bootstrap
-#   (root-cause /tmp/candidate_missing_rootcause.md — NULL bounds force the Wilson-over-AIFS-votes
-#   fallback that under-certifies below ask and discards every candidate). 2026-06-13 (q_ucb
-#   symmetry): the soft-anchor (CAPTURE_MISSING) fallback now emits a GENUINE Wilson UPPER bound
-#   alongside its lower twin (same inputs/z), so EVERY materialized posterior carries BOTH bounds
-#   and the tradeable-latest reader's both-bounds predicate has a uniform carrier shape; the
-#   distinct wilson_aifs_member_votes basis keeps the row non-live-eligible (no fabricated edge).
+#   (root-cause /tmp/candidate_missing_rootcause.md — NULL bounds force legacy fallback bounds
+#   that under-certify below ask and discard every candidate). 2026-06-13 (q_ucb
+#   symmetry): the soft-anchor (CAPTURE_MISSING) fallback can compute a GENUINE Wilson UPPER bound
+#   alongside its lower twin (same inputs/z), but non-live carriers must not enter
+#   forecast_posteriors. Only fused-Normal rows with certified bootstrap bounds and a live runtime
+#   policy are materialized as execution-authority posterior rows.
 """
 
 from __future__ import annotations
@@ -25,15 +25,6 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Mapping, Sequence
 
-from src.data.ecmwf_aifs_sampled_2t_localday import (
-    HIGH_DATA_VERSION as AIFS_HIGH_DATA_VERSION,
-    LOW_DATA_VERSION as AIFS_LOW_DATA_VERSION,
-    PRODUCT_ID as AIFS_PRODUCT_ID,
-    SOURCE_ID as AIFS_SOURCE_ID,
-    EXPECTED_AIFS_MEMBER_COUNT,
-    expected_aifs_sample_steps_for_local_day,
-    AifsSampledLocalDayExtraction,
-)
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.replacement_forecast_cycle_policy import (
     TRADEABLE_GRADE_QLCB_BASIS,
@@ -49,8 +40,12 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (
     OpenMeteoIfs9LocalDayAnchor,
 )
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9PrecisionGuardResult
-from src.data.replacement_forecast_bundle_reader import HIGH_DATA_VERSION, LOW_DATA_VERSION
+from src.data.replacement_forecast_bundle_reader import (
+    HIGH_DATA_VERSION,
+    LOW_DATA_VERSION,
+)
 from src.data.replacement_forecast_readiness import (
+    LIVE_RUNTIME_LAYER,
     PRODUCT_ID,
     READY_STATUS,
     SOURCE_ID,
@@ -58,13 +53,13 @@ from src.data.replacement_forecast_readiness import (
     ReplacementForecastDependency,
     build_replacement_forecast_readiness,
 )
+from src.data.replacement_forecast_runtime_policy import (
+    REQUIRED_FLAGS,
+)
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.contracts.availability_time import proof_of_possession_available_at
 from src.state.readiness_repo import write_readiness_state
 from src.state.source_run_repo import get_source_run
-from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin, build_openmeteo_ifs9_aifs_soft_anchor_result
-from src.strategy.openmeteo_ecmwf_ifs9_aifs_soft_anchor import SoftAnchorConfig
-
 
 UTC = timezone.utc
 
@@ -89,15 +84,24 @@ REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED = "FUSED_Q_BUILD_FAILED"
 # FUSED_Q_BUILD_FAILED (the point q is fine; only the bounds are absent). The fused-Normal
 # q point is STILL written to the DB (shadow materialization completes for accrual), but
 # live eligibility is killed. Without this a FULL/PARTIAL row with NULL q_lcb_json would be
-# live-eligible, letting buy_yes fall back to Wilson-over-AIFS-votes — exactly the two-measures
+# live-eligible, letting buy_yes fall back to legacy bounds — exactly the two-measures
 # disease (fused-Normal q point + legacy LCB authority) that the Milan incident root-caused.
 REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING = "FUSED_NORMAL_BOUNDS_MISSING"
+# The fused CENTER materialized q purely from N(mu*, sigma), but the certified fused-q
+# SHAPE/BOUNDS bootstrap did not run (flag-off / fused-q build failure / predictive_sigma thin).
+# This replaces the old cold fail-closed fallback. The live gate licenses solely
+# FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis, which this mode never carries, so a
+# fused-center-only row is materialized for experiment accrual but is NOT live-tradeable. Diagnosably
+# distinct from FUSED_Q_BUILD_FAILED (which produced NO center q) and from the legacy
+# SOFT_ANCHOR_FALLBACK.
+REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL = "FUSED_CENTER_ONLY_NORMAL"
 
 # FIX 5 — capture-status provenance (recording only; the live gate enforces via q_mode).
 REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT = "FULL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT = "PARTIAL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY = "STALE_HISTORY_ONLY"
 REPLACEMENT_CAPTURE_STATUS_DB_READ_ERROR = "DB_READ_ERROR"
+REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
 
 
 @dataclass(frozen=True)
@@ -110,18 +114,14 @@ class ReplacementForecastMaterializeRequest:
     baseline_source_run_id: str
     baseline_data_version: str
     baseline_source_available_at: datetime | str
-    aifs_extraction: AifsSampledLocalDayExtraction
-    aifs_source_run_id: str
-    aifs_source_available_at: datetime | str
     openmeteo_anchor: OpenMeteoIfs9LocalDayAnchor
     openmeteo_source_run_id: str | None
     openmeteo_source_available_at: datetime | str
-    bins: Sequence[AifsTemperatureBin]
+    bins: Sequence[object]
     source_cycle_time: datetime | str
     computed_at: datetime | str
     expires_at: datetime | str | None = None
     anchor_artifact_id: int | None = None
-    aifs_artifact_id: int | None = None
     openmeteo_precision_guard: OpenMeteoIfs9PrecisionGuardResult | None = None
     anchor_weight: float = 0.80
     anchor_sigma_c: float = 3.00
@@ -176,7 +176,7 @@ def _role_possession_available_at(
 
     LIVE STATE (architect verdict 2026-06-16): only the baseline role currently writes a
     ``source_run`` row, so this upgrades baseline to true possession today and auto-upgrades the
-    aifs/openmeteo roles for free the day they begin recording ``source_run`` rows. Reading
+    Open-Meteo role for free the day it begins recording ``source_run`` rows. Reading
     ``source_run`` here is the SAME conn/DB ``_insert_posterior`` already writes source_run rows on.
     """
     # source_run lookup degrades to None when the row OR the table is absent —
@@ -212,12 +212,33 @@ def _data_version(metric: str) -> str:
     return HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
 
 
+def _replacement_is_live_layer(
+    *,
+    replacement_q_mode: str,
+    q_lcb_map: Mapping[str, float] | None,
+    q_ucb_map: Mapping[str, float] | None,
+    q_lcb_basis: str | None,
+) -> bool:
+    """True only for the exact live q carrier."""
+    live_q_carrier = (
+        replacement_q_mode in {REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL, REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL}
+        and q_lcb_map is not None
+        and q_ucb_map is not None
+        and q_lcb_basis == _QLCB_BASIS
+    )
+    if not live_q_carrier:
+        return False
+    try:
+        from src.config import settings  # noqa: PLC0415
+
+        feature_flags = settings["feature_flags"]
+        return all(bool(feature_flags.get(key, False)) for key in REQUIRED_FLAGS)
+    except Exception:
+        return False
+
+
 def _anchor_data_version(metric: str) -> str:
     return ANCHOR_HIGH_DATA_VERSION if metric == "high" else ANCHOR_LOW_DATA_VERSION
-
-
-def _aifs_data_version(metric: str) -> str:
-    return AIFS_HIGH_DATA_VERSION if metric == "high" else AIFS_LOW_DATA_VERSION
 
 
 def _json(value: Mapping[str, object] | Sequence[object]) -> str:
@@ -232,9 +253,66 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
-def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
-    """Keep old PR399 shadow DBs fail-closed instead of returning stale rows."""
+def _ensure_observation_hourly_extrema_compatibility(conn: sqlite3.Connection) -> None:
+    """Repair a legacy invalid view that blocks SQLite schema ALTERs."""
 
+    columns = _table_columns(conn, "observation_instants")
+    if not columns:
+        return
+    if "running_min" not in columns:
+        conn.execute("ALTER TABLE observation_instants ADD COLUMN running_min REAL")
+    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
+    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema")
+    conn.execute("""
+        CREATE VIEW observation_hourly_extrema AS
+            SELECT
+                o.*,
+                o.running_max AS hour_bucket_max,
+                o.running_min AS hour_bucket_min
+            FROM observation_instants o
+    """)
+
+
+def _ensure_forecast_posteriors_runtime_layer(conn: sqlite3.Connection) -> None:
+    columns = _table_columns(conn, "forecast_posteriors")
+    if not columns:
+        return
+    _ensure_observation_hourly_extrema_compatibility(conn)
+    if "runtime_layer" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE forecast_posteriors
+            ADD COLUMN runtime_layer TEXT
+                CHECK (runtime_layer IS NULL OR runtime_layer IN ('live'))
+            """
+        )
+        columns.add("runtime_layer")
+    if "trade_authority_status" in columns:
+        conn.execute(
+            """
+            UPDATE forecast_posteriors
+               SET runtime_layer = ?
+             WHERE runtime_layer IS NULL
+               AND trade_authority_status = 'LIVE_AUTHORITY'
+            """,
+            (LIVE_RUNTIME_LAYER,),
+        )
+    conn.execute(
+        """
+        DELETE FROM forecast_posteriors
+         WHERE runtime_layer IS NULL
+            OR runtime_layer != ?
+        """,
+        (LIVE_RUNTIME_LAYER,),
+    )
+    if "trade_authority_status" in columns:
+        conn.execute("ALTER TABLE forecast_posteriors DROP COLUMN trade_authority_status")
+
+
+def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
+    """Keep old PR399 DBs fail-closed instead of returning stale rows."""
+
+    _ensure_forecast_posteriors_runtime_layer(conn)
     anchor_columns = _table_columns(conn, "deterministic_forecast_anchors")
     if anchor_columns and "anchor_identity_hash" not in anchor_columns:
         conn.execute("ALTER TABLE deterministic_forecast_anchors ADD COLUMN anchor_identity_hash TEXT")
@@ -249,6 +327,8 @@ def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
     ):
         if posterior_columns and column not in posterior_columns:
             conn.execute(f"ALTER TABLE forecast_posteriors ADD COLUMN {column} TEXT")
+    if posterior_columns:
+        _ensure_forecast_posteriors_runtime_layer(conn)
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_deterministic_forecast_anchors_identity_hash
@@ -256,22 +336,31 @@ def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
             WHERE anchor_identity_hash IS NOT NULL
         """
     )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_topology
-            ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
-        """
-    )
-    conn.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash
-            ON forecast_posteriors(posterior_identity_hash)
-            WHERE posterior_identity_hash IS NOT NULL
-        """
-    )
+    posterior_columns = _table_columns(conn, "forecast_posteriors")
+    if {
+        "city",
+        "target_date",
+        "temperature_metric",
+        "bin_topology_hash",
+        "computed_at",
+    }.issubset(posterior_columns):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_topology
+                ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
+            """
+        )
+    if "posterior_identity_hash" in posterior_columns:
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash
+                ON forecast_posteriors(posterior_identity_hash)
+                WHERE posterior_identity_hash IS NOT NULL
+            """
+        )
 
 
-def _bin_topology_payload(bins: Sequence[AifsTemperatureBin], *, settlement_step_c: float) -> list[dict[str, object]]:
+def _bin_topology_payload(bins: Sequence[object], *, settlement_step_c: float) -> list[dict[str, object]]:
     return [
         {
             "bin_id": item.bin_id,
@@ -312,8 +401,8 @@ def _precision_guard_block_reason(
     guard = request.openmeteo_precision_guard
     if guard is None:
         return ("OM9_PRECISION_GUARD_REQUIRED_FOR_MATERIALIZATION",)
-    if not guard.passable_for_shadow_veto:
-        return ("OM9_PRECISION_GUARD_BLOCKED_MATERIALIZATION", *guard.reason_codes)
+    if not guard.passable_for_live_materialization:
+        return ("OM9_PRECISION_GUARD_NOT_LIVE_PASS", *guard.reason_codes)
     return ()
 
 
@@ -323,55 +412,17 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
     request_source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time")
     target_date_value = date.fromisoformat(_date_text(request.target_date))
     reasons: list[str] = []
-    dependency_times = (
+    dependency_times = [
         ("baseline_b0", _to_utc(request.baseline_source_available_at, field_name="baseline_source_available_at")),
-        ("aifs_sampled_2t", _to_utc(request.aifs_source_available_at, field_name="aifs_source_available_at")),
         ("openmeteo_ifs9_anchor", _to_utc(request.openmeteo_source_available_at, field_name="openmeteo_source_available_at")),
-    )
+    ]
     expected = expected_replacement_dependency_identity_by_role(metric)
     if not str(request.baseline_source_run_id or "").strip():
         reasons.append("REPLACEMENT_MATERIALIZATION_BASELINE_SOURCE_RUN_ID_MISSING")
-    if not str(request.aifs_source_run_id or "").strip():
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_SOURCE_RUN_ID_MISSING")
     if not str(request.openmeteo_source_run_id or "").strip():
         reasons.append("REPLACEMENT_MATERIALIZATION_OPENMETEO_SOURCE_RUN_ID_MISSING")
     if request.baseline_data_version != expected["baseline_b0"].data_version:
         reasons.append("REPLACEMENT_MATERIALIZATION_BASELINE_DATA_VERSION_MISMATCH")
-    if len(request.aifs_extraction.members) != EXPECTED_AIFS_MEMBER_COUNT:
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_MEMBER_COVERAGE_INCOMPLETE")
-    if not request.aifs_extraction.identity_decision_valid:
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_GRIB_IDENTITY_INVALID")
-    if request.aifs_extraction.identity_reason_codes != ("AIFS_GRIB_IDENTITY_VALID",):
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_GRIB_IDENTITY_REASON_MISMATCH")
-    if not str(request.aifs_extraction.artifact_id or "").strip():
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ID_MISSING")
-    elif request.aifs_artifact_id is not None and int(request.aifs_extraction.artifact_id) != int(request.aifs_artifact_id):
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ID_MISMATCH")
-    if not str(request.aifs_extraction.raw_sha256 or "").strip():
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_RAW_SHA256_MISSING")
-    if request.aifs_extraction.source_product_id != AIFS_PRODUCT_ID:
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_PRODUCT_ID_MISMATCH")
-    if request.aifs_extraction.source_cycle_time is None:
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_SOURCE_CYCLE_TIME_MISSING")
-    else:
-        aifs_source_cycle_time = _to_utc(request.aifs_extraction.source_cycle_time, field_name="aifs_source_cycle_time")
-        if aifs_source_cycle_time != request_source_cycle_time:
-            reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_SOURCE_CYCLE_TIME_MISMATCH")
-        expected_steps = expected_aifs_sample_steps_for_local_day(
-            source_cycle_time=request.aifs_extraction.source_cycle_time,
-            city_timezone=request.city_timezone,
-            target_local_date=target_date_value,
-        )
-        for member in request.aifs_extraction.members:
-            observed_steps = tuple(
-                sorted(
-                    int((valid_time - request.aifs_extraction.source_cycle_time).total_seconds() // 3600)
-                    for valid_time in member.contributing_valid_times_utc
-                )
-            )
-            if observed_steps != expected_steps:
-                reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_STEP_COVERAGE_INCOMPLETE")
-                break
     if request.openmeteo_anchor.source_cycle_time is None:
         reasons.append("REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_MISSING")
     else:
@@ -410,29 +461,6 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
 
 def _artifact_identity_block_reasons(conn: sqlite3.Connection, request: ReplacementForecastMaterializeRequest) -> tuple[str, ...]:
     reasons: list[str] = []
-    if request.aifs_extraction.artifact_id is None:
-        return ("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ID_MISSING",)
-    request_source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
-    request_aifs_available_at = _to_utc(request.aifs_source_available_at, field_name="aifs_source_available_at").isoformat()
-    row = conn.execute(
-        """
-        SELECT artifact_id, product_id, sha256, source_cycle_time, source_available_at
-        FROM raw_forecast_artifacts
-        WHERE artifact_id = ?
-        """,
-        (int(request.aifs_extraction.artifact_id),),
-    ).fetchone()
-    if row is None:
-        return ("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ROW_MISSING",)
-    row_map = dict(row)
-    if str(row_map.get("product_id") or "") != request.aifs_extraction.source_product_id:
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_PRODUCT_MISMATCH")
-    if str(row_map.get("sha256") or "") != str(request.aifs_extraction.raw_sha256 or ""):
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_SHA256_MISMATCH")
-    if _to_utc(str(row_map.get("source_cycle_time") or ""), field_name="aifs_artifact_source_cycle_time").isoformat() != request_source_cycle_time:
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_SOURCE_CYCLE_TIME_MISMATCH")
-    if _to_utc(str(row_map.get("source_available_at") or ""), field_name="aifs_artifact_source_available_at").isoformat() != request_aifs_available_at:
-        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_SOURCE_AVAILABLE_AT_MISMATCH")
     return tuple(reasons)
 
 
@@ -527,7 +555,6 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
         "measurement_policy": anchor.measurement_policy,
         "precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
         "role": "soft_spatial_anchor",
-        "trade_authority_status": "SHADOW_ONLY",
         "training_allowed": False,
     }
     # Task #32: honest re-materialization provenance. Recorded ONLY when the trigger set it, so a
@@ -560,8 +587,8 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
             source_available_at, captured_at, artifact_id, model, native_grid,
             delivery_grid_resolution, interpolation_method,
             contributing_times_json, anchor_identity_hash, provenance_json,
-            trade_authority_status, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            training_allowed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ANCHOR_SOURCE_ID,
@@ -582,7 +609,6 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
             _json(contributing_times),
             anchor_identity_hash,
             _json(provenance),
-            "SHADOW_ONLY",
             0,
         ),
     )
@@ -628,17 +654,15 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
 
 
 def _replacement_fused_q_shape_enabled() -> bool:
-    """Flag gate for the FUSED-Q SHAPE replacement (2026-06-09 AIFS-replacement experiment).
+    """Flag gate for the FUSED-Q SHAPE replacement.
 
     When ``replacement_0_1_fused_q_shape_enabled`` is true AND the BAYES_PRECISION_FUSION fusion produced an
     override with a predictive sigma, the posterior q is built DIRECTLY from
-    N(mu*, sigma_pred) via the ONE settlement bin integrator (bin_probability_settlement) —
-    fully replacing the AIFS member-vote shape. Experiment verdict (n=39 settled cells,
-    /tmp/aifs_replacement_experiment.md): the AIFS shape put EXACTLY ZERO probability on the
-    winning bin in 11/39 cells (member votes truncate support; the soft-anchor can only shift
-    that mass, never create coverage) — LogLoss 11.07 vs fused-N 1.51, hit 25.6% vs 46.2%.
+    N(mu*, sigma_pred) via the ONE settlement bin integrator (bin_probability_settlement).
+    Settlement-cell experiment verdict: the old member-vote shape put EXACTLY ZERO probability
+    on the winning bin in 11/39 cells; fused-N reduced LogLoss 11.07 -> 1.51.
     A Normal has full support: the zero-coverage CATEGORY is unconstructable under this shape.
-    FAIL-CLOSED: any config error -> False (AIFS-shape q, today's behavior).
+    FAIL-CLOSED: any config error -> False.
     """
     try:
         from src.config import settings  # noqa: PLC0415
@@ -762,42 +786,6 @@ def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequ
         return "C"
 
 
-def _replacement_member_vote_smoothing_alpha() -> float | None:
-    """Flag-gated additive (Laplace/Dirichlet) smoothing alpha for the AIFS member-vote prior.
-
-    THE_PATH member-vote smoothing. Returns the configured alpha (degC-free Dirichlet
-    pseudo-count) ONLY when ``replacement_0_1_member_vote_smoothing_enabled`` is true, else
-    None. None makes build_openmeteo_ifs9_aifs_soft_anchor_result reproduce the raw count/total
-    member prior BYTE-IDENTICALLY (default-OFF). FAIL-CLOSED: any config error / missing key /
-    non-positive or non-finite alpha -> None (no smoothing, construction proceeds with raw
-    inputs). Never raises. This is the ONE place the flag is read; the smoothing itself reuses
-    the existing soft-anchor fusion (no parallel posterior path).
-    """
-    try:
-        from src.config import settings  # noqa: PLC0415
-        from src.strategy.ecmwf_aifs_sampled_2t_probabilities import (  # noqa: PLC0415
-            MEMBER_VOTE_SMOOTHING_ALPHA,
-        )
-
-        edli_cfg = settings["edli"]
-        if not bool(edli_cfg.get("replacement_0_1_member_vote_smoothing_enabled", False)):
-            return None
-        raw_alpha = edli_cfg.get("replacement_0_1_member_vote_smoothing_alpha", MEMBER_VOTE_SMOOTHING_ALPHA)
-        alpha = float(raw_alpha)
-        if not math.isfinite(alpha) or alpha <= 0.0:
-            return None
-        return alpha
-    except Exception as exc:  # fail-closed: never break shadow materialization
-        try:
-            import logging  # noqa: PLC0415
-            logging.getLogger("zeus.replacement_member_vote_smoothing").warning(
-                "replacement_0_1 member-vote smoothing wiring skipped (fail-closed): %s", exc
-            )
-        except Exception:
-            pass
-        return None
-
-
 @dataclass(frozen=True)
 class _BayesPrecisionFusionFusionOverride:
     """The BAYES_PRECISION_FUSION fused center/spread that replace the single-anchor in the soft-anchor build,
@@ -818,21 +806,20 @@ class _BayesPrecisionFusionFusionOverride:
     raw_model_forecast_ids: tuple[int, ...] = ()
     # BLOCKER 3: the ifs025->ifs9 anchor bridge provenance applied to the anchor prior.
     anchor_bridge: Mapping[str, object] | None = None
-    # FUSED-Q SHAPE (2026-06-09 AIFS-replacement experiment): the PREDICTIVE sigma for building
+    # FUSED-Q SHAPE: the PREDICTIVE sigma for building
     # q directly from N(mu*, sigma_pred) — sigma_pred^2 = fused.sd^2 + sigma_resid^2, where
     # sigma_resid is the walk-forward std of the fused-center residual series (common-date mean
     # of the instruments' de-biased residuals), conservatively floored. None when the residual
-    # substrate is too thin AND no conservative default applies (caller falls back to the
-    # AIFS-shape soft-anchor q).
+    # substrate is too thin AND no conservative default applies.
     predictive_sigma_c: float | None = None
     # FIX 1 (2026-06-09): the K3 decorrelated-provider completeness verdict computed INSIDE the
-    # fusion (the same "served %d/5" determination the materializer already logs). True =
-    # all 5 declared decorrelated providers served (-> FUSED_NORMAL_FULL); False = INCOMPLETE
+    # fusion (the same served/expected determination the materializer already logs). True =
+    # all domain/lead-servable decorrelated providers served (-> FUSED_NORMAL_FULL); False = INCOMPLETE
     # (-> FUSED_NORMAL_PARTIAL). The materializer REUSES this; it never re-derives a parallel
     # provider check (single-builder).
     decorrelated_providers_complete: bool = False
-    # FIX 5 (2026-06-09): capture-status provenance. count of the 5 decorrelated providers whose
-    # CURRENT value entered the fused set for this cell, and the count expected (5). Recording only.
+    # FIX 5 (2026-06-09): capture-status provenance. Count of the domain/lead-servable
+    # decorrelated providers whose CURRENT value entered the fused set for this cell.
     decorrelated_providers_served: int = 0
     decorrelated_providers_expected: int = 5
     # Task #32 follow-up (brand law): per-instrument serving provenance for every model that
@@ -929,8 +916,7 @@ def _replacement_bayes_precision_fusion_override(
 
     LAYERING (BAYES_PRECISION_FUSION_SPEC.md §6 integration): the override is computed from the ALREADY
     EB-bias-corrected anchor center (so it composes AFTER the EB bias layer); it replaces only
-    the anchor center/spread; the AIFS member-vote prior + member-vote smoothing + the downstream
-    q_lcb settlement floor + EMOS + bin integration are all UNCHANGED. FAIL-SOFT / FAIL-CLOSED:
+    the anchor center/spread. FAIL-SOFT / FAIL-CLOSED:
     any error, missing config, or zero surviving extras -> None (never raises, never blocks).
     """
     try:
@@ -1084,6 +1070,49 @@ def _replacement_bayes_precision_fusion_override(
             use_covariance=True,
         )
 
+        # METHOD UNIFY 2026-06-18: replace T2 BLUE center (fused.mu) with the RAW diagonal
+        # weighted mean — the SAME formula walk_forward_model_weights uses in the spine ENTRY.
+        # Closes the #135 two-center split (RAW-entry vs T2-BLUE-exit) so forecast_posteriors
+        # center == spine entry center for the same inputs.  Width (fused.sd) is UNCHANGED.
+        #
+        # Algorithm (mirrors walk_forward_model_weights exactly, via raw_second_moment_weights):
+        #  1. For each instrument in capture.likelihood, compute raw_m2 = mean(r²) from
+        #     train_residuals (in degC; bias² included — NO demeaning).
+        #  2. Include the anchor as a regular member with its own raw_m2 (from
+        #     capture.anchor_raw_m2_native).
+        #  3. Compute weights via the shared raw_second_moment_weights helper (same unit
+        #     scaling, same EB-shrink, same equal-weight fallback as the spine).
+        #  4. mu_diagonal = Σ_m w_m · z_m, where z_m = ins.z (already RAW via _raw_instrument).
+        from src.forecast.center import raw_second_moment_weights as _raw_w  # noqa: PLC0415
+        from src.forecast.model_selection import ANCHOR_MODEL as _ANCHOR  # noqa: PLC0415
+
+        _raw_m2_and_n: dict[str, tuple[float | None, int]] = {}
+        _z_by_model: dict[str, float] = {}
+        for _ins in capture.likelihood:
+            if _ins.train_residuals:
+                _m2 = sum(r * r for r in _ins.train_residuals) / len(_ins.train_residuals)
+                _raw_m2_and_n[_ins.model] = (_m2, _ins.n_train)
+            else:
+                _raw_m2_and_n[_ins.model] = (None, 0)
+            _z_by_model[_ins.model] = float(_ins.z)
+        # Include anchor as a MEMBER (not a separate Bayesian prior).
+        if capture.anchor_z is not None:
+            _raw_m2_and_n[_ANCHOR] = (capture.anchor_raw_m2_native, capture.anchor_raw_n_train)
+            _z_by_model[_ANCHOR] = float(capture.anchor_z)
+        # Serving unit (F-city vs C-city): read from the request bins (the degC residuals stored
+        # in train_residuals are always in degC so the unit scaling only affects the floor/shrink
+        # target — matching the spine's _u logic and the operator's f06d2176bc fix).
+        _serving_unit = _city_settlement_unit_from_bins(request)
+        _weights = _raw_w(_raw_m2_and_n, unit=_serving_unit)
+        if _weights and _z_by_model:
+            _mu_diagonal = float(sum(_weights.get(m, 0.0) * z for m, z in _z_by_model.items()))
+        elif _z_by_model:
+            # No precision signal at all → equal-weight RAW mean (pure RAW, never T2 BLUE).
+            _mu_diagonal = float(sum(_z_by_model.values()) / len(_z_by_model))
+        else:
+            # No instruments: unreachable after the has_extras guard above; use anchor RAW value.
+            _mu_diagonal = float(anchor_value_corrected_c)
+
         used_models = tuple(fused.used_models)
         # K3 ANTIBODY (2026-06-09): surface a STRUCTURALLY-incomplete decorrelated set LOUDLY. The
         # 4 declared decorrelated PROVIDERS are NOAA(gfs) / DWD-ICON(one of icon_d2|icon_eu|
@@ -1098,32 +1127,34 @@ def _replacement_bayes_precision_fusion_override(
         # so each family is served when ANY of its members is in used_models.
         from src.data.replacement_fusion_upgrade_trigger import (  # noqa: PLC0415
             DECORRELATED_PROVIDER_FAMILIES,
-            EXPECTED_DECORRELATED_PROVIDER_COUNT,
             decorrelated_provider_families_of,
+            expected_provider_families_for_city,
         )
 
         _served_families = decorrelated_provider_families_of(set(used_models))
+        _expected_families = expected_provider_families_for_city(lat, lon, lead_days)
         _missing_providers = [
             f"{fam}/{'|'.join(DECORRELATED_PROVIDER_FAMILIES[fam])}"
-            for fam in DECORRELATED_PROVIDER_FAMILIES
+            for fam in sorted(_expected_families)
             if fam not in _served_families
         ]
         # FIX 1/FIX 5 (2026-06-09): the SINGLE K3 completeness verdict reused by the q-mode +
-        # capture-status provenance. 5 declared decorrelated providers; served = 5 - missing.
+        # capture-status provenance. Expected providers are domain/lead-aware: nest-only families
+        # that cannot serve this city/lead are not phantom requirements.
         # This is the ONLY provider-count determination — the q-mode FULL/PARTIAL split and the
         # FIX-5 capture_status both read it (no parallel re-derivation).
-        _decorrelated_expected = EXPECTED_DECORRELATED_PROVIDER_COUNT
-        _decorrelated_served = _decorrelated_expected - len(_missing_providers)
+        _decorrelated_expected = len(_expected_families)
+        _decorrelated_served = len(_served_families & _expected_families)
         _decorrelated_complete = not _missing_providers
         if _missing_providers:
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
                     "replacement_0_1 BAYES_PRECISION_FUSION fusion decorrelated-provider INCOMPLETE for %s %s: served "
-                    "%d/5, missing %s (used=%s). A structurally-unservable provider (e.g. gem 12h-"
-                    "cadence single_runs) must be resolved explicitly, not silently dropped.",
-                    request.city, metric, _decorrelated_served, _missing_providers,
-                    list(used_models),
+                    "%d/%d, missing %s (expected=%s used=%s). A servable provider that is absent "
+                    "must be resolved explicitly, not silently dropped.",
+                    request.city, metric, _decorrelated_served, _decorrelated_expected,
+                    _missing_providers, sorted(_expected_families), list(used_models),
                 )
             except Exception:
                 pass
@@ -1139,7 +1170,7 @@ def _replacement_bayes_precision_fusion_override(
         # anchor center, though passed as anchor_z_corrected, is the persisted anchor product).
         # Sorted + de-duped for a deterministic provenance list.
         dep_ids = set(consumed_ids)
-        from src.forecast.model_selection import ANCHOR_MODEL as _ANCHOR  # noqa: PLC0415
+        # _ANCHOR already imported above in the METHOD UNIFY block.
         anchor_row = persisted_current.get(_ANCHOR)
         if anchor_row is not None:
             dep_ids.add(int(anchor_row[1]))
@@ -1157,7 +1188,7 @@ def _replacement_bayes_precision_fusion_override(
 
         # FUSED-Q PREDICTIVE SIGMA (2026-06-09): sigma for the settlement VALUE, not the mean.
         # fused.sd is the posterior sd of mu* (V* + widenings) — far too tight as a predictive
-        # spread (the AIFS-replacement experiment's tight-sigma caveat). The irreducible part is
+        # spread (the fused-N experiment's tight-sigma caveat). The irreducible part is
         # measured from the walk-forward FUSED-CENTER residual series: per common target_date,
         # the mean of the instruments' de-biased residuals; its std IS the historical error of
         # an equal-weight fused center at this cell. sigma_pred = sqrt(fused.sd^2 + sigma_resid^2),
@@ -1192,7 +1223,7 @@ def _replacement_bayes_precision_fusion_override(
         } or None
 
         return _BayesPrecisionFusionFusionOverride(
-            anchor_value_c=float(fused.mu),
+            anchor_value_c=_mu_diagonal,
             anchor_sigma_c=float(fused.sd),
             method=fused.method,
             used_models=used_models,
@@ -1227,7 +1258,7 @@ def _replacement_bayes_precision_fusion_override(
 # Created: 2026-06-09
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md §1d-§1e (fused-N-direct q,
 #   σ_pred = sqrt(fused.sd² + σ_resid²)); root-cause /tmp/candidate_missing_rootcause.md (the
-#   live LCB authority falls back to Wilson-over-AIFS-votes when q_lcb_json is NULL → under-certifies
+#   live LCB falls back to legacy bounds when q_lcb_json is NULL -> under-certifies
 #   below ask → every proof killed). This builds a REAL per-bin q_lcb/q_ucb consistent with the fused
 #   posterior so the bundle q_lcb takes priority over the Wilson fallback (no downstream change).
 #
@@ -1259,149 +1290,9 @@ _QLCB_BOOTSTRAP_DRAWS = 200
 _QLCB_BASIS = TRADEABLE_GRADE_QLCB_BASIS
 _QLCB_SEED = 0x5EED_F09  # deterministic per-posterior rng (provenance-stable bounds)
 
-# ---------------------------------------------------------------------------
-# SOFT-ANCHOR Q_LCB FALLBACK (2026-06-12) — Wilson-over-AIFS-member-votes, PROMOTED into the
-# materializer so NO posterior is ever born with a NULL q_lcb.
-#
-# Created: 2026-06-12
-# Last reused or audited: 2026-06-12
-# Authority basis: /tmp/qlcb_coverage_fix_report.md (root-cause: 100% of NULL q_lcb_json on the
-#   06-12/06-13 surface are CAPTURE_MISSING soft-anchor rows — the BAYES_PRECISION_FUSION override
-#   returned None because the persisted CURRENT single_runs capture was absent at lead+1, so the
-#   fused-center bootstrap NEVER ran; ZERO NULLs come from the bootstrap raising). Single-authority
-#   law (architecture census 2026-06-11): the SAME Wilson-over-AIFS-votes bound the live decision
-#   path computed at read time (event_reactor_adapter._replacement_yes_lcb_for_bin / _wilson_lower_
-#   bound) is now computed ONCE at materialization, killing the materializer-vs-decision twin
-#   authority. The decision path still reads the bundle q_lcb first, so this is a no-behavior-change
-#   PROMOTION for the live read; what changes is that the bound is now PERSISTED + provenance-stamped
-#   with its OWN basis ("wilson_aifs_member_votes") instead of NULL.
-#
-# WHY NOT an analytic predictive-Normal bound here: measured (report Part 2). The soft-anchor
-# Gaussian spread is anchor_sigma_c≈3.0C (wide vs ~1-2C settlement bins); a center-uncertainty
-# bootstrap at that sigma collapses the per-bin 5th-percentile to ~0 on every bin (useless), and a
-# tighter SEM-style center sigma UNDERCOVERS on the n=21 settled CAPTURE_MISSING cells (overconfident,
-# unsafe). With n=21<min_n=30 there is INSUFFICIENT settled history to license any tighter bound, so
-# the honest move is the member-vote Wilson bound (a real binomial lower bound on the AIFS support
-# fraction) — NOT a fabricated Normal floor.
-#
-# HONESTY / NO-AUTO-PROMOTE: the basis string is DISTINCT from the certified bootstrap marker, so the
-# calibration-credential reader (event_reactor_adapter._FUSED_BOOTSTRAP_QLCB_BASIS exact-match) does
-# NOT treat it as the bootstrap basis — a CAPTURE_MISSING / SOFT_ANCHOR row is STILL not live-eligible
-# (its q_mode is not in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE). This bound exists for shadow accrual,
-# coverage measurement, and to make NULL q_lcb UNCONSTRUCTABLE — never to silently arm a degraded
-# (no-current-capture) posterior. Bound is clipped to [0, q_point] per bin (a lower bound can never
-# exceed the point mass).
-# ---------------------------------------------------------------------------
-_QLCB_SOFT_ANCHOR_BASIS = "wilson_aifs_member_votes"
-_QLCB_WILSON_Z = 1.645  # one-sided 95% (matches the live decision-path Wilson z)
-
-
-def _wilson_lower_bound(successes: float, trials: float, *, z: float = _QLCB_WILSON_Z) -> float:
-    """One-sided Wilson lower bound for a binomial proportion (successes/trials).
-
-    Byte-identical math to event_reactor_adapter._wilson_lower_bound (the live decision-path
-    fallback this PROMOTES). z=1.645 -> ~95% one-sided. Returns 0.0 for trials<=0.
-    """
-    if trials <= 0.0:
-        return 0.0
-    successes = min(max(float(successes), 0.0), float(trials))
-    p_hat = successes / float(trials)
-    z2 = z * z
-    denom = 1.0 + z2 / float(trials)
-    center = p_hat + z2 / (2.0 * float(trials))
-    margin = z * ((p_hat - (p_hat * p_hat) + z2 / (4.0 * float(trials))) / float(trials)) ** 0.5
-    return max(0.0, min(1.0, (center - margin) / denom))
-
-
-def _wilson_upper_bound(successes: float, trials: float, *, z: float = _QLCB_WILSON_Z) -> float:
-    """One-sided Wilson UPPER bound for a binomial proportion (successes/trials).
-
-    The exact symmetric counterpart of ``_wilson_lower_bound``: identical Wilson centre/denom,
-    ``(center + margin) / denom`` instead of ``- margin``. z=1.645 -> ~95% one-sided (the SAME z
-    the LCB uses, so the two bounds are the same-confidence two-sided interval ends, not a mixed
-    pair). A genuine binomial bound on the AIFS support fraction — NOT a fabricated value and NOT a
-    copy of the point or the LCB. Returns 1.0 for trials<=0 (no evidence -> widest honest upper).
-    """
-    if trials <= 0.0:
-        return 1.0
-    successes = min(max(float(successes), 0.0), float(trials))
-    p_hat = successes / float(trials)
-    z2 = z * z
-    denom = 1.0 + z2 / float(trials)
-    center = p_hat + z2 / (2.0 * float(trials))
-    margin = z * ((p_hat - (p_hat * p_hat) + z2 / (4.0 * float(trials))) / float(trials)) ** 0.5
-    return max(0.0, min(1.0, (center + margin) / denom))
-
-
-def _build_soft_anchor_wilson_lcb(
-    *,
-    aifs_probabilities: Mapping[str, float],
-    member_count: float,
-    q_point: Mapping[str, float],
-) -> dict[str, float]:
-    """Per-bin Wilson-over-AIFS-member-votes q_lcb for the soft-anchor (no-fusion) path.
-
-    For each bin: successes = aifs_prob(bin) * member_count, trials = member_count, then the
-    one-sided Wilson lower bound — the SAME estimator the live decision path used at read time.
-    Clipped to [0, q_point[bin]] (a lower bound can never exceed the point mass). Bins absent from
-    the AIFS vote map get q_lcb = 0.0 (no support evidence -> honest zero lower bound).
-
-    Raises on a non-finite member_count (caller fail-softs to NULL — never WORSE than status quo).
-    """
-    mc = float(member_count)
-    if not (math.isfinite(mc) and mc > 0.0):
-        raise ValueError(f"member_count must be positive-finite, got {member_count}")
-    out: dict[str, float] = {}
-    for bin_id, q_pt in q_point.items():
-        prob = aifs_probabilities.get(bin_id)
-        if prob is None:
-            out[bin_id] = 0.0
-            continue
-        lb = _wilson_lower_bound(float(prob) * mc, mc)
-        out[bin_id] = min(max(lb, 0.0), max(float(q_pt), 0.0))
-    return out
-
-
-def _build_soft_anchor_wilson_ucb(
-    *,
-    aifs_probabilities: Mapping[str, float],
-    member_count: float,
-    q_point: Mapping[str, float],
-) -> dict[str, float]:
-    """Per-bin Wilson-over-AIFS-member-votes q_ucb for the soft-anchor (no-fusion) path.
-
-    The genuine one-sided Wilson UPPER bound — the EXACT symmetric counterpart of
-    ``_build_soft_anchor_wilson_lcb`` from the IDENTICAL inputs (the AIFS member-vote support
-    fraction × member_count, same z). This is the honest upper band of the soft-anchor support, so
-    a CAPTURE_MISSING posterior (no fused inputs -> no fused-center bootstrap upper band) is still
-    born with BOTH bounds instead of a half-bound. It is NOT a fabrication: not q_ucb=q_point, not a
-    constant, not a copy of q_lcb. The carrier honesty is preserved upstream — the basis string
-    stays ``wilson_aifs_member_votes`` (distinct from the certified fused bootstrap marker) and the
-    q_mode is CAPTURE_MISSING, so this row remains structurally NON-live-eligible (the credential
-    reader's exact-basis gate AND the q-mode gate both reject it). The bound exists for shadow
-    accrual, coverage measurement, and so the tradeable-latest reader's both-bounds predicate is the
-    SAME shape on every row (a fused row never falls out of the reader window behind a run of
-    half-bounded CAPTURE_MISSING rows).
-
-    Clipped to [q_point[bin], 1.0] (an upper bound can never sit below the point mass). Bins absent
-    from the AIFS vote map get q_ucb clipped up from the no-evidence Wilson upper (successes=0), so
-    they are still >= q_point — an honest wide upper where there is no vote support.
-
-    Raises on a non-finite member_count (caller fail-softs to NULL — never WORSE than status quo).
-    """
-    mc = float(member_count)
-    if not (math.isfinite(mc) and mc > 0.0):
-        raise ValueError(f"member_count must be positive-finite, got {member_count}")
-    out: dict[str, float] = {}
-    for bin_id, q_pt in q_point.items():
-        prob = aifs_probabilities.get(bin_id)
-        successes = 0.0 if prob is None else float(prob) * mc
-        ub = _wilson_upper_bound(successes, mc)
-        out[bin_id] = max(min(ub, 1.0), min(max(float(q_pt), 0.0), 1.0))
-    return out
-
-
-def _family_rounding_rule(bins: Sequence["AifsTemperatureBin"]) -> str:
+# Live rows carry only certified fused-center bootstrap bounds. Degraded or
+# missing-capture carriers are not written into the live posterior table.
+def _family_rounding_rule(bins: Sequence[object]) -> str:
     """Return the single settlement rounding rule shared by a bin family.
 
     The market bin family is constructed with ONE rounding rule (the seed builder
@@ -1424,12 +1315,15 @@ def _build_fused_q_bounds(
     mu_star: float,
     center_sigma_c: float,
     predictive_sigma_c: float,
-    bins: Sequence["AifsTemperatureBin"],
+    bins: Sequence[object],
     half_step: float,
     q_point: Mapping[str, float],
     n_draws: int = _QLCB_BOOTSTRAP_DRAWS,
     rounding_rule: str = "wmo_half_up",
-) -> tuple[dict[str, float], dict[str, float]]:
+    return_samples: bool = False,
+) -> tuple[dict[str, float], dict[str, float]] | tuple[
+    dict[str, float], dict[str, float], dict[str, list[float]]
+]:
     """Vectorized fused-center parameter-uncertainty bootstrap for per-bin q_lcb / q_ucb.
 
     Draws ``n_draws`` centers μ_i ~ N(μ*, center_sigma_c) and integrates every settlement bin
@@ -1437,8 +1331,20 @@ def _build_fused_q_bounds(
     over the (draws × bins) grid with scipy.special.ndtr). Returns (q_lcb_map, q_ucb_map) where
     q_lcb[bin] = 5th percentile and q_ucb[bin] = 95th percentile of the per-bin probability across
     draws, clipped so q_lcb ≤ q_point ≤ q_ucb per bin and q_lcb ≥ 0.
+    When ``return_samples`` is true, also return the per-bin draw vectors so the
+    live decision adapter can compute empirical edge p-values directly.
 
-    Raises on any construction failure (caller fail-softs to NULL — Wilson fallback, status quo).
+    PATH-A COHERENCE (2026-06-18 FINAL no-shadow execution flow §5): each draw's row is
+    renormalized to the probability simplex BEFORE the marginal quantile — the IDENTICAL
+    renormalize-then-quantile transform ``src/probability/joint_q_band.build_joint_q_band``
+    (the q_lcb AUTHORITY) performs. This makes the modal-collapse defect of the old raw
+    per-bin-percentile Path B unconstructable: a tight modal spike most draws agree on keeps
+    a high q_lcb. This bound is no longer an INDEPENDENT q_lcb method — it applies the same
+    coherent transform as the authority, so the persisted forecast_posteriors q_lcb can never
+    carry a collapsed value.
+
+    Raises on any construction failure. The caller fail-softs the certified bootstrap bounds, then
+    may promote non-certified Wilson member-vote bounds under their own basis.
     """
     import numpy as np  # noqa: PLC0415
     from scipy.special import ndtr  # noqa: PLC0415
@@ -1485,11 +1391,33 @@ def _build_fused_q_bounds(
     z_high = (highs[None, :] - mu_draws[:, None]) / sigma  # (N, M)
     probs = np.clip(ndtr(z_high) - ndtr(z_low), 0.0, 1.0)  # (N, M) per-draw per-bin mass
 
-    q_lcb_vec = np.percentile(probs, 5.0, axis=0)  # (M,)
+    # PATH-A COHERENCE (2026-06-18 FINAL no-shadow execution flow §5): renormalize EACH
+    # draw's row to the probability simplex BEFORE taking the marginal quantile — the
+    # EXACT transformation src/probability/joint_q_band.build_joint_q_band performs
+    # (q_k = q_k / q_k.sum() per draw, then quantile along axis 0). Without this the
+    # per-bin 5th percentile is taken over RAW masses that do NOT sum to 1, and a narrow
+    # high-belief MODAL bin's q_lcb COLLAPSES to ~0 because the handful of draws whose
+    # spike landed one bin over drive its low quantile toward 0 (the modal-collapse
+    # defect this module's Path B used to ship). Per-row renormalization makes the
+    # marginal quantiles quantiles of COHERENT joint distributions, so a tight modal
+    # spike most draws agree on keeps a high q_lcb. build_joint_q_band is the q_lcb
+    # AUTHORITY; this vectorized materializer bound applies the IDENTICAL renormalize-
+    # then-quantile transform so the persisted forecast_posteriors q_lcb can never
+    # carry the collapsed Path-B value. Over the standard-bin grid the open-tail bins
+    # (lower_c/upper_c None) carry the residual mass so each row already sums to ~1; the
+    # explicit renormalize is the structural guarantee (a degenerate all-zero row — no
+    # finite bin captured the draw — is left as-is rather than divided by zero).
+    _row_sums = probs.sum(axis=1, keepdims=True)  # (N, 1)
+    _safe = _row_sums[:, 0] > 0.0
+    if np.any(_safe):
+        probs[_safe, :] = probs[_safe, :] / _row_sums[_safe, :]
+
+    q_lcb_vec = np.percentile(probs, 5.0, axis=0)  # (M,) marginal quantile of coherent rows
     q_ucb_vec = np.percentile(probs, 95.0, axis=0)  # (M,)
 
     q_lcb_map: dict[str, float] = {}
     q_ucb_map: dict[str, float] = {}
+    q_samples_map: dict[str, list[float]] = {}
     for idx, bin_id in enumerate(bin_ids):
         q_pt = float(q_point.get(bin_id, 0.0))
         lcb = float(q_lcb_vec[idx])
@@ -1501,6 +1429,10 @@ def _build_fused_q_bounds(
         ucb = max(ucb, q_pt)
         q_lcb_map[bin_id] = lcb
         q_ucb_map[bin_id] = ucb
+        if return_samples:
+            q_samples_map[bin_id] = [float(x) for x in probs[:, idx].tolist()]
+    if return_samples:
+        return q_lcb_map, q_ucb_map, q_samples_map
     return q_lcb_map, q_ucb_map
 
 
@@ -1510,7 +1442,7 @@ def _insert_posterior(
     *,
     metric: str,
     anchor_id: int,
-) -> int:
+) -> int | None:
     # Wave-2 item 7 (2026-06-12): the per-city EB bias-correction of the center was
     # DELETED — settlement-refuted as a wrong-set over-correction (2026-06-09 wiring
     # audit, commit ff7f33dd5b) because it was fit on the thin live single_runs anchor
@@ -1530,37 +1462,24 @@ def _insert_posterior(
     # SIGN: δ_city = anchor − settlement; applied below as corrected = raw − δ_city, so a cold
     # anchor (δ<0) warms and a hot anchor (δ>0) cools; the corrected center feeds the fusion prior
     # → the de-bias propagates into the fused μ*. FAIL-SOFT: any error → None (family-level fallback).
-    bias_shift_c: float | None
-    try:
-        from src.calibration.anchor_representativeness_debias import get_city_debias_c  # noqa: PLC0415
-
-        bias_shift_c = get_city_debias_c(request.city, metric)
-    except Exception:
-        bias_shift_c = None
-    # THE_PATH member-vote smoothing: flag-gated additive Laplace/Dirichlet alpha so the AIFS
-    # member prior is strictly positive on every bin and the soft_anchor.py:197-198 zero-prior
-    # -inf veto can never make a bin un-hittable. None when flag OFF -> byte-identical to today.
-    member_vote_smoothing_alpha = _replacement_member_vote_smoothing_alpha()
+    # RAW NO-DE-BIAS LAW (2026-06-18 FINAL no-shadow execution flow §3-§4; operator
+    # "NO fitted forward per-city de-bias"): the consumed posterior center is RAW. The
+    # per-city representativeness de-bias (``get_city_debias_c`` → δ_city) is a FITTED
+    # FORWARD PER-CITY shift on μ — forbidden under the RAW law. It is forced to None
+    # here (fail-closed: even were the artifact placed in state/, the consumed center
+    # stays RAW), so ``anchor_value_corrected_c == raw_anchor_value_c`` (zero shift) and
+    # the fused μ* the materializer writes to forecast_posteriors is the RAW diagonal
+    # center — the SAME RAW belief the spine entry serves. The q_lcb empirical
+    # reliability guard (decision layer) — NOT a center de-bias — is what makes RAW
+    # honest. (Removing this RAW pin re-enables a forbidden forward per-city de-bias.)
+    bias_shift_c: float | None = None
     # BAYES_PRECISION_FUSION-Bayes fusion (flag-gated, default-OFF): replace the single OM9 9km anchor center/spread
     # with the multi-model Bayesian posterior. Computed from the EB-corrected anchor center so it
-    # composes AFTER the EB bias layer; member-vote smoothing stays applied to the AIFS prior; the
-    # downstream q_lcb floor + EMOS + bin integration are unchanged. None -> byte-identical path.
+    # composes AFTER the EB bias layer; downstream EMOS + bin integration are unchanged.
     raw_anchor_value_c = request.openmeteo_anchor.high_c if metric == "high" else request.openmeteo_anchor.low_c
     anchor_value_corrected_c = float(raw_anchor_value_c) - (0.0 if bias_shift_c is None else float(bias_shift_c))
     bayes_precision_fusion_override = _replacement_bayes_precision_fusion_override(
         request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c, conn=conn
-    )
-    result = build_openmeteo_ifs9_aifs_soft_anchor_result(
-        aifs_extraction=request.aifs_extraction,
-        openmeteo_anchor=request.openmeteo_anchor,
-        metric=metric,
-        bins=request.bins,
-        config=SoftAnchorConfig(anchor_weight=request.anchor_weight, anchor_sigma_c=request.anchor_sigma_c),
-        settlement_step_c=float(request.settlement_step_c),
-        bias_shift_c=bias_shift_c,
-        member_vote_smoothing_alpha=member_vote_smoothing_alpha,
-        anchor_value_override_c=(bayes_precision_fusion_override.anchor_value_c if bayes_precision_fusion_override is not None else None),
-        anchor_sigma_override_c=(bayes_precision_fusion_override.anchor_sigma_c if bayes_precision_fusion_override is not None else None),
     )
     target_date = _date_text(request.target_date)
     source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
@@ -1571,7 +1490,7 @@ def _insert_posterior(
     # constructed before its LAST-arriving input landed — availability is gated by the slowest
     # dependency. The old max(request.*_source_available_at) used the cycle-time nominal-lag GUESS
     # (~8.4h early for the baseline) as each input; this recovers the honest possession time.
-    available_at = max(
+    _possession_candidates = [
         _role_possession_available_at(
             conn,
             source_run_id=request.baseline_source_run_id,
@@ -1579,21 +1498,18 @@ def _insert_posterior(
         ),
         _role_possession_available_at(
             conn,
-            source_run_id=request.aifs_source_run_id,
-            request_source_available_at=request.aifs_source_available_at,
-        ),
-        _role_possession_available_at(
-            conn,
             source_run_id=request.openmeteo_source_run_id,
             request_source_available_at=request.openmeteo_source_available_at,
         ),
-    ).isoformat()
+    ]
+    available_at = max(_possession_candidates).isoformat()
     computed_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
     data_version = _data_version(metric)
-    q = {key: float(value) for key, value in result.posterior.probabilities.items()}
-    q_shape = "aifs_member_votes_soft_anchor"
+    _n_bins_seed = len(request.bins) or 1
+    q = {b.bin_id: 1.0 / _n_bins_seed for b in request.bins}
+    q_shape = "uniform_placeholder_pending_fused"
     # FUSED-Q SHAPE (2026-06-09, flag-gated): build q DIRECTLY from N(mu*, sigma_pred) over the
-    # SAME settlement bins, replacing the AIFS member-vote shape. The experiment showed the AIFS
+    # SAME settlement bins, replacing the old member-vote shape. The experiment showed the old
     # shape assigns EXACTLY ZERO to the winning bin on 28% of settled cells (vote-support
     # truncation) — a Normal makes that category unconstructable. Uses the ONE settlement bin
     # integrator (emos.bin_probability_settlement, the same preimage math as the live analytic
@@ -1625,11 +1541,13 @@ def _insert_posterior(
     # so the floor could not inflate the tail. Empty tuple when no cap bit (no floor / no open-ended
     # bin away from center). Defaults defined here so the fail-closed / flag-off paths stay coherent.
     settlement_sigma_floor_catchall_capped: tuple[str, ...] = ()
-    # Q_LCB / Q_UCB bootstrap outputs (NULL unless a fused-q is built AND the bound construction
-    # succeeds). FAIL-SOFT: any failure leaves these None -> q_lcb_json/q_ucb_json written as NULL,
-    # which the live side treats exactly as today (Wilson fallback) -> never WORSE than status quo.
+    # Q_LCB / Q_UCB outputs. The certified bootstrap basis is present only when fused-q is built and
+    # bound construction succeeds. If it fails, the soft-anchor Wilson fallback below may publish
+    # lower/upper carrier bounds under its own non-live-eligible basis; if that fallback also fails,
+    # q_lcb_json/q_ucb_json remain NULL.
     q_lcb_map: dict[str, float] | None = None
     q_ucb_map: dict[str, float] | None = None
+    q_bootstrap_samples_by_bin: dict[str, list[float]] | None = None
     q_lcb_basis: str | None = None
     if bayes_precision_fusion_override is not None:
         # An override exists. Default mode while we attempt the fused-q build below.
@@ -1858,13 +1776,15 @@ def _insert_posterior(
             q_shape = "fused_normal_direct"
             # Q_LCB / Q_UCB (2026-06-09) — fused-center parameter-uncertainty bootstrap. INDEPENDENT
             # fail-soft: a bound-construction error must NOT roll back the fused q point (that would
-            # regress the q_shape gain). On error: q_lcb/q_ucb stay NULL (Wilson fallback, status quo)
-            # + loud WARNING; replacement_q_mode/q_shape unaffected. The bounds use the SAME _sigma_used
-            # the point q integrates at (settlement-floored if the floor applied) so q_lcb ≤ q_point ≤
-            # q_ucb holds per bin; center uncertainty is fused.sd (anchor_sigma_c), NOT σ_resid (already
-            # inside _sigma_used) — no double-count.
+            # regress the q_shape gain). On error the certified bootstrap bounds are absent and a
+            # loud WARNING is emitted; the later soft-anchor Wilson fallback may publish
+            # non-certified carrier bounds under its own basis. replacement_q_mode/q_shape remain
+            # diagnosable. The bounds use the SAME _sigma_used the point q integrates at
+            # (settlement-floored if the floor applied) so q_lcb <= q_point <= q_ucb holds per bin;
+            # center uncertainty is fused.sd (anchor_sigma_c), NOT sigma_resid (already inside
+            # _sigma_used) — no double-count.
             try:
-                _lcb_map, _ucb_map = _build_fused_q_bounds(
+                _lcb_map, _ucb_map, _q_samples = _build_fused_q_bounds(
                     mu_star=float(bayes_precision_fusion_override.anchor_value_c),
                     center_sigma_c=float(bayes_precision_fusion_override.anchor_sigma_c),
                     predictive_sigma_c=_sigma_used,
@@ -1872,19 +1792,22 @@ def _insert_posterior(
                     half_step=_half_step,
                     q_point=q,
                     rounding_rule=_rounding_rule,
+                    return_samples=True,
                 )
                 q_lcb_map = _lcb_map
                 q_ucb_map = _ucb_map
+                q_bootstrap_samples_by_bin = _q_samples
                 q_lcb_basis = _QLCB_BASIS
             except Exception as _qexc:
                 q_lcb_map = None
                 q_ucb_map = None
+                q_bootstrap_samples_by_bin = None
                 q_lcb_basis = None
                 try:
                     import logging  # noqa: PLC0415
                     logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                        "replacement_0_1 q_lcb/q_ucb bootstrap skipped (fail-soft to NULL, "
-                        "Wilson fallback unchanged): %s",
+                        "replacement_0_1 q_lcb/q_ucb bootstrap skipped "
+                        "(fail-soft to non-certified Wilson fallback when available): %s",
                         _qexc,
                     )
                 except Exception:
@@ -1925,65 +1848,69 @@ def _insert_posterior(
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                    "replacement_0_1 fused-q shape skipped (fail-closed to soft-anchor q): %s",
+                    "replacement_0_1 fused-q shape skipped (fail-closed to fused-center-only / skip): %s",
                     _exc,
                 )
             except Exception:
                 pass
-    # SOFT-ANCHOR Q_LCB/Q_UCB FALLBACK (2026-06-12; q_ucb added 2026-06-13) — PROMOTE the
-    # Wilson-over-AIFS-votes BOUNDS into the materializer so NO posterior is born with a NULL bound.
-    # Reached ONLY when the fused-center bootstrap did not produce a bound (q_lcb_map is None):
-    # flag-off, no BAYES_PRECISION_FUSION override (CAPTURE_MISSING — the persisted current capture
-    # was absent), predictive_sigma None, or a fused-q build failure. The bounds are the SAME
-    # estimator the live decision path computed at read time (single-authority law) — built from the
-    # AIFS member-vote probabilities the soft-anchor posterior already carries — now computed ONCE
-    # here with their OWN basis.
-    #
-    # Q_UCB ROOT FIX (2026-06-13): the soft-anchor path used to build ONLY the one-sided q_lcb and
-    # leave q_ucb NULL, so 100% of CAPTURE_MISSING rows (the entire q_ucb-less population on the
-    # 06-14 surface: 158/158, fingerprinted by replacement_q_mode=CAPTURE_MISSING +
-    # q_lcb_basis=wilson_aifs_member_votes) were born HALF-BOUNDED. A fused row never exists on this
-    # path (the fused inputs mu*/center_sigma are genuinely absent — no honest FUSED upper band can
-    # be built), so the operator's "input genuinely missing -> mark non-tradeable, do NOT serve a
-    # half-bound" rule governs: the row carries BOTH genuine Wilson bounds (the upper is the exact
-    # symmetric counterpart of the lower, same inputs/z) and STAYS non-tradeable by basis + q_mode.
-    # The bounds are built ATOMICALLY (both-or-neither): a half-bound is never written.
-    #
-    # FAIL-SOFT: any error leaves q_lcb_map AND q_ucb_map None (NULL written, status-quo Wilson
-    # read-time fallback) — never WORSE. The DISTINCT basis means the calibration credential reader
-    # does NOT treat this as the certified bootstrap basis, so a CAPTURE_MISSING / SOFT_ANCHOR row is
-    # STILL not live-eligible (correct: n=21<min_n=30 settled CAPTURE_MISSING cells → insufficient
-    # coverage to license).
-    if q_lcb_map is None:
+    # FUSED-CENTER-ONLY NORMAL FALLBACK. Reached when the live fused-q shape was NOT produced — flag-off, no fused override,
+    # predictive_sigma None, or a fused-q build failure — i.e. q_shape is still the seeded
+    # placeholder, NOT "fused_normal_direct". If a multi-model fused CENTER exists (override present) with a usable
+    # spread, build q PURELY from N(mu*, sigma) over the SAME settlement bins (anchor_weight
+    # using the SAME emos.bin_probability_settlement integrator the
+    # live path uses. If even that is impossible (no override, or no finite spread), q is left at the
+    # uniform seed and the row is recorded NON-tradeable (the live gate licenses only
+    # FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis, which this fallback never
+    # carries). This fallback is experiment-only; it is intentionally not live-eligible.
+    # FAIL-SOFT: any error leaves q at the prior value and logs.
+    if q_shape != "fused_normal_direct" and bayes_precision_fusion_override is not None:
         try:
-            _aifs_probs = dict(result.aifs_probabilities.probabilities)
-            _member_count = float(len(result.aifs_probabilities.member_values_c)) or 51.0
-            _soft_lcb = _build_soft_anchor_wilson_lcb(
-                aifs_probabilities=_aifs_probs,
-                member_count=_member_count,
-                q_point=q,
-            )
-            _soft_ucb = _build_soft_anchor_wilson_ucb(
-                aifs_probabilities=_aifs_probs,
-                member_count=_member_count,
-                q_point=q,
-            )
-            # Atomic both-or-neither: only publish once BOTH bounds built (q_ucb is the genuine
-            # symmetric Wilson upper, never a half-bound). The bundle reader's both-bounds
-            # tradeable-grade predicate then sees a consistent carrier shape on every row.
-            q_lcb_map = _soft_lcb
-            q_ucb_map = _soft_ucb
-            q_lcb_basis = _QLCB_SOFT_ANCHOR_BASIS
-        except Exception as _wexc:
-            q_lcb_map = None
-            q_ucb_map = None
-            q_lcb_basis = None
+            _fc_mu = float(bayes_precision_fusion_override.anchor_value_c)
+            # Spread: ONLY the predictive settlement sigma (sqrt(fused.sd^2 + sigma_resid^2)) is a
+            # valid dispersion for a settlement bin Normal. We deliberately do NOT substitute
+            # anchor_sigma_c (the fused CENTER uncertainty) when predictive_sigma_c is None — that
+            # conflates center uncertainty with predictive settlement spread (the q point and q bounds
+            # intentionally separate the two). When predictive_sigma_c is None (residual substrate too
+            # thin) we leave q at the honest uniform seed (non-tradeable) rather than fabricate a
+            # spread — "if even a fused-center Normal is impossible, do NOT serve a cold/wrong q".
+            _fc_sigma_raw = bayes_precision_fusion_override.predictive_sigma_c
+            _fc_sigma = float(_fc_sigma_raw) if _fc_sigma_raw is not None else None
+            if _fc_sigma is not None and math.isfinite(_fc_sigma) and _fc_sigma > 0.0 and math.isfinite(_fc_mu):
+                from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
+
+                _fc_half_step = float(request.settlement_step_c) / 2.0
+                _fc_rounding_rule = _family_rounding_rule(request.bins)
+                _fc_q = {
+                    b.bin_id: bin_probability_settlement(
+                        mu=_fc_mu,
+                        sigma=_fc_sigma,
+                        bin_low=(None if b.lower_c is None else float(b.lower_c)),
+                        bin_high=(None if b.upper_c is None else float(b.upper_c)),
+                        half_step=_fc_half_step,
+                        rounding_rule=_fc_rounding_rule,
+                    )
+                    for b in request.bins
+                }
+                _fc_total = sum(_fc_q.values())
+                if _fc_total > 0.0 and math.isfinite(_fc_total):
+                    q = {key: float(value) / _fc_total for key, value in _fc_q.items()}
+                    q_shape = "fused_center_only_normal"
+                    # Only the predictive settlement sigma reaches this block (the guard requires a
+                    # finite _fc_sigma sourced solely from predictive_sigma_c), so the basis is the
+                    # fused-center residual std — never the center-uncertainty sd.
+                    replacement_sigma_basis = "fused_center_residual_std"
+                    # Distinct mode: a fused CENTER materialized the q but the certified fused-q
+                    # bootstrap shape/bounds did NOT (so the live gate still rejects it). Diagnosably
+                    # different from FUSED_Q_BUILD_FAILED (no center q at all) and from the deliberate
+                    # SOFT_ANCHOR_FALLBACK.
+                    replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL
+        except Exception as _fcexc:
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                    "replacement_0_1 soft-anchor Wilson q_lcb/q_ucb fallback skipped "
-                    "(fail-soft to NULL bounds, read-time Wilson unchanged): %s",
-                    _wexc,
+                    "replacement_0_1 fused-center-only Normal fallback skipped "
+                    "(keeping uniform/soft seed): %s",
+                    _fcexc,
                 )
             except Exception:
                 pass
@@ -1991,12 +1918,11 @@ def _insert_posterior(
     bin_topology_hash = _json_hash(bin_topology_payload)
     dependency_payload = {
         "baseline_b0": request.baseline_source_run_id,
-        "aifs_sampled_2t": request.aifs_source_run_id,
         "openmeteo_ifs9_anchor": request.openmeteo_source_run_id,
     }
     dependency_hash = _json_hash(dependency_payload)
     posterior_config = {
-        "posterior_method": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        "posterior_method": "openmeteo_ecmwf_ifs9_bayes_fusion",
         "anchor_weight": float(request.anchor_weight),
         "anchor_sigma_c": float(request.anchor_sigma_c),
         "settlement_step_c": float(request.settlement_step_c),
@@ -2036,36 +1962,31 @@ def _insert_posterior(
         capture_status = REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT
     else:
         capture_status = REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT
-    # CYCLE-PHASE PROVENANCE (operator cycle-physics directive 2026-06-10). 00/12Z are the
-    # full synoptic cycles; 06/18Z are intermediate cycles whose skill/bias differ. The
-    # de-bias + fusion weights are trained on ~99% 00Z-cycle history, so an intermediate-cycle
-    # posterior applies a synoptic-fit bias correction across cycle phase. We TAG the phase so
-    # the live bundle reader can hold intermediate-phase posteriors to shadow-only by default
-    # (production stays alive in dead zones; live trading waits for a settlement-graded license).
+    # CYCLE-PHASE PROVENANCE. 00/06/12/18Z are live runtime cycles; this tag is provenance only,
+    # never a live/experiment switch.
     cycle_phase = classify_cycle_phase(_to_utc(request.source_cycle_time, field_name="source_cycle_time"))
+    live_layer = _replacement_is_live_layer(
+        replacement_q_mode=replacement_q_mode,
+        q_lcb_map=q_lcb_map,
+        q_ucb_map=q_ucb_map,
+        q_lcb_basis=q_lcb_basis,
+    )
+    if not live_layer:
+        return None
+    runtime_layer = LIVE_RUNTIME_LAYER
+    if bayes_precision_fusion_override is not None:
+        _prov_anchor_value_c = float(bayes_precision_fusion_override.anchor_value_c)
+    else:
+        _prov_anchor_value_c = None
     provenance_payload = {
         "anchor_weight": request.anchor_weight,
         "anchor_sigma_c": request.anchor_sigma_c,
-        "anchor_value_c": result.anchor_value_c,
-        # Synoptic (00/12Z) vs intermediate (06/18Z) model-cycle phase. The live gate reads
-        # THIS tag (fail-closed to the source_cycle_time hour when absent on legacy rows).
+        "anchor_value_c": _prov_anchor_value_c,
+        "runtime_layer": runtime_layer,
         "cycle_phase": cycle_phase,
-        "aifs_artifact_id": request.aifs_artifact_id,
-        "aifs_identity": {
-            "identity_decision_valid": request.aifs_extraction.identity_decision_valid,
-            "identity_reason_codes": list(request.aifs_extraction.identity_reason_codes),
-            "identity_decision_hash": request.aifs_extraction.identity_decision_hash,
-            "member_ids_hash": request.aifs_extraction.member_ids_hash,
-            "step_hours_hash": request.aifs_extraction.step_hours_hash,
-            "artifact_id": request.aifs_extraction.artifact_id,
-            "raw_sha256": request.aifs_extraction.raw_sha256,
-            "source_product_id": request.aifs_extraction.source_product_id,
-        },
         "openmeteo_anchor_artifact_id": request.anchor_artifact_id,
         "openmeteo_precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
-        "aifs_probabilities": dict(result.aifs_probabilities.probabilities),
-        "aifs_member_count": len(result.aifs_probabilities.member_values_c),
-        "q_point_json_role": "shadow_point_probability_only",
+        "q_point_json_role": "live_point_probability",
         "q_shape": q_shape,
         # FIX 1 (2026-06-09): explicit q-mode authority — the live gate reads THIS, not the q_shape
         # string. FUSED_NORMAL_{FULL,PARTIAL} are live-eligible; every other mode is no-submit.
@@ -2091,15 +2012,13 @@ def _insert_posterior(
         # FIX 5 (2026-06-09): capture-status provenance (recording only).
         "capture_status": capture_status,
         # Q_LCB / Q_UCB provenance. The role is BASIS-AWARE so the certified fused-center bootstrap
-        # bound and the promoted soft-anchor Wilson-over-AIFS-votes bound never alias: only the
+        # bound and any legacy fallback bound never alias: only the
         # bootstrap basis carries the calibration credential (event_reactor_adapter basis-exact
         # match). The percentile vectors do NOT sum to 1 (expected for bounds; require_sum=False).
         # q_lcb_map is now NULL only on a true fail-soft (the Wilson fallback itself raised).
         "q_lcb_json_role": (
             "fused_center_bootstrap_lcb"
             if q_lcb_basis == _QLCB_BASIS
-            else "wilson_aifs_member_votes_lcb"
-            if q_lcb_basis == _QLCB_SOFT_ANCHOR_BASIS
             else "absent_no_calibrated_lcb_available"
         ),
         # q_ucb role is BASIS-AWARE, symmetric with q_lcb_json_role: the soft-anchor Wilson upper
@@ -2109,22 +2028,26 @@ def _insert_posterior(
         "q_ucb_json_role": (
             "fused_center_bootstrap_ucb"
             if (q_ucb_map is not None and q_lcb_basis == _QLCB_BASIS)
-            else "wilson_aifs_member_votes_ucb"
-            if (q_ucb_map is not None and q_lcb_basis == _QLCB_SOFT_ANCHOR_BASIS)
             else "absent_no_calibrated_ucb_available"
         ),
         "q_lcb_basis": q_lcb_basis,
         # bootstrap_draws is meaningful ONLY for the bootstrap basis; the Wilson member-vote bound
         # is analytic (no draws) -> None.
         "q_lcb_bootstrap_draws": (_QLCB_BOOTSTRAP_DRAWS if q_lcb_basis == _QLCB_BASIS else None),
+        # Empirical edge-confidence substrate. The live adapter computes
+        # p_value = (1 + count(q_side_draw - native_cost <= 0)) / (1 + draws)
+        # from these exact draws instead of laundering the robust LCB pass/fail
+        # gate as a fake {0,1} FDR p-value. Present only for the fused-center
+        # bootstrap basis.
+        "q_bootstrap_samples_by_bin": (
+            q_bootstrap_samples_by_bin if q_lcb_basis == _QLCB_BASIS else None
+        ),
         "bin_topology": bin_topology_payload,
         "bin_topology_hash": bin_topology_hash,
         "dependency_hash": dependency_hash,
         "posterior_config_hash": posterior_config_hash,
         "family_id": family_id,
-        "posterior_authority_status": "SHADOW_ONLY",
-        "runtime_policy_status": "SHADOW_VETO_ONLY",
-        "trade_authority_status": "SHADOW_ONLY",
+        "runtime_policy_status": runtime_layer,
         "training_allowed": False,
     }
     # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
@@ -2168,7 +2091,7 @@ def _insert_posterior(
                 if bayes_precision_fusion_override.current_value_serving
                 else None
             ),
-            "fusion_authority": "SHADOW_ONLY",
+            "runtime_layer": runtime_layer,
         }
     posterior_identity_hash = _json_hash(
         {
@@ -2188,50 +2111,60 @@ def _insert_posterior(
             "bin_topology_hash": bin_topology_hash,
             "posterior_config_hash": posterior_config_hash,
             "anchor_id": anchor_id,
-            "aifs_artifact_id": request.aifs_artifact_id,
             "anchor_artifact_id": request.anchor_artifact_id,
         }
     )
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO forecast_posteriors (
-            source_id, product_id, data_version, city, target_date,
-            temperature_metric, source_cycle_time, source_available_at,
-            computed_at, q_json, q_lcb_json, q_ucb_json, posterior_method,
-            aifs_source_run_id, openmeteo_anchor_id,
-            dependency_source_run_ids_json, family_id, bin_topology_hash,
-            dependency_hash, posterior_config_hash, posterior_identity_hash,
-            provenance_json,
-            trade_authority_status, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            SOURCE_ID,
-            PRODUCT_ID,
-            data_version,
-            request.city,
-            target_date,
-            metric,
-            source_cycle_time,
-            available_at,
-            computed_at,
-            _json(q),
-            (None if q_lcb_map is None else _json(q_lcb_map)),
-            (None if q_ucb_map is None else _json(q_ucb_map)),
-            "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
-            request.aifs_source_run_id,
-            anchor_id,
-            _json(dependency_payload),
-            family_id,
-            bin_topology_hash,
-            dependency_hash,
-            posterior_config_hash,
-            posterior_identity_hash,
-            _json(provenance_payload),
-            "SHADOW_ONLY",
-            0,
-        ),
-    )
+    try:
+        conn.execute(
+            """
+            INSERT INTO forecast_posteriors (
+                source_id, product_id, data_version, city, target_date,
+                temperature_metric, source_cycle_time, source_available_at,
+                computed_at, q_json, q_lcb_json, q_ucb_json, posterior_method,
+                openmeteo_anchor_id,
+                dependency_source_run_ids_json, family_id, bin_topology_hash,
+                dependency_hash, posterior_config_hash, posterior_identity_hash,
+                provenance_json,
+                runtime_layer, training_allowed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                SOURCE_ID,
+                PRODUCT_ID,
+                data_version,
+                request.city,
+                target_date,
+                metric,
+                source_cycle_time,
+                available_at,
+                computed_at,
+                _json(q),
+                (None if q_lcb_map is None else _json(q_lcb_map)),
+                (None if q_ucb_map is None else _json(q_ucb_map)),
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
+                anchor_id,
+                _json(dependency_payload),
+                family_id,
+                bin_topology_hash,
+                dependency_hash,
+                posterior_config_hash,
+                posterior_identity_hash,
+                _json(provenance_payload),
+                runtime_layer,
+                0,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        row = conn.execute(
+            """
+            SELECT posterior_id FROM forecast_posteriors
+            WHERE posterior_identity_hash = ?
+            """,
+            (posterior_identity_hash,),
+        ).fetchone()
+        if row is not None:
+            return int(row[0] if not isinstance(row, sqlite3.Row) else row["posterior_id"])
+        raise RuntimeError(f"forecast_posteriors insert rejected: {exc}") from exc
     row = conn.execute(
         """
         SELECT posterior_id FROM forecast_posteriors
@@ -2240,7 +2173,10 @@ def _insert_posterior(
         (posterior_identity_hash,),
     ).fetchone()
     if row is None:
-        raise RuntimeError("replacement posterior materialization failed")
+        raise RuntimeError(
+            "forecast_posteriors insert returned no row for posterior_identity_hash="
+            f"{posterior_identity_hash}"
+        )
     return int(row[0] if not isinstance(row, sqlite3.Row) else row["posterior_id"])
 
 
@@ -2267,31 +2203,18 @@ def _build_readiness(
             _to_utc(request.source_cycle_time, field_name="source_cycle_time")
         )
     )
-    return build_replacement_forecast_readiness(
-        city=request.city,
-        target_date=request.target_date,
-        temperature_metric=metric,
-        decision_time=computed_at,
-        computed_at=computed_at,
-        expires_at=expires_at,
-        dependencies=(
-            ReplacementForecastDependency(
-                role="baseline_b0",
-                source_id=expected["baseline_b0"].source_id,
-                product_id=expected["baseline_b0"].product_id,
-                data_version=request.baseline_data_version,
-                source_run_id=request.baseline_source_run_id,
-                source_available_at=request.baseline_source_available_at,  # AVAIL-POSSESSION-EXEMPTED: forwards the request's per-role possession input into the dependency lineage record (passthrough of an already-determined value, not a fresh stamp)
-            ),
-            ReplacementForecastDependency(
-                role="aifs_sampled_2t",
-                source_id=AIFS_SOURCE_ID,
-                product_id=AIFS_PRODUCT_ID,
-                data_version=_aifs_data_version(metric),
-                source_run_id=request.aifs_source_run_id,
-                source_available_at=request.aifs_source_available_at,  # AVAIL-POSSESSION-EXEMPTED: forwards the request's per-role possession input into the dependency lineage record (passthrough of an already-determined value, not a fresh stamp)
-                artifact_id=request.aifs_artifact_id,
-            ),
+    dependencies: list[ReplacementForecastDependency] = [
+        ReplacementForecastDependency(
+            role="baseline_b0",
+            source_id=expected["baseline_b0"].source_id,
+            product_id=expected["baseline_b0"].product_id,
+            data_version=request.baseline_data_version,
+            source_run_id=request.baseline_source_run_id,
+            source_available_at=request.baseline_source_available_at,  # AVAIL-POSSESSION-EXEMPTED: forwards the request's per-role possession input into the dependency lineage record (passthrough of an already-determined value, not a fresh stamp)
+        ),
+    ]
+    dependencies.extend(
+        [
             ReplacementForecastDependency(
                 role="openmeteo_ifs9_anchor",
                 source_id=ANCHOR_SOURCE_ID,
@@ -2311,15 +2234,24 @@ def _build_readiness(
                 source_available_at=computed_at,  # AVAIL-POSSESSION-EXEMPTED: derived posterior artifact — computed_at IS its availability instant (DERIVED_JUSTIFIED), not fetched-data possession
                 posterior_id=posterior_id,
             ),
-        ),
+        ]
+    )
+    return build_replacement_forecast_readiness(
+        city=request.city,
+        target_date=request.target_date,
+        temperature_metric=metric,
+        decision_time=computed_at,
+        computed_at=computed_at,
+        expires_at=expires_at,
+        dependencies=tuple(dependencies),
     )
 
 
-def materialize_replacement_forecast_shadow(
+def materialize_replacement_forecast_live(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
 ) -> ReplacementForecastMaterializeResult:
-    """Write anchor, posterior, and readiness rows for replacement shadow/veto."""
+    """Write anchor, posterior, and readiness rows for replacement live use."""
 
     metric = _metric(request.temperature_metric)
     _ensure_replacement_identity_columns(conn)
@@ -2365,6 +2297,14 @@ def materialize_replacement_forecast_shadow(
         )
     anchor_id = _insert_anchor(conn, request, metric=metric)
     posterior_id = _insert_posterior(conn, request, metric=metric, anchor_id=anchor_id)
+    if posterior_id is None:
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=(REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET,),
+            posterior_id=None,
+            anchor_id=anchor_id,
+            readiness_id=None,
+        )
     readiness = _build_readiness(request, metric=metric, posterior_id=posterior_id, anchor_id=anchor_id)
     expected = expected_replacement_dependency_identity_by_role(metric)["soft_anchor_posterior"]
     write_readiness_state(

@@ -2,9 +2,10 @@
 # Created: 2026-06-07
 # Last reused/audited: 2026-06-07
 # Lifecycle: created=2026-06-07; last_reviewed=2026-06-07
-# Purpose: Download current-target Open-Meteo ECMWF IFS 9km and AIFS ENS raw inputs for replacement forecast materialization.
+# Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
-# Authority basis: Raw artifacts remain SHADOW_ONLY; live authority still comes from posterior/readiness gates.
+# Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
+#   forecast_posteriors rows with runtime_layer='live'.
 """Download replacement forecast raw inputs for current market targets."""
 
 from __future__ import annotations
@@ -12,8 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
-from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -25,9 +24,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config import cities_by_name  # noqa: E402
-from src.data.ecmwf_aifs_ens_request import build_aifs_ens_open_data_request, retrieve_aifs_ens_open_data_request  # noqa: E402
-from src.data.ecmwf_aifs_sampled_2t_localday import HIGH_DATA_VERSION as AIFS_HIGH_DATA_VERSION  # noqa: E402
-from src.data.ecmwf_aifs_sampled_2t_localday import LOW_DATA_VERSION as AIFS_LOW_DATA_VERSION  # noqa: E402
 from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
     HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION,
     LOW_DATA_VERSION as OPENMETEO_LOW_DATA_VERSION,
@@ -40,12 +36,10 @@ from src.data.replacement_forecast_current_target_plan import (  # noqa: E402
     build_replacement_forecast_current_target_plan,
 )
 from src.state.db import _connect  # noqa: E402
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema  # noqa: E402
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema  # noqa: E402
 
 
-METRIC_TO_AIFS_VERSION = {"high": AIFS_HIGH_DATA_VERSION, "low": AIFS_LOW_DATA_VERSION}
 METRIC_TO_OPENMETEO_VERSION = {"high": OPENMETEO_HIGH_DATA_VERSION, "low": OPENMETEO_LOW_DATA_VERSION}
-MIN_COMPLETE_AIFS_BYTES = 100_000_000
 
 
 def _safe_name(value: str) -> str:
@@ -77,22 +71,6 @@ def _parse_cycle(value: str | None, *, now: datetime, release_lag_hours: float) 
 
 def _source_available_at(cycle: datetime, *, release_lag_hours: float) -> datetime:
     return cycle.astimezone(UTC) + timedelta(hours=release_lag_hours)
-
-
-def _aifs_steps_for_targets(targets: list[object], *, cycle: datetime) -> tuple[int, ...]:
-    steps: set[int] = set()
-    for target in targets:
-        city_config = cities_by_name.get(target.city)
-        if city_config is None:
-            continue
-        start_utc, end_utc = _local_day_window(city_config.timezone, target.target_date)
-        for step in range(0, 121, 6):
-            valid = cycle.astimezone(UTC) + timedelta(hours=step)
-            if start_utc <= valid < end_utc:
-                steps.add(step)
-    if not steps:
-        raise ValueError("no AIFS 6-hour steps cover current replacement targets")
-    return tuple(sorted(steps))
 
 
 def _local_day_window(city_timezone: str, target_date: str) -> tuple[datetime, datetime]:
@@ -328,11 +306,8 @@ def download_current_target_raw_inputs(
     cycle: datetime,
     limit: int | None,
     write_db: bool,
-    skip_aifs: bool,
-    skip_openmeteo: bool,
     release_lag_hours: float,
     anchor_sigma_c: float,
-    aifs_retries: int,
     include_covered: bool = False,
 ) -> dict[str, object]:
     # Fetch the FULL plan (no limit) so uncovered cities beyond the first `limit`
@@ -370,162 +345,103 @@ def download_current_target_raw_inputs(
     manifests: list[RawForecastArtifactManifest] = []
     skipped_cities: list[dict[str, object]] = []
     downloaded: dict[str, object] = {
-        "aifs_grib": None,
         "openmeteo_payload_count": 0,
         "precision_metadata_count": 0,
     }
 
-    targets_by_metric: dict[str, list[object]] = defaultdict(list)
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import BucketTransportNotAdmissible
+
     for target in targets:
-        targets_by_metric[target.temperature_metric].append(target)
-
-    if targets and not skip_aifs:
-        aifs_steps = _aifs_steps_for_targets(targets, cycle=cycle)
-        step_slug = f"{aifs_steps[0]}_{aifs_steps[-1]}_{len(aifs_steps)}steps"
-        aifs_path = raw_dir / f"aifs_ens_{cycle.strftime('%Y%m%d_%Hz')}_2t_steps_{step_slug}.grib2"
-        request = build_aifs_ens_open_data_request(
-            forecast_date=cycle.date(),
-            cycle_hour=cycle.hour,
-            target_path=aifs_path,
-            steps=aifs_steps,
+        city_config = cities_by_name.get(target.city)
+        if city_config is None:
+            continue
+        payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
+        precision_path = raw_dir / f"openmeteo_precision_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}.json"
+        request = build_anchor_request(
+            latitude=float(city_config.lat),
+            longitude=float(city_config.lon),
+            run=cycle,
+            timezone_name=city_config.timezone,
+            forecast_hours=120,
         )
-        if aifs_path.exists() and aifs_path.stat().st_size < MIN_COMPLETE_AIFS_BYTES:
-            aifs_path.unlink()
-        if not aifs_path.exists():
-            last_error: Exception | None = None
-            for attempt in range(max(1, int(aifs_retries))):
-                try:
-                    retrieve_aifs_ens_open_data_request(request)
-                    last_error = None
-                    break
-                except Exception as exc:  # noqa: BLE001 - transport retry surface
-                    last_error = exc
-                    if aifs_path.exists() and aifs_path.stat().st_size < MIN_COMPLETE_AIFS_BYTES:
-                        aifs_path.unlink()
-                    if attempt + 1 >= max(1, int(aifs_retries)):
-                        break
-                    time.sleep(min(90.0, 10.0 * (2 ** attempt)))
-            if last_error is not None:
-                raise last_error
-        downloaded["aifs_grib"] = str(aifs_path)
-        for metric, metric_targets in sorted(targets_by_metric.items()):
-            scope_cities = sorted({target.city for target in metric_targets})
-            scope_dates = sorted({target.target_date for target in metric_targets})
-            manifests.append(
-                RawForecastArtifactManifest.from_file(
-                    aifs_path,
-                    source_id="ecmwf_aifs_ens",
-                    product_id="ecmwf_aifs_ens_sampled_2t_6h_v1",
-                    data_version=METRIC_TO_AIFS_VERSION[metric],
-                    source_cycle_time=cycle.isoformat(),
-                    source_available_at=source_available.isoformat(),
-                    captured_at=max(captured_at, source_available).isoformat(),
-                    request_url="ecmwf-opendata://aifs-ens/2t/current-targets",
-                    request_params=request.retrieve_kwargs(),
-                    product_metadata={
-                        "artifact_class": "aifs_sampled_2t_grib_current_targets",
-                        "cities": scope_cities,
-                        "target_dates": scope_dates,
-                        "metric": metric,
-                        "source_run_id": f"aifs-current-targets-{metric}-{cycle.strftime('%Y%m%dT%H%M%SZ')}",
-                    },
-                )
-            )
-
-    if not skip_openmeteo:
-        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import BucketTransportNotAdmissible
-
-        for target in targets:
-            city_config = cities_by_name.get(target.city)
-            if city_config is None:
-                continue
-            payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
-            precision_path = raw_dir / f"openmeteo_precision_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}.json"
-            request = build_anchor_request(
-                latitude=float(city_config.lat),
-                longitude=float(city_config.lon),
-                run=cycle,
-                timezone_name=city_config.timezone,
-                forecast_hours=120,
-            )
-            anchor_transport_provenance: dict[str, object] = {
-                "openmeteo_endpoint": "single_runs_api",
-                "run_authority": "run_pinned_single_runs",
-            }
-            # Per-city fault isolation (2026-06-11): one city for which NO rung can serve this
-            # cycle (BucketTransportNotAdmissible — single-runs 400 + meta older-run + (bucket
-            # un-declared OR city not whitelisted OR a step unwritten)) must NOT abort the
-            # whole batch. The city is recorded as skipped and the loop continues; it falls to
-            # a higher rung next tick. This preserves — never weakens — the rung-2 refusal:
-            # a non-admissible city simply gets no artifact this cycle.
-            if not payload_path.exists():
-                # Transport ladder (operator directive 2026-06-11, K4.0b(f)): rung 1 run-pinned
-                # single-runs → rung 2 meta-stamped standard → rung 3 S3 bucket partial-run.
-                # _resolve_anchor_payload encapsulates the whole ladder and returns
-                # (payload, provenance), or raises BucketTransportNotAdmissible when NO rung can
-                # serve this city this cycle (so the city is skipped, not the batch aborted).
-                try:
-                    payload, anchor_transport_provenance = _resolve_anchor_payload(
-                        request=request,
-                        city=target.city,
-                        target_date=target.target_date,
-                        timezone_name=city_config.timezone,
-                    )
-                except BucketTransportNotAdmissible as not_admissible:
-                    skipped_cities.append(
-                        {
-                            "city": target.city,
-                            "target_date": target.target_date,
-                            "metric": target.temperature_metric,
-                            "reason": str(not_admissible)[:200],
-                        }
-                    )
-                    continue
-                _write_json(payload_path, payload)
-            _write_json(precision_path, _precision_metadata(target.city, target.target_date, anchor_sigma_c=anchor_sigma_c))
-            downloaded["openmeteo_payload_count"] = int(downloaded["openmeteo_payload_count"]) + 1
-            downloaded["precision_metadata_count"] = int(downloaded["precision_metadata_count"]) + 1
-            # source_available_at semantics by transport (Fitz #4): the API release-lag
-            # (cycle + ~14h) models when single-runs/standard PUBLISH a run. The S3 bucket
-            # serves a run's steps the moment they are WRITTEN — hours BEFORE that lag (the
-            # whole point of rung 3). Tagging a bucket artifact with the API lag would push its
-            # source_available_at into the future and hide it from seed discovery's
-            # availability filter (it admits only manifests with source_available_at <= now),
-            # so the early data would never materialize. For a bucket read the data is
-            # available at capture time; for rungs 1-2 keep the API release-lag.
-            is_bucket = str(anchor_transport_provenance.get("run_authority", "")).startswith("bucket_partial_run")
-            effective_source_available = captured_at if is_bucket else source_available
-            manifests.append(
-                build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
-                    payload_path,
+        anchor_transport_provenance: dict[str, object] = {
+            "openmeteo_endpoint": "single_runs_api",
+            "run_authority": "run_pinned_single_runs",
+        }
+        # Per-city fault isolation (2026-06-11): one city for which NO rung can serve this
+        # cycle (BucketTransportNotAdmissible — single-runs 400 + meta older-run + (bucket
+        # un-declared OR city not whitelisted OR a step unwritten)) must NOT abort the
+        # whole batch. The city is recorded as skipped and the loop continues; it falls to
+        # a higher rung next tick. This preserves — never weakens — the rung-2 refusal:
+        # a non-admissible city simply gets no artifact this cycle.
+        if not payload_path.exists():
+            # Transport ladder (operator directive 2026-06-11, K4.0b(f)): rung 1 run-pinned
+            # single-runs → rung 2 meta-stamped standard → rung 3 S3 bucket partial-run.
+            # _resolve_anchor_payload encapsulates the whole ladder and returns
+            # (payload, provenance), or raises BucketTransportNotAdmissible when NO rung can
+            # serve this city this cycle (so the city is skipped, not the batch aborted).
+            try:
+                payload, anchor_transport_provenance = _resolve_anchor_payload(
                     request=request,
-                    metric=target.temperature_metric,
-                    source_available_at=effective_source_available.isoformat(),
-                    captured_at=max(captured_at, effective_source_available).isoformat(),
-                    product_metadata={
-                        "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
-                        "city": target.city,
-                        "cities": [target.city],
-                        "target_date": target.target_date,
-                        "target_dates": [target.target_date],
-                        "metric": target.temperature_metric,
-                        "source_run_id": (
-                            f"openmeteo-current-targets-{_safe_name(target.city)}-"
-                            f"{target.temperature_metric}-{cycle.strftime('%Y%m%dT%H%M%SZ')}"
-                        ),
-                        "openmeteo_payload_json": str(payload_path),
-                        "precision_metadata_json": str(precision_path),
-                        **anchor_transport_provenance,
-                    },
+                    city=target.city,
+                    target_date=target.target_date,
+                    timezone_name=city_config.timezone,
                 )
+            except BucketTransportNotAdmissible as not_admissible:
+                skipped_cities.append(
+                    {
+                        "city": target.city,
+                        "target_date": target.target_date,
+                        "metric": target.temperature_metric,
+                        "reason": str(not_admissible)[:200],
+                    }
+                )
+                continue
+            _write_json(payload_path, payload)
+        _write_json(precision_path, _precision_metadata(target.city, target.target_date, anchor_sigma_c=anchor_sigma_c))
+        downloaded["openmeteo_payload_count"] = int(downloaded["openmeteo_payload_count"]) + 1
+        downloaded["precision_metadata_count"] = int(downloaded["precision_metadata_count"]) + 1
+        # source_available_at semantics by transport (Fitz #4): the API release-lag
+        # (cycle + ~14h) models when single-runs/standard PUBLISH a run. The S3 bucket
+        # serves a run's steps the moment they are WRITTEN — hours BEFORE that lag (the
+        # whole point of rung 3). Tagging a bucket artifact with the API lag would push its
+        # source_available_at into the future and hide it from seed discovery's
+        # availability filter (it admits only manifests with source_available_at <= now),
+        # so the early data would never materialize. For a bucket read the data is
+        # available at capture time; for rungs 1-2 keep the API release-lag.
+        is_bucket = str(anchor_transport_provenance.get("run_authority", "")).startswith("bucket_partial_run")
+        effective_source_available = captured_at if is_bucket else source_available
+        manifests.append(
+            build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
+                payload_path,
+                request=request,
+                metric=target.temperature_metric,
+                source_available_at=effective_source_available.isoformat(),
+                captured_at=max(captured_at, effective_source_available).isoformat(),
+                product_metadata={
+                    "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+                    "city": target.city,
+                    "cities": [target.city],
+                    "target_date": target.target_date,
+                    "target_dates": [target.target_date],
+                    "metric": target.temperature_metric,
+                    "source_run_id": (
+                        f"openmeteo-current-targets-{_safe_name(target.city)}-"
+                        f"{target.temperature_metric}-{cycle.strftime('%Y%m%dT%H%M%SZ')}"
+                    ),
+                    "openmeteo_payload_json": str(payload_path),
+                    "precision_metadata_json": str(precision_path),
+                    **anchor_transport_provenance,
+                },
             )
+        )
 
     written_manifests: list[str] = []
     db_artifact_ids: list[int] = []
     conn = None
     if write_db:
         conn = _connect(forecast_db, write_class="live")
-        ensure_replacement_forecast_shadow_schema(conn)
+        ensure_replacement_forecast_live_schema(conn)
         # BEGIN IMMEDIATE: take the write lock up front so busy_timeout WAITS for it,
         # instead of a deferred BEGIN failing on the SELECT->INSERT upgrade under
         # rollback-journal (delete) mode contention (the forecast-DB lock storm).
@@ -564,18 +480,40 @@ def download_current_target_raw_inputs(
     }
 
 
+def download_current_target_openmeteo_inputs(
+    *,
+    forecast_db: Path,
+    output_dir: Path,
+    cycle: datetime,
+    limit: int | None,
+    write_db: bool,
+    release_lag_hours: float,
+    anchor_sigma_c: float,
+    include_covered: bool = False,
+) -> dict[str, object]:
+    """Live replacement-chain downloader for Open-Meteo current-target inputs."""
+
+    return download_current_target_raw_inputs(
+        forecast_db=forecast_db,
+        output_dir=output_dir,
+        cycle=cycle,
+        limit=limit,
+        write_db=write_db,
+        release_lag_hours=release_lag_hours,
+        anchor_sigma_c=anchor_sigma_c,
+        include_covered=include_covered,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Download current replacement forecast raw inputs")
     parser.add_argument("--forecast-db", type=Path, default=ROOT / "state" / "zeus-forecasts.db")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "state" / "replacement_forecast_shadow" / "raw_manifests")
-    parser.add_argument("--cycle", help="UTC cycle datetime; default = probe-resolved newest published pair-complete cycle")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "state" / "replacement_forecast_live" / "raw_manifests")
+    parser.add_argument("--cycle", help="UTC cycle datetime; default = probe-resolved newest published anchor-complete cycle")
     parser.add_argument("--release-lag-hours", type=float, default=14.0)
     parser.add_argument("--anchor-sigma-c", type=float, default=3.0)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--write-db", action="store_true")
-    parser.add_argument("--skip-aifs", action="store_true")
-    parser.add_argument("--skip-openmeteo", action="store_true")
-    parser.add_argument("--aifs-retries", type=int, default=4)
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--stdout", action="store_true")
     args = parser.parse_args(argv)
@@ -583,13 +521,13 @@ def main(argv: list[str] | None = None) -> int:
         cycle = _parse_cycle(args.cycle, now=datetime.now(tz=UTC), release_lag_hours=args.release_lag_hours)
     else:
         # Run-selection single authority (2026-06-11): no explicit cycle → the probe-resolved
-        # newest pair-complete published cycle, same as the production jobs. Never a guess.
+        # newest anchor-complete published cycle, same as the production jobs. Never a guess.
         from src.data.replacement_forecast_production import _probe_resolved_available_cycle
 
         maybe_cycle = _probe_resolved_available_cycle()
         if maybe_cycle is None:
             print(
-                json.dumps({"status": "CYCLE_PROBE_UNRESOLVED", "detail": "no pair-complete cycle provable by provider probes; pass --cycle to override"}),
+                json.dumps({"status": "CYCLE_PROBE_UNRESOLVED", "detail": "no anchor-complete cycle provable by provider probes; pass --cycle to override"}),
                 file=sys.stderr,
             )
             return 2
@@ -601,11 +539,8 @@ def main(argv: list[str] | None = None) -> int:
             cycle=cycle,
             limit=args.limit,
             write_db=args.write_db,
-            skip_aifs=args.skip_aifs,
-            skip_openmeteo=args.skip_openmeteo,
             release_lag_hours=args.release_lag_hours,
             anchor_sigma_c=args.anchor_sigma_c,
-            aifs_retries=args.aifs_retries,
             # An EXPLICIT --cycle is an operator instruction to (re)download THAT cycle's
             # raw inputs for the whole current window — coverage must not filter it.
             include_covered=bool(args.cycle),

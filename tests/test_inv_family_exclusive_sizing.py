@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-06-18
 # Purpose: Relationship antibody (Fitz §3) — mutually-exclusive weather bins
 #          (one city/date/metric partition) must NOT emit independent live
 #          orders. P0-1 STAGE A single-best entry gate.
@@ -47,8 +47,8 @@ from src.engine.evaluator import EdgeDecision
 from src.strategy.family_exclusive_dedup import (
     FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
-    NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG,
-    NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG,
+    BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG,
+    BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG,
     WeatherFamilyExposureReducer,
     WeatherFamilyExposure,
     WeatherFamilyKey,
@@ -331,12 +331,12 @@ def test_open_pending_active_family_exposure_blocks_fdr_selected_hypothesis_with
     assert "FDR" not in rejected.rejection_stage
 
 
-def test_known_different_market_family_exposure_does_not_block_replacement_market() -> None:
-    """Known venue family identity narrows B2 exposure blocking.
+def test_known_different_market_family_exposure_still_blocks_same_weather_partition() -> None:
+    """Venue family identity must not narrow weather partition blocking.
 
-    City/date/metric remains the conservative fallback, but when both old and
-    new sides carry explicit market-family ids, only the same event family can
-    block replacement/reopened weather markets.
+    Market slugs and condition ids can identify a bin rather than the physical
+    city/date/metric underlying, so live entry gating must block any open same
+    weather partition exposure even when both sides carry different ids.
     """
     bins = {s[2]: s for s in _BIN_SPECS}
     new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
@@ -359,8 +359,9 @@ def test_known_different_market_family_exposure_does_not_block_replacement_marke
         enabled=True,
     )
 
-    assert _count_trades(out) == 1
-    assert out[0].should_trade is True
+    assert _count_trades(out) == 0
+    assert out[0].should_trade is False
+    assert out[0].rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
 
 
 def test_unknown_market_family_exposure_blocks_conservatively() -> None:
@@ -544,6 +545,47 @@ def test_trade_db_family_exposures_include_live_entry_commands(tmp_path) -> None
             bin_label="20-21°F",
             phase="pending_entry",
             position_id="pos-1",
+        )
+    ]
+
+
+def test_trade_db_family_exposures_include_open_position_without_command_row(tmp_path) -> None:
+    """EDLI/chain-bridged holdings must block family siblings even without commands."""
+    import sqlite3
+
+    db_path = tmp_path / "family-exposure-position-only.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            bin_label TEXT,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            cost_basis_usd REAL,
+            chain_cost_basis_usd REAL
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("pos-live", CITY, TARGET_DATE, METRIC, "20-21°F", "active", 0.0, 7.0, 0.0, 5.53),
+    )
+
+    exposures = weather_family_exposures_from_trade_db(conn)
+
+    assert exposures == [
+        WeatherFamilyExposure(
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+            bin_label="20-21°F",
+            phase="active",
+            position_id="pos-live",
         )
     ]
 
@@ -826,9 +868,9 @@ def test_weather_family_decision_is_first_class_single_leg_intent() -> None:
     assert family_decision is not None
     assert family_decision.family_portfolio_intent is True
     assert family_decision.portfolio.family_key == WeatherFamilyKey(CITY, TARGET_DATE, METRIC)
-    assert family_decision.portfolio.selected_leg is mid_bin
-    assert family_decision.portfolio.selected_legs == (mid_bin,)
-    assert family_decision.portfolio.fallback_candidate_legs == (mid_bin, low_price_tail)
+    assert family_decision.portfolio.selected_leg is low_price_tail
+    assert family_decision.portfolio.selected_legs == (low_price_tail,)
+    assert family_decision.portfolio.fallback_candidate_legs == (low_price_tail, mid_bin)
     assert family_decision.portfolio.objective.startswith("expected_log_growth_payoff_vector")
     assert family_decision.portfolio.payoff_matrix
     assert family_decision.dropped == ()
@@ -852,11 +894,11 @@ def test_family_decision_retains_ranked_fallback_candidates_before_execution_via
     )
 
     assert family_decision is not None
-    assert family_decision.portfolio.selected_leg is mid_bin
+    assert family_decision.portfolio.selected_leg is low_price_tail
     assert family_decision.portfolio.fallback_candidate_legs == (
+        low_price_tail,
         mid_bin,
         side_bin,
-        low_price_tail,
     )
     assert [d.dropped_bin for d in family_decision.dropped] == ["19°F or below"]
 
@@ -865,8 +907,8 @@ def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monke
     """Live-disabled buy_no is a structural non-executable leg, not fallback capacity."""
 
     flags = dict(evaluator_module.settings["feature_flags"])
-    flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = True
-    flags[NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = False
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = True
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG] = False
     monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
 
     bins = {s[2]: s for s in _BIN_SPECS}
@@ -886,21 +928,21 @@ def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monke
     )
 
     assert family_decision is not None
-    assert family_decision.portfolio.selected_leg is best_buy_yes
+    assert family_decision.portfolio.selected_leg is fallback_buy_yes
     assert family_decision.portfolio.fallback_candidate_legs == (
-        best_buy_yes,
         fallback_buy_yes,
+        best_buy_yes,
     )
     assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
-    assert family_decision.dropped[0].rejection_reason == "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+    assert family_decision.dropped[0].rejection_reason == "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED"
 
 
 def test_family_decision_all_live_disabled_buy_no_does_not_self_drop(monkeypatch) -> None:
     """If no executable sibling exists, blocked diagnostics must not mark the selected leg dropped."""
 
     flags = dict(evaluator_module.settings["feature_flags"])
-    flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = True
-    flags[NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = False
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = True
+    flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG] = False
     monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
 
     bins = {s[2]: s for s in _BIN_SPECS}

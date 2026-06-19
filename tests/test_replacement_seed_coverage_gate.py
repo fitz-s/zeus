@@ -27,13 +27,13 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from src.data.replacement_forecast_shadow_materialization_queue import _seed_already_covered
+from src.data.replacement_forecast_live_materialization_queue import SOURCE_ID, _seed_already_covered
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
 
 
 UTC = timezone.utc
-_SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
+_SOURCE_ID = SOURCE_ID
 _STRATEGY_KEY = _SOURCE_ID
 _CITY = "Shanghai"
 _TARGET_DATE = "2026-06-07"
@@ -68,10 +68,10 @@ def _insert_posterior(db_path: str, *, q_lcb_json: str | None) -> None:
         INSERT INTO forecast_posteriors (
             source_id, product_id, data_version, city, target_date,
             temperature_metric, source_cycle_time, source_available_at,
-            computed_at, q_json, q_lcb_json, posterior_method,
+            computed_at, q_json, q_lcb_json, q_ucb_json, posterior_method,
             dependency_source_run_ids_json, provenance_json,
-            trade_authority_status, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            runtime_layer, training_allowed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             _SOURCE_ID,
@@ -85,10 +85,11 @@ def _insert_posterior(db_path: str, *, q_lcb_json: str | None) -> None:
             "2026-06-06T01:30:00+00:00",
             json.dumps({"cold": 0.2, "warm": 0.8}),
             q_lcb_json,
+            None if q_lcb_json is None else json.dumps({"cold": 0.3, "warm": 0.9}),
             "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
             json.dumps({"baseline_b0": _BASELINE_RUN}),
-            json.dumps({"city": _CITY}),
-            "SHADOW_ONLY",
+                json.dumps({"city": _CITY, "q_lcb_basis": "fused_center_bootstrap_p05"}),
+            "live",
             0,
         ),
     )
@@ -109,7 +110,7 @@ def _insert_readiness(db_path: str, *, expires_at: datetime) -> None:
             "readiness:test",
             f"{_CITY}|{_TARGET_DATE}|{_METRIC}",
             "strategy",
-            "SHADOW_ONLY",
+            "READY",
             "2026-06-06T01:30:00+00:00",
             _STRATEGY_KEY,
             expires_at.isoformat(),

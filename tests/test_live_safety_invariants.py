@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-06-17
 # Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -3104,8 +3104,11 @@ def test_day0_closed_non_accepting_market_skips_exit_monitor_chain_missing(monke
         deps=deps,
     )
 
-    assert portfolio_dirty is False
+    assert portfolio_dirty is True
     assert tracker_dirty is False
+    assert pos.state == "pending_exit"
+    assert pos.exit_state == "backoff_exhausted"
+    assert pos.exit_reason == "MARKET_CLOSED_AWAITING_SETTLEMENT"
     assert summary["monitor_skipped_closed_market_pending_settlement"] == 1
     assert "monitor_chain_missing" not in summary
     assert "monitor_incomplete_exit_context" not in summary
@@ -3113,6 +3116,59 @@ def test_day0_closed_non_accepting_market_skips_exit_monitor_chain_missing(monke
     assert monitor_results[0].exit_reason == "MARKET_CLOSED_AWAITING_SETTLEMENT"
     assert monitor_results[0].fresh_prob is None
     assert monitor_results[0].fresh_edge is None
+
+
+def test_day0_closed_market_detection_uses_static_market_end_when_clob_info_missing():
+    """Missing post-close CLOB info must not send held positions into stale quote retry."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="snapshot-closed-day0-001",
+        state="day0_window",
+        chain_state="synced",
+        city="Chicago",
+        target_date="2026-04-01",
+        market_id="0xsnapshotclosed",
+        condition_id="0xsnapshotclosed",
+    )
+
+    class Row(dict):
+        def __getitem__(self, key):
+            if isinstance(key, int):
+                return list(self.values())[key]
+            return super().__getitem__(key)
+
+    class SnapshotConn:
+        def execute(self, sql, params=()):
+            assert params == ("0xsnapshotclosed",)
+
+            class Cursor:
+                def fetchone(self):
+                    return Row(
+                        snapshot_id="snap-market-ended",
+                        condition_id="0xsnapshotclosed",
+                        market_end_at="2026-04-01T12:00:00+00:00",
+                        market_close_at=None,
+                        captured_at="2026-04-01T11:45:00+00:00",
+                    )
+
+            return Cursor()
+
+    class MissingMarketInfoClob:
+        def get_clob_market_info(self, condition_id):
+            raise RuntimeError("post-close market info unavailable")
+
+    info = cycle_runtime._closed_non_accepting_market_info(
+        MissingMarketInfoClob(),
+        pos,
+        SnapshotConn(),
+        decision_time=datetime(2026, 4, 1, 18, 30, tzinfo=timezone.utc),
+    )
+
+    assert info is not None
+    assert info["source"] == "executable_snapshot_market_end"
+    assert info["condition_id"] == "0xsnapshotclosed"
+    assert info["accepting_orders"] is False
 
 
 def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
@@ -3539,6 +3595,7 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
     assert payload["last_monitor_market_price"] == pytest.approx(0.44)
     assert payload["selected_method"] == "emos"
     assert payload["applied_validations"] == ["identity_one_calibrator"]
+    assert payload["exit_decision_available"] is False
 
     current = conn.execute(
         """
@@ -3557,8 +3614,95 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
     conn.close()
 
 
-def test_monitoring_phase_persists_monitor_evidence_before_exit_evaluation(tmp_path, monkeypatch):
-    """Exit evaluation must not consume monitor evidence that was never projected."""
+def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
+    """Monitor refresh must not roll a chain-corrected position back to stale fill size."""
+    from src.engine.lifecycle_events import (
+        build_entry_canonical_write,
+        build_monitor_refreshed_canonical_write,
+    )
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    conn = get_connection(tmp_path / "monitor-refresh-preserve-chain.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="monitor-preserve-chain-1",
+        state="holding",
+        city="Shenzhen",
+        target_date="2026-06-19",
+        order_id="o-monitor-preserve-chain",
+        entered_at="2026-06-17T16:33:02+00:00",
+        order_posted_at="2026-06-17T16:32:37+00:00",
+        order_status="filled",
+        strategy_key="opening_inertia",
+        bin_label="32C",
+        condition_id="0xmonitorpreservechain000000000000000000000000000000000000001",
+        size_usd=9.99,
+        shares=13.5,
+        cost_basis_usd=9.99,
+        entry_price=0.74,
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-monitor-preserve-chain-seed",
+        source_module="tests/test_monitor_refresh_preserves_chain_corrected_entry_economics",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET size_usd = 44.4,
+               shares = 60.0,
+               cost_basis_usd = 44.4,
+               entry_price = 0.74,
+               chain_shares = 60.0,
+               chain_avg_price = 0.74,
+               chain_cost_basis_usd = 44.4,
+               chain_seen_at = '2026-06-17T20:51:29+00:00'
+         WHERE position_id = ?
+        """,
+        ("monitor-preserve-chain-1",),
+    )
+
+    pos.last_monitor_prob = 0.869
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_edge = 0.133
+    pos.last_monitor_market_price = 0.735
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_at = "2026-06-17T20:53:17+00:00"
+    monitor_events, monitor_projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=4,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        source_module="tests/test_monitor_refresh_preserves_chain_corrected_entry_economics",
+    )
+    append_many_and_project(conn, monitor_events, monitor_projection)
+
+    current = conn.execute(
+        """
+        SELECT size_usd, shares, cost_basis_usd, chain_shares,
+               chain_cost_basis_usd, last_monitor_prob, last_monitor_edge,
+               last_monitor_market_price, updated_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        ("monitor-preserve-chain-1",),
+    ).fetchone()
+    assert current["size_usd"] == pytest.approx(44.4)
+    assert current["shares"] == pytest.approx(60.0)
+    assert current["cost_basis_usd"] == pytest.approx(44.4)
+    assert current["chain_shares"] == pytest.approx(60.0)
+    assert current["chain_cost_basis_usd"] == pytest.approx(44.4)
+    assert current["last_monitor_prob"] == pytest.approx(0.869)
+    assert current["last_monitor_edge"] == pytest.approx(0.133)
+    assert current["last_monitor_market_price"] == pytest.approx(0.735)
+    assert current["updated_at"] == "2026-06-17T20:53:17+00:00"
+    conn.close()
+
+
+def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monkeypatch):
+    """Monitor refresh canonical evidence must include the final hold/exit decision."""
     from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime
     from src.engine.lifecycle_events import build_entry_canonical_write
@@ -3613,19 +3757,18 @@ def test_monitoring_phase_persists_monitor_evidence_before_exit_evaluation(tmp_p
         )
 
     def fake_evaluate_exit(self, exit_context):
-        row = conn.execute(
-            """
-            SELECT last_monitor_prob, last_monitor_market_price, updated_at
-              FROM position_current
-             WHERE position_id = ?
-            """,
+        prior_monitor_events = conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'",
             (self.trade_id,),
-        ).fetchone()
-        assert row is not None
-        assert row["last_monitor_prob"] == pytest.approx(0.62)
-        assert row["last_monitor_market_price"] == pytest.approx(0.44)
-        assert row["updated_at"] == "2026-04-01T05:00:00+00:00"
-        return ExitDecision(False, reason="HOLD", selected_method=self.selected_method or self.entry_method)
+        ).fetchone()[0]
+        assert prior_monitor_events == 0
+        return ExitDecision(
+            False,
+            reason="CI_OVERLAP_HOLD",
+            trigger="CI_OVERLAP_HOLD",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["replacement_posterior", "ci_overlap_hold"],
+        )
 
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
     monkeypatch.setattr(Position, "evaluate_exit", fake_evaluate_exit)
@@ -3671,6 +3814,25 @@ def test_monitoring_phase_persists_monitor_evidence_before_exit_evaluation(tmp_p
         ).fetchone()[0]
         == 1
     )
+    event = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+        """,
+        ("monitor-before-exit-1",),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert payload["last_monitor_prob"] == pytest.approx(0.62)
+    assert payload["last_monitor_market_price"] == pytest.approx(0.44)
+    assert payload["exit_decision_available"] is True
+    assert payload["exit_decision_should_exit"] is False
+    assert payload["exit_decision_reason"] == "CI_OVERLAP_HOLD"
+    assert payload["exit_decision_trigger"] == "CI_OVERLAP_HOLD"
+    assert payload["exit_decision_applied_validations"] == [
+        "replacement_posterior",
+        "ci_overlap_hold",
+    ]
     conn.close()
 
 
@@ -3748,8 +3910,13 @@ def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     assert pos.state == "day0_window"
     assert observed_methods == [EntryMethod.DAY0_OBSERVATION.value]
     assert pos.entry_method == EntryMethod.ENS_MEMBER_COUNTING.value
-    assert pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
-    assert pos.applied_validations == [EntryMethod.DAY0_OBSERVATION.value]
+    assert (
+        pos.selected_method
+        == monitor_refresh.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+    )
+    assert EntryMethod.DAY0_OBSERVATION.value in pos.applied_validations
+    assert "day0_observation_remaining_window" in pos.applied_validations
+    assert "whale_toxicity_deferred:fresh_probability_authority" in pos.applied_validations
     assert pos.last_monitor_prob == pytest.approx(0.52)
     assert pos.last_monitor_market_price == pytest.approx(0.41)
     assert summary["monitors"] == 1
@@ -3788,8 +3955,12 @@ def test_day0_window_refresh_uses_day0_observation_semantics(monkeypatch):
 
     assert observed_methods == [EntryMethod.DAY0_OBSERVATION.value]
     assert pos.entry_method == "ens_member_counting"
-    assert pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
+    assert (
+        pos.selected_method
+        == monitor_refresh.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+    )
     assert EntryMethod.DAY0_OBSERVATION.value in pos.applied_validations
+    assert "day0_observation_remaining_window" in pos.applied_validations
     assert edge_ctx.p_posterior == pytest.approx(0.52)
     assert edge_ctx.entry_provenance == EntryMethod.ENS_MEMBER_COUNTING
     assert pos.last_monitor_prob == pytest.approx(0.52)
@@ -3849,6 +4020,74 @@ def test_day0_wu_observation_unavailable_falls_back_to_forecast_origin_monitor(m
     assert pos.selected_method == EntryMethod.ENS_MEMBER_COUNTING.value
     assert "day0_observation_unavailable:forecast_monitor_fallback" in pos.applied_validations
     assert "q_source:emos" in pos.applied_validations
+
+
+def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
+    """Tokyo LOW regression: absorbing hard fact is exact monitor belief."""
+    from src.engine import monitor_refresh
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
+
+    pos = _make_position(
+        state="day0_window",
+        city="Tokyo",
+        cluster="East Asia",
+        target_date="2026-06-18",
+        bin_label="21°C on June 18?",
+        direction="buy_no",
+        temperature_metric="low",
+        unit="C",
+        entry_method="ens_member_counting",
+        selected_method="",
+        applied_validations=[],
+        entry_price=0.58,
+        p_posterior=0.720612963366361,
+        token_id="tok_yes_tokyo_low_21",
+        no_token_id="tok_no_tokyo_low_21",
+    )
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            assert token_id == "tok_no_tokyo_low_21"
+            return 0.99, 1.00, 100.0, 100.0
+
+    monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda *, position, city, now=None, world_conn=None: HardFactVerdict(
+            action="HOLD_STRUCTURAL_WIN",
+            reason="running low extreme 20 killed bin [21.0,21.0]",
+            metric="low",
+            rounded_extreme=20.0,
+            source="metar_fast_lane",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.engine.position_belief.load_replacement_belief",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("replacement posterior must not be read before absorbing hard fact")
+        ),
+    )
+
+    edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)
+
+    assert pos.selected_method == monitor_refresh.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
+    assert pos.last_monitor_prob_is_fresh is True
+    assert pos.last_monitor_prob == pytest.approx(1.0)
+    assert pos.last_monitor_market_price == pytest.approx(0.99)
+    assert pos.last_monitor_edge == pytest.approx(0.01)
+    assert edge_ctx.p_posterior == pytest.approx(1.0)
+    assert edge_ctx.forward_edge == pytest.approx(0.01)
+    assert monitor_refresh.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT in pos.applied_validations
+    belief_tags = [
+        tag for tag in pos.applied_validations
+        if str(tag).startswith("belief_source=day0_absorbing_hard_fact;")
+    ]
+    assert belief_tags
+    assert "yes_verdict=YES_DEAD" in belief_tags[0]
+    assert "held_verdict=STRUCTURAL_WIN" in belief_tags[0]
+    assert "held_prob=1.000000" in belief_tags[0]
+    assert "forecast_posteriors_dominated_by_day0_hard_fact" in pos.applied_validations
+    assert "model_divergence_panic_inapplicable:day0_absorbing_hard_fact" in pos.applied_validations
 
 
 def test_day0_high_morning_observation_is_not_exit_authority():
@@ -3967,9 +4206,10 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
     monkeypatch.setattr(
         monitor_refresh,
         "_day0_observation_quality_rejection_reason",
-        lambda city, obs, metric, decision_time=None: _orig_quality_gate(
+        lambda city, obs, metric, decision_time=None, **kwargs: _orig_quality_gate(
             city, obs, metric,
             decision_time=datetime(2026, 6, 7, 15, 10, tzinfo=timezone.utc),
+            **kwargs,
         ),
     )
     monkeypatch.setattr(
@@ -4033,7 +4273,10 @@ def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
 
     assert observed_markets == [pytest.approx(pos.entry_price)]
     assert pos.entry_method == EntryMethod.ENS_MEMBER_COUNTING.value
-    assert pos.selected_method == EntryMethod.DAY0_OBSERVATION.value
+    assert (
+        pos.selected_method
+        == monitor_refresh.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+    )
     assert pos.last_monitor_market_price == pytest.approx(0.37)
     assert pos.last_monitor_best_bid == pytest.approx(0.37)
     assert pos.last_monitor_best_ask == pytest.approx(0.55)
@@ -4138,11 +4381,12 @@ def test_live_exit_collateral_blocked_goes_to_retry():
     outcome = execute_exit(
         portfolio=portfolio,
         position=pos,
-        exit_context=ExitContext(
-            exit_reason="EDGE_REVERSAL",
-            current_market_price=0.45,
-            best_bid=None,
-        ),
+            exit_context=ExitContext(
+                exit_reason="EDGE_REVERSAL",
+                current_market_price=0.45,
+                current_market_price_is_fresh=True,
+                best_bid=None,
+            ),
         clob=clob,
     )
 
@@ -5120,6 +5364,30 @@ def test_live_execute_exit_blocks_incomplete_context():
     assert pos.exit_state == "retry_pending"
     assert pos.exit_retry_count == 1
     assert pos.last_exit_error == "missing_current_market_price"
+    assert pos in portfolio.positions
+
+
+def test_live_execute_exit_blocks_stale_market_price_context():
+    """Direct execute_exit callers must not place exits from stale price evidence."""
+    pos = _make_position(state="holding")
+    portfolio = _make_portfolio(pos)
+    clob = _make_clob()
+
+    outcome = execute_exit(
+        portfolio=portfolio,
+        position=pos,
+        exit_context=ExitContext(
+            exit_reason="EDGE_REVERSAL",
+            current_market_price=0.45,
+            current_market_price_is_fresh=False,
+        ),
+        clob=clob,
+    )
+
+    assert outcome == "exit_blocked: stale_market_price"
+    assert pos.exit_state == "retry_pending"
+    assert pos.exit_retry_count == 1
+    assert pos.last_exit_error == "stale_current_market_price"
     assert pos in portfolio.positions
 
 

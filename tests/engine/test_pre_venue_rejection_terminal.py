@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -118,3 +119,38 @@ def test_post_venue_unknown_still_blocks_as_post_submit_unknown():
     assert result.venue_call_started is True
     assert result.side_effect_known is False
     assert result.reconciliation_followup_required is True
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "entry_cooldown:same_token_entry_cooling_down",
+        "duplicate_entry_same_token:open_position_same_token",
+    ],
+)
+def test_executor_designed_pre_submit_rejections_do_not_count_as_venue_rejects(reason):
+    """Local executor gates reject before SDK submission and must not emit venue ACK evidence."""
+
+    def _executor_submit(intent, conn=None, decision_id="", snapshot_conn=None):
+        return SimpleNamespace(
+            status="rejected",
+            reason=reason,
+            command_state=None,
+            order_id=None,
+            external_order_id=None,
+        )
+
+    result = submit_event_bound_final_intent_via_existing_executor(
+        final_intent_cert=_FINAL,
+        execution_command_cert=_COMMAND,
+        conn=None,  # type: ignore[arg-type]
+        decision_time=_now(),
+        executor_submit=_executor_submit,
+    )
+
+    assert result.status == "PRE_SUBMIT_ERROR"
+    assert result.reason_code == reason
+    assert result.venue_call_started is False
+    assert result.venue_ack_received is False
+    assert result.side_effect_known is True
+    assert result.reconciliation_followup_required is False

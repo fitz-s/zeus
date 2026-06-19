@@ -21,13 +21,13 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 
 def _forecast_db(tmp_path: Path) -> Path:
     db = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db))
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     conn.commit()
     conn.close()
     return db
@@ -95,7 +95,9 @@ def test_request_params_and_identity_persisted(tmp_path) -> None:
 
 def test_previous_runs_records_om_previous_runs_product(tmp_path) -> None:
     """The previous_runs rows must record source_family='openmeteo_previous_runs' and the
-    correct per-model previous-runs source_id (e.g. gfs_global -> gfs_previous_runs)."""
+    correct per-model previous-runs source_id (e.g. icon_global -> icon_previous_runs).
+    (2026-06-17: the example was gfs_global; gfs_global was dropped from the fusion and is no
+    longer fetched, so the pin moved to the still-fetched icon_global.)"""
     from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
@@ -111,9 +113,9 @@ def test_previous_runs_records_om_previous_runs_product(tmp_path) -> None:
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         """SELECT source_id, source_family, product_id FROM raw_model_forecasts
-           WHERE model='gfs_global' AND endpoint='previous_runs'"""
+           WHERE model='icon_global' AND endpoint='previous_runs'"""
     ).fetchone()
     conn.close()
     assert row is not None
     assert row["source_family"] == "openmeteo_previous_runs"
-    assert row["source_id"] == "gfs_previous_runs"
+    assert row["source_id"] == "icon_previous_runs"

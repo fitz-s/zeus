@@ -222,6 +222,19 @@ class RejectionReason(str, Enum):
         RejectionCategory.DESIGNED_GATE,
         "day0 hard-fact authority (observed extreme) contradicts the candidate.",
     )
+    ENTRY_COOLDOWN = (
+        "entry_cooldown",
+        RejectionCategory.DESIGNED_GATE,
+        "Duplicate-entry suppression while the same token/direction is cooling down "
+        "or already active; prevents repeated same-order submission.",
+    )
+    OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED = (
+        "OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED",
+        RejectionCategory.DESIGNED_GATE,
+        "A new-entry candidate's token is already present in canonical "
+        "position_current; the monitor/exit lifecycle owns further decisions for "
+        "that exposure, so the entry selector excludes it before executor submit.",
+    )
     LIVE_CANARY_DISABLED = (
         "LIVE_CANARY_DISABLED",
         RejectionCategory.DESIGNED_GATE,

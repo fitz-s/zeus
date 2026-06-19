@@ -57,7 +57,7 @@ def _create_db(path) -> None:
             CREATE TABLE readiness_state (
                 readiness_id TEXT PRIMARY KEY,
                 strategy_key TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'SHADOW_ONLY',
+                status TEXT NOT NULL DEFAULT 'READY',
                 dependency_json TEXT NOT NULL DEFAULT '{}',
                 provenance_json TEXT NOT NULL,
                 expires_at TEXT
@@ -134,7 +134,7 @@ def _create_db(path) -> None:
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
                 'Paris', '2026-06-09', 'high',
                 '{"baseline_b0":"baseline-current-Paris"}',
-                'SHADOW_VETO_ONLY', 0
+                'LIVE_AUTHORITY', 0
             )
             """
         )
@@ -150,7 +150,7 @@ def _create_db(path) -> None:
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
                 'Madrid', '2026-06-09', 'high',
                 '{"baseline_b0":"baseline-stale-Madrid"}',
-                'SHADOW_VETO_ONLY', 0
+                'LIVE_AUTHORITY', 0
             )
             """
         )
@@ -158,7 +158,7 @@ def _create_db(path) -> None:
             """
                 INSERT INTO readiness_state (
                     readiness_id, strategy_key, status, dependency_json, provenance_json
-                ) VALUES (?, ?, 'SHADOW_ONLY', ?, ?)
+                ) VALUES (?, ?, 'READY', ?, ?)
             """,
             (
                 "ready-paris",
@@ -171,7 +171,7 @@ def _create_db(path) -> None:
             """
                 INSERT INTO readiness_state (
                     readiness_id, strategy_key, status, dependency_json, provenance_json
-                ) VALUES (?, ?, 'SHADOW_ONLY', ?, ?)
+                ) VALUES (?, ?, 'READY', ?, ?)
             """,
             (
                 "ready-madrid-stale",
@@ -228,11 +228,16 @@ def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_ta
     assert plan.status == "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE"
     assert plan.target_count == 3
     assert plan.covered_count == 1
+    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): missing_aifs_manifest_count is
+    # permanently 0 (AIFS is no longer a manifest the gate waits on) and aifs_download_targets is
+    # empty (AIFS is never downloaded). Seeding now gates on the OPENMETEO manifest alone: London
+    # (both present) stays seedable; Madrid (no openmeteo manifest in this fixture) is still NOT
+    # seedable and is the lone openmeteo_download target.
     assert plan.can_seed_count == 1
-    assert plan.missing_aifs_manifest_count == 1
+    assert plan.missing_aifs_manifest_count == 0
     assert plan.missing_openmeteo_manifest_count == 1
     assert [row["city"] for row in download_plan["seedable_targets"]] == ["London"]
-    assert [row["city"] for row in download_plan["aifs_download_targets"]] == ["Madrid"]
+    assert [row["city"] for row in download_plan["aifs_download_targets"]] == []
     assert [row["city"] for row in download_plan["openmeteo_download_targets"]] == ["Madrid"]
 
 
@@ -292,19 +297,23 @@ def test_current_target_plan_ignores_artifact_rows_whose_file_is_deleted(tmp_pat
     re-fetches, while disk-based seed discovery finds nothing -> the ~30h zero-trade stall.
 
     Models the real incident exactly: London is seedable with files on disk; delete the file
-    (leave the DB row) and London must flip to missing_aifs_manifest so the gate re-downloads.
+    (leave the DB row) and London must flip to missing_openmeteo_manifest so the gate re-downloads.
+
+    AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): the re-download trigger is now carried
+    by the OPENMETEO manifest alone (missing_aifs_manifest is permanently False — AIFS is no longer a
+    leg the gate waits on). The DB<->disk provenance invariant (a deleted file flips the target back
+    to needs-download, so the gate re-fetches) is preserved via the openmeteo manifest.
     """
     db = tmp_path / "forecasts.db"
     _create_db(db)
     now_utc = datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc)
 
-    # Baseline: London has artifacts on disk -> seedable, no missing manifest.
+    # Baseline: London has artifacts on disk -> seedable (openmeteo present), nothing missing.
     before = build_replacement_forecast_current_target_plan(db, now_utc=now_utc)
     london_before = next(row for row in before.rows if row.city == "London")
     assert london_before.can_seed is True
-    assert london_before.aifs_manifest_count == 1
     assert london_before.openmeteo_manifest_count == 1
-    assert london_before.missing_aifs_manifest is False
+    assert london_before.missing_openmeteo_manifest is False
 
     # The cleanup deletes the GRIB/manifest FILE but the DB row survives (dangling pointer).
     present_artifact = Path(db).parent / "present_artifact.grib2"
@@ -312,12 +321,13 @@ def test_current_target_plan_ignores_artifact_rows_whose_file_is_deleted(tmp_pat
 
     after = build_replacement_forecast_current_target_plan(db, now_utc=now_utc)
     london_after = next(row for row in after.rows if row.city == "London")
-    assert london_after.aifs_manifest_count == 0, "a deleted artifact file must not count as coverage"
-    assert london_after.openmeteo_manifest_count == 0
-    assert london_after.missing_aifs_manifest is True, "gate must see missing -> re-download"
-    assert london_after.missing_openmeteo_manifest is True
+    assert london_after.openmeteo_manifest_count == 0, "a deleted artifact file must not count as coverage"
+    assert london_after.missing_openmeteo_manifest is True, "gate must see missing -> re-download"
     assert london_after.can_seed is False
-    assert after.missing_aifs_manifest_count >= 1
+    assert after.missing_openmeteo_manifest_count >= 1
+    # AIFS leg is permanently non-blocking now.
+    assert london_after.missing_aifs_manifest is False
+    assert after.missing_aifs_manifest_count == 0
 
 
 def test_current_target_plan_does_not_seed_after_local_target_day_starts(tmp_path) -> None:
@@ -448,7 +458,7 @@ def test_current_target_plan_blocks_when_source_run_dependency_schema_is_missing
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
-                'Madrid', '2026-06-09', 'high', 'SHADOW_VETO_ONLY', 0
+                'Madrid', '2026-06-09', 'high', 'LIVE_AUTHORITY', 0
             )
             """
         )

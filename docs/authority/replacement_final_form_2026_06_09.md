@@ -1,10 +1,10 @@
 # Replacement Forecast Final Form (2026-06-09, operator-ratified)
 
-**Status:** LIVE_AUTHORITY (flag-only, operator directive 2026-06-08).  
+**Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; `LIVE_AUTHORITY`, `trade_authority_status`, and shadow/diagnostic labels are not live execution authority.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-06-12 (1e-bis addendum. fitted k,w artifact; per-cell floor; anchor permanent; single q authority — baseline cap deleted)  
-**Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 + four experiments `docs/evidence/2026_06_09_final_form/aifs_replacement_experiment.md`, `docs/evidence/2026_06_09_final_form/inverted_blend_experiment.md`, `docs/evidence/2026_06_09_final_form/uncovered_cities_regional_report.md`, `docs/evidence/2026_06_09_final_form/universality_sweep.md`.
+**Last audited:** 2026-06-18 (live/experiment split: OpenMeteo anchor + Bayes fusion live path; AIFS and shadow/diagnostic labels removed from live runtime semantics)
+**Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
 
@@ -164,7 +164,7 @@ These make error categories **unconstructable**, not merely less likely.
 **L1 — Coverage never implies cycle-currency.** `covered` (posterior exists) says nothing about which cycle it was built on. Five instances fixed 2026-06-09:
 1. `replacement_forecast_current_target_plan.py:36` — download gate (94b584cc3f): requires downloaded HWM ≥ available cycle
 2. `download_replacement_forecast_current_targets.py:177` — `include_covered=True` when cycle stale (9c594c9fc3)
-3. `replacement_forecast_shadow_materialization_queue.py:345` — seed checks posterior AND `expires_at > now` (pre-existing, confirmed clean)
+3. `replacement_forecast_live_materialization_queue.py` — seed checks posterior AND `expires_at > now` (pre-existing, confirmed clean)
 4. `_download_bayes_precision_fusion_extra_raw_inputs_if_needed` — coverage filter removed; replaced by row-level per-(model, city, target, metric, cycle, endpoint) skip (df8199ef8e)
 5. Download gate for replacement anchor — same root (9c594c9fc3, instance 3 in commit)
 
@@ -182,9 +182,9 @@ These make error categories **unconstructable**, not merely less likely.
 
 ## 4. Authority Status and Risk Posture
 
-**LIVE_AUTHORITY flag ladder:** All policy flags true → `LIVE_AUTHORITY` branch in `event_reactor_adapter.py:1745`. Row `trade_authority_status='SHADOW_ONLY'` is a **data-class label** that `bundle_reader.py:76` REQUIRES — flipping it breaks the chain. Authority lives at the policy layer, not the row label.
+**Live runtime semantics:** All required replacement policy flags true -> rows may be materialized/read as `runtime_layer='live'`. Execution and monitoring must consume the live row set only. Historical row labels such as `LIVE_AUTHORITY`, `trade_authority_status`, `SHADOW_ONLY`, `SHADOW_VETO_ONLY`, and `DIAGNOSTIC_ONLY` are not live authority and must not be joined into the execution or monitor decision path.
 
-**q_lcb fallback:** Bundle `q_lcb=None` falls back to baseline q_lcb via Wilson lower-bound over AIFS votes (`event_reactor_adapter.py:6685–6714`) — conservative, not a blocker. The replacement q_lcb is only populated when the fused-q shape is constructed successfully.
+**q_lcb requirement:** The live replacement path requires fused-q certified bootstrap `q_lcb_json` / `q_ucb_json`. A missing bound blocks live materialization/readiness; it must not fall back through baseline or retired experiment provenance.
 
 **FSR dependency (commit 8c6e028066):** The replacement forecast is an OVERLAY authority — it writes posteriors and readiness that depend on `baseline_b0 (ecmwf_open_data)` source_run. It emits no source_run or ensemble_snapshots of its own. The opendata baseline producer (mx2t6_high / mn2t6_low) MUST remain enabled; disabling it starves FSR.
 

@@ -120,11 +120,11 @@ settlement_capture:
   allowed_market_phases: [settlement_day]
   allowed_discovery_modes: [day0_capture]
   cycle_axis_dispatch_mode: day0_capture
-  allowed_directions: [buy_yes]
+  allowed_directions: [buy_yes, buy_no]
   allowed_bin_topology: [point, finite_range]
   metric_support:
     high: live
-    low:  blocked   # LOW oracle bridge not yet shipped (PLAN.md §A3 D-3)
+    low:  live      # LOW Day0 absorbing facts are live-gated at entry q/LCB seam.
   kelly_default_multiplier: 1.0
   kelly_phase_overrides:
     pre_trading: 0.0

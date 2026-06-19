@@ -74,7 +74,7 @@ def _forecast_event(
     )
 
 
-def _day0_event(*, live_authority_status: str = "LIVE_AUTHORITY"):
+def _day0_event(*, live_authority_status: str = "live"):
     payload = Day0ExtremeUpdatedPayload(
         city="Chicago",
         target_date="2026-05-24",
@@ -202,6 +202,49 @@ def test_forecast_binding_completeness_label_is_advisory_structure_binds():
         )
 
 
+def test_redecision_event_binds_as_forecast_candidate_family():
+    """EDLI_REDECISION_PENDING carries an FSR-shaped payload and must use the same
+    candidate binding path. If this regresses, live redecision events loop as
+    unsupported instead of reaching the value gate."""
+
+    payload = _forecast_payload()
+    event = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key=f"{payload.city}|{payload.target_date}|{payload.metric}|{payload.snapshot_id}",
+        source="edli_redecision:screen",
+        observed_at="2026-05-24T09:00:00+00:00",
+        available_at="2026-05-24T10:00:00+00:00",
+        received_at="2026-05-24T10:01:00+00:00",
+        payload=payload,
+        causal_snapshot_id=payload.snapshot_id,
+    )
+    full_family = [
+        _candidate(
+            condition_id="condition-1", yes_token_id="yes-1", no_token_id="no-1",
+            bin=Bin(low=70, high=71, unit="F", label="70-71°F"),
+        ),
+        _candidate(
+            condition_id="condition-2", yes_token_id="yes-2", no_token_id="no-2",
+            bin=Bin(low=72, high=73, unit="F", label="72-73°F"),
+        ),
+        _candidate(
+            condition_id="condition-low", yes_token_id="yes-low", no_token_id="no-low",
+            bin=Bin(low=None, high=69, unit="F", label="69°F or below"),
+        ),
+        _candidate(
+            condition_id="condition-high", yes_token_id="yes-high", no_token_id="no-high",
+            bin=Bin(low=74, high=None, unit="F", label="74°F or above"),
+        ),
+    ]
+
+    family = bind_event_to_candidate_family(event, full_family, decision_time=DECISION_TIME)
+
+    assert family.event_type == "EDLI_REDECISION_PENDING"
+    assert family.city == payload.city
+    assert family.target_date == payload.target_date
+    assert family.metric == payload.metric
+
+
 def test_day0_event_requires_live_authority_status():
     event = _day0_event(live_authority_status="UNKNOWN")
 
@@ -211,6 +254,41 @@ def test_day0_event_requires_live_authority_status():
             [_candidate(target_date="2026-05-24")],
             decision_time=DECISION_TIME,
         )
+
+
+def test_day0_event_accepts_pre_cutover_durable_live_authority_alias():
+    event = _day0_event(live_authority_status="LIVE_AUTHORITY")
+    full_family = [
+        _candidate(
+            target_date="2026-05-24",
+            condition_id="condition-1", yes_token_id="yes-1", no_token_id="no-1",
+            bin=Bin(low=70, high=71, unit="F", label="70-71°F"),
+        ),
+        _candidate(
+            target_date="2026-05-24",
+            condition_id="condition-2", yes_token_id="yes-2", no_token_id="no-2",
+            bin=Bin(low=72, high=73, unit="F", label="72-73°F"),
+        ),
+        _candidate(
+            target_date="2026-05-24",
+            condition_id="condition-low", yes_token_id="yes-low", no_token_id="no-low",
+            bin=Bin(low=None, high=69, unit="F", label="69°F or below"),
+        ),
+        _candidate(
+            target_date="2026-05-24",
+            condition_id="condition-high", yes_token_id="yes-high", no_token_id="no-high",
+            bin=Bin(low=74, high=None, unit="F", label="74°F or above"),
+        ),
+    ]
+
+    family = bind_event_to_candidate_family(
+        event,
+        full_family,
+        decision_time=DECISION_TIME,
+    )
+
+    assert family.event_type == "DAY0_EXTREME_UPDATED"
+    assert family.target_date == "2026-05-24"
 
 
 def test_market_event_never_creates_live_trade_candidate():

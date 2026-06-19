@@ -64,7 +64,7 @@ source. The 5 `scripts/` + 3 `tests/` files are in-scope for B4/B7.
 Key sub-categories:
 - **scripts/** (27 files): calibration/obs/settlement v2 pipeline scripts — mostly B4 delete targets.
 - **tests/** (31 files): v2 test files mapping to v2 tables/scripts — will be renamed or deleted with their subjects.
-- **src/** (5 files): `drift_refit_arm.py`, `executable_market_snapshot.py`,
+- **src/** (5 files): `retrain_trigger_v2.py`, `executable_market_snapshot_v2.py`,
   `observation_instants_v2_writer.py`, `polymarket_v2_adapter.py`, `v2_table_schema_preference.py`.
   These are B3/B7 targets (rename or keep with justification).
 - **src/state/schema/**: `v2_schema.py` — B3 target.
@@ -103,7 +103,7 @@ Top 40 files by total forbidden-token-line count. Columns: occurrences of `versi
 | tests/test_truth_surface_health.py | 66 | 180 | 95 | 0 | 0 | 43 | 0 | 384 |
 | src/state/db.py | 98 | 124 | 103 | 30 | 1 | 26 | 0 | 382 |
 | scripts/verify_truth_surfaces.py | 63 | 173 | 47 | 0 | 0 | 43 | 0 | 326 |
-| scripts/rebuild_calibration_pairs.py | 107 | 109 | 11 | 2 | 0 | 92 | 0 | 321 |
+| scripts/rebuild_calibration_pairs_v2.py | 107 | 109 | 11 | 2 | 0 | 92 | 0 | 321 |
 | tests/test_phase5_gate_d_low_purity.py | 80 | 90 | 4 | 3 | 0 | 77 | 0 | 254 |
 | architecture/topology.yaml | 22 | 159 | 57 | 1 | 0 | 1 | 0 | 240 |
 | src/calibration/manager.py | 75 | 41 | 46 | 0 | 0 | 74 | 0 | 236 |
@@ -189,7 +189,7 @@ PR3 replacement per audit §B5 mapping table (`docs/findings_2026_05_28.md` §Re
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `pricing_semantics_id` | `Position.pricing_semantics_id: str = "legacy_unclassified"` (l.474) | `pricing_semantics_id` |
+| `pricing_semantics_version` | `Position.pricing_semantics_version: str = "legacy_unclassified"` (l.474) | `pricing_semantics_id` |
 | `execution_cost_basis_version` | `Position.execution_cost_basis_version: str = ""` (l.475) | `cost_basis_policy_id` |
 | `signal_version` | `Position.signal_version: str = "v2"` (l.491) | `signal_id` |
 | `calibration_version` | `Position.calibration_version: str = ""` (l.492) | `calibration_model_id` |
@@ -201,19 +201,19 @@ Also serialized at l.2305–2306; downstream in `src/execution/fill_tracker.py` 
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `pricing_semantics_id` | ExecutionIntent + 2 subclasses (l.858, l.1006, l.1348, l.1570) | `pricing_semantics_id` |
+| `pricing_semantics_version` | ExecutionIntent + 2 subclasses (l.858, l.1006, l.1348, l.1570) | `pricing_semantics_id` |
 
 ### `src/analysis/market_analysis_vnext.py`
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `bin_schema_id` | `MarketAnalysisVNext` dataclass field (l.71, l.102) | `bin_schema_id` |
+| `bin_schema_version` | `MarketAnalysisVNext` dataclass field (l.71, l.102) | `bin_schema_id` |
 
 ### `src/calibration/forecast_calibration_domain.py`
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `bin_schema_id` | `BinGrid` dataclass (l.154) | `bin_schema_id` |
+| `bin_schema_version` | `BinGrid` dataclass (l.154) | `bin_schema_id` |
 | `data_version` | `CalibrationPairsRow` (l.223) + `CalibrationPairsKey` (l.481) | `dataset_id` |
 
 ### `src/calibration/blocked_oos.py`
@@ -226,13 +226,13 @@ Also serialized at l.2305–2306; downstream in `src/execution/fill_tracker.py` 
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `fit_artifact_id` | dataclass field `str = "hpf_v1"` (l.93) | `fit_artifact_id` |
+| `fit_version` | dataclass field `str = "hpf_v1"` (l.93) | `fit_artifact_id` |
 
 ### `src/calibration/decision_group.py`
 
 | Field | Location | Proposed replacement |
 |-------|----------|---------------------|
-| `forecast_model_id` | function params + validation (l.43, l.93) | `forecast_model_id` |
+| `source_model_version` | function params + validation (l.43, l.93) | `forecast_model_id` |
 
 ### `src/calibration/retrain_trigger.py`
 
@@ -256,7 +256,7 @@ respectively). All map to `dataset_id` / `source_snapshot_id`.
 
 ### `src/contracts/expiring_assumption.py`
 
-`semantic_id: str` dataclass field (l.19) → `semantic_id` or `assumption_version_id`.
+`semantic_version: str` dataclass field (l.19) → `semantic_id` or `assumption_version_id`.
 
 ### `src/contracts/venue_submission_envelope.py`
 
@@ -268,7 +268,7 @@ respectively). All map to `dataset_id` / `source_snapshot_id`.
 
 ### `src/types/metric_identity.py`
 
-`data_version: str` in `MetricIdentity` dataclass (l.27); `source_family_from_dataset_id`
+`data_version: str` in `MetricIdentity` dataclass (l.27); `source_family_from_data_version`
 helper (l.162). All → `dataset_id`.
 
 ### `src/state/db.py`

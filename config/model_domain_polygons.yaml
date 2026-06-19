@@ -132,3 +132,48 @@ domains:
       lat_max: 61.00
       lon_min: -9.00
       lon_max: 2.50
+
+  # NOAA HRRR 3km CONUS rapid-refresh nest. 2026-06-17 PRECISION-INPUT FIX (operator directive:
+  # feed the precise station-resolving data, NOT a statistical bias correction). Settlement-graded
+  # raw bias (state/zeus-forecasts.db previous-runs joined to VERIFIED WU highs, lead-1, n=60):
+  # mean +0.004C, MAE 1.332 — near-perfect raw calibration vs the coarse globals' ~1C cold drift.
+  # In-CONUS gfs_hrrr is the most-specific NOAA-family rep (suppresses gfs_global + ncep_nbm).
+  # Domain: CONUS hull (HRRR is CONUS-only; the API 400s outside). All 13 US settlement cities
+  # (NYC/Chicago/Miami/Dallas/Houston/Atlanta/Austin/Denver/Seattle/LA/SF + Toronto edge) fall
+  # inside. max_lead_days=2 (HRRR is a short-range nest; matches the icon_d2/ukmo_uk pattern).
+  gfs_hrrr:
+    model_name: gfs_hrrr
+    region_label: conus
+    max_lead_days: 2
+    polygon:
+      - [-125.00, 21.00]
+      - [-66.00, 21.00]
+      - [-66.00, 50.00]
+      - [-125.00, 50.00]
+      - [-125.00, 21.00]
+    bounding_box:
+      lat_min: 21.00
+      lat_max: 50.00
+      lon_min: -125.00
+      lon_max: -66.00
+
+  # Environment Canada HRDPS 2.5km North-America continental nest. 2026-06-17 PRECISION-INPUT FIX.
+  # Settlement-graded raw bias (previous-runs joined to VERIFIED WU highs, lead-1, n=18): mean
+  # +0.862C, MAE 1.427 — station-resolving, distinct CMC physics (decorrelated from NOAA/ECMWF).
+  # In-domain gem_hrdps_continental is the CMC-family rep (suppresses gem_global ~15km global).
+  # Domain: HRDPS continental hull (CONUS + S-Canada + N-Mexico). Covers the US cities + Toronto.
+  gem_hrdps_continental:
+    model_name: gem_hrdps_continental
+    region_label: north_america
+    max_lead_days: 2
+    polygon:
+      - [-142.00, 18.00]
+      - [-52.00, 18.00]
+      - [-52.00, 62.00]
+      - [-142.00, 62.00]
+      - [-142.00, 18.00]
+    bounding_box:
+      lat_min: 18.00
+      lat_max: 62.00
+      lon_min: -142.00
+      lon_max: -52.00

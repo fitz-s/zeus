@@ -184,14 +184,9 @@ def _mainstream_gate_test_isolation(monkeypatch):
     if isinstance(edli_cfg, dict):
         monkeypatch.setitem(edli_cfg, "mainstream_agreement_reference_enabled", False)
         monkeypatch.setitem(edli_cfg, "mainstream_agreement_enforce_on_submit", False)
-        # SAME live-coupling category (#110 / operator 2026-06-05): the one-calibrator regime
-        # flag is now LIVE-ON in config for shadow trading. The seam reads the MUTABLE
-        # ``edli_emos_sole_calibrator_enabled`` — flag-ON routes non-day0 cells to EMOS /
-        # honest-raw and BYPASSES the bias/grid maze. Without this pin, flipping it ON for live
-        # silently broke every maze-path seam test (bias-correction lockstep, grid mutual-excl).
-        # Default OFF here so the legacy maze path is deterministic regardless of the live config
-        # value; a regime test sets the flag explicitly (tests/engine/test_emos_seam_serve_loud.py).
-        monkeypatch.setitem(edli_cfg, "edli_emos_sole_calibrator_enabled", False)
+        # SINGLE TRUTH (bias-maze strip 2026-06-17): the ``edli_emos_sole_calibrator_enabled``
+        # pin is DROPPED — the flag is removed and the EMOS/honest-raw regime is now
+        # unconditional for non-day0 cells (no legacy maze path to pin to OFF).
 
     import src.data.mainstream_forecast_source as _ms
 
@@ -330,7 +325,7 @@ _WLA_CACHE_PATH = _WLA_REPO_ROOT / ".pytest_cache" / "writer_lock_antibody.json"
 # connect path). Allowlisting a no-connect file would weaken the gate.
 _WLA_CANONICAL_INFRA_ALLOWLIST = frozenset({
     "src/state/db.py",                              # canonical_shim
-    "src/state/collateral_ledger.py",               # singleton_persistent_conn (2026-05-13 fix): CollateralLedger(db_path=) opens a ledger-owned conn for the process-wide singleton so it survives transient caller-conn lifecycles. Single connect site, no schema mutation outside init_collateral_schema.
+    "src/state/collateral_ledger.py",               # singleton_path_backed (2026-06-17 fix): CollateralLedger(db_path=) stores a durable DB path and opens short-lived conns per operation so the global singleton survives transient caller-conn lifecycles without parking a live trade-DB writer.
 })
 
 # Residual must-not-leak set: daemon src/ sites pending Track A.6 retrofit.

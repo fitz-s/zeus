@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-13
+# Last reused or audited: 2026-06-17
 # Authority basis: adversarial review /tmp/day0_adversarial_review.md MUST-FIX
 #   #1 (hard-fact bin-death exit lane) + #3-wiring (resting-order cancel on bin
 #   death) — operator requirement "新高出现时能否立即drop". Calibration artifact:
@@ -75,6 +75,20 @@ class HardFactVerdict:
     source: str  # "wu_api" | "metar_fast_lane" | "wu_api+metar_fast_lane"
 
 
+@dataclass(frozen=True)
+class HardFactMonitorBelief:
+    """Exact monitor belief derived from an absorbing Day0 hard fact."""
+
+    held_side_prob: float
+    yes_prob: float
+    yes_verdict: str  # "YES_WON" | "YES_DEAD"
+    held_verdict: str  # "STRUCTURAL_WIN" | "STRUCTURAL_LOSS"
+
+
+def _normalize_direction(direction: Any) -> str:
+    return str(getattr(direction, "value", direction) or "")
+
+
 def hard_fact_bin_verdict(
     *,
     metric: str,
@@ -85,6 +99,8 @@ def hard_fact_bin_verdict(
 ) -> Optional[HardFactVerdict]:
     """Pure absorbing-boundary verdict for one held bin against a settlement-grade
     extreme (already margin-adjusted by the caller). None = no hard fact."""
+    metric = str(getattr(metric, "value", metric) or "").strip().lower()
+    direction = _normalize_direction(direction)
     if metric not in {"high", "low"} or direction not in {"buy_yes", "buy_no"}:
         return None
     if bin_low is None and bin_high is None:
@@ -130,6 +146,44 @@ def hard_fact_bin_verdict(
             "HOLD_STRUCTURAL_WIN",
             f"running {metric} extreme {effective_extreme} entered absorbing "
             f"shoulder [{bin_low},{bin_high}] — YES structurally won",
+        )
+    return None
+
+
+def hard_fact_monitor_belief(
+    *, verdict: HardFactVerdict, direction: Any
+) -> Optional[HardFactMonitorBelief]:
+    """Convert a hard-fact action into exact YES and held-side probabilities."""
+
+    direction = _normalize_direction(direction)
+    action = str(getattr(verdict, "action", "") or "")
+    if direction == "buy_yes" and action == "EXIT_DEAD_BIN":
+        return HardFactMonitorBelief(
+            held_side_prob=0.0,
+            yes_prob=0.0,
+            yes_verdict="YES_DEAD",
+            held_verdict="STRUCTURAL_LOSS",
+        )
+    if direction == "buy_no" and action == "HOLD_STRUCTURAL_WIN":
+        return HardFactMonitorBelief(
+            held_side_prob=1.0,
+            yes_prob=0.0,
+            yes_verdict="YES_DEAD",
+            held_verdict="STRUCTURAL_WIN",
+        )
+    if direction == "buy_yes" and action == "HOLD_STRUCTURAL_WIN":
+        return HardFactMonitorBelief(
+            held_side_prob=1.0,
+            yes_prob=1.0,
+            yes_verdict="YES_WON",
+            held_verdict="STRUCTURAL_WIN",
+        )
+    if direction == "buy_no" and action == "EXIT_DEAD_BIN":
+        return HardFactMonitorBelief(
+            held_side_prob=0.0,
+            yes_prob=1.0,
+            yes_verdict="YES_WON",
+            held_verdict="STRUCTURAL_LOSS",
         )
     return None
 
@@ -275,7 +329,7 @@ def evaluate_hard_fact_exit(
     moment = (now or datetime.now(UTC)).astimezone(UTC)
     try:
         target_date = str(getattr(position, "target_date", "") or "")
-        direction = str(getattr(position, "direction", "") or "")
+        direction = _normalize_direction(getattr(position, "direction", "") or "")
         metric = str(getattr(position, "temperature_metric", "") or "high")
         if not target_date or direction not in {"buy_yes", "buy_no"}:
             return None

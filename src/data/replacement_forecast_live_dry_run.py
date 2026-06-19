@@ -1,4 +1,4 @@
-"""Dry-run gate for replacement forecast simple-switch readiness."""
+"""Dry-run gate for replacement forecast live readiness."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from src.data.replacement_forecast_runtime_policy import REQUIRED_FLAGS, resolve
 from src.state.db import _connect, list_sqlite_tables_and_views_read_only
 
 
-OPTIONAL_DEPENDENCIES = ("requests", "ecmwf.opendata", "eccodes")
+OPTIONAL_DEPENDENCIES = ("requests",)
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ class ReplacementForecastLiveDryRunInput:
     optional_dependencies: tuple[str, ...] = OPTIONAL_DEPENDENCIES
     source_fact_status_override: str | None = None
     data_fact_status_override: str | None = None
-    assume_replacement_shadow_schema_initialized: bool = False
+    assume_replacement_live_schema_initialized: bool = False
     assume_refit_handoff_available: bool = False
     assume_raw_artifact_lineage_available: bool = False
 
@@ -56,9 +56,9 @@ class ReplacementForecastLiveDryRunReport:
     trade_tables: tuple[str, ...]
     refit_handoff_status: str
     materialized_posterior_count: int
-    shadow_decision_count: int
+    legacy_decision_count: int
     latest_materialized_posterior: Mapping[str, object] | None
-    latest_shadow_decision: Mapping[str, object] | None
+    latest_legacy_decision: Mapping[str, object] | None
     configured_refit_handoff_path: str
     configured_refit_handoff_status: str
     raw_artifact_lineage_status: str
@@ -90,9 +90,9 @@ class ReplacementForecastLiveDryRunReport:
             "trade_tables": list(self.trade_tables),
             "refit_handoff_status": self.refit_handoff_status,
             "materialized_posterior_count": self.materialized_posterior_count,
-            "shadow_decision_count": self.shadow_decision_count,
+            "legacy_decision_count": self.legacy_decision_count,
             "latest_materialized_posterior": dict(self.latest_materialized_posterior) if self.latest_materialized_posterior is not None else None,
-            "latest_shadow_decision": dict(self.latest_shadow_decision) if self.latest_shadow_decision is not None else None,
+            "latest_legacy_decision": dict(self.latest_legacy_decision) if self.latest_legacy_decision is not None else None,
             "configured_refit_handoff_path": self.configured_refit_handoff_path,
             "configured_refit_handoff_status": self.configured_refit_handoff_status,
             "raw_artifact_lineage_status": self.raw_artifact_lineage_status,
@@ -155,58 +155,34 @@ def _replacement_materialization_inventory(forecast_db: Path) -> tuple[int, int,
             latest_posterior: Mapping[str, object] | None = None
             latest_decision: Mapping[str, object] | None = None
             if "forecast_posteriors" in tables:
+                posterior_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
+                }
+                if "runtime_layer" not in posterior_columns:
+                    return 0, decision_count, None, latest_decision
                 posterior_count = int(
                     conn.execute(
                         """
                         SELECT COUNT(*)
                         FROM forecast_posteriors
-                        WHERE source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
-                          AND trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                        WHERE source_id = 'openmeteo_ecmwf_ifs9_bayes_fusion'
+                          AND runtime_layer = 'live'
                         """
                     ).fetchone()[0]
                 )
                 row = conn.execute(
                     """
                     SELECT posterior_id, city, target_date, temperature_metric, data_version,
-                           trade_authority_status, training_allowed, computed_at
+                           runtime_layer, training_allowed, computed_at
                     FROM forecast_posteriors
-                    WHERE source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
-                      AND trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                    WHERE source_id = 'openmeteo_ecmwf_ifs9_bayes_fusion'
+                      AND runtime_layer = 'live'
                     ORDER BY posterior_id DESC
                     LIMIT 1
                     """
                 ).fetchone()
                 latest_posterior = dict(row) if row is not None else None
-            if "replacement_shadow_decisions" in tables:
-                decision_count = int(conn.execute("SELECT COUNT(*) FROM replacement_shadow_decisions").fetchone()[0])
-                decision_columns = {
-                    str(row["name"])
-                    for row in conn.execute("PRAGMA table_info(replacement_shadow_decisions)").fetchall()
-                }
-                select_columns = [
-                    column
-                    for column in (
-                        "decision_id",
-                        "posterior_id",
-                        "city",
-                        "target_date",
-                        "temperature_metric",
-                        "baseline_direction",
-                        "allowed_direction",
-                        "trade_authority_status",
-                        "recorded_at",
-                    )
-                    if column in decision_columns
-                ]
-                row = conn.execute(
-                    f"""
-                    SELECT {", ".join(select_columns)}
-                    FROM replacement_shadow_decisions
-                    ORDER BY recorded_at DESC, decision_id DESC
-                    LIMIT 1
-                    """
-                ).fetchone()
-                latest_decision = dict(row) if row is not None else None
             return posterior_count, decision_count, latest_posterior, latest_decision
         finally:
             conn.close()
@@ -215,7 +191,7 @@ def _replacement_materialization_inventory(forecast_db: Path) -> tuple[int, int,
 
 
 def _raw_artifact_lineage_inventory(forecast_db: Path, *, assume_available: bool) -> tuple[str, Mapping[str, int]]:
-    required_sources = ("openmeteo_ecmwf_ifs_9km", "ecmwf_aifs_ens")
+    required_sources = ("openmeteo_ecmwf_ifs_9km",)
     empty_counts = {source_id: 0 for source_id in required_sources}
     if assume_available:
         return "ASSUMED_READY", empty_counts
@@ -239,7 +215,7 @@ def _raw_artifact_lineage_inventory(forecast_db: Path, *, assume_available: bool
                 """
                 SELECT source_id, COUNT(*) AS count
                 FROM raw_forecast_artifacts
-                WHERE source_id IN ('openmeteo_ecmwf_ifs_9km', 'ecmwf_aifs_ens')
+                WHERE source_id IN ('openmeteo_ecmwf_ifs_9km')
                   AND source_available_at IS NOT NULL
                   AND source_available_at != ''
                   AND artifact_path IS NOT NULL
@@ -265,7 +241,7 @@ def _latest_readiness_artifact_inventory(
     latest_posterior: Mapping[str, object] | None,
     assume_available: bool,
 ) -> tuple[str, Mapping[str, int]]:
-    required_roles = ("aifs_sampled_2t", "openmeteo_ifs9_anchor")
+    required_roles = ("openmeteo_ifs9_anchor",)
     empty_counts = {role: 0 for role in required_roles}
     if assume_available:
         return "ASSUMED_READY", empty_counts
@@ -302,7 +278,7 @@ def _latest_readiness_artifact_inventory(
                     """
                     SELECT dependency_json, provenance_json
                     FROM readiness_state
-                    WHERE strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
+                    WHERE strategy_key = 'openmeteo_ecmwf_ifs9_bayes_fusion'
                       AND city = ?
                       AND target_local_date = ?
                       AND temperature_metric = ?
@@ -315,7 +291,7 @@ def _latest_readiness_artifact_inventory(
                 """
                 SELECT dependency_json, provenance_json
                 FROM readiness_state
-                WHERE strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
+                WHERE strategy_key = 'openmeteo_ecmwf_ifs9_bayes_fusion'
                 ORDER BY computed_at DESC, recorded_at DESC
                 """
             ).fetchall()
@@ -476,9 +452,9 @@ def _configured_refit_handoff(root: Path, *, assume_available: bool) -> tuple[Pa
     try:
         settings_payload = json.loads(settings_path.read_text(encoding="utf-8"))
         if isinstance(settings_payload, Mapping):
-            shadow_cfg = settings_payload.get("replacement_forecast_shadow")
-            if isinstance(shadow_cfg, Mapping):
-                raw_path = shadow_cfg.get("refit_handoff_path") or REFIT_HANDOFF_FILE
+            live_cfg = settings_payload.get("replacement_forecast_live")
+            if isinstance(live_cfg, Mapping):
+                raw_path = live_cfg.get("refit_handoff_path") or REFIT_HANDOFF_FILE
     except FileNotFoundError:
         return root / REFIT_HANDOFF_FILE, "MISSING_SETTINGS"
     except Exception as exc:  # noqa: BLE001 - diagnostic fail-closed status
@@ -507,13 +483,9 @@ def build_replacement_forecast_live_dry_run_report(
         raise TypeError("request must be ReplacementForecastLiveDryRunInput")
     root = Path(request.root)
     flags = {key: bool(request.runtime_flags.get(key, False)) for key in REQUIRED_FLAGS}
-    # DEAD-PROMOTION-APPARATUS REMOVAL (2026-06-16): the resolver IGNORES the
-    # promotion / capital-objective evidence objects post-operator-severance
-    # (LIVE_AUTHORITY is FLAG-ONLY; runtime_policy.py:234-311 reads only the 5 flags),
-    # and the preflight already DISCARDED the evidence-status. The configured-evidence
-    # loader (which imported the deleted go_live_report verdict module) is removed; the
-    # preflight resolves the SAME flag-derived policy.status as the live daemon — this
-    # is behavior-identical. See docs/evidence/timing_audit/.
+    # The resolver mirrors the live daemon. That policy is necessary but not sufficient:
+    # the materialized posterior row must also be runtime_layer='live' with fused q and
+    # certified bootstrap bounds.
     policy = resolve_replacement_forecast_runtime_policy(
         flags,
         promotion_evidence=None,
@@ -524,7 +496,7 @@ def build_replacement_forecast_live_dry_run_report(
     trade_db = root / "state" / "zeus_trades.db"
     forecast_tables = _tables(forecast_db)
     actual_forecast_tables = forecast_tables
-    if request.assume_replacement_shadow_schema_initialized:
+    if request.assume_replacement_live_schema_initialized:
         forecast_tables = tuple(sorted(set(forecast_tables).union(REQUIRED_FORECAST_TABLES)))
     world_tables = _tables(world_db)
     trade_tables = _tables(trade_db)
@@ -571,7 +543,7 @@ def build_replacement_forecast_live_dry_run_report(
     current_target_coverage_status, current_target_coverage_counts, current_target_coverage_missing_examples = (
         _current_target_coverage_inventory(forecast_db)
     )
-    switch_surface_ready = live_switch.simple_switch_ready or live_switch.live_authority_ready
+    switch_surface_ready = live_switch.simple_switch_ready or live_switch.live_ready
     reasons = list(live_switch.reason_codes if not switch_surface_ready else ())
     if refit_handoff_status.startswith("INVALID:"):
         reasons.append("REPLACEMENT_DRY_RUN_REFIT_HANDOFF_INVALID")
@@ -588,17 +560,13 @@ def build_replacement_forecast_live_dry_run_report(
     if latest_readiness_artifact_status not in {"READY", "ASSUMED_READY", "NOT_APPLICABLE_NO_POSTERIOR"}:
         reasons.append("REPLACEMENT_DRY_RUN_LATEST_READINESS_ARTIFACTS_NOT_READY")
     if (
-        policy.can_read_shadow_posterior
-        and not request.assume_replacement_shadow_schema_initialized
+        policy.can_initiate_trade
+        and not request.assume_replacement_live_schema_initialized
         and current_target_coverage_status not in {"READY", "NO_CURRENT_TARGETS"}
     ):
         reasons.append("REPLACEMENT_DRY_RUN_CURRENT_TARGET_COVERAGE_NOT_READY")
     if "requests" in dependencies and dependencies.get("requests") != "OK":
         reasons.append("REPLACEMENT_DRY_RUN_OPENMETEO_REQUESTS_MISSING")
-    if "eccodes" in dependencies and dependencies.get("eccodes") != "OK":
-        reasons.append("REPLACEMENT_DRY_RUN_AIFS_GRIB_DECODER_MISSING")
-    if "ecmwf.opendata" in dependencies and dependencies.get("ecmwf.opendata") != "OK":
-        reasons.append("REPLACEMENT_DRY_RUN_AIFS_DOWNLOAD_CLIENT_MISSING")
     status = "DRY_RUN_READY" if not reasons else "BLOCKED"
     return ReplacementForecastLiveDryRunReport(
         status=status,
@@ -616,9 +584,9 @@ def build_replacement_forecast_live_dry_run_report(
         trade_tables=trade_tables,
         refit_handoff_status=refit_handoff_status,
         materialized_posterior_count=posterior_count,
-        shadow_decision_count=decision_count,
+        legacy_decision_count=decision_count,
         latest_materialized_posterior=latest_posterior,
-        latest_shadow_decision=latest_decision,
+        latest_legacy_decision=latest_decision,
         configured_refit_handoff_path=str(configured_refit_handoff_path),
         configured_refit_handoff_status=configured_refit_handoff_status,
         raw_artifact_lineage_status=raw_artifact_lineage_status,
@@ -631,7 +599,7 @@ def build_replacement_forecast_live_dry_run_report(
         assumptions={
             "source_fact_status_override": request.source_fact_status_override,
             "data_fact_status_override": request.data_fact_status_override,
-            "assume_replacement_shadow_schema_initialized": request.assume_replacement_shadow_schema_initialized,
+            "assume_replacement_live_schema_initialized": request.assume_replacement_live_schema_initialized,
             "assume_refit_handoff_available": request.assume_refit_handoff_available,
             "assume_raw_artifact_lineage_available": request.assume_raw_artifact_lineage_available,
             "actual_missing_forecast_tables": [

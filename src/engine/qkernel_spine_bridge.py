@@ -1,6 +1,8 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
-# Authority basis: docs/rebuild/consult_build_spec.md (Wave 5 reactor wiring) +
+# Last audited: 2026-06-17
+# Authority basis: operator single-truth law + residual_legacy_sources.md (GATE-0
+#   bias-maze strip: _spine_debias_authority unconditional identity, settlement-residual
+#   seam removed) + docs/rebuild/consult_build_spec.md (Wave 5 reactor wiring) +
 #   docs/rebuild/impl_w4_family_decision_engine.md (the engine contract this bridge
 #   drives) + docs/rebuild/arm_replay_report.md (the spine validated BEFORE this
 #   integration) + docs/rebuild/impl_w5b_integration.md (this integration's report).
@@ -54,14 +56,11 @@ DRIFT RESOLVED (recorded per operator law — see impl_w5b_integration.md §"Inp
     REALITY (spine-source rewire 2026-06-16): those members are the RAW MULTI-MODEL
     member envelope sourced from ``raw_model_forecasts`` (~7-13 decorrelated NWP
     providers, latest cycle per model) — the SAME source the ARM/settlement-EV replay
-    validates (``fresh_members_at_cycle``). They are RAW, NOT chain-of-record-debiased:
-    settlement-residual de-bias is applied at the seam ONLY when
-    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` (a follow-up flip; see the de-bias seam below),
-    else ``_NoOpDebiasAuthority`` applies ZERO shift and ``raw == debiased``. The center
-    this ships is therefore the RAW multi-model center (~-0.39 settlement-residual bias,
-    matching the replay BEFORE de-bias), NOT a de-biased ~0 center — enabling the flag is
-    the separate deploy step that reaches the fully-validated debiased center. These
-    members are the validated multi-model envelope, NOT the reactor's legacy served
+    validates (``fresh_members_at_cycle``). SINGLE TRUTH: there is NO settlement-residual
+    de-bias layer — ``_spine_debias_authority`` is unconditionally ``_NoOpDebiasAuthority``
+    (ZERO shift, ``raw == debiased``), so the center this ships IS the raw precise
+    multi-model fused center, untouched. These members are the validated multi-model
+    envelope, NOT the reactor's legacy served
     mu*/σ (the LEGACY EMOS/replacement values are no longer used for belief). If the
     producer stashed no members at all (the threaded inputs are absent — e.g. <3 fresh
     models on the causal cycle), the bridge returns a TYPED no-trade
@@ -92,7 +91,6 @@ a typed ``SPINE_WIRING_FAULT`` no-trade so the reactor emits a deterministic rec
 from __future__ import annotations
 
 import hashlib
-import os
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -158,91 +156,23 @@ _DIRECT_ROUTE_ID_PREFIXES = ("DIRECT_YES:", "DIRECT_NO:")
 # the Monte-Carlo resolution of the robust edge lower bound.
 SPINE_BAND_DRAWS: Optional[int] = None
 
-# COLD-CENTER-BIAS FIX (settlement-residual de-bias), live opt-in seam.
-#
-# The spine center mu* runs systematically ~0.5 deg C COLD vs realized settlement
-# (docs/evidence/qkernel_rebuild/cold_center_bias_fix_2026-06-16.md). The fix fits
-# per-(city, metric) walk-forward settlement-residual artifacts
-# (src/forecast/settlement_residual_debias.py) and applies them through the real
-# DebiasAuthority on the product-agnostic representativeness basis. It is PROVEN on
-# the settlement-EV replay (modal EV -0.046 -> +0.052; aggregate +0.018 -> +0.030).
-#
-# This live seam is DEFAULT-OFF: until the orchestrator flips
-# ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` the bridge uses ``_NoOpDebiasAuthority`` and
-# live behavior is unchanged (no restart-time behavior change from this commit).
-#
-# PROVENANCE (orchestrator deploy decision): POST-FIX (spine-source rewire 2026-06-16)
-# the members threaded to THIS seam are the RAW MULTI-MODEL consensus from
-# ``raw_model_forecasts`` (see ``build_fresh_model_set`` / ``_NoOpDebiasAuthority``) —
-# the SAME basis the provider's settlement residuals are fit against in
-# zeus-forecasts.db. The earlier "chain-of-record-debiased members" caveat is obsolete:
-# there is no upstream chain-debias on these served members (de-bias is OFF; raw ==
-# debiased), so enabling this seam applies the provider's settlement-residual shift to
-# RAW members fit on RAW members — the validated, no-double-count configuration. The
-# flag stays OFF in THIS commit (which ships the proven raw multi-model center, ~-0.39
-# residual bias); flipping ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` is the orchestrator's
-# separate deploy step to reach the fully-validated debiased (~0) center.
-_SPINE_SETTLE_RESID_DEBIAS_ENV = "ZEUS_SPINE_SETTLE_RESID_DEBIAS"
+# SINGLE TRUTH (legacy bias-maze strip 2026-06-17): the spine center IS the raw precise
+# multi-model fused center from ``raw_model_forecasts`` (~7-13 decorrelated NWP providers,
+# latest cycle per model). There is NO settlement-residual de-bias layer and NO bias flag.
+# ``_spine_debias_authority`` is UNCONDITIONALLY the identity ``_NoOpDebiasAuthority``:
+# ``build_center`` / ``build_sigma`` run on the RAW fused members with ZERO shift, so
+# ``raw == debiased``. (The removed seam read ``ZEUS_SPINE_SETTLE_RESID_DEBIAS`` and the
+# deleted ``settlement_residual_debias`` provider; both gone under the single-truth law.)
 
 
-def _settlement_residual_debias_enabled() -> bool:
-    """True iff the live settlement-residual de-bias seam is operator-enabled."""
-    return os.environ.get(_SPINE_SETTLE_RESID_DEBIAS_ENV) == "1"
+def _spine_debias_authority(case: ForecastCase):  # noqa: ARG001 — identity contract
+    """The identity de-bias authority the live spine builder uses (single truth).
 
-
-def _spine_debias_authority(case: ForecastCase):
-    """The de-bias authority the live spine builder uses for ``case``.
-
-    Default (flag OFF): ``_NoOpDebiasAuthority`` — zero shift, current live behavior.
-    Flag ON: a per-case ``DebiasAuthority`` seeded with the walk-forward settlement-
-    residual artifact (see the provenance caveat above). Fails CLOSED to the no-op
-    authority on any provider error so the seam can never fault the reactor hot path.
+    ALWAYS ``_NoOpDebiasAuthority`` — zero shift, ``raw == debiased``. The spine ships
+    the raw precise multi-model fused center untouched; there is no statistical de-bias
+    correction layer (operator single-truth law).
     """
-    if not _settlement_residual_debias_enabled():
-        return _NoOpDebiasAuthority()
-    try:
-        provider = _live_settlement_residual_provider()
-        if provider is None:
-            return _NoOpDebiasAuthority()
-        return provider.debias_authority(case)
-    except Exception:  # noqa: BLE001 — never fault the hot path on a de-bias fit
-        return _NoOpDebiasAuthority()
-
-
-_LIVE_SETTLE_RESID_PROVIDER: Any = None
-_LIVE_SETTLE_RESID_PROVIDER_BUILT: bool = False
-
-
-def _live_settlement_residual_provider():
-    """Lazily build (and cache) the live settlement-residual provider, or None.
-
-    Reads the live ``zeus-forecasts.db`` once (read-only). Cached for the process so
-    every case reuses the same fitted residual series; ``apply`` per-case filtering
-    keeps each case walk-forward. Returns None if the DB path cannot be resolved.
-    """
-    global _LIVE_SETTLE_RESID_PROVIDER, _LIVE_SETTLE_RESID_PROVIDER_BUILT
-    if _LIVE_SETTLE_RESID_PROVIDER_BUILT:
-        return _LIVE_SETTLE_RESID_PROVIDER
-    _LIVE_SETTLE_RESID_PROVIDER_BUILT = True
-    try:
-        import sqlite3
-
-        from src.forecast.settlement_residual_debias import (
-            SettlementResidualDebiasProvider,
-        )
-
-        db_path = os.environ.get(
-            "ZEUS_FORECASTS_DB",
-            os.path.join(os.getcwd(), "state", "zeus-forecasts.db"),
-        )
-        if not os.path.exists(db_path):
-            _LIVE_SETTLE_RESID_PROVIDER = None
-            return None
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        _LIVE_SETTLE_RESID_PROVIDER = SettlementResidualDebiasProvider.from_connection(con)
-    except Exception:  # noqa: BLE001
-        _LIVE_SETTLE_RESID_PROVIDER = None
-    return _LIVE_SETTLE_RESID_PROVIDER
+    return _NoOpDebiasAuthority()
 
 
 # ===========================================================================
@@ -523,13 +453,49 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
     source_cycle = _parse_source_cycle_time(payload.get("_edli_spine_source_cycle_time_utc"))
     if source_cycle is None:
         return None
+    # RAW PRECISION (FINAL no-shadow §1-§2): the per-member raw second moment Ê[(x−Y)²]
+    # + walk-forward n, threaded by the Stage-0 producer in the SAME index order as the
+    # member arrays. Lifted here so build_fresh_model_set can attach it to each
+    # RawModelMember and the spine's walk_forward_model_weights forms the RAW diagonal
+    # 1/E[r²] weight. Absent (None) ⇒ equal-weight (the dormant-seam behavior, unchanged).
+    raw_m2_by_index = _coerce_optional_float_list(payload.get("_edli_spine_raw_m2_by_index"))
+    n_by_index = _coerce_int_list(payload.get("_edli_spine_n_by_index"))
     return {
         "mu_native": mu_f,
         "sigma_native": sigma_f,
         "debiased_members_native": members,
         "raw_members_native": raw_members,
         "source_cycle_time_utc": source_cycle,
+        "raw_m2_by_index": raw_m2_by_index,
+        "n_by_index": n_by_index,
     }
+
+
+def _coerce_optional_float_list(value: Any) -> Optional[tuple[Optional[float], ...]]:
+    """Coerce a threaded list of (float|None) raw second moments. None on any fault."""
+    if value is None:
+        return None
+    try:
+        out: list[Optional[float]] = []
+        for v in value:
+            if v is None:
+                out.append(None)
+                continue
+            fv = float(v)
+            out.append(fv if np.isfinite(fv) and fv > 0.0 else None)
+        return tuple(out)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int_list(value: Any) -> Optional[tuple[int, ...]]:
+    """Coerce a threaded list of walk-forward counts. None on any fault."""
+    if value is None:
+        return None
+    try:
+        return tuple(int(v) for v in value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_source_cycle_time(value: Any) -> Optional[datetime]:
@@ -585,18 +551,43 @@ def build_fresh_model_set(
     ``debiased_members_native``, which since the source rewire is the RAW multi-model
     envelope from ``raw_model_forecasts`` (~7-13 decorrelated NWP providers, latest cycle
     per model, °C→native) — the SAME member set the ARM/settlement-EV replay validates
-    (``fresh_members_at_cycle``). De-bias is OFF live, so ``raw == debiased`` (the
-    producer stashes the raw envelope into BOTH keys). The ``build_center`` (envelope-
-    lock) and ``build_sigma`` (realized-floor) authorities run on these RAW members, with
-    settlement-residual de-bias applied at the seam ONLY when
-    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` (a follow-up flip; else ``_NoOpDebiasAuthority``
-    = zero shift). Falls back to the raw array, then to ``mu_native``, only if no member
-    array was threaded.
+    (``fresh_members_at_cycle``). SINGLE TRUTH: there is no de-bias layer, so
+    ``raw == debiased`` (the producer stashes the raw envelope into BOTH keys). The
+    ``build_center`` (envelope-lock) and ``build_sigma`` (realized-floor) authorities run
+    on these RAW members with ZERO shift (``_NoOpDebiasAuthority``). Falls back to the raw
+    array, then to ``mu_native``, only if no member array was threaded.
     """
     values = served.get("debiased_members_native") or served.get("raw_members_native") or ()
     arr = np.asarray(values, dtype=float)
     if arr.size == 0:
         arr = np.asarray([float(served["mu_native"])], dtype=float)
+    # RAW PRECISION (FINAL no-shadow §1-§2): the per-member raw second moment Ê[(x−Y)²]
+    # + walk-forward n, lifted by _served_predictive_inputs in the SAME index order as
+    # the member array. Attached to each RawModelMember so build_center's
+    # walk_forward_model_weights forms the RAW diagonal 1/E[r²] weight. When absent /
+    # length-mismatched, every member carries raw_m2=None ⇒ equal-weight (unchanged).
+    _raw_m2 = served.get("raw_m2_by_index")
+    _n_by = served.get("n_by_index")
+    _have_precision = (
+        isinstance(_raw_m2, (tuple, list))
+        and len(_raw_m2) == int(arr.size)
+        and isinstance(_n_by, (tuple, list))
+        and len(_n_by) == int(arr.size)
+    )
+
+    def _member_m2(i: int) -> float | None:
+        if not _have_precision:
+            return None
+        return _raw_m2[i]
+
+    def _member_n(i: int) -> int:
+        if not _have_precision:
+            return 0
+        try:
+            return int(_n_by[i])
+        except (TypeError, ValueError):
+            return 0
+
     members = tuple(
         RawModelMember(
             model_id=f"reactor_served_{i}",
@@ -608,6 +599,8 @@ def build_fresh_model_set(
             station_mapping_id=case.station_id,
             raw_forecast_artifact_id="reactor_served",
             data_version="reactor_served",
+            walk_forward_raw_m2_native=_member_m2(i),
+            walk_forward_n=_member_n(i),
         )
         for i, v in enumerate(arr.tolist())
     )
@@ -626,20 +619,14 @@ def build_fresh_model_set(
 
 
 class _NoOpDebiasAuthority:
-    """De-bias is a NO-OP at this live seam by DEFAULT — no shift is applied.
+    """De-bias is the IDENTITY at this live seam — no shift is ever applied (single truth).
 
-    POST-FIX REALITY (spine-source rewire 2026-06-16): the members threaded here are the
-    RAW multi-model envelope from ``raw_model_forecasts`` (NOT a chain-of-record-debiased
-    set; the prior claim was false). Live de-bias is OFF, so this authority applies ZERO
-    shift and ``raw == debiased``. The ``build_center`` (envelope-lock) and ``build_sigma``
-    (realized-floor) authorities run on these RAW members — reproducing the ARM-replay
-    member set BEFORE de-bias (raw multi-model center, ~-0.39 settlement-residual bias).
-    Settlement-residual de-bias is a SEPARATE, opt-in step: when
-    ``ZEUS_SPINE_SETTLE_RESID_DEBIAS=1`` the bridge uses a per-case ``DebiasAuthority``
-    seeded with the walk-forward settlement-residual artifact instead of this no-op (see
-    ``_spine_debias_authority`` / the de-bias seam block above), which is the follow-up
-    flip that reaches the fully-validated debiased (~0) center. This no-op is the
-    DEFAULT-OFF behavior this commit ships.
+    The members threaded here are the RAW precise multi-model envelope from
+    ``raw_model_forecasts`` (NOT a chain-of-record-debiased set). Under the operator
+    single-truth law there is NO settlement-residual de-bias layer, so this authority
+    applies ZERO shift and ``raw == debiased``. The ``build_center`` (envelope-lock) and
+    ``build_sigma`` (realized-floor) authorities run on these RAW members untouched — the
+    raw precise multi-model fused center IS what the spine ships.
     """
 
     def apply(self, case: ForecastCase, models: FreshModelSet):
@@ -902,11 +889,9 @@ def decide_family_via_spine(
             # NOT chain-of-record-debiased, and are NOT "the ARM-replay-validated
             # center+σ" — the ARM replay reads the SAME ``raw_model_forecasts`` table
             # but the live center is recomputed here, not lifted from a validated run.
-            # De-bias: no-op by default (``_NoOpDebiasAuthority`` → raw envelope is the
-            # center). When the operator enables the settlement-residual seam
-            # (ZEUS_SPINE_SETTLE_RESID_DEBIAS=1), this is a per-case DebiasAuthority
-            # seeded with the walk-forward settlement-residual artifact that corrects the
-            # proven ~0.5C cold-center bias. Default-OFF: no live behavior change here.
+            # De-bias: IDENTITY always (``_NoOpDebiasAuthority`` → raw envelope is the
+            # center). Single-truth law: there is no settlement-residual de-bias layer and
+            # no bias flag — the raw precise multi-model fused center IS what ships.
             predictive_builder=PredictiveDistributionBuilder(_spine_debias_authority(case)),
             # ROUTE IDENTITY (consult_review_pr409.md §5 BLOCKER): DIRECT native routes
             # ONLY. The unchanged submit path executes ONE native leg, so the decision

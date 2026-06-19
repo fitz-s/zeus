@@ -133,15 +133,52 @@ def _set_state(key: str, value) -> None:
 
 
 
+def _refresh_entries_pause_from_durable_state() -> dict:
+    """Refresh the entry-pause fields from the durable DB authority.
+
+    Entry pause is a live-money submit gate.  The in-process projection is only
+    an operator visibility cache; it must not be a second authority because it
+    can drift from the DB view used at the executor boundary.
+    """
+
+    conn = None
+    try:
+        conn = get_world_connection()
+        durable_state = query_control_override_state(conn)
+    except Exception as exc:
+        logger.error("entries pause durable-state query failed: %s", exc, exc_info=True)
+        durable_state = {
+            "status": "query_error",
+            "entries_paused": True,
+            "entries_pause_source": "control_db_query_error",
+            "entries_pause_reason": "entries_pause_durable_state_unavailable",
+        }
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    if durable_state.get("status") in {"ok", "query_error"}:
+        _control_state["entries_paused"] = bool(durable_state.get("entries_paused", False))
+        _control_state["entries_pause_source"] = durable_state.get("entries_pause_source")
+        _control_state["entries_pause_reason"] = durable_state.get("entries_pause_reason")
+        _control_state["durable_override_status"] = durable_state.get("status", "unknown")
+    return durable_state
+
+
 def is_entries_paused() -> bool:
-    return _control_state.get("entries_paused", False)
+    return bool(_refresh_entries_pause_from_durable_state().get("entries_paused", False))
 
 
 def get_entries_pause_source() -> str | None:
+    _refresh_entries_pause_from_durable_state()
     return _control_state.get("entries_pause_source")
 
 
 def get_entries_pause_reason() -> str | None:
+    _refresh_entries_pause_from_durable_state()
     return _control_state.get("entries_pause_reason")
 
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from src.data.replacement_forecast_shadow_materialization_queue import (
+from src.data.replacement_forecast_live_materialization_queue import (
     _surface_subprocess_warnings,
 )
 
@@ -30,7 +30,7 @@ def test_subprocess_warning_lines_are_relogged(caplog) -> None:
         "fusion decorrelated-provider INCOMPLETE for Wuhan high: served 3/4, missing "
         "['CMC/gem_global']"
     )
-    with caplog.at_level(logging.WARNING, logger="zeus.replacement_shadow_materialization_queue"):
+    with caplog.at_level(logging.WARNING, logger="zeus.replacement_live_materialization_queue"):
         _surface_subprocess_warnings("Wuhan.json", _completed(stderr=k3_line + "\nplain info line"))
     surfaced = [r.message for r in caplog.records]
     assert any("decorrelated-provider INCOMPLETE" in m for m in surfaced), (
@@ -41,7 +41,7 @@ def test_subprocess_warning_lines_are_relogged(caplog) -> None:
 
 
 def test_error_lines_also_surfaced_and_info_lines_not(caplog) -> None:
-    with caplog.at_level(logging.WARNING, logger="zeus.replacement_shadow_materialization_queue"):
+    with caplog.at_level(logging.WARNING, logger="zeus.replacement_live_materialization_queue"):
         _surface_subprocess_warnings(
             "x.json",
             _completed(stdout="something ERROR: boom\n2026-06-09 [zeus.foo] INFO: routine line"),

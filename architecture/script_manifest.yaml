@@ -557,6 +557,86 @@ scripts:
     required_helpers: [scripts.check_data_pipeline_live_e2e._connect_live_readonly]
     required_tests: [tests/test_check_live_order_e2e.py]
     reason: "Classifies existing venue_commands, venue_command_events, submission envelopes, order facts, and trade facts. It fails closed unless an accepted/resting or filled command has daemon-to-command correlation fields, venue order identity, live venue facts, and matching record-chain proof."
+  check_live_restart_preflight.py:
+    # Created: 2026-06-18
+    # Last reused or audited: 2026-06-18
+    # Authority basis: AGENTS.md live-money restart proof gates
+    class: diagnostic
+    lifecycle: long_lived
+    status: active
+    authority_scope: diagnostic_non_promotion
+    canonical_command: "python3 scripts/check_live_restart_preflight.py --json"
+    read_targets: [repo, config/settings.json, state/zeus_trades.db, state/zeus-forecasts.db, process_table]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: [live_runtime_dbs, process_table]
+    dangerous_if_run: false
+    promotion_barrier: "Read-only pre-restart diagnostic; cannot submit/cancel orders, mutate DB truth, start daemons, or authorize live trading by itself."
+    required_helpers: [src.engine.position_belief.load_replacement_belief]
+    required_tests: [tests/test_check_live_restart_preflight.py]
+    reason: "Separates process state, submit config, posterior freshness, pending-exit risk, and held-position belief coverage before an armed live daemon restart."
+  repair_dust_exit_projection.py:
+    # Created: 2026-06-18
+    # Last reused or audited: 2026-06-18
+    # Authority basis: AGENTS.md position/execution truth gate; scripts/AGENTS.md repair contract
+    class: repair
+    lifecycle: long_lived
+    status: active
+    authority_scope: live_trade_projection_repair
+    canonical_command: "python3 scripts/repair_dust_exit_projection.py --json"
+    read_targets: [state/zeus_trades.db]
+    write_targets: [state/zeus_trades.db, stdout]
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus_trades.db
+    external_inputs: [live_runtime_dbs]
+    dangerous_if_run: false
+    promotion_barrier: "Repairs only restart-visible dust pending-exit projection fields from existing canonical backoff evidence; cannot submit/cancel orders, alter shares/phase, or authorize live trading."
+    required_helpers: [src.state.ledger.append_many_and_project, src.state.projection.upsert_position_current]
+    required_tests: [tests/test_repair_dust_exit_projection.py, tests/test_check_live_restart_preflight.py]
+    reason: "Eliminates restart reload risk where chain dust already reached backoff_exhausted but position_current.order_status still says filled."
+  init_replacement_forecast_live_schema.py:
+    # Created: 2026-06-18
+    # Last reused or audited: 2026-06-18
+    # Authority basis: forecast DB schema ownership; replacement live-support schema migration
+    class: repair
+    lifecycle: long_lived
+    status: active
+    authority_scope: forecast_schema_repair
+    canonical_command: "python3 scripts/init_replacement_forecast_live_schema.py --stdout [--commit]"
+    read_targets: [state/zeus-forecasts.db]
+    write_targets: [state/zeus-forecasts.db, stdout]
+    dry_run_default: true
+    apply_flag: "--commit"
+    target_db: state/zeus-forecasts.db
+    external_inputs: [live_runtime_dbs]
+    dangerous_if_run: true
+    promotion_barrier: "Initializes or repairs forecast-class live-support schema only; does not authorize trading, start daemons, submit/cancel orders, or promote experiment rows."
+    required_helpers: [src.state.schema.v2_schema.ensure_replacement_forecast_live_schema]
+    required_tests: [tests/test_replacement_forecast_live_schema.py]
+    reason: "Operator-runnable targeted initializer for replacement forecast live-support schema after removing legacy authority-status columns from the execution path."
+  build_oof_qlcb_reliability_table.py:
+    # Created: 2026-06-18
+    # Last reused or audited: 2026-06-18
+    # Authority basis: q_lcb reliability guard cell scheme in src/decision/qlcb_reliability_guard.py
+    class: config_writer
+    lifecycle: long_lived
+    status: active
+    authority_scope: qlcb_reliability_artifact_generation
+    canonical_command: "python3 scripts/build_oof_qlcb_reliability_table.py"
+    read_targets: [/tmp/unbiased_test_forecasts.json, state/zeus-forecasts.db]
+    write_targets: [state/qlcb_oof_reliability.json, stdout]
+    dry_run_default: false
+    apply_flag: implicit
+    target_db: state/qlcb_oof_reliability.json
+    external_inputs: [/tmp/unbiased_test_forecasts.json]
+    dangerous_if_run: false
+    promotion_barrier: "Writes only the generated q_lcb reliability artifact; it does not mutate DBs, submit orders, or authorize trading without the runtime guard reading the artifact."
+    required_helpers: [src.decision.qlcb_reliability_guard, src.forecast.center, src.calibration.emos]
+    required_tests: [tests/decision/test_qlcb_reliability_guard.py, tests/decision/test_qlcb_guard_decision_integration.py]
+    reason: "Builds rolling-origin OOF reliability cells for the live q_lcb reliability guard using the same bucket/cell scheme consumed at decision time."
   check_live_release_gate.py:
     # Created: 2026-05-21
     # Last reused or audited: 2026-05-21
@@ -766,6 +846,9 @@ scripts:
   fit_settlement_sigma_floor.py: {class: config_writer, dangerous_if_run: false, dry_run_default: false, apply_flag: implicit, target_db: state/settlement_sigma_floor.json, read_targets: [state/zeus-forecasts.db], write_targets: [state/settlement_sigma_floor.json], authority_scope: config_generation, reuse_when: "Regenerate the empirical settlement sigma-floor artifact from VERIFIED settlement_outcomes for EMOS q-builder dispersion flooring.", do_not_use_when: "Do not treat output as canonical settlement truth or promotion authority; review the generated JSON before enabling edli_settlement_sigma_floor_enabled.", canonical_command: "python3 scripts/fit_settlement_sigma_floor.py [--fcst PATH] [--out PATH] [--asof YYYY-MM-DD]", external_inputs: [], promotion_barrier: "Generated floor table is a config artifact only; live use still requires the edli_v1 flag and operator review.", required_helpers: [src.calibration.emos.settlement_sigma_floor], required_tests: [tests/calibration/test_settlement_sigma_floor.py], unguarded_write_rationale: "Writes only the declared JSON config artifact; reads forecast-class settlement_outcomes read-only."}
   measure_member_correlation.py: {class: diagnostic_report_writer, dangerous_if_run: false, dry_run_default: false, apply_flag: implicit, target_db: state/member_correlation_fit.json, read_targets: [state/zeus-forecasts.db], write_targets: [state/member_correlation_fit.json], authority_scope: measurement_artifact, reuse_when: "Measure within-family ICC (ρ_w) for AIFS 51-member ensemble and between-family ICC (ρ_b) for deterministic multi-model ensemble from VERIFIED settled events; compute N_eff = N²/(N + ρ_w·Σ n_m(n_m−1) + ρ_b·(N²−Σ n_m²)) per statistical_calibration_authority_2026-06-12.txt Task 3.1.", do_not_use_when: "Do not treat N_eff artifact as a live confidence-bound parameter without operator review and a separate wiring change.", canonical_command: "python3 scripts/measure_member_correlation.py [--fcst PATH] [--out PATH] [--n-boot N]", external_inputs: [], promotion_barrier: "Generated N_eff artifact is a measurement artifact only; live confidence-bound use requires operator review and a separate materializer-wiring change.", required_tests: [tests/calibration/test_member_correlation.py], unguarded_write_rationale: "Writes only the declared state/member_correlation_fit.json artifact; reads forecast_posteriors.provenance_json (AIFS aifs_probabilities) + raw_model_forecasts + settlement_outcomes(VERIFIED) read-only via file:...?mode=ro."}
   fit_opportunity_growth_rate.py: {class: config_writer, dangerous_if_run: false, dry_run_default: false, apply_flag: implicit, target_db: state/opportunity_growth_rate.json, read_targets: [state/zeus-world.db], write_targets: [state/opportunity_growth_rate.json], authority_scope: config_generation, reuse_when: "Regenerate the future-opportunity log-growth rate g* (daily) from settled edli_live_profit_audit deployments (pnl_usd / kelly_size_usd realized return, holding-period normalized) with a day-block-bootstrap CI, for the exit policy's released-capital multiplier M(T)=e^{g*T} (exit capability E3, consult-3 Q1 task #52). REFUSES below MIN_SETTLED_DEPLOYMENTS=30.", do_not_use_when: "Do not treat g* as live-licensed without operator review; the exit policy DEFAULTS g*=0 (conservative) until the sign-invariant CI licenses a non-zero value and the replacement_exit_policy_enabled flag is flipped.", canonical_command: "python3 scripts/fit_opportunity_growth_rate.py [--world PATH] [--out PATH] [--n-boot N]", external_inputs: [], promotion_barrier: "Generated g* artifact is a config artifact only; live use requires the replacement_exit_policy_enabled flag and operator review of the sign-invariant CI.", required_tests: [tests/strategy/test_exit_policy.py], unguarded_write_rationale: "Writes only the declared state/opportunity_growth_rate.json artifact; reads world-class edli_live_profit_audit read-only via file:...?mode=ro."}
+  apply_replacement_forecast_live_switch.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--apply", target_db: state/zeus-forecasts.db, read_targets: [config/settings.json, docs/operations/current_source_validity.md, docs/operations/current_data_state.md, state/zeus-forecasts.db, state/replacement_forecast_live/refit_handoff.json], write_targets: [config/settings.json, docs/operations/current_source_validity.md, docs/operations/current_data_state.md, state/zeus-forecasts.db, state/replacement_forecast_live/refit_handoff.json, state/replacement_forecast_live/switch_backups, stdout], authority_scope: operator_live_switch, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "Operator-runnable replacement forecast live switch. Default mode writes only a readiness receipt; --apply mutates live config/current-fact/refit/schema surfaces after preflight.", do_not_use_when: "Do not use as an experiment or shadow promotion tool; it is only for the live replacement forecast switch and requires operator-reviewed evidence inputs.", canonical_command: "python3 scripts/apply_replacement_forecast_live_switch.py --evidence-json PATH --refit-handoff-json PATH [--apply] [--receipt-json PATH]", external_inputs: [promotion_evidence_json, refit_handoff_json], promotion_barrier: "--apply requires explicit evidence/refit inputs and creates rollback backups before any live-root writes.", required_helpers: [src.data.replacement_forecast_config_switch, src.data.replacement_forecast_current_fact_patch, src.data.replacement_forecast_live_dry_run, src.data.replacement_forecast_refit_handoff_install, scripts.init_replacement_forecast_live_schema], required_tests: [tests/test_replacement_forecast_config_switch.py], unguarded_write_rationale: "Dangerous live-root writes are explicit --apply only; the script backs up mutated files/DB first and reports rollback commands."}
+  plan_replacement_forecast_live_config.py: {class: diagnostic, dangerous_if_run: false, dry_run_default: true, apply_flag: "--apply", target_db: config/settings.json, read_targets: [config/settings.json], write_targets: [config/settings.json, stdout], authority_scope: operator_live_switch, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "Inspect or apply only the replacement forecast live feature-flag/materialization config patch.", do_not_use_when: "Do not use as a trading authorization receipt; it only plans/applies settings.json config and does not prove sidecar liveness, posterior freshness, or order safety.", canonical_command: "python3 scripts/plan_replacement_forecast_live_config.py [--settings-json PATH] [--apply] [--stdout]", external_inputs: [], promotion_barrier: "--apply changes config only; live restart still requires preflight and operator evidence gates.", required_helpers: [src.data.replacement_forecast_config_switch], required_tests: [tests/test_replacement_forecast_config_switch.py], unguarded_write_rationale: "Only writes the explicitly provided settings JSON when --apply is set; default is read-only."}
+  materialize_replacement_forecast_live.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--commit", target_db: state/zeus-forecasts.db, read_targets: [request_json, raw_forecast_artifacts], write_targets: [state/zeus-forecasts.db], authority_scope: forecast_materialization, reuse_when: "Materialize one live replacement forecast request into forecast_posteriors/readiness_state using runtime_layer='live' semantics.", do_not_use_when: "Do not use with retired or non-live request shapes; queued production should normally call src.data.replacement_forecast_live_materialization_queue.", canonical_command: "python3 scripts/materialize_replacement_forecast_live.py --input-json PATH [--commit] [--init-schema]", external_inputs: [request_json], promotion_barrier: "Dry-run by default; --commit writes only forecast-class posterior/readiness rows and never submits orders.", required_helpers: [src.data.replacement_forecast_materializer.materialize_replacement_forecast_live, src.state.schema.v2_schema.ensure_replacement_forecast_live_schema], required_tests: [tests/data/test_replacement_cycle_availability.py, tests/test_forecast_live_daemon.py], unguarded_write_rationale: "Explicit --commit only; writes through forecast DB connection with BEGIN IMMEDIATE and live schema initializer."}
   fit_bias_scale.py: {class: config_writer, dangerous_if_run: false, dry_run_default: false, apply_flag: implicit, target_db: state/bias_scale_fit.json, read_targets: [state/zeus-forecasts.db], write_targets: [state/bias_scale_fit.json], authority_scope: config_generation, reuse_when: "Regenerate the JOINT per-city bias b_loc + global scale k calibration artifact (interval-censored categorical MLE + EB shrinkage) from VERIFIED forecast_posteriors ⋈ settlement_outcomes; superseding the variance-only k that absorbed center bias (statistical_calibration_authority_2026-06-12 Task 1.1 / Migration Step 1). Add --era-mode to make the FULL settled history usable: it ALSO joins the historical calibration_pairs era (error_model_family='full_transport_v1', back to 2024) as a DISTINCT era and runs a pooled/free-era/EB-partial-pooling triple fit + era-effect LRT + parametric-bootstrap boundary test + the addendum-A5 pooling decision rule (statistical_calibration_addendum_2026-06-13 C1/A5/A6/A9, the deploy unlock past the ~1-week forecast_posteriors retention).", do_not_use_when: "Do not wire the materializer to read this artifact or treat it as deployed calibration — deploy is operator-gated AFTER reviewing the --gate walk-forward evidence (k-reduction gate, prequential paired log-loss lower bound, PIT histogram, modal reliability) and, in --era-mode, the era decision-rule verdict + per-era LRT/bootstrap p-values.", canonical_command: "python3 scripts/fit_bias_scale.py [--fcst PATH] [--out PATH] [--sigma-scale-fit PATH] [--gate] [--era-mode]", external_inputs: [], promotion_barrier: "Generated (b,k) artifact is a config artifact only; live use requires operator review of the Step-1 walk-forward gate and a separate materializer-wiring change.", required_helpers: [scripts.fit_sigma_scale], required_tests: [tests/test_fit_bias_scale.py], unguarded_write_rationale: "Writes only the declared state/bias_scale_fit.json config artifact; reads forecast-class forecast_posteriors ⋈ settlement_outcomes read-only via file:...?mode=ro."}
   fit_anchor_representativeness_debias.py: {class: config_writer, dangerous_if_run: false, dry_run_default: false, apply_flag: implicit, target_db: state/anchor_representativeness_debias.json, read_targets: [state/zeus-forecasts.db], write_targets: [state/anchor_representativeness_debias.json], authority_scope: config_generation, reuse_when: "Regenerate the per-city anchor representativeness de-bias δ_city artifact (law-8 foundation fix) from the FULL previous_runs OpenMeteo IFS9 anchor history ⋈ VERIFIED settlement_outcomes. δ_city = EB-shrunk robust per-city median of (anchor_c − settlement_c), lead-pooled, with an activation guard (n>=n_min) + a do-no-harm walk-forward gate. Re-run as settled history grows so well-sampled cities reach full correction (λ→1) and newly-eligible cities cross n_min. Roots: cold_bias_metadata_root.md (per-city grid-cell-vs-station representativeness offset) + percity_corrected_oos.md (thin live-anchor overfit → fit on the deep previous_runs history).", do_not_use_when: "Do not wire/promote without operator review of the per-family walk_forward.do_no_harm verdict + activation set. The loader src/calibration/anchor_representativeness_debias.py is fail-soft + gate-checked; the artifact is gitignored generated state, not committed.", canonical_command: "python3 scripts/fit_anchor_representativeness_debias.py [--db PATH] [--out PATH] [--n-min N] [--metrics high low]", external_inputs: [], promotion_barrier: "Generated δ_city artifact is a config artifact only; live use is ARTIFACT-GATED (loader returns None when absent → byte-identical to today) and requires the operator to place the fitted artifact in state/ and restart.", required_helpers: [], required_tests: [tests/test_anchor_representativeness_debias.py], unguarded_write_rationale: "Writes only the declared state/anchor_representativeness_debias.json config artifact; reads forecast-class raw_model_forecasts ⋈ settlement_outcomes read-only via file:...?mode=ro&immutable=1."}
   fit_sigma_shape_kernel.py: {class: config_writer, dangerous_if_run: false, dry_run_default: false, apply_flag: implicit, target_db: state/sigma_scale_fit.candidate.json, read_targets: [state/zeus-forecasts.db], write_targets: [state/sigma_scale_fit.candidate.json], authority_scope: config_generation, reuse_when: "GATE-2 sigma-shape refit: drop the uniform pedestal and fit an absolute sigma-floor (regime-aware, step units) by composite MLE on VERIFIED settled cells, replacing the over-flattening (1-w)Normal+wUniform live form. Writes a CANDIDATE artifact only.", do_not_use_when: "Do not overwrite the live state/sigma_scale_fit.json; do not promote without operator sign-off, consumer wiring for floor_steps, and forward after-cost fills (holdout shows the floor magnitude is non-stationary on 5 days).", canonical_command: "python3 scripts/fit_sigma_shape_kernel.py [--fcst PATH] [--out state/sigma_scale_fit.candidate.json] [--min-cells N]", external_inputs: [], promotion_barrier: "CANDIDATE artifact only; live promotion is operator-gated AND requires the materializer to read floor_steps. Never writes the live artifact.", required_helpers: [scripts.fit_sigma_scale], required_tests: [tests/strategy/test_sigma_shape_ring_calibration.py], unguarded_write_rationale: "Writes only the declared CANDIDATE JSON config artifact; reads forecast-class settlement_outcomes read-only via mode=ro uri."}
@@ -862,7 +945,7 @@ scripts:
     reason: >
       PR1 of data_temporal_kernel program. Enforces 6 inter-registry coherence assertions:
       (1) calendar source_id in data_sources_registry; (2) entry_primary ROLE implies live_authorization (keyed on allowed_roles+backfill_only, not tier);
-      (3) SHADOW_ONLY implies not live; (4) backfill_only implies not live;
+      (3) non-live allowed_roles imply not live; (4) backfill_only implies not live;
       (5) code data_version param matches SDK param (calendar drift advisory);
       (6) HKO never carries WU/VHHH station mapping. Zero behavior change; read-only.
   data_collection_frontier_report.py:
@@ -2483,7 +2566,7 @@ scripts:
     class: etl_writer
     status: active
     lifecycle: long_lived
-    authority_scope: shadow_only_research_accrual
+    authority_scope: training_history_seed
     dangerous_if_run: false
     dry_run_default: true
     apply_flag: "--dry-run omitted"
@@ -2493,8 +2576,8 @@ scripts:
     external_inputs: [B0_multilead_dataset.json]
     delete_policy: retain_until_superseded
     promotion_barrier: >
-      Writes ONLY trade_authority_status='SHADOW_ONLY', training_allowed=0 rows.
-      Does NOT change any posterior or live-money table. Fusion reaches T2_BAYES
+      Writes ONLY raw_model_forecasts training-history rows with training_allowed=0.
+      Does NOT change any posterior, readiness, or live-money table. Fusion reaches T2_BAYES
       only after replacement_0_1_bayes_precision_fusion_enabled is flipped AND BayesPrecisionFusionHistoryProvider
       reads the seeded rows. INSERT OR IGNORE — fully idempotent.
     reuse_when: >

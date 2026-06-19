@@ -42,9 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--city", required=True)
     parser.add_argument("--target-date", required=True)
     parser.add_argument("--temperature-metric", choices=("high", "low"), required=True)
-    parser.add_argument("--aifs-manifest-json", type=Path, required=True)
     parser.add_argument("--openmeteo-manifest-json", type=Path, required=True)
-    parser.add_argument("--aifs-samples-json", type=Path, required=True)
     parser.add_argument("--openmeteo-payload-json", type=Path, required=True)
     parser.add_argument("--precision-metadata-json", type=Path, required=True)
     parser.add_argument("--computed-at", help="Decision/queue time; default now UTC")
@@ -81,9 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                 temperature_metric=args.temperature_metric,
                 market_bins=bins,
                 baseline_coverage=coverage,
-                aifs_manifest=load_manifest_with_path(args.aifs_manifest_json),
                 openmeteo_manifest=load_manifest_with_path(args.openmeteo_manifest_json),
-                aifs_samples_json=args.aifs_samples_json,
                 openmeteo_payload_json=args.openmeteo_payload_json,
                 precision_metadata_json=args.precision_metadata_json,
                 computed_at=_dt(args.computed_at, field_name="computed_at"),

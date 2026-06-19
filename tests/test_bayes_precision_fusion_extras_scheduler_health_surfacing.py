@@ -58,7 +58,8 @@ def _patch_env(extras_report: dict | None, download_report=None):
     return patch.multiple(
         "src.data.replacement_forecast_production",
         _replacement_forecast_runtime_flags_from_settings=MagicMock(return_value=_BASE_FLAGS),
-        _replacement_forecast_shadow_materialization_queue_config=MagicMock(return_value=_BASE_CFG),
+        _replacement_forecast_live_materialization_enabled=MagicMock(return_value=True),
+        _replacement_forecast_live_materialization_queue_config=MagicMock(return_value=_BASE_CFG),
         _download_replacement_forecast_current_targets_if_needed=MagicMock(return_value=download_report),
         _download_bayes_precision_fusion_extra_raw_inputs_if_needed=MagicMock(return_value=extras_report),
     )

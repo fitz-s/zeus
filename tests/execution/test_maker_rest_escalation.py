@@ -15,6 +15,7 @@ from src.execution.maker_rest_escalation import (
     find_expired_resting_entries,
     run_cancels_for_expired_rests,
     run_maker_rest_escalation_cycle,
+    run_persisted_cancels_for_expired_rests,
 )
 
 UTC = timezone.utc
@@ -31,7 +32,35 @@ def _db() -> sqlite3.Connection:
         """CREATE TABLE venue_commands (
             command_id TEXT PRIMARY KEY, intent_kind TEXT, market_id TEXT,
             token_id TEXT, side TEXT, size REAL, price REAL,
-            venue_order_id TEXT, state TEXT, created_at TEXT)"""
+            venue_order_id TEXT, state TEXT, last_event_id TEXT,
+            created_at TEXT, updated_at TEXT)"""
+    )
+    conn.execute(
+        """CREATE TABLE venue_command_events (
+            event_id TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT,
+            state_after TEXT NOT NULL,
+            UNIQUE (command_id, sequence_no)
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE provenance_envelope_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_type TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            payload_json TEXT,
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            venue_timestamp TEXT,
+            local_sequence INTEGER NOT NULL,
+            UNIQUE (subject_type, subject_id, local_sequence)
+        )"""
     )
     conn.execute(
         """CREATE TABLE venue_order_facts (
@@ -53,7 +82,7 @@ def _add_order(
     matched: str = "0",
 ):
     conn.execute(
-        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             command_id,
             intent_kind,
@@ -64,8 +93,31 @@ def _add_order(
             0.5,
             venue_order_id,
             "ACKED",
+            None,
+            created_at.isoformat(),
             created_at.isoformat(),
         ),
+    )
+    conn.execute(
+        """INSERT INTO venue_command_events (
+            event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after
+        ) VALUES (?, ?, 1, 'INTENT_CREATED', ?, NULL, 'INTENT_CREATED')""",
+        (f"{command_id}-intent", command_id, created_at.isoformat()),
+    )
+    conn.execute(
+        """INSERT INTO venue_command_events (
+            event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after
+        ) VALUES (?, ?, 2, 'SUBMIT_REQUESTED', ?, NULL, 'SUBMITTING')""",
+        (f"{command_id}-requested", command_id, created_at.isoformat()),
+    )
+    conn.execute(
+        """INSERT INTO venue_command_events (
+            event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after
+        ) VALUES (?, ?, 3, 'SUBMIT_ACKED', ?, NULL, 'ACKED')""",
+        (f"{command_id}-acked", command_id, created_at.isoformat()),
     )
     for i, state in enumerate(fact_states):
         conn.execute(
@@ -138,7 +190,7 @@ class TestScopeGuards:
         """No venue_order_id (lost ack) -> command recovery owns it, not this job."""
         conn = _db()
         conn.execute(
-            "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 "c1",
                 "ENTRY",
@@ -149,6 +201,8 @@ class TestScopeGuards:
                 0.5,
                 None,
                 "SUBMITTING",
+                None,
+                (NOW - timedelta(minutes=300)).isoformat(),
                 (NOW - timedelta(minutes=300)).isoformat(),
             ),
         )
@@ -225,6 +279,43 @@ class TestEscalationRedecisionHarvest:
         clob = _FakeClob()
         stats = run_cancels_for_expired_rests(expired, clob)
         assert stats == {"scanned": 1, "cancelled": 1, "cancel_failed": 0}
+
+
+class TestPersistedRestCancel:
+    def test_persisted_cancel_records_command_terminal_state_before_harvest(self):
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+        expired = find_expired_resting_entries(conn, now=NOW)
+        collected: list[dict] = []
+        clob = _FakeClob()
+
+        stats = run_persisted_cancels_for_expired_rests(
+            expired,
+            clob,
+            conn_factory=lambda: conn,
+            close_connections=False,
+            collect_cancelled=collected,
+        )
+
+        assert stats == {
+            "scanned": 1,
+            "cancelled": 1,
+            "cancel_failed": 0,
+            "cancel_journal_failed": 0,
+        }
+        assert clob.cancelled == ["o1"]
+        assert [entry["command_id"] for entry in collected] == ["c1"]
+        assert conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'c1'"
+        ).fetchone()[0] == "CANCELLED"
+        events = [
+            row[0]
+            for row in conn.execute(
+                "SELECT event_type FROM venue_command_events "
+                "WHERE command_id = 'c1' ORDER BY sequence_no"
+            ).fetchall()
+        ]
+        assert events[-2:] == ["CANCEL_REQUESTED", "CANCEL_ACKED"]
 
 
 class TestDeadlineSource:

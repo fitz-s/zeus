@@ -187,8 +187,23 @@ def _settled_economics_value(position: Any, attr: str) -> object | None:
     return float(value)
 
 
+def _nullable_bool_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return 1 if bool(value) else 0
+
+
 def build_position_current_projection(position: Any) -> dict:
     _position_metric = resolve_position_metric(position)
+    order_status = getattr(position, "order_status", "")
+    exit_state = str(getattr(position, "exit_state", "") or "")
+    exit_reason = str(getattr(position, "exit_reason", "") or "")
+    if exit_state == "backoff_exhausted" and exit_reason:
+        # position_current does not have a dedicated exit_state column. Persist
+        # the terminal non-executable exit state through order_status so a
+        # restarted monitor reloads the same hold-to-settlement state instead
+        # of treating dust as a fresh pending exit.
+        order_status = "backoff_exhausted"
     return {
         "position_id": getattr(position, "trade_id"),
         "phase": canonical_phase_for_position(position),
@@ -212,8 +227,14 @@ def build_position_current_projection(position: Any) -> dict:
         "exit_retry_count": int(getattr(position, "exit_retry_count", 0) or 0),
         "next_exit_retry_at": _nullable(getattr(position, "next_exit_retry_at", None)),
         "last_monitor_prob": _nullable(getattr(position, "last_monitor_prob", None)),
+        "last_monitor_prob_is_fresh": _nullable_bool_int(
+            getattr(position, "last_monitor_prob_is_fresh", None)
+        ),
         "last_monitor_edge": _nullable(getattr(position, "last_monitor_edge", None)),
         "last_monitor_market_price": _nullable(getattr(position, "last_monitor_market_price", None)),
+        "last_monitor_market_price_is_fresh": _nullable_bool_int(
+            getattr(position, "last_monitor_market_price_is_fresh", None)
+        ),
         "decision_snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
         "entry_method": getattr(position, "entry_method", ""),
         "strategy_key": _strategy_key(position),
@@ -224,7 +245,7 @@ def build_position_current_projection(position: Any) -> dict:
         "no_token_id": _nullable(getattr(position, "no_token_id", "")),
         "condition_id": _nullable(getattr(position, "condition_id", "")),
         "order_id": _nullable(getattr(position, "order_id", "")),
-        "order_status": _nullable(getattr(position, "order_status", "")),
+        "order_status": _nullable(order_status),
         "updated_at": projection_updated_at(position),
         # Slice P2-C2 (PR #19 phase 2, 2026-04-26) + P2-fix2 (post-review
         # BLOCKER #1, 2026-04-26): route via resolver for audit trail
@@ -565,6 +586,9 @@ def build_monitor_refreshed_canonical_write(
     sequence_no: int,
     phase_after: str,
     source_module: str = "src.engine.cycle_runtime",
+    exit_decision: Any | None = None,
+    final_should_exit: bool | None = None,
+    final_exit_reason: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Persist a no-transition monitor refresh for an open position."""
     if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
@@ -580,31 +604,59 @@ def build_monitor_refreshed_canonical_write(
     )
     trade_id = str(getattr(position, "trade_id"))
     slug = f"monitor_refreshed:{sequence_no}"
-    payload = json.dumps(
-        {
-            "city": getattr(position, "city", ""),
-            "target_date": getattr(position, "target_date", ""),
-            "bin_label": getattr(position, "bin_label", ""),
-            "direction": getattr(position, "direction", ""),
-            "unit": getattr(position, "unit", "F"),
-            "last_monitor_prob": _nullable(getattr(position, "last_monitor_prob", None)),
-            "last_monitor_prob_is_fresh": bool(getattr(position, "last_monitor_prob_is_fresh", False)),
-            "last_monitor_edge": _nullable(getattr(position, "last_monitor_edge", None)),
-            "last_monitor_market_price": _nullable(getattr(position, "last_monitor_market_price", None)),
-            "last_monitor_market_price_is_fresh": bool(
-                getattr(position, "last_monitor_market_price_is_fresh", False)
-            ),
-            "last_monitor_best_bid": _nullable(getattr(position, "last_monitor_best_bid", None)),
-            "last_monitor_best_ask": _nullable(getattr(position, "last_monitor_best_ask", None)),
-            "last_monitor_market_vig": _nullable(getattr(position, "last_monitor_market_vig", None)),
-            "selected_method": getattr(position, "selected_method", ""),
-            "applied_validations": list(getattr(position, "applied_validations", []) or []),
-            "condition_id": getattr(position, "condition_id", ""),
-            "phase_after": phase_after,
-        },
-        default=str,
-        sort_keys=True,
-    )
+    payload_dict: dict[str, Any] = {
+        "city": getattr(position, "city", ""),
+        "target_date": getattr(position, "target_date", ""),
+        "bin_label": getattr(position, "bin_label", ""),
+        "direction": getattr(position, "direction", ""),
+        "unit": getattr(position, "unit", "F"),
+        "last_monitor_prob": _nullable(getattr(position, "last_monitor_prob", None)),
+        "last_monitor_prob_is_fresh": bool(getattr(position, "last_monitor_prob_is_fresh", False)),
+        "last_monitor_edge": _nullable(getattr(position, "last_monitor_edge", None)),
+        "last_monitor_market_price": _nullable(getattr(position, "last_monitor_market_price", None)),
+        "last_monitor_market_price_is_fresh": bool(
+            getattr(position, "last_monitor_market_price_is_fresh", False)
+        ),
+        "last_monitor_best_bid": _nullable(getattr(position, "last_monitor_best_bid", None)),
+        "last_monitor_best_ask": _nullable(getattr(position, "last_monitor_best_ask", None)),
+        "last_monitor_market_vig": _nullable(getattr(position, "last_monitor_market_vig", None)),
+        "selected_method": getattr(position, "selected_method", ""),
+        "applied_validations": list(getattr(position, "applied_validations", []) or []),
+        "condition_id": getattr(position, "condition_id", ""),
+        "phase_after": phase_after,
+    }
+    if exit_decision is not None:
+        should_exit = (
+            bool(final_should_exit)
+            if final_should_exit is not None
+            else bool(getattr(exit_decision, "should_exit", False))
+        )
+        reason = (
+            str(final_exit_reason)
+            if final_exit_reason is not None
+            else str(getattr(exit_decision, "reason", "") or "")
+        )
+        payload_dict.update(
+            {
+                "exit_decision_available": True,
+                "exit_decision_should_exit": should_exit,
+                "exit_decision_reason": reason,
+                "exit_decision_trigger": str(getattr(exit_decision, "trigger", "") or ""),
+                "exit_decision_urgency": str(getattr(exit_decision, "urgency", "") or ""),
+                "exit_decision_selected_method": str(
+                    getattr(exit_decision, "selected_method", "") or ""
+                ),
+                "exit_decision_applied_validations": list(
+                    getattr(exit_decision, "applied_validations", []) or []
+                ),
+                "exit_decision_neg_edge_count": _nullable(
+                    getattr(position, "neg_edge_count", None)
+                ),
+            }
+        )
+    else:
+        payload_dict["exit_decision_available"] = False
+    payload = json.dumps(payload_dict, default=str, sort_keys=True)
     event = {
         "event_id": f"{trade_id}:monitor_refreshed:{sequence_no}",
         "position_id": trade_id,

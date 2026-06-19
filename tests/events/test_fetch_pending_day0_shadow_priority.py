@@ -23,7 +23,7 @@ from __future__ import annotations
 import sqlite3
 
 from src.events.event_priority import (
-    PRIORITY_DAY0_SHADOW,
+    PRIORITY_DAY0_NON_TRADEABLE,
     PRIORITY_DAY0_TRADEABLE,
     day0_emit_priority,
 )
@@ -127,7 +127,7 @@ def test_shadow_day0_flood_does_not_starve_tradeable_fsr_when_not_tradeable():
                 f"st{i}",
                 available_at="2026-06-11T06:00:00+00:00",
                 received_at="2026-06-11T06:01:00+00:00",
-                priority=PRIORITY_DAY0_SHADOW,
+                priority=PRIORITY_DAY0_NON_TRADEABLE,
             )
         )
     fsr = _tradeable_fsr(
@@ -198,7 +198,7 @@ def test_default_day0_is_tradeable_true_preserves_legacy_ordering():
 
 def test_day0_emit_carries_shadow_priority_under_shadow_scope():
     """EMISSION test: build_day0_extreme_updated_event with day0_is_tradeable=False
-    stamps PRIORITY_DAY0_SHADOW; True stamps PRIORITY_DAY0_TRADEABLE. Pins the
+    stamps PRIORITY_DAY0_NON_TRADEABLE; True stamps PRIORITY_DAY0_TRADEABLE. Pins the
     emission-priority half of the fix to the shared constant."""
     from datetime import datetime, timezone
 
@@ -232,7 +232,7 @@ def test_day0_emit_carries_shadow_priority_under_shadow_scope():
         received_at="2026-06-11T11:30:00+00:00",
         day0_is_tradeable=False,
     )
-    assert shadow.priority == PRIORITY_DAY0_SHADOW
+    assert shadow.priority == PRIORITY_DAY0_NON_TRADEABLE
 
     tradeable = build_day0_extreme_updated_event(
         observation=observation,
@@ -250,4 +250,4 @@ def test_day0_emit_carries_shadow_priority_under_shadow_scope():
         received_at="2026-06-11T11:30:00+00:00",
     )
     assert default.priority == PRIORITY_DAY0_TRADEABLE
-    assert day0_emit_priority(day0_is_tradeable=False) == PRIORITY_DAY0_SHADOW
+    assert day0_emit_priority(day0_is_tradeable=False) == PRIORITY_DAY0_NON_TRADEABLE

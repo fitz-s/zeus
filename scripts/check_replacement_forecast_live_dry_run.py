@@ -20,9 +20,7 @@ from src.data.replacement_forecast_live_dry_run import (  # noqa: E402
 from src.data.replacement_forecast_runtime_policy import (  # noqa: E402
     DIRECTION_FLIP_FLAG,
     KELLY_INCREASE_FLAG,
-    SHADOW_FLAG,
-    TRADE_AUTHORITY_FLAG,
-    VETO_FLAG,
+    LIVE_FLAG,
 )
 
 
@@ -41,21 +39,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Replacement forecast live dry-run gate")
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--stdout", action="store_true", help="Print JSON report")
-    parser.add_argument("--assume-shadow-veto-flags", action="store_true", help="Preview shadow+veto feature flags without editing config")
+    parser.add_argument("--assume-live-flags", action="store_true", help="Preview live feature flags without editing config")
     parser.add_argument("--assume-current-facts", action="store_true", help="Preview current source/data fact status without editing docs")
-    parser.add_argument("--assume-shadow-schema", action="store_true", help="Preview replacement shadow schema after targeted initializer")
+    parser.add_argument("--assume-live-schema", action="store_true", help="Preview replacement live schema after targeted initializer")
     parser.add_argument("--assume-refit-handoff", action="store_true", help="Preview a ready refit handoff file without editing live root")
     args = parser.parse_args(argv)
     try:
         flags = dict(_load_root_feature_flags(args.root))
-        if args.assume_shadow_veto_flags:
+        if args.assume_live_flags:
             flags.update(
                 {
-                    SHADOW_FLAG: True,
-                    VETO_FLAG: True,
-                    TRADE_AUTHORITY_FLAG: False,
-                    KELLY_INCREASE_FLAG: False,
-                    DIRECTION_FLIP_FLAG: False,
+                    LIVE_FLAG: True,
+                    KELLY_INCREASE_FLAG: True,
+                    DIRECTION_FLIP_FLAG: True,
                 }
             )
         report = build_replacement_forecast_live_dry_run_report(
@@ -64,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_flags=flags,
                 source_fact_status_override="CURRENT_FOR_LIVE" if args.assume_current_facts else None,
                 data_fact_status_override="CURRENT_FOR_LIVE" if args.assume_current_facts else None,
-                assume_replacement_shadow_schema_initialized=bool(args.assume_shadow_schema),
+                assume_replacement_live_schema_initialized=bool(args.assume_live_schema),
                 assume_refit_handoff_available=bool(args.assume_refit_handoff),
             )
         )

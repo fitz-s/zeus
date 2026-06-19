@@ -1049,6 +1049,7 @@ class ExecutionIntent:
     decision_source_context: DecisionSourceContext | None = None
     submit_order_type: OrderType | None = None
     post_only: bool = False
+    taker_quality_proof: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         # Slice P3-fix1 (post-review BLOCKER from critic M1 + code-reviewer
@@ -1748,6 +1749,7 @@ class FinalExecutionIntent:
     correlation_key: str = ""
     decision_source_context: DecisionSourceContext | None = None
     passive_maker_context: PassiveMakerExecutionContext | None = None
+    taker_quality_proof: Mapping[str, Any] | None = None
     pricing_semantics_id: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
@@ -1767,6 +1769,7 @@ class FinalExecutionIntent:
         correlation_key: str = "",
         decision_source_context: DecisionSourceContext | None = None,
         passive_maker_context: PassiveMakerExecutionContext | None = None,
+        taker_quality_proof: Mapping[str, Any] | None = None,
     ) -> "FinalExecutionIntent":
         hypothesis.assert_matches_cost_basis(cost_basis)
         cost_basis.assert_submit_safe()
@@ -1807,6 +1810,7 @@ class FinalExecutionIntent:
             correlation_key=correlation_key,
             decision_source_context=decision_source_context,
             passive_maker_context=passive_maker_context,
+            taker_quality_proof=taker_quality_proof,
         )
 
     def __post_init__(self) -> None:

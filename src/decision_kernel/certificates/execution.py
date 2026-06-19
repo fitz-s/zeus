@@ -65,6 +65,7 @@ def build_final_intent_certificate_from_actionable(
     available_crossable_shares: float | None = None,
     sweep_expected_fill_price: str | None = None,
     executable_market_context: Mapping[str, object] | None = None,
+    taker_quality_proof: Mapping[str, object] | None = None,
 ) -> DecisionCertificate:
     action = actionable_cert.payload
     # The governor-decided ``order_mode`` is the SOLE authority for the order-type
@@ -154,8 +155,14 @@ def build_final_intent_certificate_from_actionable(
     # order genuinely needs the book).
     if order_spec.mode == "TAKER":
         passive_maker_context_payload = None
+        if not isinstance(taker_quality_proof, Mapping):
+            raise ValueError("TAKER_QUALITY_PROOF_REQUIRED")
+        taker_quality_payload = dict(taker_quality_proof)
+        if taker_quality_payload.get("passed") is not True:
+            raise ValueError("TAKER_QUALITY_PROOF_NOT_PASSED")
     else:
         passive_maker_context_payload = _context_payload(passive_maker_context, "passive_maker_context")
+        taker_quality_payload = None
     payload = {
         "event_id": action["event_id"],
         "event_type": action.get("event_type"),
@@ -205,6 +212,7 @@ def build_final_intent_certificate_from_actionable(
         "cost_basis_id": f"cost_basis:{cost_basis_hash[:16]}",
         "decision_source_context": decision_source_context_payload,
         "passive_maker_context": passive_maker_context_payload,
+        "taker_quality_proof": taker_quality_payload,
         "neg_risk": bool(action.get("neg_risk", False)),
         "tick_size": str(Decimal(str(tick_size))),
         "min_order_size": float(min_order_size),

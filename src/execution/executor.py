@@ -135,6 +135,694 @@ def _risk_allocator_order_type_allows_intent(
     return False
 
 
+_ENTRY_DUPLICATE_TERMINAL_PHASES = frozenset(
+    {"voided", "economically_closed", "settled", "quarantined", "admin_closed"}
+)
+_ENTRY_DUPLICATE_OPEN_COMMAND_STATES = frozenset(
+    {
+        "INTENT_CREATED",
+        "SNAPSHOT_BOUND",
+        "SIGNED_PERSISTED",
+        "POSTING",
+        "POST_ACKED",
+        "SUBMITTING",
+        "ACKED",
+        "PARTIAL",
+        "UNKNOWN",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "REVIEW_REQUIRED",
+        "CANCEL_PENDING",
+    }
+)
+_ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES = frozenset(
+    {"REJECTED", "SUBMIT_REJECTED", "CANCELLED", "EXPIRED"}
+)
+_ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES = frozenset(
+    {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
+)
+_ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
+_ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE = Decimal("0.03")
+_ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD = Decimal("0.05")
+_ENTRY_TAKER_MIN_CONFIDENCE = Decimal("0.60")
+_ENTRY_TAKER_MIN_PROFIT_RATIO = Decimal("1.20")
+
+
+def _quote_sql_identifier(identifier: str) -> str:
+    if not identifier or not all(ch.isalnum() or ch == "_" for ch in identifier):
+        raise ValueError(f"unsafe sqlite identifier: {identifier!r}")
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _entry_has_positive_trade_fact(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str = "",
+    position_id: str = "",
+    order_id: str = "",
+) -> bool:
+    if not _table_exists(conn, "venue_trade_facts"):
+        return False
+    if command_id:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_trade_facts
+             WHERE CAST(filled_size AS REAL) > 0
+               AND command_id = ?
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        return row is not None
+    if not _table_exists(conn, "venue_commands"):
+        return False
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM venue_trade_facts vtf
+          JOIN venue_commands vc ON vc.command_id = vtf.command_id
+         WHERE CAST(vtf.filled_size AS REAL) > 0
+           AND (
+                (? != '' AND vc.position_id = ?)
+                OR (? != '' AND vc.venue_order_id = ?)
+           )
+         LIMIT 1
+        """,
+        (position_id, position_id, order_id, order_id),
+    ).fetchone()
+    return row is not None
+
+
+def _latest_entry_command_for_duplicate_position(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    order_id: str,
+) -> dict | None:
+    if not _table_exists(conn, "venue_commands"):
+        return None
+    row = conn.execute(
+        """
+        SELECT command_id, state, venue_order_id
+          FROM venue_commands
+         WHERE intent_kind = 'ENTRY'
+           AND (
+                position_id = ?
+                OR (? != '' AND venue_order_id = ?)
+           )
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1
+        """,
+        (position_id, order_id, order_id),
+    ).fetchone()
+    if row is None:
+        return None
+    if isinstance(row, sqlite3.Row):
+        return {key: row[key] for key in row.keys()}
+    return {"command_id": row[0], "state": row[1], "venue_order_id": row[2]}
+
+
+def _entry_command_has_terminal_no_fill_order_fact(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> bool:
+    if not command_id or not _table_exists(conn, "venue_order_facts"):
+        return False
+    row = conn.execute(
+        """
+        SELECT state, matched_size
+          FROM venue_order_facts
+         WHERE command_id = ?
+         ORDER BY local_sequence DESC, observed_at DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    state = str(row["state"] if isinstance(row, sqlite3.Row) else row[0] or "").upper()
+    if state not in _ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES:
+        return False
+    matched_size = row["matched_size"] if isinstance(row, sqlite3.Row) else row[1]
+    try:
+        return Decimal(str(matched_size or "0")) == Decimal("0")
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _entry_terminal_command_has_no_fill_exposure(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    state: str,
+) -> bool:
+    if str(state or "").upper() not in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES:
+        return False
+    if _entry_has_positive_trade_fact(conn, command_id=command_id):
+        return False
+    return True
+
+
+def _pending_entry_terminal_no_fill_allows_entry(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row | tuple,
+) -> bool:
+    phase = str(row["phase"] if isinstance(row, sqlite3.Row) else row[1] or "").lower()
+    if phase != "pending_entry":
+        return False
+    position_id = str(row["position_id"] if isinstance(row, sqlite3.Row) else row[0] or "")
+    order_id = str(row["order_id"] if isinstance(row, sqlite3.Row) else row[2] or "")
+    try:
+        shares = Decimal(str(row["shares"] if isinstance(row, sqlite3.Row) else row[3] or "0"))
+        cost_basis = Decimal(str(row["cost_basis_usd"] if isinstance(row, sqlite3.Row) else row[4] or "0"))
+    except (InvalidOperation, ValueError):
+        return False
+    if shares != Decimal("0") or cost_basis != Decimal("0"):
+        return False
+    command = _latest_entry_command_for_duplicate_position(
+        conn,
+        position_id=position_id,
+        order_id=order_id,
+    )
+    if command is None:
+        return False
+    command_id = str(command.get("command_id") or "")
+    state = str(command.get("state") or "").upper()
+    if state not in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES:
+        return False
+    if _entry_has_positive_trade_fact(conn, position_id=position_id, order_id=order_id):
+        return False
+    return _entry_terminal_command_has_no_fill_exposure(
+        conn,
+        command_id=command_id,
+        state=state,
+    )
+
+
+def _attached_schema_names(conn: sqlite3.Connection) -> tuple[str, ...]:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return ("main",)
+    names: list[str] = []
+    for row in rows:
+        try:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        except (IndexError, KeyError, TypeError):
+            continue
+        text = str(name or "").strip()
+        if text:
+            names.append(text)
+    return tuple(dict.fromkeys(names)) or ("main",)
+
+
+def _table_exists_in_schema(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    schema_sql = _quote_sql_identifier(schema)
+    row = conn.execute(
+        f"SELECT 1 FROM {schema_sql}.sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _entry_control_pause_component(conn: sqlite3.Connection) -> dict:
+    """Read the durable entries-paused override at the submit boundary."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    checked_schemas: list[str] = []
+    authority_schemas: list[str] = []
+    for schema in _attached_schema_names(conn):
+        if schema == "temp":
+            continue
+        checked_schemas.append(schema)
+        try:
+            if not _table_exists_in_schema(conn, schema, "control_overrides"):
+                continue
+            authority_schemas.append(schema)
+            schema_sql = _quote_sql_identifier(schema)
+            row = conn.execute(
+                f"""
+                SELECT value, issued_by, reason, issued_at, effective_until
+                FROM {schema_sql}.control_overrides
+                WHERE target_type = 'global'
+                  AND target_key = 'entries'
+                  AND action_type = 'gate'
+                  AND issued_at <= ?
+                  AND (effective_until IS NULL OR effective_until > ?)
+                ORDER BY precedence DESC, issued_at DESC, override_id DESC
+                LIMIT 1
+                """,
+                (now, now),
+            ).fetchone()
+        except sqlite3.Error:
+            continue
+        if row is None:
+            continue
+        value = str(row["value"] if isinstance(row, sqlite3.Row) else row[0] or "").strip().lower()
+        if value in {"true", "1", "yes", "on"}:
+            issued_by = row["issued_by"] if isinstance(row, sqlite3.Row) else row[1]
+            reason = row["reason"] if isinstance(row, sqlite3.Row) else row[2]
+            issued_at = row["issued_at"] if isinstance(row, sqlite3.Row) else row[3]
+            effective_until = row["effective_until"] if isinstance(row, sqlite3.Row) else row[4]
+            return {
+                "component": "entries_pause_control_override",
+                "allowed": False,
+                "reason": str(reason or "entries_paused"),
+                "issued_by": str(issued_by or ""),
+                "issued_at": str(issued_at or ""),
+                "effective_until": "" if effective_until is None else str(effective_until),
+                "authority_schema": schema,
+            }
+
+    if authority_schemas:
+        return {
+            "component": "entries_pause_control_override",
+            "allowed": True,
+            "reason": "allowed",
+            "authority_schema": ",".join(authority_schemas),
+        }
+    return {
+        "component": "entries_pause_control_override",
+        "allowed": True,
+        "reason": "missing_control_override_table",
+        "checked_schemas": checked_schemas,
+    }
+
+
+def _proof_decimal(proof: Any, key: str) -> Decimal | None:
+    if not isinstance(proof, dict):
+        return None
+    raw = proof.get(key)
+    if raw in (None, ""):
+        return None
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return value if value.is_finite() else None
+
+
+def _proof_bool(proof: Any, key: str) -> bool | None:
+    if not isinstance(proof, dict):
+        return None
+    raw = proof.get(key)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _entry_taker_quality_component(
+    *,
+    effective_order_type: str,
+    post_only: bool,
+    intent_order_type: str | None = None,
+    taker_quality_proof: Any = None,
+) -> dict:
+    """Final live-entry policy: takers need explicit edge-vs-maker proof."""
+
+    order_type = str(effective_order_type or "").strip().upper()
+    if post_only:
+        if order_type not in {"GTC", "GTD"}:
+            return {
+                "component": "entry_taker_quality",
+                "allowed": False,
+                "reason": "entry_resting_order_type_required",
+                "order_type": order_type,
+                "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
+                "post_only": True,
+            }
+        return {
+            "component": "entry_taker_quality",
+            "allowed": True,
+            "reason": "maker_resting_allowed",
+            "order_type": order_type,
+            "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
+            "post_only": True,
+        }
+    if order_type not in {"FOK", "FAK"}:
+        return {
+            "component": "entry_taker_quality",
+            "allowed": False,
+            "reason": "entry_taker_requires_fok_or_fak",
+            "order_type": order_type,
+            "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
+            "post_only": False,
+        }
+    if not isinstance(taker_quality_proof, dict):
+        return {
+            "component": "entry_taker_quality",
+            "allowed": False,
+            "reason": "missing_taker_quality_proof",
+            "order_type": order_type,
+            "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
+            "post_only": False,
+        }
+    proof_passed = _proof_bool(taker_quality_proof, "passed")
+    taker_edge = _proof_decimal(taker_quality_proof, "taker_fee_adjusted_edge")
+    taker_profit = _proof_decimal(taker_quality_proof, "taker_expected_profit_usd")
+    maker_profit = _proof_decimal(taker_quality_proof, "maker_expected_profit_usd")
+    incremental_profit = _proof_decimal(taker_quality_proof, "incremental_expected_profit_usd")
+    confidence = _proof_decimal(taker_quality_proof, "model_confidence")
+    missing = [
+        name
+        for name, value in (
+            ("taker_fee_adjusted_edge", taker_edge),
+            ("taker_expected_profit_usd", taker_profit),
+            ("maker_expected_profit_usd", maker_profit),
+            ("incremental_expected_profit_usd", incremental_profit),
+            ("model_confidence", confidence),
+            ("passed", None if proof_passed is None else Decimal("1")),
+        )
+        if value is None
+    ]
+    if missing:
+        return {
+            "component": "entry_taker_quality",
+            "allowed": False,
+            "reason": "invalid_taker_quality_proof",
+            "missing": ",".join(missing),
+            "order_type": order_type,
+            "post_only": False,
+        }
+    if proof_passed is not True:
+        return {
+            "component": "entry_taker_quality",
+            "allowed": False,
+            "reason": "taker_quality_proof_not_passed",
+            "order_type": order_type,
+            "post_only": False,
+        }
+    required_profit = max(
+        maker_profit * _ENTRY_TAKER_MIN_PROFIT_RATIO,
+        maker_profit + _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD,
+    )
+    if taker_edge < _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE:
+        reason = "taker_fee_adjusted_edge_below_floor"
+    elif incremental_profit < _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD:
+        reason = "taker_incremental_profit_below_floor"
+    elif taker_profit < required_profit:
+        reason = "taker_profit_not_significantly_above_maker"
+    elif confidence < _ENTRY_TAKER_MIN_CONFIDENCE:
+        reason = "model_confidence_below_taker_floor"
+    else:
+        reason = ""
+    if reason:
+        return {
+            "component": "entry_taker_quality",
+            "allowed": False,
+            "reason": reason,
+            "order_type": order_type,
+            "post_only": False,
+            "taker_fee_adjusted_edge": str(taker_edge),
+            "taker_expected_profit_usd": str(taker_profit),
+            "maker_expected_profit_usd": str(maker_profit),
+            "incremental_expected_profit_usd": str(incremental_profit),
+            "model_confidence": str(confidence),
+        }
+    return {
+        "component": "entry_taker_quality",
+        "allowed": True,
+        "reason": "taker_quality_passed",
+        "order_type": order_type,
+        "intent_order_type": "" if intent_order_type is None else str(intent_order_type),
+        "post_only": False,
+        "taker_fee_adjusted_edge": str(taker_edge),
+        "taker_expected_profit_usd": str(taker_profit),
+        "maker_expected_profit_usd": str(maker_profit),
+        "incremental_expected_profit_usd": str(incremental_profit),
+        "model_confidence": str(confidence),
+    }
+
+
+def _parse_sqlite_timestamp(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _entry_same_token_cooldown_component(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    candidate_position_id: str,
+    now: datetime | None = None,
+) -> dict:
+    """Throttle repeated ENTRY attempts for a top-ranked token."""
+
+    token = str(token_id or "").strip()
+    if not token:
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": False,
+            "reason": "missing_token_id",
+        }
+    if not _table_exists(conn, "venue_commands"):
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "missing_venue_commands_table",
+        }
+    rows = conn.execute(
+        """
+        SELECT command_id, position_id, state, created_at, updated_at
+        FROM venue_commands
+        WHERE intent_kind = 'ENTRY'
+          AND side = 'BUY'
+          AND token_id = ?
+          AND position_id != ?
+        ORDER BY updated_at DESC, created_at DESC
+        """,
+        (token, candidate_position_id),
+    ).fetchall()
+    if not rows:
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "allowed_no_prior_entry",
+            "token_id": token,
+        }
+    command_id = ""
+    position_id = ""
+    state = ""
+    created_at = ""
+    updated_at = ""
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            command_id = str(row["command_id"])
+            position_id = str(row["position_id"])
+            state = str(row["state"])
+            created_at = row["created_at"]
+            updated_at = row["updated_at"]
+        else:
+            command_id = str(row[0])
+            position_id = str(row[1])
+            state = str(row[2])
+            created_at = row[3]
+            updated_at = row[4]
+        if _entry_terminal_command_has_no_fill_exposure(
+            conn,
+            command_id=command_id,
+            state=state,
+        ):
+            continue
+        break
+    else:
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "allowed_terminal_no_fill_prior_entries",
+            "token_id": token,
+        }
+    last_seen = _parse_sqlite_timestamp(updated_at) or _parse_sqlite_timestamp(created_at)
+    if last_seen is None:
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": False,
+            "reason": "prior_entry_timestamp_unparseable",
+            "existing_command_id": command_id,
+            "existing_position_id": position_id,
+            "existing_command_state": state,
+        }
+    now_utc = now or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    age_seconds = (now_utc.astimezone(timezone.utc) - last_seen).total_seconds()
+    remaining_seconds = _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - age_seconds
+    if remaining_seconds > 0:
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": False,
+            "reason": "same_token_entry_cooling_down",
+            "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
+            "remaining_seconds": int(remaining_seconds),
+            "existing_command_id": command_id,
+            "existing_position_id": position_id,
+            "existing_command_state": state,
+            "existing_updated_at": str(updated_at or ""),
+            "existing_created_at": str(created_at or ""),
+        }
+    return {
+        "component": "entry_same_token_cooldown",
+        "allowed": True,
+        "reason": "allowed_cooldown_elapsed",
+        "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
+        "age_seconds": int(age_seconds),
+        "existing_command_id": command_id,
+        "existing_command_state": state,
+    }
+
+
+def _entry_duplicate_same_token_component(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    candidate_position_id: str,
+) -> dict:
+    """Final pre-submit duplicate-exposure gate for live entry orders.
+
+    Evaluator-level dedup can be bypassed by retries, stale projections, or
+    distinct decision/size idempotency keys. The executor is the last boundary
+    before command persistence and SDK submission, so it must independently
+    reject same-token open exposure.
+    """
+
+    token = str(token_id or "").strip()
+    if not token:
+        return {
+            "component": "entry_duplicate_same_token",
+            "allowed": False,
+            "reason": "missing_token_id",
+        }
+
+    if _table_exists(conn, "position_current"):
+        phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_TERMINAL_PHASES)
+        rows = conn.execute(
+            f"""
+            SELECT position_id, phase, order_id, shares, cost_basis_usd
+            FROM position_current
+            WHERE (token_id = ? OR no_token_id = ?)
+              AND position_id != ?
+              AND phase NOT IN ({phase_placeholders})
+            """,
+            (
+                token,
+                token,
+                candidate_position_id,
+                *sorted(_ENTRY_DUPLICATE_TERMINAL_PHASES),
+            ),
+        ).fetchall()
+        for row in rows:
+            if _pending_entry_terminal_no_fill_allows_entry(conn, row):
+                continue
+            return {
+                "component": "entry_duplicate_same_token",
+                "allowed": False,
+                "reason": "open_position_same_token",
+                "existing_position_id": str(row["position_id"] if isinstance(row, sqlite3.Row) else row[0]),
+                "existing_phase": str(row["phase"] if isinstance(row, sqlite3.Row) else row[1]),
+            }
+
+    if _table_exists(conn, "venue_commands"):
+        terminal_phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_TERMINAL_PHASES)
+        open_state_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_OPEN_COMMAND_STATES)
+        terminal_no_exposure_placeholders = ",".join(
+            "?" for _ in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES
+        )
+        rows = conn.execute(
+            f"""
+            SELECT vc.command_id, vc.position_id, vc.state, pc.phase
+            FROM venue_commands vc
+            LEFT JOIN position_current pc ON pc.position_id = vc.position_id
+            WHERE vc.intent_kind = 'ENTRY'
+              AND vc.side = 'BUY'
+              AND vc.token_id = ?
+              AND vc.position_id != ?
+              AND (
+                    vc.state IN ({open_state_placeholders})
+                 OR (
+                        vc.state = 'FILLED'
+                    AND (
+                            pc.phase IS NULL
+                         OR pc.phase NOT IN ({terminal_phase_placeholders})
+                    )
+                 )
+                 OR (
+                        vc.state NOT IN ({terminal_no_exposure_placeholders})
+                    AND vc.state != 'FILLED'
+                    AND vc.state NOT IN ({open_state_placeholders})
+                 )
+              )
+            ORDER BY vc.updated_at DESC, vc.created_at DESC
+            """,
+            (
+                token,
+                candidate_position_id,
+                *sorted(_ENTRY_DUPLICATE_OPEN_COMMAND_STATES),
+                *sorted(_ENTRY_DUPLICATE_TERMINAL_PHASES),
+                *sorted(_ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES),
+                *sorted(_ENTRY_DUPLICATE_OPEN_COMMAND_STATES),
+            ),
+        ).fetchall()
+        for row in rows:
+            if isinstance(row, sqlite3.Row):
+                command_id = str(row["command_id"])
+                position_id = str(row["position_id"])
+                state = str(row["state"])
+                phase = row["phase"]
+            else:
+                command_id = str(row[0])
+                position_id = str(row[1])
+                state = str(row[2])
+                phase = row[3]
+            if (
+                _entry_terminal_command_has_no_fill_exposure(
+                    conn,
+                    command_id=command_id,
+                    state=state,
+                )
+            ):
+                continue
+            return {
+                "component": "entry_duplicate_same_token",
+                "allowed": False,
+                "reason": "open_or_filled_entry_command_same_token",
+                "existing_command_id": command_id,
+                "existing_position_id": position_id,
+                "existing_command_state": state,
+                "existing_phase": "" if phase is None else str(phase),
+            }
+
+    return {
+        "component": "entry_duplicate_same_token",
+        "allowed": True,
+        "reason": "allowed",
+        "token_id": token,
+    }
+
+
 def _venue_submit_amount_precision_rejection_reason(
     intent: ExecutionIntent,
     *,
@@ -518,51 +1206,35 @@ def _assert_collateral_allows_buy(
 
 def _refresh_entry_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> dict:
     """Refresh collateral truth synchronously on the submit path before preflight."""
-    import time as _time
+    from src.execution.collateral import refresh_collateral_snapshot_for_submit
 
-    from src.data.polymarket_client import PolymarketClient
-    from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
+    return refresh_collateral_snapshot_for_submit(conn, action="entry_submit")
 
-    # 2026-06-16 (#122): a TRANSIENT `database is locked` on the collateral WRITE is NOT
-    # CollateralInsufficient — conflating them REJECTED decided harvest orders on transient
-    # zeus_trades.db write-contention (no in-process trade-write mutex; the snapshot-capture
-    # writer thrashes the WAL lock). Retry the brief write a bounded number of times; the
-    # lock clears well under a second. Only a GENUINE CollateralInsufficient, a non-lock
-    # error, or a lock persisting past every retry surfaces (then the order is simply
-    # re-decided next cycle — never a silent loss, never a fabricated insufficiency).
-    _LOCK_RETRIES = 5
-    _LOCK_BACKOFF_SECONDS = 0.4
-    client = PolymarketClient()
-    adapter = client._ensure_v2_adapter()
-    snapshot = None
-    for _attempt in range(_LOCK_RETRIES):
-        try:
-            snapshot = CollateralLedger(conn).refresh(adapter)
-            break
-        except CollateralInsufficient:
-            raise
-        except sqlite3.OperationalError as exc:
-            if "lock" not in str(exc).lower() or _attempt == _LOCK_RETRIES - 1:
-                raise CollateralInsufficient(f"collateral_refresh_failed: {exc}") from exc
-            _time.sleep(_LOCK_BACKOFF_SECONDS)
-        except Exception as exc:
-            raise CollateralInsufficient(f"collateral_refresh_failed: {exc}") from exc
-    if snapshot is None:
-        raise CollateralInsufficient("collateral_refresh_failed: lock_retries_exhausted")
-    if snapshot.authority_tier == "DEGRADED":
-        raise CollateralInsufficient("collateral_snapshot_degraded: refreshed_before_submit")
-    return _capability_component(
-        "collateral_snapshot_refresh",
-        authority_tier=snapshot.authority_tier,
-        captured_at=snapshot.captured_at.isoformat(),
+
+def _refresh_exit_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> dict:
+    """Refresh CTF inventory truth before exit sell preflight."""
+    from src.execution.collateral import refresh_collateral_snapshot_for_submit
+
+    return refresh_collateral_snapshot_for_submit(
+        conn,
+        action="exit_submit",
+        reuse_fresh_snapshot=True,
     )
 
 
-def _assert_collateral_allows_sell(token_id: str, shares: float) -> dict:
+def _assert_collateral_allows_sell(
+    token_id: str,
+    shares: float,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> dict:
     """Fail before command persistence or SDK contact when CTF inventory is insufficient."""
-    from src.state.collateral_ledger import assert_sell_preflight
+    from src.state.collateral_ledger import CollateralLedger, assert_sell_preflight
 
-    assert_sell_preflight(token_id, shares)
+    if conn is not None:
+        CollateralLedger(conn).sell_preflight(token_id=token_id, size=shares)
+    else:
+        assert_sell_preflight(token_id, shares)
     return _capability_component("collateral_ledger", collateral="CTF", token_id=token_id, shares=shares)
 
 
@@ -1997,6 +2669,7 @@ def _legacy_entry_intent_from_final(
         decision_source_context=intent.decision_source_context,
         submit_order_type=intent.order_type,
         post_only=intent.post_only,
+        taker_quality_proof=intent.taker_quality_proof,
     )
 
 
@@ -2475,7 +3148,8 @@ def execute_exit_order(
         order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
-        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares)
+        collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(conn)
+        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares, conn=conn)
 
         # -------------------------------------------------------------------
         # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).
@@ -2680,6 +3354,7 @@ def execute_exit_order(
                             _capability_component("order_type_selection", order_type=order_type),
                             heartbeat_component,
                             ws_gap_component,
+                            collateral_refresh_component,
                             collateral_component,
                             _capability_component("replacement_sell_guard"),
                             _exit_decision_source_component(),
@@ -3433,6 +4108,32 @@ def _live_order(
                 order_role="entry",
                 idempotency_key=idem.value,
             )
+        taker_quality_component = _entry_taker_quality_component(
+            effective_order_type=effective_order_type,
+            post_only=submit_post_only,
+            intent_order_type=submit_order_type,
+            taker_quality_proof=getattr(intent, "taker_quality_proof", None),
+        )
+        if not taker_quality_component.get("allowed"):
+            reason = str(taker_quality_component.get("reason") or "entry_taker_quality")
+            logger.warning(
+                "_live_order: entry taker-quality policy blocked before command "
+                "persistence for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                taker_quality_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"entry_taker_quality:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
         amount_precision_error = _venue_submit_amount_precision_rejection_reason(
             intent,
             shares=shares,
@@ -3543,6 +4244,88 @@ def _live_order(
                 order_role="entry",
             )
 
+        entries_pause_component = _entry_control_pause_component(conn)
+        if not entries_pause_component.get("allowed"):
+            reason = str(entries_pause_component.get("reason") or "entries_paused")
+            logger.warning(
+                "_live_order: entries pause blocked entry before command "
+                "persistence for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                entries_pause_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"entries_paused:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                intent_id=None,
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
+
+        duplicate_same_token_component = _entry_duplicate_same_token_component(
+            conn,
+            token_id=intent.token_id,
+            candidate_position_id=trade_id,
+        )
+        if not duplicate_same_token_component.get("allowed"):
+            reason = str(
+                duplicate_same_token_component.get("reason")
+                or "duplicate_entry_same_token"
+            )
+            logger.warning(
+                "_live_order: duplicate same-token entry blocked before command "
+                "persistence for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                duplicate_same_token_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"duplicate_entry_same_token:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                intent_id=None,
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
+
+        cooldown_component = _entry_same_token_cooldown_component(
+            conn,
+            token_id=intent.token_id,
+            candidate_position_id=trade_id,
+        )
+        if not cooldown_component.get("allowed"):
+            reason = str(
+                cooldown_component.get("reason") or "same_token_entry_cooldown"
+            )
+            logger.warning(
+                "_live_order: same-token entry cooldown blocked before command "
+                "persistence for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                cooldown_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"entry_cooldown:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                intent_id=None,
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
+
         decision_source_component = _entry_decision_source_component(intent)
         if not decision_source_component.get("allowed"):
             reason = str(decision_source_component.get("reason") or "invalid_decision_source_context")
@@ -3643,7 +4426,7 @@ def _live_order(
                             cutover_component,
                             _component_from_result(
                                 "risk_allocator",
-                                risk_allocator_decision,
+                            risk_allocator_decision,
                             ),
                             _capability_component(
                                 "order_type_selection",
@@ -3652,10 +4435,14 @@ def _live_order(
                                 intent_order_type=submit_order_type,
                                 post_only=submit_post_only,
                             ),
+                            taker_quality_component,
                             heartbeat_component,
                             ws_gap_component,
                             collateral_refresh_component,
                             collateral_component,
+                            entries_pause_component,
+                            cooldown_component,
+                            duplicate_same_token_component,
                             decision_source_component,
                             corrected_identity_component,
                             _capability_component("executable_snapshot_gate"),

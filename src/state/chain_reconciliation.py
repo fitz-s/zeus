@@ -426,6 +426,79 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             )
         return True
 
+    def _canonical_chain_observation_phase(position_id: str) -> str | None:
+        """Return the current canonical phase for a chain-economics no-op write.
+
+        Chain observations do not own lifecycle transitions; they only refresh
+        chain_shares / chain_seen_at / chain economics.  Therefore the event
+        must fold the current canonical phase to itself.  Pending entries remain
+        excluded because entry-fill detection owns that race; pending exits are
+        included because exit_lifecycle still needs fresh chain facts while a
+        sell attempt is backoff/exhausted/in flight.
+        """
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT phase FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+        except Exception:
+            return None
+        if row is None:
+            if _has_canonical_position_history(position_id):
+                raise RuntimeError("canonical chain-observation baseline missing current projection")
+            return None
+        phase = str(row[0] or "")
+        if phase == LifecyclePhase.PENDING_ENTRY.value:
+            return None
+        if phase not in {
+            LifecyclePhase.ACTIVE.value,
+            LifecyclePhase.DAY0_WINDOW.value,
+            LifecyclePhase.PENDING_EXIT.value,
+        }:
+            raise RuntimeError(
+                f"canonical chain-observation baseline phase is not open: got {phase!r}"
+            )
+        return phase
+
+    def _preserve_existing_chain_noop_projection_fields(
+        projection: dict,
+        position_id: str,
+    ) -> None:
+        """Keep non-chain lifecycle/monitor fields stable on chain no-op writes.
+
+        Chain observation and size-correction events are chain-truth writes. They
+        must not erase the latest exit reason, retry state, or monitor snapshot
+        just because the runtime Position cache lacks those fields.
+        """
+        if conn is None:
+            return
+        fields = (
+            "exit_reason",
+            "exit_retry_count",
+            "next_exit_retry_at",
+            "last_monitor_prob",
+            "last_monitor_prob_is_fresh",
+            "last_monitor_edge",
+            "last_monitor_market_price",
+            "last_monitor_market_price_is_fresh",
+        )
+        try:
+            row = conn.execute(
+                f"SELECT {', '.join(fields)} FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+        except Exception:
+            return
+        if row is None:
+            return
+        for idx, field in enumerate(fields):
+            current_value = row[field] if hasattr(row, "keys") else row[idx]
+            if current_value is None:
+                continue
+            projection[field] = current_value
+
     def _append_canonical_rescue_if_available(position: Position) -> bool:
         if conn is None:
             return False
@@ -487,25 +560,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     ) -> bool:
         if conn is None:
             return False
-        # Race: if the fill just landed, the position is still in pending_entry
-        # phase when chain reconciliation runs. The fill event will set the
-        # correct size in its own path — skip canonical size correction here
-        # to avoid colliding with fill detection. On the next cycle the phase
-        # will be 'active' and real size corrections can proceed normally.
-        try:
-            _phase_row = conn.execute(
-                "SELECT phase FROM position_current WHERE position_id = ?",
-                (getattr(position, "trade_id", ""),),
-            ).fetchone()
-        except Exception:
-            _phase_row = None
-        if _phase_row is not None and str(_phase_row[0] or "") == "pending_entry":
-            return False
-        expected_phase = "day0_window" if getattr(position, "day0_entered_at", "") else "active"
-        if not _canonical_size_correction_baseline_available(
-            getattr(position, "trade_id", ""),
-            expected_phase=expected_phase,
-        ):
+        current_phase = _canonical_chain_observation_phase(getattr(position, "trade_id", ""))
+        if not current_phase:
             return False
 
         from src.engine.lifecycle_events import build_chain_size_corrected_canonical_write
@@ -514,20 +570,17 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         try:
             # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): size-correction
             # does NOT transition the canonical phase — pass the position's
-            # *current* phase explicitly. expected_phase here is the same
-            # value the size-correction baseline gate checked above (day0_window
-            # if the position has entered the day0 window, else active).
-            current_phase = (
-                LifecyclePhase.DAY0_WINDOW.value
-                if expected_phase == "day0_window"
-                else LifecyclePhase.ACTIVE.value
-            )
+            # *current* canonical phase explicitly.
             events, projection = build_chain_size_corrected_canonical_write(
                 position,
                 local_shares_before=local_shares_before,
                 sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
                 phase_after=current_phase,
                 source_module="src.state.chain_reconciliation",
+            )
+            _preserve_existing_chain_noop_projection_fields(
+                projection,
+                getattr(position, "trade_id", ""),
             )
             append_many_and_project(conn, events, projection)
         except Exception as exc:
@@ -640,9 +693,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
 
         Gating mirrors _append_canonical_size_correction_if_available:
           - conn present; skip pending_entry phase (don't fight fill detection);
-          - canonical row must exist with phase == expected_phase
-            (active/day0_window) — a missing projection with prior history is a
-            contract violation surfaced by the shared baseline gate.
+          - canonical row must exist in an open chain-observable phase
+            (active/day0_window/pending_exit) — a missing projection with prior
+            history or terminal phase is a contract violation surfaced by the
+            shared baseline gate.
 
         Fail-closed: any unexpected error is swallowed (logged) so reconcile
         never crashes. The next cycle re-detects and retries the write.
@@ -651,24 +705,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             return False
         try:
             trade_id = getattr(position, "trade_id", "")
-            # Race: fill just landed → still pending_entry. The fill path owns
-            # the size; skip here to avoid colliding with fill detection.
-            try:
-                _phase_row = conn.execute(
-                    "SELECT phase FROM position_current WHERE position_id = ?",
-                    (trade_id,),
-                ).fetchone()
-            except Exception:
-                _phase_row = None
-            if _phase_row is not None and str(_phase_row[0] or "") == "pending_entry":
-                return False
-            expected_phase = "day0_window" if getattr(position, "day0_entered_at", "") else "active"
-            # Reuse the shared baseline gate: requires a canonical row whose
-            # phase == expected_phase (raises on a history-without-projection
-            # contract violation, returns False on no-history positions).
-            if not _canonical_size_correction_baseline_available(
-                trade_id, expected_phase=expected_phase
-            ):
+            current_phase = _canonical_chain_observation_phase(trade_id)
+            if not current_phase:
                 return False
 
             row_exists, persisted_chain_shares, persisted_seen_at = (
@@ -723,11 +761,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             )
             from src.state.db import append_many_and_project
 
-            current_phase = (
-                LifecyclePhase.DAY0_WINDOW.value
-                if expected_phase == "day0_window"
-                else LifecyclePhase.ACTIVE.value
-            )
             events, projection = build_chain_economics_observed_canonical_write(
                 position,
                 chain_observed_at=now,
@@ -736,6 +769,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 chain_shares_before=persisted_chain_shares,
                 source_module="src.state.chain_reconciliation",
             )
+            _preserve_existing_chain_noop_projection_fields(projection, trade_id)
             append_many_and_project(conn, events, projection)
         except Exception as exc:
             logger.warning(
@@ -1075,6 +1109,27 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         for _tid, _positions in _token_to_positions.items():
             _chain_cp = chain_by_token.get(_tid)
             _chain_bal = _chain_cp.size if _chain_cp is not None else 0.0
+            if _chain_bal > 0.0 and len(_positions) > 1 and any(
+                (float(getattr(_p, "chain_shares", 0.0) or 0.0) >= _chain_bal - 0.01)
+                and bool(getattr(_p, "chain_verified_at", "") or "")
+                for _p in _positions
+            ):
+                # The chain balance is token-aggregate truth. If an individual
+                # lot already carries that aggregate observation, LIFO allocation
+                # cannot distinguish lots and would false-void real exposure.
+                for _p in _positions:
+                    aggregate_backed_set.add(_p.trade_id)
+                stats["skipped_aggregate_allocation_existing_chain_observation"] = (
+                    stats.get("skipped_aggregate_allocation_existing_chain_observation", 0) + 1
+                )
+                logger.warning(
+                    "AGGREGATE_ALLOCATION_SKIPPED: token=%s chain=%.4f rows=%d "
+                    "reason=existing_lot_carries_aggregate_chain_observation",
+                    _tid,
+                    _chain_bal,
+                    len(_positions),
+                )
+                continue
             _allocated, _phantoms = allocate_chain_truth(_positions, _chain_bal)
             for _ph in _phantoms:
                 phantom_set.add(_ph.trade_id)

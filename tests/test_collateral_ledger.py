@@ -45,6 +45,7 @@ from src.state.collateral_ledger import (
     CollateralLedger,
     CollateralSnapshot,
     COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS,
+    DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS,
     SQLITE_SIGNED_INTEGER_MAX,
     init_collateral_schema,
     require_pusd_redemption_allowed,
@@ -165,28 +166,32 @@ def test_init_collateral_schema_preserves_existing_busy_timeout(tmp_path):
         db.close()
 
 
-def test_owned_collateral_ledger_connection_uses_live_db_pragmas(tmp_path, monkeypatch):
+def test_path_backed_collateral_ledger_short_connection_uses_live_db_pragmas(tmp_path, monkeypatch):
     monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "23456")
 
-    ledger = CollateralLedger(db_path=tmp_path / "trade.db")
+    db_path = tmp_path / "trade.db"
+    ledger = CollateralLedger(db_path=db_path)
     try:
-        conn = ledger._conn
-        assert conn is not None
-        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 23456
-        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
-        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert ledger._conn is None
+        assert ledger._db_path == db_path
+        with ledger._connection_scope() as conn:
+            assert conn is not None
+            assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 23456
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+            assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
         ledger.close()
 
 
-def test_owned_collateral_ledger_bad_timeout_env_falls_back(tmp_path, monkeypatch):
+def test_path_backed_collateral_ledger_bad_timeout_env_falls_back(tmp_path, monkeypatch):
     monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "1e10000")
 
     ledger = CollateralLedger(db_path=tmp_path / "trade.db")
     try:
-        conn = ledger._conn
-        assert conn is not None
-        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+        assert ledger._conn is None
+        with ledger._connection_scope() as conn:
+            assert conn is not None
+            assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS
     finally:
         ledger.close()
 
@@ -196,8 +201,8 @@ def test_live_collateral_refresh_skips_when_refresh_lane_is_busy(monkeypatch):
 
     External heartbeat mode can schedule a dedicated collateral refresh and
     venue-background maintenance in the same window.  Only one path may refresh
-    the process-global ledger at a time; otherwise the singleton's SQLite
-    connection can be used concurrently and starve submit preflight.
+    the process-global ledger at a time; otherwise concurrent trade DB writes can
+    starve submit preflight.
     """
 
     import src.main as main

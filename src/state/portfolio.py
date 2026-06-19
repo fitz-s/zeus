@@ -1,7 +1,7 @@
 """Portfolio state management. Spec §6.4.
 
 Atomic JSON + SQL mirror. Positions are projection-cache adapters; canonical
-truth is `position_events` + `position_current` (see PR #352, F1+F4 in
+truth is `position_events` + `position_current` (see PR #352, F1 in
 docs/findings_2026_05_28.md). The `Position` dataclass is a runtime view that
 combines submitted-intent economics, verified fill economics, and chain-
 observed economics into a single object — but each economics object has its
@@ -10,18 +10,6 @@ own authority field on `position_current` and event payloads. The legacy
 remain as derived/compatibility views and MUST NOT be mutated by chain-
 balance rescue after F1: balance-only rescue writes the chain aggregate into
 ``chain_avg_price`` / ``chain_cost_basis_usd`` / ``chain_shares`` only.
-
-F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): the runtime ``state`` /
-``exit_state`` / ``chain_state`` fields on ``Position`` are **projection-side
-mirrors**, not money-path authority. Canonical ``position_current.phase`` is
-set by event builders (``build_*_canonical_write`` in
-``src.engine.lifecycle_events``) receiving an explicit ``phase_after`` from
-their callers and writing it through ``append_many_and_project``. Direct
-in-memory mutation of ``Position.state`` cannot change ``position_current.phase``
-unless a builder receives a legal phase transition and the projection is
-persisted. ``phase_for_runtime_position`` / ``canonical_phase_for_position``
-remain available as legacy adapters for reading legacy serialized rows; they
-are not consulted by the money-path canonical event builders.
 
 Provides exposure queries for risk limit enforcement.
 """
@@ -2185,6 +2173,22 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
     order_posted_at = str(row.get("order_posted_at") or entered_at or "")
     day0_entered_at = str(row.get("day0_entered_at") or "") if state == "day0_window" else ""
     runtime_strategy_key = _runtime_strategy_key_from_projection_row(row)
+    exit_retry_count = int(row.get("exit_retry_count") or 0)
+    next_exit_retry_at = str(row.get("next_exit_retry_at")) if row.get("next_exit_retry_at") else None
+    runtime_exit_state = str(row.get("exit_state") or "")
+    if (
+        not runtime_exit_state
+        and state == "pending_exit"
+        and str(row.get("order_status") or "") == "backoff_exhausted"
+    ):
+        runtime_exit_state = "backoff_exhausted"
+    if (
+        not runtime_exit_state
+        and state == "pending_exit"
+        and exit_retry_count > 0
+        and next_exit_retry_at
+    ):
+        runtime_exit_state = "retry_pending"
     payload = dict(
         trade_id=str(row.get("trade_id") or row.get("position_id") or ""),
         market_id=str(row.get("market_id") or ""),
@@ -2209,8 +2213,8 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         entry_ci_width=float(row.get("entry_ci_width") or 0.0),
         # Exit-retry persistence (2026-06-12): reload the bounded-backoff state
         # so MAX_EXIT_RETRIES -> backoff_exhausted is reachable across cycles.
-        exit_retry_count=int(row.get("exit_retry_count") or 0),
-        next_exit_retry_at=(str(row.get("next_exit_retry_at")) if row.get("next_exit_retry_at") else None),
+        exit_retry_count=exit_retry_count,
+        next_exit_retry_at=next_exit_retry_at,
         entered_at=entered_at if state != "pending_tracked" else "",
         day0_entered_at=day0_entered_at,
         decision_snapshot_id=str(row.get("decision_snapshot_id") or ""),
@@ -2224,10 +2228,14 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         order_status=str(row.get("order_status") or ""),
         order_posted_at=order_posted_at,
         chain_state=str(row.get("chain_state") or ""),
-        exit_state=str(row.get("exit_state") or ""),
+        exit_state=runtime_exit_state,
         last_monitor_prob=row.get("last_monitor_prob"),
+        last_monitor_prob_is_fresh=bool(row.get("last_monitor_prob_is_fresh") or False),
         last_monitor_edge=row.get("last_monitor_edge"),
         last_monitor_market_price=row.get("last_monitor_market_price"),
+        last_monitor_market_price_is_fresh=bool(
+            row.get("last_monitor_market_price_is_fresh") or False
+        ),
         admin_exit_reason=str(row.get("admin_exit_reason") or ""),
         entry_fill_verified=bool(row.get("entry_fill_verified", False)),
         # PR #352 (Part-5 audit Finding 1): the durable projection stores chain

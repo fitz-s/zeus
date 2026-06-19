@@ -12,16 +12,19 @@
 #   Reduces ~9.5-12k HTTP/day to ~600-900. q-path byte-identical (same rows, fewer fetches).
 """F1 step-2/3/9 — the FORWARD + walk-forward BAYES_PRECISION_FUSION multi-model download/persist job.
 
-For each current-target (city, metric, target_date, lead) x the 8 extra Open-Meteo models
-(decorrelated globals gfs_global/icon_global/gem_global/jma_seamless + icon_eu + in-domain
-regionals icon_d2/arome + icon_seamless for alias-dedup), this job:
+For each current-target (city, metric, target_date, lead) x the extra Open-Meteo models
+(decorrelated globals icon_global/ukmo_global + icon_eu + the domain-gated CONUS/N-America nests
+ncep_nbm/gfs_hrrr/gem_hrdps + in-domain regionals icon_d2/arome/ukmo_uk), this job:
+(2026-06-17: the coarse globals gfs_global 25km / gem_global 15km, the settlement-cold
+jma_seamless, AND the alias-dedup probe icon_seamless were all DROPPED from the fusion; they are
+no longer fetched here.)
 
   (1) FORWARD single_runs fetch  — today's current-target value at the fixed cycle (live capture
       for replay; SPEC §3 single-runs identity). REUSES bayes_precision_fusion_capture._default_live_fetch.
   (2) fixed-lead previous_runs fetch — the no-leak walk-forward train value via the OM
       previous-runs API temperature_2m_previous_dayN hourly var (SPEC §3 fixed-lead). Forces
       temperature_unit=celsius (forecast_value_c is ALWAYS degC -> SPEC §7 C/F unit-mix antibody).
-  (3) INSERTs the surviving rows into raw_model_forecasts (SHADOW_ONLY, training_allowed=0),
+  (3) INSERTs the surviving rows into raw_model_forecasts (raw live input, training_allowed=0),
       on a SINGLE zeus-forecasts.db connection (INV-37), UNIQUE-idempotent per cycle.
   (4) PRUNES rows older than the retention cutoff (~180d, SPEC §5) in the same transaction.
 
@@ -59,7 +62,7 @@ from src.forecast.model_selection import (
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_download")
 
-# SPEC §5: ~6 months retention on the shadow capture table.
+# SPEC §5: ~6 months retention on the raw input capture table.
 RETENTION_DAYS = 180
 
 
@@ -92,7 +95,17 @@ _RMF_LOGICAL_KEY_COLUMNS = (
 OPENMETEO_PROVIDER = "open-meteo"
 SINGLE_RUNS_SOURCE_FAMILY = "openmeteo_single_runs"
 PREVIOUS_RUNS_SOURCE_FAMILY = "openmeteo_previous_runs"
-BAYES_PRECISION_FUSION_CELL_SELECTION = "nearest"          # OM default cell pick (nearest gridpoint to requested).
+# 2026-06-17 CELL-SELECTION FIX (operator "fix the math, not a hardcoded value"): the prior
+# "nearest" pick snapped coastal airports to the nearest OFFSHORE grid cell, so the model
+# returned the SEA-surface temperature (cold by day) instead of the airport's land surface — the
+# systematic cold drag. "land" picks the nearest LAND gridpoint (OM prefers >50%-land cells), i.e.
+# the model's value AT the airport, not over water. This is a DATA-precision fix (finer data
+# closer to the airport), NOT a de-bias / fitted offset. Settlement-graded proof (ecmwf_ifs, all
+# cities, high+low, last 10 settled days, n=452): pooled MAE 1.121 -> 0.996 (-0.125, -11%); cold
+# bias -0.595 -> -0.423; worst offender Tokyo high -4.09 -> -1.34. Inland airports are unaffected
+# (nearest IS land there). cell_selection is part of the BLOCKER-4 product identity, so the land
+# captures accumulate their OWN de-bias history (never mixed with the legacy nearest history).
+BAYES_PRECISION_FUSION_CELL_SELECTION = "land"             # nearest LAND gridpoint (airport surface, not offshore sea cell).
 BAYES_PRECISION_FUSION_ELEVATION_PARAM = "requested"       # OM elevation = requested point (no override).
 BAYES_PRECISION_FUSION_DOWNSCALING_POLICY = "none"         # no statistical downscaling applied to the raw value.
 
@@ -102,6 +115,11 @@ BAYES_PRECISION_FUSION_DOWNSCALING_POLICY = "none"         # no statistical down
 # and BLOCKER 3 (the ifs025->ifs9 bridge). Falls back to '<model>_previous_runs'.
 OPENMETEO_PREVIOUS_RUNS_SOURCE_ID: dict[str, str] = {
     ANCHOR_MODEL: "ecmwf_previous_runs",
+    # 2026-06-17: gfs_global/gem_global/jma_seamless were dropped from the FORWARD fusion, but
+    # these previous-runs routing entries are RETAINED — they are the de-bias-HISTORY layer (the
+    # same class as the kept ecmwf_previous_runs / gfs_previous_runs / gem_previous_runs / jma_
+    # previous_runs registry specs), and resolve the product-identity of the existing history rows
+    # as they age out. They are not forward-fetch surface.
     "gfs_global": "gfs_previous_runs",
     "icon_global": "icon_previous_runs",
     "icon_eu": "icon_previous_runs",
@@ -109,7 +127,15 @@ OPENMETEO_PREVIOUS_RUNS_SOURCE_ID: dict[str, str] = {
     "jma_seamless": "jma_previous_runs",
     "icon_d2": "icon_d2_previous_runs",
     "meteofrance_arome_france_hd": "arome_previous_runs",
+    # icon_seamless was REMOVED 2026-06-17 (alias-dedup probe, no longer fetched). The previous-
+    # runs routing entry is retained so any remaining history rows resolve their product-identity
+    # (they age out under the 180d retention). Not a forward-fetch surface.
     "icon_seamless": "icon_d2_previous_runs",
+    # 2026-06-17 PRECISION-INPUT FIX: high-res CONUS / N-America regional experts. The OM
+    # previous-runs API serves both under their single-runs id (curl-verified 2026-06-17), so the
+    # source_id is the conventional '<model>_previous_runs' feed identity.
+    "gfs_hrrr": "gfs_hrrr_previous_runs",
+    "gem_hrdps_continental": "gem_hrdps_continental_previous_runs",
 }
 
 
@@ -230,15 +256,13 @@ def _bayes_precision_fusion_product_identity(model: str, endpoint: str, target: 
 # the posterior is stuck at EQUAL_WEIGHT forever (the prior is never formed). The anchor is the
 # FIRST element so its row provenance is unambiguous in the candidate ordering.
 #
-# The full capture set: anchor (prior) + globals + icon_eu (likelihood) + in-domain regionals
-# + the alias-dedup probe (icon_seamless). icon_seamless is captured only so the fusion's
-# alias-dedup test has both series; it is dropped from the fused Sigma downstream (never
-# double-counts icon_d2).
+# The full capture set: anchor (prior) + globals + icon_eu (likelihood) + in-domain regionals.
+# 2026-06-17: icon_seamless was REMOVED — it was the alias-dedup probe (bit-identical to icon_d2,
+# contributing no decorrelated information); it is no longer fetched or fused.
 BAYES_PRECISION_FUSION_EXTRA_MODELS: tuple[str, ...] = (
     (ANCHOR_MODEL,)
     + tuple(GLOBAL_LIKELIHOOD_MODELS)
     + tuple(REGIONAL_MODELS)
-    + ("icon_seamless",)
 )
 
 # CANDIDATE-ACCRUAL LANE (2026-06-09 regional survey /tmp/uncovered_cities_regional_report.md,
@@ -275,12 +299,18 @@ BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS: tuple[str, ...] = ()
 # gem exception in _read_persisted_current_capture. gem_seamless was REJECTED as a substitute:
 # it serves HRDPS/RDPS for North-American cities — a different physical product than the GDPS
 # history (the source-identity violation class of the EB-bias wrong-set bug ff7f33dd5b).
-SINGLE_RUNS_UNSERVABLE_MODELS: tuple[str, ...] = ("gem_global",)
+# 2026-06-17: gem_global (the only member) was dropped from the fusion, so no fetched model is
+# single-runs-unservable any more — this list is now empty (the previous_runs-substitution path it
+# guarded is still exercised by the surviving providers).
+SINGLE_RUNS_UNSERVABLE_MODELS: tuple[str, ...] = ()
 
-# R3 — Per-model run cadence: the UTC init hours each provider actually publishes.
-# Fetching a model at a non-publishing cycle re-pulls the SAME underlying run under a
-# wrong source_cycle_time (measured: jma_seamless 531 rows@06Z + 612@18Z = redundant).
-# Models not listed here default to all four {0,6,12,18}.
+# R3 — Per-model run cadence: the UTC init hours each provider actually publishes. Fetching a model
+# at a non-publishing cycle re-pulls the SAME underlying run under a wrong source_cycle_time.
+# Models not listed here default to all four {0,6,12,18}. NOTE (2026-06-17): jma_seamless and
+# gem_global — the ONLY restricted-cadence models — were dropped from the fusion, so this gate is
+# currently DORMANT (no fetched model is listed). The entries are kept as ACCURATE provider-cadence
+# reference (and are pinned by test_openmeteo_call_budget); they re-arm automatically if a restricted-
+# cadence model is ever re-added.
 MODEL_PUBLISH_CYCLE_HOURS: dict[str, frozenset[int]] = {
     "jma_seamless": frozenset({0, 12}),   # JMA GSM/seamless init 00/12Z only
     "gem_global":   frozenset({0, 12}),   # CMC GDPS 00/12Z only
@@ -321,8 +351,8 @@ OPENMETEO_PREVIOUS_RUNS_MODEL_IDS: dict[str, str] = {
 #     domain-limited. We reuse the icon_d2 polygon as the EU-presence gate (model_selection
 #     already does this: icon_eu_in_eu_domain = regional_eligible("icon_d2", ...)).
 #
-# Globals (gfs_global, icon_global, gem_global, jma_seamless, ecmwf_ifs) are worldwide;
-# they are never skipped here.
+# The fetched globals (icon_global, ukmo_global, ecmwf_ifs) are worldwide; they are never skipped
+# here. (gfs_global/gem_global/jma_seamless were dropped 2026-06-17 — no longer fetched.)
 _DOMAIN_GATED_MODELS: frozenset[str] = (
     frozenset(REGIONAL_MODELS)
     | frozenset({ICON_EU_MODEL})
@@ -410,6 +440,11 @@ def _default_previous_runs_fetch(
             "models": om_model,
             "temperature_unit": "celsius",  # NEVER the settlement unit (C/F mix antibody)
             "timezone": timezone_name,
+            # 2026-06-17 land-cell fix: the walk-forward de-bias history must train on the SAME
+            # land-surface cell the live value reads (else land-current is corrected by
+            # nearest-history). cell_selection is in the product identity -> the land history
+            # accrues under its own hash, never mixed with the legacy nearest residuals.
+            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
         payload = fetch(
             PREVIOUS_RUNS_URL,
@@ -537,6 +572,7 @@ def _parse_batched_single_runs_payload(
                 sub_payload,
                 city_timezone=timezone_name,
                 target_local_date=target_local_date,
+                require_full_localday=True,  # 2026-06-17: reject horizon-clipped partial days
             )
             result[model] = (float(anchor.high_c), float(anchor.low_c))
         except Exception as exc:
@@ -816,7 +852,7 @@ def _persist_chunk_with_lock_retry(
     """
     from src.state.db import _connect  # noqa: PLC0415
     from src.state.schema.v2_schema import (  # noqa: PLC0415
-        ensure_replacement_forecast_shadow_schema,
+        ensure_replacement_forecast_live_schema,
     )
 
     written = 0
@@ -824,7 +860,7 @@ def _persist_chunk_with_lock_retry(
     for _attempt in range(attempts):
         conn = _connect(Path(forecast_db), write_class="live")
         try:
-            ensure_replacement_forecast_shadow_schema(conn)
+            ensure_replacement_forecast_live_schema(conn)
             if rows:
                 _scan_and_audit_request_conflicts(conn, rows)
             # BEGIN IMMEDIATE: take the write lock up front so busy_timeout WAITS for it,

@@ -69,12 +69,12 @@ def test_one_fetch_per_model_cycle_and_under_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "_default_live_fetch_batched", fake_single)
     monkeypatch.setattr(dl, "_default_previous_runs_fetch_batched", fake_prev)
 
-    from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
     import sqlite3
 
     db = tmp_path / "f.db"
     conn = sqlite3.connect(str(db))
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     conn.commit()
     conn.close()
 

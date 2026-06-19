@@ -60,6 +60,7 @@ import pytest
 
 import src.main as main_module
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+import src.data.substrate_observer as substrate_observer
 
 
 def _venue_open_now(target_date: str) -> datetime:
@@ -94,18 +95,25 @@ def _reset_substrate_refresh_cursor():
     """
     saved = main_module._SUBSTRATE_REFRESH_CURSOR
     main_module._SUBSTRATE_REFRESH_CURSOR = 0
+    saved_lifted = substrate_observer._SUBSTRATE_REFRESH_CURSOR
+    substrate_observer._SUBSTRATE_REFRESH_CURSOR = 0
     try:
         yield
     finally:
         main_module._SUBSTRATE_REFRESH_CURSOR = saved
+        substrate_observer._SUBSTRATE_REFRESH_CURSOR = saved_lifted
 
 
 def _enable_edli_cfg(monkeypatch, *, enabled: bool = True) -> None:
+    # P2 lift: the substrate warm cycle + market_discovery read _settings_section from
+    # src.data.substrate_observer (its own _settings_section), so the edli_v1 config gate
+    # must be patched there. (The mainstream warmer that stays in src.main still reads
+    # main_module._settings_section; tests for that patch main_module separately.)
     monkeypatch.setattr(
-        main_module,
+        substrate_observer,
         "_settings_section",
         lambda name, default=None: (
-            {"enabled": enabled} if name == "edli" else (default if default is not None else {})
+            {"enabled": enabled} if name in {"edli", "edli_v1"} else (default if default is not None else {})
         ),
     )
 
@@ -134,13 +142,13 @@ def test_pending_family_refresh_does_not_call_global_weather_discovery():
     has a separate discovery budget; putting it in this path makes the substrate
     warmer overrun and starves the reactor of fresh receipt flow.
     """
-    src = inspect.getsource(main_module._refresh_pending_family_snapshots)
+    src = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
 
     assert "find_weather_markets_or_raise" not in src
 
 
 def test_pending_family_refresh_default_budget_stays_inside_price_ttl():
-    src = inspect.getsource(main_module._refresh_pending_family_snapshots)
+    src = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
     match = re.search(
         r'ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "([0-9.]+)"',
         src,
@@ -151,7 +159,7 @@ def test_pending_family_refresh_default_budget_stays_inside_price_ttl():
 
 
 def test_pending_family_refresh_has_no_fixed_family_cap():
-    src = inspect.getsource(main_module._refresh_pending_family_snapshots)
+    src = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
 
     assert "_FAMILY_REFRESH_CAP" not in src
     # No fixed-prefix truncation that DROPS families. The funnel-starvation fix
@@ -166,10 +174,52 @@ def test_pending_family_refresh_has_no_fixed_family_cap():
     # families[:<int>] would be a hard drop; families[:start_offset] is the rotation.
     dropping_caps = re.findall(r"families\[:\s*\d+\s*\]", src)
     assert not dropping_caps, f"fixed-count family cap present: {dropping_caps}"
-    assert "families[:start_offset]" in src, (
-        "expected the rotating-cursor wrap-around families[:start_offset]; the "
+    assert "ordinary_families[:start_offset]" in src, (
+        "expected the rotating-cursor wrap-around ordinary_families[:start_offset]; the "
         "round-robin sweep is what prevents tail-family starvation"
     )
+
+
+def test_warm_lane_money_risk_priority_stays_ahead_of_pending_rotation():
+    """Open rests and held positions are live money-risk, not ordinary backlog.
+
+    They must remain ahead of the rotating pending-event tail every tick; the
+    fair cursor should rotate only the ordinary pending families so a large
+    pending queue cannot bury already-submitted orders or chain-confirmed
+    holdings.
+    """
+
+    src = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
+
+    assert "get_trade_connection, get_trade_connection_read_only" in src
+    assert "held_position_priority_families" in src
+    assert "priority_families + new_priority_families + rotated_ordinary_families" in src
+    assert "ordinary_families[start_offset:] + ordinary_families[:start_offset]" in src
+
+
+def test_continuous_redecision_confirms_money_path_before_emit():
+    """Continuous redecision must not enqueue from an unconfirmed first-pass screen.
+
+    The first screen only identifies candidate families to refresh. The second
+    screen, after the explicit money-path substrate refresh, is the one allowed
+    to mutate acted_state and emit EDLI_REDECISION_PENDING.
+    """
+
+    screen_src = inspect.getsource(main_module._edli_continuous_redecision_screen_cycle)
+    confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+
+    assert "probe_acted_state = dict(_edli_redecision_acted_state)" in screen_src
+    assert "acted_state=probe_acted_state" in screen_src
+    assert "_edli_refresh_continuous_money_path_families(" in screen_src
+    assert "skipping emit this tick rather than queueing stale redecision" in screen_src
+    assert "confirmed_entry_scope = set(family_keys)" in screen_src
+    assert "family_keys &= confirmed_entry_scope" in screen_src
+    assert "rest_pull_families &= confirmed_rest_scope" in screen_src
+    assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS" in confirm_src
+    assert "_edli_redecision_confirm_refresh_lock" in confirm_src
+    assert "_market_substrate_refresh_lock" not in confirm_src
+    assert "include_pending_families=False" in confirm_src
+    assert "extra_priority_families=clean_families" in confirm_src
 
 
 def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatch):
@@ -178,54 +228,126 @@ def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatc
     monkeypatch.setattr(main_module.time, "monotonic", lambda: 100.0)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS", "0.75")
 
-    assert main_module._snapshot_capture_budget_for_refresh(
+    assert substrate_observer._snapshot_capture_budget_for_refresh(
         refresh_deadline=90.0,
         snapshot_reserve_s=12.0,
     ) == pytest.approx(14.0)
-    assert main_module._snapshot_capture_budget_for_refresh(
+    assert substrate_observer._snapshot_capture_budget_for_refresh(
         refresh_deadline=125.0,
         snapshot_reserve_s=12.0,
     ) == pytest.approx(25.0)
 
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_TARGET_WINDOW_SECONDS", "3.5")
-    assert main_module._snapshot_capture_budget_for_refresh(
+    assert substrate_observer._snapshot_capture_budget_for_refresh(
         refresh_deadline=90.0,
         snapshot_reserve_s=12.0,
     ) == pytest.approx(15.5)
 
 
-def test_market_discovery_defers_while_reactor_active():
-    src = inspect.getsource(main_module._market_discovery_cycle)
+def test_market_discovery_does_not_defer_on_reactor_state_after_p2_lift():
+    """SUPERIORITY (system_decomposition_plan §8 Step 1 / §9): INVERTED from the old
+    "defers_while_reactor_active" test.
 
-    assert "_edli_reactor_active()" in src
-    assert "market_discovery deferred" in src
+    The P2 lift DELETES the outer pending gates from _market_discovery_cycle. The universe
+    sweep is now a separate-process producer triggered by substrate STALENESS alone; it can
+    no longer reference the reactor's in-process state. The old assertion (the gate is
+    PRESENT) tested the exact regression this refactor kills — it is inverted to assert the
+    gate is GONE, making the gate-on-backlog line un-writable across the process boundary.
+    """
+    # AST over the function body (not raw text) so an explanatory COMMENT describing the
+    # deleted gate does not falsely match — only an executable code reference to a
+    # reactor-backlog identifier is a coupling.
+    import ast
+
+    tree = ast.parse(inspect.getsource(substrate_observer._market_discovery_cycle))
+    used: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            used.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            used.add(node.attr)
+    for sym in ("_edli_reactor_active", "_edli_pending_opportunity_count",
+                "_market_discovery_pending_fairness_seconds", "pending_count"):
+        assert sym not in used, (
+            f"the lifted _market_discovery_cycle must not reference {sym!r} in CODE — the "
+            "outer pending gates are DELETED (§0/§8 Step 1/§9); the producer fires on "
+            "substrate staleness alone, with no consumer state in scope."
+        )
+
+
+def test_held_position_monitor_does_not_pause_live_decision_line():
+    """Held-position monitoring is not a global live-money stop-the-world lock.
+
+    The monitor's own job stays non-reentrant, and broad discretionary scans may
+    defer during its bootstrap. Targeted EDLI decision lanes must continue: those
+    lanes are what refresh prices, re-decide resting orders, recover commands,
+    and submit/reject new events while positions are being monitored.
+    """
+
+    was_active = main_module._held_position_monitor_active.is_set()
+    was_bootstrap_complete = main_module._held_position_monitor_bootstrap_complete.is_set()
+    if was_active:
+        main_module._held_position_monitor_active.clear()
+    if was_bootstrap_complete:
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+    try:
+        main_module._held_position_monitor_active.set()
+        live_decision_jobs = {
+            "edli_event_reactor",
+            "edli_command_recovery",
+            "maker_rest_escalation",
+            "edli_redecision_screen",
+            "EDLI market-substrate warm",
+            "EDLI market-channel substrate refresh",
+            "new_listing_scout",
+        }
+        for job_name in live_decision_jobs:
+            assert main_module._defer_for_held_position_monitor(job_name) is False
+
+        discretionary_jobs = {
+            "market_discovery",
+            "afternoon_snapshot_capture",
+            "EDLI mainstream warm",
+        }
+        for job_name in discretionary_jobs:
+            assert main_module._defer_for_held_position_monitor(job_name) is True
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+        if was_active:
+            main_module._held_position_monitor_active.set()
+        if was_bootstrap_complete:
+            main_module._held_position_monitor_bootstrap_complete.set()
 
 
 def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     """GREEN-after-fix: a dedicated warm job exists and, when EDLI is enabled, invokes
     the family-snapshot refresh exactly once per tick."""
-    assert hasattr(main_module, "_edli_market_substrate_warm_cycle"), (
-        "expected a dedicated _edli_market_substrate_warm_cycle scheduler job (mirroring "
-        "_edli_bankroll_warm_cycle) that owns the decoupled substrate refresh."
+    assert hasattr(substrate_observer, "_edli_market_substrate_warm_cycle"), (
+        "expected a dedicated _edli_market_substrate_warm_cycle producer (lifted to the P2 "
+        "substrate-observer module) that owns the decoupled substrate refresh."
     )
 
     calls: list[int] = []
     monkeypatch.setattr(
-        main_module,
+        substrate_observer,
         "_refresh_pending_family_snapshots",
         lambda *a, **k: calls.append(1),
     )
     # The warm job opens world/forecasts connections; stub them so no real DB/venue work
-    # runs. The test only asserts the refresh is invoked exactly once.
+    # runs. The test only asserts the refresh is invoked exactly once. The cycle imports
+    # get_forecasts_connection_read_only from src.state.db at call time, so patch state_db.
     import src.state.db as state_db
 
     monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
     monkeypatch.setattr(
-        main_module, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **_kwargs: _FakeConn())
     _enable_edli_cfg(monkeypatch, enabled=True)
 
-    main_module._edli_market_substrate_warm_cycle()
+    substrate_observer._edli_market_substrate_warm_cycle()
     assert calls == [1], "warm job must invoke the family-snapshot refresh exactly once"
 
 
@@ -233,7 +355,7 @@ def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
     """The warm job owns an independent cadence; reactor-active must not starve price refresh."""
     calls: list[int] = []
     monkeypatch.setattr(
-        main_module,
+        substrate_observer,
         "_refresh_pending_family_snapshots",
         lambda *a, **k: calls.append(1),
     )
@@ -241,13 +363,14 @@ def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
 
     monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
     monkeypatch.setattr(
-        main_module, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **_kwargs: _FakeConn())
     _enable_edli_cfg(monkeypatch, enabled=True)
 
     assert main_module._edli_reactor_active_lock.acquire(blocking=False)
     try:
-        main_module._edli_market_substrate_warm_cycle()
+        substrate_observer._edli_market_substrate_warm_cycle()
     finally:
         main_module._edli_reactor_active_lock.release()
 
@@ -258,7 +381,7 @@ def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):
     """Config gate: disabled edli → no refresh side effect."""
     calls: list[int] = []
     monkeypatch.setattr(
-        main_module,
+        substrate_observer,
         "_refresh_pending_family_snapshots",
         lambda *a, **k: calls.append(1),
     )
@@ -266,30 +389,32 @@ def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):
 
     monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
     monkeypatch.setattr(
-        main_module, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
     _enable_edli_cfg(monkeypatch, enabled=False)
 
-    main_module._edli_market_substrate_warm_cycle()
-    assert calls == [], "disabled edli must skip the refresh"
+    substrate_observer._edli_market_substrate_warm_cycle()
+    assert calls == [], "disabled edli_v1 must skip the refresh"
 
 
 def test_market_substrate_warm_cycle_failsoft_on_refresh_error(monkeypatch):
     """Fail-soft: a refresh that raises must not propagate out of the warm job (the
     next tick retries; the reactor's EXECUTABLE_SNAPSHOT_RETRY keeps decisions
     fail-closed in the interim)."""
+    import src.state.db as state_db
+
     def _raising(*a, **k):
         raise RuntimeError("gamma scan timeout")
 
-    monkeypatch.setattr(main_module, "_refresh_pending_family_snapshots", _raising)
-    monkeypatch.setattr(main_module, "get_world_connection", lambda: _FakeConn(), raising=False)
+    monkeypatch.setattr(substrate_observer, "_refresh_pending_family_snapshots", _raising)
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn(), raising=False)
     monkeypatch.setattr(
-        main_module, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
     # Must not raise.
-    main_module._edli_market_substrate_warm_cycle()
+    substrate_observer._edli_market_substrate_warm_cycle()
 
 
 def test_pending_family_refresh_order_prioritizes_new_target_dates():
@@ -368,7 +493,7 @@ def test_pending_family_refresh_order_prioritizes_new_target_dates():
     insert_event("fresh-b", "Tokyo", "2026-06-06", "2026-06-05T00:00:01+00:00")
 
     capture = _CaptureConn(conn)
-    rows = main_module._pending_family_rows_for_refresh(
+    rows = substrate_observer._pending_family_rows_for_refresh(
         capture, consumer_name="edli_reactor_v1"
     )
     families = [(row[0], row[1], row[2]) for row in rows]
@@ -378,7 +503,8 @@ def test_pending_family_refresh_order_prioritizes_new_target_dates():
 
     plan = _explain_plan(conn, capture.sql, capture.params)
     assert "USING INDEX idx_opportunity_event_processing_status" in plan
-    assert "SCAN p" not in plan
+    assert "LIMIT ?" in capture.sql
+    assert capture.params == ("edli_reactor_v1", 2000)
 
 
 def test_pending_family_refresh_does_not_truncate_to_fixed_family_cap(monkeypatch):
@@ -458,7 +584,7 @@ def test_pending_family_refresh_does_not_truncate_to_fixed_family_cap(monkeypatc
 
     import src.data.market_scanner as scanner
     import src.data.polymarket_client as polymarket_client
-    import src.engine.event_reactor_adapter as adapter
+    import src.data.market_topology_rows as adapter  # P2: topology reader relocated (lane-neutral)
     import src.state.db as state_db
 
     def _topology_rows(_forecasts_conn, payload):
@@ -493,9 +619,11 @@ def test_pending_family_refresh_does_not_truncate_to_fixed_family_cap(monkeypatc
 
     monkeypatch.setattr(adapter, "_event_family_market_topology_rows", _topology_rows)
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **_k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **_k: _FakeConn())
     monkeypatch.setattr(scanner, "reconstruct_weather_market_from_static_topology", _reconstruct)
     monkeypatch.setattr(scanner, "_gamma_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Gamma should not be called")))
     monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [])
+    monkeypatch.setenv("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "1.0")
 
     submitted: list[list[dict]] = []
     refresh_kwargs: list[dict] = []
@@ -508,7 +636,7 @@ def test_pending_family_refresh_does_not_truncate_to_fixed_family_cap(monkeypatc
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
 
     assert result["status"] == "refreshed"
     assert result["families_checked"] == 12
@@ -598,7 +726,7 @@ def test_pending_family_refresh_timeboxes_topology_before_capture_reserve(monkey
 
     import src.data.market_scanner as scanner
     import src.data.polymarket_client as polymarket_client
-    import src.engine.event_reactor_adapter as adapter
+    import src.data.market_topology_rows as adapter  # P2: topology reader relocated (lane-neutral)
     import src.state.db as state_db
 
     def _topology_rows(_forecasts_conn, payload):
@@ -653,7 +781,7 @@ def test_pending_family_refresh_timeboxes_topology_before_capture_reserve(monkey
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
 
     assert result["status"] == "refreshed"
     assert result["topology_budget_exhausted"] == 1
@@ -730,7 +858,7 @@ def test_pending_family_refresh_reserves_time_for_direct_gamma_lookup(monkeypatc
 
     import src.data.market_scanner as scanner
     import src.data.polymarket_client as polymarket_client
-    import src.engine.event_reactor_adapter as adapter
+    import src.data.market_topology_rows as adapter  # P2: topology reader relocated (lane-neutral)
     import src.state.db as state_db
 
     def _topology_rows(_forecasts_conn, _payload):
@@ -782,9 +910,7 @@ def test_pending_family_refresh_reserves_time_for_direct_gamma_lookup(monkeypatc
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(
-        conn, _FakeConn(), now_utc=_venue_open_now("2026-06-09")
-    )
+    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
 
     assert result["status"] == "refreshed"
     assert result["topology_budget_exhausted"] == 1
@@ -880,7 +1006,7 @@ def test_pending_family_refresh_direct_gamma_lookup_drains_multiple_families(mon
 
     import src.data.market_scanner as scanner
     import src.data.polymarket_client as polymarket_client
-    import src.engine.event_reactor_adapter as adapter
+    import src.data.market_topology_rows as adapter  # P2: topology reader relocated (lane-neutral)
     import src.state.db as state_db
 
     monkeypatch.setenv("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "29.0")
@@ -915,9 +1041,7 @@ def test_pending_family_refresh_direct_gamma_lookup_drains_multiple_families(mon
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(
-        conn, _FakeConn(), now_utc=_venue_open_now("2026-06-09")
-    )
+    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == len(families)
@@ -953,7 +1077,7 @@ def test_condition_buy_sides_fresh_requires_yes_and_no_selected_tokens():
         """
     )
 
-    assert not main_module._condition_buy_sides_fresh(
+    assert not substrate_observer._condition_buy_sides_fresh(
         conn,
         "cond-1",
         "2026-06-06T00:00:30+00:00",
@@ -969,7 +1093,7 @@ def test_condition_buy_sides_fresh_requires_yes_and_no_selected_tokens():
         """
     )
 
-    assert main_module._condition_buy_sides_fresh(
+    assert substrate_observer._condition_buy_sides_fresh(
         conn,
         "cond-1",
         "2026-06-06T00:00:30+00:00",
@@ -1023,7 +1147,7 @@ def test_prune_fresh_market_outcomes_keeps_refresh_moving_past_completed_conditi
     }
 
     pruned, fresh_skipped, stale_submitted = (
-        main_module._prune_fresh_market_outcomes_for_snapshot_refresh(
+        substrate_observer._prune_fresh_market_outcomes_for_snapshot_refresh(
             conn,
             [market],
             fresh_at_iso="2026-06-06T00:00:30+00:00",
@@ -1070,7 +1194,7 @@ def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeyp
 
     import src.data.market_scanner as scanner
     import src.data.polymarket_client as polymarket_client
-    import src.engine.event_reactor_adapter as adapter
+    import src.data.market_topology_rows as adapter  # P2: topology reader relocated (lane-neutral)
     import src.state.db as state_db
 
     monkeypatch.setattr(adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows)
@@ -1092,9 +1216,7 @@ def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeyp
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(
-        world_conn, forecasts_conn, now_utc=_venue_open_now("2026-06-07")
-    )
+    result = substrate_observer._refresh_pending_family_snapshots(world_conn, forecasts_conn)
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 0
@@ -1138,7 +1260,7 @@ def test_pending_family_refresh_falls_back_to_gamma_when_static_topology_incompl
 
     import src.data.market_scanner as scanner
     import src.data.polymarket_client as polymarket_client
-    import src.engine.event_reactor_adapter as adapter
+    import src.data.market_topology_rows as adapter  # P2: topology reader relocated (lane-neutral)
     import src.state.db as state_db
 
     monkeypatch.setattr(adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows)
@@ -1169,9 +1291,7 @@ def test_pending_family_refresh_falls_back_to_gamma_when_static_topology_incompl
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(
-        world_conn, forecasts_conn, now_utc=_venue_open_now("2026-06-07")
-    )
+    result = substrate_observer._refresh_pending_family_snapshots(world_conn, forecasts_conn)
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 1
@@ -1207,7 +1327,7 @@ def test_pending_family_refresh_matches_gamma_with_canonical_city_alias(monkeypa
 
     import src.data.market_scanner as scanner
     import src.data.polymarket_client as polymarket_client
-    import src.engine.event_reactor_adapter as adapter
+    import src.data.market_topology_rows as adapter  # P2: topology reader relocated (lane-neutral)
     import src.state.db as state_db
 
     monkeypatch.setattr(adapter, "_event_family_market_topology_rows", lambda *a, **k: [])
@@ -1237,9 +1357,7 @@ def test_pending_family_refresh_matches_gamma_with_canonical_city_alias(monkeypa
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = main_module._refresh_pending_family_snapshots(
-        world_conn, forecasts_conn, now_utc=_venue_open_now("2026-06-07")
-    )
+    result = substrate_observer._refresh_pending_family_snapshots(world_conn, forecasts_conn)
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 1
@@ -1250,6 +1368,8 @@ def test_pending_family_refresh_matches_gamma_with_canonical_city_alias(monkeypa
 
 
 def test_mainstream_warm_cycle_uses_bounded_fresh_family_window(monkeypatch):
+    was_bootstrap_complete = main_module._held_position_monitor_bootstrap_complete.is_set()
+    main_module._held_position_monitor_bootstrap_complete.set()
     monkeypatch.setattr(
         main_module,
         "_settings_section",
@@ -1284,7 +1404,11 @@ def test_mainstream_warm_cycle_uses_bounded_fresh_family_window(monkeypatch):
 
     monkeypatch.setattr(mainstream, "warm_mainstream_point", _warm)
 
-    main_module._edli_mainstream_warm_cycle()
+    try:
+        main_module._edli_mainstream_warm_cycle()
+    finally:
+        if not was_bootstrap_complete:
+            main_module._held_position_monitor_bootstrap_complete.clear()
 
     assert warmed == rows[:2]
 

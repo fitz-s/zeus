@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Created: 2026-06-08
+  Authority basis: docs/architecture/system_decomposition_plan.md §4.2 / §6 (P3 row) / §8 Step 3.
+
+  ARTIFACT ONLY. This launchd job description is committed for the operator to install
+  when the cutover is performed; the process-topology refactor that produced it does NOT
+  load, kickstart, or enable any service. It mirrors the existing com.zeus.substrate-observer
+  / com.zeus.data-ingest pattern (KeepAlive + RunAtLoad + ThrottleInterval, ProgramArguments
+  -> `python -m <daemon module>`).
+
+  This is the NEW P3 price-channel-ingest program: it runs the persistent user-channel WS
+  ingestor thread + the market-channel and user-channel/reconcile cycles that durably bridge
+  fills and write execution_feasibility_evidence the order daemon only READS (interface I2).
+  The order daemon (com.zeus.live-trading) no longer starts the WS thread nor schedules these
+  two cycles.
+
+  WHY ITS OWN SERVICE: a persistent WebSocket lifecycle is distinct from cron-tick daemons
+  (§6 co-location). And critically — the WS thread is the ws_gap_guard latch WRITER; running
+  it in THIS process means a WS auth/transport flap can no longer poison the order daemon's
+  in-process submit latch (the reduce_only-forever regression, §9). A WS outage surfaces to
+  the order daemon ONLY as stale/absent execution_feasibility_evidence rows.
+
+  CREDENTIALS — DO NOT COMMIT REAL SECRETS. The WS thread needs the Polymarket L2 credentials
+  (POLYMARKET_API_KEY / _SECRET / _PASSPHRASE). They are left as REPLACE_ME placeholders here
+  so no live secret is checked into the repo. At INSTALL time the operator substitutes the
+  same values used by com.zeus.live-trading (or, preferred, points the daemon at the existing
+  secret source). ZEUS_USER_CHANNEL_WS_AUTO_DERIVE=1 derives the subscription set from the
+  live market scanner; the EDLI runtime mode that gates the two cycles is read from settings
+  (config/edli_v1) — no extra env beyond ZEUS_MODE=live is required for it here.
+
+  INSTALL (operator, NOT performed by the refactor):
+    # 1) substitute the three POLYMARKET_API_* REPLACE_ME values with the real L2 creds
+    #    (same as com.zeus.live-trading), then:
+    cp deploy/launchd/com.zeus.price-channel-ingest.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.zeus.price-channel-ingest.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>POLYMARKET_API_KEY</key>
+		<string>REPLACE_ME_POLYMARKET_API_KEY</string>
+		<key>POLYMARKET_API_PASSPHRASE</key>
+		<string>REPLACE_ME_POLYMARKET_API_PASSPHRASE</string>
+		<key>POLYMARKET_API_SECRET</key>
+		<string>REPLACE_ME_POLYMARKET_API_SECRET</string>
+		<key>PYTHONPATH</key>
+		<string>/Users/leofitz/zeus</string>
+		<key>PYTHONSAFEPATH</key>
+		<string>1</string>
+		<key>ZEUS_CLOB_FACT_CACHE_TTL_SECONDS</key>
+		<string>0</string>
+		<key>ZEUS_MODE</key>
+		<string>live</string>
+		<key>ZEUS_PRIMARY_ROOT</key>
+		<string>/Users/leofitz/zeus</string>
+		<key>ZEUS_USER_CHANNEL_WS_AUTO_DERIVE</key>
+		<string>1</string>
+		<key>ZEUS_USER_CHANNEL_WS_ENABLED</key>
+		<string>1</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.zeus.price-channel-ingest</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/leofitz/zeus/.venv/bin/python</string>
+		<string>-m</string>
+		<string>src.ingest.price_channel_daemon</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/leofitz/zeus/logs/zeus-price-channel-ingest.err</string>
+	<key>StandardOutPath</key>
+	<string>/Users/leofitz/zeus/logs/zeus-price-channel-ingest.log</string>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/leofitz/zeus</string>
+</dict>
+</plist>

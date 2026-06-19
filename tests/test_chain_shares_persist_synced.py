@@ -98,6 +98,15 @@ def _seed_position_current(
     pos: Position,
     *,
     chain_shares,
+    phase: str = "active",
+    exit_reason: str | None = None,
+    exit_retry_count: int = 0,
+    next_exit_retry_at: str | None = None,
+    last_monitor_prob: float | None = None,
+    last_monitor_prob_is_fresh: int | None = None,
+    last_monitor_edge: float | None = None,
+    last_monitor_market_price: float | None = None,
+    last_monitor_market_price_is_fresh: int | None = None,
 ) -> None:
     """Seed an ACTIVE position_current row with the given chain_shares (None = NULL).
 
@@ -108,7 +117,7 @@ def _seed_position_current(
 
     payload = {
         "position_id": pos.trade_id,
-        "phase": "active",
+        "phase": phase,
         "trade_id": pos.trade_id,
         "market_id": pos.market_id,
         "city": pos.city,
@@ -122,9 +131,11 @@ def _seed_position_current(
         "cost_basis_usd": pos.cost_basis_usd,
         "entry_price": pos.entry_price,
         "p_posterior": pos.p_posterior,
-        "last_monitor_prob": None,
-        "last_monitor_edge": None,
-        "last_monitor_market_price": None,
+        "last_monitor_prob": last_monitor_prob,
+        "last_monitor_prob_is_fresh": last_monitor_prob_is_fresh,
+        "last_monitor_edge": last_monitor_edge,
+        "last_monitor_market_price": last_monitor_market_price,
+        "last_monitor_market_price_is_fresh": last_monitor_market_price_is_fresh,
         "decision_snapshot_id": pos.decision_snapshot_id,
         "entry_method": pos.entry_method,
         "strategy_key": pos.strategy_key,
@@ -145,6 +156,13 @@ def _seed_position_current(
         "chain_cost_basis_usd": None,
         "chain_seen_at": "",
         "chain_absence_at": "",
+        "realized_pnl_usd": None,
+        "exit_price": None,
+        "settlement_price": None,
+        "settled_at": None,
+        "exit_reason": exit_reason,
+        "exit_retry_count": exit_retry_count,
+        "next_exit_retry_at": next_exit_retry_at,
     }
     conn.execute(
         f"""
@@ -193,6 +211,65 @@ def _read_persisted_chain_seen_at(db_path: str, trade_id: str) -> str | None:
     if row is None:
         return None
     return row["chain_seen_at"] or None
+
+
+def _read_persisted_chain_state(db_path: str, trade_id: str) -> tuple[str | None, float | None, str | None]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT phase, chain_shares, chain_seen_at FROM position_current WHERE position_id = ?",
+            (trade_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return (None, None, None)
+    return (row["phase"], row["chain_shares"], row["chain_seen_at"])
+
+
+def _read_persisted_exit_state(db_path: str, trade_id: str) -> tuple[str | None, int | None, str | None]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT exit_reason, exit_retry_count, next_exit_retry_at FROM position_current WHERE position_id = ?",
+            (trade_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return (None, None, None)
+    return (row["exit_reason"], row["exit_retry_count"], row["next_exit_retry_at"])
+
+
+def _read_persisted_monitor_state(db_path: str, trade_id: str) -> tuple[float | None, int | None, float | None, float | None, int | None]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT last_monitor_prob,
+                   last_monitor_prob_is_fresh,
+                   last_monitor_edge,
+                   last_monitor_market_price,
+                   last_monitor_market_price_is_fresh
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (trade_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return (None, None, None, None, None)
+    return (
+        row["last_monitor_prob"],
+        row["last_monitor_prob_is_fresh"],
+        row["last_monitor_edge"],
+        row["last_monitor_market_price"],
+        row["last_monitor_market_price_is_fresh"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +361,81 @@ def test_synced_chain_shares_observation_emits_canonical_event() -> None:
     # No-op phase grammar: persisted as CHAIN_SIZE_CORRECTED (only allowed
     # no-op-phase chain event type) with the disambiguating reason.
     assert obs[0]["event_type"] == "CHAIN_SIZE_CORRECTED"
+
+
+def test_pending_exit_chain_observation_preserves_pending_exit_phase() -> None:
+    """A pending_exit position with chain-confirmed shares still needs chain
+    observation refreshes.  The write must preserve pending_exit rather than
+    requiring an active/day0 baseline or releasing the exit lifecycle state.
+    """
+    trade_id = "pending-exit-chain-observed"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+
+        pos = _make_position(
+            trade_id=trade_id,
+            token_id="tok-pending-exit",
+            shares=5.07,
+            chain_state="synced",
+        )
+        pos.state = "pending_exit"
+        pos.exit_state = "backoff_exhausted"
+        _seed_position_current(
+            conn,
+            pos,
+            chain_shares=None,
+            phase="pending_exit",
+            exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+            exit_retry_count=7,
+            last_monitor_prob=0.42,
+            last_monitor_prob_is_fresh=1,
+            last_monitor_edge=-0.05,
+            last_monitor_market_price=0.31,
+            last_monitor_market_price_is_fresh=1,
+        )
+
+        portfolio = PortfolioState(positions=[pos])
+        chain = ChainPosition(
+            token_id="tok-pending-exit",
+            size=5.07,
+            avg_price=0.64,
+            cost=3.2448,
+            condition_id="cond-pending-exit",
+        )
+        stats = reconcile(portfolio, [chain], conn=conn)
+
+        rows = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no
+            """,
+            (trade_id,),
+        ).fetchall()
+        conn.close()
+
+        phase, persisted_shares, persisted_seen_at = _read_persisted_chain_state(
+            db_path, trade_id
+        )
+        exit_reason, exit_retry_count, _next_retry = _read_persisted_exit_state(
+            db_path, trade_id
+        )
+        monitor_state = _read_persisted_monitor_state(db_path, trade_id)
+
+    assert stats.get("chain_observation_persisted", 0) == 1
+    assert phase == "pending_exit"
+    assert persisted_shares == pytest.approx(5.07)
+    assert persisted_seen_at
+    assert exit_reason == "MARKET_CLOSED_AWAITING_SETTLEMENT"
+    assert exit_retry_count == 7
+    assert monitor_state == pytest.approx((0.42, 1, -0.05, 0.31, 1))
+    obs = [r for r in rows if '"reason": "chain_economics_observed"' in (r["payload_json"] or "")]
+    assert len(obs) == 1
+    assert obs[0]["event_type"] == "CHAIN_SIZE_CORRECTED"
+    assert obs[0]["phase_before"] == "pending_exit"
+    assert obs[0]["phase_after"] == "pending_exit"
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +538,90 @@ def test_size_mismatch_still_uses_correction_path() -> None:
     assert status == "ok" and persisted == pytest.approx(25.0), (
         f"correction path must persist chain.size=25.0, got {persisted!r}"
     )
+
+
+def test_pending_exit_size_mismatch_preserves_pending_exit_phase() -> None:
+    """Size correction is also a no-transition chain fact for pending_exit.
+
+    A sell-retry/backoff position can still be present on chain with updated
+    aggregate economics.  Reconciliation must persist that chain truth without
+    releasing pending_exit or quarantining the position for lacking an active
+    baseline.
+    """
+    trade_id = "pending-exit-size-corrected"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+
+        pos = _make_position(
+            trade_id=trade_id,
+            token_id="tok-pending-exit-size",
+            shares=5.0,
+            chain_state="synced",
+        )
+        pos.state = "pending_exit"
+        pos.exit_state = "retry_pending"
+        _seed_position_current(
+            conn,
+            pos,
+            chain_shares=5.0,
+            phase="pending_exit",
+            exit_reason="EDGE_REVERSAL",
+            exit_retry_count=2,
+            next_exit_retry_at="2026-05-01T00:05:00+00:00",
+            last_monitor_prob=0.58,
+            last_monitor_prob_is_fresh=1,
+            last_monitor_edge=-0.12,
+            last_monitor_market_price=0.09,
+            last_monitor_market_price_is_fresh=1,
+        )
+
+        portfolio = PortfolioState(positions=[pos])
+        chain = ChainPosition(
+            token_id="tok-pending-exit-size",
+            size=6.25,
+            avg_price=0.64,
+            cost=4.0,
+            condition_id="cond-pending-exit-size",
+        )
+        stats = reconcile(portfolio, [chain], conn=conn)
+
+        rows = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no
+            """,
+            (trade_id,),
+        ).fetchall()
+        conn.close()
+
+        phase, persisted_shares, persisted_seen_at = _read_persisted_chain_state(
+            db_path, trade_id
+        )
+        exit_reason, exit_retry_count, next_retry = _read_persisted_exit_state(
+            db_path, trade_id
+        )
+        monitor_state = _read_persisted_monitor_state(db_path, trade_id)
+
+    payloads = [r["payload_json"] or "" for r in rows]
+    assert stats.get("updated", 0) == 1
+    assert stats.get("review_required_persisted", 0) == 0
+    assert stats.get("skipped_size_correction_missing_canonical_baseline", 0) == 0
+    assert phase == "pending_exit"
+    assert persisted_shares == pytest.approx(6.25)
+    assert persisted_seen_at
+    assert exit_reason == "EDGE_REVERSAL"
+    assert exit_retry_count == 2
+    assert next_retry == "2026-05-01T00:05:00+00:00"
+    assert monitor_state == pytest.approx((0.58, 1, -0.12, 0.09, 1))
+    correction = [r for r in rows if '"reason": "chain_size_corrected"' in (r["payload_json"] or "")]
+    assert len(correction) == 1, f"expected correction event; payloads={payloads}"
+    assert correction[0]["event_type"] == "CHAIN_SIZE_CORRECTED"
+    assert correction[0]["phase_before"] == "pending_exit"
+    assert correction[0]["phase_after"] == "pending_exit"
+    assert not any('"reason": "chain_economics_observed"' in p for p in payloads)
 
 
 # ---------------------------------------------------------------------------

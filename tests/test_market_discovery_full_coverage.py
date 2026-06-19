@@ -33,6 +33,7 @@ import pytest
 
 import src.data.market_scanner as ms
 from src.data.market_scanner import refresh_executable_market_substrate_snapshots
+import src.data.substrate_observer as substrate_observer
 
 _NOW = datetime(2026, 5, 24, 12, 0, 0, tzinfo=timezone.utc)
 _CITY_SLUG_RE = re.compile(r"in-([a-z-]+)-on-")
@@ -595,13 +596,13 @@ def test_cached_topology_limits_gamma_lookup_window(monkeypatch):
     monkeypatch.setattr(main_mod.time, "monotonic", lambda: fake_now)
     monkeypatch.delenv("ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_SECONDS", raising=False)
 
-    deadline_with_cache = main_mod._gamma_lookup_deadline_for_snapshot_refresh(
+    deadline_with_cache = substrate_observer._gamma_lookup_deadline_for_snapshot_refresh(
         refresh_deadline=115.0,
         refresh_budget_s=15.0,
         snapshot_reserve_s=6.0,
         cached_topology_count=50,
     )
-    deadline_without_cache = main_mod._gamma_lookup_deadline_for_snapshot_refresh(
+    deadline_without_cache = substrate_observer._gamma_lookup_deadline_for_snapshot_refresh(
         refresh_deadline=115.0,
         refresh_budget_s=15.0,
         snapshot_reserve_s=6.0,
@@ -630,7 +631,7 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
 
     tag_scan_called = []
     slug_only_called = []
-    monkeypatch.setattr(main_mod, "_market_discovery_last_completed_monotonic", None)
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
 
     def _mock_find_weather_markets(**kwargs):
         tag_scan_called.append(kwargs)
@@ -643,7 +644,6 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
     import src.data.market_scanner as scanner_mod
     monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
     monkeypatch.setattr(scanner_mod, "find_slug_pattern_weather_markets", _mock_find_slug_pattern)
-    monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 0)
 
     monkeypatch.setattr(
         "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
@@ -665,8 +665,8 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
         mock_clob_cls.return_value.__exit__ = MagicMock(return_value=False)
         mock_lock = MagicMock()
         mock_lock.acquire.return_value = True
-        with patch.object(main_mod, "_market_discovery_lock", mock_lock):
-            main_mod._market_discovery_cycle()
+        with patch.object(substrate_observer, "_market_discovery_lock", mock_lock):
+            substrate_observer._market_discovery_cycle()
 
     assert len(tag_scan_called) >= 1, (
         "_market_discovery_cycle must call find_weather_markets (full tag-query "
@@ -685,15 +685,14 @@ def test_market_discovery_defers_while_edli_pending_backlog(monkeypatch):
     import src.main as main_mod
     import src.data.market_scanner as scanner_mod
 
-    monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 650)
-    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli" else (default or {}))
+    monkeypatch.setattr(substrate_observer, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
-    monkeypatch.setattr(main_mod, "_market_discovery_last_completed_monotonic", 100.0)
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", 100.0)
     monkeypatch.setattr(main_mod.time, "monotonic", lambda: 120.0)
     monkeypatch.setattr(scanner_mod, "find_weather_markets", lambda **kwargs: pytest.fail("must defer"))
 
-    main_mod._market_discovery_cycle()
+    substrate_observer._market_discovery_cycle()
 
 
 def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkeypatch):
@@ -713,12 +712,11 @@ def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkey
 
     calls: list[dict] = []
     captured: list[dict] = []
-    monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 650)
-    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli" else (default or {}))
+    monkeypatch.setattr(substrate_observer, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
     # STALE substrate: last full capture 400s ago (> 300s fairness window).
-    monkeypatch.setattr(main_mod, "_market_discovery_last_completed_monotonic", 100.0)
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", 100.0)
     monkeypatch.setattr(main_mod.time, "monotonic", lambda: 500.0)
 
     def _mock_find_weather_markets(**kwargs):
@@ -741,7 +739,7 @@ def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkey
     ):
         mock_clob_cls.return_value.__enter__ = lambda s: MagicMock()
         mock_clob_cls.return_value.__exit__ = MagicMock(return_value=False)
-        main_mod._market_discovery_cycle()
+        substrate_observer._market_discovery_cycle()
 
     # Decoupled from the backlog: full executable-substrate capture ran despite pending=650.
     assert calls
@@ -756,30 +754,37 @@ def test_market_discovery_defers_when_substrate_fresh_regardless_of_pending(monk
     defers without re-capturing."""
     import src.main as main_mod
 
-    monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 650)
-    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli" else (default or {}))
+    monkeypatch.setattr(substrate_observer, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
     # FRESH substrate: last full capture 100s ago (< 300s fairness window).
-    monkeypatch.setattr(main_mod, "_market_discovery_last_completed_monotonic", 400.0)
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", 400.0)
     monkeypatch.setattr(main_mod.time, "monotonic", lambda: 500.0)
     monkeypatch.setattr(
         "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
         lambda *args, **kwargs: pytest.fail("a FRESH substrate must not be re-captured"),
     )
     # Defers at the fairness early-return; no capture, no exception.
-    main_mod._market_discovery_cycle()
+    substrate_observer._market_discovery_cycle()
 
 
 def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):
-    """Missing EDLI processing schema must not break universe discovery."""
+    """Universe discovery runs regardless of EDLI pending state (P2 superiority).
+
+    Pre-P2 this guarded "a missing EDLI processing schema must not break discovery" because
+    the cycle READ a consumer pending_count. The P2 lift DELETES that read entirely — the
+    producer no longer touches EDLI processing state at all, so discovery can never be
+    broken by it. This test now asserts the stronger invariant: with a STALE substrate the
+    producer captures the universe, with zero reference to any pending/reactor state.
+    """
     import src.main as main_mod
     import src.data.market_scanner as scanner_mod
 
     calls: list[dict] = []
-    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli" else (default or {}))
+    monkeypatch.setattr(substrate_observer, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    # P2: force STALE substrate so the staleness gate falls through to capture (order-independent).
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
-    monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("no such table")))
 
     def _mock_find_weather_markets(**kwargs):
         calls.append(kwargs)
@@ -800,7 +805,7 @@ def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):
     ):
         mock_clob_cls.return_value.__enter__ = lambda s: MagicMock()
         mock_clob_cls.return_value.__exit__ = MagicMock(return_value=False)
-        main_mod._market_discovery_cycle()
+        substrate_observer._market_discovery_cycle()
 
     assert calls
 
@@ -825,12 +830,17 @@ def test_market_discovery_busy_substrate_lock_releases_discovery_lock(monkeypatc
 
     discovery_lock = _FakeLock(True)
     substrate_lock = _FakeLock(False)
-    monkeypatch.setattr(main_mod, "_market_discovery_lock", discovery_lock)
-    monkeypatch.setattr(main_mod, "_market_substrate_refresh_lock", substrate_lock)
+    monkeypatch.setattr(substrate_observer, "_market_discovery_lock", discovery_lock)
+    monkeypatch.setattr(substrate_observer, "_market_substrate_refresh_lock", substrate_lock)
+    # P2: the pure staleness gate skips early if the substrate is fresh. Force STALE
+    # (clock unset) so the cycle reaches the lock logic this test exercises. (A prior test's
+    # successful cycle leaves a real time.monotonic() in this module global; monkeypatch it
+    # back to None so this lock test is order-independent.)
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "0")
     monkeypatch.setattr(scanner_mod, "find_weather_markets", lambda **kwargs: pytest.fail("must not scan"))
 
-    main_mod._market_discovery_cycle()
+    substrate_observer._market_discovery_cycle()
 
     assert discovery_lock.acquire_calls == 1
     assert discovery_lock.release_calls == 1
@@ -844,8 +854,11 @@ def test_market_discovery_releases_locks_when_refresh_raises(monkeypatch):
 
     discovery_lock = _FakeLock(True)
     substrate_lock = _FakeLock(True)
-    monkeypatch.setattr(main_mod, "_market_discovery_lock", discovery_lock)
-    monkeypatch.setattr(main_mod, "_market_substrate_refresh_lock", substrate_lock)
+    monkeypatch.setattr(substrate_observer, "_market_discovery_lock", discovery_lock)
+    monkeypatch.setattr(substrate_observer, "_market_substrate_refresh_lock", substrate_lock)
+    # P2: force STALE substrate (clock unset) so the staleness gate falls through to the
+    # capture/lock path this test exercises (order-independent — see note above).
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "0")
     monkeypatch.setattr(scanner_mod, "find_weather_markets", lambda **kwargs: [_make_market("Miami", 1)])
 
@@ -857,13 +870,19 @@ def test_market_discovery_releases_locks_when_refresh_raises(monkeypatch):
         _raise_refresh,
     )
     mock_conn = MagicMock()
+    # P2 lift: the bare lifted _market_discovery_cycle no longer carries the
+    # @_scheduler_job decorator that swallowed exceptions (the daemon applies that wrapper
+    # at registration). Its OWN contract is lock hygiene: it releases BOTH locks via
+    # `finally` even when the refresh raises, then lets the error propagate to the daemon's
+    # fail-soft wrapper. Assert exactly that: error propagates, locks released.
     with (
         patch("src.data.polymarket_client.PolymarketClient") as mock_clob_cls,
         patch("src.state.db.get_trade_connection", return_value=mock_conn),
     ):
         mock_clob_cls.return_value.__enter__ = lambda s: MagicMock()
         mock_clob_cls.return_value.__exit__ = MagicMock(return_value=False)
-        main_mod._market_discovery_cycle()
+        with pytest.raises(RuntimeError, match="boom"):
+            substrate_observer._market_discovery_cycle()
 
     assert discovery_lock.release_calls == 1
     assert substrate_lock.release_calls == 1

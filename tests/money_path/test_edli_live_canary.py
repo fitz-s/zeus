@@ -417,21 +417,23 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
     assert projection["current_state"] == "CAP_TRANSITIONED"
 
 
-def _seed_active_family_order(conn, *, aggregate_id="aggregate-1"):
+def _seed_active_family_order(conn, *, aggregate_id="aggregate-1", plan_updates=None):
     """An OPEN/in-flight order for (condition-1, token-no-1, buy_no): no terminal event."""
+    payload = {
+        "event_id": "event-1",
+        "final_intent_id": "intent-1",
+        "condition_id": "condition-1",
+        "token_id": "token-no-1",
+        "direction": "buy_no",
+        "limit_price": 0.70,
+    }
+    payload.update(plan_updates or {})
     _insert_live_order_event(
         conn,
         aggregate_id=aggregate_id,
         sequence=1,
         event_type="SubmitPlanBuilt",
-        payload={
-            "event_id": "event-1",
-            "final_intent_id": "intent-1",
-            "condition_id": "condition-1",
-            "token_id": "token-no-1",
-            "direction": "buy_no",
-            "limit_price": 0.70,
-        },
+        payload=payload,
     )
     _insert_live_order_event(
         conn,
@@ -446,14 +448,29 @@ def _seed_active_family_order(conn, *, aggregate_id="aggregate-1"):
     )
 
 
-def _lock_reason(conn, *, limit_price=0.70):
+def _lock_reason(
+    conn,
+    *,
+    condition_id="condition-1",
+    token_id="token-no-1",
+    direction="buy_no",
+    family_id=None,
+    city=None,
+    target_date=None,
+    metric=None,
+    limit_price=0.70,
+):
     from src.engine import event_reactor_adapter as adapter
 
     return adapter._locked_live_opportunity_active_order_reason(
         conn,
-        condition_id="condition-1",
-        token_id="token-no-1",
-        direction="buy_no",
+        condition_id=condition_id,
+        token_id=token_id,
+        direction=direction,
+        family_id=family_id,
+        city=city,
+        target_date=target_date,
+        metric=metric,
         side="BUY",
         limit_price=limit_price,
     )
@@ -476,6 +493,59 @@ def test_fixA_active_live_order_suppresses_new_submit():
     assert much_better is not None  # no price-improvement escape while order is live
 
 
+def test_fixA_family_sibling_active_order_suppresses_new_submit():
+    """A live resting order on one weather-family bin blocks sibling-bin entry."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(
+        conn,
+        plan_updates={
+            "family_id": "weather-family-chicago-2026-06-19-high",
+            "city": "Chicago",
+            "target_date": "2026-06-19",
+            "metric": "high",
+        },
+    )
+
+    reason = _lock_reason(
+        conn,
+        condition_id="condition-sibling",
+        token_id="token-no-sibling",
+        direction="buy_no",
+        family_id="weather-family-chicago-2026-06-19-high",
+        city="Chicago",
+        target_date="2026-06-19",
+        metric="high",
+        limit_price=0.68,
+    )
+
+    assert reason is not None
+    assert reason.startswith("EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED")
+    assert "family_id=weather-family-chicago-2026-06-19-high" in reason
+
+
+def test_fixA_newer_terminal_aggregate_does_not_hide_older_active_order():
+    """Scan every matching aggregate; newest terminal cannot unlock older active."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn, aggregate_id="aggregate-active-old")
+    _seed_active_family_order(conn, aggregate_id="aggregate-terminal-new")
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-terminal-new",
+        sequence=3,
+        event_type="SubmitRejected",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "reason": "venue_rejected",
+        },
+    )
+
+    reason = _lock_reason(conn, limit_price=0.70)
+
+    assert reason is not None
+    assert "aggregate_id=aggregate-active-old" in reason
+
+
 def test_fixA_terminal_cancel_releases_lock_for_rebid():
     """FIX A (#125): after the latest family order reaches a TERMINAL lifecycle event
     (a confirmed cancel/expiry/reconcile of an UNFILLED resting maker — the 900s
@@ -495,6 +565,79 @@ def test_fixA_terminal_cancel_releases_lock_for_rebid():
     # Same price as the timed-out rest -> NOT suppressed (the old 0.02 gate would
     # have permanently blocked this exact re-bid). The family re-enters the pipeline.
     assert _lock_reason(conn, limit_price=0.70) is None
+
+
+def test_fixA_terminal_venue_command_releases_stale_aggregate_lock():
+    """A venue-command terminal state is canonical closure evidence even if the
+    live-order aggregate missed its terminal release event."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            decision_id TEXT,
+            state TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, decision_id, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-1",
+            "command-1",
+            "EXPIRED",
+            "2026-06-17T20:22:02+00:00",
+            "2026-06-17T20:33:19+00:00",
+        ),
+    )
+
+    assert _lock_reason(conn, limit_price=0.70) is None
+
+
+def test_fixA_terminal_venue_command_releases_lock_from_trade_db(monkeypatch):
+    """Production shape: live-order aggregate is in world DB while venue_commands
+    is owned by the trade DB. Terminal venue state must still release the lock."""
+    from src.state import db as state_db
+
+    world_conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(world_conn)
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            decision_id TEXT,
+            state TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, decision_id, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-1",
+            "command-1",
+            "EXPIRED",
+            "2026-06-17T20:22:02+00:00",
+            "2026-06-17T20:33:19+00:00",
+        ),
+    )
+
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: trade_conn)
+
+    assert _lock_reason(world_conn, limit_price=0.70) is None
 
 
 def test_fixA_unknown_indeterminate_state_fails_closed_suppresses():
@@ -1360,6 +1503,8 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
                 submit_started_at="2026-05-24T18:10:00+00:00",
                 submit_finished_at="2026-05-24T18:10:01+00:00",
                 raw_response={"status": "submitted"},
+                venue_call_started=True,
+                venue_ack_received=True,
             )
 
         submit = adapter.event_bound_live_adapter_from_trade_conn(
@@ -1422,6 +1567,8 @@ def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch):
                 submit_started_at="2026-05-24T18:10:00+00:00",
                 submit_finished_at="2026-05-24T18:10:01+00:00",
                 raw_response={"status": "submitted"},
+                venue_call_started=True,
+                venue_ack_received=True,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
         )
@@ -1551,6 +1698,7 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
                 submit_started_at="2026-05-24T18:10:00+00:00",
                 submit_finished_at="2026-05-24T18:10:01+00:00",
                 raw_response={"status": "rejected"},
+                venue_call_started=True,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
         )
@@ -1697,6 +1845,8 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
                 submit_finished_at="2026-05-24T18:10:30+00:00",
                 raw_response={"status": "timeout"},
                 reconciliation_followup_required=True,
+                venue_call_started=True,
+                side_effect_known=False,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
         )
@@ -1856,7 +2006,6 @@ def test_main_live_mode_wires_production_executor_boundary_source():
     assert "submit_event_bound_final_intent_via_existing_executor" in source
     assert "executor_submit=lambda final_intent_cert, execution_command_cert" in source
     assert "live_bridge_mode" in source
-    assert "submit_disabled_live_bridge" in source
     assert "pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn" in source
 
 

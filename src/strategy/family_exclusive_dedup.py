@@ -63,8 +63,8 @@ logger = logging.getLogger(__name__)
 
 ENV_FLAG = "ZEUS_LIVE_MAX_ONE_ENTRY_PER_WEATHER_FAMILY"
 _DEFAULT = "1"  # ON by default (live-money fail-safe).
-NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG = "NATIVE_MULTIBIN_BUY_NO_SHADOW"
-NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG = "NATIVE_MULTIBIN_BUY_NO_LIVE"
+BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_ENABLED"
+BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_ENABLED"
 
 # Wave 4 (2026-05-27): Stage B family-portfolio optimizer activation.
 # Two-tier env var split so operator can promote multi-leg sizing through
@@ -86,12 +86,8 @@ def _family_portfolio_max_legs() -> int:
     matching env var. Defaults to 1 on both tiers (Stage A behaviour). Unknown
     or invalid values fall back to 1 (fail-safe).
 
-    K4 fix (PR #348 operator review, P0-5, 2026-05-27): the live tier is
-    HARD-CAPPED to 1 regardless of env, until ``optimize_exclusive_outcome_portfolio``
-    ships a true full-family expected-log-growth optimiser (current
-    implementation normalises posterior over candidate legs only and uses
-    an average-edge proxy for ELG, not the proper sum over outcomes).
-    Shadow tier remains uncapped so the optimiser can run for observation.
+    The live tier now honors the live max-leg env after ``optimize_exclusive_outcome_portfolio``
+    moved from an average-edge proxy to candidate-outcome expected log growth.
     """
     mode = get_mode()
     if mode == "shadow":
@@ -99,20 +95,10 @@ def _family_portfolio_max_legs() -> int:
             return max(1, int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, "1")))
         except (TypeError, ValueError):
             return 1
-    # Live tier — refuse multi-leg until full-outcome ELG ships.
     try:
-        env_legs = int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "1"))
+        return max(1, int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "1")))
     except (TypeError, ValueError):
-        env_legs = 1
-    if env_legs > 1:
-        logger.warning(
-            "%s=%d refused in live mode — Stage B family optimiser is not yet "
-            "full-family ELG (P0-5 blocker, PR #348 review). Capping to 1 until "
-            "src.strategy.family_exclusive_dedup.optimize_exclusive_outcome_portfolio "
-            "ships a true full-outcome expected-log-growth solver.",
-            ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, env_legs,
-        )
-    return 1
+        return 1
 
 
 def _family_portfolio_max_loss_usd() -> float | None:
@@ -315,9 +301,10 @@ def _exposure_key(exposure: Any) -> WeatherFamilyKey:
 def _family_keys_conflict(left: WeatherFamilyKey, right: WeatherFamilyKey) -> bool:
     """Return whether two keys should share one exposure budget.
 
-    When both sides know the venue weather family identity, only the same
-    family blocks. If either side is legacy/unknown, fall back to conservative
-    city/date/metric blocking so historical exposure cannot disappear.
+    Weather temperature bins for one city/date/metric are one settlement
+    partition. Venue ids and market slugs are not allowed to narrow this live
+    mutex because they can be per-bin/per-condition identifiers rather than the
+    physical underlying event.
     """
     if (
         left.city,
@@ -329,8 +316,6 @@ def _family_keys_conflict(left: WeatherFamilyKey, right: WeatherFamilyKey) -> bo
         right.temperature_metric,
     ):
         return False
-    if left.market_family_id and right.market_family_id:
-        return left.market_family_id == right.market_family_id
     return True
 
 
@@ -430,6 +415,9 @@ _TRADE_ORDER_BLOCKING_STATES = frozenset(
     }
 )
 _TRADE_FACT_BLOCKING_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "PARTIAL"})
+_TRADE_POSITION_BLOCKING_PHASES = frozenset(
+    {"pending_entry", "active", "day0_window", "pending_exit"}
+)
 
 
 def _table_exists(conn: Any, table_name: str, *, schema: str = "main") -> bool:
@@ -509,17 +497,21 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
 
     The trade DB owns venue command/order/trade facts. Family metadata still
     prefers the canonical position projection when it exists, but projection
-    lag must not erase durable command truth. A blocking exposure is admitted
-    when command/order/trade truth says an ENTRY is live, partially matched,
-    filled, unknown-side-effect, or under review, deriving family identity from
-    submission envelopes/snapshots/market events when ``position_current`` is
-    absent or not yet joined.
+    lag must not erase durable command truth, and command-row absence must not
+    erase a held chain/bridge position. A blocking exposure is admitted directly
+    from open ``position_current`` rows and from command/order/trade truth that
+    says an ENTRY is live, partially matched, filled, unknown-side-effect, or
+    under review.
     """
 
-    if conn is None or not _table_exists(conn, "venue_commands"):
+    if conn is None:
         return []
     schemas = _attached_schemas(conn)
     position_schema = "world" if "world" in schemas and _table_exists(conn, "position_current", schema="world") else "main"
+    has_position_current = _table_exists(conn, "position_current", schema=position_schema)
+    has_venue_commands = _table_exists(conn, "venue_commands")
+    if not has_position_current and not has_venue_commands:
+        return []
     has_order_facts = _table_exists(conn, "venue_order_facts")
     has_trade_facts = _table_exists(conn, "venue_trade_facts")
     order_state_sql = (
@@ -579,7 +571,7 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
         seen.add(dedupe_key)
         exposures.append(exposure)
 
-    if _table_exists(conn, "position_current", schema=position_schema):
+    if has_position_current:
         pc_cols = _table_columns(conn, "position_current", schema=position_schema)
         pc_family_id = _column_expr(
             pc_cols,
@@ -592,15 +584,73 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
                 default=_column_expr(pc_cols, "pc", "market_slug"),
             ),
         )
-        projection_sql = f"""
+        pc_city = _column_expr(pc_cols, "pc", "city")
+        pc_target_date = _column_expr(pc_cols, "pc", "target_date")
+        pc_metric = _column_expr(
+            pc_cols,
+            "pc",
+            "temperature_metric",
+            default=_column_expr(pc_cols, "pc", "metric"),
+        )
+        pc_bin_label = _column_expr(pc_cols, "pc", "bin_label")
+        pc_phase = _column_expr(pc_cols, "pc", "phase", default="'active'")
+        pc_position_id = _column_expr(pc_cols, "pc", "position_id")
+        positive_terms = [
+            f"COALESCE(pc.{name}, 0) > 0"
+            for name in ("chain_shares", "shares", "chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+            if name in pc_cols
+        ]
+        direct_positive_sql = " AND (" + " OR ".join(positive_terms) + ")" if positive_terms else " AND 0"
+        direct_phase_sql = (
+            "LOWER(COALESCE(pc.phase, '')) IN ({})".format(
+                ",".join("?" for _ in _TRADE_POSITION_BLOCKING_PHASES)
+            )
+            if "phase" in pc_cols
+            else "1=1"
+        )
+        direct_position_sql = f"""
         SELECT
-            pc.city,
-            pc.target_date,
-            pc.temperature_metric,
+            {pc_city} AS city,
+            {pc_target_date} AS target_date,
+            {pc_metric} AS temperature_metric,
             {pc_family_id} AS market_family_id,
-            pc.bin_label,
-            pc.phase,
-            pc.position_id,
+            {pc_bin_label} AS bin_label,
+            {pc_phase} AS phase,
+            {pc_position_id} AS position_id
+        FROM {position_schema}.position_current pc
+        WHERE {direct_phase_sql}
+          {direct_positive_sql}
+        """
+        try:
+            rows = conn.execute(
+                direct_position_sql,
+                tuple(sorted(_TRADE_POSITION_BLOCKING_PHASES)) if "phase" in pc_cols else (),
+            ).fetchall()
+        except Exception:
+            logger.warning("[WEATHER_FAMILY_EXPOSURE_POSITION_DB_READ_FAILED]", exc_info=True)
+        else:
+            for row in rows:
+                city, target_date, metric, market_family_id, bin_label, phase, position_id = tuple(row)
+                _append_exposure(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    market_family_id=market_family_id,
+                    bin_label=bin_label,
+                    phase=phase,
+                    position_id=position_id,
+                )
+
+        if has_venue_commands:
+            projection_sql = f"""
+        SELECT
+            {pc_city} AS city,
+            {pc_target_date} AS target_date,
+            {pc_metric} AS temperature_metric,
+            {pc_family_id} AS market_family_id,
+            {pc_bin_label} AS bin_label,
+            {pc_phase} AS phase,
+            {pc_position_id} AS position_id,
             vc.command_id
         FROM venue_commands vc
         JOIN {position_schema}.position_current pc
@@ -612,31 +662,34 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
               OR {trade_state_sql}
           )
         """
-        try:
-            rows = conn.execute(projection_sql, params).fetchall()
-        except Exception:
-            logger.warning("[WEATHER_FAMILY_EXPOSURE_PROJECTION_DB_READ_FAILED]", exc_info=True)
-        else:
-            for row in rows:
-                (
-                    city,
-                    target_date,
-                    metric,
-                    market_family_id,
-                    bin_label,
-                    phase,
-                    position_id,
-                    command_id,
-                ) = tuple(row)
-                _append_exposure(
-                    city=city,
-                    target_date=target_date,
-                    metric=metric,
-                    market_family_id=market_family_id,
-                    bin_label=bin_label,
-                    phase=phase,
-                    position_id=position_id or command_id,
-                )
+            try:
+                rows = conn.execute(projection_sql, params).fetchall()
+            except Exception:
+                logger.warning("[WEATHER_FAMILY_EXPOSURE_PROJECTION_DB_READ_FAILED]", exc_info=True)
+            else:
+                for row in rows:
+                    (
+                        city,
+                        target_date,
+                        metric,
+                        market_family_id,
+                        bin_label,
+                        phase,
+                        position_id,
+                        command_id,
+                    ) = tuple(row)
+                    _append_exposure(
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        market_family_id=market_family_id,
+                        bin_label=bin_label,
+                        phase=phase,
+                        position_id=position_id or command_id,
+                    )
+
+    if not has_venue_commands:
+        return exposures
 
     envelope_table = "venue_submission_envelopes" if _table_exists(conn, "venue_submission_envelopes") else None
     snapshot_table = "executable_market_snapshots" if _table_exists(conn, "executable_market_snapshots") else None
@@ -958,14 +1011,17 @@ def _score_portfolio_combo(
         payoff_rows.append(row)
         outcome_returns.append(sum(weight * payoff for weight, payoff in zip(leg_weights, row)))
 
-    expected_net_profit = (
-        sum(_edge_family_selection_score(leg.edge) for leg in selected)
-        / float(len(selected))
+    expected_net_profit = sum(
+        probability * outcome_return
+        for probability, outcome_return in zip(posterior_vector, outcome_returns)
     )
-    growth = 1.0 + log_growth_fraction * expected_net_profit
-    if growth <= 0.0:
-        return (-math.inf, expected_net_profit, min(outcome_returns), tuple(payoff_rows), posterior_vector, leg_weights)
-    expected_log_growth = math.log(growth)
+    expected_log_growth = 0.0
+    for probability, outcome_return in zip(posterior_vector, outcome_returns):
+        growth = 1.0 + log_growth_fraction * outcome_return
+        if growth <= 0.0:
+            expected_log_growth = -math.inf
+            break
+        expected_log_growth += probability * math.log(growth)
     return (
         expected_log_growth,
         expected_net_profit,
@@ -1096,24 +1152,24 @@ def _strict_feature_flag(name: str, *, default: bool = False) -> bool:
 
 
 def _native_buy_no_live_rejection_reason() -> str | None:
-    if not native_multibin_buy_no_live_enabled():
-        return "NATIVE_MULTIBIN_BUY_NO_LIVE_DISABLED"
+    if not buy_no_native_quote_evidence_submit_enabled():
+        return "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED"
     return None
 
 
-def native_multibin_buy_no_shadow_enabled() -> bool:
-    return _strict_feature_flag(NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG)
+def buy_no_native_quote_evidence_enabled() -> bool:
+    return _strict_feature_flag(BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG)
 
 
-def native_multibin_buy_no_live_enabled() -> bool:
-    shadow_enabled = native_multibin_buy_no_shadow_enabled()
-    live_enabled = _strict_feature_flag(NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG)
-    if live_enabled and not shadow_enabled:
+def buy_no_native_quote_evidence_submit_enabled() -> bool:
+    evidence_enabled = buy_no_native_quote_evidence_enabled()
+    submit_enabled = _strict_feature_flag(BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG)
+    if submit_enabled and not evidence_enabled:
         raise ValueError(
-            f"{NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG}=true requires "
-            f"{NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG}=true"
+            f"{BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG}=true requires "
+            f"{BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG}=true"
         )
-    return live_enabled
+    return submit_enabled
 
 
 def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
@@ -1126,7 +1182,7 @@ def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
     try:
         return _native_buy_no_live_rejection_reason()
     except ValueError as exc:
-        return f"NATIVE_MULTIBIN_BUY_NO_FLAG_INVALID:{exc}"
+        return f"BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID:{exc}"
 
 
 def preselect_single_family_edge_before_kelly(

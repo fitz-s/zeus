@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Callable
 import numpy as np
 
 from src.contracts.settlement_semantics import apply_settlement_rounding
+from src.signal.day0_low_distribution import build_day0_low_distribution
 from src.signal.forecast_uncertainty import day0_nowcast_context
 
 if TYPE_CHECKING:
@@ -20,8 +21,10 @@ if TYPE_CHECKING:
 class Day0LowNowcastSignal:
     """Low-temperature Day0 signal.
 
-    final_low = min(observed_low_so_far, blended_remaining)
+    final_low = settle(min(observed_low_so_far, future_member_min))
     observed_low_so_far forms a ceiling: the day's minimum cannot be above it.
+    current_temp is diagnostic context only; it MUST NOT enter the settlement-value path
+    (a daily minimum is a path extremum, not a convex blend with the current temperature).
     """
 
     def __init__(
@@ -75,10 +78,15 @@ class Day0LowNowcastSignal:
         return apply_settlement_rounding(values, self._round_fn, self._precision)
 
     def settlement_samples(self) -> np.ndarray:
-        anchored = np.minimum(self.ens_remaining, self.current_temp)
-        w = self._remaining_weight()
-        blended = w * anchored + (1.0 - w) * self.current_temp
-        return self._settle(np.minimum(self.obs_ceiling, blended))
+        # Physical LOW preimage: each sample = settle(min(observed_low_so_far, future_member_min)).
+        # current_temp is intentionally NOT consulted (diagnostic only) — see build_day0_low_distribution.
+        return build_day0_low_distribution(
+            observed_low_so_far=self.obs_ceiling,
+            future_member_mins=self.ens_remaining,
+            round_fn=self._round_fn,
+            precision=self._precision,
+            provenance=f"source={self._observation_source};time={self._observation_time}",
+        )
 
     @staticmethod
     def _bound(value, *, open_default: float) -> float:
@@ -112,9 +120,9 @@ class Day0LowNowcastSignal:
         Notes:
           - `n_mc` and `rng` are ACCEPTED for signature symmetry with
             Day0HighSignal but NOT USED — LOW nowcast samples are
-            deterministic (anchored blend of ens_remaining + current_temp,
-            clipped by obs_ceiling). No Monte Carlo needed; the sample set
-            IS the distribution.
+            deterministic: settle(min(obs_ceiling, future_member_min)) per
+            member (current_temp is NOT consulted). No Monte Carlo needed;
+            the sample set IS the distribution.
           - DOES NOT delegate to day0_high_signal (R-BE invariant — no
             HIGH→LOW cross-import). Pre-P9C handoff flagged "lazy-
             construction delegating to HIGH" concern; the current impl is

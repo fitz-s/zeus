@@ -18,7 +18,7 @@ per-bin 5th/95th percentile as q_lcb/q_ucb. Pinned here:
   - basis recorded as fused_center_bootstrap_p05
   - deterministic with the seeded rng (stable provenance bounds)
   - a Milan-incident-shaped posterior exposes far-tail fragility (q_lcb << q for an off-mode bin)
-  - construction failure → NULL + warning (fail-soft; never WORSE than the Wilson status quo)
+  - construction failure → non-certified Wilson bounds + warning (fail-soft; not live-eligible)
   - integration: the fused-q path populates q_lcb_json/q_ucb_json columns + provenance role/basis.
 """
 from __future__ import annotations
@@ -204,10 +204,13 @@ def test_fused_path_populates_qlcb_qucb_columns(monkeypatch) -> None:
     assert prov["q_lcb_bootstrap_draws"] == mod._QLCB_BOOTSTRAP_DRAWS
 
 
-def test_bound_construction_failure_fails_soft_to_null(monkeypatch) -> None:
-    # The bootstrap must NOT roll back the fused q point on failure — q_lcb/q_ucb stay NULL (Wilson
-    # fallback, status quo) + a loud WARNING. This guarantees a bound failure can never make the live
-    # path WORSE than today.
+def test_bound_construction_failure_on_fused_path_leaves_null_bounds_never_cold_aifs(monkeypatch) -> None:
+    # AIFS DROPPED (operator directive 2026-06-17): the bootstrap must NOT roll back the fused q point
+    # on failure (the q_shape gain is preserved). The certified bootstrap bounds are absent and a loud
+    # WARNING is emitted. CONTRACT CHANGE: on a FUSED path (override present) the materializer NO
+    # LONGER decorates the row with Wilson-over-AIFS-member-votes carrier bounds — those bounds attach
+    # ONLY to the legacy no-override CAPTURE_MISSING path. The fused row's bounds stay NULL (honest,
+    # non-tradeable: the live gate licenses only the certified bootstrap basis anyway).
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     _enable_fused_shape(monkeypatch)
@@ -229,12 +232,14 @@ def test_bound_construction_failure_fails_soft_to_null(monkeypatch) -> None:
     assert prov["q_shape"] == "fused_normal_direct"
     q = json.loads(row["q_json"])
     assert sum(q.values()) == pytest.approx(1.0, abs=1e-6)
-    # Bounds fail soft to NULL == Wilson-fallback status quo.
+    # NO cold-AIFS carrier bounds on a fused row: bounds stay NULL (non-tradeable by absence).
     assert row["q_lcb_json"] is None
     assert row["q_ucb_json"] is None
+    assert prov["q_lcb_basis"] is None
     assert prov["q_lcb_json_role"] == "absent_no_calibrated_lcb_available"
     assert prov["q_ucb_json_role"] == "absent_no_calibrated_ucb_available"
-    assert prov["q_lcb_basis"] is None
+    assert prov["q_lcb_bootstrap_draws"] is None
+    assert prov["q_bootstrap_samples_by_bin"] is None
     assert any("q_lcb/q_ucb bootstrap skipped" in r.getMessage() for r in records), (
         "a bound failure must emit a loud WARNING (anti-silent-sink)"
     )

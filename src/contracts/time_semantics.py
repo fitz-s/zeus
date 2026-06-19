@@ -253,12 +253,12 @@ def _readiness_ttl_hours() -> float:
 
 def _download_release_lag_hours() -> float:
     return _settings_path(
-        "replacement_forecast_shadow", "download_release_lag_hours", default=14.0
+        "replacement_forecast_live", "download_release_lag_hours", default=14.0
     )
 
 
 def _model_cycle_cadence_hours() -> float:
-    # AIFS-ENS cycles {00,06,12,18}Z → 6h cadence. Fixed by the model, not us.
+    # OpenMeteo anchor cycles {00,06,12,18}Z -> 6h cadence. Fixed by the model, not us.
     return 6.0
 
 
@@ -275,13 +275,13 @@ def _source_cycle_max_age_hours() -> float:
 
 def _materialize_interval_minutes() -> float:
     return _settings_path(
-        "replacement_forecast_shadow", "materialization_interval_min", default=5.0
+        "replacement_forecast_live", "materialization_interval_min", default=5.0
     )
 
 
 def _materialize_limit_per_cycle() -> float:
     return _settings_path(
-        "replacement_forecast_shadow", "materialization_limit_per_cycle", default=10.0
+        "replacement_forecast_live", "materialization_limit_per_cycle", default=10.0
     )
 
 
@@ -501,10 +501,10 @@ REGISTRY: list[Entry] = [
         operation="delay from a model cycle time to when its data is published/downloadable",
         source=_download_release_lag_hours,
         source_ref="config/settings.json "
-        "replacement_forecast_shadow.download_release_lag_hours (14.0)",
+        "replacement_forecast_live.download_release_lag_hours (14.0)",
         basis_kind=BasisKind.EXTERNAL,
         basis=(
-            "14h is the AIFS-ENS publication lag — set by the upstream provider, not "
+            "14h is the OpenMeteo anchor publication lag model — set by the upstream provider, not "
             "us. EXTERNAL: we observe it, we do not choose it. The download cron fires "
             "at (cycle + this lag) % 24 for each of the four cycles."
         ),
@@ -785,8 +785,8 @@ REGISTRY: list[Entry] = [
         operation="max request files the materializer queue drains per cycle (throughput)",
         source=_materialize_limit_per_cycle,
         source_ref="config/settings.json "
-        "replacement_forecast_shadow.materialization_limit_per_cycle (10); "
-        "src/data/replacement_forecast_shadow_materialization_queue.py:510 limit=10",
+        "replacement_forecast_live.materialization_limit_per_cycle (10); "
+        "src/data/replacement_forecast_live_materialization_queue.py:510 limit=10",
         basis_kind=BasisKind.GUESS,
         basis=(
             "10 files/cycle is a guess. Throughput = limit × (1 / interval). At 10 "
@@ -818,7 +818,7 @@ REGISTRY: list[Entry] = [
         operation="interval between materializer queue drain cycles",
         source=lambda: _materialize_interval_minutes() * 60.0,
         source_ref="config/settings.json "
-        "replacement_forecast_shadow.materialization_interval_min (5) → seconds",
+        "replacement_forecast_live.materialization_interval_min (5) -> seconds",
         basis_kind=BasisKind.GUESS,
         basis=(
             "5-min drain cycle is a guess. Together with the per-cycle limit it sets "

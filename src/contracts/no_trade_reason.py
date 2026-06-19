@@ -81,7 +81,10 @@ class NoTradeReason(StrEnum):
     P_CAL_INVALID = auto()
     CALIBRATION_MATURITY_INVALID = auto()
     CALIBRATION_IMMATURE_NO_PLATT = auto()
-    NATIVE_MULTIBIN_BUY_NO_FLAG_INVALID = auto()
+    # Persisted value kept for existing SQLite CHECK compatibility. The source
+    # symbol uses the current quote-evidence name; a schema migration can rename
+    # the stored value separately if needed.
+    BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID = "native_multibin_buy_no_flag_invalid"
 
     # ── Market liquidity / crosscheck ─────────────────────────────────────────
     MARKET_EMPTY_ORDERBOOK = auto()

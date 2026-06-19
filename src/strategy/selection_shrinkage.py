@@ -12,12 +12,11 @@
 #   covariance). Plan: docs/evidence/plans/2026-06-13_c2_c3_trading_math.md.
 """Selection-stage shrinkage and posterior-utility licensing (C2).
 
-Replacement math for the vacuous {0,1}-p-value BH/FDR gate on the live
-trading path. The BH gate consumes degenerate p-values in {0,1} (every 0
-passes, every 1 fails — a literal no-op multiplicity correction; see
-``src/engine/event_reactor_adapter.py`` lines 9854/9876) and, even with
-continuous p-values, mutually exclusive sum-to-one bins violate PRDS so
-BH is invalid; FDR controls E[V/R], not bankroll log growth — the wrong
+Replacement math for the formerly vacuous {0,1}-p-value BH/FDR gate on the
+live trading path. The old gate consumed degenerate LCB-pass flags as p-values
+(every 0 passed, every 1 failed — a literal no-op multiplicity correction) and,
+even with continuous p-values, mutually exclusive sum-to-one bins violate PRDS
+so BH is invalid; FDR controls E[V/R], not bankroll log growth — the wrong
 objective entirely.
 
 The replacement (authority A2) is honest math, NOT a throttle (NO-CAPS law):

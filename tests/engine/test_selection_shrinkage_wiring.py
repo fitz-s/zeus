@@ -3,8 +3,8 @@
 # Authority basis: docs/authority/statistical_calibration_addendum_2026-06-13.md A2/D3
 #   (task #60 C2). Relationship tests over the reactor wiring of the EB-shrinkage
 #   selection gate: (1) flag=false leaves the GATE DECISION identical to the
-#   current BH behavior (golden comparison on a synthetic candem family) while
-#   the shadow quantities are still computed; (2) the EB license REPLACES the BH
+#   current edge-FDR behavior (golden comparison on a synthetic candidate family) while
+#   the shadow quantities are still computed; (2) the EB license REPLACES the FDR
 #   decision when the flag is ON. These verify the property that holds ACROSS the
 #   boundary where the candidate family flows into the selection gate.
 """Reactor-wiring relationship tests for C2 selection shrinkage (task #60)."""
@@ -55,9 +55,9 @@ def _family(*, edges):
     return proofs
 
 
-def test_shadow_authority_label_off_is_bh_fdr():
-    """flag OFF: selection_authority is BH_FDR and the shadow quantities are still
-    computed (shadow logging). The DECISION is BH's, untouched."""
+def test_shadow_authority_label_off_is_edge_fdr_gate():
+    """flag OFF: selection_authority names the edge-FDR gate honestly and the
+    shadow quantities are still computed (shadow logging)."""
     proofs = _family(edges=[
         ("t_sel", 0.86, 0.80, 0.72),   # the certified NO harvest
         ("t_b", 0.40, 0.30, 0.55),
@@ -70,7 +70,7 @@ def test_shadow_authority_label_off_is_bh_fdr():
         selected_price=0.72,
         authority_on=False,
     )
-    assert v.selection_authority == "BH_FDR"
+    assert v.selection_authority == "BH_EDGE_FDR"
     # Shadow quantities are still computed (not None) — the shadow-logging contract.
     assert v.lfsr is not None
     assert v.edge_shrunk is not None
@@ -117,9 +117,9 @@ def test_shrinkage_pulls_selected_edge_below_raw_in_a_noisy_family():
     assert v.edge_shrunk <= raw_edge + 1e-9
 
 
-def test_no_executable_universe_falls_back_to_bh():
+def test_no_executable_universe_falls_back_to_edge_fdr_gate():
     """If the selected bin has no executable price, shrinkage is not computable
-    and the authority falls back to BH_FDR (never a silent admit)."""
+    and the authority falls back to the edge-FDR gate (never a silent admit)."""
     proofs = _family(edges=[
         ("t_sel", 0.86, 0.80, None),   # no price → not in universe
         ("t_b", 0.40, 0.30, 0.55),
@@ -131,7 +131,7 @@ def test_no_executable_universe_falls_back_to_bh():
         selected_price=0.72,
         authority_on=True,
     )
-    assert v.selection_authority == "BH_FDR"
+    assert v.selection_authority == "BH_EDGE_FDR"
     assert v.eb_licensed is None
 
 
@@ -169,7 +169,7 @@ def test_c2_shadow_columns_excluded_from_receipt_json_hash():
         lfsr=0.02,
         edge_shrunk=0.11,
         edge_shrunk_posterior_sd=0.03,
-        selection_authority="BH_FDR",
+        selection_authority="BH_EDGE_FDR",
     )
     rj_without = _receipt_json(without)
     rj_with = _receipt_json(with_c2)

@@ -20,6 +20,8 @@ from src.data.replacement_forecast_live_switch_surface import (
     build_replacement_forecast_live_switch_report,
 )
 from src.data.replacement_forecast_readiness import (
+    HIGH_DATA_VERSION,
+    LOW_DATA_VERSION,
     PRODUCT_ID,
     READY_STATUS,
     SOURCE_ID,
@@ -116,8 +118,8 @@ def _latest_replacement_readiness(
         (
             STRATEGY_KEY,
             SOURCE_ID,
-            "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1",
-            "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_low_v1",
+            HIGH_DATA_VERSION,
+            LOW_DATA_VERSION,
             city,
             target_date,
             temperature_metric,
@@ -171,15 +173,15 @@ def _blocked_result(
     )
 
 
-def _shadow_unavailable_result(
+def _replacement_unavailable_result(
     candidate: ReplacementForecastCandidateView,
     *,
     reason_codes: tuple[str, ...],
 ) -> ReplacementForecastReactorHookResult:
-    """Keep replacement shadow/veto advisory when its own evidence is unavailable."""
+    """Fail closed when replacement live authority is unavailable."""
 
     return ReplacementForecastReactorHookResult(
-        status="SHADOW_ONLY",
+        status="BLOCKED",
         reason_codes=reason_codes,
         effective_direction=candidate.baseline_direction,
         effective_q_posterior=candidate.baseline_q_posterior,
@@ -294,6 +296,40 @@ def _h3_direction_for_candidate_bin(*, candidate_bin_id: str | None, replacement
     return f"{side}:{candidate_bin_id}"
 
 
+def _replacement_direction_for_candidate(
+    proof: Any,
+    *,
+    replacement_bundle: object | None,
+    bin_id: str | None,
+) -> str:
+    replacement_direction = _h3_direction_for_candidate_bin(
+        candidate_bin_id=bin_id,
+        replacement_bundle=replacement_bundle,
+    )
+    if replacement_direction is not None:
+        return replacement_direction
+    return str(getattr(proof, "direction", "") or "")
+
+
+def _replacement_yes_point_for_bin(
+    replacement_bundle: object | None,
+    *,
+    bin_id: str | None,
+) -> float | None:
+    if replacement_bundle is None or not bin_id:
+        return None
+    q = getattr(replacement_bundle, "q", {}) or {}
+    if not isinstance(q, Mapping):
+        return None
+    raw = q.get(bin_id)
+    if raw is None:
+        return None
+    try:
+        return min(max(float(raw), 0.0), 1.0)
+    except (TypeError, ValueError):
+        return None
+
+
 def _replacement_q_lcb_for_candidate(
     proof: Any,
     *,
@@ -305,20 +341,28 @@ def _replacement_q_lcb_for_candidate(
     # honest fail-soft default: when there is no replacement data for the bin (bundle absent,
     # no bin binding, no q_lcb entry) the candidate falls back to baseline_q_lcb — that is a
     # legacy strategy genuinely running on baseline q, not a cap on the replacement value.
-    # The SHADOW_VETO down-clamp (veto can only lower q_lcb, never raise) stays downstream as
-    # its own honest gate.
+    # Any non-live replacement artifact is unavailable to this execution hook.
     baseline_q_lcb = float(getattr(proof, "q_lcb_5pct"))
     if replacement_bundle is None:
         return baseline_q_lcb
     bin_id = _candidate_bin_id(proof, replacement_bundle=replacement_bundle)
     if not bin_id:
         return baseline_q_lcb
-    direction = str(getattr(proof, "direction", "") or "")
-    q = getattr(replacement_bundle, "q", {}) or {}
+    q_yes = _replacement_yes_point_for_bin(replacement_bundle, bin_id=bin_id)
+    if q_yes is None:
+        return baseline_q_lcb
+    direction = _replacement_direction_for_candidate(
+        proof,
+        replacement_bundle=replacement_bundle,
+        bin_id=bin_id,
+    )
     q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
     q_ucb = getattr(replacement_bundle, "q_ucb", None) or {}
     if direction.startswith("buy_yes"):
         raw = q_lcb.get(bin_id)
+        if raw is None:
+            return baseline_q_lcb
+        return min(max(float(raw), 0.0), q_yes)
     elif direction.startswith("buy_no"):
         raw = None
         for key in (
@@ -330,6 +374,15 @@ def _replacement_q_lcb_for_candidate(
             if key in q_lcb:
                 raw = q_lcb[key]
                 break
+        if raw is not None:
+            return min(max(float(raw), 0.0), 1.0 - q_yes)
+        if isinstance(q_ucb, Mapping) and bin_id in q_ucb:
+            try:
+                q_ucb_yes = min(max(float(q_ucb[bin_id]), 0.0), 1.0)
+            except (TypeError, ValueError):
+                return 0.0
+            return min(max(1.0 - q_ucb_yes, 0.0), 1.0 - q_yes)
+        return 0.0
     else:
         raw = q_lcb.get(bin_id)
     if raw is None:
@@ -348,10 +401,15 @@ def _replacement_q_posterior_for_candidate(
     bin_id = _candidate_bin_id(proof, replacement_bundle=replacement_bundle)
     if not bin_id:
         return min(max(baseline_q, 0.0), 1.0)
+    q_yes = _replacement_yes_point_for_bin(replacement_bundle, bin_id=bin_id)
+    if q_yes is None:
+        return min(max(baseline_q, 0.0), 1.0)
     q = getattr(replacement_bundle, "q", {}) or {}
-    direction = _h3_direction_for_candidate_bin(candidate_bin_id=bin_id, replacement_bundle=replacement_bundle)
-    if direction is None:
-        direction = str(getattr(proof, "direction", "") or "")
+    direction = _replacement_direction_for_candidate(
+        proof,
+        replacement_bundle=replacement_bundle,
+        bin_id=bin_id,
+    )
     if direction.startswith("buy_no"):
         for key in (
             f"buy_no:{bin_id}",
@@ -361,11 +419,8 @@ def _replacement_q_posterior_for_candidate(
         ):
             if key in q:
                 return min(max(float(q[key]), 0.0), 1.0)
-        return min(max(baseline_q, 0.0), 1.0)
-    raw = q.get(bin_id)
-    if raw is None:
-        return min(max(baseline_q, 0.0), 1.0)
-    return min(max(float(raw), 0.0), 1.0)
+        return 1.0 - q_yes
+    return q_yes
 
 
 def _candidate_view_from_proof(
@@ -401,82 +456,14 @@ def _candidate_view_from_proof(
     )
 
 
-def _write_replacement_shadow_decision(
-    conn: sqlite3.Connection,
-    result: ReplacementForecastReactorHookResult,
-) -> None:
-    decision = result.veto_decision
-    if decision is None:
-        return
-    row = decision.as_shadow_decision_row()
-    baseline_source_run_id = None
-    dependencies = row["dependency_source_run_ids_json"]
-    if isinstance(dependencies, Mapping):
-        raw_baseline = dependencies.get("baseline_b0")
-        baseline_source_run_id = str(raw_baseline) if raw_baseline is not None else None
-    conn.execute(
-        """
-        INSERT INTO replacement_shadow_decisions (
-            posterior_id, baseline_source_run_id, market_snapshot_id,
-            condition_id, token_id, decision_time, baseline_direction,
-            candidate_direction, allowed_direction, baseline_q_lcb,
-            candidate_q_lcb, allowed_q_lcb, baseline_kelly_fraction,
-            candidate_kelly_fraction, allowed_kelly_fraction, veto,
-            veto_reason, dependency_source_run_ids_json, provenance_json,
-            trade_authority_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(posterior_id, market_snapshot_id, condition_id, token_id, decision_time)
-        DO UPDATE SET
-            baseline_source_run_id = excluded.baseline_source_run_id,
-            baseline_direction = excluded.baseline_direction,
-            candidate_direction = excluded.candidate_direction,
-            allowed_direction = excluded.allowed_direction,
-            baseline_q_lcb = excluded.baseline_q_lcb,
-            candidate_q_lcb = excluded.candidate_q_lcb,
-            allowed_q_lcb = excluded.allowed_q_lcb,
-            baseline_kelly_fraction = excluded.baseline_kelly_fraction,
-            candidate_kelly_fraction = excluded.candidate_kelly_fraction,
-            allowed_kelly_fraction = excluded.allowed_kelly_fraction,
-            veto = excluded.veto,
-            veto_reason = excluded.veto_reason,
-            dependency_source_run_ids_json = excluded.dependency_source_run_ids_json,
-            provenance_json = excluded.provenance_json,
-            trade_authority_status = excluded.trade_authority_status
-        """,
-        (
-            row["posterior_id"],
-            baseline_source_run_id,
-            row["market_snapshot_id"],
-            row["condition_id"],
-            row["token_id"],
-            row["decision_time"],
-            row["baseline_direction"],
-            row["candidate_direction"],
-            row["allowed_direction"],
-            row["baseline_q_lcb"],
-            row["candidate_q_lcb"],
-            row["allowed_q_lcb"],
-            row["baseline_kelly_fraction"],
-            row["candidate_kelly_fraction"],
-            row["allowed_kelly_fraction"],
-            row["veto"],
-            row["veto_reason"],
-            json.dumps(row["dependency_source_run_ids_json"], sort_keys=True, separators=(",", ":"), default=str),
-            json.dumps(row["provenance_json"], sort_keys=True, separators=(",", ":"), default=str),
-            row["trade_authority_status"],
-        ),
-    )
-
-
 def build_replacement_forecast_event_hook(
     request: ReplacementForecastHookFactoryInput,
 ) -> Callable[[Any, OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None]:
     """Build the DB-backed replacement hook for the real event reactor path.
 
-    The underlying reactor hook is pure. This factory-owned wrapper may persist
-    one ``replacement_shadow_decisions`` audit row after a shadow-veto result.
-    Audit-write failure returns baseline/no-mutation behavior before live
-    authority and blocks under live authority.
+    The underlying reactor hook is pure. This factory wrapper reads only
+    live-authority posterior/readiness rows; non-live replacement artifacts do
+    not write audit rows or participate in execution decisions.
     """
 
     if not isinstance(request, ReplacementForecastHookFactoryInput):
@@ -532,8 +519,8 @@ def build_replacement_forecast_event_hook(
         )
         candidate_view = _candidate_view_from_proof(proof, decision_time)
         if switch_decision.blocked:
-            if policy.status != "LIVE_AUTHORITY":
-                return _shadow_unavailable_result(
+            if not policy.can_initiate_trade:
+                return _replacement_unavailable_result(
                     candidate_view,
                     reason_codes=switch_decision.reason_codes,
                 )
@@ -551,8 +538,8 @@ def build_replacement_forecast_event_hook(
             else None
         )
         if baseline_bundle is None:
-            if policy.status != "LIVE_AUTHORITY":
-                return _shadow_unavailable_result(
+            if not policy.can_initiate_trade:
+                return _replacement_unavailable_result(
                     candidate_view,
                     reason_codes=("REPLACEMENT_HOOK_BASELINE_BUNDLE_MISSING",),
                 )
@@ -567,12 +554,12 @@ def build_replacement_forecast_event_hook(
                 temperature_metric=temperature_metric,
                 decision_time=decision_time,
                 current_bin_topology_hash=_current_bin_topology_hash(proof, event),
-                require_baseline_bundle=policy.status != "LIVE_AUTHORITY",
+                require_baseline_bundle=not policy.can_initiate_trade,
             )
         if bundle_result is None or not bundle_result.ok:
             reason_code = bundle_result.reason_code if bundle_result is not None else "REPLACEMENT_HOOK_READINESS_MISSING"
-            if policy.status != "LIVE_AUTHORITY":
-                return _shadow_unavailable_result(
+            if not policy.can_initiate_trade:
+                return _replacement_unavailable_result(
                     candidate_view,
                     reason_codes=(reason_code,),
                 )
@@ -581,9 +568,8 @@ def build_replacement_forecast_event_hook(
                 reason_code=reason_code,
             )
         replacement_bundle = bundle_result.bundle if bundle_result is not None and bundle_result.ok else None
-        # Wave-2 item 1: single q authority — the replacement q_lcb is used directly for
-        # every policy status (no baseline cap). The SHADOW_VETO down-clamp remains downstream
-        # in the veto guardrail (it can only lower q_lcb, never raise it).
+        # Wave-2 item 1: single q authority — the replacement q_lcb is used directly
+        # only when the runtime policy is live.
         candidate_view = _candidate_view_from_proof(
             proof,
             decision_time,
@@ -596,16 +582,6 @@ def build_replacement_forecast_event_hook(
             replacement_bundle=replacement_bundle,
             readiness=readiness,
         )
-        if hook_result.status == "SHADOW_VETO_ONLY":
-            try:
-                _write_replacement_shadow_decision(request.forecast_conn, hook_result)
-            except Exception:
-                if policy.status != "LIVE_AUTHORITY":
-                    return _shadow_unavailable_result(
-                        candidate_view,
-                        reason_codes=("REPLACEMENT_SHADOW_DECISION_WRITE_FAILED",),
-                    )
-                return _blocked_result(candidate_view, reason_code="REPLACEMENT_SHADOW_DECISION_WRITE_FAILED")
         return hook_result
 
     return _hook

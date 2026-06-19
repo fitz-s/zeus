@@ -107,9 +107,6 @@ from src.decision.payoff_vector import (  # noqa: E402
     point_fair_value,
 )
 from src.forecast.debias_authority import DebiasAuthority  # noqa: E402
-from src.forecast.settlement_residual_debias import (  # noqa: E402
-    SettlementResidualDebiasProvider,
-)
 from src.probability.joint_q import JointQError, build_joint_q  # noqa: E402
 from src.probability.joint_q_band import JointQBandError, build_joint_q_band  # noqa: E402
 from src.probability.outcome_space import OutcomeSpaceError  # noqa: E402
@@ -283,18 +280,8 @@ def build_family_spine(fc_con, city_obj, rec, debias_auth) -> Optional[FamilySpi
     floor_art = realized_sigma_floor(case)
     sigma_resid = float(floor_art.rmse_native) if floor_art is not None else 1.0
 
-    # Per-case de-bias authority. When ``debias_auth`` is a settlement-residual
-    # PROVIDER, derive the WALK-FORWARD artifact for THIS case (fit only on
-    # settlements strictly before this target date — no leakage); else use the
-    # passed authority unchanged (the legacy empty-authority replay).
-    case_debias = (
-        debias_auth.debias_authority(case)
-        if hasattr(debias_auth, "debias_authority")
-        else debias_auth
-    )
-
     pd = build_predictive_distribution(
-        case, fms, case_debias,
+        case, fms, debias_auth,
         obs=None, has_fusion_capture=True,
         fused_center_sd_native=fused_center_sd,
         sigma_resid_native=sigma_resid,
@@ -691,18 +678,11 @@ def main() -> None:
         s for s in arm.load_settlements(fc_con, WINDOW_START)
         if s["target_date"] <= WINDOW_END
     ]
-    # COLD-CENTER-BIAS FIX: seed the de-bias with settlement-residual artifacts.
-    # The provider fits per-(city, metric) trailing residual medians from VERIFIED
-    # settlement_outcomes; build_family_spine derives a WALK-FORWARD artifact per
-    # case (only settlements strictly before that target date), so this sweep is
-    # leakage-free. Set CRG_DISABLE_SETTLE_RESID_DEBIAS=1 to reproduce the legacy
-    # empty-authority baseline (the BEFORE column of the EV table).
-    if os.environ.get("CRG_DISABLE_SETTLE_RESID_DEBIAS") == "1":
-        debias_auth = DebiasAuthority()
-        print("De-bias: DISABLED (legacy empty authority) — baseline run")
-    else:
-        debias_auth = SettlementResidualDebiasProvider.from_connection(fc_con)
-        print("De-bias: settlement-residual walk-forward provider ENABLED")
+    # SINGLE TRUTH (bias-maze strip 2026-06-17): the settlement-residual de-bias provider
+    # is REMOVED. The replay runs on the raw precise multi-model fused center with the
+    # IDENTITY (empty-artifact) DebiasAuthority — exactly what the live spine ships.
+    debias_auth = DebiasAuthority()
+    print("De-bias: IDENTITY (single-truth raw multi-model center)")
 
     print(f"Settled VERIFIED families in {WINDOW_START}..{WINDOW_END}: {len(settlements)}")
 

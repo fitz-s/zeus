@@ -160,7 +160,9 @@ def test_reconciler_cycle_drives_negrisk_misroute_to_operator_required(
     """
     import pathlib
     import src.execution.settlement_commands as sc
-    import src.main as main_mod
+    # P4 lift (system_decomposition_plan §8 Step 2): _redeem_reconciler_cycle moved from
+    # src.main to the P4 post-trade-capital module.
+    import src.execution.post_trade_capital as main_mod
 
     # Seed the REDEEM_TX_HASHED row (Karachi tx to Standard CTF)
     cmd_id = _insert_tx_hashed_command(trade_conn, _NEGRISK_CONDITION_ID, _TX_HASH_KARACHI)
@@ -171,8 +173,9 @@ def test_reconciler_cycle_drives_negrisk_misroute_to_operator_required(
     import src.state.db as _db_mod
     monkeypatch.setattr(_db_mod, "ZEUS_WORLD_DB_PATH", world_path)
 
-    # Patch get_mode → "live"
-    monkeypatch.setattr("src.main.get_mode", lambda: "live")
+    # Patch get_mode → "live" (P4 module namespace; _redeem_reconciler_cycle calls get_mode()
+    # bound in src.execution.post_trade_capital).
+    monkeypatch.setattr("src.execution.post_trade_capital.get_mode", lambda: "live")
 
     # Patch acquire_lock → always acquired
     @contextmanager

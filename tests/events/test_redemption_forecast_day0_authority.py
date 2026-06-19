@@ -53,7 +53,7 @@ def _day0(**overrides):
         metric_match_status="MATCH",
         rounding_status="MATCH",
         source_authorized_status="AUTHORIZED",
-        live_authority_status="LIVE_AUTHORITY",
+        live_authority_status="live",
         observation_available_at="2026-05-24T08:05:00+00:00",
         observation_time="2026-05-24T08:00:00+00:00",
         raw_value=80.2,
@@ -94,6 +94,32 @@ def test_live_day0_authority_passes_with_settlement_semantics():
 def test_observability_table_row_is_not_live_authority():
     with pytest.raises(Day0AuthorityError, match="not live authority"):
         observability_row_to_authority({"city": "Chicago", "live_authority_status": "OBSERVABILITY_ONLY"})
+
+
+def test_pre_cutover_durable_live_authority_alias_is_read_as_live():
+    row = {
+        "city": "Chicago",
+        "target_date": "2026-05-24",
+        "metric": "high",
+        "source_match_status": "MATCH",
+        "station_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "LIVE_AUTHORITY",
+        "observation_available_at": "2026-05-24T08:05:00+00:00",
+        "observation_time": "2026-05-24T08:00:00+00:00",
+        "raw_value": 80.2,
+        "rounded_value": 80,
+        "settlement_semantics": _semantics(),
+    }
+
+    evidence = observability_row_to_authority(row)
+
+    assert evidence.live_authority_status == "live"
+    assert_live_day0_authority(evidence)
 
 
 def test_station_mismatch_blocks():

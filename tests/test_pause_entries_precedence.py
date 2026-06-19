@@ -14,7 +14,7 @@ touched; writes go to per-test tmp mirrors.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -191,6 +191,50 @@ def test_resume_entries_rejects_non_operator_caller():
     """resume_entries must raise ValueError when called with system_auto_pause."""
     with pytest.raises(ValueError, match="resume_entries requires issued_by"):
         cp.resume_entries("x", issued_by="system_auto_pause")
+
+
+def test_entries_pause_read_is_db_authoritative_when_memory_is_stale_false():
+    """Submit gating must not miss an active durable pause because memory is stale."""
+    conn = get_world_connection()
+    _seed_operator_row(conn)
+    conn.close()
+
+    cp._control_state["entries_paused"] = False
+    cp._control_state["entries_pause_source"] = None
+    cp._control_state["entries_pause_reason"] = None
+
+    assert cp.is_entries_paused() is True
+    assert cp.get_entries_pause_source() == "manual_command"
+    assert cp.get_entries_pause_reason() == "manual operator pause"
+
+
+def test_entries_pause_read_clears_stale_memory_when_db_unpaused():
+    """A stale in-memory pause must not outlive the durable DB view."""
+    now = datetime.now(timezone.utc)
+    conn = get_world_connection()
+    upsert_control_override(
+        conn,
+        override_id=AUTO_PAUSE_OVERRIDE_ID,
+        target_type="global",
+        target_key="entries",
+        action_type="gate",
+        value="true",
+        issued_by="system_auto_pause",
+        issued_at=(now - timedelta(minutes=30)).isoformat(),
+        reason="auto_pause:expired",
+        effective_until=(now - timedelta(minutes=15)).isoformat(),
+        precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+    )
+    conn.commit()
+    conn.close()
+
+    cp._control_state["entries_paused"] = True
+    cp._control_state["entries_pause_source"] = "auto_exception"
+    cp._control_state["entries_pause_reason"] = "auto_pause:expired"
+
+    assert cp.is_entries_paused() is False
+    assert cp.get_entries_pause_source() is None
+    assert cp.get_entries_pause_reason() is None
 
 
 # ---------------------------------------------------------------------------

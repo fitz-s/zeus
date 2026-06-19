@@ -3,8 +3,8 @@
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10. Single source of
 #   truth for (a) the bounded source-cycle staleness horizon shared by the materialization
 #   fail-closed gate AND the live-admission belt-and-suspenders gate, and (b) the model-cycle
-#   PHASE classification (synoptic 00/12Z vs intermediate 06/18Z) introduced by the 4-cycle
-#   download schedule (commit efff09c643). Evidence: (computed_at - source_cycle_time) over
+#   PHASE classification used as provenance for the 4-cycle download schedule. Evidence:
+#   (computed_at - source_cycle_time) over
 #   forecast_posteriors ran min 9.5h / avg 18.9h / max 28.8h in healthy operation (n=1168),
 #   so a 30h bound admits all healthy operation with margin while rejecting multi-day laundering.
 """Replacement-forecast cycle policy: bounded staleness horizon + cycle-phase classification.
@@ -20,14 +20,9 @@ encode the invariant in shared structure, not in N parallel checks):
      ``MAX_CYCLE_AGE`` hours. Expired-but-rematerializable: re-stamping the same cycle is
      allowed ONLY while still within the bound.
 
-  2. CYCLE PHASE — 00Z/12Z are the full synoptic cycles (complete radiosonde assimilation);
-     06Z/18Z are intermediate cycles with different skill/bias characteristics. The
-     walk-forward de-bias + fusion weights were trained on history that is ~99% 00Z-cycle
-     (settlement-graded residual substrate: 00Z 133,837 rows vs 06/12/18Z 1,012 combined),
-     so a bias correction fit on synoptic phase is misapplied to intermediate phase. We tag
-     each posterior's phase in provenance and let the live gate hold intermediate-phase
-     posteriors to SHADOW-ONLY by default (never weaken a gate) until a settlement-graded
-     comparison licenses them.
+  2. CYCLE PHASE — operator policy has promoted all four standard UTC cycles
+     (00Z/06Z/12Z/18Z) to live-eligible replacement cycles. Phase remains provenance only;
+     it must not downgrade 06Z/18Z rows or route them into an experiment-only state.
 """
 
 from __future__ import annotations
@@ -46,10 +41,9 @@ UTC = timezone.utc
 # data "extremely stale" and refused.
 #
 #   bound = 2 x LIVE_REFRESH_INTERVAL + P50 publication lag
-#         = 2 x 12h (live-eligible cycles are 00Z/12Z only, operator cycle policy)
+#         = 2 x 12h (replacement live refresh cadence)
 #           + 6h   (MEASURED anchor publication lag, healthy: open-meteo bucket meta
-#                   showed 06-10 06Z run completed +5.9h; AIFS open-data index 8-10h;
-#                   p50 of the binding healthy leg ~= 6h — see
+#                   showed 06-10 06Z run completed +5.9h; see
 #                   docs/evidence/anchor_channels/ + rule1_audits/2026-06-10)
 #         = 30h
 #
@@ -60,29 +54,29 @@ UTC = timezone.utc
 # (replacement_cycle_availability) eliminated our own fetch delay (publication + <=15min),
 # so publication lag is the only stochastic term left in the derivation.
 # tests/data/test_cycle_staleness_derivation.py pins the formula to these inputs.
-LIVE_CYCLE_REFRESH_INTERVAL_HOURS = 12.0  # 00Z/12Z live-eligible cadence (operator policy)
+LIVE_CYCLE_REFRESH_INTERVAL_HOURS = 12.0
 MEASURED_P50_PUBLICATION_LAG_HOURS = 6.0  # basis=MEASURED 2026-06-11 (see derivation above)
 REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT = (
     2.0 * LIVE_CYCLE_REFRESH_INTERVAL_HOURS + MEASURED_P50_PUBLICATION_LAG_HOURS
 )
 _MAX_AGE_ENV = "ZEUS_REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS"
 
-# Cycle-phase labels (provenance_json.cycle_phase). Synoptic = the full 00Z/12Z assimilation;
-# intermediate = the 06Z/18Z partial-assimilation cycles.
+# Cycle-phase labels (provenance_json.cycle_phase). All standard 00Z/06Z/12Z/18Z
+# cycles are live-eligible under current operator policy.
 CYCLE_PHASE_SYNOPTIC = "synoptic"
-CYCLE_PHASE_INTERMEDIATE = "intermediate"
-_SYNOPTIC_CYCLE_HOURS = frozenset({0, 12})
-_INTERMEDIATE_CYCLE_HOURS = frozenset({6, 18})
+CYCLE_PHASE_INTERMEDIATE = "experiment"
+_SYNOPTIC_CYCLE_HOURS = frozenset({0, 6, 12, 18})
+_INTERMEDIATE_CYCLE_HOURS = frozenset()
 
 
 # ---------------------------------------------------------------------------
 # TRADEABLE-GRADE COVERAGE PREDICATE — SINGLE AUTHORITY (2026-06-12).
 #
 # Created: 2026-06-12
-# Authority basis: /tmp/qlcb_coverage_fix_report.md. When the soft-anchor (no-fusion) path began
-#   carrying a PROMOTED Wilson-over-AIFS-votes q_lcb (basis="wilson_aifs_member_votes") instead of
+# Authority basis: /tmp/qlcb_coverage_fix_report.md. When the no-fusion path began
+#   carrying a promoted legacy q_lcb instead of
 #   NULL, the three mask-and-starve antibody sites that proxied "tradeable-grade coverage" as
-#   `q_lcb_json IS NOT NULL` (shadow_materialization_queue / seed_discovery / current_target_plan)
+#   `q_lcb_json IS NOT NULL` (live_materialization_queue / seed_discovery / current_target_plan)
 #   would have WRONGLY counted a soft-anchor row as covered — re-introducing the exact mask-and-
 #   starve disease they were built to prevent (an untradeable, no-current-capture row marking its
 #   scope "done forever" and blocking its own fusion repair). The proxy was only ever valid because
@@ -108,12 +102,18 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     table alias with a trailing dot already applied by the caller's existing convention (e.g. "p.").
     """
     cols = set(posterior_columns)
+    fragments: list[str] = []
+    if "q_lcb_json" in cols:
+        fragments.append(f"AND {alias}q_lcb_json IS NOT NULL")
+    if "q_ucb_json" in cols:
+        fragments.append(f"AND {alias}q_ucb_json IS NOT NULL")
     if "provenance_json" not in cols:
-        return ""
-    return (
+        return "\n              ".join(fragments)
+    fragments.append(
         f"AND json_extract({alias}provenance_json, '$.q_lcb_basis') = "
         f"'{TRADEABLE_GRADE_QLCB_BASIS}'"
     )
+    return "\n              ".join(fragments)
 
 
 def replacement_source_cycle_max_age_hours() -> float:
@@ -139,8 +139,7 @@ def replacement_readiness_expires_at(source_cycle_time: datetime) -> datetime:
     TWO sites — materializer + request builder), while the staleness law above says the
     cycle's data is lawful for ``max_age_hours`` after the CYCLE time. Two freshness clocks
     ⇒ the 3h clock re-killed data the 30h law declared lawful: on 2026-06-11 the 06Z rows'
-    readiness died at ~06:31Z and every scope went
-    REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED while the cycle was only ~26h old.
+    readiness died at ~06:31Z while the cycle was only ~26h old.
 
     ONE clock now: readiness expires exactly when the cycle's staleness bound expires.
     The H3 expires_at gate and the cycle-age gate in the bundle reader thereby verify the
@@ -176,19 +175,17 @@ def cycle_age_exceeds_bound(
 
 
 def classify_cycle_phase(source_cycle_time: datetime) -> str:
-    """Classify a model cycle as synoptic (00/12Z) or intermediate (06/18Z) by its UTC hour.
+    """Classify a model cycle by UTC hour.
 
     Any hour that is not exactly a 6-hourly cycle hour (defensive: clock skew, sub-hour
-    timestamps) is bucketed by nearest 6h cycle; off-cadence hours fall through to
-    intermediate (the MORE conservative label — it cannot accidentally grant a non-00/12Z
-    cycle the synoptic free pass).
+    timestamps) is bucketed by nearest 6h cycle. The four standard cycles all return
+    ``synoptic`` so 06Z/18Z cannot be downgraded by provenance classification.
     """
     hour = source_cycle_time.astimezone(UTC).hour
     if hour in _SYNOPTIC_CYCLE_HOURS:
         return CYCLE_PHASE_SYNOPTIC
     if hour in _INTERMEDIATE_CYCLE_HOURS:
         return CYCLE_PHASE_INTERMEDIATE
-    # Off-cadence hour: snap to the nearest lower 6h cycle and reclassify. Conservative
-    # fallthrough to intermediate for anything that is not cleanly 00/12Z.
+    # Off-cadence hour: snap to the nearest lower 6h cycle and reclassify.
     snapped = (hour // 6) * 6
     return CYCLE_PHASE_SYNOPTIC if snapped in _SYNOPTIC_CYCLE_HOURS else CYCLE_PHASE_INTERMEDIATE

@@ -103,6 +103,15 @@ def _solar_heuristic_confidence(
     return 0.5 + 0.45 * ((progress - peak_progress) / max(0.05, 1.0 - peak_progress))
 
 
+def _solar_only_post_peak_confidence(
+    current_local_hour: int,
+    solar_day: SolarDay | None,
+) -> float | None:
+    if solar_day is None:
+        return None
+    return _apply_solar_bounds(0.0, current_local_hour, solar_day)
+
+
 def get_peak_hour_context(
     city_name: str, target_date: date, current_local_hour: int
 ) -> tuple[Optional[int], float, str]:
@@ -147,6 +156,9 @@ def get_peak_hour_context(
             # Shenzhen / Singapore) if HK trading needs a diurnal prior before
             # the hko_hourly_accumulator builds native history.
             conn.close()
+            solar_conf = _solar_only_post_peak_confidence(current_local_hour, solar_day)
+            if solar_conf is not None:
+                return None, solar_conf, "solar_only_no_diurnal_history"
             return None, 0.0, "insufficient_diurnal_data_rows"
 
         peak_row = max(season_rows, key=lambda r: r["avg_temp"])
@@ -241,7 +253,8 @@ def post_peak_confidence(
         conn.close()
 
         if not season_rows or len(season_rows) < 12:
-            return 0.0
+            solar_conf = _solar_only_post_peak_confidence(current_local_hour, solar_day)
+            return solar_conf if solar_conf is not None else 0.0
 
         current_row = next((r for r in season_rows if r["hour"] == current_local_hour), None)
         if current_row and current_row["p_high_set"] is not None:

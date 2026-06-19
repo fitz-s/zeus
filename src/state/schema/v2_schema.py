@@ -24,6 +24,13 @@ import os
 import sqlite3
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
 def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
     """Create settlement_outcomes table + indexes. Idempotent. K1 forecast-class table.
 
@@ -224,7 +231,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
         # contract_version + boundary_min_value columns dropped in P7B (no live
         # consumer; P8 will re-add if needed when shadow-activation consumers land).
         "ALTER TABLE ensemble_snapshots ADD COLUMN unit TEXT",
-        # PLAN_v4 executable forecast-entry linkage. NULL means legacy/shadow-only.
+        # PLAN_v4 executable forecast-entry linkage. NULL means no live consumer.
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_id TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_transport TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_run_id TEXT",
@@ -232,7 +239,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_cycle_time TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_release_time TEXT",
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_available_at TEXT",
-        # 2026-05-07 LOW/HIGH alignment recovery: nullable shadow columns for
+        # 2026-05-07 LOW/HIGH alignment recovery: nullable evidence columns for
         # contract-object and explicit forecast-window evidence. These columns
         # only make evidence persistable; they do not relax training_allowed or
         # change live decision authority.
@@ -281,8 +288,70 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
     """)
 
 
-def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None:
-    """Create shadow-only replacement forecast provenance tables."""
+def _ensure_forecast_posteriors_runtime_layer_compatibility(conn: sqlite3.Connection) -> None:
+    """Ensure forecast_posteriors carries the runtime-layer column."""
+
+    columns = _table_columns(conn, "forecast_posteriors")
+    if not columns:
+        return
+    if "runtime_layer" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE forecast_posteriors
+            ADD COLUMN runtime_layer TEXT
+                CHECK (runtime_layer IS NULL OR runtime_layer IN ('live'))
+            """
+        )
+        columns.add("runtime_layer")
+    if "trade_authority_status" in columns:
+        conn.execute(
+            """
+            UPDATE forecast_posteriors
+               SET runtime_layer = 'live'
+             WHERE runtime_layer IS NULL
+               AND trade_authority_status = 'LIVE_AUTHORITY'
+            """
+        )
+    conn.execute("""
+        DELETE FROM forecast_posteriors
+         WHERE runtime_layer IS NULL
+            OR runtime_layer != 'live'
+    """)
+    if "trade_authority_status" in columns:
+        conn.execute("ALTER TABLE forecast_posteriors DROP COLUMN trade_authority_status")
+        columns.remove("trade_authority_status")
+    if {"runtime_layer", "city", "target_date", "temperature_metric", "computed_at"}.issubset(columns):
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_runtime_layer_target
+                ON forecast_posteriors(runtime_layer, city, target_date, temperature_metric, computed_at)
+        """)
+
+
+def _ensure_observation_hourly_extrema_compatibility(conn: sqlite3.Connection) -> None:
+    """Repair legacy observation extrema schema so later ALTER TABLE can run."""
+
+    columns = _table_columns(conn, "observation_instants")
+    if not columns:
+        return
+    if "running_min" not in columns:
+        conn.execute("ALTER TABLE observation_instants ADD COLUMN running_min REAL")
+        columns.add("running_min")
+    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
+    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema")
+    conn.execute("""
+        CREATE VIEW observation_hourly_extrema AS
+            SELECT
+                o.*,
+                o.running_max AS hour_bucket_max,
+                o.running_min AS hour_bucket_min
+            FROM observation_instants o
+    """)
+
+
+def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
+    """Create replacement forecast live-support/provenance tables."""
+
+    _ensure_observation_hourly_extrema_compatibility(conn)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS raw_forecast_artifacts (
@@ -299,8 +368,6 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             request_url TEXT,
             request_params_json TEXT NOT NULL DEFAULT '{}',
             artifact_metadata_json TEXT NOT NULL DEFAULT '{}',
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
@@ -333,8 +400,6 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             contributing_times_json TEXT NOT NULL DEFAULT '[]',
             anchor_identity_hash TEXT,
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
@@ -366,7 +431,6 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             q_lcb_json TEXT,
             q_ucb_json TEXT,
             posterior_method TEXT NOT NULL,
-            aifs_source_run_id TEXT,
             openmeteo_anchor_id INTEGER REFERENCES deterministic_forecast_anchors(anchor_id),
             dependency_source_run_ids_json TEXT NOT NULL DEFAULT '[]',
             family_id TEXT,
@@ -375,8 +439,8 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             posterior_config_hash TEXT,
             posterior_identity_hash TEXT,
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')),
+            runtime_layer TEXT NOT NULL DEFAULT 'live'
+                CHECK (runtime_layer IN ('live')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
@@ -395,6 +459,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             ON forecast_posteriors(posterior_identity_hash)
             WHERE posterior_identity_hash IS NOT NULL
     """)
+    _ensure_forecast_posteriors_runtime_layer_compatibility(conn)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS replacement_shadow_decisions (
@@ -418,8 +483,6 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             veto_reason TEXT,
             dependency_source_run_ids_json TEXT NOT NULL DEFAULT '[]',
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_VETO_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_VETO_ONLY')),
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(posterior_id, market_snapshot_id, condition_id, token_id, decision_time)
         )
@@ -432,16 +495,16 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     # ------------------------------------------------------------------------
     # raw_model_forecasts  (BAYES_PRECISION_FUSION_SPEC.md §6 F1 raw capture)
     # ------------------------------------------------------------------------
-    # The spec-named SHADOW-ONLY multi-model walk-forward capture table. One row per
+    # Multi-model walk-forward capture table. One row per
     # (model, city, target_date, metric, source_cycle_time, endpoint): the decorrelated
     # globals (gfs_global/icon_global/gem_global/jma_seamless/icon_eu) + in-domain regionals
     # (icon_d2/arome) fetched ALONGSIDE the single ECMWF anchor. forecast_value_c is ALWAYS
     # degC (SPEC §7 "C/F unit mix" antibody — the residual against settlement is taken in C).
     # endpoint distinguishes single_runs (live capture, variable-lead, replay) from
     # previous_runs (fixed-lead, the ONLY rows that train walk-forward history; SPEC §3
-    # causality run_time != source_available_at). SHADOW_ONLY + training_allowed=0 are
-    # CHECK-pinned exactly like raw_forecast_artifacts: this is a research-accrual surface,
-    # NEVER an order/training truth table. Lives ONLY on zeus-forecasts.db (FORECAST_CLASS,
+    # causality run_time != source_available_at). training_allowed=0 is
+    # CHECK-pinned exactly like raw_forecast_artifacts: this is an experiment-accrual surface,
+    # never an order/training truth table. Lives ONLY on zeus-forecasts.db (FORECAST_CLASS,
     # INV-37 single-DB). The walk-forward history JOIN (src/data/bayes_precision_fusion_history_provider.py)
     # reads endpoint='previous_runs' rows JOINed to settlement_outcomes (same DB) with
     # target_date < decision_date and authority='VERIFIED' (no-leak, IRON RULE #3).
@@ -492,8 +555,6 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             model_domain_hash TEXT,
             coverage_status TEXT,
             artifact_id INTEGER REFERENCES raw_forecast_artifacts(artifact_id),
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
@@ -822,30 +883,30 @@ def _create_settlement_capture_verifications(conn: sqlite3.Connection) -> None:
     """)
 
 
-def ensure_replacement_forecast_shadow_schema(conn: sqlite3.Connection) -> None:
-    """Create only the replacement forecast shadow tables on a forecast DB.
+def ensure_replacement_forecast_live_schema(conn: sqlite3.Connection) -> None:
+    """Create only the replacement forecast live-support tables on a forecast DB.
 
     This is the targeted simple-switch initializer for the Open-Meteo ECMWF IFS
-    9km + AIFS sampled-2t path. It deliberately avoids the broader canonical
+    9km + Bayes fusion path. It deliberately avoids the broader canonical
     schema migration surface and creates no world/trade truth tables.
     """
 
     nested_transaction = conn.in_transaction
     if nested_transaction:
-        conn.execute("SAVEPOINT replacement_forecast_shadow_schema")
+        conn.execute("SAVEPOINT replacement_forecast_live_schema")
     else:
         conn.execute("BEGIN")
     try:
-        _create_replacement_forecast_shadow_tables(conn)
+        _create_replacement_forecast_live_tables(conn)
         if nested_transaction:
-            conn.execute("RELEASE SAVEPOINT replacement_forecast_shadow_schema")
+            conn.execute("RELEASE SAVEPOINT replacement_forecast_live_schema")
         else:
             conn.execute("COMMIT")
     except Exception:
         try:
             if nested_transaction:
-                conn.execute("ROLLBACK TO SAVEPOINT replacement_forecast_shadow_schema")
-                conn.execute("RELEASE SAVEPOINT replacement_forecast_shadow_schema")
+                conn.execute("ROLLBACK TO SAVEPOINT replacement_forecast_live_schema")
+                conn.execute("RELEASE SAVEPOINT replacement_forecast_live_schema")
             else:
                 conn.execute("ROLLBACK")
         except Exception:
@@ -985,10 +1046,9 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             _create_ensemble_snapshots(conn)
 
             # ----------------------------------------------------------------
-            # Replacement forecast shadow provenance tables. These are forecast-
-            # class research surfaces only; they do not grant entry authority.
+            # Replacement forecast live-support provenance tables.
             # ----------------------------------------------------------------
-            _create_replacement_forecast_shadow_tables(conn)
+            _create_replacement_forecast_live_tables(conn)
 
             # ----------------------------------------------------------------
             # calibration_pairs  (K1 forecast-class: moves to zeus-forecasts.db)
@@ -1058,10 +1118,22 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             except Exception as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_platt_models_lookup
-                ON platt_models(temperature_metric, cluster, season, data_version, input_space, is_active)
-        """)
+        platt_columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(platt_models)").fetchall()
+        }
+        if {
+            "temperature_metric",
+            "cluster",
+            "season",
+            "data_version",
+            "input_space",
+            "is_active",
+        }.issubset(platt_columns):
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_platt_models_lookup
+                    ON platt_models(temperature_metric, cluster, season, data_version, input_space, is_active)
+            """)
 
         # ----------------------------------------------------------------
         # validated_calibration_transfers
@@ -1218,6 +1290,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             "ALTER TABLE observation_instants ADD COLUMN authority TEXT NOT NULL DEFAULT 'UNVERIFIED'",
             "ALTER TABLE observation_instants ADD COLUMN data_version TEXT NOT NULL DEFAULT 'v1'",
             "ALTER TABLE observation_instants ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE observation_instants ADD COLUMN running_min REAL",
             "ALTER TABLE observation_instants ADD COLUMN temperature_metric TEXT",
             "ALTER TABLE observation_instants ADD COLUMN physical_quantity TEXT",
             "ALTER TABLE observation_instants ADD COLUMN observation_field TEXT",
@@ -1289,16 +1362,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
         # Consolidation 2026-05-29: dropped the legacy _v2-suffixed alias view
         # too, so no stale view points at the now-renamed table.
         # ----------------------------------------------------------------
-        conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
-        conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema")
-        conn.execute("""
-            CREATE VIEW observation_hourly_extrema AS
-                SELECT
-                    o.*,
-                    o.running_max AS hour_bucket_max,
-                    o.running_min AS hour_bucket_min
-                FROM observation_instants o
-        """)
+        _ensure_observation_hourly_extrema_compatibility(conn)
 
         # ----------------------------------------------------------------
         # historical_forecasts — DROPPED in B3 (PR3).

@@ -13,7 +13,7 @@ Ensure the adversarial-debate methodology (`docs/methodology/adversarial_debate_
 
 Auto-triggers on session boot when ANY of these hold:
 - Task description contains keywords listed in the `description` frontmatter
-- Active task is a Mode C (longlast multi-batch) or Mode D (adversarial debate) per `.agents/skills/zeus-ai-handoff/SKILL.md` §3
+- Active task is a Mode C (longlast multi-batch) or Mode D (adversarial debate) per established mode rules in this session bootstrap context
 - Operator references "another cycle", "next round", "the methodology", "critic gate", "stage-gated revert", "5th outcome"
 - Recent commits in active branch reference `task_*_harness_debate/` or `task_*_contamination_remediation/`
 - New session resuming work after compaction in a debate-class context
@@ -48,7 +48,7 @@ When fired, this SKILL ensures the agent reads:
 ## Cross-references
 
 - **`.claude/skills/multi-agent-debate-and-execution/SKILL.md`** (NEW v1 2026-05-03) — generic reusable EXECUTION + CLOSURE phase skill. Covers per-packet boot template, GO/DONE/REVIEW cycle, 3-batch decomposition, PATH A precision-favored framing, K3-adjacent surface pre-flag, HONEST DISCLOSURE pattern, 10-ATTACK template, co-tenant safe staging, cross-module orchestration seam. Embeds 5-packet 32-cycle Zeus R3 §1 #2 case study. Mirror at `~/.claude/skills/multi-agent-debate-and-execution/SKILL.md` for cross-project reuse. Methodology doc covers DEBATE phase; this new skill covers EXECUTION + CLOSURE.
-- `.agents/skills/zeus-ai-handoff/SKILL.md` (Mode C/D selection)
+- `.agents/skills/zeus-phase-discipline/SKILL.md` (Mode C/D operating pattern):
 - `.claude/skills/zeus-phase-discipline/SKILL.md` (Mode C per-batch; 14 anti-drift mechanisms compressed)
 - Root `AGENTS.md` (Required Reads for adversarial work; §3 "What to read by task" → Adversarial debate / multi-agent / contamination remediation bullet)
 - `docs/operations/task_2026-04-27_harness_debate/` (4-cycle case studies: R1+R2+R3+Tier 2)

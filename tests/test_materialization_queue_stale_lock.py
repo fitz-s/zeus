@@ -5,7 +5,7 @@
 #   finally-unlink, so its lock blocked the queue forever -> materializer dark -> readiness
 #   (3h TTL) expired -> reactor READINESS_EXPIRED -> zero trades. Relationship tests for the
 #   stale-lock self-heal antibody (dead-PID detection + quarantine + steal) in
-#   src/data/replacement_forecast_shadow_materialization_queue.py.
+#   src/data/replacement_forecast_live_materialization_queue.py.
 """Relationship tests: an orphaned queue lock from a DEAD holder cannot block the queue.
 
 The category (Fitz #5 make-it-unconstructable + #3 immune system): the queue's exclusive lock
@@ -23,7 +23,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from src.data.replacement_forecast_shadow_materialization_queue import _queue_lock
+from src.data.replacement_forecast_live_materialization_queue import _queue_lock
 
 
 def _dead_pid() -> int:

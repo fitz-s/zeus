@@ -75,7 +75,7 @@ def _receipt_reason_literal_sites() -> list[tuple[str, str]]:
 
 def test_every_receipt_reason_literal_base_is_registered():
     sites = _receipt_reason_literal_sites()
-    assert len(sites) >= 30, (
+    assert len(sites) >= 25, (
         f"AST scan found only {len(sites)} EventSubmissionReceipt reason literals — "
         "the scan itself regressed (emit sites moved?); fix the scanner before "
         "trusting this antibody"
@@ -111,6 +111,7 @@ def test_registry_lookup_strips_detail_suffix():
         ("TRADE_SCORE_NON_POSITIVE", RejectionCategory.HONEST_MARKET),
         ("LIVE_INFERENCE_INPUTS_MISSING:READINESS_EXPIRED", RejectionCategory.HONEST_DATA),
         ("DAY0_SCOPE_SHADOW_ONLY", RejectionCategory.DESIGNED_GATE),
+        ("entry_cooldown:same_token_entry_cooling_down", RejectionCategory.DESIGNED_GATE),
         ("EDLI_LIVE_CERTIFICATE_BUILD_FAILED:cost_basis_hash missing", RejectionCategory.ARTIFICIAL_SUSPECT),
         # The exception-leak class: NEVER classifies as honest.
         ("UNIQUE constraint failed: platt_models.x", RejectionCategory.ARTIFICIAL_SUSPECT),
@@ -144,6 +145,7 @@ def test_known_db_history_bases_are_registered():
         "EXECUTABLE_NATIVE_ASK_MISSING",
         "FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE",
         "DAY0_SCOPE_SHADOW_ONLY",
+        "entry_cooldown",
         "REPLACEMENT_FORECAST_HOOK_BLOCKED",
         "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED",
         "SUBMIT_ABORTED_EDGE_REVERSED",

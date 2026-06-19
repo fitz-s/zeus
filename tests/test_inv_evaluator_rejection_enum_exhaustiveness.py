@@ -85,7 +85,7 @@ MIGRATION_TABLE: list[tuple[int, str, str]] = [
     (2811, "P_cal is non-finite", "p_cal_invalid"),
     (2827, "invalid calibration maturity level", "calibration_maturity_invalid"),
     (2845, "calibration_level=4 has no Platt model", "calibration_immature_no_platt"),
-    (2871, "[str(exc)] ValueError native_multibin_buy_no", "native_multibin_buy_no_flag_invalid"),
+    (2871, "[str(exc)] ValueError buy_no_native_quote_evidence", "native_multibin_buy_no_flag_invalid"),
     (2950, "[str(e)] EmptyOrderbookError", "market_empty_orderbook"),
     (2963, "[str(e)] generic exception clob loop", "market_liquidity_error"),
     (2989, "crosscheck unavailable:", "crosscheck_unavailable"),

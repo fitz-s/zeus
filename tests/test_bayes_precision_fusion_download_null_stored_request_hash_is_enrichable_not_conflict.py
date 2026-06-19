@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import sqlite3
 
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 from src.data.bayes_precision_fusion_download import _detect_request_conflict
 
 
 def _conn():
     conn = sqlite3.connect(":memory:")
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     return conn
 
 

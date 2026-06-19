@@ -9,10 +9,8 @@ from src.data.replacement_forecast_readiness import READY_STATUS, ReplacementFor
 from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDecision
 from src.data.replacement_forecast_runtime_policy import (
     BLOCKED_STATUS,
-    LIVE_AUTHORITY_STATUS,
+    LIVE_STATUS,
     SAFE_DEFAULT_STATUS,
-    SHADOW_ONLY_STATUS,
-    SHADOW_VETO_ONLY_STATUS,
     ReplacementForecastCapitalObjectiveEvidence,
     ReplacementForecastRuntimePolicy,
 )
@@ -20,9 +18,7 @@ from src.data.replacement_forecast_runtime_policy import (
 
 SWITCH_DISABLED = "DISABLED"
 SWITCH_BLOCKED = "BLOCKED"
-SWITCH_SHADOW_ONLY = "SHADOW_ONLY"
-SWITCH_SHADOW_VETO_ONLY = "SHADOW_VETO_ONLY"
-SWITCH_LIVE_AUTHORITY = "LIVE_AUTHORITY"
+SWITCH_LIVE = "live"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
 
@@ -56,24 +52,20 @@ class ReplacementForecastSwitchDecisionInput:
 class ReplacementForecastSwitchDecision:
     status: str
     reason_codes: tuple[str, ...]
-    can_read_shadow_posterior: bool
+    can_read_live_posterior: bool
     can_apply_reactor_hook: bool
-    can_apply_veto: bool
     can_initiate_trade: bool
     can_increase_kelly: bool
     can_flip_direction: bool
     readiness_id: str | None
 
     def __post_init__(self) -> None:
-        if self.status not in {SWITCH_DISABLED, SWITCH_BLOCKED, SWITCH_SHADOW_ONLY, SWITCH_SHADOW_VETO_ONLY, SWITCH_LIVE_AUTHORITY}:
+        if self.status not in {SWITCH_DISABLED, SWITCH_BLOCKED, SWITCH_LIVE}:
             raise ValueError("invalid replacement switch decision status")
         for reason in self.reason_codes:
             _reject_alias(str(reason), field_name="reason_codes")
-        if self.status != SWITCH_LIVE_AUTHORITY and (self.can_initiate_trade or self.can_increase_kelly or self.can_flip_direction):
-            raise ValueError("only live-authority switch decisions can grant live trade authority")
-        if self.can_apply_veto and not self.can_apply_reactor_hook:
-            raise ValueError("veto requires reactor hook admission")
-
+        if self.status != SWITCH_LIVE and (self.can_initiate_trade or self.can_increase_kelly or self.can_flip_direction):
+            raise ValueError("only live switch decisions can grant live trading")
     @property
     def blocked(self) -> bool:
         return self.status == SWITCH_BLOCKED
@@ -82,9 +74,8 @@ class ReplacementForecastSwitchDecision:
         return {
             "status": self.status,
             "reason_codes": list(self.reason_codes),
-            "can_read_shadow_posterior": self.can_read_shadow_posterior,
+            "can_read_live_posterior": self.can_read_live_posterior,
             "can_apply_reactor_hook": self.can_apply_reactor_hook,
-            "can_apply_veto": self.can_apply_veto,
             "can_initiate_trade": self.can_initiate_trade,
             "can_increase_kelly": self.can_increase_kelly,
             "can_flip_direction": self.can_flip_direction,
@@ -107,31 +98,23 @@ def evaluate_replacement_forecast_switch_decision(
         return ReplacementForecastSwitchDecision(
             status=SWITCH_DISABLED,
             reason_codes=policy.reason_codes,
-            can_read_shadow_posterior=False,
+            can_read_live_posterior=False,
             can_apply_reactor_hook=False,
-            can_apply_veto=False,
             can_initiate_trade=False,
             can_increase_kelly=False,
             can_flip_direction=False,
             readiness_id=None,
         )
 
-    # OPERATOR DIRECTIVE (2026-06-08): refit live-promotion gate and
-    # capital-objective-evidence veto removed. LIVE_AUTHORITY from the flag
-    # ladder (runtime_policy) is the sole authority for can_initiate_trade.
-    # The refit/evidence-file gates were circular (proof requires trading) and
-    # are promotion bureaucracy, not safety controls. Safety controls (q_lcb
-    # floor, Kelly, cost floor, direction law, RiskGuard) are enforced
-    # downstream and are unaffected by this removal.
     reasons: list[str] = []
     if policy.status == BLOCKED_STATUS:
         reasons.extend(policy.reason_codes)
     simple_switch_reasons = tuple(
         reason
         for reason in live_switch.reason_codes
-        if reason != "REPLACEMENT_SWITCH_TRADE_AUTHORITY_NOT_SIMPLE_SWITCH"
+        if reason != "REPLACEMENT_SWITCH_LIVE_NOT_SIMPLE_SWITCH"
     )
-    if simple_switch_reasons and live_switch.status not in {"SIMPLE_SWITCH_READY", "LIVE_AUTHORITY_READY"}:
+    if simple_switch_reasons and live_switch.status not in {"SIMPLE_SWITCH_READY", "live"}:
         reasons.extend(simple_switch_reasons)
     if readiness is None:
         reasons.append("REPLACEMENT_SWITCH_READINESS_MISSING")
@@ -142,46 +125,20 @@ def evaluate_replacement_forecast_switch_decision(
         return ReplacementForecastSwitchDecision(
             status=SWITCH_BLOCKED,
             reason_codes=tuple(reasons),
-            can_read_shadow_posterior=False,
+            can_read_live_posterior=False,
             can_apply_reactor_hook=False,
-            can_apply_veto=False,
             can_initiate_trade=False,
             can_increase_kelly=False,
             can_flip_direction=False,
             readiness_id=getattr(readiness, "readiness_id", None),
         )
 
-    if policy.status == SHADOW_ONLY_STATUS:
+    if policy.status == LIVE_STATUS:
         return ReplacementForecastSwitchDecision(
-            status=SWITCH_SHADOW_ONLY,
-            reason_codes=("REPLACEMENT_SWITCH_SHADOW_ONLY_ADMITTED",),
-            can_read_shadow_posterior=True,
-            can_apply_reactor_hook=False,
-            can_apply_veto=False,
-            can_initiate_trade=False,
-            can_increase_kelly=False,
-            can_flip_direction=False,
-            readiness_id=readiness.readiness_id if readiness is not None else None,
-        )
-    if policy.status == SHADOW_VETO_ONLY_STATUS:
-        return ReplacementForecastSwitchDecision(
-            status=SWITCH_SHADOW_VETO_ONLY,
-            reason_codes=("REPLACEMENT_SWITCH_SHADOW_VETO_ONLY_ADMITTED",),
-            can_read_shadow_posterior=True,
+            status=SWITCH_LIVE,
+            reason_codes=("REPLACEMENT_SWITCH_LIVE_ADMITTED",),
+            can_read_live_posterior=True,
             can_apply_reactor_hook=True,
-            can_apply_veto=True,
-            can_initiate_trade=False,
-            can_increase_kelly=False,
-            can_flip_direction=False,
-            readiness_id=readiness.readiness_id if readiness is not None else None,
-        )
-    if policy.status == LIVE_AUTHORITY_STATUS:
-        return ReplacementForecastSwitchDecision(
-            status=SWITCH_LIVE_AUTHORITY,
-            reason_codes=("REPLACEMENT_SWITCH_LIVE_AUTHORITY_ADMITTED",),
-            can_read_shadow_posterior=True,
-            can_apply_reactor_hook=True,
-            can_apply_veto=True,
             can_initiate_trade=policy.can_initiate_trade,
             can_increase_kelly=policy.can_increase_kelly,
             can_flip_direction=policy.can_flip_direction,
@@ -190,9 +147,8 @@ def evaluate_replacement_forecast_switch_decision(
     return ReplacementForecastSwitchDecision(
         status=SWITCH_BLOCKED,
         reason_codes=("REPLACEMENT_SWITCH_POLICY_UNSUPPORTED",),
-        can_read_shadow_posterior=False,
+        can_read_live_posterior=False,
         can_apply_reactor_hook=False,
-        can_apply_veto=False,
         can_initiate_trade=False,
         can_increase_kelly=False,
         can_flip_direction=False,

@@ -1,13 +1,13 @@
 from tests.test_replacement_forecast_materializer import _conn, _precision_guard, _request
 
-from src.data.replacement_forecast_materializer import materialize_replacement_forecast_shadow
+from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
 
 
-def test_om9_precision_shadow_only_blocks_materialized_veto_path() -> None:
+def test_om9_precision_review_required_blocks_live_materialization() -> None:
     guard = _precision_guard(city_class="coastal", land_sea_mask="sea")
 
-    result = materialize_replacement_forecast_shadow(_conn(), _request(openmeteo_precision_guard=guard))
+    result = materialize_replacement_forecast_live(_conn(), _request(openmeteo_precision_guard=guard))
 
-    assert guard.status == "SHADOW_ONLY"
+    assert guard.status == "REVIEW_REQUIRED"
     assert result.status == "BLOCKED"
-    assert "OM9_PRECISION_GUARD_BLOCKED_MATERIALIZATION" in result.reason_codes
+    assert "OM9_PRECISION_GUARD_NOT_LIVE_PASS" in result.reason_codes

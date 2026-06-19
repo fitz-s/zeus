@@ -4,9 +4,9 @@
 """M3 user-channel WebSocket submit guard.
 
 The user WebSocket is venue truth for real-time order/trade activity.  A gap is
-therefore a fail-closed condition for new submit: Zeus may continue monitor,
-exit, and reconciliation work, but it must not submit new venue commands until a
-future M5 reconciliation sweep provides recovery evidence.
+therefore a fail-closed condition for submit: Zeus may continue monitor, exit
+evaluation, and reconciliation work, but entry and exit venue submission remain
+blocked until a future M5 reconciliation sweep provides recovery evidence.
 
 This module is intentionally tiny and in-memory for M3.  It mirrors the shape
 of heartbeat/cutover guards so executor and cycle_runner have one deterministic

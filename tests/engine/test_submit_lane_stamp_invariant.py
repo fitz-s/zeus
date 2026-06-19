@@ -39,6 +39,7 @@ from src.state.db import init_schema
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
 _DECISION_TIME = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+_TARGET_DATE = "2026-05-25"
 
 
 def _store() -> tuple[sqlite3.Connection, EventStore]:
@@ -50,7 +51,7 @@ def _store() -> tuple[sqlite3.Connection, EventStore]:
 def _forecast_event(key_suffix: str = "a"):
     payload = ForecastSnapshotReadyPayload(
         city="Chicago",
-        target_date="2026-05-24",
+        target_date=_TARGET_DATE,
         metric="high",
         source_id="opendata",
         source_run_id="run-1",
@@ -75,7 +76,7 @@ def _forecast_event(key_suffix: str = "a"):
     )
     return make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
-        entity_key=f"Chicago|2026-05-24|high|{key_suffix}",
+        entity_key=f"Chicago|{_TARGET_DATE}|high|{key_suffix}",
         source="forecast_live",
         observed_at="2026-05-24T18:00:00+00:00",
         available_at="2026-05-24T18:01:00+00:00",
@@ -94,7 +95,7 @@ def _full_pass_receipt(event, *, submit_lane, reason, proof_accepted=True):
         event_id=event.event_id,
         causal_snapshot_id=event.causal_snapshot_id,
         city="Chicago",
-        target_date="2026-05-24",
+        target_date=_TARGET_DATE,
         metric="high",
         condition_id="condition-1",
         token_id="yes-1",
@@ -269,6 +270,11 @@ def test_no_submit_adapter_lane_reason_classified_transient_not_failopen():
     assert _is_transient_money_path_reason("NO_SUBMIT_ADAPTER_LANE:operator_arm_none")
     # An honest no-edge decline on the same adapter stays terminal (keeps its reason).
     assert not _is_transient_money_path_reason("TRADE_SCORE_NON_POSITIVE")
+    # Structural event-type bugs must terminate loudly; re-running the same
+    # payload cannot create trade value or a held-position decision.
+    assert not _is_transient_money_path_reason(
+        "unsupported live candidate event type: EDLI_REDECISION_PENDING"
+    )
 
 
 def test_persist_boundary_raises_on_live_stamped_full_pass_no_submit():

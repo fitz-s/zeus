@@ -56,11 +56,12 @@ DISAGREE_W = 0.5     # weight on cross-source spread added into fusion sigma^2.
 TAU0_FLOOR = 0.8     # floor on prior std tau0.
 COMMON_DATES_MIN = 5  # >=5 date-aligned common rows before Ledoit-Wolf shrink; else diagonal C0.
 
-# Source identities (spec §3) — the production anchor + decorrelated globals + regionals.
+# Source identity (spec §3). Only the anchor is consumed by this module's fusion math. The
+# model-set authority (decorrelated globals + regionals) lives SOLELY in
+# src.forecast.model_selection. 2026-06-17: the duplicate DECORR_GLOBALS / ICON_EU_MODEL /
+# REGIONAL_MODELS that previously sat here were dead (no importer, no in-file use) AND listed the
+# now-removed coarse globals gfs_global/gem_global — deleted to keep one authority and no drift.
 ANCHOR_MODEL = "ecmwf_ifs"                       # universal 0.1 anchor = prior mean.
-DECORR_GLOBALS = ("gfs_global", "icon_global", "gem_global", "jma_seamless")
-ICON_EU_MODEL = "icon_eu"                        # DWD global/EU rep carried at all leads.
-REGIONAL_MODELS = ("icon_d2", "meteofrance_arome_france_hd")
 
 
 # ---- EB bias (walk-forward) ---------------------------------------------------------
@@ -238,6 +239,11 @@ class ModelInstrument:
     n_train: int
     residuals_by_date: Mapping[str, float] = field(default_factory=dict)
     is_regional: bool = False
+    # v3 rule 5 (grid representativeness): sigma_repr^2 (degC^2) for THIS model's native
+    # cell at this city — ADDED to the Sigma DIAGONAL (Sigma_source = Sigma_model_residual
+    # + sigma_repr^2). Widen-only, >= 0; default 0.0 => byte-identical (the off / unknown-cell
+    # path). The fusion DERIVES the down-weight via Sigma^-1; this is never a hand weight.
+    sigma_repr_sq: float = 0.0
 
 
 def _common_window_residual_matrix(
@@ -281,6 +287,7 @@ def fuse_bayes_precision_posterior(
     likelihood: Sequence[ModelInstrument],
     disagree_var: float = 0.0,
     use_covariance: bool = True,
+    anchor_sigma_repr_sq: float = 0.0,
 ) -> FusedPosterior:
     """Run the proven C1 fusion and return the center+spread for the soft-anchor.
 
@@ -328,10 +335,18 @@ def fuse_bayes_precision_posterior(
             s = float(np.std(vh, ddof=1)) if len(vh) > 1 else SIGMA_FLOOR
             if ins.n_train < MIN_TRAIN:
                 s *= LOWN_INFLATE
+            # v3 rule 5: representativeness variance ADDS to the member variance (widen-only;
+            # 0.0 default => unchanged). Member std -> sqrt(s^2 + sigma_repr^2).
+            s = math.sqrt(s * s + max(0.0, ins.sigma_repr_sq))
             sds.append(max(s, SIGMA_FLOOR))
         # THIN-ANCHOR RETENTION: the anchor center participates with the conservative thin
         # variance; tau0 here is the MEMBER std, not a trusted prior (method stays EQUAL_WEIGHT).
-        thin_tau0 = TAU0_FLOOR * LOWN_INFLATE if anchor_center is not None else None
+        # The anchor cell's sigma_repr^2 widens that thin member variance too.
+        thin_tau0 = (
+            math.sqrt((TAU0_FLOOR * LOWN_INFLATE) ** 2 + max(0.0, anchor_sigma_repr_sq))
+            if anchor_center is not None
+            else None
+        )
         mu, sd = equal_weight(z, np.array(sds), disagree_var, anchor_center, thin_tau0)
         lik_models = tuple(ins.model for ins in instruments)
         used = ((ANCHOR_MODEL,) + lik_models) if anchor_center is not None else lik_models
@@ -346,9 +361,13 @@ def fuse_bayes_precision_posterior(
     mu0 = float(anchor_center)
     tau0 = max(TAU0_FLOOR, float(anchor_tau0))
 
+    # v3 rule 5: the anchor (ecmwf_ifs 9km cell) carries its OWN representativeness error;
+    # widen the prior spread by sigma_repr^2 (0.0 default => tau0 unchanged).
+    tau0_eff = math.sqrt(tau0 ** 2 + max(0.0, anchor_sigma_repr_sq))
+
     # ---- all extras absent: posterior is the anchor prior (fail-soft fallback) ----
     if not instruments:
-        mu, sd = bayes_fuse(np.array([]), np.zeros((0, 0)), mu0, tau0, disagree_var)
+        mu, sd = bayes_fuse(np.array([]), np.zeros((0, 0)), mu0, tau0_eff, disagree_var)
         return FusedPosterior(
             mu=mu, sd=sd, method="ANCHOR_FALLBACK",
             used_models=(ANCHOR_MODEL,), anchor_model=ANCHOR_MODEL,
@@ -376,7 +395,15 @@ def fuse_bayes_precision_posterior(
     else:
         Sigma = np.diag(np.full(len(instruments), (SIGMA_FLOOR * LOWN_INFLATE) ** 2))
 
-    mu, sd = bayes_fuse(z_lik, Sigma, mu0, tau0, disagree_var)
+    # v3 rule 5: Sigma_source = Sigma_model_residual + sigma_repr^2, added to the DIAGONAL
+    # ONLY (the off-diagonal cross-model covariance from shrink_cov is unchanged). Widen-only;
+    # the existing T2 Sigma^-1 DERIVES the per-instrument down-weight — never a hand weight.
+    # All-zero (default / unknown cells) leaves Sigma byte-identical.
+    repr_sq = np.array([ins.sigma_repr_sq for ins in instruments], dtype=float)
+    if np.any(repr_sq > 0.0):
+        Sigma = Sigma + np.diag(repr_sq)
+
+    mu, sd = bayes_fuse(z_lik, Sigma, mu0, tau0_eff, disagree_var)
     return FusedPosterior(
         mu=mu, sd=sd, method="T2_BAYES",
         used_models=(ANCHOR_MODEL,) + tuple(ins.model for ins in instruments),

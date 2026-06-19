@@ -144,35 +144,6 @@ def test_belief_improving_does_not_pull_order():
     assert decision is None, "favorable belief move must not trigger a WORSENING cancel"
 
 
-# --- Stale-quote cancel: quote priced off a dead book -----------------------------------------
-def test_stale_quote_cancel_fires_past_max_age():
-    """A resting order whose quote_age_ms exceeds pre_submit_max_quote_age_ms is priced off a dead
-    book → cancel (re-decide next cycle on fresh price). This is NOT a belief move."""
-    decision = cr.screen_stale_quote_cancel(
-        family_id="Wuhan|2026-06-01|high",
-        bin_label="b30",
-        side="buy_yes",
-        quote_age_ms=1500.0,
-        pre_submit_max_quote_age_ms=1000.0,
-    )
-    assert decision is not None
-    assert decision.action == "CANCEL_STALE"
-    assert decision.reason == "QUOTE_STALE"
-
-
-def test_fresh_quote_is_not_cancelled():
-    """ANTI-TWITCH: a fresh quote (within max age) is NOT cancelled. The stale-cancel must not fire
-    on a live book just because the price moved."""
-    decision = cr.screen_stale_quote_cancel(
-        family_id="Wuhan|2026-06-01|high",
-        bin_label="b30",
-        side="buy_yes",
-        quote_age_ms=200.0,
-        pre_submit_max_quote_age_ms=1000.0,
-    )
-    assert decision is None, "a fresh quote must never be cancelled (anti-twitch)"
-
-
 # ===========================================================================
 # §4.6 — Exit discriminator hardening (Dimension 6) + EVIDENCE_UNAVAILABLE
 # ===========================================================================

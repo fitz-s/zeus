@@ -21,8 +21,9 @@ P4 unifies both through ``MarketPhase.SETTLEMENT_DAY``:
 target_date)``.
 
 Flag ``ZEUS_MARKET_PHASE_DISPATCH`` (shared with P3) gates the
-migration. Default OFF preserves byte-equal pre-P4 behavior at both
-sites (T6 invariant). Default ON activates the unified phase axis.
+migration. The post-A6 default is ON and activates the unified phase
+axis; setting the flag OFF preserves byte-equal pre-P4 behavior at both
+sites (T6 invariant).
 """
 from __future__ import annotations
 
@@ -255,6 +256,27 @@ def test_day0_transition_flag_on_fires_in_settlement_day(
         city_timezone="Europe/London",
         decision_time_utc=decision_time,
         legacy_hours_to_settlement=20.0,
+    ) is True
+
+
+def test_day0_transition_flag_on_tokyo_enters_at_local_midnight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "1")
+    just_before = datetime(2026, 6, 17, 14, 59, 59, tzinfo=UTC)
+    at_midnight = datetime(2026, 6, 17, 15, 0, 0, tzinfo=UTC)
+
+    assert should_enter_day0_window(
+        target_date_str="2026-06-18",
+        city_timezone="Asia/Tokyo",
+        decision_time_utc=just_before,
+        legacy_hours_to_settlement=21.0,
+    ) is False
+    assert should_enter_day0_window(
+        target_date_str="2026-06-18",
+        city_timezone="Asia/Tokyo",
+        decision_time_utc=at_midnight,
+        legacy_hours_to_settlement=21.0,
     ) is True
 
 

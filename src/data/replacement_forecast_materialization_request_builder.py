@@ -14,7 +14,6 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
 )
-from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin
 
 
 UTC = timezone.utc
@@ -94,36 +93,40 @@ def _bins(rows: object, *, settlement_step_c: float = 1.0) -> list[dict[str, obj
         raise ValueError("bins must be a non-empty array")
     if settlement_step_c <= 0:
         raise ValueError("settlement_step_c must be positive")
-    validated: list[AifsTemperatureBin] = []
     out: list[dict[str, object]] = []
     for row in rows:
         if not isinstance(row, Mapping):
             raise ValueError("bins entries must be objects")
-        bin_spec = AifsTemperatureBin(
-            bin_id=str(row.get("bin_id") or ""),
-            lower_c=None if row.get("lower_c") is None else float(row["lower_c"]),
-            upper_c=None if row.get("upper_c") is None else float(row["upper_c"]),
-            center_c=None if row.get("center_c") is None else float(row["center_c"]),
-            display_unit=str(row.get("display_unit") or "C").strip().upper(),  # type: ignore[arg-type]
-            settlement_unit=str(row.get("settlement_unit") or "C").strip().upper(),  # type: ignore[arg-type]
-            rounding_rule=str(row.get("rounding_rule") or "wmo_half_up").strip(),  # type: ignore[arg-type]
-        )
-        validated.append(bin_spec)
+        bin_id = str(row.get("bin_id") or "")
+        if not bin_id:
+            raise ValueError("bin_id is required")
+        lower_c = None if row.get("lower_c") is None else float(row["lower_c"])
+        upper_c = None if row.get("upper_c") is None else float(row["upper_c"])
+        center_c = None if row.get("center_c") is None else float(row["center_c"])
+        if lower_c is not None and upper_c is not None and upper_c < lower_c:
+            raise ValueError("bin upper_c must be >= lower_c")
+        display_unit = str(row.get("display_unit") or "C").strip().upper()  # type: ignore[arg-type]
+        settlement_unit = str(row.get("settlement_unit") or "C").strip().upper()  # type: ignore[arg-type]
+        rounding_rule = str(row.get("rounding_rule") or "wmo_half_up").strip()  # type: ignore[arg-type]
+        if display_unit not in {"C", "F"} or settlement_unit not in {"C", "F"}:
+            raise ValueError("bin display_unit and settlement_unit must be C or F")
+        if not rounding_rule:
+            raise ValueError("bin rounding_rule is required")
         out.append(
             {
-                "bin_id": bin_spec.bin_id,
-                "lower_c": bin_spec.lower_c,
-                "upper_c": bin_spec.upper_c,
-                "center_c": bin_spec.center_c,
-                "display_unit": bin_spec.display_unit,
-                "settlement_unit": bin_spec.settlement_unit,
-                "rounding_rule": bin_spec.rounding_rule,
+                "bin_id": bin_id,
+                "lower_c": lower_c,
+                "upper_c": upper_c,
+                "center_c": center_c,
+                "display_unit": display_unit,
+                "settlement_unit": settlement_unit,
+                "rounding_rule": rounding_rule,
             }
         )
-    # Reuse the probability bridge validation without needing member data.
-    from src.strategy.ecmwf_aifs_sampled_2t_probabilities import _validate_full_family_bins
 
-    _validate_full_family_bins(validated, settlement_step_c=float(settlement_step_c))
+    seen = {str(item["bin_id"]) for item in out}
+    if len(seen) != len(out):
+        raise ValueError("bins must have unique bin_id values")
     return out
 
 
@@ -132,8 +135,8 @@ def _precision_ready(path: Path) -> tuple[Mapping[str, object], tuple[str, ...]]
     guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         OpenMeteoIfs9PrecisionMetadata(**dict(metadata_payload))
     )
-    if not guard.passable_for_shadow_veto:
-        return metadata_payload, ("OM9_PRECISION_GUARD_BLOCKED_REQUEST_BUILD", *guard.reason_codes)
+    if not guard.passable_for_live_materialization:
+        return metadata_payload, ("OM9_PRECISION_GUARD_NOT_LIVE_PASS_REQUEST_BUILD", *guard.reason_codes)
     return metadata_payload, ()
 
 
@@ -142,7 +145,7 @@ def build_replacement_forecast_materialization_request(
     *,
     base_dir: Path | str,
 ) -> ReplacementForecastMaterializationRequestBuildResult:
-    """Build the exact JSON consumed by materialize_replacement_forecast_shadow.py."""
+    """Build the exact JSON consumed by materialize_replacement_forecast_live.py."""
 
     base_path = Path(base_dir)
     city = _required_text(payload, "city")
@@ -171,9 +174,9 @@ def build_replacement_forecast_materialization_request(
         raise ValueError("expires_at must be after computed_at")
 
     baseline_available = _dt(payload.get("baseline_source_available_at"), field_name="baseline_source_available_at")
-    aifs_available = _dt(payload.get("aifs_source_available_at"), field_name="aifs_source_available_at")
     openmeteo_available = _dt(payload.get("openmeteo_source_available_at"), field_name="openmeteo_source_available_at")
-    if max(baseline_available, aifs_available, openmeteo_available) > computed_at:
+    future_candidates = [baseline_available, openmeteo_available]
+    if max(future_candidates) > computed_at:
         return ReplacementForecastMaterializationRequestBuildResult(
             status="BLOCKED",
             reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_HAS_FUTURE_DEPENDENCY",),
@@ -189,15 +192,6 @@ def build_replacement_forecast_materialization_request(
             request=None,
         )
 
-    if "aifs_samples_json" in payload:
-        aifs_input_key = "aifs_samples_json"
-        aifs_input_value = _existing_path(payload, "aifs_samples_json", base_dir=base_path)
-    elif "aifs_grib_path" in payload:
-        aifs_input_key = "aifs_grib_path"
-        aifs_input_value = _existing_path(payload, "aifs_grib_path", base_dir=base_path)
-    else:
-        raise ValueError("aifs_samples_json or aifs_grib_path is required")
-
     request = {
         "city": city,
         "city_id": str(payload.get("city_id") or city),
@@ -210,22 +204,17 @@ def build_replacement_forecast_materialization_request(
         "baseline_source_run_id": _required_text(payload, "baseline_source_run_id"),
         "baseline_data_version": _required_text(payload, "baseline_data_version"),
         "baseline_source_available_at": baseline_available.isoformat(),
-        "aifs_source_run_id": _required_text(payload, "aifs_source_run_id"),
-        "aifs_source_available_at": aifs_available.isoformat(),
         "openmeteo_source_run_id": _required_text(payload, "openmeteo_source_run_id"),
         "openmeteo_source_available_at": openmeteo_available.isoformat(),
         "anchor_weight": float(payload.get("anchor_weight", 0.80)),
         "anchor_sigma_c": float(payload.get("anchor_sigma_c", 3.00)),
         "settlement_step_c": float(payload.get("settlement_step_c", 1.0)),
         "bins": _bins(payload.get("bins"), settlement_step_c=float(payload.get("settlement_step_c", 1.0))),
-        aifs_input_key: aifs_input_value,
         "openmeteo_payload_json": _existing_path(payload, "openmeteo_payload_json", base_dir=base_path),
         "precision_metadata_json": precision_metadata_json,
     }
     for optional_key in (
-        "aifs_manifest_json",
         "openmeteo_manifest_json",
-        "aifs_artifact_id",
         "openmeteo_anchor_artifact_id",
         "latitude",
         "longitude",

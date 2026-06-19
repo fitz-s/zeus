@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
 
+from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.idempotency import canonical_json, sha256_text
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
 from src.types.market import Bin, BinTopologyError, to_json_safe, validate_bin_topology
@@ -25,6 +26,11 @@ MARKET_DATA_EVENT_TYPES = {
     "BOOK_SNAPSHOT",
     "BEST_BID_ASK_CHANGED",
     "NEW_MARKET_DISCOVERED",
+}
+
+FORECAST_CANDIDATE_EVENT_TYPES = {
+    "FORECAST_SNAPSHOT_READY",
+    "EDLI_REDECISION_PENDING",
 }
 
 
@@ -89,7 +95,7 @@ def bind_event_to_candidate_family(
     metric = _required_payload_text(payload, "metric")
     causal_snapshot_id = _validate_event_causality(event, payload)
 
-    if event.event_type == "FORECAST_SNAPSHOT_READY":
+    if event.event_type in FORECAST_CANDIDATE_EVENT_TYPES:
         _validate_forecast_event(event, payload, causal_snapshot_id)
     elif event.event_type == "DAY0_EXTREME_UPDATED":
         _validate_day0_event(payload)
@@ -195,7 +201,7 @@ def _validate_event_causality(event: OpportunityEvent, payload: dict) -> str:
 
 
 def _validate_forecast_event(event: OpportunityEvent, payload: dict, causal_snapshot_id: str) -> None:
-    if event.event_type != "FORECAST_SNAPSHOT_READY":
+    if event.event_type not in FORECAST_CANDIDATE_EVENT_TYPES:
         raise CandidateBindingError("forecast validator received non-forecast event")
     # Coverage labels are ADVISORY here (serving-authority ruling, incident
     # 2026-06-11T16:33:51Z; THIRD site found live 2026-06-11T19:53Z minutes
@@ -220,7 +226,7 @@ def _validate_forecast_event(event: OpportunityEvent, payload: dict, causal_snap
 
 def _validate_day0_event(payload: dict) -> None:
     required_statuses = {
-        "live_authority_status": {"LIVE_AUTHORITY"},
+        "live_authority_status": {"live"},
         "source_match_status": {"MATCH"},
         "station_match_status": {"MATCH"},
         "local_date_status": {"MATCH"},
@@ -230,7 +236,10 @@ def _validate_day0_event(payload: dict) -> None:
         "source_authorized_status": {"AUTHORIZED"},
     }
     for field_name, accepted in required_statuses.items():
-        if payload.get(field_name) not in accepted:
+        value = payload.get(field_name)
+        if field_name == "live_authority_status":
+            value = normalize_day0_live_authority_status(value)
+        if value not in accepted:
             raise CandidateBindingError(
                 f"Day0 candidate binding requires {field_name} in {sorted(accepted)!r}"
             )

@@ -39,7 +39,7 @@ from src.data.bayes_precision_fusion_download import (  # noqa: E402
     _bayes_precision_fusion_product_identity,
 )
 from src.state.db import _connect  # noqa: E402
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema  # noqa: E402
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema  # noqa: E402
 
 PROMOTED_MODELS = (
     "ncep_nbm_conus",
@@ -95,7 +95,7 @@ def _daily_extrema(payload: dict, lead: int) -> dict[str, tuple[float, float, in
 def main() -> int:
     db_path = ROOT / "state" / "zeus-forecasts.db"
     conn = _connect(db_path, write_class="live")
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     existing: set[tuple] = set(
         tuple(r) for r in conn.execute(
             "SELECT model, city, metric, lead_days, target_date FROM raw_model_forecasts"

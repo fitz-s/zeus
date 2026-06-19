@@ -28,6 +28,16 @@ test_trust_policy:
   # Machine-readable registry: 122 tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_p2_substrate_observer_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P2 relationship tests: substrate observer producers move out of src.main, keep shared snapshot lock, remove reactor-backlog gates, and register in substrate-observer daemon."}
+    tests/test_p3_price_channel_ingest_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P3 relationship tests: price/user channel ingest and durable fill bridge move out of src.main into price-channel daemon while order runtime keeps only DB read/boot recovery seams."}
+    tests/test_p4_post_trade_capital_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P4 relationship tests: post-trade capital lifecycle and chain-sync READ move out of order daemon while exit-SUBMIT phase stays in src.main."}
+    tests/test_step4_wu_daily_dedup.py: {created: "2026-06-08", last_used: "2026-06-18", note: "WU daily dedup relationship tests: remove duplicate src.main WU collector and leave data-ingest as sole WU daily owner with duplicate-owner antibody."}
+    tests/test_check_live_restart_preflight.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Read-only restart preflight gate: proves live trading daemon absence/presence, submit config, live posterior freshness, pending-exit restart risk, and held-position live belief coverage before operator restart. No DB writes or venue actions."}
+    tests/engine/test_market_anchor_retired_from_live_adapter.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Live/experiment separation antibody: retired market-anchor cap must not be wired back into event_reactor_adapter or its live q_lcb path."}
+    tests/test_replacement_member_vote_smoothing_not_live_wired.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Live/experiment separation antibody: AIFS member-vote smoothing remains experiment-layer math and must not reappear as an edli live settings switch or materializer reader."}
+    tests/test_raw_forecast_artifact_manifest.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Manifest compatibility antibody: retired trade_authority_status top-level field is dropped during raw artifact manifest load while unknown authority aliases still fail closed."}
+    tests/test_repair_dust_exit_projection.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Dust pending-exit projection repair antibody: only existing canonical EXIT_CHAIN_DUST_STILL_HELD backoff evidence may mark position_current.order_status=backoff_exhausted; no venue action or share mutation."}
+    tests/test_replacement_forecast_live_schema.py: {created: "2026-06-06", last_used: "2026-06-18", note: "Replacement forecast live-support schema compatibility: forecast_posteriors migrates legacy trade_authority_status to runtime_layer='live' and drops the old column; live support tables stay forecast-class only. Renamed from test_replacement_forecast_shadow_schema.py on 2026-06-18."}
     tests/execution/test_inv37_harvester_atomicity.py: {created: "2026-06-14", last_used: "2026-06-14", note: "INV-37 harvester atomicity RED-on-revert (ChatGPT PR#408 B1). T1: pre-fix two-independent-commit pattern leaves partial state (forecasts commits, trades does not) on injected crash — proves the violation was real. T2: post-fix ATTACH+SAVEPOINT rolls back BOTH sides atomically on injected exception after forecasts write — RED if reverted to two-conn pattern. T3: happy-path commit persists both sides. T4: SAVEPOINT spans both MAIN and ATTACHed schemas. Authority: docs/operations/inv37_harvester_fix_2026-06-14.md"}
     tests/engine/test_post_refresh_reelect_fresh_at_none.py: {created: "2026-06-14", last_used: "2026-06-14", note: "RED-on-revert RT: post-refresh re-elect in _build_event_bound_no_submit_receipt_core MUST pass fresh_at=None (NOT decision_time). The bug excluded refresher rows (captured_at > decision_time) via the captured_at ceiling -> stale re-election -> _snapshot_price_stale_reason fires again -> permanent STALE requeue -> 0 EDLI receipts 2026-06-12 to 2026-06-14. T1: DB contract (fresh_at=None returns post-decision row; fresh_at=decision_time excludes it). T2: source-level call-site guard (reverted arg -> RED immediately). Authority: docs/evidence/deadloop_2026-06-14/diagnosis.md"}
     tests/riskguard/test_no_network_io_under_conn.py: {created: "2026-06-13", last_used: "2026-06-13", note: "T0-1 conn-across-IO RED-on-revert RT: in riskguard._tick_once the bankroll NETWORK fetch (bankroll_provider.current) MUST precede opening either write-class DB conn (_get_runtime_trade_connection/get_connection); sentinel fires on conn-open, asserts fetch recorded first. Authority: t0_live_problem_report_2026-06-13 T0-1 + dimension-#4"}
@@ -124,7 +134,7 @@ test_trust_policy:
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-05-31"}
     tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-06-17"}
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_continuous_redecision_exit.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_edge_zone_admission_102.py: {created: "2026-06-04", last_used: "2026-06-05", note: "RT (#102): book-wide EV-per-dollar edge-zone admission — positive after-cost EV admitted / negative rejected regardless of arrival order; flag-gated last money-path step"}
@@ -304,7 +314,7 @@ test_trust_policy:
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
     tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-06-10"}
-    tests/test_day0_shadow_scope_no_submit.py: {created: "2026-06-09", last_used: "2026-06-10"}
+    tests/test_day0_shadow_scope_no_submit.py: {created: "2026-06-09", last_used: "2026-06-18", note: "live-only EDLI adapter boundary: forecast_plus_day0 is the only production scope; former day0_shadow/forecast_only scopes reject before proof build or executor submit"}
     tests/test_diurnal_peak_prob_monotone.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_edli_status_pulse_submit_counter.py: {created: "2026-06-09", last_used: "2026-06-10"}
     tests/test_stake_min_order_not_edge_reversed.py: {created: "2026-06-09", last_used: "2026-06-10"}
@@ -522,7 +532,7 @@ test_trust_policy:
     tests/test_charter_sunset_required.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_check_pr_identity_collisions.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_city_kelly_multiplier.py: {created: "2026-05-03", last_used: "2026-05-03"}
-    tests/test_collateral_ledger_global_persistent_conn.py: {created: "2026-05-13", last_used: "2026-05-15"}
+    tests/test_collateral_ledger_global_path_backed.py: {created: "2026-05-13", last_used: "2026-06-17"}
     tests/test_companion_loop_break.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_contract_source_fields_baseline.py: {created: "2026-05-01", last_used: "2026-05-01"}
     tests/test_cycle_runner_db_lock_degrade.py: {created: "2026-05-05", last_used: "2026-05-05"}
@@ -747,15 +757,13 @@ test_trust_policy:
     tests/events/test_live_cap_no_caps_directive.py: {created: "2026-06-05", last_used: "2026-06-05", note: "no-caps directive RT: $250 ceiling + rate-window flag-gated — disabled ⇒ no cap; ON ⇒ caps unchanged"}
     tests/events/test_reactor_reservation_rollback_flow.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT: reactor reservation rollback flow on the no-caps path"}
     tests/sizing/test_portfolio_reservation_rollback.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT: portfolio reservation rollback under multi-bet correlated sizing"}
-    # day0-activate — day0 shadow activation: live absorbing-mask direction antibody + day0_shadow scope (2026-06-05)
+    # day0 live activation: absorbing-mask direction antibody + single live scope (2026-06-05, modernized 2026-06-18)
     tests/engine/test_day0_live_mask_direction.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P0 RT: pins LIVE day0 absorbing-mask direction (observed-so-far → mask → posterior) so inversion is UNCONSTRUCTABLE; reproduces #98 Paris low=14°C wrong-side"}
-    tests/money_path/test_day0_shadow_scope.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P1 RT: day0_shadow edli_live_scope admits day0 + structural no-submit (scope ⊥ arm axis); forecast_only stays byte-identical"}
+    tests/money_path/test_day0_shadow_scope.py: {created: "2026-06-05", last_used: "2026-06-18", note: "live-only EDLI scope law: forecast_plus_day0 is the only production scope; day0_shadow/forecast_only/unknown scopes fail closed before entering execution semantics"}
     tests/engine/test_day0_mask_consolidation.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P2 RT: collapse to ONE absorbing mask — hardened inline _edli_day0_mask_for_analysis truth table (zero behavioral delta), dark module deleted"}
     tests/engine/test_day0_mask_runtime_gate.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P3 RT: runtime DAY0_MASK_CONTRADICTS_OBSERVATION fail-closed gate — surviving bin contradicting rounded_value raises; future inversion fails CLOSED"}
     tests/engine/test_no_loss_class_nonexecutable_yes_gate.py: {created: "2026-06-13", last_used: "2026-06-13", note: "RED-on-revert antibody for the buy-NO loss-class gate in _canonical_probability_and_fdr_proof: a NON-executable-YES far bin emits q_lcb_no=0.0/p=1.0/prefilter=False (profitable-era gate), while an EXECUTABLE-YES bin's buy_no stays reconciled via the native NO edge (GOOD-fill path). RED-on-revert proven by temporarily restoring the 745aa10c6f forecast-NO else-branch (q_lcb_no jumps to 0.775). Authority: settled-data loss-class replay 2026-06-13, n=485, 98.1% admit; git regression 745aa10c6f"}
     tests/engine/test_no_calibration_loss_class_coverage.py: {created: "2026-06-13", last_used: "2026-06-13", note: "settled_data guard: reproduces forecast_posteriors JOIN settlement_outcomes replay (q_lcb_no=1-q_ucb_yes on the winning bin); unguarded forecast-NO admits the loss class on ~98% of settled winners, the gate admits ZERO (98%->0). Read-only state/zeus-forecasts.db?mode=ro with graceful pytest.skip when absent; synthetic-data twin always enforces the gate. Authority: settled-data loss-class replay 2026-06-13, n=485, 98.1% admit; git regression 745aa10c6f"}
-    tests/test_replacement_live_qlcb_missing_floor_blocks.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 7 RT: LIVE replacement_0_1 q_lcb path BLOCKS on a missing settlement sigma-floor input (anchor/cell/topology/setup) — never degrades to the raw overconfident Wilson bound; antibody verified to fail on revert"}
-    tests/test_replacement_shadow_qlcb_missing_floor_logs_raw_fallback.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 7 RT: SHADOW half of the mode split — missing floor input logs raw-fallback + returns None (keep raw); live_authority=True on same input raises"}
     tests/test_replacement_materializer_soft_anchor_qlcb.py: {created: "2026-06-12", last_used: "2026-06-13", note: "soft-anchor (CAPTURE_MISSING) q_lcb/q_ucb fallback RT. 2026-06-12: Wilson-over-AIFS-votes q_lcb promoted, byte-identical to live decision Wilson, distinct basis keeps row non-live. 2026-06-13 q_ucb CARRIER FIX: the soft-anchor path emitted ONLY q_lcb (q_ucb NULL) -> 100% of q_ucb-less rows on 06-14 (158/158) were CAPTURE_MISSING half-bounds. Now emits a GENUINE symmetric Wilson UPPER bound alongside the lower (same inputs/z, lcb<=q<=ucb, not fabricated). RED-on-revert: drop the q_ucb_map=_soft_ucb emission -> source guard test_soft_anchor_fallback_emits_q_ucb_whenever_it_emits_q_lcb fails (verified exit=1). Cross-module invariant: every soft-anchor posterior that gets a q_lcb also gets a genuine q_ucb; basis+q_mode keep it non-tradeable (no auto-arm)."}
     # PR #400 compliance additions — operator-directed TDD tests (2026-06-08)
     tests/test_no_internal_version_suffixes.py: {created: "2026-06-11", last_used: "2026-06-12", note: "PR#405 rename ban-test: no internal _v[0-9] suffixes (allowlist external SDK names; grandfather shrinks only); u0r=0 occurrences pin"}
@@ -1185,7 +1193,7 @@ categories:
     - tests/test_check_live_order_e2e.py
     - tests/test_check_pr_identity_collisions.py
     - tests/test_city_kelly_multiplier.py
-    - tests/test_collateral_ledger_global_persistent_conn.py
+    - tests/test_collateral_ledger_global_path_backed.py
     - tests/test_companion_loop_break.py
     - tests/test_contract_source_fields_baseline.py
     - tests/test_counter_caplog_ledger.py
@@ -1302,7 +1310,7 @@ categories:
     - tests/test_boot_guard_kelly_ceiling.py
     - tests/test_startup_wallet_dedup.py
     - tests/test_startup_wallet_warm_overlap.py
-    # day0-activate — day0 shadow activation antibodies (2026-06-05)
+    # day0 live activation antibodies (2026-06-05, modernized 2026-06-18)
     - tests/engine/test_day0_live_mask_direction.py
     - tests/money_path/test_day0_shadow_scope.py
     - tests/engine/test_day0_mask_consolidation.py

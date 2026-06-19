@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-06-18
 # Authority basis: operator stagnation root-cause 2026-06-12 ("continuous redecision没有作用中") +
 #   /tmp/continuous_redecision_resurrection.md. RELATIONSHIP antibodies for the P1 deadlock-free
 #   belief write, the P2 cheap screen, §4.5 rest management, and the EDLI_REDECISION_PENDING consume
@@ -30,6 +30,8 @@ def _mem_trade() -> sqlite3.Connection:
         CREATE TABLE executable_market_snapshots (
             snapshot_id TEXT PRIMARY KEY,
             condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
             selected_outcome_token_id TEXT,
             orderbook_top_bid TEXT,
             orderbook_top_ask TEXT,
@@ -42,15 +44,147 @@ def _mem_trade() -> sqlite3.Connection:
     return conn
 
 
+class _SqlCaptureConn:
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self.statements: list[str] = []
+
+    def execute(self, sql, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        self.statements.append(str(sql))
+        return self._conn.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+
 def _cache(conn, *, family_id="hyp|live|Wuhan|2026-06-12|high|disc", p_yes=0.99,
-           snapshot_id="snap1", cond="0xc30", recorded_at="2026-06-12T00:00:00+00:00"):
+           snapshot_id="snap1", cond="0xc30", recorded_at="2026-06-12T00:00:00+00:00",
+           temperature_metric="high"):
     cr.cache_belief(
         conn,
         family_id=family_id, city="Wuhan", target_date="2026-06-12",
         snapshot_id=snapshot_id, calibrator_model_hash="identity",
         bin_labels=["b29", "b30"], p_posterior_vec=[0.001, p_yes],
-        recorded_at=recorded_at, condition_ids=["0xc29", cond],
+        recorded_at=recorded_at, temperature_metric=temperature_metric,
+        condition_ids=["0xc29", cond],
     )
+
+
+def test_belief_reads_use_indexable_prefix_ranges_not_like_scans():
+    world = _mem_world()
+    family_id = "hyp|live|Wuhan|2026-06-12|high|disc"
+    _cache(
+        world,
+        family_id=family_id,
+        p_yes=0.70,
+        snapshot_id="old",
+        recorded_at="2026-06-12T00:00:00+00:00",
+    )
+    _cache(
+        world,
+        family_id=family_id,
+        p_yes=0.80,
+        snapshot_id="new",
+        recorded_at="2026-06-12T01:00:00+00:00",
+    )
+    captured = _SqlCaptureConn(world)
+
+    latest = cr.latest_cached_belief(captured, family_id=family_id)
+    beliefs = cr._all_latest_beliefs(captured)
+
+    assert latest is not None
+    assert latest.snapshot_id == "new"
+    assert len(beliefs) == 1
+    statements = "\n".join(captured.statements).upper()
+    probability_reads = [
+        stmt for stmt in captured.statements
+        if "FROM probability_trace_fact" in stmt
+    ]
+    assert probability_reads
+    for stmt in probability_reads:
+        upper = stmt.upper()
+        assert " LIKE " not in upper
+        assert "DECISION_ID >= ?" in upper
+        assert "DECISION_ID < ?" in upper
+        assert "ORDER BY" not in upper
+    assert "ROW_NUMBER" not in statements
+    assert "PARTITION BY" not in statements
+
+
+def test_screen_entry_reuses_supplied_beliefs_without_probability_trace_read():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.99, cond="0xc30")
+    _snapshot(trade, bid="0.30", ask="0.70", selected_outcome_token_id="yes-c30")
+    beliefs = cr._all_latest_beliefs(world)
+    captured_world = _SqlCaptureConn(world)
+
+    fired = cr.screen_entry_redecisions(
+        captured_world,
+        trade,
+        decision_time="2026-06-12T00:45:00+00:00",
+        min_edge=0.01,
+        beliefs=beliefs,
+    )
+
+    assert len(fired) == 1
+    assert all("probability_trace_fact" not in stmt for stmt in captured_world.statements)
+
+
+def _snapshot(
+    conn,
+    *,
+    condition_id="0xc30",
+    yes_token_id="yes-c30",
+    no_token_id="no-c30",
+    selected_outcome_token_id="yes-c30",
+    bid="0.70",
+    ask="0.72",
+    snapshot_id="s1",
+):
+    conn.execute(
+        "INSERT INTO executable_market_snapshots "
+        "(snapshot_id, condition_id, yes_token_id, no_token_id, selected_outcome_token_id, "
+        "orderbook_top_bid, orderbook_top_ask, freshness_deadline, captured_at) VALUES "
+        "(?,?,?,?,?,?,?,?,?)",
+        (
+            snapshot_id,
+            condition_id,
+            yes_token_id,
+            no_token_id,
+            selected_outcome_token_id,
+            bid,
+            ask,
+            "2026-06-12T02:00:00+00:00",
+            "2026-06-12T00:30:00+00:00",
+        ),
+    )
+    conn.commit()
+
+
+def _regret_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            regret_event_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            rejection_stage TEXT NOT NULL,
+            rejection_reason TEXT NOT NULL,
+            regret_bucket TEXT NOT NULL,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            family_id TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            q_lcb_5pct REAL,
+            c_fee_adjusted REAL,
+            trade_score REAL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
 
 
 # ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -114,6 +248,52 @@ def test_belief_write_uses_given_conn_no_second_connection():
     raw.execute("ROLLBACK")
 
 
+def test_screen_entry_uses_live_regret_backoff_from_world_table():
+    from datetime import datetime, timezone
+
+    world = _mem_world()
+    trade = _mem_trade()
+    _regret_table(world)
+    family_id = "hyp|live|Wuhan|2026-06-12|high|disc"
+    _cache(world, family_id=family_id, p_yes=0.90, cond="0xc30")
+    _snapshot(trade, condition_id="0xc30", bid="0.20", ask="0.70")
+    created_at = datetime.now(timezone.utc).isoformat()
+    prior_all_in_cost = cr._all_in_cost(0.70)
+    world.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            city, target_date, metric, family_id, bin_label, direction,
+            q_lcb_5pct, c_fee_adjusted, trade_score, created_at
+        ) VALUES (
+            'r1', 'event-1', 'TRADE_SCORE', 'TRADE_SCORE_NON_POSITIVE:score=-0.01', 'FEE_ERASED_EDGE',
+            'Wuhan', '2026-06-12', 'high', ?, 'b30', 'buy_yes',
+            0.90, ?, -0.01, ?
+        )
+        """,
+        (family_id, prior_all_in_cost, created_at),
+    )
+    world.commit()
+
+    blocked = cr.screen_entry_redecisions(
+        world,
+        trade,
+        decision_time="2026-06-12T00:30:00+00:00",
+        min_edge=0.01,
+    )
+    assert blocked == []
+
+    trade.execute("DELETE FROM executable_market_snapshots")
+    _snapshot(trade, condition_id="0xc30", bid="0.20", ask="0.67", snapshot_id="s2")
+    improved = cr.screen_entry_redecisions(
+        world,
+        trade,
+        decision_time="2026-06-12T00:30:00+00:00",
+        min_edge=0.01,
+    )
+    assert len(improved) == 1
+
+
 def test_persist_belief_live_removed():
     """The deadlock-causing entry point must be GONE (replaced by write_belief_row)."""
     assert not hasattr(cr, "persist_belief_live"), (
@@ -130,13 +310,7 @@ def test_entry_screen_fires_on_edge_appeared():
     trade = _mem_trade()
     _cache(world, p_yes=0.99, cond="0xc30")
     # Fresh executable snapshot: YES ask 0.70 → edge = 0.99 - 0.70 - fee ≈ +0.28.
-    trade.execute(
-        "INSERT INTO executable_market_snapshots "
-        "(snapshot_id, condition_id, selected_outcome_token_id, orderbook_top_bid, "
-        "orderbook_top_ask, freshness_deadline, captured_at) VALUES "
-        "('s1','0xc30','tok','0.30','0.70','2026-06-12T02:00:00+00:00','2026-06-12T00:30:00+00:00')"
-    )
-    trade.commit()
+    _snapshot(trade, bid="0.30", ask="0.70", selected_outcome_token_id="yes-c30")
     fired = cr.screen_entry_redecisions(
         world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
     )
@@ -144,23 +318,111 @@ def test_entry_screen_fires_on_edge_appeared():
     assert ("hyp|live|Wuhan|2026-06-12|high|disc", "b30", "buy_yes") in keys
 
 
+def test_entry_screen_fires_on_buy_no_edge_appeared():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.05, cond="0xc30")
+    # YES bid 0.30 implies NO ask 0.70; NO posterior is 0.95.
+    _snapshot(trade, bid="0.30", ask="0.72", selected_outcome_token_id="yes-c30")
+    fired = cr.screen_entry_redecisions(
+        world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
+    )
+    keys = {(e.family_id, e.bin_label, e.direction) for e in fired}
+    assert ("hyp|live|Wuhan|2026-06-12|high|disc", "b30", "buy_no") in keys
+
+
+def test_screened_family_keys_uses_persisted_metric_for_hash_family_id():
+    world = _mem_world()
+    family_id = "edli_family_hash_without_metric"
+    _cache(world, family_id=family_id, temperature_metric="low")
+
+    keys = cr.screened_family_keys(
+        world,
+        [cr.EnqueuedRedecision(family_id, "b30", "buy_yes", 0.12)],
+    )
+
+    assert keys == {("Wuhan", "2026-06-12", "low")}
+
+
 def test_entry_screen_silent_when_no_edge():
     world = _mem_world()
     trade = _mem_trade()
     _cache(world, p_yes=0.55, cond="0xc30")
     # YES ask 0.72 → edge = 0.55 - 0.72 - fee < 0 → no enqueue.
-    trade.execute(
-        "INSERT INTO executable_market_snapshots "
-        "(snapshot_id, condition_id, selected_outcome_token_id, orderbook_top_bid, "
-        "orderbook_top_ask, freshness_deadline, captured_at) VALUES "
-        "('s1','0xc30','tok','0.20','0.72','2026-06-12T02:00:00+00:00','2026-06-12T00:30:00+00:00')"
-    )
-    trade.commit()
+    _snapshot(trade, bid="0.20", ask="0.72", selected_outcome_token_id="yes-c30")
     fired = cr.screen_entry_redecisions(
         world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
     )
     assert all(e.direction != "buy_yes" or e.family_id != "hyp|live|Wuhan|2026-06-12|high|disc"
                for e in fired)
+
+
+def test_price_reader_uses_bounded_condition_seeks_not_window_sort():
+    trade = _mem_trade()
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        bid="0.10",
+        ask="0.90",
+        snapshot_id="old",
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots
+        (snapshot_id, condition_id, yes_token_id, no_token_id, selected_outcome_token_id,
+         orderbook_top_bid, orderbook_top_ask, freshness_deadline, captured_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "new",
+            "0xc30",
+            "yes-c30",
+            "no-c30",
+            "yes-c30",
+            "0.70",
+            "0.72",
+            "2026-06-12T02:00:00+00:00",
+            "2026-06-12T00:31:00+00:00",
+        ),
+    )
+    trade.commit()
+    captured = _SqlCaptureConn(trade)
+
+    quotes = cr.read_freshest_executable_prices(captured, condition_ids={"0xc30"})
+
+    sql_text = "\n".join(captured.statements).upper()
+    assert "ROW_NUMBER" not in sql_text
+    assert "PARTITION BY" not in sql_text
+    assert quotes[("0xc30", "buy_yes")].price == 0.72
+    assert quotes[("0xc30", "buy_no")].price == pytest.approx(0.30)
+
+
+def test_price_reader_uses_native_selected_outcome_books():
+    trade = _mem_trade()
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        selected_outcome_token_id="yes-c30",
+        bid="0.30",
+        ask="0.32",
+        snapshot_id="yes-native",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        selected_outcome_token_id="no-c30",
+        bid="0.68",
+        ask="0.70",
+        snapshot_id="no-native",
+    )
+
+    quotes = cr.read_freshest_executable_prices(trade, condition_ids={"0xc30"})
+    bids = cr.read_freshest_resting_best_bids(trade, condition_ids={"0xc30"})
+
+    assert quotes[("0xc30", "buy_yes")].price == pytest.approx(0.32)
+    assert quotes[("0xc30", "buy_no")].price == pytest.approx(0.70)
+    assert bids[("0xc30", "buy_yes")].price == pytest.approx(0.30)
+    assert bids[("0xc30", "buy_no")].price == pytest.approx(0.68)
 
 
 # ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -178,7 +440,12 @@ def test_rest_pull_fires_on_belief_decay_new_evidence():
         condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
         limit_price=0.70, quote_age_ms=0.0,
     )
-    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
     assert len(pulls) == 1
     _rest, decision = pulls[0]
     assert decision.reason == "BELIEF_WORSENING"
@@ -195,8 +462,409 @@ def test_rest_pull_holds_on_same_snapshot_price_wiggle():
         condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
         limit_price=0.70, quote_age_ms=0.0,  # fresh quote, no stale pull
     )
-    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
     assert pulls == [], "a bare wiggle on the same snapshot must never pull a rest (anti-twitch)"
+
+
+def test_rest_pull_does_not_cancel_by_order_age_alone():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=120_000.0,
+    )
+
+    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+
+    assert pulls == [], "resting order age alone is not confirmed trading value or cancel evidence"
+
+
+def test_rest_pull_refreshes_confirmed_value_after_cooldown_with_fresh_book():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.69", ask="0.72")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=6 * 60 * 1000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "CONFIRMED_VALUE_REFRESH"
+    assert pulls[0][1].detail > cr.IMPROVE_DELTA
+
+
+def test_rest_pull_does_not_refresh_confirmed_value_on_stale_book():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.69", ask="0.72")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=6 * 60 * 1000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T02:00:01+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert pulls == []
+
+
+def test_rest_pull_does_not_refresh_confirmed_value_when_taker_edge_not_real():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.73, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.69", ask="0.72")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.73, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=6 * 60 * 1000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert pulls == []
+
+
+def test_rest_pull_does_not_treat_normal_spread_as_book_moved():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    # YES best bid is below the resting limit, while ask is two ticks above it.
+    # The old bug used ask cost and would pull; maker-rest drift must use best bid.
+    _snapshot(trade, bid="0.69", ask="0.72")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=0.0,
+    )
+
+    pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
+
+    assert pulls == []
+
+
+def test_rest_pull_fires_when_best_bid_moves_past_limit_tolerance():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.73", ask="0.75")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=0.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "BOOK_MOVED"
+
+
+def test_rest_pull_fires_when_best_bid_is_one_tick_ahead_of_limit():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.71", ask="0.73")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=0.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "BOOK_MOVED"
+    assert pulls[0][1].detail == pytest.approx(cr.TICK_SIZE)
+
+
+def test_rest_pull_ignores_stale_book_moved_evidence():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.73", ask="0.75")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=0.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T02:00:01+00:00",
+    )
+
+    assert pulls == []
+
+
+def test_buy_no_rest_uses_native_no_best_bid_for_book_moved():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.10, snapshot_id="snap1", cond="0xc30")
+    # NO selected-token rows are native NO books; the top bid is 0.80.
+    _snapshot(trade, bid="0.80", ask="0.82", selected_outcome_token_id="no-c30")
+    rest = cr.OpenRest(
+        command_id="cmd-no", venue_order_id="vo-no",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_no",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.76, quote_age_ms=0.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "BOOK_MOVED"
+
+
+def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
+    import src.main as main
+
+    world = _mem_world()
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT, "
+        "side TEXT, price REAL, snapshot_id TEXT, created_at TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    _cache(world, p_yes=0.20, snapshot_id="snap1", cond="0xc30")
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        yes_token_id="yes-c30",
+        no_token_id="no-c30",
+        selected_outcome_token_id="no-c30",
+        bid="0.18",
+        ask="0.22",
+        snapshot_id="snap1",
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "cmd-no",
+            "order-no",
+            "no-c30",
+            "m1",
+            "BUY",
+            0.75,
+            "snap1",
+            "2026-06-12T00:00:00+00:00",
+            "ENTRY",
+        ),
+    )
+    trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-no", "LIVE", 1))
+    trade.commit()
+
+    rests = main._edli_open_maker_rests_for_screen(trade, world)
+
+    assert len(rests) == 1
+    assert rests[0].side == "buy_no"
+    assert rests[0].resting_posterior == pytest.approx(0.80)
+    assert rests[0].created_at == "2026-06-12T00:00:00+00:00"
+    assert rests[0].fact_state == "LIVE"
+    assert rests[0].matched_size is None
+
+
+def test_open_maker_rests_avoids_full_order_fact_window_scan():
+    import src.main as main
+
+    world = _mem_world()
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT, "
+        "side TEXT, price REAL, snapshot_id TEXT, created_at TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    trade.execute(
+        "CREATE UNIQUE INDEX idx_test_order_seq "
+        "ON venue_order_facts(venue_order_id, local_sequence)"
+    )
+    _cache(world, p_yes=0.20, snapshot_id="snap1", cond="0xc30")
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        yes_token_id="yes-c30",
+        no_token_id="no-c30",
+        selected_outcome_token_id="no-c30",
+        bid="0.18",
+        ask="0.22",
+        snapshot_id="snap1",
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "cmd-no",
+            "order-no",
+            "no-c30",
+            "m1",
+            "BUY",
+            0.75,
+            "snap1",
+            "2026-06-12T00:00:00+00:00",
+            "ENTRY",
+        ),
+    )
+    for seq in range(1, 201):
+        trade.execute(
+            "INSERT INTO venue_order_facts VALUES (?,?,?)",
+            (f"closed-{seq}", "EXPIRED", seq),
+        )
+    trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-no", "LIVE", 1))
+    trade.commit()
+
+    captured = _SqlCaptureConn(trade)
+
+    rests = main._edli_open_maker_rests_for_screen(captured, world)
+
+    assert len(rests) == 1
+    statements = "\n".join(captured.statements).upper()
+    assert "ROW_NUMBER" not in statements
+    assert "PARTITION BY" not in statements
+    assert "WHERE VENUE_ORDER_ID = ?" in statements
+
+
+def test_open_maker_rests_skip_unresolved_orders_from_redecision_screen():
+    import src.main as main
+
+    world = _mem_world()
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT, "
+        "side TEXT, price REAL, snapshot_id TEXT, created_at TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "cmd-unresolved",
+            "order-unresolved",
+            "token-not-in-snapshot",
+            "m1",
+            "BUY",
+            0.75,
+            "snap1",
+            "2026-06-12T00:00:00+00:00",
+            "ENTRY",
+        ),
+    )
+    trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-unresolved", "LIVE", 1))
+    trade.commit()
+
+    rests = main._edli_open_maker_rests_for_screen(trade, world)
+
+    assert rests == []
+
+
+def test_open_rest_families_are_priority_warm_inputs_without_fact_window_scan():
+    import src.main as main
+
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, position_id TEXT, venue_order_id TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    trade.execute(
+        "CREATE UNIQUE INDEX idx_test_order_seq "
+        "ON venue_order_facts(venue_order_id, local_sequence)"
+    )
+    trade.execute(
+        "CREATE TABLE position_current ("
+        "position_id TEXT PRIMARY KEY, city TEXT, target_date TEXT, "
+        "temperature_metric TEXT, phase TEXT)"
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?)",
+        ("cmd1", "pos1", "order-live", "ENTRY"),
+    )
+    trade.execute(
+        "INSERT INTO position_current VALUES (?,?,?,?,?)",
+        ("pos1", "Wuhan", "2026-06-12", "high", "pending_entry"),
+    )
+    for seq in range(1, 201):
+        trade.execute(
+            "INSERT INTO venue_order_facts VALUES (?,?,?)",
+            (f"closed-{seq}", "EXPIRED", seq),
+        )
+    trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-live", "LIVE", 1))
+    trade.commit()
+    captured = _SqlCaptureConn(trade)
+
+    families = main._open_rest_family_rows_for_refresh(captured)
+
+    assert families == [("Wuhan", "2026-06-12", "high")]
+    statements = "\n".join(captured.statements).upper()
+    assert "ROW_NUMBER" not in statements
+    assert "PARTITION BY" not in statements
+    assert "WHERE VENUE_ORDER_ID = ?" in statements
 
 
 # ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -332,6 +1000,7 @@ def test_redecision_event_consumed_and_belief_persisted():
                 "target_date": "2026-05-24", "snapshot_id": "snap-1",
                 "calibrator_model_hash": "identity", "bin_labels": ["b73", "b74"],
                 "p_posterior_vec": [0.4, 0.6], "condition_ids": ["0xa", "0xb"],
+                "q_lcb_yes_vec": [0.35, 0.55], "q_lcb_no_vec": [0.60, 0.40],
             },
         )
         return replace(
@@ -358,7 +1027,10 @@ def test_redecision_event_consumed_and_belief_persisted():
     assert result.dead_lettered == 0
     # P1: the belief was persisted through the reactor's OWN conn (deadlock-free), now queryable.
     belief_rows = conn.execute(
-        "SELECT decision_id FROM probability_trace_fact WHERE decision_id LIKE 'edli_belief:%'"
+        "SELECT decision_id, q_lcb_yes_json, q_lcb_no_json "
+        "FROM probability_trace_fact WHERE decision_id LIKE 'edli_belief:%'"
     ).fetchall()
     assert len(belief_rows) == 1, "the reactor must persist the receipt belief_payload (P1)"
     assert "hyp|live|Chicago|2026-05-24|high|d" in belief_rows[0][0]
+    assert belief_rows[0][1] == "[0.35, 0.55]"
+    assert belief_rows[0][2] == "[0.6, 0.4]"

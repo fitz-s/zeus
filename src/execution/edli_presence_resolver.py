@@ -266,7 +266,7 @@ def resolve_presence(
         ro.close()
     if not proofs:
         log("Nothing to resolve.")
-        return 0
+        return 1 if before != (0, 0) else 0
     if not apply:
         log("DRY-RUN: re-run with --apply to append recovered-fill + Reconciled + CONSUMED.")
         return 0

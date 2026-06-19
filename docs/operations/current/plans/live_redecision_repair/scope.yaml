@@ -1,0 +1,119 @@
+id: live_redecision_repair
+status: implementing
+owner: operator
+frontier: live_decision_redecision_exit_and_forecast_authority
+allowed_files:
+  - docs/operations/current/plans/live_redecision_repair/PLAN.md
+  - docs/operations/current/plans/live_redecision_repair/scope.yaml
+  - architecture/_schema_fingerprint.txt
+  - architecture/script_manifest.yaml
+  - config/settings.json
+  - scripts/check_replacement_forecast_live_dry_run.py
+  - scripts/apply_replacement_forecast_live_switch.py
+  - scripts/plan_replacement_forecast_live_config.py
+  - scripts/verify_e2e_money_path.py
+  - src/execution/exit_lifecycle.py
+  - src/execution/collateral.py
+  - src/execution/executor.py
+  - src/execution/exchange_reconcile.py
+  - src/state/collateral_ledger.py
+  - src/state/db.py
+  - src/state/ledger.py
+  - src/state/projection.py
+  - src/state/portfolio.py
+  - src/state/schema/v2_schema.py
+  - src/state/db_writer_lock.py
+  - src/engine/lifecycle_events.py
+  - src/engine/cycle_runtime.py
+  - src/engine/monitor_refresh.py
+  - src/engine/position_belief.py
+  - src/engine/qkernel_spine_bridge.py
+  - src/engine/replacement_forecast_hook_factory.py
+  - src/engine/replacement_forecast_reactor_hook.py
+  - src/data/replacement_forecast_bundle_reader.py
+  - src/data/replacement_forecast_config_switch.py
+  - src/data/replacement_forecast_current_target_plan.py
+  - src/data/replacement_forecast_materializer.py
+  - src/data/replacement_forecast_production.py
+  - src/data/replacement_forecast_seed_discovery.py
+  - src/data/replacement_forecast_shadow_materialization_queue.py
+  - src/data/replacement_forecast_event_payload.py
+  - src/data/replacement_forecast_receipt_provenance.py
+  - src/data/replacement_forecast_runtime_policy.py
+  - src/data/replacement_forecast_live_dry_run.py
+  - src/data/replacement_forecast_switch_decision.py
+  - src/data/replacement_forecast_live_switch_surface.py
+  - src/data/replacement_forecast_readiness.py
+  - src/data/source_job_registry.py
+  - src/events/continuous_redecision.py
+  - src/ingest/forecast_live_daemon.py
+  - src/ingest_main.py
+  - src/main.py
+  - src/control/heartbeat_supervisor.py
+  - src/control/live_health.py
+  - src/control/ws_gap_guard.py
+  - src/observability/status_summary.py
+  - scripts/healthcheck.py
+  - tests/test_position_current_trade_schema_migration.py
+  - tests/test_exit_safety.py
+  - tests/test_exchange_reconcile.py
+  - tests/execution/test_collateral_lock_retry.py
+  - tests/test_collateral_ledger.py
+  - tests/test_healthcheck.py
+  - tests/test_heartbeat_supervisor.py
+  - tests/engine/test_position_belief_authority.py
+  - tests/events/test_continuous_redecision_resurrection.py
+  - tests/execution/test_escalation_redecision_emit.py
+  - tests/test_replacement_forecast_materializer.py
+  - tests/test_replacement_forecast_bundle_reader_tradeable_latest.py
+  - tests/test_replacement_forecast_runtime_policy.py
+  - tests/test_replacement_forecast_switch_decision.py
+  - tests/test_replacement_forecast_config_switch.py
+  - tests/test_replacement_forecast_current_target_plan.py
+  - tests/test_replacement_forecast_seed_discovery.py
+  - tests/test_replacement_qlcb_materialization.py
+  - tests/engine/test_qkernel_spine_bridge.py
+  - tests/integration/test_qkernel_spine_blockers_pr409.py
+  - tests/integration/test_qkernel_spine_routing.py
+  - tests/engine/test_replacement_0_1_authority_evidence_gate.py
+  - tests/engine/test_event_reactor_no_bypass.py
+  - tests/test_live_safety_invariants.py
+forbidden_files:
+  - state/zeus_trades.db
+  - state/zeus-world.db
+live_side_effects_allowed: replacement_forecast_authority_db_repair_live_path_rename_and_daemon_reload_only
+operator_approved_live_side_effects:
+  - state/zeus-forecasts.db forecast_posteriors schema/status repair on 2026-06-17
+  - state/zeus-forecasts.db readiness_state provenance live/diagnostic repair on 2026-06-17
+  - rename state/replacement_forecast_shadow to state/replacement_forecast_live on 2026-06-17
+  - launchctl kickstart com.zeus.live-trading com.zeus.forecast-live com.zeus.data-ingest on 2026-06-17
+operator_approval_required_for:
+  - live DB schema migration
+  - LaunchAgent plist edit or reload
+  - daemon/process restart
+  - submit order
+  - cancel order
+  - operator control change
+tests:
+  - tests/test_position_current_trade_schema_migration.py
+  - tests/test_exit_safety.py
+  - tests/test_exchange_reconcile.py
+  - tests/execution/test_collateral_lock_retry.py
+  - tests/test_collateral_ledger.py
+  - tests/test_healthcheck.py
+  - tests/test_heartbeat_supervisor.py
+  - tests/engine/test_position_belief_authority.py
+  - tests/events/test_continuous_redecision_resurrection.py
+  - tests/execution/test_escalation_redecision_emit.py
+  - tests/test_replacement_forecast_materializer.py
+  - tests/test_replacement_forecast_bundle_reader_tradeable_latest.py
+  - tests/test_replacement_forecast_runtime_policy.py
+  - tests/test_replacement_forecast_switch_decision.py
+  - tests/test_replacement_qlcb_materialization.py
+  - tests/engine/test_qkernel_spine_bridge.py
+  - tests/integration/test_qkernel_spine_blockers_pr409.py
+  - tests/integration/test_qkernel_spine_routing.py
+  - tests/engine/test_replacement_0_1_authority_evidence_gate.py
+  - tests/engine/test_event_reactor_no_bypass.py
+  - tests/test_live_safety_invariants.py
+closeout_required: true

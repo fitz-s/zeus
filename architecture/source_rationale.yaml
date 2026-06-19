@@ -168,6 +168,14 @@ providers:
       Compares Polymarket market resolution URLs against config/cities.json::wu_station;
       writes alerts when they diverge. Operator-only tooling — not on any live daemon
       hot-path and never a forecast/settlement/calibration source.
+  price_channel:
+    role: venue_clob_fact_stream
+    client: src/ingest/price_channel_ingest.py
+    why: >
+      P3 live price/user channel ingest lane for Polymarket CLOB/user-channel
+      facts. Produces execution_feasibility_evidence and durable fill bridge
+      rows for the order daemon to read; it is venue fact input only, not a
+      forecast, settlement, or calibration authority.
 package_defaults:
   src/contracts:
     zone: K0_frozen_kernel
@@ -300,6 +308,17 @@ files:
     - src/ingest/harvester_truth_writer.py
     - src/state/uma_resolution_listener.py
     - scripts/etl_forecast_skill_from_forecasts.py
+  src/data/replacement_forecast_live_materialization_queue.py:
+    zone: K2_runtime
+    authority_role: replacement_live_materialization_queue
+    why: Live replacement forecast queue runner; drains live seed/request files into the materializer on the forecast DB using runtime_layer='live' semantics. Replaces retired src/data/replacement_forecast_shadow_materialization_queue.py so live production no longer imports a shadow-labeled implementation.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/data/replacement_forecast_production.py
+    - scripts/materialize_replacement_forecast_live.py
+    - tests/data/test_replacement_cycle_availability.py
   src/runtime/bankroll_provider.py:
     zone: K2_runtime
     authority_role: wallet_bankroll_provider
@@ -2642,3 +2661,47 @@ files:
     why: Typed Observation/Proposal/Command/Outcome surface for Venus.
     hazards:
     - VENUS_CONTROL_ONLY
+  src/data/market_topology_rows.py:
+    zone: K2_runtime
+    authority_role: market_topology_projection_rows
+    why: Shared row helpers for market topology consumers after substrate observer decomposition; keeps topology row shape out of the order daemon.
+    downstream:
+    - src/data/substrate_observer.py
+  src/data/substrate_observer.py:
+    zone: K2_runtime
+    authority_role: executable_substrate_producer_lane
+    why: P2 live substrate observer; owns market_discovery and pending-family executable snapshot refresh outside the order daemon so reactor backlog cannot gate price substrate production.
+    downstream:
+    - src/ingest/substrate_observer_daemon.py
+    - src/engine/event_reactor_adapter.py
+  src/ingest/substrate_observer_daemon.py:
+    zone: K2_runtime
+    authority_role: executable_substrate_observer_daemon
+    why: Launchable daemon boundary for P2 substrate observer jobs that write executable market snapshots for live decision consumers.
+    downstream:
+    - deploy/launchd/com.zeus.substrate-observer.plist
+  src/ingest/price_channel_ingest.py:
+    zone: K2_runtime
+    authority_role: price_channel_fact_producer_lane
+    why: P3 live price/user channel ingest lane; owns CLOB/user-channel WS lifecycle, durable fill bridge scan, and execution_feasibility_evidence production outside the order daemon.
+    downstream:
+    - src/ingest/price_channel_daemon.py
+    - src/main.py
+  src/ingest/price_channel_daemon.py:
+    zone: K2_runtime
+    authority_role: price_channel_ingest_daemon
+    why: Launchable daemon boundary for P3 price/user channel ingest so venue feed failures cannot poison the order daemon process latch.
+    downstream:
+    - deploy/launchd/com.zeus.price-channel-ingest.plist
+  src/execution/post_trade_capital.py:
+    zone: K2_runtime
+    authority_role: post_trade_capital_lifecycle_lane
+    why: P4 post-trade capital lane; owns chain-sync READ, settlement harvester, redeem/wrap state-machine pollers, and preserves no sell-order submission in this process.
+    downstream:
+    - src/ingest/post_trade_capital_daemon.py
+  src/ingest/post_trade_capital_daemon.py:
+    zone: K2_runtime
+    authority_role: post_trade_capital_daemon
+    why: Launchable daemon boundary for P4 post-trade capital lifecycle so chain/redeem/wrap faults and WAL contention do not block live order decisions.
+    downstream:
+    - deploy/launchd/com.zeus.post-trade-capital.plist

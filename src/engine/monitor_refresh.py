@@ -7,21 +7,23 @@
 
 Blueprint v2 §7 Layer 1: recompute the held-side probability.
 
-PRIMARY AUTHORITY (corrected 2026-06-16): ``monitor_probability_refresh`` reads
-the multi-model fused posterior ``forecast_posteriors`` (via
+PRIMARY AUTHORITY (corrected 2026-06-17): Day0 absorbing hard facts dominate
+model belief when qualified; otherwise ``monitor_probability_refresh`` reads the
+multi-model fused posterior ``forecast_posteriors`` (via
 ``position_belief.load_replacement_belief``, sourced from ``raw_model_forecasts``)
-— the SAME source family as the entry decision. The legacy ENS member-counting
-and day0 refreshers below it are explicit fallback telemetry: the ENS path reads
-``ensemble_snapshots`` (a single-model ECMWF ensemble) and is NOT the entry
-authority — the "SAME METHOD as entry" parity holds ONLY for the replacement
-posterior primary lane, and is STALE for the legacy ens/day0 refreshers.
+as the SAME source family as the entry decision. The legacy ENS member-counting
+path is retained as diagnostic telemetry only and must not substitute for a
+stale/missing replacement belief on non-day0 positions. The day0 observation
+lane remains a separate settlement-day authority.
 Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_raw).
 """
 
 import logging
 import sqlite3
+import copy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -54,6 +56,7 @@ from src.data.market_scanner import _parse_temp_range, get_last_scan_authority, 
 from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine.evaluator import (
+    DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE,
     _day0_observation_field,
     _day0_observation_quality_rejection_reason,
     _day0_observation_source_rejection_reason,
@@ -86,6 +89,11 @@ _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
 _WHALE_TOXICITY_MIN_NOTIONAL_USD = 25.0
 _NOWCAST_PERSISTENT_FAILURE_THRESHOLD = 3
 _DAY0_LOW_EXTREME_AUTHORITY_HOURS = 6.0
+SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT = "day0_absorbing_hard_fact"
+SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW = "day0_observation_remaining_window"
+_DAY0_STALE_OBSERVATION_REJECTION_PREFIX = (
+    "Day0 observation is stale for executable probability generation:"
+)
 _nowcast_consecutive_write_failures = 0
 
 
@@ -121,6 +129,39 @@ def _model_only_native_posterior(p_native: float) -> float:
     if not np.isfinite(p) or not 0.0 <= p <= 1.0:
         raise ValueError(f"native monitor probability must be in [0, 1], got {p!r}")
     return p
+
+
+def _held_side_probability_from_yes_bin_probability(p_yes_bin: float, direction: str) -> float:
+    """Convert a YES-bin point probability into the held-side outcome space."""
+    p_yes = _model_only_native_posterior(p_yes_bin)
+    direction_value = getattr(direction, "value", direction)
+    if str(direction_value) == "buy_no":
+        return _model_only_native_posterior(one_minus(p_yes))
+    return p_yes
+
+
+def _day0_remaining_window_belief_validations(metric: str | None = None) -> list[str]:
+    metric_part = f";metric={metric}" if metric else ""
+    return [
+        "day0_observation_remaining_window",
+        (
+            "belief_source=day0_observation_remaining_window"
+            f";kind=probabilistic_remaining_window{metric_part}"
+            ";posterior_mode=model_only_v1"
+        ),
+        "market_quote_prior_excluded:day0_observation_remaining_window",
+        "alpha_blend_inapplicable:day0_observation_remaining_window",
+    ]
+
+
+def _stamp_day0_remaining_window_belief(
+    position: Position,
+    *,
+    metric: str | None = None,
+) -> None:
+    setattr(position, "selected_method", SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW)
+    for validation in _day0_remaining_window_belief_validations(metric):
+        _append_monitor_validation(position, validation)
 
 
 @dataclass(frozen=True)
@@ -376,19 +417,19 @@ def _track_belief_staleness(pos: Position) -> None:
         )
 
 
-def _position_is_replacement_authority(pos: Position) -> bool:
-    """True when the position was ENTERED under the replacement-chain belief
-    authority (``probability_authority='replacement_0_1'``).
-
-    Discriminator: replacement-chain (edli) entries carry an ``edli``-prefixed
-    ``trade_id`` — the established codebase convention (portfolio._is_open_edli_
-    entry_position_row, trade_id.startswith("edli")). Pre-replacement (legacy)
-    inventory has non-edli trade_ids and may still use the legacy refresh path.
-    A position with no trade_id is treated as NON-replacement (fail-open to the
-    legacy path) so this gate never strands a genuinely-legacy holding.
-    """
-    trade_id = str(getattr(pos, "trade_id", "") or "")
-    return trade_id.startswith("edli")
+def _is_position_target_local_day(pos: Position, city, target_d) -> bool:
+    if target_d is None:
+        return False
+    try:
+        target_date_value = target_d if isinstance(target_d, date) else date.fromisoformat(str(target_d))
+    except Exception:
+        return False
+    timezone_name = str(getattr(city, "timezone", "") or "").strip()
+    try:
+        local_today = datetime.now(ZoneInfo(timezone_name)).date()
+    except Exception:
+        local_today = datetime.now(timezone.utc).date()
+    return target_date_value == local_today
 
 
 def _enqueue_single_family_belief_reseed_failsoft(
@@ -396,14 +437,15 @@ def _enqueue_single_family_belief_reseed_failsoft(
 ) -> dict[str, object] | None:
     """Fail-soft single-family replacement-posterior re-materialization trigger.
 
-    Called when a replacement-authority held position finds its belief
+    Called when a non-day0 held position finds its replacement belief
     stale/missing (BELIEF_AUTHORITY_FAULT): re-materialize THAT family's
     posterior onto the freshest materializable cycle so the exit organ regains a
     fresh same-authority belief next cycle, instead of papering over the fault
     with a cross-era legacy substitution (regime law U1/U2, 2026-06-12).
 
-    Reuses the SAME lane the reactor/poll uses (forecast_db/seed_dir/raw_manifest_dir
-    from the shadow-materialization queue config + the shared idempotency marker),
+    Reuses the SAME live materialization lane the reactor/poll uses
+    (forecast_db/seed_dir/raw_manifest_dir from the live queue config + the
+    shared idempotency marker),
     so a family already enqueued elsewhere never double-enqueues. NEVER raises into
     the monitor: any error (config missing, DB lock, import failure) is logged and
     a status dict (or None) is returned.
@@ -412,13 +454,13 @@ def _enqueue_single_family_belief_reseed_failsoft(
         from pathlib import Path
 
         from src.data.replacement_forecast_production import (
-            _replacement_forecast_shadow_materialization_queue_config,
+            _replacement_forecast_live_materialization_queue_config,
         )
         from src.data.replacement_cycle_advance_trigger import (
             enqueue_single_family_cycle_advance_reseed,
         )
 
-        cfg = _replacement_forecast_shadow_materialization_queue_config()
+        cfg = _replacement_forecast_live_materialization_queue_config()
         forecast_db = cfg.get("forecast_db")
         seed_dir = cfg.get("seed_dir")
         raw_manifest_dir = cfg.get("raw_manifest_dir")
@@ -695,8 +737,7 @@ def _resolve_unified_exit_bias_native(
     Returns the native-unit per-city bias SHIFT to subtract from the member extrema BEFORE
     p_raw on the exit/monitor path, so the exit belief matches the entry belief — or None.
 
-    Flag-gated by ``feature_flags.exit_bias_family_unify_enabled`` (default OFF → returns None
-    immediately, exit path byte-identical to today). When ON, reads the SAME populated VERIFIED
+    The live flag ``feature_flags.exit_bias_family_unify_enabled`` reads the SAME populated VERIFIED
     family the reactor entry uses (``event_reactor_adapter._EDLI_BIAS_FAMILY`` =
     'edli_per_city_v1', 71 rows) with the reactor's EXACT read shape:
     ``month=target_month, target_month=target_month, authority='VERIFIED', lead_bucket=None``.
@@ -1299,13 +1340,10 @@ def _refresh_ens_member_counting(
             city.name, anomaly_removed * 100,
         )
 
-    if position.direction == "buy_no":
-        _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, [
-            *applied,
-            "buy_no_independent_monitor_probability_missing",
-        ]
-    p_cal_native = p_cal_yes
+    p_cal_native = _held_side_probability_from_yes_bin_probability(
+        p_cal_yes,
+        position.direction,
+    )
 
     current_p_posterior = _model_only_native_posterior(p_cal_native)
 
@@ -1336,6 +1374,11 @@ def _position_state_value(pos: Position) -> str:
     return str(getattr(getattr(pos, "state", ""), "value", getattr(pos, "state", "")) or "")
 
 
+def _city_supports_executable_day0_observation(city) -> bool:
+    source_type = str(getattr(city, "settlement_source_type", "") or "").strip()
+    return source_type in DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE
+
+
 def _fetch_day0_observation(city: Position | object, target_d: date):
     reference_time = datetime.now(timezone.utc)
     try:
@@ -1344,8 +1387,50 @@ def _fetch_day0_observation(city: Position | object, target_d: date):
         return get_current_observation(city)
 
 
+def _is_stale_day0_observation_quality_rejection(reason: str | None) -> bool:
+    return str(reason or "").startswith(_DAY0_STALE_OBSERVATION_REJECTION_PREFIX)
+
+
+def _stale_day0_observation_can_remain_monitor_authority(
+    *,
+    quality_rejection: str | None,
+    temperature_metric: MetricIdentity,
+    temporal_context,
+) -> bool:
+    """Allow mature HIGH bounds to keep held-position monitor authority.
+
+    This is deliberately monitor-only. Entry decisions still require a fresh
+    observation tick; held positions after the high peak need the latest known
+    running high plus temporal maturity so the exit/redecision loop does not go
+    blind merely because the station has not emitted another post-peak sample.
+    """
+
+    if not _is_stale_day0_observation_quality_rejection(quality_rejection):
+        return False
+    if not temperature_metric.is_high():
+        return False
+    daypart = str(getattr(temporal_context, "daypart", "") or "")
+    post_peak_confidence = float(getattr(temporal_context, "post_peak_confidence", 0.0) or 0.0)
+    return daypart == "post_peak" and post_peak_confidence >= 0.5
+
+
+def _is_position_day0_quote_eligible(pos: Position) -> bool:
+    if _position_state_value(pos) == "day0_window":
+        return True
+    city = cities_by_name.get(str(getattr(pos, "city", "") or ""))
+    if city is None:
+        return False
+    if not _city_supports_executable_day0_observation(city):
+        return False
+    try:
+        target_d = date.fromisoformat(str(getattr(pos, "target_date", "") or ""))
+    except Exception:
+        return False
+    return _is_position_target_local_day(pos, city, target_d)
+
+
 def _day0_bid_only_monitor_quote(conn, clob: PolymarketClient, pos: Position, token_id: str) -> HeldTokenMonitorQuote | None:
-    if _position_state_value(pos) != "day0_window" or not hasattr(clob, "get_orderbook"):
+    if not _is_position_day0_quote_eligible(pos) or not hasattr(clob, "get_orderbook"):
         return None
     try:
         from src.data.market_scanner import _top_book_level_decimal
@@ -1505,19 +1590,46 @@ def _refresh_day0_observation(
             source_rejection,
         ]
 
+    coverage_validations: list[str] = []
+    obs_coverage_status = str(_day0_observation_field(obs, "coverage_status", "") or "").strip().upper()
+    if obs_coverage_status == "WINDOW_INCOMPLETE":
+        coverage_validations.append("day0_observation_bound_only:coverage_window_incomplete")
+
+    temporal_context = None
     quality_rejection = _day0_observation_quality_rejection_reason(
         city,
         obs,
         temperature_metric,
         decision_time=datetime.now(timezone.utc),
+        allow_incomplete_window_bound=True,
     )
     if quality_rejection is not None:
-        _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, [
-            "day0_observation",
-            "observation_quality_gate",
-            quality_rejection,
-        ]
+        if _is_stale_day0_observation_quality_rejection(quality_rejection):
+            try:
+                from src.signal.diurnal import build_day0_temporal_context
+                temporal_context = build_day0_temporal_context(
+                    city.name,
+                    target_d,
+                    city.timezone,
+                    observation_time=_day0_observation_field(obs, "observation_time"),
+                    observation_source=_day0_observation_field(obs, "source", ""),
+                )
+            except Exception:
+                temporal_context = None
+        if _stale_day0_observation_can_remain_monitor_authority(
+            quality_rejection=quality_rejection,
+            temperature_metric=temperature_metric,
+            temporal_context=temporal_context,
+        ):
+            coverage_validations.append("day0_observation_stale_post_peak_bound")
+        else:
+            _set_monitor_probability_fresh(position, False)
+            return position.p_posterior, [
+                "day0_observation",
+                *coverage_validations,
+                "observation_quality_gate",
+                quality_rejection,
+            ]
 
     ens_result = fetch_ensemble(
         city,
@@ -1536,17 +1648,18 @@ def _refresh_day0_observation(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
 
-    try:
-        from src.signal.diurnal import build_day0_temporal_context
-        temporal_context = build_day0_temporal_context(
-            city.name,
-            target_d,
-            city.timezone,
-            observation_time=_day0_observation_field(obs, "observation_time"),
-            observation_source=_day0_observation_field(obs, "source", ""),
-        )
-    except Exception:
-        temporal_context = None
+    if temporal_context is None:
+        try:
+            from src.signal.diurnal import build_day0_temporal_context
+            temporal_context = build_day0_temporal_context(
+                city.name,
+                target_d,
+                city.timezone,
+                observation_time=_day0_observation_field(obs, "observation_time"),
+                observation_source=_day0_observation_field(obs, "source", ""),
+            )
+        except Exception:
+            temporal_context = None
 
     if temporal_context is None:
         _set_monitor_probability_fresh(position, False)
@@ -1624,118 +1737,44 @@ def _refresh_day0_observation(
 
     p_raw_vector = day0.p_vector(all_bins, n_mc=day0_n_mc())
 
-    # L3 Phase 9C metric-aware Platt read (Day0 exit lane)
-    # Slice P2-C2 + P2-fix5: use hoisted _position_metric_str (resolver
-    # already fired audit log at function entry).
-    # Phase 2.6 (2026-05-04, critic-opus MAJOR 4): same Phase 2 stratification
-    # threading as the ensemble exit lane above.
-    cal, cal_level = _monitor_calibrator_for_ens_result(
-        conn=conn,
-        city=city,
-        target_date=position.target_date,
-        temperature_metric=_position_metric_str,
-        ens_result=ens_result,
-    )
-    if cal is not None and len(all_bins) > 1:
-        p_cal_vector = calibrate_and_normalize(
-            p_raw_vector,
-            cal,
-            0.0,
-            bin_widths=[b.width for b in all_bins],
-        )
-        p_cal_yes = float(p_cal_vector[held_idx])
-        p_cal_full = p_cal_vector
-        applied = [
+    # U1/U2 regime-unification law: Day0 is observation authority plus the
+    # remaining-window raw snapshot. Do not resurrect legacy ENS+Platt monitor
+    # calibration here; normalize the raw vector honestly and mark it as such.
+    p_cal_full = np.asarray(p_raw_vector, dtype=float)
+    p_cal_sum = float(p_cal_full.sum())
+    if p_cal_sum <= 0.0 or not np.isfinite(p_cal_full).all():
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
             "day0_observation",
             "fresh_ens_fetch",
             *forecast_source_validations,
-            "mc_instrument_noise",
-            "platt_recalibration",
-            "vector_normalization",
+            "day0_honest_raw_invalid_p_raw",
         ]
-    elif cal is not None:
-        p_cal_yes = cal.predict_for_bin(
-            float(p_raw_vector[0]),
-            0.0,
-            bin_width=all_bins[0].width,
-        )
-        p_cal_full = np.array([p_cal_yes], dtype=float)
-        applied = [
-            "day0_observation",
-            "fresh_ens_fetch",
-            *forecast_source_validations,
-            "mc_instrument_noise",
-            "platt_recalibration",
-        ]
-    else:
-        p_cal_yes = float(p_raw_vector[held_idx])
-        p_cal_full = p_raw_vector if len(all_bins) > 1 else np.array([p_cal_yes], dtype=float)
-        applied = [
-            "day0_observation",
-            "fresh_ens_fetch",
-            *forecast_source_validations,
-            "mc_instrument_noise",
-        ]
+    p_cal_full = p_cal_full / p_cal_sum
+    p_cal_yes = float(p_cal_full[held_idx])
+    applied = [
+        "day0_observation",
+        *coverage_validations,
+        "fresh_ens_fetch",
+        *forecast_source_validations,
+        "mc_instrument_noise",
+        "day0_remaining_window_raw_vector_normalization",
+    ]
 
     member_extrema = extrema.mins if temperature_metric.is_low() else extrema.maxes
     if member_extrema is None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "metric_extrema_missing"]
-    ensemble_spread = TemperatureDelta(float(np.std(member_extrema)), city.settlement_unit)
 
-    # M2b: hold age from a REAL entered_at (shared helper; twin of the
-    # ENS-member-counting path). NaN -> explicit refuse below.
-    hours_since_open = _hours_since_open_or_nan(position)
-
-    # K1/#68: verify calibration authority before computing alpha.
-    # Slice P2-A2 (PR #19 phase 2, 2026-04-26): twin of the gate above —
-    # scope to active metric for the same false-positive-suppression reason.
-    _authority_verified = False
-    if conn is not None and hasattr(conn, 'execute'):
-        from src.calibration.store import get_pairs_for_bucket as _get_pairs
-        _cal_season = season_from_date(target_d.isoformat(), lat=city.lat)
-        _gate_metric = "high" if _position_metric_str == "high" else None  # hoisted (P2-fix5)
-        try:
-            _unverified_pairs = _get_pairs(
-                conn, city.cluster, _cal_season,
-                authority_filter='UNVERIFIED',
-                metric=_gate_metric,
-            )
-        except Exception:
-            _unverified_pairs = []
-        if _unverified_pairs:
-            logger.warning(
-                "Monitor authority gate: %d UNVERIFIED calibration rows for %s/%s — using stale probability",
-                len(_unverified_pairs), city.name, _cal_season,
-            )
-            _set_monitor_probability_fresh(position, False)
-            applied.append("authority_gate_blocked")
-            return position.p_posterior, applied
-        _authority_verified = True
-
-    # M2b: missing/malformed entered_at -> hours_since_open is NaN -> REFUSE
-    # (twin of the ENS-member-counting guard; compute_alpha silently tolerates
-    # NaN, so the refusal must be explicit here).
-    if not np.isfinite(hours_since_open):
-        _set_monitor_probability_fresh(position, False)
-        applied.append("entered_at_missing_alpha_refused")
-        return position.p_posterior, applied
-
-    alpha = compute_alpha(
-        calibration_level=cal_level,
-        ensemble_spread=ensemble_spread,
-        model_agreement=getattr(position, "entry_model_agreement", "NOT_CHECKED"),
-        lead_days=0.0,
-        hours_since_open=hours_since_open,
-        authority_verified=_authority_verified,
-    ).value_for_consumer("ev")
-    if position.direction == "buy_no":
-        _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, [
-            *applied,
-            "buy_no_independent_monitor_probability_missing",
-        ]
-    p_cal_native = p_cal_yes
+    # Day0 observation remaining-window belief is not legacy alpha blending.
+    # The probability authority is the observed-so-far bound plus remaining
+    # hourly extrema, normalized in settlement-bin space. Market quotes and
+    # hold-age alpha are therefore inapplicable to this belief.
+    alpha = 1.0
+    p_cal_native = _held_side_probability_from_yes_bin_probability(
+        p_cal_yes,
+        position.direction,
+    )
     current_p_posterior = _model_only_native_posterior(p_cal_native)
 
     # A1: Stash bootstrap-relevant data for fresh CI computation in refresh_position
@@ -1746,11 +1785,16 @@ def _refresh_day0_observation(
         "bins": all_bins,
         "held_idx": held_idx,
         "member_extrema": extrema.maxes if extrema.maxes is not None else extrema.mins,
-        "calibrator": cal,
+        "calibrator": None,
         "lead_days": 0.0,
         "unit": city.settlement_unit,
+        "bootstrap_signal_type": SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW,
     })
 
+    _stamp_day0_remaining_window_belief(
+        position,
+        metric=temperature_metric.temperature_metric,
+    )
     _set_monitor_probability_fresh(position, True)
 
     # T5 nowcast wiring (Phase 2 T5): gate on market_slug + hours_remaining.
@@ -1770,7 +1814,12 @@ def _refresh_day0_observation(
         observation_available_at=_day0_observation_field(obs, "observation_available_at"),
     )
 
-    return current_p_posterior, [*applied, "model_only_posterior", "alpha_posterior"]
+    return current_p_posterior, [
+        *applied,
+        *_day0_remaining_window_belief_validations(
+            temperature_metric.temperature_metric,
+        ),
+    ]
 
 
 def _day0_extreme_authority_rejection_reason(
@@ -2220,6 +2269,83 @@ def _detect_whale_toxicity_from_orderbook(
     return None
 
 
+def _day0_absorbing_hard_fact_overlay(
+    *,
+    pos: Position,
+    conn,
+    city,
+    target_d,
+) -> tuple[float, Position, bool] | None:
+    """Return exact monitor belief when a qualified Day0 hard fact is absorbing."""
+
+    if _position_state_value(pos) != "day0_window":
+        return None
+    if not _is_position_target_local_day(pos, city, target_d):
+        return None
+    metric = str(getattr(pos, "temperature_metric", "") or "").strip().lower()
+    if metric not in {"high", "low"}:
+        return None
+    try:
+        from src.execution.day0_hard_fact_exit import (
+            evaluate_hard_fact_exit,
+            hard_fact_monitor_belief,
+        )
+
+        verdict = evaluate_hard_fact_exit(
+            position=pos,
+            city=city,
+            now=datetime.now(timezone.utc),
+            world_conn=conn,
+        )
+        if verdict is None:
+            return None
+        belief = hard_fact_monitor_belief(
+            verdict=verdict,
+            direction=getattr(pos, "direction", ""),
+        )
+        if belief is None:
+            return None
+    except Exception as exc:  # noqa: BLE001 - hard-fact overlay must fail soft
+        logger.warning(
+            "monitor_probability_refresh: day0 hard-fact overlay failed for %s: %s",
+            getattr(pos, "trade_id", "?"),
+            exc,
+        )
+        return None
+
+    hard_pos = replace(pos)
+    setattr(hard_pos, "selected_method", SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
+    _append_monitor_validation(hard_pos, SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
+    _append_monitor_validation(
+        hard_pos,
+        (
+            "belief_source=day0_absorbing_hard_fact;"
+            "kind=deterministic_absorbing;"
+            f"metric={verdict.metric};"
+            f"yes_verdict={belief.yes_verdict};"
+            f"held_verdict={belief.held_verdict};"
+            f"yes_prob={belief.yes_prob:.6f};"
+            f"held_prob={belief.held_side_prob:.6f};"
+            f"effective_extreme={verdict.rounded_extreme:g};"
+            f"source={verdict.source or 'unknown'}"
+        ),
+    )
+    if belief.held_verdict == "STRUCTURAL_WIN":
+        _append_monitor_validation(hard_pos, "day0_hard_fact_structural_win_hold")
+    else:
+        _append_monitor_validation(hard_pos, "day0_hard_fact_structural_loss")
+    _append_monitor_validation(
+        hard_pos,
+        "model_divergence_panic_inapplicable:day0_absorbing_hard_fact",
+    )
+    _append_monitor_validation(
+        hard_pos,
+        "forecast_posteriors_dominated_by_day0_hard_fact",
+    )
+    _set_monitor_probability_fresh(hard_pos, True)
+    return float(belief.held_side_prob), hard_pos, True
+
+
 def monitor_probability_refresh(
     pos: Position,
     *,
@@ -2229,16 +2355,24 @@ def monitor_probability_refresh(
 ) -> tuple[float, Position, bool | None]:
     """Refresh held-side posterior without consuming the held-token quote.
 
-    PRIMARY AUTHORITY (K1 single belief authority, 2026-06-12): the
-    replacement-chain posterior (``forecast_posteriors``) — the SAME authority
-    the entry decision used. The legacy ens/day0 refreshers below remain as
-    explicit fallback telemetry only; they cannot be the freshness authority
-    while a fresh replacement row exists. This kills the entry-belief vs
-    exit-belief twin-authority that left every held position with
-    ``last_monitor_prob_is_fresh=False`` for its entire lifetime (719/719
-    stale refreshes on the Karachi 2026-06-12 position) while the entry
-    posterior had already re-ranked the held bin to family top.
+    PRIMARY AUTHORITY: a qualified Day0 absorbing hard fact is exact and
+    dominates model belief. When no absorbing hard fact exists, the K1 single
+    belief authority is the replacement-chain posterior
+    (``forecast_posteriors``), the SAME authority the entry decision used. The
+    legacy ens/day0 refreshers below remain as explicit fallback telemetry only;
+    they cannot be the freshness authority while a fresh replacement row exists.
+    This removes the entry-belief vs exit-belief twin-authority failure mode
+    without encoding any current live-position coverage claim in source comments.
     """
+    hard_fact_overlay = _day0_absorbing_hard_fact_overlay(
+        pos=pos,
+        conn=conn,
+        city=city,
+        target_d=target_d,
+    )
+    if hard_fact_overlay is not None:
+        return hard_fact_overlay
+
     from src.engine.position_belief import (
         SELECTED_METHOD_REPLACEMENT_POSTERIOR,
         load_replacement_belief,
@@ -2283,7 +2417,11 @@ def monitor_probability_refresh(
         pos.entry_method == EntryMethod.DAY0_OBSERVATION.value
         or (
             _position_state_value(pos) == "day0_window"
-            and str(getattr(city, "settlement_source_type", "") or "") == "wu_icao"
+            and _city_supports_executable_day0_observation(city)
+        )
+        or (
+            _is_position_target_local_day(pos, city, target_d)
+            and _city_supports_executable_day0_observation(city)
         )
     )
 
@@ -2308,8 +2446,8 @@ def monitor_probability_refresh(
     # PREREQUISITE: all live legacy held positions (Houston aef7968f active;
     # Chengdu ad59da00 / Hong Kong day0_window) have ``forecast_posteriors`` coverage
     # for their family, so widening never strands a held position with NO belief
-    # source — the same-family reseed re-materializes on the SAME authority next
-    # cycle. The ensemble registry below is retained ONLY as applied-list telemetry.
+    # source. The same-family reseed is the only repair lane; the ensemble
+    # registry below is retained ONLY as applied-list telemetry.
     if not _would_use_day0_lane:
         _set_monitor_probability_fresh(pos, False)
         _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
@@ -2331,12 +2469,10 @@ def monitor_probability_refresh(
     refresh_pos = pos
     day0_unsupported_forecast_fallback = False
     day0_observation_unavailable_forecast_fallback = False
-    if (
-        _position_state_value(pos) == "day0_window"
-        and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value
-    ):
-        if str(getattr(city, "settlement_source_type", "") or "") == "wu_icao":
-            refresh_pos = replace(pos, entry_method=EntryMethod.DAY0_OBSERVATION.value)
+    if _would_use_day0_lane and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
+        if _city_supports_executable_day0_observation(city):
+            refresh_pos = copy.copy(pos)
+            refresh_pos.entry_method = EntryMethod.DAY0_OBSERVATION.value
         else:
             day0_unsupported_forecast_fallback = True
     setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
@@ -2378,6 +2514,18 @@ def monitor_probability_refresh(
             refresh_pos,
             "day0_observation_unsupported:forecast_monitor_fallback",
         )
+    if (
+        _would_use_day0_lane
+        and not day0_observation_unavailable_forecast_fallback
+        and getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None) is True
+    ):
+        try:
+            _day0_metric = MetricIdentity.from_raw(
+                getattr(refresh_pos, "temperature_metric", None)
+            ).temperature_metric
+        except Exception:
+            _day0_metric = None
+        _stamp_day0_remaining_window_belief(refresh_pos, metric=_day0_metric)
     return (
         current_p_posterior,
         refresh_pos,
@@ -2392,6 +2540,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     Returns: EdgeContext wrapping both fresh market and semantic provenance.
     Missing probability authority materializes as non-finite probability fields.
     """
+    monitor_evaluated_at = datetime.now(timezone.utc).isoformat()
+    pos.last_monitor_at = monitor_evaluated_at
     current_p_market = (
         pos.last_monitor_market_price
         if pos.last_monitor_market_price is not None
@@ -2419,7 +2569,6 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         market_refreshed = True
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True
-        pos.last_monitor_at = quote.source_timestamp
 
     # 2. Recompute P_posterior from fresh ENS/Day0 evidence
     city = cities_by_name.get(pos.city)
@@ -2467,18 +2616,26 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
 
     _track_belief_staleness(pos)
 
-    pos.last_monitor_whale_toxicity = _detect_whale_toxicity_from_orderbook(
-        conn,
-        clob,
-        pos,
-        held_best_bid=pos.last_monitor_best_bid,
-        held_best_ask=pos.last_monitor_best_ask,
-    )
-
     probability_authority_available = (
         pos.last_monitor_prob_is_fresh
         and np.isfinite(current_p_posterior)
     )
+
+    if pos.direction != "buy_yes":
+        pos.last_monitor_whale_toxicity = False
+        _append_monitor_validation(pos, "whale_toxicity_not_applicable:buy_no")
+    elif probability_authority_available:
+        pos.last_monitor_whale_toxicity = None
+        _append_monitor_validation(pos, "whale_toxicity_deferred:fresh_probability_authority")
+    else:
+        pos.last_monitor_whale_toxicity = _detect_whale_toxicity_from_orderbook(
+            conn,
+            clob,
+            pos,
+            held_best_bid=pos.last_monitor_best_bid,
+            held_best_ask=pos.last_monitor_best_ask,
+        )
+
     divergence_score = _compute_divergence_score(
         current_p_posterior, current_p_market, available=probability_authority_available
     )

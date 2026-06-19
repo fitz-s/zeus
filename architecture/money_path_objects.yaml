@@ -101,6 +101,11 @@ state_machines:
       - SUBMIT_UNKNOWN_SIDE_EFFECT
       - REVIEW_REQUIRED
       - SUBMIT_REJECTED
+      - SUBMIT_REQUESTED
+      - SUBMIT_ACKED
+      - CANCEL_ACKED
+      - PARTIAL_FILL_OBSERVED
+      - PRE_SUBMIT_ORPHAN_RECOVERY_NO_VENUE_ATTEMPT
     invariant_tests:
       - tests/money_path/test_002_execution_lifecycle_replay.py
       - tests/test_command_recovery.py
@@ -284,6 +289,7 @@ state_machines:
       - ZEUS_ALLOW_LEGACY_EXECUTION_INTENT
       - ZEUS_LEGACY_EXECUTION_INTENT_SCOPE
       - ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS
+      - ZEUS_USER_CHANNEL_WS_MARKET_EVENTS_FALLBACK_MAX_AGE_HOURS
     invariant_tests:
       - tests/test_inv_family_exclusive_sizing.py
       - tests/test_inv_family_exclusive_cross_module_integration.py
@@ -639,11 +645,39 @@ state_machines:
       - LIVE_DEPTH_AUTHORITY_MISSING          # FINDING-A: fresh-price witness lacks the swept depth
       - BANKROLL_FREE_CASH_MISSING            # FINDING-B: live bankroll provider with unresolvable free cash
       - QLCB_COVERAGE_AUTHORITY_FAULT         # FINDING-C: coverage shrinker threw (fail-closed in live)
+      - ENTRY_TAKER_QUALITY_FALLBACK_NO_PASSIVE_BID_BELOW_ASK
+      - BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED
+      - BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_ENABLED
     invariant_tests:
       - tests/events/test_forecast_snapshot_ready.py
       - tests/events/test_reactor.py
       - tests/engine/test_event_reactor_no_bypass.py
       - tests/strategy/live_inference/test_no_trade_regret.py
+
+  forecast_snapshot_classification:
+    owner: src/events/triggers/forecast_snapshot_ready.py
+    description: >
+      ForecastSnapshotClassification.reason labels for the forecast-snapshot
+      event trigger. These are source-completeness/classification labels, not
+      venue command states; posterior-backed rows are admitted only when their
+      upstream readiness_status is LIVE_ELIGIBLE.
+    states:
+      - COMPLETE_POSTERIOR_BACKED
+      - POSTERIOR_BACKED_NOT_LIVE_ELIGIBLE
+    invariant_tests:
+      - tests/events/test_forecast_snapshot_ready.py
+      - tests/test_replacement_forecast_reactor_hook.py
+
+  forecast_center_method:
+    owner: src/forecast/center.py
+    description: >
+      CenterEstimate.center_method labels for the forecast center builder.
+      RAW_FALLBACK is the fail-closed no-members method and does not authorize
+      an invented live distribution.
+    states:
+      - RAW_FALLBACK
+    invariant_tests:
+      - tests/forecast/test_raw_center_and_provenance.py
 
   exit_family_decision_reason:
     owner: src/strategy/exit_family_optimizer.py
@@ -1057,6 +1091,13 @@ external_truth_sources:
     authority_tier: intraday_observation
     endpoint_patterns: [aviationweather.gov, /api/data/metar]
     required_tests: [tests/test_day0_fast_obs_lane.py, tests/test_day0_first_principles_antibodies.py]
+  nea_sg_observation:
+    # Singapore NEA real-time air-temperature API. It is an intraday
+    # observation covariate for Singapore/Changi monitoring, not a settlement
+    # source; WU/METAR remains settlement authority.
+    authority_tier: intraday_observation_covariate
+    endpoint_patterns: [api-open.data.gov.sg, api.data.gov.sg, /real-time/api/air-temperature, /environment/air-temperature]
+    required_tests: [tests/test_nea_sg_obs.py]
   iem_asos_archive:
     # Offline calibration archive (Iowa Environmental Mesonet ASOS download):
     # historical METAR used by scripts/measure_wu_metar_divergence.py to fit the

@@ -31,7 +31,7 @@ import pytest
 from src.forecast.bayes_precision_fusion import MIN_TRAIN
 from src.state.schema.v2_schema import (
     apply_canonical_schema,
-    ensure_replacement_forecast_shadow_schema,
+    ensure_replacement_forecast_live_schema,
 )
 
 
@@ -39,7 +39,7 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_canonical_schema(conn, forecast_tables=True)
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     return conn
 
 

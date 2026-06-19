@@ -2,7 +2,7 @@ from dataclasses import replace
 
 from tests.test_replacement_forecast_materializer import _conn, _request
 
-from src.data.replacement_forecast_materializer import materialize_replacement_forecast_shadow
+from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
 
 
 def test_materialization_blocks_aifs_member_with_missing_expected_step() -> None:
@@ -15,7 +15,7 @@ def test_materialization_blocks_aifs_member_with_missing_expected_step() -> None
     )
     extraction = replace(request.aifs_extraction, members=(bad_first, *request.aifs_extraction.members[1:]))
 
-    result = materialize_replacement_forecast_shadow(_conn(), replace(request, aifs_extraction=extraction))
+    result = materialize_replacement_forecast_live(_conn(), replace(request, aifs_extraction=extraction))
 
     assert result.ok is False
     assert "REPLACEMENT_MATERIALIZATION_AIFS_STEP_COVERAGE_INCOMPLETE" in result.reason_codes

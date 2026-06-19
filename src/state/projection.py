@@ -28,8 +28,10 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "exit_retry_count",
     "next_exit_retry_at",
     "last_monitor_prob",
+    "last_monitor_prob_is_fresh",
     "last_monitor_edge",
     "last_monitor_market_price",
+    "last_monitor_market_price_is_fresh",
     "decision_snapshot_id",
     "entry_method",
     "strategy_key",
@@ -171,12 +173,12 @@ def _find_existing_open_row(
     row = conn.execute(
         """
         SELECT position_id FROM position_current
-         WHERE token_id = ?
+         WHERE (token_id = ? OR no_token_id = ?)
            AND position_id != ?
            AND phase IN (?, ?, ?, ?, ?)
          LIMIT 1
         """,
-        (token_id, exclude_position_id, *_F109_OPEN_PHASES),
+        (token_id, token_id, exclude_position_id, *_F109_OPEN_PHASES),
     ).fetchone()
     return str(row[0]) if row is not None else None
 
@@ -206,10 +208,63 @@ class NullConditionIdOnOpenPhaseError(ValueError):
 # Phases that require a non-empty condition_id. These are the phases where
 # the position is still active and CTF operations may be needed.
 _CONDITION_ID_REQUIRED_PHASES = frozenset(_F109_OPEN_PHASES)
+_MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
+    {
+        "market_id",
+        "token_id",
+        "no_token_id",
+        "condition_id",
+        "order_id",
+        "order_status",
+        "size_usd",
+        "shares",
+        "cost_basis_usd",
+        "entry_price",
+        "p_posterior",
+        "entry_ci_width",
+        "entry_method",
+        "fill_authority",
+        "recovery_authority",
+        "chain_shares",
+        "chain_avg_price",
+        "chain_cost_basis_usd",
+        "chain_seen_at",
+        "chain_absence_at",
+    }
+)
+
+
+def _preserve_existing_monitor_refresh_authority(
+    conn: sqlite3.Connection, projection: dict
+) -> dict:
+    if projection.get("_canonical_event_type") != "MONITOR_REFRESHED":
+        return projection
+    position_id = str(projection.get("position_id") or "")
+    if not position_id:
+        return projection
+    current_columns = table_columns(conn, "position_current")
+    preserved = tuple(
+        column
+        for column in CANONICAL_POSITION_CURRENT_COLUMNS
+        if column in _MONITOR_REFRESH_PRESERVED_COLUMNS and column in current_columns
+    )
+    if not preserved:
+        return projection
+    row = conn.execute(
+        f"SELECT {', '.join(preserved)} FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return projection
+    merged = dict(projection)
+    for index, column in enumerate(preserved):
+        merged[column] = row[index]
+    return merged
 
 
 @capability("canonical_position_write", lease=True)
 def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
+    projection = _preserve_existing_monitor_refresh_authority(conn, projection)
     # F109 writer-side idempotency check (2026-05-17).
     # Runs before INSERT so the race window with the partial UNIQUE INDEX is
     # tight. If a same-token open-phase row exists with a *different*
@@ -219,7 +274,7 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     # sqlite3.IntegrityError from the INDEX will propagate through the
     # caller's SAVEPOINT and roll back the entire entry.
     candidate_phase = str(projection.get("phase") or "")
-    candidate_token = projection.get("token_id")
+    candidate_token = projection.get("token_id") or projection.get("no_token_id")
     candidate_position_id = str(projection.get("position_id") or "")
 
     # Fix B (2026-05-19): fail-closed guard for NULL condition_id on open phases.

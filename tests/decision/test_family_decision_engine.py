@@ -757,6 +757,38 @@ def test_select_uses_argmax_delta_u_not_scalar_trade_score(monkeypatch):
     assert selected.economics.optimal_delta_u > lose.economics.optimal_delta_u
 
 
+def test_select_prefers_capital_efficiency_when_utility_and_edge_tie(monkeypatch):
+    """Equal growth candidates should not tie-break toward higher capital lockup."""
+    case = _case()
+    space = _outcome_space(case)
+    high_cost_route = _hand_route(space, side="NO", bin_id="b24", cost=0.80)
+    low_cost_route = _hand_route(space, side="YES", bin_id="b25", cost=0.27)
+    high_cost = _hand_decision(
+        high_cost_route,
+        edge_lcb=0.08,
+        optimal_delta_u=0.12,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.90,
+    )
+    low_cost = _hand_decision(
+        low_cost_route,
+        edge_lcb=0.08,
+        optimal_delta_u=0.12,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([high_cost, low_cost])
+
+    assert reason is None
+    assert selected is low_cost
+
+
 # ===========================================================================
 # SPEC RED-on-revert #2: no_trade_reason present when no candidate passes.
 # ===========================================================================

@@ -158,3 +158,47 @@ def test_build_presence_proof_double_count_guard_refuses(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="exceed order size"):
         pr.build_presence_proof(None, "agg", trades=[t], funder_address=FUNDER)
+
+
+def test_resolve_presence_returns_incomplete_when_stuck_but_no_fill_proofs(monkeypatch):
+    """A non-fill proof refusal must let boot continue to resting/absorbed.
+
+    Returning success here would strand a live-resting order before the third
+    resolver rung can prove and reconcile it.
+    """
+
+    class DummyConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pr, "_read_authenticated_venue", lambda: ([], []))
+    monkeypatch.setattr(pr, "_funder_address", lambda: FUNDER)
+    monkeypatch.setattr(pr, "get_world_connection_read_only", lambda: DummyConn())
+    monkeypatch.setattr(pr, "_readiness_counts", lambda conn: (1, 1))
+    monkeypatch.setattr(pr, "_pending_aggregates", lambda conn, aggregate_id: ["agg1"])
+
+    def _no_presence(*args, **kwargs):
+        raise RuntimeError("no CONFIRMED trade owned by our funder on this token")
+
+    monkeypatch.setattr(pr, "build_presence_proof", _no_presence)
+    logs: list[str] = []
+
+    assert pr.resolve_presence(aggregate_id=None, apply=True, log=logs.append) == 1
+    assert any("PRESENCE_SKIP" in msg for msg in logs)
+    assert "Nothing to resolve." in logs
+
+
+def test_resolve_presence_returns_clean_when_no_stuck_work(monkeypatch):
+    class DummyConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pr, "_read_authenticated_venue", lambda: ([], []))
+    monkeypatch.setattr(pr, "_funder_address", lambda: FUNDER)
+    monkeypatch.setattr(pr, "get_world_connection_read_only", lambda: DummyConn())
+    monkeypatch.setattr(pr, "_readiness_counts", lambda conn: (0, 0))
+    monkeypatch.setattr(pr, "_pending_aggregates", lambda conn, aggregate_id: [])
+    logs: list[str] = []
+
+    assert pr.resolve_presence(aggregate_id=None, apply=True, log=logs.append) == 0
+    assert "Nothing to resolve." in logs

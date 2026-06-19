@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS position_events (
         'EXIT_ORDER_FILLED',
         'EXIT_ORDER_VOIDED',
         'EXIT_ORDER_REJECTED',
+        'EXIT_RETRY_RELEASED',
         'SETTLED',
         'ADMIN_VOIDED',
         'MANUAL_OVERRIDE_APPLIED',
@@ -118,8 +119,10 @@ CREATE TABLE IF NOT EXISTS position_current (
     entry_price REAL,
     p_posterior REAL,
     last_monitor_prob REAL,
+    last_monitor_prob_is_fresh INTEGER,
     last_monitor_edge REAL,
     last_monitor_market_price REAL,
+    last_monitor_market_price_is_fresh INTEGER,
     decision_snapshot_id TEXT,
     entry_method TEXT,
     strategy_key TEXT NOT NULL CHECK (strategy_key IN (

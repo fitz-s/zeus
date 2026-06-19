@@ -24,34 +24,6 @@ class EdliNoSubmitReceiptLedger:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def insert_shadow_idempotent(
-        self,
-        receipt: EventSubmissionReceipt,
-        *,
-        decision_time: datetime,
-        created_at: datetime | None = None,
-    ) -> str:
-        """Insert a DAY0_SCOPE_SHADOW_ONLY shadow receipt into edli_no_submit_receipts.
-
-        Shadow receipts carry proof_accepted=False (they are scope-rejected, not
-        pipeline-accepted) but MUST land in this table so the shadow comparator's
-        adapter (day0_remaining_day_adapter) can pair their q_live/direction/bin_label
-        against settled outcomes. The never-submit guarantee is preserved: the receipt
-        has side_effect_status="NO_SUBMIT" and the reactor still routes it through
-        _write_regret for no_trade_regret_events persistence.
-
-        Preconditions enforced here:
-          - side_effect_status == "NO_SUBMIT" (structural no-submit is still mandatory)
-          - reason == "DAY0_SCOPE_SHADOW_ONLY" (only the shadow reason bypasses proof_accepted)
-        """
-        if receipt.side_effect_status != "NO_SUBMIT":
-            raise ValueError("insert_shadow_idempotent only accepts NO_SUBMIT receipts")
-        if receipt.reason != "DAY0_SCOPE_SHADOW_ONLY":
-            raise ValueError(
-                "insert_shadow_idempotent only accepts DAY0_SCOPE_SHADOW_ONLY receipts"
-            )
-        return self._insert_impl(receipt, decision_time=decision_time, created_at=created_at)
-
     def insert_idempotent(
         self,
         receipt: EventSubmissionReceipt,
@@ -164,7 +136,7 @@ class EdliNoSubmitReceiptLedger:
                 "trade_score": receipt.trade_score,
                 "fdr_family_id": receipt.fdr_family_id,
                 "fdr_hypothesis_count": receipt.fdr_hypothesis_count,
-                # C2 selection-shrinkage shadow columns (task #60). None on
+                # C2 selection-shrinkage telemetry columns (task #60). None on
                 # legacy / gate-reject receipts that never reached candidate-
                 # proof generation; populated by the adapter on every replacement
                 # -path candidate receipt.
@@ -252,8 +224,8 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # BUG-2 fix (#135): omit mainstream_* fields when the gate was NOT evaluated
     # (all None) so receipt_hash is byte-identical to pre-gate baseline when the
     # flag is OFF. Presence of the fields with null values changes the JSON and
-    # therefore the hash — breaking shadow-inertness / triggering EdliReceiptHashDrift
-    # on retry for pre-existing shadow receipts. Mirror the decision_proof_bundle
+    # therefore the hash — breaking legacy-inertness / triggering EdliReceiptHashDrift
+    # on retry for pre-existing receipts. Mirror the decision_proof_bundle
     # exclusion pattern: drop the block entirely when not populated.
     if all(payload.get(k) is None for k in _MAINSTREAM_GATE_FIELDS):
         for k in _MAINSTREAM_GATE_FIELDS:
@@ -261,7 +233,7 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # B2 (PR-4, 2026-06-03): alpha_gap — omit when None for hash stability.
     # Receipts without an executable quote (c_fee_adjusted=NULL) had no alpha_gap
     # before B2; including "alpha_gap: null" would change their hash and trigger
-    # EdliReceiptHashDrift on all pre-B2 shadow receipts.  When the gap IS
+    # EdliReceiptHashDrift on all pre-B2 receipts.  When the gap IS
     # computed (both q_live and c_fee_adjusted present), include it so backfill
     # and audit tooling can recover the value from the blob.
     alpha_gap_val = payload.get("alpha_gap")
@@ -278,7 +250,7 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
         payload.pop("alpha_gap", None)
     # #120: q_source — omit when None for hash stability (pre-#120 receipts had no
     # such key; "q_source: null" would change the JSON/hash and trigger
-    # EdliReceiptHashDrift on retry of every existing shadow receipt). When set,
+    # EdliReceiptHashDrift on retry of every existing receipt). When set,
     # persist it so the serving calibrator is recoverable from the blob forever.
     if payload.get("q_source") is None:
         payload.pop("q_source", None)
@@ -324,16 +296,16 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # decided is first-class decision provenance, recoverable from the blob forever.
     if payload.get("submit_lane") is None:
         payload.pop("submit_lane", None)
-    # C2 selection-shrinkage shadow fields (task #60): ALWAYS excluded from
+    # C2 selection-shrinkage telemetry fields (task #60): ALWAYS excluded from
     # receipt_json — never hashed. Their canonical home is the queryable COLUMNS
     # (lfsr / edge_shrunk / edge_shrunk_posterior_sd / selection_authority).
     # Reason (same as envelope_json): the C2 quantities are populated on EVERY
     # gate receipt the moment the code deploys — even with the replacement flag
     # OFF — so serializing them would change receipt_json (and therefore
-    # receipt_hash) for a pre-C2 shadow receipt RETRIED after deploy, raising
+    # receipt_hash) for a pre-C2 receipt RETRIED after deploy, raising
     # EdliReceiptHashDriftError on the money path for the SAME (event_id,
     # final_intent_id) key. Excluding them keeps receipt_hash byte-identical to
-    # the pre-C2 baseline (true shadow-inertness when the flag is OFF) while the
+    # the pre-C2 baseline (true legacy-inertness when the flag is OFF) while the
     # full selection-stage decision stays queryable in SQL via the columns.
     for _c2_field in ("lfsr", "edge_shrunk", "edge_shrunk_posterior_sd", "selection_authority"):
         payload.pop(_c2_field, None)

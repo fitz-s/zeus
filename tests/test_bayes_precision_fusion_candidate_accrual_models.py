@@ -1,17 +1,21 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-17
 # Authority basis: 2026-06-09 uncovered-cities regional survey
 #   (/tmp/uncovered_cities_regional_report.md, settlement-graded) + SAME-DAY operator-directed
 #   promotion: ukmo_global_deterministic_10km -> 5th decorrelated global (-10.3%, n=1099);
-#   ncep_nbm_conus -> NCEP-family CONUS rep (-14.4%, n=1029; NBM blends NCEP models incl. GFS
-#   -> family single-rep contest, NEVER alongside gfs_global); ukmo_uk_deterministic_2km ->
+#   ncep_nbm_conus -> NCEP-family CONUS rep (-14.4%, n=1029); ukmo_uk_deterministic_2km ->
 #   London regional expert + UKMO-family rep (0.919 vs 1.039, n=112).
-"""PROMOTION antibodies: family single-rep correctness for the 2026-06-09 promoted models.
+#   2026-06-17 COARSE-GLOBAL REMOVAL (operator): gfs_global (0.25/25km) and gem_global (~15km)
+#   DROPPED from selection. NCEP is now repped ONLY by its CONUS nests (gfs_hrrr/ncep_nbm) and
+#   CMC ONLY by the N-America nest (gem_hrdps); OUTSIDE those domains NCEP/CMC have NO rep —
+#   there is no global fallback to fall back TO. These tests are RED-on-revert for that law.
+"""PROMOTION antibodies: family single-rep correctness for the promoted models.
 
-The cross-model invariant (one mechanism, three families): each physical provider family
-(ICON, NCEP, UKMO) contributes EXACTLY ONE instrument per fusion, most-specific-eligible-first.
-NBM and gfs_global never coexist; ukmo_uk_2km and ukmo_global never coexist; out-of-domain
-specifics fall back to the family global."""
+The cross-model invariant (one mechanism, families): each physical provider family
+(ICON, NCEP, UKMO, CMC) contributes EXACTLY ONE instrument per fusion, most-specific-eligible-
+first. NBM and gfs_hrrr never coexist; ukmo_uk_2km and ukmo_global never coexist. 2026-06-17:
+the coarse globals gfs_global/gem_global are gone, so OUTSIDE their nest domains NCEP/CMC are
+structurally absent (no fall-back-to-global) — a non-CONUS city legitimately fuses without them."""
 from __future__ import annotations
 
 import sqlite3
@@ -51,30 +55,40 @@ def test_promoted_models_ride_the_extra_download_set() -> None:
         assert m not in BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS
 
 
-def test_conus_nbm_is_the_ncep_rep_and_gfs_is_suppressed() -> None:
+def test_conus_nbm_is_the_ncep_rep_when_hrrr_absent_and_gfs_global_never_selected() -> None:
+    # In CONUS with the 3km gfs_hrrr nest absent from `present`, ncep_nbm (the ~13km CONUS blend)
+    # is the NCEP rep. 2026-06-17: gfs_global is a STRAY value in PRESENT_ALL but is no longer in
+    # the selection vocabulary -> it is NEITHER used NOR a dropped provider-dup; it is simply gone.
     sel = select_models(present_models=PRESENT_ALL, lat=ATLANTA[0], lon=ATLANTA[1], lead_days=1)
     assert NBM_MODEL in sel.used_models
-    assert "gfs_global" not in sel.used_models, (
-        "NBM blends NCEP models including GFS — they must NEVER coexist in one fusion"
+    assert "gfs_global" not in sel.used_models
+    assert "gfs_global" not in sel.dropped_provider_dups, (
+        "gfs_global is removed from the fusion — it is not a recognized provider-dup, just absent"
     )
-    assert "gfs_global" in sel.dropped_provider_dups
     # UKMO family: uk_2km out-of-domain -> the 10km global is the rep.
     assert UKMO_GLOBAL_MODEL in sel.used_models
     assert UKMO_UK_MODEL not in sel.used_models
 
 
-def test_outside_conus_gfs_carries_the_ncep_family() -> None:
+def test_outside_conus_ncep_has_no_rep() -> None:
+    # RED-ON-REVERT (2026-06-17 coarse-global removal): with gfs_global dropped, NCEP_FAMILY =
+    # (gfs_hrrr, ncep_nbm_conus) — BOTH CONUS-domain-gated. Outside CONUS neither is eligible and
+    # there is NO global member to carry the family, so NCEP is STRUCTURALLY ABSENT. (Re-adding
+    # gfs_global to NCEP_FAMILY would make gfs_global the rep here and flip this RED.)
     for lat, lon in (TOKYO, SINGAPORE, LONDON):
         sel = select_models(present_models=PRESENT_ALL, lat=lat, lon=lon, lead_days=1)
-        ncep = [m for m in sel.used_models if m in (NBM_MODEL, "gfs_global")]
-        assert ncep == ["gfs_global"], (lat, lon, sel.used_models)
-        assert NBM_MODEL in sel.dropped_provider_dups
+        ncep = [m for m in sel.used_models if m in (NBM_MODEL, "gfs_hrrr", "gfs_global")]
+        assert ncep == [], (lat, lon, sel.used_models)
+        assert "gfs_global" not in sel.used_models
 
 
-def test_conus_beyond_nbm_lead_horizon_falls_back_to_gfs() -> None:
+def test_conus_beyond_nbm_lead_horizon_has_no_ncep_rep() -> None:
+    # Beyond the nest lead horizon in CONUS, ncep_nbm and gfs_hrrr are both lead-ineligible. With
+    # the coarse global gone there is NOTHING to fall back to -> NCEP has no rep (an honest
+    # degraded fusion at long lead, not a phantom). gfs_global is never selected.
     sel = select_models(present_models=PRESENT_ALL, lat=ATLANTA[0], lon=ATLANTA[1], lead_days=5)
-    ncep = [m for m in sel.used_models if m in (NBM_MODEL, "gfs_global")]
-    assert ncep == ["gfs_global"]
+    ncep = [m for m in sel.used_models if m in (NBM_MODEL, "gfs_hrrr", "gfs_global")]
+    assert ncep == []
 
 
 def test_london_uk2km_is_regional_expert_and_ukmo_global_suppressed() -> None:
@@ -108,11 +122,11 @@ def test_candidate_domain_gates() -> None:
 
 
 def test_download_fetches_promoted_models_domain_gated(tmp_path) -> None:
-    from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
     db = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db))
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     conn.close()
 
     single_calls: list[str] = []
@@ -150,11 +164,11 @@ def test_download_row_level_skip_only_missing_fetches(tmp_path) -> None:
     # persisted is not re-fetched; anything missing IS fetched regardless of coverage.
     from datetime import UTC, datetime
 
-    from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+    from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
     db = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db))
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     cycle_iso = "2026-06-09T00:00:00+00:00"
     # Pre-persist gfs single_runs for this exact cell+cycle.
     conn.execute(

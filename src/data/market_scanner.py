@@ -4473,9 +4473,25 @@ def _default_substrate_fee_details(token_id: str) -> dict[str, Any]:
     live entry gate.
     """
 
-    from src.engine.evaluator import _default_weather_fee_rate
+    from src.config import CONFIG_DIR
+    from src.contracts.exceptions import FeeRateUnavailableError
+    from src.contracts.reality_contract import load_contracts_from_yaml
 
-    rate = float(_default_weather_fee_rate())
+    try:
+        contracts = load_contracts_from_yaml(
+            CONFIG_DIR / "reality_contracts" / "economic.yaml"
+        )
+        fee_contract = next(
+            (contract for contract in contracts if contract.contract_id == "FEE_RATE_WEATHER"),
+            None,
+        )
+        if fee_contract is None:
+            raise FeeRateUnavailableError("FEE_RATE_WEATHER contract not found in economic.yaml")
+        rate = float(fee_contract.current_value)
+    except FeeRateUnavailableError:
+        raise
+    except Exception as exc:
+        raise FeeRateUnavailableError(f"FEE_RATE_WEATHER contract unavailable: {exc}") from exc
     return canonicalize_fee_details(
         {
             "fee_rate_fraction": rate,

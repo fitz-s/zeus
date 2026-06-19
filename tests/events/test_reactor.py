@@ -69,7 +69,7 @@ def _day0_event(key_suffix: str = "a"):
         metric_match_status="MATCH",
         rounding_status="MATCH",
         source_authorized_status="AUTHORIZED",
-        live_authority_status="LIVE_AUTHORITY",
+        live_authority_status="live",
     )
     return make_day0_extreme_updated_event(
         entity_key=f"Chicago|2026-05-24|high|{key_suffix}",
@@ -828,7 +828,7 @@ def test_processed_event_terminal_surface_includes_execution_receipt_certificate
         riskguard_gate=lambda _event: True,
         final_intent_submit=_submit,
         reject=lambda *_args: None,
-        config=ReactorConfig(reactor_mode="submit_disabled_live_bridge", real_order_submit_enabled=False),
+        config=ReactorConfig(reactor_mode="live_no_submit", real_order_submit_enabled=False),
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
 
@@ -1145,6 +1145,59 @@ def test_payload_decision_time_cannot_override_reactor_decision_time():
     assert row is not None
     assert row[0] == decision_time.isoformat()
     assert row[0] != payload["decision_time"]
+
+
+def test_all_candidates_rejected_regret_is_family_level_only():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    payload = json.loads(event.payload_json)
+    payload.update(
+        {
+            "family_id": "family-chicago",
+            "bin_label": "74F",
+            "direction": "buy_yes",
+            "condition_id": "condition-1",
+            "token_id": "token-1",
+            "q_live": 0.61,
+            "q_lcb_5pct": 0.57,
+            "c_fee_adjusted": 0.56,
+            "trade_score": -0.01,
+        }
+    )
+    event = replace(
+        event,
+        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda _event, _decision_time: None,
+        reject=lambda _event, _stage, _reason: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    reactor._write_regret(
+        event,
+        "TRADE_SCORE",
+        "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22; best_rejected=73F buy_no",
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+    )
+
+    row = conn.execute(
+        """
+        SELECT family_id, bin_label, direction, condition_id, token_id,
+               q_live, q_lcb_5pct, c_fee_adjusted, trade_score
+          FROM no_trade_regret_events
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "family-chicago"
+    assert row[1:] == (None, None, None, None, None, None, None, None)
 
 
 def test_reactor_rejects_no_submit_receipt_without_decision_proof_bundle():

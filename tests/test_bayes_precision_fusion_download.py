@@ -10,7 +10,7 @@ Relationship under test (download job -> raw_model_forecasts persistence boundar
   (a) when capture-flag ON it WRITES raw_model_forecasts rows (single_runs FORWARD +
       previous_runs fixed-lead) for the surviving models; (b) it persists NOTHING when there
       are no targets / no surviving fetches; (c) FAIL-SOFT per model (a raising fetch drops
-      only that model); (d) forecast_value_c is degC and trade_authority_status='SHADOW_ONLY';
+      only that model); (d) forecast_value_c is degC and training_allowed=0;
       (e) retention prunes rows older than the cutoff; (f) idempotent re-run (UNIQUE upsert).
 All fetchers are injected (NO network).
 """
@@ -22,13 +22,13 @@ from pathlib import Path
 
 import pytest
 
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 
 def _forecast_db(tmp_path: Path) -> Path:
     db = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db))
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     conn.commit()
     conn.close()
     return db
@@ -74,15 +74,14 @@ def test_download_writes_single_and_previous_runs(tmp_path) -> None:
         single_runs_fetch=_single, previous_runs_fetch=_previous,
     )
     assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
-    # At least the 8 extra models x {single_runs, previous_runs} for the one target.
+    # Current selected model set x {single_runs, previous_runs} for the one target.
     n_single = _count(db, endpoint="single_runs")
     n_prev = _count(db, endpoint="previous_runs")
-    assert n_single >= 7, f"expected forward single_runs rows for the extra models, got {n_single}"
-    assert n_prev >= 4, f"expected previous_runs fixed-lead rows, got {n_prev}"
-    # forecast_value_c is degC; SHADOW_ONLY + training_allowed=0 are pinned.
+    assert n_single > 0, f"expected in-domain forward single_runs rows, got {n_single}"
+    assert n_prev > 0, f"expected previous_runs fixed-lead rows, got {n_prev}"
+    # forecast_value_c is degC; training_allowed=0 is pinned.
     conn = sqlite3.connect(str(db)); conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM raw_model_forecasts LIMIT 1").fetchone()
-    assert row["trade_authority_status"] == "SHADOW_ONLY"
     assert row["training_allowed"] == 0
     assert 15.0 <= row["forecast_value_c"] <= 25.0
     conn.close()
@@ -375,7 +374,7 @@ def test_domain_gate_unavailable_global_is_loud_not_silent(tmp_path) -> None:
     db = _forecast_db(tmp_path)
 
     def _single(*, model, **k):
-        if model == "gfs_global":
+        if model == "icon_global":
             return None  # simulate upstream unavailability
         return 20.0
 
@@ -385,18 +384,19 @@ def test_domain_gate_unavailable_global_is_loud_not_silent(tmp_path) -> None:
         single_runs_fetch=_single, previous_runs_fetch=lambda **k: 19.0,
     )
 
-    # gfs_global (global model, always in-domain) failure must be in `dropped`.
-    assert "gfs_global:single_runs" in report["dropped"], (
+    # icon_global (worldwide global, always in-domain) failure must be in `dropped`. (2026-06-17:
+    # gfs_global was dropped from the fusion; icon_global is the canonical worldwide global here.)
+    assert "icon_global:single_runs" in report["dropped"], (
         "unavailable global model must be in dropped, not silently absent"
     )
     # It must NOT be in domain_excluded (that is reserved for domain-geographic skips).
     excluded_set = set(report["domain_excluded"])
-    assert not any("gfs_global" in e for e in excluded_set), (
-        "gfs_global must never appear in domain_excluded (it is a global model)"
+    assert not any("icon_global" in e for e in excluded_set), (
+        "icon_global must never appear in domain_excluded (it is a global model)"
     )
     # global_models_unavailable must flag it.
-    assert "gfs_global" in report["global_models_unavailable"], (
-        "gfs_global single_runs failure must appear in global_models_unavailable"
+    assert "icon_global" in report["global_models_unavailable"], (
+        "icon_global single_runs failure must appear in global_models_unavailable"
     )
 
 

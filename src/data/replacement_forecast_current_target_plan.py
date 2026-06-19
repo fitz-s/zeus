@@ -17,7 +17,7 @@ from src.engine.time_context import has_city_local_day_started
 from src.state.db import _connect
 
 
-SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
+SOURCE_ID = "openmeteo_ecmwf_ifs9_bayes_fusion"
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,6 @@ class ReplacementForecastCurrentTargetPlanRow:
     market_bin_count: int
     posterior_count: int
     readiness_count: int
-    aifs_manifest_count: int
     openmeteo_manifest_count: int
     baseline_source_run_id: str | None = None
     day0_observed_extreme_required: bool = False
@@ -39,16 +38,13 @@ class ReplacementForecastCurrentTargetPlanRow:
 
     @property
     def can_seed(self) -> bool:
+        # Live seeding needs the OM9 anchor plus already-captured fusion rows.
+        # Removed model families are not completeness requirements here.
         return (
             not self.covered
             and not self.day0_observed_extreme_required
-            and self.aifs_manifest_count > 0
             and self.openmeteo_manifest_count > 0
         )
-
-    @property
-    def missing_aifs_manifest(self) -> bool:
-        return not self.covered and self.aifs_manifest_count <= 0
 
     @property
     def missing_openmeteo_manifest(self) -> bool:
@@ -62,13 +58,11 @@ class ReplacementForecastCurrentTargetPlanRow:
             "market_bin_count": self.market_bin_count,
             "posterior_count": self.posterior_count,
             "readiness_count": self.readiness_count,
-            "aifs_manifest_count": self.aifs_manifest_count,
             "openmeteo_manifest_count": self.openmeteo_manifest_count,
             "baseline_source_run_id": self.baseline_source_run_id,
             "day0_observed_extreme_required": self.day0_observed_extreme_required,
             "covered": self.covered,
             "can_seed": self.can_seed,
-            "missing_aifs_manifest": self.missing_aifs_manifest,
             "missing_openmeteo_manifest": self.missing_openmeteo_manifest,
         }
 
@@ -81,7 +75,6 @@ class ReplacementForecastCurrentTargetPlan:
     covered_count: int
     missing_coverage_count: int
     can_seed_count: int
-    missing_aifs_manifest_count: int
     missing_openmeteo_manifest_count: int
     day0_observed_extreme_required_count: int
     rows: tuple[ReplacementForecastCurrentTargetPlanRow, ...]
@@ -98,7 +91,6 @@ class ReplacementForecastCurrentTargetPlan:
             "covered_count": self.covered_count,
             "missing_coverage_count": self.missing_coverage_count,
             "can_seed_count": self.can_seed_count,
-            "missing_aifs_manifest_count": self.missing_aifs_manifest_count,
             "missing_openmeteo_manifest_count": self.missing_openmeteo_manifest_count,
             "day0_observed_extreme_required_count": self.day0_observed_extreme_required_count,
             "rows": [row.as_dict() for row in self.rows],
@@ -149,7 +141,6 @@ def _blocked_plan(reason_code: str) -> ReplacementForecastCurrentTargetPlan:
         covered_count=0,
         missing_coverage_count=0,
         can_seed_count=0,
-        missing_aifs_manifest_count=0,
         missing_openmeteo_manifest_count=0,
         day0_observed_extreme_required_count=0,
         rows=(),
@@ -161,7 +152,6 @@ def _status_from_counts(
     target_count: int,
     missing_coverage_count: int,
     can_seed_count: int,
-    missing_aifs_manifest_count: int,
     missing_openmeteo_manifest_count: int,
     day0_observed_extreme_required_count: int,
 ) -> tuple[str, tuple[str, ...]]:
@@ -172,15 +162,12 @@ def _status_from_counts(
     reasons: list[str] = ["REPLACEMENT_CURRENT_TARGET_PLAN_MISSING_REPLACEMENT_COVERAGE"]
     if can_seed_count:
         reasons.append("REPLACEMENT_CURRENT_TARGET_PLAN_HAS_SEEDABLE_TARGETS")
-    if missing_aifs_manifest_count:
-        reasons.append("REPLACEMENT_CURRENT_TARGET_PLAN_MISSING_AIFS_MANIFESTS")
     if missing_openmeteo_manifest_count:
         reasons.append("REPLACEMENT_CURRENT_TARGET_PLAN_MISSING_OPENMETEO_MANIFESTS")
     if day0_observed_extreme_required_count:
         reasons.append("REPLACEMENT_CURRENT_TARGET_PLAN_DAY0_OBSERVED_EXTREME_REQUIRED")
     if (
         can_seed_count <= 0
-        and missing_aifs_manifest_count <= 0
         and missing_openmeteo_manifest_count <= 0
         and day0_observed_extreme_required_count >= missing_coverage_count
     ):
@@ -279,7 +266,6 @@ def build_replacement_forecast_current_target_plan(
             covered_count=0,
             missing_coverage_count=0,
             can_seed_count=0,
-            missing_aifs_manifest_count=0,
             missing_openmeteo_manifest_count=0,
             day0_observed_extreme_required_count=0,
             rows=(),
@@ -306,7 +292,6 @@ def build_replacement_forecast_current_target_plan(
                 covered_count=0,
                 missing_coverage_count=0,
                 can_seed_count=0,
-                missing_aifs_manifest_count=0,
                 missing_openmeteo_manifest_count=0,
                 day0_observed_extreme_required_count=0,
                 rows=(),
@@ -333,8 +318,8 @@ def build_replacement_forecast_current_target_plan(
         # materialization marking its scope covered at PLAN level and blocking its own fusion repair
         # (observed 2026-06-11: Atlanta/Austin/Beijing 00Z rows self-masked one tick after
         # materializing). The original proxy `p.q_lcb_json IS NOT NULL` broke once the soft-anchor
-        # path began carrying a promoted Wilson q_lcb (basis="wilson_aifs_member_votes") instead of
-        # NULL — so the predicate now keys on the certified bootstrap basis (single authority:
+        # older non-certified paths began carrying q_lcb instead of NULL, so the
+        # predicate now keys on the certified bootstrap basis (single authority:
         # cycle_policy). Schema-conditional like the queue clause.
         posterior_tradeable_grade_clause = tradeable_grade_coverage_sql(
             posterior_columns=posterior_columns, alias="p."
@@ -361,7 +346,7 @@ def build_replacement_forecast_current_target_plan(
             # raw inputs once the 3h TTL lapses — the stale-after-first-cycle bug). Only
             # a row whose expires_at is still in the future counts as live coverage.
             readiness_status_clause = """
-                          AND r.status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'READY')
+                          AND r.status = 'READY'
                           AND (r.expires_at IS NULL OR r.expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now'))
             """
         sql_limit = "" if limit is None else f" LIMIT {int(limit)}"
@@ -436,7 +421,7 @@ def build_replacement_forecast_current_target_plan(
                         FROM forecast_posteriors p
                         WHERE p.source_id = ?
                           AND p.training_allowed = 0
-                          AND p.trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                          AND p.runtime_layer = 'live'
                           AND p.city = targets.city
                           AND p.target_date = targets.target_date
                           AND p.temperature_metric = targets.temperature_metric
@@ -484,7 +469,7 @@ def build_replacement_forecast_current_target_plan(
                     FROM forecast_posteriors
                     WHERE source_id = ?
                       AND training_allowed = 0
-                      AND trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                      AND runtime_layer = 'live'
                       {posterior_tradeable_grade_clause.replace("p.q_lcb_json", "q_lcb_json")}
                     GROUP BY city, target_date, temperature_metric
                 ),
@@ -524,7 +509,6 @@ def build_replacement_forecast_current_target_plan(
         for row in rows:
             metric = str(row["temperature_metric"])
             expected = expected_replacement_dependency_identity_by_role(metric)
-            aifs_expected = expected["aifs_sampled_2t"]
             openmeteo_expected = expected["openmeteo_ifs9_anchor"]
             city = str(row["city"])
             target_date = str(row["target_date"])
@@ -534,10 +518,8 @@ def build_replacement_forecast_current_target_plan(
                 timezone_by_city=timezone_by_city,
                 now_utc=evaluation_now_utc,
             )
-            aifs_count = 0
             openmeteo_count = 0
             if not require_raw_artifacts:
-                aifs_count = 1
                 openmeteo_count = 1
             elif metadata_column is not None:
                 manifest_rows = conn.execute(
@@ -546,7 +528,6 @@ def build_replacement_forecast_current_target_plan(
                     FROM raw_forecast_artifacts
                     WHERE (
                         source_id = ? AND data_version = ?
-                        OR source_id = ? AND data_version = ?
                     )
                       AND artifact_path IS NOT NULL
                       AND artifact_path != ''
@@ -568,8 +549,6 @@ def build_replacement_forecast_current_target_plan(
                       )
                     """,
                     (
-                        aifs_expected.source_id,
-                        aifs_expected.data_version,
                         openmeteo_expected.source_id,
                         openmeteo_expected.data_version,
                         city,
@@ -592,8 +571,6 @@ def build_replacement_forecast_current_target_plan(
                         continue
                     source_id = str(manifest["source_id"])
                     data_version = str(manifest["data_version"])
-                    if source_id == aifs_expected.source_id and data_version == aifs_expected.data_version:
-                        aifs_count += 1
                     if source_id == openmeteo_expected.source_id and data_version == openmeteo_expected.data_version:
                         openmeteo_count += 1
             out.append(
@@ -604,7 +581,6 @@ def build_replacement_forecast_current_target_plan(
                     market_bin_count=int(row["market_bin_count"]),
                     posterior_count=int(row["posterior_count"]),
                     readiness_count=int(row["readiness_count"]),
-                    aifs_manifest_count=aifs_count,
                     openmeteo_manifest_count=openmeteo_count,
                     baseline_source_run_id=row["baseline_source_run_id"],
                     day0_observed_extreme_required=day0_observed_extreme_required,
@@ -616,14 +592,12 @@ def build_replacement_forecast_current_target_plan(
     covered_count = sum(1 for row in out if row.covered)
     missing_coverage_count = target_count - covered_count
     can_seed_count = sum(1 for row in out if row.can_seed)
-    missing_aifs_manifest_count = sum(1 for row in out if row.missing_aifs_manifest)
     missing_openmeteo_manifest_count = sum(1 for row in out if row.missing_openmeteo_manifest)
     day0_observed_extreme_required_count = sum(1 for row in out if row.day0_observed_extreme_required and not row.covered)
     status, reasons = _status_from_counts(
         target_count=target_count,
         missing_coverage_count=missing_coverage_count,
         can_seed_count=can_seed_count,
-        missing_aifs_manifest_count=missing_aifs_manifest_count,
         missing_openmeteo_manifest_count=missing_openmeteo_manifest_count,
         day0_observed_extreme_required_count=day0_observed_extreme_required_count,
     )
@@ -634,7 +608,6 @@ def build_replacement_forecast_current_target_plan(
         covered_count=covered_count,
         missing_coverage_count=missing_coverage_count,
         can_seed_count=can_seed_count,
-        missing_aifs_manifest_count=missing_aifs_manifest_count,
         missing_openmeteo_manifest_count=missing_openmeteo_manifest_count,
         day0_observed_extreme_required_count=day0_observed_extreme_required_count,
         rows=tuple(out),
@@ -650,9 +623,6 @@ def replacement_forecast_download_plan_from_current_targets(
     return {
         "status": plan.status,
         "reason_codes": list(plan.reason_codes),
-        "aifs_download_targets": [
-            row.as_dict() for row in missing if row.missing_aifs_manifest
-        ],
         "openmeteo_download_targets": [
             row.as_dict() for row in missing if row.missing_openmeteo_manifest
         ],

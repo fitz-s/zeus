@@ -248,7 +248,7 @@ def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path:
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
                 'NYC', '2026-06-09', 'high',
                 '{"baseline_b0":"covered-baseline-run"}',
-                'SHADOW_VETO_ONLY', 0
+                'LIVE_AUTHORITY', 0
             )
             """
         )
@@ -343,7 +343,7 @@ def test_seed_discovery_does_not_skip_current_source_run_because_stale_replaceme
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
                 'NYC', '2026-06-08', 'high',
                 '{"baseline_b0":"baseline-stale-run"}',
-                'SHADOW_VETO_ONLY', 0
+                'LIVE_AUTHORITY', 0
             )
             """
         )
@@ -394,7 +394,7 @@ def test_seed_discovery_retries_when_current_posterior_exists_but_readiness_is_m
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
                 'NYC', '2026-06-08', 'high',
                 '{"baseline_b0":"baseline-run"}',
-                'SHADOW_VETO_ONLY', 0
+                'LIVE_AUTHORITY', 0
             )
             """
         )
@@ -432,7 +432,7 @@ def test_seed_discovery_skips_when_current_posterior_and_readiness_exist(tmp_pat
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
                 'NYC', '2026-06-08', 'high',
                 '{"baseline_b0":"baseline-run"}',
-                'SHADOW_VETO_ONLY', 0
+                'LIVE_AUTHORITY', 0
             )
             """
         )
@@ -584,7 +584,7 @@ def test_seed_discovery_blocks_when_replacement_dependency_schema_is_missing(tmp
                 trade_authority_status, training_allowed
             ) VALUES (
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
-                'NYC', '2026-06-07', 'high', 'SHADOW_VETO_ONLY', 0
+                'NYC', '2026-06-07', 'high', 'LIVE_AUTHORITY', 0
             )
             """
         )

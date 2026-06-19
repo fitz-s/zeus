@@ -6,13 +6,13 @@
 #   producer as a hard reject (UNKNOWN_REVIEW_REQUIRED, zero orders). Single-q-authority
 #   regime (2026-06-12) made the baseline provenance-only; the candidate bin stays optional
 #   because the downstream DIRECTION-LAW recheck no-ops on a bare candidate.
-"""Pure pre-intent hook for replacement forecast shadow/veto evidence.
+"""Pure pre-intent hook for live replacement forecast evidence.
 
 This module is side-effect-free: it consumes an already-read B0 candidate and
 an already-read replacement posterior bundle, then returns the effective values
 the caller may use before final order intent construction. The DB-backed
 factory in ``replacement_forecast_hook_factory`` may write an audit row for a
-shadow-veto decision; that write is outside this pure hook contract.
+diagnostic decision; that write is outside this pure hook contract.
 """
 
 from __future__ import annotations
@@ -28,24 +28,30 @@ from src.data.replacement_forecast_readiness import ReplacementForecastReadiness
 from src.data.replacement_forecast_receipt_provenance import ReplacementForecastReceiptProvenance, build_replacement_forecast_receipt_provenance
 from src.data.replacement_forecast_runtime_policy import (
     BLOCKED_STATUS,
-    LIVE_AUTHORITY_STATUS,
+    LIVE_STATUS,
     ReplacementForecastRuntimePolicy,
     SAFE_DEFAULT_STATUS,
-    SHADOW_ONLY_STATUS,
-    SHADOW_VETO_ONLY_STATUS,
 )
 from src.data.replacement_forecast_switch_decision import (
     SWITCH_BLOCKED,
     SWITCH_DISABLED,
-    SWITCH_LIVE_AUTHORITY,
-    SWITCH_SHADOW_ONLY,
-    SWITCH_SHADOW_VETO_ONLY,
+    SWITCH_LIVE,
     ReplacementForecastSwitchDecision,
 )
-from src.engine.replacement_forecast_veto import ReplacementForecastVetoDecision, ReplacementForecastVetoInput, apply_replacement_forecast_shadow_veto
-
 
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
+REPLACEMENT_EXECUTION_LIVE_STATUS = "live"
+REPLACEMENT_EXECUTION_EXPERIMENT_STATUS = "experiment"
+
+
+@dataclass(frozen=True)
+class _ExecutionLayerReceiptProvenance:
+    inner: ReplacementForecastReceiptProvenance
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = self.inner.as_dict()
+        payload["runtime_layer"] = REPLACEMENT_EXECUTION_LIVE_STATUS
+        return payload
 
 
 @dataclass(frozen=True)
@@ -84,6 +90,17 @@ class ReplacementForecastCandidateView:
         for field_name in ("baseline_q_posterior", "baseline_q_lcb", "candidate_q_posterior", "candidate_q_lcb"):
             if not 0.0 <= float(getattr(self, field_name)) <= 1.0:
                 raise ValueError("q values must be in [0, 1]")
+        for q_field, lcb_field in (
+            ("baseline_q_posterior", "baseline_q_lcb"),
+            ("candidate_q_posterior", "candidate_q_lcb"),
+        ):
+            q_value = float(getattr(self, q_field))
+            lcb_value = float(getattr(self, lcb_field))
+            if lcb_value > q_value + 1e-12:
+                raise ValueError(
+                    f"{lcb_field} must not exceed {q_field}: "
+                    f"{lcb_value:.12g} > {q_value:.12g}"
+                )
         if self.baseline_kelly_fraction < 0.0 or self.candidate_kelly_fraction < 0.0:
             raise ValueError("kelly fractions must be non-negative")
         # FIX-3 (§0.5) structural guard: the directional tokens must be WELL-FORMED
@@ -146,16 +163,17 @@ class ReplacementForecastReactorHookResult:
     effective_q_posterior: float
     effective_q_lcb: float
     effective_kelly_fraction: float
-    veto_decision: ReplacementForecastVetoDecision | None = None
-    receipt_provenance: ReplacementForecastReceiptProvenance | None = None
+    veto_decision: Mapping[str, Any] | None = None
+    receipt_provenance: ReplacementForecastReceiptProvenance | _ExecutionLayerReceiptProvenance | None = None
 
     @property
     def changed_baseline(self) -> bool:
-        return self.veto_decision is not None and (
-            self.effective_direction != self.veto_decision.baseline_direction
-            or abs(self.effective_q_posterior - self.veto_decision.baseline_q_posterior) > 1e-15
-            or abs(self.effective_q_lcb - self.veto_decision.baseline_q_lcb) > 1e-15
-            or abs(self.effective_kelly_fraction - self.veto_decision.baseline_kelly_fraction) > 1e-15
+        decision = self.veto_decision
+        return decision is not None and (
+            self.effective_direction != decision.get("baseline_direction")
+            or abs(self.effective_q_posterior - float(decision.get("baseline_q_posterior", 0.0))) > 1e-15
+            or abs(self.effective_q_lcb - float(decision.get("baseline_q_lcb", 0.0))) > 1e-15
+            or abs(self.effective_kelly_fraction - float(decision.get("baseline_kelly_fraction", 0.0))) > 1e-15
         )
 
     def effective_values(self) -> dict[str, object]:
@@ -250,7 +268,7 @@ def _forecast_decision_payload(
         "condition_id": candidate.condition_id,
         "token_id": candidate.token_id,
         "decision_time": candidate.decision_time,
-        "trade_authority_status": status,
+        "runtime_layer": status,
     }
 
 
@@ -263,133 +281,88 @@ def apply_replacement_forecast_reactor_hook(
     readiness: ReplacementForecastReadinessDecision | None = None,
     guardrail_report: ReplacementForecastGuardrailReport | Mapping[str, Any] | None = None,
 ) -> ReplacementForecastReactorHookResult:
-    """Apply replacement forecast shadow/veto logic before final intent.
+    """Apply live replacement forecast logic before final intent.
 
-    Disabled, blocked, and shadow-only states never mutate the baseline
-    candidate. Any non-disabled path must pass through the daemon-facing switch
-    decision so stale inventory, missing readiness, or missing replacement
-    bundles cannot be bypassed by handing the hook a raw policy.
+    Disabled and blocked states never mutate the baseline candidate. Any live
+    path must pass through the daemon-facing switch decision so stale inventory,
+    missing readiness, or missing replacement bundles cannot be bypassed by
+    handing the hook a raw policy.
     """
 
     if not isinstance(policy, ReplacementForecastRuntimePolicy):
         raise TypeError("policy must be ReplacementForecastRuntimePolicy")
     candidate_view = candidate if isinstance(candidate, ReplacementForecastCandidateView) else ReplacementForecastCandidateView.from_mapping(candidate)
     if policy.status == SAFE_DEFAULT_STATUS:
-        return _no_change(candidate_view, status="DISABLED", reason_codes=policy.reason_codes)
+        return _no_change(candidate_view, status=REPLACEMENT_EXECUTION_EXPERIMENT_STATUS, reason_codes=policy.reason_codes)
     if switch_decision is None:
         return _no_change(candidate_view, status="BLOCKED", reason_codes=("REPLACEMENT_REACTOR_SWITCH_DECISION_MISSING",))
     if not isinstance(switch_decision, ReplacementForecastSwitchDecision):
         raise TypeError("switch_decision must be ReplacementForecastSwitchDecision")
     if switch_decision.status == SWITCH_DISABLED:
-        return _no_change(candidate_view, status="DISABLED", reason_codes=switch_decision.reason_codes)
+        return _no_change(candidate_view, status=REPLACEMENT_EXECUTION_EXPERIMENT_STATUS, reason_codes=switch_decision.reason_codes)
     if switch_decision.status == SWITCH_BLOCKED:
         return _no_change(candidate_view, status="BLOCKED", reason_codes=switch_decision.reason_codes)
     if policy.status == BLOCKED_STATUS:
         return _no_change(candidate_view, status="BLOCKED", reason_codes=policy.reason_codes)
-    if policy.status != LIVE_AUTHORITY_STATUS and (
+    if policy.status != LIVE_STATUS and (
         policy.can_initiate_trade or policy.can_increase_kelly or policy.can_flip_direction
     ):
         return _no_change(candidate_view, status="BLOCKED", reason_codes=("REPLACEMENT_REACTOR_POLICY_UNSUPPORTED",))
-    if switch_decision.status == SWITCH_SHADOW_ONLY:
-        return _no_change(candidate_view, status="SHADOW_ONLY", reason_codes=switch_decision.reason_codes)
-    if policy.status == SHADOW_ONLY_STATUS:
-        return _no_change(candidate_view, status="BLOCKED", reason_codes=("REPLACEMENT_REACTOR_SWITCH_POLICY_MISMATCH",))
-    if (
-        policy.status == SHADOW_VETO_ONLY_STATUS
-        and switch_decision.status == SWITCH_SHADOW_VETO_ONLY
-        and switch_decision.can_apply_veto
-        and policy.can_apply_veto
-    ):
-        mode = "SHADOW_VETO_ONLY"
-    elif (
-        policy.status == LIVE_AUTHORITY_STATUS
-        and switch_decision.status == SWITCH_LIVE_AUTHORITY
+    if not (
+        policy.status == LIVE_STATUS
+        and switch_decision.status == SWITCH_LIVE
         and switch_decision.can_initiate_trade
     ):
-        mode = "LIVE_AUTHORITY"
-    else:
         return _no_change(candidate_view, status="BLOCKED", reason_codes=("REPLACEMENT_REACTOR_POLICY_UNSUPPORTED",))
     if replacement_bundle is None or readiness is None:
         return _no_change(candidate_view, status="BLOCKED", reason_codes=("REPLACEMENT_REACTOR_HOOK_DEPENDENCY_MISSING",))
 
-    if mode == "LIVE_AUTHORITY":
-        # Authorization gates: a flip vs the baseline direction requires explicit
-        # flip authority; a Kelly increase requires explicit kelly authority.
-        if candidate_view.candidate_direction != candidate_view.baseline_direction and not policy.can_flip_direction:
-            return _no_change(
-                candidate_view,
-                status="BLOCKED",
-                reason_codes=("REPLACEMENT_REACTOR_DIRECTION_FLIP_NOT_AUTHORIZED",),
-            )
-        if candidate_view.candidate_kelly_fraction > candidate_view.baseline_kelly_fraction + 1e-15 and not policy.can_increase_kelly:
-            return _no_change(
-                candidate_view,
-                status="BLOCKED",
-                reason_codes=("REPLACEMENT_REACTOR_KELLY_INCREASE_NOT_AUTHORIZED",),
-            )
-        # FIX-3 (§0.5): re-assert DIRECTION LAW at the flip/consuming boundary.
-        # Do NOT trust the upstream candidate_direction string. Re-derive the
-        # lawful side from (candidate bin vs argmax(replacement.q)); if the claimed
-        # side disagrees, refuse the flip with the typed law-violation receipt.
-        lawful_direction = _lawful_direction_for_candidate(
-            candidate_view.candidate_direction, replacement_bundle
+    # Authorization gates: a flip vs the baseline direction requires explicit
+    # flip authority; a Kelly increase requires explicit kelly authority.
+    if candidate_view.candidate_direction != candidate_view.baseline_direction and not policy.can_flip_direction:
+        return _no_change(
+            candidate_view,
+            status="BLOCKED",
+            reason_codes=("REPLACEMENT_REACTOR_DIRECTION_FLIP_NOT_AUTHORIZED",),
         )
-        if lawful_direction is not None and lawful_direction != candidate_view.candidate_direction:
-            return _no_change(
-                candidate_view,
-                status="BLOCKED",
-                reason_codes=("REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION",),
-            )
-        decision_payload = _forecast_decision_payload(
-            replacement_bundle=replacement_bundle,
-            candidate=candidate_view,
-            status="LIVE_AUTHORITY",
-            reasons=("REPLACEMENT_LIVE_AUTHORITY_APPLIED",),
+    if candidate_view.candidate_kelly_fraction > candidate_view.baseline_kelly_fraction + 1e-15 and not policy.can_increase_kelly:
+        return _no_change(
+            candidate_view,
+            status="BLOCKED",
+            reason_codes=("REPLACEMENT_REACTOR_KELLY_INCREASE_NOT_AUTHORIZED",),
         )
-        live_receipt_provenance = build_replacement_forecast_receipt_provenance(
+    # FIX-3 (§0.5): re-assert DIRECTION LAW at the flip/consuming boundary.
+    # Do NOT trust the upstream candidate_direction string. Re-derive the
+    # lawful side from (candidate bin vs argmax(replacement.q)); if the claimed
+    # side disagrees, refuse the flip with the typed law-violation receipt.
+    lawful_direction = _lawful_direction_for_candidate(
+        candidate_view.candidate_direction, replacement_bundle
+    )
+    if lawful_direction is not None and lawful_direction != candidate_view.candidate_direction:
+        return _no_change(
+            candidate_view,
+            status="BLOCKED",
+            reason_codes=("REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION",),
+        )
+    decision_payload = _forecast_decision_payload(
+        replacement_bundle=replacement_bundle,
+        candidate=candidate_view,
+        status=REPLACEMENT_EXECUTION_LIVE_STATUS,
+        reasons=("REPLACEMENT_LIVE_APPLIED",),
+    )
+    live_receipt_provenance = _ExecutionLayerReceiptProvenance(
+        build_replacement_forecast_receipt_provenance(
             veto_decision=decision_payload,
             readiness=readiness,
             guardrail_report=guardrail_report,
         )
-        return ReplacementForecastReactorHookResult(
-            status="LIVE_AUTHORITY",
-            reason_codes=("REPLACEMENT_LIVE_AUTHORITY_APPLIED",),
-            effective_direction=candidate_view.candidate_direction,
-            effective_q_posterior=candidate_view.candidate_q_posterior,
-            effective_q_lcb=candidate_view.candidate_q_lcb,
-            effective_kelly_fraction=candidate_view.candidate_kelly_fraction,
-            receipt_provenance=live_receipt_provenance,
-        )
-
-    veto_decision = apply_replacement_forecast_shadow_veto(
-        replacement_bundle=replacement_bundle,
-        veto_input=ReplacementForecastVetoInput(
-            baseline_direction=candidate_view.baseline_direction,
-            baseline_q_posterior=candidate_view.baseline_q_posterior,
-            baseline_q_lcb=candidate_view.baseline_q_lcb,
-            baseline_kelly_fraction=candidate_view.baseline_kelly_fraction,
-            candidate_direction=candidate_view.candidate_direction,
-            candidate_q_posterior=candidate_view.candidate_q_posterior,
-            candidate_q_lcb=candidate_view.candidate_q_lcb,
-            candidate_kelly_fraction=candidate_view.candidate_kelly_fraction,
-            market_snapshot_id=candidate_view.market_snapshot_id,
-            condition_id=candidate_view.condition_id,
-            token_id=candidate_view.token_id,
-            decision_time=candidate_view.decision_time,
-        ),
-    )
-    receipt_provenance = build_replacement_forecast_receipt_provenance(
-        veto_decision=veto_decision,
-        readiness=readiness,
-        guardrail_report=guardrail_report,
     )
     return ReplacementForecastReactorHookResult(
-        status="SHADOW_VETO_ONLY",
-        reason_codes=veto_decision.reasons or policy.reason_codes,
-        effective_direction=veto_decision.allowed_direction,
-        effective_q_posterior=candidate_view.baseline_q_posterior,
-        effective_q_lcb=veto_decision.allowed_q_lcb,
-        effective_kelly_fraction=veto_decision.allowed_kelly_fraction,
-        veto_decision=veto_decision,
-        receipt_provenance=receipt_provenance,
+        status=REPLACEMENT_EXECUTION_LIVE_STATUS,
+        reason_codes=("REPLACEMENT_LIVE_APPLIED",),
+        effective_direction=candidate_view.candidate_direction,
+        effective_q_posterior=candidate_view.candidate_q_posterior,
+        effective_q_lcb=candidate_view.candidate_q_lcb,
+        effective_kelly_fraction=candidate_view.candidate_kelly_fraction,
+        receipt_provenance=live_receipt_provenance,
     )

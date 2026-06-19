@@ -61,12 +61,14 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `venus_sensing_report.py` | Venus sensing report, including daemon-independent source-contract watch |
 | `backfill_tigge_snapshot_p_raw.py` | Replay-compatible TIGGE `p_raw_json` materialization |
 | `watch_source_contract.py` | Polymarket settlement source-contract monitor, city quarantine writer, and conversion-history reporter |
+| `build_oof_qlcb_reliability_table.py` | Config writer: build generated OOF q_lcb reliability artifact from read-only forecasts DB plus offline forecast JSON (created 2026-06-18) |
 | `source_contract_auto_convert.py` | Cron-safe source-contract transition controller, deterministic date-scope planner, apply/evidence runner, quarantine release gate, receipt writer, and Discord reporter |
 | `arm_live_mode.sh` | Deprecated operator tool retained only for non-live execution cleanup checks; it must not be used to introduce runtime modes (created 2026-05-01) |
 | `install_hooks.sh` | Installs git pre-commit and related hook symlinks for fail-closed enforcement (ultrareview25 P0-2; created 2026-05-01) |
 | `check_dynamic_sql.py` | Enforcement scan for f-string SQL interpolations without whitelist; security review §10 antibody (created 2026-05-01) |
 | `check_identity_column_defaults.py` | Enforcement check for identity-column DEFAULT violations per INV-14 and SYNTHESIS K-D (created 2026-05-01) |
 | `check_invariant_test_citations.py` | Enforcement scan verifying all test files carry invariant citation headers per SYNTHESIS K-A two-ring rule (created 2026-05-01) |
+| `check_live_restart_preflight.py` | Read-only pre-restart diagnostic for process state, submit config, posterior freshness, pending-exit risk, and held-position belief coverage (created 2026-06-18) |
 | `migrate_observations_k1.py` | Repair script: migrates live state/zeus-world.db::observations from legacy single-atom to K1 dual-atom shape (dry-run/apply; created 2026-05-01) |
 | `_rebuild_calibration_pairs_parallel.py` | Compute-in-workers + write-in-main parallel orchestrator for rebuild_calibration_pairs; imported lazily when --workers>1 (created 2026-05-11) |
 | `authority_inventory.py` | Authority inventory v2 per task_2026-05-15_p9_authority_inventory SCAFFOLD; diagnostic report writer (created 2026-05-15) |
@@ -91,6 +93,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `live_health_monitor.sh` | Polls live_health_probe.py every 60s; emits one line per state change; runtime support (created 2026-05-11) |
 | `local_post_extract_chain.sh` | Local post-extract chain for TIGGE downloads; pairs with cloud_tigge_autochain.sh (created 2026-05-04) |
 | `maintenance_worker_install.py` | Installer for maintenance_worker daemon and rules; config_writer (created 2026-05-15) |
+| `init_replacement_forecast_live_schema.py` | Repair: initialize replacement forecast live-support schema on forecasts DB; dry-run unless `--commit` (created 2026-06-18) |
 | `migrate_ensemble_snapshots_add_ingest_backend.py` | Migration: add ingest_backend column to ensemble_snapshots per TIGGE_DOWNLOAD_SPEC_v3 §3 Phase 0 #5 (dry-run/apply; created 2026-05-07) |
 | `migrate_phase2_cycle_stratification.py` | Migration: Phase 2 cycle stratification per DESIGN_PHASE2_PLATT_CYCLE_STRATIFICATION (dry-run/apply; created 2026-05-14) |
 | `migrate_world_observations_to_forecasts.py` | Migration: move world observation rows to zeus-forecasts.db post K1 split per task_2026-05-14_k1_followups PLAN §2 P0 (dry-run/apply; created 2026-05-14) |
@@ -98,6 +101,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `operator_record_redeem.py` | Operator CLI: advance REDEEM_OPERATOR_REQUIRED rows; runtime support (created 2026-05-14) |
 | `pre-commit-capability-gate.sh` | Pre-commit enforcement gate for capability declarations; runs on staged changes (created 2026-05-06) |
 | `reevaluate_readiness_2026_05_07.py` | Repair: re-evaluate BLOCKED readiness rows post D1 bridge policy 2026-05-07 (dry-run/apply; created 2026-05-07) |
+| `repair_dust_exit_projection.py` | Repair dust pending-exit projections from existing canonical backoff evidence; no venue action (dry-run/apply; created 2026-06-18) |
 | `replay_correctness_gate.py` | Enforcement gate for replay correctness per IMPLEMENTATION_PLAN Phase 0.G + ADR-5 (created 2026-05-14) |
 | `repro_antibodies.py` | Antibody reproduction diagnostic; verifies antibody tests catch their target defect (created 2026-05-03) |
 | `ritual_signal_aggregate.py` | Aggregate ritual signal metrics per ANTI_DRIFT_CHARTER §3 M1; diagnostic_report_writer (created 2026-05-06) |

@@ -445,8 +445,13 @@ class TestRCAMonitorLowMetricContinuity:
         np.testing.assert_allclose(bootstrap["member_extrema"], mins)
         assert bootstrap["p_raw"][0] > 0.0
         assert posterior == pytest.approx(bootstrap["p_raw"][0])
-        assert "model_only_posterior" in applied
-        assert "alpha_posterior" in applied
+        assert "day0_observation_remaining_window" in applied
+        assert any(
+            item.startswith("belief_source=day0_observation_remaining_window")
+            for item in applied
+        )
+        assert "model_only_posterior" not in applied
+        assert "alpha_posterior" not in applied
 
 
 # ---------------------------------------------------------------------------

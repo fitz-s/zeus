@@ -1,17 +1,17 @@
 # Created: 2026-06-08
 # Last reused/audited: 2026-06-13
 # Authority basis: operator Point-1 directive 2026-06-08 — move BAYES_PRECISION_FUSION/replacement_0_1
-#   forecast PRODUCTION (raw-input download + light shadow materialization) OFF the
+#   forecast PRODUCTION (raw-input download + live materialization) OFF the
 #   live-trading daemon (src/main.py) INTO the forecast-live (data) daemon. The
-#   ~365MB AIFS ensemble download (~11.5 min) monopolized disk I/O on the trading
+#   large forecast downloads monopolized disk I/O on the trading
 #   process, starving the reactor + market_scanner and locking riskguard dependency
 #   reads -> DATA_DEGRADED flap that blocked all trades. The weeks-stable baseline
 #   ran forecast production in a SEPARATE daemon; this module restores that split.
 """Shared replacement-forecast PRODUCTION functions (raw-input download +
-light shadow materialization).
+live materialization).
 
-These 6 functions were moved VERBATIM out of ``src/main.py`` so the heavy AIFS
-ensemble download no longer runs inside the live-trading process. They are now
+These functions were moved out of ``src/main.py`` so heavy forecast downloads
+no longer run inside the live-trading process. They are now
 imported by BOTH ``src/main.py`` (for back-compat name resolution + the in-cycle
 runtime-flags read) AND ``src/ingest/forecast_live_daemon.py`` (which actually
 SCHEDULES the download + materialize jobs on the data daemon's lane).
@@ -83,11 +83,11 @@ def _replacement_forecast_runtime_flags_from_settings() -> dict[str, bool]:
     return {key: bool(flags.get(key, False)) for key in REQUIRED_FLAGS}
 
 
-def _replacement_forecast_shadow_materialization_queue_config() -> dict[str, object]:
+def _replacement_forecast_live_materialization_queue_config() -> dict[str, object]:
     from src.config import PROJECT_ROOT
 
-    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
-    base_dir = PROJECT_ROOT / "state" / "replacement_forecast_shadow"
+    cfg = _settings_section("replacement_forecast_live", {}) or {}
+    base_dir = PROJECT_ROOT / "state" / "replacement_forecast_live"
     raw_manifest_dir = cfg.get("raw_manifest_dir")
     forecast_db = cfg.get("forecast_db")
 
@@ -115,13 +115,19 @@ def _replacement_forecast_shadow_materialization_queue_config() -> dict[str, obj
         "download_limit": int(cfg.get("download_limit_per_cycle") or cfg.get("seed_discovery_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
         "download_release_lag_hours": float(cfg.get("download_release_lag_hours") or 14.0),
         "download_anchor_sigma_c": float(cfg.get("download_anchor_sigma_c") or 3.0),
-        "download_aifs_retries": int(cfg.get("download_aifs_retries") or 4),
     }
+
+
+def _replacement_forecast_live_materialization_enabled() -> bool:
+    from src.data.replacement_forecast_runtime_policy import LIVE_FLAG
+
+    flags = _replacement_forecast_runtime_flags_from_settings()
+    return bool(flags.get(LIVE_FLAG, False))
 
 
 # The two raw-artifact sources this downloader owns. The cycle high-water mark is the MIN over
 # BOTH of MAX(source_cycle_time): a half-downloaded cycle (one source lagging) is NOT current.
-_CURRENT_TARGET_ARTIFACT_SOURCE_IDS = ("ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km")
+_CURRENT_TARGET_ARTIFACT_SOURCE_IDS = ("openmeteo_ecmwf_ifs_9km",)
 
 
 def _max_downloaded_current_target_cycle(forecast_db: Path) -> datetime | None:
@@ -158,25 +164,22 @@ def _max_downloaded_current_target_cycle(forecast_db: Path) -> datetime | None:
 def _probe_resolved_available_cycle() -> datetime | None:
     """SINGLE run-selection authority for every production download lane (K4.0b(a)).
 
-    The fetchable cycle is whatever the providers' probes CONFIRM is published for BOTH
-    legs (AIFS open-data index + the anchor transport ladder incl. the S3 bucket) — never
+    The fetchable cycle is whatever the anchor provider probes CONFIRM is published — never
     a wall-clock − release-lag guess. The guessed clock asked for unpublished 12Z/18Z
     runs every night; the rung-2 meta guard refused them (correctly) and the refusal
     aborted the whole download→materialize cycle (2026-06-11 incident,
     logs/zeus-forecast-live.err: "provider declares run 06:00 but caller wants 18:00").
-    None = no pair-complete cycle provable right now → callers SKIP the tick with a
+    None = no anchor cycle provable right now → callers SKIP the tick with a
     receipt and retry next tick; they must never fall back to a guessed run.
     """
     from src.data.replacement_cycle_availability import (  # noqa: PLC0415
         newest_complete_cycle,
-        probe_aifs_cycle_available,
         probe_anchor_available_any,
-        resolve_cycle_leg_availability,
+        resolve_anchor_cycle_availability,
     )
 
-    availability = resolve_cycle_leg_availability(
+    availability = resolve_anchor_cycle_availability(
         datetime.now(timezone.utc),
-        probe_aifs=probe_aifs_cycle_available,
         probe_anchor=probe_anchor_available_any,
     )
     return newest_complete_cycle(availability)
@@ -190,7 +193,7 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
     if forecast_db is None or output_dir is None:
         raise ValueError("replacement current-target download requires forecast_db and raw_manifest_dir/download_output_dir")
     from scripts.download_replacement_forecast_current_targets import (
-        download_current_target_raw_inputs,
+        download_current_target_openmeteo_inputs,
     )
     from src.data.replacement_forecast_current_target_plan import (
         build_replacement_forecast_current_target_plan,
@@ -214,7 +217,7 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
     if available_cycle is None:
         return {
             "status": "CYCLE_PROBE_UNRESOLVED_SKIP",
-            "detail": "no pair-complete cycle provable by provider probes this tick; "
+        "detail": "no anchor cycle provable by provider probes this tick; "
             "retrying next tick — a guessed run is never requested",
         }
     downloaded_cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
@@ -228,11 +231,7 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
             "available_cycle": available_cycle.isoformat(),
             "downloaded_cycle": downloaded_cycle.isoformat(),
         }
-    if (
-        plan.missing_aifs_manifest_count <= 0
-        and plan.missing_openmeteo_manifest_count <= 0
-        and cycle_is_current
-    ):
+    if plan.missing_openmeteo_manifest_count <= 0 and cycle_is_current:
         return {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "coverage": plan.as_dict(),
@@ -240,17 +239,14 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
             "downloaded_cycle": downloaded_cycle.isoformat(),
         }
     cycle = available_cycle
-    return download_current_target_raw_inputs(
+    return download_current_target_openmeteo_inputs(
         forecast_db=Path(str(forecast_db)),
         output_dir=Path(str(output_dir)),
         cycle=cycle,
         limit=int(cfg.get("download_limit") or 10),
         write_db=True,
-        skip_aifs=False,
-        skip_openmeteo=False,
         release_lag_hours=release_lag_hours,
         anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
-        aifs_retries=int(cfg.get("download_aifs_retries") or 4),
         # CYCLE-CURRENCY (K-root instance #3): when this call fires because the available
         # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
         # needed for ALL current targets — coverage ("a posterior exists") must not filter
@@ -260,14 +256,15 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
 
 
 def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
-    """THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model SHADOW capture/accrual (CONTINUITY_AND_WIRING.md §4 step 2,
-    BAYES_PRECISION_FUSION_SPEC.md §6 F1). Gated by the NEW capture flag
+    """BAYES_PRECISION_FUSION multi-model live-input capture/accrual.
+
+    Gated by the capture flag
     ``settings['edli']['replacement_0_1_bayes_precision_fusion_capture_enabled']`` (default FALSE),
     SEPARATE from replacement_0_1_bayes_precision_fusion_enabled: when ON it downloads + persists the 8 extra
     OM models (single_runs FORWARD + previous_runs fixed-lead) into raw_model_forecasts on
     zeus-forecasts.db. It writes NOTHING into forecast_posteriors and touches NO posterior/q/
     center/spread/order -> the money path is byte-identical whether or not this runs. Forward,
-    daily, fail-soft (it NEVER raises into the shadow cycle). Returns None when the flag is OFF or
+    daily, fail-soft (it NEVER raises into the live materialization cycle). Returns None when the flag is OFF or
     there is no forecast_db / no targets."""
     try:
         if not bool(settings["edli"].get("replacement_0_1_bayes_precision_fusion_capture_enabled", False)):
@@ -291,7 +288,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
 
         release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
         # RUN-SELECTION AUTHORITY (2026-06-11): the capture cycle is the SAME probe-resolved
-        # pair-complete cycle the anchor/AIFS lanes fetch — fusion binds same-cycle rows, so
+        # anchor cycle the Open-Meteo lane fetches — fusion binds same-cycle rows, so
         # capture at a guessed (now − lag) cycle either targets an unpublished run (every
         # extras fetch 400s, high-water froze at 06-10T06Z, q_lcb stayed NULL on every fresh
         # posterior) or a stale one. Per-model publication gaps inside the cycle stay
@@ -332,8 +329,8 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
             targets=targets,
             release_lag_hours=release_lag_hours,
         )
-    except Exception as exc:  # noqa: BLE001 - fail-soft: shadow accrual never breaks the cycle
-        logger.warning("BAYES_PRECISION_FUSION extra-model shadow capture skipped (fail-soft): %s", exc)
+    except Exception as exc:  # noqa: BLE001 - fail-soft: extras accrual never breaks the cycle
+        logger.warning("BAYES_PRECISION_FUSION extra-model capture skipped (fail-soft): %s", exc)
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
@@ -480,7 +477,7 @@ def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = No
     fan-out while lead+1/lead+2 city scopes were still un-captured. Those scopes were then
     permanently stranded: the q-path (replacement_forecast_materializer.py:966-975 ->
     read_current_instrument_values) found no current single_runs row, returned None, and
-    q_shape fell back to the known-bad legacy aifs_member_votes_soft_anchor shape
+    q_shape fell back to the old non-fused posterior shape
     (EXTRAS_CURRENT_CYCLE_COMPLETE_SKIPPED fired 318×; lead+1 was 93% STALE). The new gate is
     coverage-aware (``_extras_coverage_missing``): incomplete iff a PLANNED scope's own
     single_runs is absent, so it keeps re-running until every planned lead's scopes land.
@@ -498,7 +495,7 @@ def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = No
          monotone bounded sequence -> finite re-runs. This distinguishes "not yet captured but
          servable -> re-run" (written>0 keeps healing) from "unservable -> complete-with-gap".
       B. CROSS-CYCLE ROLLOVER (makes complete-with-gap safe). The probe is keyed to
-         ``_probe_resolved_available_cycle()`` — the newest PAIR-COMPLETE cycle on the fixed
+         ``_probe_resolved_available_cycle()`` — the newest anchor-complete cycle on the fixed
          00/06/12/18Z grid (replacement_cycle_availability.py:47), monotone in publish order.
          Within ~6h the next cycle publishes, the probe advances to C', the latch (keyed on C's
          ISO) goes stale, and C' is healed from scratch. A permanently-unservable scope thus
@@ -543,12 +540,10 @@ def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = No
 
 
 def _per_leg_downloaded_cycle(forecast_db: Path, source_id: str) -> datetime | None:
-    """Per-leg high-water mark of downloaded raw-input cycles (None = unknown → fetch).
+    """Per-source high-water mark of downloaded raw-input cycles (None = unknown → fetch).
 
-    Same fail-open contract as _max_downloaded_current_target_cycle, but for ONE leg, so
-    the availability poll can complete a cycle leg-by-leg as the provider publishes
-    (2026-06-10 incident: AIFS 12Z published hours before the open-meteo 12Z anchor;
-    the one-shot whole-cycle download could only fail the pair together)."""
+    Same fail-open contract as _max_downloaded_current_target_cycle, but scoped to the
+    live OpenMeteo anchor source."""
     from src.state.db import _connect  # noqa: PLC0415
 
     try:
@@ -573,13 +568,12 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     need, no guessed numbers — K4.0b(a) availability-poll organ).
 
     Every poll tick:
-      1. Resolve per-leg published state of the recent cycles by PROBING the providers
+      1. Resolve anchor published state of the recent cycles by PROBING the provider
          (src/data/replacement_cycle_availability.py). The release-lag constant takes NO
          part in this decision; it remains only the legacy cron's backstop schedule.
-      2. Fetch any published leg the journal does not yet hold, newest cycle first —
-         per leg, so one provider lagging (the 12Z-anchor case) never delays the other.
-    Idempotent: per-leg high-water marks short-circuit; the underlying downloader also
-    skips already-present manifests. Fail-soft per leg: a failed leg is retried on the
+      2. Fetch the published anchor cycle when the journal does not yet hold it.
+    Idempotent: source high-water marks short-circuit; the underlying downloader also
+    skips already-present manifests. Fail-soft: a failed anchor fetch is retried on the
     next tick. Returns a compact report dict (None when the feature flag is off)."""
     if not bool(cfg.get("download_current_targets_enabled", False)):
         return None
@@ -588,32 +582,22 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     if forecast_db is None or output_dir is None:
         return None
     from scripts.download_replacement_forecast_current_targets import (  # noqa: PLC0415
-        download_current_target_raw_inputs,
+        download_current_target_openmeteo_inputs,
     )
     from src.data.replacement_cycle_availability import (  # noqa: PLC0415
         newest_complete_cycle,
-        probe_aifs_cycle_available,
         probe_anchor_available_any,
-        resolve_cycle_leg_availability,
+        resolve_anchor_cycle_availability,
     )
 
     now = datetime.now(timezone.utc)
-    availability = resolve_cycle_leg_availability(
+    availability = resolve_anchor_cycle_availability(
         now,
-        probe_aifs=probe_aifs_cycle_available,
         probe_anchor=probe_anchor_available_any,
     )
-    aifs_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "ecmwf_aifs_ens")
     anchor_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "openmeteo_ecmwf_ifs_9km")
-    newest_aifs_published = next((a.cycle for a in availability if a.aifs_available), None)
     newest_anchor_published = next((a.cycle for a in availability if a.anchor_available), None)
 
-    fetch_aifs_cycle = (
-        newest_aifs_published
-        if newest_aifs_published is not None
-        and (aifs_have is None or newest_aifs_published > aifs_have)
-        else None
-    )
     fetch_anchor_cycle = (
         newest_anchor_published
         if newest_anchor_published is not None
@@ -623,44 +607,38 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     report: dict[str, object] = {
         "status": "AVAILABILITY_POLL",
         "now": now.isoformat(),
-        "newest_aifs_published": newest_aifs_published.isoformat() if newest_aifs_published else None,
         "newest_anchor_published": newest_anchor_published.isoformat() if newest_anchor_published else None,
         "newest_complete_published": (
             newest_complete_cycle(availability).isoformat()
             if newest_complete_cycle(availability)
             else None
         ),
-        "aifs_downloaded_cycle": aifs_have.isoformat() if aifs_have else None,
         "anchor_downloaded_cycle": anchor_have.isoformat() if anchor_have else None,
         "legs_fetched": [],
     }
-    if fetch_aifs_cycle is None and fetch_anchor_cycle is None:
+    if fetch_anchor_cycle is None:
         # Legs current — but do NOT return yet: the extras lane below must still run.
         # Leg currency does not imply the same-cycle multimodel extras exist (2026-06-11:
         # legs poll-fetched at 00Z while every extras row sat unfetched → q_lcb NULL).
         report["status"] = "AVAILABILITY_POLL_CURRENT"
-    for leg, cycle, skip_aifs, skip_openmeteo in (
-        ("aifs", fetch_aifs_cycle, False, True),
-        ("anchor", fetch_anchor_cycle, True, False),
+    for leg, cycle in (
+        ("anchor", fetch_anchor_cycle),
     ):
         if cycle is None:
             continue
         try:
-            download_current_target_raw_inputs(
+            download_current_target_openmeteo_inputs(
                 forecast_db=Path(str(forecast_db)),
                 output_dir=Path(str(output_dir)),
                 cycle=cycle,
                 limit=int(cfg.get("download_limit") or 10),
                 write_db=True,
-                skip_aifs=skip_aifs,
-                skip_openmeteo=skip_openmeteo,
                 release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
                 anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
-                aifs_retries=int(cfg.get("download_aifs_retries") or 4),
                 include_covered=True,
             )
             report["legs_fetched"].append({"leg": leg, "cycle": cycle.isoformat()})  # type: ignore[union-attr]
-        except Exception as exc:  # noqa: BLE001 — per-leg fail-soft; next tick retries
+        except Exception as exc:  # noqa: BLE001 — anchor fail-soft; next tick retries
             logger.warning(
                 "availability-poll %s leg fetch failed for cycle %s (retry next tick): %s",
                 leg,
@@ -673,14 +651,14 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     # The bayes_precision_fusion extras ride the SAME probe-driven tick (run-selection
     # single authority): fusion needs same-cycle multimodel rows to produce q_lcb, and the
     # lag-modeled cron (next fire hours away) left q_lcb NULL long after the probe poll had
-    # already fetched the anchor/AIFS legs (2026-06-11: 00Z posteriors materialized with
+    # already fetched the anchor leg (2026-06-11: 00Z posteriors materialized with
     # q_lcb NULL = honest no-edge = no orders, while every extras row sat unfetched).
     # Idempotent per persisted (model, city, target, metric, cycle, endpoint) row;
     # flag-gated + fail-soft inside — it never breaks the poll.
     #
     # R4b (2026-06-13): gate the extras fan-out so the 5-min poll does NOT re-drive the full
-    # download on every tick. The extras are only needed when (a) a new cycle leg was actually
-    # fetched this tick (fetch_aifs_cycle or fetch_anchor_cycle is not None), OR (b) the
+    # download on every tick. The extras are only needed when (a) a new anchor cycle was actually
+    # fetched this tick, OR (b) the
     # current-cycle's extras are COVERAGE-incomplete (per-(city,metric,target_date) probe, fix
     # 2026-06-16 — was a coverage-blind flat row-count that stranded lead+1/+2 scopes).
     # When every planned scope is captured (or the residual is a proven unservable-this-cycle
@@ -692,7 +670,7 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     # fan-out re-resolves internally for its OWN target build; momentary disagreement costs at
     # most one benign extra pass and self-corrects next tick.
     _extras_cycle = _probe_resolved_available_cycle()
-    _fresh_leg_fetched = (fetch_aifs_cycle is not None or fetch_anchor_cycle is not None)
+    _fresh_leg_fetched = fetch_anchor_cycle is not None
     _should_run_extras = _fresh_leg_fetched or _extras_cycle_incomplete(cfg, _extras_cycle)
     if _should_run_extras:
         bayes_precision_fusion_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
@@ -735,7 +713,7 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
             }
     # U5 step 2a — NEWER-CYCLE re-materialization TRIGGER (sister of the fusion-upgrade trigger).
     # This availability-poll lane already KNOWS the moment a fresher cycle's raw legs land (the
-    # per-leg fetches above), so the cycle-advance re-seed rides the SAME tick (operator law:
+    # anchor fetch above), so the cycle-advance re-seed rides the SAME tick (operator law:
     # 下载有自己的daemon — no new daemon, no parallel materialization path). It enqueues ONE seed per
     # active-window family whose latest posterior consumed a STRICTLY older cycle than the freshest
     # materializable one, HELD positions first, idempotent per (scope, target-cycle). Fail-soft.
@@ -821,10 +799,9 @@ def _enqueue_cycle_advance_reseeds_if_needed(cfg: dict[str, object]) -> dict[str
 def _anchor_meta_stamp_cross_check() -> None:
     """Hourly: re-verify meta-stamped anchor artifacts against single-runs once the same
     run is served there (K4.0b(f) belt-and-suspenders; MISMATCH ⇒ ERROR + receipt)."""
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+    if not _replacement_forecast_live_materialization_enabled():
         return
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    cfg = _replacement_forecast_live_materialization_queue_config()
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
         return
@@ -850,10 +827,9 @@ def _replacement_cycle_availability_poll() -> None:
     """Interval job: probe provider publication state and fetch fresh raw-input legs the
     moment they exist — BEFORE the engine needs them (operator directive 2026-06-11).
     Runs on the download lane; never blocks the 5-min materialize cycle."""
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+    if not _replacement_forecast_live_materialization_enabled():
         return
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    cfg = _replacement_forecast_live_materialization_queue_config()
     report = _replacement_cycle_availability_poll_if_needed(cfg)
     if report is None:
         return
@@ -867,9 +843,8 @@ def _replacement_cycle_availability_poll() -> None:
 def _replacement_forecast_download_cycle() -> None:
     """Proactive raw-input PRE-FETCH for the BAYES_PRECISION_FUSION/replacement soft-anchor forecast.
 
-    Operator directive 2026-06-08 (WIRING FIX): the 150-300MB AIFS-ensemble +
-    OpenMeteo raw-input downloads MUST NOT run inside the 5-min seed->materialize
-    cycle. At ~500kB/s a single AIFS-ensemble fetch takes 5-10 min, so when it ran
+    Operator directive 2026-06-08 (WIRING FIX): forecast raw-input downloads
+    MUST NOT run inside the 5-min seed->materialize cycle. When large downloads ran
     inline the materialize job overran its 5-min interval and apscheduler SKIPPED
     every subsequent cycle ("maximum number of running instances reached") — seeds
     never got produced and readiness went permanently stale. Raw inputs are DATA
@@ -879,10 +854,9 @@ def _replacement_forecast_download_cycle() -> None:
     Runs on the default executor (20-worker pool) on its own long interval, so it
     overlaps the fast materialize cycle on a separate thread without blocking it.
     Fail-soft and idempotent (skips already-downloaded manifests)."""
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+    if not _replacement_forecast_live_materialization_enabled():
         return
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    cfg = _replacement_forecast_live_materialization_queue_config()
     download_report = _download_replacement_forecast_current_targets_if_needed(cfg)
     if download_report is not None:
         _dl_status = download_report.get("status")
@@ -904,17 +878,17 @@ def _replacement_forecast_download_cycle() -> None:
             logger.info(
                 "replacement forecast current-target download report: %s", download_report
             )
-    # THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model SHADOW capture/accrual (forward + fixed-lead), gated by the
+    # THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model capture/accrual (forward + fixed-lead), gated by the
     # SEPARATE replacement_0_1_bayes_precision_fusion_capture_enabled flag. Pure side-effect on
     # raw_model_forecasts (zeus-forecasts.db); NO posterior/q/order effect. Fail-soft.
     bayes_precision_fusion_capture_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
     if bayes_precision_fusion_capture_report is not None and bayes_precision_fusion_capture_report.get("status") not in {
         "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",
     }:
-        logger.info("BAYES_PRECISION_FUSION extra-model shadow capture report: %s", bayes_precision_fusion_capture_report)
+        logger.info("BAYES_PRECISION_FUSION extra-model diagnostic capture report: %s", bayes_precision_fusion_capture_report)
     # SILENT-DEATH SURFACING (2026-06-09): if the extras sub-step fails or is
     # fail-soft skipped, the parent download job still shows OK in scheduler
-    # health (only AIFS/IFS9 success is tracked by the @_scheduler_job wrapper).
+    # health (only the parent download wrapper is tracked by the @_scheduler_job wrapper).
     # Write a distinct component entry so logs/scheduler_jobs_health.json shows
     # the degradation and an operator/alert can detect multi-day extras outages.
     if bayes_precision_fusion_capture_report is not None:
@@ -931,19 +905,18 @@ def _replacement_forecast_download_cycle() -> None:
             _wsh("bayes_precision_fusion_capture", failed=False)
 
 
-@_scheduler_job("replacement_forecast_shadow_materialize")
-def _replacement_forecast_shadow_materialize_cycle() -> None:
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+@_scheduler_job("replacement_forecast_live_materialize")
+def _replacement_forecast_live_materialize_cycle() -> None:
+    if not _replacement_forecast_live_materialization_enabled():
         return
-    from src.data.replacement_forecast_shadow_materialization_queue import (
-        process_replacement_forecast_shadow_materialization_queue,
+    from src.data.replacement_forecast_live_materialization_queue import (
+        process_replacement_forecast_live_materialization_queue,
     )
 
     # Raw-input download is now a SEPARATE job (_replacement_forecast_download_cycle)
     # so it can never block this seed->materialize cycle (see that function's note).
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
-    report = process_replacement_forecast_shadow_materialization_queue(
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    report = process_replacement_forecast_live_materialization_queue(
         request_dir=cfg["request_dir"],
         processed_dir=cfg["processed_dir"],
         failed_dir=cfg["failed_dir"],
@@ -957,6 +930,6 @@ def _replacement_forecast_shadow_materialize_cycle() -> None:
         limit=int(cfg["limit"]),
     )
     if report.failed_count:
-        logger.warning("replacement forecast shadow materialization queue failures: %s", report.as_dict())
+        logger.warning("replacement forecast live materialization queue failures: %s", report.as_dict())
     elif report.processed_count:
-        logger.info("replacement forecast shadow materialization queue processed: %s", report.as_dict())
+        logger.info("replacement forecast live materialization queue processed: %s", report.as_dict())

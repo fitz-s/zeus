@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 PRODUCT_IDENTITY_COLUMNS = {
     "source_id",
@@ -50,7 +50,7 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 def test_raw_model_forecasts_has_all_product_identity_columns() -> None:
     conn = sqlite3.connect(":memory:")
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     cols = _columns(conn, "raw_model_forecasts")
     missing = PRODUCT_IDENTITY_COLUMNS - cols
     assert not missing, f"raw_model_forecasts missing product-identity columns: {sorted(missing)}"
@@ -59,7 +59,7 @@ def test_raw_model_forecasts_has_all_product_identity_columns() -> None:
 def test_legacy_value_columns_preserved() -> None:
     """The extension is additive — the original capture columns survive (no DROP)."""
     conn = sqlite3.connect(":memory:")
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     cols = _columns(conn, "raw_model_forecasts")
     for legacy in (
         "model", "city", "target_date", "metric", "source_cycle_time",
@@ -73,7 +73,7 @@ def test_raw_sha256_and_artifact_id_are_nullable() -> None:
     """raw_sha256 and artifact_id are nullable per the brief (capture may precede artifact
     persistence). Inserting a row WITHOUT them must succeed."""
     conn = sqlite3.connect(":memory:")
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     conn.execute(
         """
         INSERT INTO raw_model_forecasts

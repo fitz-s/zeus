@@ -29,8 +29,14 @@ from types import SimpleNamespace
 from typing import Callable, Optional
 
 from src.execution.collateral import check_sell_collateral
+from src.state.collateral_ledger import CollateralInsufficient
 from src.observability.counters import increment as _cnt_inc
-from src.execution.executor import OrderResult, create_exit_order_intent, execute_exit_order
+from src.execution.executor import (
+    OrderResult,
+    create_exit_order_intent,
+    execute_exit_order,
+    _refresh_exit_collateral_snapshot_for_submit,
+)
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     enter_pending_exit_runtime_state,
@@ -46,6 +52,22 @@ from src.state.portfolio import (
 )
 
 logger = logging.getLogger(__name__)
+
+_PENDING_EXIT_SCAN_INACTIVE_STATES = frozenset(
+    {
+        "settled",
+        "voided",
+        "admin_closed",
+        "quarantined",
+        "economically_closed",
+        "closed",
+    }
+)
+
+
+def _runtime_state_value(position: Position) -> str:
+    raw_state = getattr(position, "state", "")
+    return str(getattr(raw_state, "value", raw_state) or "").strip().lower()
 
 
 def _venue_order_payload(value: object | None) -> dict | None:
@@ -132,6 +154,7 @@ def _emit_typed_realized_fill(
 
 MAX_EXIT_RETRIES = 10
 DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes between retries
+PENDING_EXIT_REPRICE_MIN_TICKS = 2
 
 EXIT_EVENT_VOCABULARY = (
     "EXIT_INTENT",
@@ -216,6 +239,21 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _commit_before_exit_venue_io(conn: sqlite3.Connection | None, *, stage: str) -> None:
+    """Release trade DB writes before live cancel/sell HTTP calls."""
+
+    if conn is None:
+        return
+    try:
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "exit lifecycle commit before venue I/O failed at %s: %s",
+            stage,
+            exc,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +537,34 @@ def _mark_pending_exit(position: Position) -> None:
     )
 
 
+def mark_market_closed_awaiting_settlement(
+    position: Position,
+    *,
+    reason: str = "MARKET_CLOSED_AWAITING_SETTLEMENT",
+    error: str = "market_closed_non_accepting_orders",
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """Stop live exit retry for a market that can no longer accept orders.
+
+    Once the market is closed, quote freshness is no longer a solvable exit
+    precondition. The position must remain in the settlement lane instead of
+    re-entering stale-price retry loops.
+    """
+
+    _mark_pending_exit(position)
+    position.exit_state = "backoff_exhausted"
+    position.next_exit_retry_at = ""
+    position.exit_reason = reason
+    position.last_exit_error = error[:500]
+    _dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=reason,
+        error=error,
+        event_type="EXIT_ORDER_REJECTED",
+    )
+
+
 def _release_pending_exit(position: Position) -> None:
     if position.state == "pending_exit":
         position.state = release_pending_exit_runtime_state(
@@ -691,6 +757,8 @@ def is_exit_cooldown_active(position: Position) -> bool:
 # Authority basis: Fix A — ghost pending_exit chain-truth sync
 
 _CTF_BALANCE_OF_SELECTOR = "0x00fdd58e"  # balanceOf(address,uint256) keccak256[:4]
+_CTF_SCALE = Decimal("1000000")
+_CHAIN_BALANCE_DUST_SHARES = Decimal("0.01")
 
 
 def _abi_encode_balance_of(owner: str, token_id: str) -> str:
@@ -750,6 +818,127 @@ def _query_ctf_balance(
         return None
 
 
+def _ctf_units_to_shares(raw_units: int | str | Decimal) -> Decimal:
+    """Convert raw ERC-1155 CTF units to Polymarket share units."""
+
+    return Decimal(str(raw_units)) / _CTF_SCALE
+
+
+def _decimal_to_float(value: Decimal) -> float:
+    return float(value)
+
+
+def _sync_position_to_chain_dust(
+    position: Position,
+    *,
+    chain_balance_units: int,
+    chain_balance_shares: Decimal,
+    asset_id: str,
+) -> tuple[float | None, bool]:
+    """Shrink a pending-exit dust hold to the actual CTF balance.
+
+    Chain truth is still positive, so the position must remain pending_exit,
+    but local exposure must not continue to show the pre-exit size.
+    """
+
+    old_shares = _positive_decimal(getattr(position, "shares", None))
+    if old_shares is None:
+        old_shares = _positive_decimal(getattr(position, "effective_shares", None))
+    old_chain_shares = _positive_decimal(getattr(position, "chain_shares", None))
+    local_shares_before = float(old_shares) if old_shares is not None else None
+
+    changed = old_shares != chain_balance_shares or old_chain_shares != chain_balance_shares
+    ratio = Decimal("0")
+    if old_shares is not None and old_shares > 0:
+        ratio = chain_balance_shares / old_shares
+
+    for field_name in ("cost_basis_usd", "size_usd", "filled_cost_basis_usd"):
+        old_value = _positive_decimal(getattr(position, field_name, None))
+        if old_value is None:
+            continue
+        new_value = old_value * ratio if ratio > 0 else Decimal("0")
+        if old_value != new_value:
+            setattr(position, field_name, _decimal_to_float(new_value))
+            changed = True
+
+    entry_price = _positive_decimal(getattr(position, "entry_price", None))
+    if entry_price is not None:
+        chain_cost_basis = chain_balance_shares * entry_price
+        if _positive_decimal(getattr(position, "chain_cost_basis_usd", None)) != chain_cost_basis:
+            position.chain_cost_basis_usd = _decimal_to_float(chain_cost_basis)
+            changed = True
+        if _positive_decimal(getattr(position, "chain_avg_price", None)) != entry_price:
+            position.chain_avg_price = _decimal_to_float(entry_price)
+            changed = True
+
+    dust_shares_float = _decimal_to_float(chain_balance_shares)
+    if getattr(position, "shares", None) != dust_shares_float:
+        position.shares = dust_shares_float
+        changed = True
+    if getattr(position, "chain_shares", None) != dust_shares_float:
+        position.chain_shares = dust_shares_float
+        changed = True
+    position.chain_state = "exit_pending_missing"
+    position.chain_verified_at = datetime.now(timezone.utc).isoformat()
+    position.last_exit_error = (
+        f"chain_balance_units={chain_balance_units};"
+        f"chain_balance_shares={chain_balance_shares};asset_id={asset_id}"
+    )[:500]
+    return local_shares_before, changed
+
+
+def _write_chain_dust_projection_correction(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    local_shares_before: float | None,
+    chain_balance_units: int,
+    chain_balance_shares: Decimal,
+    asset_id: str,
+) -> bool:
+    """Write a no-op-phase chain correction when dust event already exists."""
+
+    if conn is None:
+        return False
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        return False
+    try:
+        from src.engine.lifecycle_events import build_chain_size_corrected_canonical_write
+        from src.state.db import append_many_and_project
+
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        events, projection = build_chain_size_corrected_canonical_write(
+            position,
+            local_shares_before=local_shares_before or 0.0,
+            sequence_no=sequence_no,
+            phase_after="pending_exit",
+            source_module="src.execution.exit_lifecycle",
+        )
+        event = events[0]
+        event["caused_by"] = "chain_dust_projection_corrected"
+        payload = json.loads(str(event.get("payload_json") or "{}"))
+        payload.update(
+            {
+                "source": "exit_lifecycle",
+                "reason": "chain_dust_projection_corrected",
+                "chain_balance_units": chain_balance_units,
+                "chain_balance_shares": str(chain_balance_shares),
+                "asset_id": asset_id,
+            }
+        )
+        event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
+        append_many_and_project(conn, events, projection)
+        return True
+    except Exception as exc:  # noqa: BLE001 - fail closed to in-memory dust hold
+        logger.warning(
+            "chain dust projection correction failed for %s: %s",
+            trade_id,
+            exc,
+        )
+        return False
+
+
 def _asset_id_for_position(position: Position) -> str:
     """Return the ERC-1155 token ID (asset_id) the position holds."""
     if getattr(position, "direction", "") == "buy_yes":
@@ -801,6 +990,7 @@ def handle_exit_pending_missing(
             asset_id, safe_address, rpc_call=rpc_call
         )
         if on_chain_balance is not None:
+            chain_balance_shares = _ctf_units_to_shares(on_chain_balance)
             if on_chain_balance == 0:
                 # Chain confirms zero balance: position is closed. Void it.
                 logger.info(
@@ -809,18 +999,47 @@ def handle_exit_pending_missing(
                     asset_id,
                 )
                 return _void_chain_confirmed_zero(portfolio, position, asset_id, conn)
+            if chain_balance_shares <= _CHAIN_BALANCE_DUST_SHARES:
+                dust_reason = "EXIT_CHAIN_DUST_STILL_HELD"
+                dust_error = (
+                    f"chain_balance_units={on_chain_balance};"
+                    f"chain_balance_shares={chain_balance_shares};asset_id={asset_id}"
+                )
+                logger.info(
+                    "CHAIN_TRUTH_DUST_HOLD %s: on-chain balance=%s units "
+                    "(%s shares) for asset_id=%s → hold to settlement",
+                    position.trade_id,
+                    on_chain_balance,
+                    chain_balance_shares,
+                    asset_id,
+                )
+                _mark_exit_dust_hold(
+                    position,
+                    reason=dust_reason,
+                    error=dust_error,
+                    conn=conn,
+                    chain_balance_units=int(on_chain_balance),
+                    chain_balance_shares=chain_balance_shares,
+                    asset_id=asset_id,
+                )
+                return {"action": "dust_hold", "position": position}
             else:
                 # Position still held on-chain. Re-queue for sell retry.
                 logger.info(
-                    "CHAIN_TRUTH_RETRY %s: on-chain balance=%s for asset_id=%s → retry exit",
+                    "CHAIN_TRUTH_RETRY %s: on-chain balance=%s units "
+                    "(%s shares) for asset_id=%s → retry exit",
                     position.trade_id,
                     on_chain_balance,
+                    chain_balance_shares,
                     asset_id,
                 )
                 _mark_exit_retry(
                     position,
                     reason="EXIT_CHAIN_MISSING_STILL_HELD",
-                    error=f"chain_balance={on_chain_balance};asset_id={asset_id}",
+                    error=(
+                        f"chain_balance_units={on_chain_balance};"
+                        f"chain_balance_shares={chain_balance_shares};asset_id={asset_id}"
+                    ),
                     conn=conn,
                 )
                 return {"action": "retry", "position": position}
@@ -955,22 +1174,105 @@ def _is_below_min_order_sell_error(error: str) -> bool:
     return "below" in text and "min_order_size" in text
 
 
+def _dust_hold_event_already_recorded(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    reason: str,
+) -> bool:
+    """Return True when this dust hold was already durably recorded.
+
+    The latest position event may be a later chain-size correction, fill check,
+    or status pulse.  Looking only at the newest EXIT_ORDER_REJECTED lets the
+    same dust hold append again after any intervening event, which is exactly
+    what makes a 0.01-share residue look like a live retry loop after restart.
+    """
+    if conn is None:
+        return False
+    try:
+        rows = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_REJECTED'
+               AND json_extract(payload_json, '$.status') = 'backoff_exhausted'
+               AND json_extract(payload_json, '$.exit_reason') = ?
+             ORDER BY sequence_no DESC
+             LIMIT 20
+            """,
+            (position.trade_id, str(reason or "")),
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    if not rows:
+        return False
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if (
+            str(payload.get("status") or "") == "backoff_exhausted"
+            and str(payload.get("exit_reason") or "") == str(reason or "")
+        ):
+            return True
+    return False
+
+
 def _mark_exit_dust_hold(
     position: Position,
     reason: str,
     error: str = "",
     conn: sqlite3.Connection | None = None,
+    chain_balance_units: int | None = None,
+    chain_balance_shares: Decimal | None = None,
+    asset_id: str = "",
 ) -> None:
     """Hold a non-executable dust exit to settlement instead of retrying."""
+    normalized_error = (error or "below_min_order_size")[:500]
+    local_shares_before: float | None = None
+    projection_changed = False
+    if chain_balance_units is not None and chain_balance_shares is not None:
+        local_shares_before, projection_changed = _sync_position_to_chain_dust(
+            position,
+            chain_balance_units=chain_balance_units,
+            chain_balance_shares=chain_balance_shares,
+            asset_id=asset_id,
+        )
+        normalized_error = (getattr(position, "last_exit_error", "") or normalized_error)[:500]
+    already_held = (
+        str(getattr(position, "exit_state", "") or "") == "backoff_exhausted"
+        and str(getattr(position, "exit_reason", "") or "") == str(reason or "")
+    )
     _mark_pending_exit(position)
+    old_order_status = str(getattr(position, "order_status", "") or "")
     position.exit_state = "backoff_exhausted"
+    position.order_status = "backoff_exhausted"
+    if old_order_status != "backoff_exhausted":
+        projection_changed = True
     position.next_exit_retry_at = ""
-    position.last_exit_error = (error or "below_min_order_size")[:500]
+    position.exit_reason = reason
+    position.last_exit_error = normalized_error
+    event_already_recorded = _dust_hold_event_already_recorded(conn, position, reason=reason)
+    if already_held or event_already_recorded:
+        if projection_changed and event_already_recorded:
+            _write_chain_dust_projection_correction(
+                conn,
+                position,
+                local_shares_before=local_shares_before,
+                chain_balance_units=chain_balance_units or 0,
+                chain_balance_shares=chain_balance_shares or Decimal("0"),
+                asset_id=asset_id,
+            )
+        return
     _dual_write_canonical_pending_exit_if_available(
         conn,
         position,
         reason=reason,
-        error=error or "below_min_order_size",
+        error=normalized_error,
         event_type="EXIT_ORDER_REJECTED",
     )
     logger.warning(
@@ -1114,6 +1416,10 @@ def execute_exit(
     Live mode: place sell order, check fill, retry on failure.
     NEVER close a live position without confirmed fill.
     """
+    is_red_force_exit = (
+        getattr(position, "exit_reason", "") == "red_force_exit"
+        or str(exit_context.exit_reason or "").upper() == "RED_FORCE_EXIT"
+    )
     # PR-S1 Bug #3: block SELL for tokens with unresolved aggregate violations.
     _eff_token_id = (
         position.token_id if getattr(position, "direction", "") == "buy_yes"
@@ -1135,6 +1441,10 @@ def execute_exit(
         retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
         _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price", conn=conn)
         return "exit_blocked: incomplete_context"
+    if not is_red_force_exit and not exit_context.current_market_price_is_fresh:
+        retry_reason = f"{exit_context.exit_reason or 'EXIT'} [STALE_MARKET_PRICE]"
+        _mark_exit_retry(position, reason=retry_reason, error="stale_current_market_price", conn=conn)
+        return "exit_blocked: stale_market_price"
 
     exit_intent = exit_intent or build_exit_intent(position, exit_context)
     _validate_exit_intent(position, exit_context, exit_intent)
@@ -1171,6 +1481,7 @@ def _execute_live_exit(
             reason=exit_intent.reason,
             error="",
         )
+        _commit_before_exit_venue_io(conn, stage="exit_intent")
 
     token_id = exit_intent.token_id
     if not token_id:
@@ -1213,12 +1524,37 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=dust_reason, error=dust_error)
         return f"sell_blocked_dust: {dust_error}"
 
+    if conn is not None:
+        try:
+            _refresh_exit_collateral_snapshot_for_submit(conn)
+        except CollateralInsufficient as exc:
+            collateral_reason = str(exc)
+            retry_reason = f"{exit_context.exit_reason} [COLLATERAL_REFRESH: {collateral_reason}]"
+            _mark_exit_retry(
+                position,
+                reason=retry_reason,
+                error=collateral_reason,
+                conn=conn,
+            )
+            if conn is not None:
+                log_pending_exit_recovery_event(
+                    conn,
+                    position,
+                    event_type="EXIT_ORDER_REJECTED",
+                    reason=retry_reason,
+                    error=collateral_reason,
+                )
+                log_exit_retry_event(conn, position, reason=retry_reason, error=collateral_reason)
+            return f"collateral_blocked: {collateral_reason}"
+        _commit_before_exit_venue_io(conn, stage="collateral_refresh")
+
     # Pre-sell collateral check (fail-closed)
     can_sell, collateral_reason = check_sell_collateral(
         position.entry_price,
         position.effective_shares,
         clob,
         token_id=token_id,
+        conn=conn,
     )
     if not can_sell:
         retry_reason = f"{exit_context.exit_reason} [COLLATERAL: {collateral_reason}]"
@@ -1328,6 +1664,7 @@ def _execute_live_exit(
         error="",
         event_type="EXIT_INTENT",
     )
+    _commit_before_exit_venue_io(conn, stage="exit_intent")
 
     try:
         raw_sell_result = place_sell_order(
@@ -2052,6 +2389,74 @@ def _log_partial_exit_execution_fact(
     )
 
 
+def _dual_write_partial_exit_projection_if_available(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    filled_shares: float,
+    remaining_shares: float,
+    fill_price: float,
+    order_id: str,
+    status: str,
+) -> bool:
+    """Persist the reduced open exposure after a partial exit fill."""
+
+    if conn is None:
+        return False
+    try:
+        import json as _json
+
+        from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+        from src.state.db import append_many_and_project
+
+        trade_id = str(getattr(position, "trade_id", "") or "")
+        if not trade_id:
+            return False
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        occurred_at = _utcnow().isoformat()
+        if not str(getattr(position, "last_monitor_at", "") or "").strip():
+            position.last_monitor_at = occurred_at
+        env = str(getattr(position, "env", "") or "live")
+        if env not in {"live", "test", "replay", "backtest"}:
+            position.env = "live"
+        events, projection = build_monitor_refreshed_canonical_write(
+            position,
+            sequence_no=sequence_no,
+            phase_after="pending_exit",
+            source_module="src.execution.exit_lifecycle",
+        )
+        if not events:
+            return False
+        event = dict(events[0])
+        payload = _json.loads(str(event.get("payload_json") or "{}"))
+        payload.update(
+            {
+                "semantic_event": "PARTIAL_FILL_OBSERVED",
+                "order_id": order_id,
+                "venue_status": status or "PARTIAL",
+                "filled_shares": filled_shares,
+                "remaining_shares": remaining_shares,
+                "fill_price": fill_price,
+            }
+        )
+        event["event_id"] = f"{trade_id}:partial_exit_fill:{sequence_no}"
+        event["caused_by"] = "partial_exit_fill"
+        event["occurred_at"] = occurred_at
+        event["order_id"] = order_id or None
+        event["venue_status"] = status or "PARTIAL"
+        event["payload_json"] = _json.dumps(payload, default=str, sort_keys=True)
+        projection["updated_at"] = occurred_at
+        append_many_and_project(conn, [event], projection)
+        return True
+    except Exception:  # noqa: BLE001 - partial-fill projection must not hide venue facts
+        logger.exception(
+            "PARTIAL_EXIT_PROJECTION_WRITE_FAILED position_id=%s order_id=%s",
+            getattr(position, "trade_id", ""),
+            order_id,
+        )
+        return False
+
+
 def _exit_command_id_for_order(
     conn: sqlite3.Connection,
     position: Position,
@@ -2091,6 +2496,14 @@ def _exit_command_id_for_order(
     return str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0]) or None
 
 
+def _last_exit_order_id(position: Position) -> str:
+    return str(
+        getattr(position, "last_exit_order_id", None)
+        or getattr(position, "order_id", "")
+        or ""
+    )
+
+
 def check_pending_exits(
     portfolio: PortfolioState,
     clob,
@@ -2114,7 +2527,12 @@ def check_pending_exits(
     stats = {"filled": 0, "retried": 0, "unchanged": 0, "filled_positions": []}
 
     for pos in list(portfolio.positions):
-        if pos.exit_state not in ("sell_placed", "sell_pending", "exit_intent"):
+        if _runtime_state_value(pos) in _PENDING_EXIT_SCAN_INACTIVE_STATES:
+            stats["skipped_inactive"] = stats.get("skipped_inactive", 0) + 1
+            continue
+        if pos.exit_state not in ("sell_placed", "sell_pending", "exit_intent") and str(
+            getattr(pos, "order_status", "") or ""
+        ) != "sell_pending_confirmation":
             continue
         _mark_pending_exit(pos)
         # NOTE: no canonical event here — upstream transition sites (execute_exit,
@@ -2144,7 +2562,8 @@ def check_pending_exits(
             stats["retried"] += 1
             continue
 
-        if not pos.last_exit_order_id:
+        exit_order_id = _last_exit_order_id(pos)
+        if not exit_order_id:
             _mark_exit_retry(pos, reason="SELL_NO_ORDER_ID", error="no_order_id", conn=conn)
             if conn is not None:
                 log_pending_exit_recovery_event(
@@ -2158,12 +2577,12 @@ def check_pending_exits(
             stats["retried"] += 1
             continue
 
-        status, status_payload = _check_order_fill(clob, pos.last_exit_order_id)
+        status, status_payload = _check_order_fill(clob, exit_order_id)
         if conn is not None:
             if status:
                 log_pending_exit_status_event(conn, pos, status=status)
             else:
-                log_exit_fill_check_error_event(conn, pos, order_id=pos.last_exit_order_id)
+                log_exit_fill_check_error_event(conn, pos, order_id=exit_order_id)
 
         if status in FILL_STATUSES:
             # Filled! Close the position.
@@ -2172,7 +2591,7 @@ def check_pending_exits(
                 _mark_exit_fill_economics_missing(
                     pos,
                     status=status,
-                    order_id=pos.last_exit_order_id,
+                    order_id=exit_order_id,
                     conn=conn,
                 )
                 stats["unchanged"] += 1
@@ -2193,7 +2612,7 @@ def check_pending_exits(
                     log_exit_fill_event(
                         conn,
                         closed,
-                        order_id=pos.last_exit_order_id,
+                        order_id=exit_order_id,
                         fill_price=actual_price,
                         current_market_price=pos.last_monitor_market_price or pos.entry_price,
                         best_bid=getattr(pos, "last_monitor_best_bid", None),
@@ -2205,7 +2624,7 @@ def check_pending_exits(
                         status=status or "CONFIRMED",
                         fill_price=actual_price,
                         filled_shares=filled_shares,
-                        order_id=pos.last_exit_order_id,
+                        order_id=exit_order_id,
                     )
                     # Slice P5-1 third site: typed RealizedFill at the
                     # async-monitor fill-receipt seam (same construction
@@ -2232,7 +2651,7 @@ def check_pending_exits(
                     _mark_exit_fill_economics_missing(
                         pos,
                         status=status,
-                        order_id=pos.last_exit_order_id,
+                        order_id=exit_order_id,
                         conn=conn,
                     )
                 else:
@@ -2241,24 +2660,33 @@ def check_pending_exits(
                         filled_shares=filled_shares,
                         remaining_shares=remaining_shares,
                         fill_price=actual_price,
-                        order_id=pos.last_exit_order_id,
+                        order_id=exit_order_id,
                         status=status,
                     )
                 if partial_applied and conn is not None:
                     log_exit_attempt_event(
                         conn,
                         pos,
-                        order_id=pos.last_exit_order_id,
+                        order_id=exit_order_id,
                         status=status or "PARTIAL",
                         current_market_price=pos.last_monitor_market_price or pos.entry_price,
                         best_bid=getattr(pos, "last_monitor_best_bid", None),
                         shares=filled_shares,
                         details={
-                            "semantic_event": "EXIT_ORDER_PARTIAL_FILL_OBSERVED",
+                            "semantic_event": "PARTIAL_FILL_OBSERVED",
                             "filled_shares": filled_shares,
                             "remaining_shares": remaining_shares,
                             "fill_price": actual_price,
                         },
+                    )
+                    _dual_write_partial_exit_projection_if_available(
+                        conn,
+                        pos,
+                        filled_shares=filled_shares,
+                        remaining_shares=remaining_shares,
+                        fill_price=actual_price,
+                        order_id=exit_order_id,
+                        status=status or "PARTIAL",
                     )
                     if status not in VOID_STATUSES:
                         _log_partial_exit_execution_fact(
@@ -2267,7 +2695,7 @@ def check_pending_exits(
                             status=status or "PARTIAL",
                             fill_price=actual_price,
                             filled_shares=filled_shares,
-                            order_id=pos.last_exit_order_id,
+                            order_id=exit_order_id,
                         )
             if status in VOID_STATUSES:
                 _mark_exit_retry(pos, reason=f"SELL_{status}", error=status, conn=conn)
@@ -2287,7 +2715,7 @@ def check_pending_exits(
                             status=status or "PARTIAL",
                             fill_price=actual_price,
                             filled_shares=filled_shares,
-                            order_id=pos.last_exit_order_id,
+                            order_id=exit_order_id,
                         )
                 stats["retried"] += 1
             elif partial_applied:
@@ -2305,7 +2733,20 @@ def check_pending_exits(
                 else:
                     stats["unchanged"] += 1
             else:
-                stats["unchanged"] += 1
+                token_id = _asset_id_for_position(pos)
+                if _cancel_stale_pending_exit_for_reprice(
+                    conn=conn,
+                    position=pos,
+                    clob=clob,
+                    token_id=token_id,
+                    log_pending_exit_recovery_event=(
+                        log_pending_exit_recovery_event if conn is not None else None
+                    ),
+                    log_exit_retry_event=log_exit_retry_event if conn is not None else None,
+                ):
+                    stats["retried"] += 1
+                else:
+                    stats["unchanged"] += 1
 
     return stats
 
@@ -2434,6 +2875,168 @@ def _positive_finite_float(value: object) -> Optional[float]:
     if not math.isfinite(numeric) or numeric <= 0.0 or numeric > 1.0:
         return None
     return numeric
+
+
+def _top_book_for_pending_exit_reprice(clob, token_id: str) -> tuple[float | None, float | None]:
+    """Return current held-token top bid/ask, allowing one-sided books."""
+
+    if clob is None or not token_id:
+        return None, None
+    book_fn = getattr(clob, "get_orderbook", None) or getattr(clob, "get_orderbook_snapshot", None)
+    if not callable(book_fn):
+        return None, None
+    try:
+        from src.data.market_scanner import _optional_top_book_level_decimal
+
+        book = book_fn(token_id)
+        top_bid, _bid_size = _optional_top_book_level_decimal(book, "bids")
+        top_ask, _ask_size = _optional_top_book_level_decimal(book, "asks")
+    except Exception as exc:
+        logger.debug(
+            "Pending-exit reprice book read failed for token=%s: %s",
+            token_id,
+            exc,
+        )
+        return None, None
+
+    def _as_float(value):
+        if value is None:
+            return None
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) and 0.0 < numeric < 1.0 else None
+
+    return _as_float(top_bid), _as_float(top_ask)
+
+
+def _exit_command_row_for_order(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    token_id: str,
+) -> sqlite3.Row | None:
+    exit_order_id = _last_exit_order_id(position)
+    if conn is None or not exit_order_id:
+        return None
+    try:
+        return conn.execute(
+            """
+            SELECT command_id, price, size, venue_order_id
+              FROM venue_commands
+             WHERE venue_order_id = ?
+               AND position_id = ?
+               AND token_id = ?
+               AND intent_kind = 'EXIT'
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 1
+            """,
+            (exit_order_id, position.trade_id, token_id),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+
+
+def _pending_exit_reprice_reason(
+    *,
+    resting_price: float,
+    best_bid: float | None,
+    best_ask: float | None,
+    min_tick: float,
+) -> str:
+    """Classify stale pending-exit sell orders from live book evidence."""
+
+    if not math.isfinite(resting_price) or resting_price <= 0.0:
+        return ""
+    min_move = max(float(min_tick) * PENDING_EXIT_REPRICE_MIN_TICKS, 0.001)
+    if best_bid is not None and resting_price - float(best_bid) >= min_move:
+        return "SELL_REPRICE_BID_MOVED_AWAY"
+    if best_bid is None and best_ask is not None and resting_price - float(best_ask) >= min_move:
+        return "SELL_REPRICE_ONE_SIDED_NO_BID"
+    return ""
+
+
+def _cancel_stale_pending_exit_for_reprice(
+    *,
+    conn: sqlite3.Connection | None,
+    position: Position,
+    clob,
+    token_id: str,
+    log_pending_exit_recovery_event=None,
+    log_exit_retry_event=None,
+) -> bool:
+    """Cancel a live pending-exit order whose price no longer tracks live CLOB.
+
+    This does not close locally and does not submit a replacement directly.  It
+    moves the position to retry_pending with zero cooldown so the normal
+    monitor path can recapture a fresh snapshot/book and issue the next limit
+    sell through existing exit safety.
+    """
+
+    row = _exit_command_row_for_order(conn, position, token_id)
+    if row is None:
+        return False
+    try:
+        resting_price = float(row["price"] if isinstance(row, sqlite3.Row) else row[1])
+    except (TypeError, ValueError):
+        return False
+    best_bid, best_ask = _top_book_for_pending_exit_reprice(clob, token_id)
+    reason = _pending_exit_reprice_reason(
+        resting_price=resting_price,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        min_tick=0.001,
+    )
+    if not reason:
+        return False
+
+    cancel_fn = getattr(clob, "cancel_order", None)
+    if not callable(cancel_fn):
+        _mark_exit_retry(
+            position,
+            reason=f"{reason} [CANCEL_UNAVAILABLE]",
+            error="cancel_order_unavailable",
+            cooldown_seconds=0,
+            conn=conn,
+        )
+        return True
+
+    detail = (
+        f"resting_price={resting_price:.6f};"
+        f"best_bid={best_bid if best_bid is not None else 'none'};"
+        f"best_ask={best_ask if best_ask is not None else 'none'}"
+    )
+    try:
+        from src.execution.exit_safety import request_cancel_for_command
+
+        command_id = str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0])
+        outcome = request_cancel_for_command(
+            conn,
+            command_id,
+            lambda order_id: cancel_fn(order_id),
+        )
+        if outcome.status != "CANCELED":
+            reason = f"{reason} [CANCEL_{outcome.status}]"
+            detail = outcome.reason or detail
+    except Exception as exc:
+        reason = f"{reason} [CANCEL_UNKNOWN]"
+        detail = str(exc)[:500]
+
+    _mark_exit_retry(
+        position,
+        reason=reason,
+        error=detail,
+        cooldown_seconds=0,
+        conn=conn,
+    )
+    if conn is not None and log_pending_exit_recovery_event is not None:
+        log_pending_exit_recovery_event(
+            conn,
+            position,
+            event_type="EXIT_ORDER_REJECTED",
+            reason=reason,
+            error=detail,
+        )
+    if conn is not None and log_exit_retry_event is not None:
+        log_exit_retry_event(conn, position, reason=reason, error=detail)
+    return True
 
 
 def _mark_exit_fill_economics_missing(

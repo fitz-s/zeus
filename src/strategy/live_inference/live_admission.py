@@ -24,6 +24,7 @@ from src.calibration.settlement_backward_coverage import (
 # greater than 51% after costs. Positive-EV low-probability lottery legs remain
 # valid research/shadow evidence, but they are not live-money entries.
 LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
+LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING = 0.99
 
 # A buy-NO on a single settlement bin is not a generic "not this exact value"
 # lottery when the model itself assigns material YES mass to that bin. The
@@ -132,6 +133,40 @@ def live_capital_efficiency_rejection_reason(
         return (
             "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:"
             f"ev_per_dollar={conservative_ev_per_dollar:.6f}:q_lcb={q_value:.6f}:price={price:.6f}"
+        )
+    return None
+
+
+def live_near_settled_entry_price_rejection_reason(
+    *,
+    execution_price: float | int | None,
+    ceiling: float = LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING,
+) -> str | None:
+    """Reject entries whose cost is already effectively settled.
+
+    A candidate with an entry price at or above the ceiling can still show a tiny
+    positive conservative EV when q_lcb is exactly 1.0, but it is no longer an
+    exploitable market. This is an economic participation gate, not a probability
+    override: the observed hard fact may remain true while the entry is skipped.
+    """
+
+    if execution_price is None:
+        return None
+    try:
+        price = float(execution_price)
+        price_ceiling = float(ceiling)
+    except (TypeError, ValueError):
+        return "ADMISSION_NEAR_SETTLED_PRICE:inputs=missing"
+    if not math.isfinite(price) or not math.isfinite(price_ceiling):
+        return "ADMISSION_NEAR_SETTLED_PRICE:inputs=nonfinite"
+    if price_ceiling <= 0.0 or price_ceiling >= 1.0:
+        raise ValueError(
+            f"near-settled entry price ceiling must be in (0, 1), got {ceiling!r}"
+        )
+    if price >= price_ceiling:
+        return (
+            "ADMISSION_NEAR_SETTLED_PRICE:"
+            f"price={price:.6f}:ceiling={price_ceiling:.6f}"
         )
     return None
 

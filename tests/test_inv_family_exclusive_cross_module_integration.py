@@ -435,7 +435,7 @@ def test_live_family_fallback_tries_second_leg_when_primary_reprice_fails(
             "live_submit_authority": True,
             "final_execution_intent_id": hypothesis_id,
             "corrected_candidate_limit_price": "0.45",
-            "corrected_pricing_shadow": {
+            "corrected_pricing_evidence": {
                 "sweep_submitted_shares": "1",
                 "sweep_filled_shares": "1",
             },

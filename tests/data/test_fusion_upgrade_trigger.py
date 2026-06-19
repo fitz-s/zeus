@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-06-17
 # Authority basis: Task #32 (operator 2026-06-11) — PARTIAL-fusion upgrade trigger. Relationship
 #   pins for the SINGLE instrument-set comparison + the idempotency bound:
 #     - a posterior fused from {A,B} with capture later containing {A,B,C} for the SAME cycle ⇒
@@ -21,24 +21,27 @@ from src.data.replacement_fusion_upgrade_trigger import (
     decorrelated_provider_families_of,
     scope_capture_offers_larger_provider_set,
 )
-from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 UTC = timezone.utc
 
-# Representative model per provider family used in the fixtures. icon_seamless / ecmwf_ifs are
-# deliberately NOT decorrelated providers (alias-dedup / anchor) — a fixture using them proves the
-# comparison ignores them.
-_NCEP = "gfs_global"
+# Representative model per provider family used in the fixtures. ecmwf_ifs is deliberately NOT
+# a decorrelated provider (anchor/prior) — a fixture using it proves the comparison ignores it.
+# icon_seamless was the alias-dedup probe and was removed from the candidate set entirely on
+# 2026-06-17 (it also contributed no family). 2026-06-17: the NCEP/CMC reps are the high-res
+# nests (gfs_hrrr 3km / gem_hrdps 2.5km) — the coarse globals gfs_global/gem_global AND
+# jma_seamless were dropped and are no longer family members. The contract is now 4 families
+# {NCEP, DWD, CMC, UKMO}.
+_NCEP = "gfs_hrrr"
 _DWD = "icon_global"
-_CMC = "gem_global"
-_JMA = "jma_seamless"
+_CMC = "gem_hrdps_continental"
 _UKMO = "ukmo_global_deterministic_10km"
 
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    ensure_replacement_forecast_shadow_schema(conn)
+    ensure_replacement_forecast_live_schema(conn)
     return conn
 
 
@@ -59,8 +62,8 @@ def _insert_posterior(
             (source_id, product_id, data_version, city, target_date, temperature_metric,
              source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
              posterior_method, dependency_source_run_ids_json, provenance_json,
-             trade_authority_status, training_allowed)
-        VALUES (?, 'pid', 'dv', ?, ?, ?, ?, ?, ?, '{}', '{}', ?, '{}', ?, 'SHADOW_ONLY', 0)
+             runtime_layer, training_allowed)
+        VALUES (?, 'pid', 'dv', ?, ?, ?, ?, ?, ?, '{}', '{}', ?, '{}', ?, 'live', 0)
         """,
         (
             SOURCE_ID, city, target_date, metric, cycle_iso, cycle_iso, computed_at,
@@ -95,7 +98,7 @@ def test_smaller_set_with_new_instrument_signals_exactly_one_upgrade() -> None:
     # Posterior fused from {NCEP, DWD} (a 2-family served set).
     _insert_posterior(
         conn, city="Testville", target_date="2026-06-13", metric="high", cycle_iso=cyc,
-        used_models=["ecmwf_ifs", _NCEP, _DWD, "icon_seamless"], computed_at="2026-06-12T10:00:00+00:00",
+        used_models=["ecmwf_ifs", _NCEP, _DWD], computed_at="2026-06-12T10:00:00+00:00",
     )
     # Capture for the SAME cycle now offers {NCEP, DWD, CMC} — CMC (a NEW family) just landed.
     _insert_single_runs(
@@ -157,7 +160,7 @@ def test_no_posterior_is_not_an_upgrade() -> None:
     cyc = "2026-06-12T06:00:00+00:00"
     _insert_single_runs(
         conn, city="Ghost", target_date="2026-06-13", metric="high", cycle_iso=cyc,
-        models=[_NCEP, _DWD, _CMC, _JMA, _UKMO],
+        models=[_NCEP, _DWD, _CMC, _UKMO],
     )
     verdict = scope_capture_offers_larger_provider_set(
         conn, city="Ghost", target_date="2026-06-13", metric="high"
@@ -165,10 +168,13 @@ def test_no_posterior_is_not_an_upgrade() -> None:
     assert verdict["is_upgrade"] is False
 
 
-def test_gem_previous_runs_counts_as_capturable() -> None:
-    """gem_global's CURRENT value is served from previous_runs (single_runs structurally
-    unservable) — the comparison must mirror that exception so a gem-only-via-previous_runs
-    capture counts as the CMC family being capturable."""
+def test_legacy_gem_global_is_not_cmc_but_gem_hrdps_is() -> None:
+    """2026-06-17 coarse-global removal antibody: gem_global is no longer a CMC family member, so a
+    stray legacy gem_global capture must NOT register CMC. The new CMC rep gem_hrdps_continental
+    (served via single_runs) is what counts. Re-adding gem_global to CMC would flip both halves RED."""
+    assert "CMC" not in decorrelated_provider_families_of({"gem_global"})
+    assert decorrelated_provider_families_of({_CMC}) == frozenset({"CMC"})
+    # At the comparison level: a posterior {NCEP,DWD} whose capture adds gem_hrdps (CMC) upgrades.
     conn = _conn()
     cyc = "2026-06-12T06:00:00+00:00"
     _insert_posterior(
@@ -177,19 +183,8 @@ def test_gem_previous_runs_counts_as_capturable() -> None:
     )
     _insert_single_runs(
         conn, city="Testville", target_date="2026-06-13", metric="high", cycle_iso=cyc,
-        models=[_NCEP, _DWD],
+        models=[_NCEP, _DWD, _CMC],  # gem_hrdps lands -> CMC newly capturable
     )
-    # gem only via previous_runs (mirrors the materializer's gem exception).
-    conn.execute(
-        """
-        INSERT INTO raw_model_forecasts
-            (model, city, target_date, metric, source_cycle_time, source_available_at,
-             captured_at, lead_days, forecast_value_c, endpoint)
-        VALUES ('gem_global', 'Testville', '2026-06-13', 'high', ?, ?, ?, 1, 20.0, 'previous_runs')
-        """,
-        (cyc, cyc, cyc),
-    )
-    conn.commit()
     verdict = scope_capture_offers_larger_provider_set(
         conn, city="Testville", target_date="2026-06-13", metric="high"
     )
@@ -197,13 +192,49 @@ def test_gem_previous_runs_counts_as_capturable() -> None:
     assert "CMC" in verdict["new_families"]
 
 
-def test_previous_runs_only_non_gem_is_capturable_and_upgrades() -> None:
-    """SUPERSEDED LAW (Task #32 follow-up, operator 2026-06-11): the original pin here said a
-    non-gem previous_runs-only model is NOT capturable. That law is dead — the generalized
-    没有新的就用老的 serving rule (replacement_current_value_serving) serves ANY provider absent
-    from single_runs at the cycle from its previous_runs row at the same natural key, branded.
-    The Beijing-06Z JMA case is therefore now CAPTURABLE, and a posterior that dropped JMA is
-    exactly the PARTIAL fusion the upgrade trigger must detect — THE live σ lever."""
+def test_non_conus_city_excludes_absent_ncep_cmc_no_phantom_upgrade() -> None:
+    """DOMAIN-AWARE RED-ON-REVERT (2026-06-17): for a non-CONUS/non-NA city (Tokyo) NCEP and CMC
+    are STRUCTURALLY ABSENT — expected_provider_families_for_city(Tokyo) is {DWD,UKMO}. A
+    stray out-of-domain NCEP capture (a legacy gfs_hrrr row) must NOT become a capturable-AND-
+    expected growth target, so a posterior already serving {DWD,JMA,UKMO} sees NO upgrade.
+    Removing the per-city expected intersection would let the stray row trigger a phantom
+    re-enqueue forever -> this goes RED."""
+    from src.config import runtime_cities_by_name  # noqa: PLC0415
+    from src.data.replacement_fusion_upgrade_trigger import (  # noqa: PLC0415
+        expected_provider_families_for_city,
+    )
+
+    tok = runtime_cities_by_name().get("Tokyo")
+    assert tok is not None, "Tokyo must be a configured city for this domain test"
+    assert expected_provider_families_for_city(float(tok.lat), float(tok.lon), 1) == frozenset(
+        {"DWD", "UKMO"}
+    )
+    conn = _conn()
+    cyc = "2026-06-12T06:00:00+00:00"
+    _insert_posterior(
+        conn, city="Tokyo", target_date="2026-06-13", metric="high", cycle_iso=cyc,
+        used_models=["ecmwf_ifs", _DWD, _UKMO], computed_at="2026-06-12T10:00:00+00:00",
+    )
+    # the real served set {DWD,UKMO} (2026-06-17: JMA dropped) PLUS a stray out-of-domain NCEP
+    # capture (gfs_hrrr row) that the domain gate must exclude.
+    _insert_single_runs(
+        conn, city="Tokyo", target_date="2026-06-13", metric="high", cycle_iso=cyc,
+        models=[_DWD, _UKMO, "gfs_hrrr"],
+    )
+    verdict = scope_capture_offers_larger_provider_set(
+        conn, city="Tokyo", target_date="2026-06-13", metric="high"
+    )
+    assert verdict["is_upgrade"] is False, verdict
+    assert "NCEP" not in verdict["capturable_families"], verdict
+    assert verdict["new_families"] == []
+
+
+def test_previous_runs_only_provider_is_capturable_and_upgrades() -> None:
+    """The generalized 没有新的就用老的 serving rule (replacement_current_value_serving) serves ANY
+    provider absent from single_runs at the cycle from its previous_runs row at the same natural
+    key, branded. A posterior that dropped that provider is exactly the PARTIAL fusion the upgrade
+    trigger must detect. (2026-06-17: the original vehicle here was jma_seamless at 06Z; jma was
+    dropped from the fusion, so the substitution is pinned on a surviving provider — ukmo_global.)"""
     conn = _conn()
     cyc = "2026-06-12T06:00:00+00:00"
     _insert_posterior(
@@ -214,27 +245,50 @@ def test_previous_runs_only_non_gem_is_capturable_and_upgrades() -> None:
         conn, city="Testville", target_date="2026-06-13", metric="high", cycle_iso=cyc,
         models=[_NCEP, _DWD],
     )
-    # jma only via previous_runs at the same natural key (JMA publishes 00/12Z — structurally
-    # absent from a 06Z cycle's single_runs): served by substitution => capturable.
+    # ukmo_global only via previous_runs at the same natural key (single_runs absent this cycle):
+    # served by substitution => the UKMO family is capturable.
     conn.execute(
         """
         INSERT INTO raw_model_forecasts
             (model, city, target_date, metric, source_cycle_time, source_available_at,
              captured_at, lead_days, forecast_value_c, endpoint)
-        VALUES ('jma_seamless', 'Testville', '2026-06-13', 'high', ?, ?, ?, 1, 20.0, 'previous_runs')
+        VALUES (?, 'Testville', '2026-06-13', 'high', ?, ?, ?, 1, 20.0, 'previous_runs')
         """,
-        (cyc, cyc, cyc),
+        (_UKMO, cyc, cyc, cyc),
     )
     conn.commit()
     verdict = scope_capture_offers_larger_provider_set(
         conn, city="Testville", target_date="2026-06-13", metric="high"
     )
-    assert "JMA" in verdict["capturable_families"], (
+    assert "UKMO" in verdict["capturable_families"], (
         "a previous_runs-substitutable provider must count as capturable — the serving authority "
         "(read_current_instrument_values) is the shared single rule and WILL fuse it"
     )
     assert verdict["is_upgrade"] is True
-    assert verdict["new_families"] == ["JMA"]
+    assert verdict["new_families"] == ["UKMO"]
+
+
+def test_conus_far_lead_does_not_over_expect_lead_capped_nests() -> None:
+    """LEAD-AWARE RED-ON-REVERT (2026-06-17 critic fix): the NCEP/CMC nests are lead-capped
+    (ncep_nbm=3, gfs_hrrr=2, gem_hrdps=2). For a CONUS city at a lead PAST those caps NCEP/CMC
+    cannot serve -> must NOT be expected, else a far-lead scope false-flags PARTIAL and re-fires
+    the upgrade loop this contract exists to kill. (Reverting the expected-set to lead 0 makes it
+    expect NCEP/CMC at lead 5 -> RED.)"""
+    from src.config import runtime_cities_by_name  # noqa: PLC0415
+    from src.data.replacement_fusion_upgrade_trigger import (  # noqa: PLC0415
+        expected_provider_families_for_city,
+    )
+
+    chi = runtime_cities_by_name().get("Chicago")
+    assert chi is not None, "Chicago must be a configured CONUS city for this lead test"
+    lat, lon = float(chi.lat), float(chi.lon)
+    # lead 1 (within every cap): CONUS expects NCEP + CMC + the pure globals.
+    assert {"NCEP", "CMC", "DWD", "UKMO"} <= expected_provider_families_for_city(lat, lon, 1)
+    # lead 3 (== ncep_nbm cap, past gem_hrdps cap 2): NCEP still expected, CMC NOT.
+    mid = expected_provider_families_for_city(lat, lon, 3)
+    assert "NCEP" in mid and "CMC" not in mid, mid
+    # lead 5 (past every nest cap): only the pure globals remain.
+    assert expected_provider_families_for_city(lat, lon, 5) == frozenset({"DWD", "UKMO"})
 
 
 # ---------------------------------------------------------------------------
@@ -272,17 +326,25 @@ def test_marker_unique_bounds_enqueue_to_once_per_superset_transition() -> None:
              served_family_set, capturable_family_set, seed_file)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (*args[:5], "CMC,DWD,NCEP", "CMC,DWD,JMA,NCEP", "seed3.json"),
+        (*args[:5], "CMC,DWD,NCEP", "CMC,DWD,NCEP,UKMO", "seed3.json"),
     )
     conn.commit()
     assert conn.total_changes - before == 1, "a strictly larger superset is a new transition"
 
 
-def test_provider_family_mapping_excludes_anchor_and_alias() -> None:
-    """The ECMWF anchor (prior) and icon_seamless (alias-dedup probe) are NOT decorrelated
-    providers — they must contribute no family, or served counts would be inflated."""
+def test_provider_family_mapping_excludes_anchor_and_dropped_models() -> None:
+    """The ECMWF anchor (prior) is NOT a decorrelated provider — it must contribute no family.
+    icon_seamless was removed from the candidate set entirely (2026-06-17 alias-dedup removal),
+    but any stray row in provenance must still map to no family (it was never in DECORRELATED_PROVIDER_FAMILIES).
+    jma_seamless was DROPPED (2026-06-17), so stray jma rows must also map to no family."""
+    assert decorrelated_provider_families_of({"ecmwf_ifs"}) == frozenset()
+    assert decorrelated_provider_families_of({"icon_seamless"}) == frozenset(), (
+        "icon_seamless was removed from the candidate set (2026-06-17) — stray rows must contribute no family"
+    )
     assert decorrelated_provider_families_of({"ecmwf_ifs", "icon_seamless"}) == frozenset()
-    assert decorrelated_provider_families_of({_JMA}) == frozenset({"JMA"})
+    assert decorrelated_provider_families_of({"jma_seamless"}) == frozenset(), (
+        "jma_seamless was dropped from the fusion — it is no longer a decorrelated provider family"
+    )
     assert decorrelated_provider_families_of(
-        {_NCEP, _DWD, _CMC, _JMA, _UKMO}
-    ) == frozenset({"NCEP", "DWD", "CMC", "JMA", "UKMO"})
+        {_NCEP, _DWD, _CMC, _UKMO}
+    ) == frozenset({"NCEP", "DWD", "CMC", "UKMO"})

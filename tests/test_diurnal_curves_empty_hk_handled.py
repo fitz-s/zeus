@@ -147,6 +147,58 @@ def test_hk_post_peak_confidence_returns_zero_without_raising(db_with_hk_empty):
     assert result == 0.0, f"expected 0.0 for empty HK, got {result}"
 
 
+def test_hk_empty_diurnal_uses_solar_fact_after_sunset(db_with_hk_empty):
+    """HK with no diurnal history still has mature high authority after sunset."""
+    from src.signal.diurnal import (
+        build_day0_temporal_context,
+        get_peak_hour_context,
+        post_peak_confidence,
+    )
+
+    db_with_hk_empty.execute(
+        """
+        INSERT INTO solar_daily (
+            city, target_date, timezone, sunrise_local, sunset_local,
+            sunrise_utc, sunset_utc, utc_offset_minutes, dst_active
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "Hong Kong",
+            "2026-07-15",
+            "Asia/Hong_Kong",
+            "2026-07-15T05:48:00+08:00",
+            "2026-07-15T19:10:00+08:00",
+            "2026-07-14T21:48:00+00:00",
+            "2026-07-15T11:10:00+00:00",
+            480,
+            0,
+        ),
+    )
+    db_with_hk_empty.commit()
+
+    peak_hour, confidence, reason = get_peak_hour_context(
+        "Hong Kong", date(2026, 7, 15), 20
+    )
+    assert peak_hour is None
+    assert confidence >= 0.98
+    assert reason == "solar_only_no_diurnal_history"
+    assert post_peak_confidence("Hong Kong", date(2026, 7, 15), 20) >= 0.98
+
+    ctx = build_day0_temporal_context(
+        "Hong Kong",
+        date(2026, 7, 15),
+        "Asia/Hong_Kong",
+        observation_time="2026-07-15T12:30:00+00:00",
+        observation_source="hko_hourly_accumulator",
+    )
+
+    assert ctx is not None
+    assert ctx.daypart == "post_peak"
+    assert ctx.post_peak_confidence >= 0.98
+    assert ctx.confidence_source == "solar_only_no_diurnal_history"
+
+
 def test_hk_peak_hour_at_multiple_hours_still_null(db_with_hk_empty):
     """Every clock-hour must produce graceful fallback, not just one."""
     from src.signal.diurnal import get_peak_hour_context

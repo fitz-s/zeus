@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-03-26; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Lifecycle: created=2026-03-26; last_reviewed=2026-06-17; last_reused=2026-06-17
 # Purpose: Operator healthcheck for live daemon, launchd, source truth, entry capability, and settlement freshness.
 # Reuse: Run when live health predicates, launchd contracts, or readiness/status summary health fields change.
 # Created: 2026-03-26
-# Last reused or audited: 2026-05-21
+# Last reused or audited: 2026-06-17
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 """Zeus health check for Venus/OpenClaw monitoring.
 
@@ -34,6 +34,12 @@ SOURCE_HEALTH_WRITER_STALE_SECONDS = 15 * 60
 LIVE_DB_UNKNOWN_HOLDER_SECONDS = 10 * 60
 SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
 LIVE_HEALTH_COMPOSITE_STALE_SECONDS = 6 * 60
+POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS = frozenset(
+    {
+        "last_monitor_prob_is_fresh",
+        "last_monitor_market_price_is_fresh",
+    }
+)
 
 # WAVE-4 F91+F99+F100 — daemon heartbeat staleness budgets, per
 # docs/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md
@@ -114,6 +120,10 @@ def _live_health_composite_path() -> Path:
     return state_path("live_health_composite.json")
 
 
+def _venue_heartbeat_keeper_path() -> Path:
+    return state_path("venue-heartbeat-keeper.json")
+
+
 def _risk_state_path() -> Path:
     return state_path("risk_state.db")
 
@@ -134,6 +144,10 @@ def _world_db_path() -> Path:
     # K1 split 2026-05-11: ensemble_snapshots / readiness_state moved to
     # forecasts.db.  Return ZEUS_FORECASTS_DB_PATH so callers (and monkeypatched
     # tests that stub this function) target the correct physical file.
+    return ZEUS_FORECASTS_DB_PATH
+
+
+def _forecast_db_path() -> Path:
     return ZEUS_FORECASTS_DB_PATH
 
 
@@ -558,6 +572,112 @@ def _live_db_holder_status() -> dict:
     }
 
 
+def _position_current_schema_status() -> dict:
+    """Ensure monitor freshness evidence can survive projection reloads."""
+
+    db_path = _trade_db_path()
+    if not db_path.exists():
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "issue": "POSITION_CURRENT_SCHEMA_DB_MISSING",
+            "missing_columns": sorted(POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS),
+        }
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='position_current'"
+        ).fetchone()
+        if table is None:
+            return {
+                "ok": False,
+                "path": str(db_path),
+                "issue": "POSITION_CURRENT_TABLE_MISSING",
+                "missing_columns": sorted(POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS),
+            }
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+        missing = sorted(POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS - columns)
+        return {
+            "ok": not missing,
+            "path": str(db_path),
+            "issue": "POSITION_CURRENT_MONITOR_FRESHNESS_SCHEMA_DRIFT" if missing else None,
+            "missing_columns": missing,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "issue": f"POSITION_CURRENT_SCHEMA_UNAVAILABLE:{type(exc).__name__}",
+            "missing_columns": sorted(POSITION_CURRENT_MONITOR_FRESHNESS_COLUMNS),
+        }
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _forecast_posteriors_runtime_layer_schema_status() -> dict:
+    """Ensure replacement forecast live rows can be represented in forecasts DB."""
+
+    db_path = _forecast_db_path()
+    if not db_path.exists():
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "issue": "FORECAST_POSTERIORS_SCHEMA_DB_MISSING",
+            "runtime_layer_supported": False,
+        }
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='forecast_posteriors'"
+        ).fetchone()
+        if row is None:
+            return {
+                "ok": False,
+                "path": str(db_path),
+                "issue": "FORECAST_POSTERIORS_TABLE_MISSING",
+                "runtime_layer_supported": False,
+            }
+        cols = {
+            str(col["name"])
+            for col in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
+        }
+        supports_runtime_layer = "runtime_layer" in cols
+        return {
+            "ok": supports_runtime_layer,
+            "path": str(db_path),
+            "issue": (
+                None
+                if supports_runtime_layer
+                else "FORECAST_POSTERIORS_RUNTIME_LAYER_SCHEMA_DRIFT"
+            ),
+            "runtime_layer_supported": supports_runtime_layer,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "path": str(db_path),
+            "issue": f"FORECAST_POSTERIORS_SCHEMA_UNAVAILABLE:{type(exc).__name__}",
+            "runtime_layer_supported": False,
+        }
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
 def _first_launchctl_field(output: str, field: str) -> str:
     match = re.search(rf"^\s*{re.escape(field)}\s*=\s*(.+)$", output or "", re.MULTILINE)
     if not match:
@@ -586,12 +706,45 @@ def _launchctl_environment(output: str) -> dict[str, str]:
     return env
 
 
+def _heartbeat_timing_contract(env: dict[str, str], *, issue_prefix: str = "") -> tuple[dict, list[str]]:
+    """Validate heartbeat timing env without surfacing unrelated secrets."""
+
+    values: dict = {
+        "cadence_seconds": None,
+        "http_timeout_seconds": None,
+    }
+    issues: list[str] = []
+    cadence_raw = env.get("ZEUS_HEARTBEAT_CADENCE_SECONDS")
+    timeout_raw = env.get("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS")
+    try:
+        cadence = int(cadence_raw) if cadence_raw not in (None, "") else 2
+    except (TypeError, ValueError):
+        cadence = None
+        issues.append(f"{issue_prefix}heartbeat_cadence_invalid")
+    try:
+        timeout = float(timeout_raw) if timeout_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        timeout = None
+        issues.append(f"{issue_prefix}heartbeat_http_timeout_invalid")
+
+    values["cadence_seconds"] = cadence
+    values["http_timeout_seconds"] = timeout
+    if cadence is not None and cadence <= 0:
+        issues.append(f"{issue_prefix}heartbeat_cadence_invalid")
+    if timeout is not None and timeout <= 0:
+        issues.append(f"{issue_prefix}heartbeat_http_timeout_invalid")
+    if cadence is not None and cadence > 0 and timeout is not None and timeout > (float(cadence) / 2.0):
+        issues.append(f"{issue_prefix}heartbeat_http_timeout_exceeds_half_cadence")
+    return values, issues
+
+
 def _launchctl_loaded_contract(
     label: str,
     *,
     root_path: Path,
     plist_path: Path,
     expected_module: str,
+    heartbeat_timing: bool = False,
 ) -> dict:
     item: dict = {
         "ok": False,
@@ -674,10 +827,34 @@ def _launchctl_loaded_contract(
         item["issues"].append("loaded_working_directory_mismatch")
     if environment.get("PYTHONPATH") != str(root_path):
         item["issues"].append("loaded_pythonpath_mismatch")
+    if label == _launchd_label():
+        forbidden_shadow_env = _forbidden_live_shadow_env(environment)
+        if forbidden_shadow_env:
+            item["issues"].append(
+                "loaded_live_trading_shadow_env_present:" + ",".join(forbidden_shadow_env)
+            )
     if module != expected_module:
         item["issues"].append("loaded_program_module_mismatch")
+    if heartbeat_timing:
+        timing, timing_issues = _heartbeat_timing_contract(
+            environment,
+            issue_prefix="loaded_",
+        )
+        item["heartbeat_timing"] = timing
+        item["issues"].extend(timing_issues)
     item["ok"] = not item["issues"]
     return item
+
+
+def _forbidden_live_shadow_env(environment: dict) -> list[str]:
+    """Return env keys that contradict the live-trading launchd contract."""
+    forbidden: list[str] = []
+    for key, value in environment.items():
+        key_text = str(key)
+        value_text = str(value)
+        if "SHADOW" in key_text.upper() or value_text.lower() == "edli_shadow_no_submit":
+            forbidden.append(key_text)
+    return sorted(forbidden)
 
 
 def _launchd_contracts(
@@ -688,13 +865,14 @@ def _launchd_contracts(
     root_path = Path(root or PROJECT_ROOT)
     launchagents = Path(launchagents_dir or _launchagents_dir())
     specs = (
-        ("live_trading", _launchd_label(), "src.main"),
-        ("data_ingest", _data_ingest_label(), "src.ingest_main"),
-        ("riskguard", _riskguard_label(), "src.riskguard.riskguard"),
-        ("forecast_live", _forecast_live_label(), "src.ingest.forecast_live_daemon"),
+        ("live_trading", _launchd_label(), "src.main", False),
+        ("data_ingest", _data_ingest_label(), "src.ingest_main", False),
+        ("riskguard", _riskguard_label(), "src.riskguard.riskguard", False),
+        ("forecast_live", _forecast_live_label(), "src.ingest.forecast_live_daemon", False),
+        ("venue_heartbeat", "com.zeus.venue-heartbeat", "src.control.heartbeat_supervisor", True),
     )
     items: list[dict] = []
-    for name, label, expected_module in specs:
+    for name, label, expected_module, heartbeat_timing in specs:
         path = launchagents / f"{label}.plist"
         item = {
             "name": name,
@@ -752,13 +930,24 @@ def _launchd_contracts(
             item["issues"].append("working_directory_mismatch")
         if env.get("PYTHONPATH") != str(root_path):
             item["issues"].append("pythonpath_mismatch")
+        if label == _launchd_label():
+            forbidden_shadow_env = _forbidden_live_shadow_env(env)
+            if forbidden_shadow_env:
+                item["issues"].append(
+                    "live_trading_shadow_env_present:" + ",".join(forbidden_shadow_env)
+                )
         if module != expected_module:
             item["issues"].append("program_module_mismatch")
+        if heartbeat_timing:
+            timing, timing_issues = _heartbeat_timing_contract(env)
+            item["heartbeat_timing"] = timing
+            item["issues"].extend(timing_issues)
         loaded = _launchctl_loaded_contract(
             label,
             root_path=root_path,
             plist_path=path,
             expected_module=expected_module,
+            heartbeat_timing=heartbeat_timing,
         )
         item["loaded"] = loaded
         for issue in loaded.get("issues", []):
@@ -1120,6 +1309,72 @@ def _missing_required_keys(payload: dict | None, required: tuple[str, ...], *, p
     return missing
 
 
+def _composite_current_fact_contradictions(payload: dict) -> list[dict]:
+    """Return current facts that contradict a healthy composite projection."""
+
+    if payload.get("healthy") is False or payload.get("status") == "DEGRADED":
+        return []
+
+    contradictions: list[dict] = []
+    keeper_path = _venue_heartbeat_keeper_path()
+    try:
+        keeper = json.loads(keeper_path.read_text()) if keeper_path.exists() else None
+    except Exception:
+        keeper = None
+    if isinstance(keeper, dict):
+        health = str(keeper.get("health") or "UNKNOWN").upper()
+        resting_order_safe = keeper.get("resting_order_safe")
+        if health != "HEALTHY" or resting_order_safe is not True:
+            contradictions.append(
+                {
+                    "surface": "venue_heartbeat",
+                    "health": health,
+                    "resting_order_safe": resting_order_safe,
+                    "written_at": keeper.get("written_at"),
+                }
+            )
+
+    status_path = _status_path()
+    try:
+        status = json.loads(status_path.read_text()) if status_path.exists() else None
+    except Exception:
+        status = None
+    execution_capability = status.get("execution_capability") if isinstance(status, dict) else None
+    if isinstance(execution_capability, dict):
+        blocked_actions: list[dict] = []
+        for action_name in ("entry", "exit"):
+            action = execution_capability.get(action_name)
+            if not isinstance(action, dict):
+                continue
+            status_value = str(action.get("status") or "").lower()
+            blocked_components = action.get("blocked_components")
+            if not isinstance(blocked_components, list):
+                blocked_components = []
+            global_allow_submit = action.get("global_allow_submit")
+            if (
+                status_value in {"blocked", "failed", "error"}
+                or global_allow_submit is False
+                or bool(blocked_components)
+            ):
+                blocked_actions.append(
+                    {
+                        "action": action_name,
+                        "status": action.get("status"),
+                        "global_allow_submit": global_allow_submit,
+                        "blocked_components": blocked_components,
+                    }
+                )
+        if blocked_actions:
+            contradictions.append(
+                {
+                    "surface": "execution_capability",
+                    "blocked_actions": blocked_actions,
+                    "status_timestamp": status.get("timestamp") if isinstance(status, dict) else None,
+                }
+            )
+    return contradictions
+
+
 def _live_health_composite_status() -> dict:
     """Read the stricter live business-plane composite when present."""
     path = _live_health_composite_path()
@@ -1203,6 +1458,21 @@ def _live_health_composite_status() -> dict:
             "issue": f"LIVE_HEALTH_COMPOSITE_STALE({computed_age_seconds:.0f}s)",
         }
 
+    contradictions = _composite_current_fact_contradictions(payload)
+    if contradictions:
+        surfaces_text = ",".join(str(item.get("surface")) for item in contradictions)
+        return {
+            "ok": False,
+            "path": str(path),
+            "status": payload.get("status", "invalid"),
+            "healthy": payload.get("healthy"),
+            "failing_surfaces": failing_surfaces,
+            "computed_at": computed_at,
+            "computed_age_seconds": round(computed_age_seconds, 1) if computed_age_seconds is not None else None,
+            "contradictions": contradictions,
+            "issue": f"LIVE_HEALTH_COMPOSITE_CONTRADICTS_CURRENT_FACTS({surfaces_text})",
+        }
+
     ok = payload.get("healthy") is not False and payload.get("status") != "DEGRADED"
     return {
         "ok": ok,
@@ -1284,6 +1554,24 @@ def check() -> dict:
     result["live_db_holders_ok"] = bool(result["live_db_holders"].get("ok", True))
     if not result["live_db_holders_ok"]:
         result["live_db_holders_issue"] = result["live_db_holders"].get("issue") or "LIVE_DB_HOLDER_POLICY"
+    result["position_current_schema"] = _position_current_schema_status()
+    result["position_current_schema_ok"] = bool(
+        result["position_current_schema"].get("ok", True)
+    )
+    if not result["position_current_schema_ok"]:
+        result["position_current_schema_issue"] = (
+            result["position_current_schema"].get("issue")
+            or "POSITION_CURRENT_SCHEMA_DRIFT"
+        )
+    result["forecast_posteriors_schema"] = _forecast_posteriors_runtime_layer_schema_status()
+    result["forecast_posteriors_schema_ok"] = bool(
+        result["forecast_posteriors_schema"].get("ok", True)
+    )
+    if not result["forecast_posteriors_schema_ok"]:
+        result["forecast_posteriors_schema_issue"] = (
+            result["forecast_posteriors_schema"].get("issue")
+            or "FORECAST_POSTERIORS_SCHEMA_DRIFT"
+        )
     result["scheduler_business_liveness"] = _scheduler_business_liveness_status()
     result["scheduler_business_liveness_ok"] = bool(
         result["scheduler_business_liveness"].get("ok", True)
@@ -1567,6 +1855,8 @@ def check() -> dict:
         and bool(result.get("settlement_truth_ok"))
         and bool(result.get("db_lock_ok", True))
         and bool(result.get("live_db_holders_ok", True))
+        and bool(result.get("position_current_schema_ok", True))
+        and bool(result.get("forecast_posteriors_schema_ok", True))
         and not bool(result.get("cycle_failed"))
         and result.get("infrastructure_level") != "RED"
     )

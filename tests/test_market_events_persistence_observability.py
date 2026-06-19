@@ -17,6 +17,7 @@ scheduler health); GREEN after P2-2 fix.
 import threading
 
 import pytest
+import src.data.substrate_observer as substrate_observer
 
 
 def _make_fake_persistence_result(status: str, inserted: int = 0, event_count: int = 1,
@@ -125,9 +126,10 @@ def test_trading_daemon_surfaces_persistence_failure(monkeypatch):
     Pre-fix: persistence failure was completely invisible; scheduler_health showed OK.
     Post-fix: RuntimeError raised → decorator writes failed=True to scheduler_health.
     """
-    from src import main
     import src.data.market_scanner as market_scanner
     import src.data.polymarket_client as polymarket_client
+    import src.ingest.substrate_observer_daemon as observer_daemon
+    import src.observability.scheduler_health as scheduler_health
     import src.state.db as state_db
 
     health_calls: list[tuple[str, dict]] = []
@@ -135,7 +137,11 @@ def test_trading_daemon_surfaces_persistence_failure(monkeypatch):
     def _record_health(job_name, **kwargs):
         health_calls.append((job_name, kwargs))
 
-    monkeypatch.setattr(main, "_write_scheduler_health", _record_health)
+    # P2 lift: scheduler health for market_discovery is now written by the substrate-observer
+    # DAEMON's _scheduler_job wrapper (the bare lifted producer carries no decorator), which
+    # imports _write_scheduler_health from src.observability.scheduler_health. Patch it there
+    # and exercise the producer THROUGH the daemon wrapper (the as-deployed unit).
+    monkeypatch.setattr(scheduler_health, "_write_scheduler_health", _record_health)
 
     # Discovery returns 2 events (non-empty).
     monkeypatch.setattr(
@@ -160,8 +166,13 @@ def test_trading_daemon_surfaces_persistence_failure(monkeypatch):
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
     monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
     monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _fake_refresh)
+    # Force STALE substrate so the staleness gate falls through to the capture path.
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
 
-    main._market_discovery_cycle()
+    # Run the producer through the daemon's fail-soft + health wrapper (the as-deployed unit).
+    observer_daemon._scheduler_job("market_discovery")(
+        substrate_observer._market_discovery_cycle
+    )()
 
     # The scheduler health for market_discovery must be FAILED (failed=True).
     failed_entries = [
@@ -176,9 +187,10 @@ def test_trading_daemon_surfaces_persistence_failure(monkeypatch):
 
 def test_trading_daemon_healthy_when_persistence_ok(monkeypatch):
     """Guard: when persistence succeeds, scheduler health is NOT marked failed."""
-    from src import main
     import src.data.market_scanner as market_scanner
     import src.data.polymarket_client as polymarket_client
+    import src.ingest.substrate_observer_daemon as observer_daemon
+    import src.observability.scheduler_health as scheduler_health
     import src.state.db as state_db
 
     health_calls: list[tuple[str, dict]] = []
@@ -186,7 +198,9 @@ def test_trading_daemon_healthy_when_persistence_ok(monkeypatch):
     def _record_health(job_name, **kwargs):
         health_calls.append((job_name, kwargs))
 
-    monkeypatch.setattr(main, "_write_scheduler_health", _record_health)
+    # P2 lift: health is written by the daemon's _scheduler_job wrapper (see the FAILED-case
+    # test above). Patch the writer at its source and run the producer through the wrapper.
+    monkeypatch.setattr(scheduler_health, "_write_scheduler_health", _record_health)
 
     monkeypatch.setattr(
         market_scanner,
@@ -208,8 +222,12 @@ def test_trading_daemon_healthy_when_persistence_ok(monkeypatch):
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
     monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
     monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _fake_refresh)
+    # Force STALE substrate so the staleness gate falls through to the capture path.
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
 
-    main._market_discovery_cycle()
+    observer_daemon._scheduler_job("market_discovery")(
+        substrate_observer._market_discovery_cycle
+    )()
 
     # No FAILED entry for market_discovery.
     failed_entries = [

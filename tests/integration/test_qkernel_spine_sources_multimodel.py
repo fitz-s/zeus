@@ -171,7 +171,12 @@ def test_spine_producer_sources_raw_model_forecasts_not_ensemble():
         conn, event=_Event(), family=_Family(), decision_time=DECISION_TIME
     )
     assert out is not None, "multi-model envelope must be sourced for a causal-bound family"
-    members, source_cycle = out
+    # FINAL no-shadow §1-§2: the producer now returns a THIRD element — the per-model RAW
+    # second moment + n (precision_by_index), in the SAME index order as the member list.
+    members, source_cycle, precision_by_index = out
+    assert len(precision_by_index) == len(members), (
+        "the per-model precision list must align 1:1 with the member list (RAW diagonal weights)"
+    )
 
     # COUNT: 8 decorrelated models, NOT the 51-member ensemble.
     assert len(members) == len(MULTIMODEL_C), (
@@ -218,7 +223,7 @@ def test_spine_producer_matches_arm_replay_fresh_members_at_cycle():
         conn, event=_Event(), family=_Family(), decision_time=DECISION_TIME
     )
     assert out is not None
-    live_members, source_cycle = out
+    live_members, source_cycle, _precision_by_index = out
     cycle_date = str(source_cycle)[:10]
 
     replay_raw = arm.fresh_members_at_cycle(conn, CITY, METRIC, TARGET_DATE, cycle_date)

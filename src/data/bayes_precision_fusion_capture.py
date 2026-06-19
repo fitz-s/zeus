@@ -1,9 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-17
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (fail-soft multi-model live capture), §4 algorithm
 #   step (1) eligible / (4) EB bias-correct; §7 antibodies (source-disagreement, lowN). The
 #   capture reuses the existing Open-Meteo single-runs fetch pattern
 #   (openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload) per model.
+#   2026-06-17: icon_seamless removed from OPENMETEO_MODEL_IDS and candidate_models — it was
+#   the alias-dedup probe (bit-identical to icon_d2). No longer fetched or fused.
 """F1 — fail-soft multi-model live capture for the BAYES_PRECISION_FUSION-Bayes fusion.
 
 Fetches the decorrelated globals (gfs_global, icon_global, gem_global, jma_seamless, icon_eu)
@@ -43,7 +45,11 @@ from src.forecast.bayes_precision_fusion import (
     DISAGREE_W,
     MIN_TRAIN,
     ModelInstrument,
-    eb_bias,
+)
+# NOTE (FINAL no-shadow §4): ``eb_bias`` is deliberately NOT imported — the consumed
+# posterior center is RAW (z = x), so the EB shift primitive must never reach this path.
+from src.forecast.grid_representativeness_loader import (
+    sigma_repr_sq_for as _sigma_repr_sq_for,
 )
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_capture")
@@ -102,23 +108,26 @@ def _available_after_decision(
         return False
 
 # Open-Meteo model ids for the single-runs forecast endpoint. icon_eu is OM's `icon_eu`;
-# jma_seamless / gem_global / gfs_global / icon_global / icon_d2 are OM model ids; the France
-# AROME-HD model is OM `meteofrance_arome_france_hd`.
+# icon_global / icon_d2 are OM model ids; the France AROME-HD model is OM
+# `meteofrance_arome_france_hd`. (2026-06-17: gfs_global/gem_global/jma_seamless were DROPPED from
+# the fusion — their forward entries are removed; `.get(model, model)` covers any stray lookup.
+# icon_seamless was also REMOVED — it was the alias-dedup probe and contributed no decorrelated
+# information; it is no longer fetched or fused.)
 OPENMETEO_MODEL_IDS: dict[str, str] = {
-    "gfs_global": "gfs_global",
     "icon_global": "icon_global",
-    "gem_global": "gem_global",
-    "jma_seamless": "jma_seamless",
     "icon_eu": "icon_eu",
     "icon_d2": "icon_d2",
     "meteofrance_arome_france_hd": "meteofrance_arome_france_hd",
-    # icon_seamless is fetched only to run the alias-dedup test against icon_d2.
-    "icon_seamless": "icon_seamless",
     # 2026-06-09 promotion (universality sweep P5): explicit entries so a future open-meteo id
     # rename can never silently break the identity fallback (`.get(model, model)`).
     "ncep_nbm_conus": "ncep_nbm_conus",
     "ukmo_global_deterministic_10km": "ukmo_global_deterministic_10km",
     "ukmo_uk_deterministic_2km": "ukmo_uk_deterministic_2km",
+    # 2026-06-17 PRECISION-INPUT FIX: high-res CONUS / N-America regional experts (3km HRRR /
+    # 2.5km HRDPS) — the station-resolving raw products the fusion needs where coarse globals
+    # snap cold. OM serves these single-runs ids directly.
+    "gfs_hrrr": "gfs_hrrr",
+    "gem_hrdps_continental": "gem_hrdps_continental",
 }
 
 # BLOCKER 3: the OM product that actually serves the ANCHOR walk-forward history via the
@@ -216,6 +225,9 @@ def _default_live_fetch(
     try:
         from urllib.parse import urlencode  # noqa: PLC0415
 
+        from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+            BAYES_PRECISION_FUSION_CELL_SELECTION,
+        )
         from src.data.openmeteo_client import fetch  # noqa: PLC0415
         from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
             SINGLE_RUNS_FORECAST_URL,
@@ -237,6 +249,9 @@ def _default_live_fetch(
             "forecast_hours": forecast_hours,
             "temperature_unit": "celsius",
             "timezone": timezone_name,
+            # 2026-06-17 land-cell fix: read the airport's LAND surface, not the offshore sea
+            # cell (the systematic coastal cold drag). Matches the recorded product identity.
+            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
         payload = fetch(
             SINGLE_RUNS_FORECAST_URL,
@@ -278,6 +293,13 @@ class BayesPrecisionFusionCaptureResult:
     # (FAIL-OPEN path). Non-zero means the arrival guard ran without evidence for
     # those models — visible in telemetry, never silently hidden.
     admitted_on_missing_availability: int = 0
+    # v3 rule 5: the anchor cell's sigma_repr^2 (degC^2), widening the fusion prior tau0.
+    # 0.0 when the grid-representativeness deploy flag is OFF or the anchor cell is unknown.
+    anchor_sigma_repr_sq: float = 0.0
+    # METHOD UNIFY 2026-06-18: anchor RAW second moment (degC²) and n_train for the shared
+    # raw_second_moment_weights helper.  None when the anchor has no walk-forward history.
+    anchor_raw_m2_native: float | None = None
+    anchor_raw_n_train: int = 0
 
     @property
     def has_extras(self) -> bool:
@@ -286,11 +308,27 @@ class BayesPrecisionFusionCaptureResult:
         return len(self.likelihood) > 0
 
 
-def _eb_corrected(model: str, raw_value: float, history: ModelHistory | None, parent_bias: float) -> tuple[float, int]:
-    """Return (z = raw - b_hat, n_train) using walk-forward EB bias. No history -> bias 0."""
-    resids = list(history.residuals) if history else []
-    b_hat = eb_bias(resids, parent_bias) if resids else 0.0
-    return raw_value - b_hat, (history.n_train if history else 0)
+def _raw_instrument(model: str, raw_value: float, history: ModelHistory | None, parent_bias: float) -> tuple[float, int]:
+    """Return (z = raw_value, n_train) — RAW instrument, NO de-bias (FINAL no-shadow §4).
+
+    2026-06-18 UNIFY (FINAL no-shadow execution flow §4): under the operator RAW
+    no-de-bias law the consumed-posterior instrument center is the RAW model value
+    ``z = x`` — NOT the EB-corrected ``z = x − b̂``. This is the change that makes the
+    materialized ``forecast_posteriors`` center the RAW diagonal center, so the EXIT
+    (``position_belief``) and MONITOR (``monitor_refresh``) belief reads — both
+    sourced from ``forecast_posteriors`` — match the spine ENTRY belief (which is
+    already RAW via ``_NoOpDebiasAuthority``). It closes the #135 two-center split
+    (RAW-entry vs EB-exit) WITHOUT a shadow product: there is one RAW belief.
+
+    The walk-forward ``history`` is RETAINED but consumed ONLY for width / provenance
+    (the residual std → anchor τ0, the cross-source disagreement var, the predictive
+    σ_resid) — it NEVER shifts the center. ``parent_bias`` is now unused for the
+    center (kept in the signature so the call sites and the pooled-residual provenance
+    are byte-stable); the RAW law forbids applying it to μ. ``n_train`` is carried
+    through unchanged (it drives the low-n width inflation, not a center move).
+    """
+    del parent_bias  # RAW law: no de-bias shift on the consumed center.
+    return float(raw_value), (history.n_train if history else 0)
 
 
 def capture_bayes_precision_instruments(
@@ -309,14 +347,15 @@ def capture_bayes_precision_instruments(
     live_fetch: LiveFetchFn | None = None,
     decision_utc: datetime | None = None,
     model_available_at: Mapping[str, str | datetime | None] | None = None,
+    apply_grid_representativeness: bool = False,
 ) -> BayesPrecisionFusionCaptureResult:
-    """F1 — fetch the extras fail-soft, EB-correct, gate, dedup, and build fusion inputs.
+    """F1 — fetch the extras fail-soft, EB-correct, gate, and build fusion inputs.
 
     ``anchor_z_corrected`` is the already-EB-corrected 0.1 anchor center the materializer already
     has (the soft-anchor anchor_value_c minus its EB shift); the capture pairs it with the
     anchor's walk-forward residual std to form the prior. The decorrelated globals + in-polygon
     regionals are fetched live (fail-soft), EB-corrected from their own histories, gated by the
-    polygon (regionals) and deduped (icon_seamless==icon_d2), then emitted as ModelInstruments.
+    polygon (regionals), then emitted as ModelInstruments.
 
     ARRIVAL GUARD (C1-AVAIL-CLOCK, 2026-06-16): ``decision_utc`` + ``model_available_at`` add a
     pre-fusion honesty gate — an extra whose honest source_available_at is in the FUTURE relative to
@@ -335,7 +374,8 @@ def capture_bayes_precision_instruments(
     fetch_fn = live_fetch or _default_live_fetch
     availability = dict(model_available_at or {})
 
-    candidate_models = list(GLOBAL_LIKELIHOOD_MODELS) + list(REGIONAL_MODELS) + ["icon_seamless"]
+    # 2026-06-17: icon_seamless removed — it was the alias-dedup probe, not a decorrelated source.
+    candidate_models = list(GLOBAL_LIKELIHOOD_MODELS) + list(REGIONAL_MODELS)
 
     # ---- fail-soft per-model live capture ----
     present_values: dict[str, float] = {}
@@ -409,38 +449,43 @@ def capture_bayes_precision_instruments(
             pooled.extend(h.residuals)
     parent_bias = (sum(pooled) / len(pooled)) if pooled else 0.0
 
-    # ---- alias dedup series (recent residual/value series for icon_seamless vs icon_d2) ----
-    alias_series: dict[str, Sequence[float]] = {}
-    for m in ("icon_d2", "icon_seamless"):
-        h = histories.get(m)
-        if h and h.forecast_values:
-            alias_series[m] = list(h.forecast_values)
-
     selection = select_models(
         present_models=present_values,
         lat=latitude, lon=longitude, lead_days=lead_days,
-        alias_series=alias_series or None,
     )
 
     # ---- EB-correct + build instruments for the SELECTED set (globals then regionals) ----
     # BLOCKER 2: each instrument carries residuals_by_target_date so the fusion aligns the
     # covariance by date (the cross-model Sigma is estimated only over the common target_dates).
+    # v3 rule 5 (grid representativeness): per-instrument sigma_repr^2 from the persisted
+    # native-cell d_eff/delta_z table — ADDED to the fusion Sigma diagonal. Fail-soft loader
+    # (unknown city/model -> 0.0); the whole layer is inert when the deploy flag is OFF.
+    def _repr_sq(model_name: str) -> float:
+        if not apply_grid_representativeness:
+            return 0.0
+        return _sigma_repr_sq_for(city, model_name)
+
+    # UNIFY (FINAL no-shadow §4): instruments enter RAW (z = x), NOT EB-corrected
+    # (z = x − b̂). The walk-forward residual history is retained for width/provenance
+    # (anchor τ0, disagreement var, σ_resid) but never shifts the center, so the fused
+    # μ* the materializer writes to forecast_posteriors is the RAW diagonal center —
+    # the same RAW belief the spine entry path serves (one belief, no shadow).
     instruments: list[ModelInstrument] = []
     for m in selection.likelihood_globals:
-        z, n = _eb_corrected(m, present_values[m], histories.get(m), parent_bias)
+        z, n = _raw_instrument(m, present_values[m], histories.get(m), parent_bias)
         h = histories.get(m)
         instruments.append(ModelInstrument(
             model=m, z=z, train_residuals=tuple(h.residuals) if h else (),
             residuals_by_date=h.residual_by_target_date if h else {},
-            n_train=n, is_regional=False,
+            n_train=n, is_regional=False, sigma_repr_sq=_repr_sq(m),
         ))
     for m in selection.regional_experts:
-        z, n = _eb_corrected(m, present_values[m], histories.get(m), parent_bias)
+        z, n = _raw_instrument(m, present_values[m], histories.get(m), parent_bias)
         h = histories.get(m)
         instruments.append(ModelInstrument(
             model=m, z=z, train_residuals=tuple(h.residuals) if h else (),
             residuals_by_date=h.residual_by_target_date if h else {},
-            n_train=n, is_regional=True,
+            n_train=n, is_regional=True, sigma_repr_sq=_repr_sq(m),
         ))
 
     # ---- anchor prior (EB-corrected center + walk-forward residual std) ----
@@ -497,6 +542,21 @@ def capture_bayes_precision_instruments(
     else:
         disagree_var = 0.0
 
+    # v3 rule 5: the anchor (ecmwf_ifs 9km cell) carries its OWN representativeness error,
+    # widening the prior spread (tau0) inside the fusion. 0.0 when the flag is OFF or the cell
+    # is unknown -> tau0 unchanged.
+    anchor_sigma_repr_sq = _repr_sq(ANCHOR_MODEL)
+
+    # METHOD UNIFY 2026-06-18: compute the anchor's RAW second moment (degC²) for the
+    # shared raw_second_moment_weights helper.  residuals = forecast − settlement (degC),
+    # so raw_m2 = mean(r²) — bias² included, same formula as the spine producer.
+    _anchor_raw_m2: float | None = None
+    _anchor_raw_n: int = 0
+    if anchor_hist and anchor_hist.n_train > 0:
+        _rs = anchor_hist.residuals
+        _anchor_raw_m2 = sum(r * r for r in _rs) / len(_rs)
+        _anchor_raw_n = anchor_hist.n_train
+
     return BayesPrecisionFusionCaptureResult(
         anchor_z=anchor_z,
         anchor_tau0=anchor_tau0,
@@ -505,4 +565,7 @@ def capture_bayes_precision_instruments(
         selection=selection,
         dropped_models=tuple(dropped),
         admitted_on_missing_availability=_missing_avail_count,
+        anchor_sigma_repr_sq=anchor_sigma_repr_sq,
+        anchor_raw_m2_native=_anchor_raw_m2,
+        anchor_raw_n_train=_anchor_raw_n,
     )

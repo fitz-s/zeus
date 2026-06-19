@@ -77,6 +77,36 @@ def test_exit_retry_state_survives_db_round_trip():
     reloaded = _position_from_projection_row(row, current_mode="live")
     assert reloaded.exit_retry_count == 4
     assert reloaded.next_exit_retry_at == "2026-06-12T13:00:00+00:00"
+    assert reloaded.exit_state == "retry_pending"
+
+
+def test_pending_exit_retry_state_recovers_when_projection_has_no_exit_state_field():
+    """Live position_current persists retry fields but not an exit_state column."""
+    reloaded = _position_from_projection_row(
+        current_mode="live",
+        row={
+            "trade_id": "retry-no-exit-state",
+            "market_id": "m1",
+            "city": "Chengdu",
+            "cluster": "Chengdu",
+            "target_date": "2026-06-19",
+            "bin_label": "b",
+            "direction": "buy_no",
+            "unit": "C",
+            "temperature_metric": "high",
+            "phase": "pending_exit",
+            "strategy_key": "settlement_capture",
+            "env": "live",
+            "chain_state": "synced",
+            "exit_retry_count": 2,
+            "next_exit_retry_at": "2026-06-18T07:04:40+00:00",
+        },
+    )
+
+    assert reloaded.state == "pending_exit"
+    assert reloaded.exit_retry_count == 2
+    assert reloaded.next_exit_retry_at == "2026-06-18T07:04:40+00:00"
+    assert reloaded.exit_state == "retry_pending"
 
 
 def test_legacy_row_without_retry_columns_defaults_to_zero():

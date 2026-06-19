@@ -58,6 +58,20 @@ class RawModelMember:
     Carries full source provenance (run id, cycle time, availability time,
     station mapping, raw artifact id, data version) so a member can be audited
     against the settlement station and product set in DebiasAuthority.
+
+    RAW SECOND-MOMENT PRECISION (2026-06-18 RAW diagonal fusion, FINAL no-shadow
+    execution flow §1-§2): ``walk_forward_raw_m2_native`` is the strictly-prior,
+    date-aligned ``Ê[(x_raw − Y)²]`` for THIS model at the family's (city, metric,
+    lead) — the RAW second moment of the residual (forecast minus settlement),
+    SQUARED then averaged over settlements with target_date < decision date. It is
+    the precision BASIS ``center.walk_forward_model_weights`` reads to form
+    ``w_m ∝ 1/max(Ê[(x_m−Y)²], SIGMA_FLOOR²)``. Under the RAW law this is the
+    deployable basis (it INCLUDES the bias² — NOT the demeaned variance ``np.var``
+    that ``shrink_cov``/``diag_cov`` estimate and that discards bias²).
+    ``walk_forward_n`` is the count of walk-forward residuals (drives the
+    shrink-to-equal-at-low-n rule). Both default to None/0 — absent history ⇒ the
+    weight collapses to equal 1/n (the conservative shrink-to-equal posture), never
+    EB, never demeaned var.
     """
 
     model_id: str
@@ -69,6 +83,11 @@ class RawModelMember:
     station_mapping_id: str
     raw_forecast_artifact_id: str
     data_version: str
+    # RAW diagonal precision basis (FINAL no-shadow execution flow §1-§2). The raw
+    # second moment Ê[(x−Y)²] (bias² INCLUDED) and its walk-forward count. None/0 ⇒
+    # no precision signal ⇒ equal 1/n for this member.
+    walk_forward_raw_m2_native: float | None = None
+    walk_forward_n: int = 0
 
 
 @dataclass(frozen=True)

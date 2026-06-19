@@ -416,7 +416,7 @@ This document therefore distinguishes **current code behavior** from **target ma
 
 ### 5.1 Current code state
 
-Registry marks `settlement_capture` live, with `allowed_market_phases: [settlement_day]`, `allowed_directions: [buy_yes]`, and topology `[point, finite_range]`. It is a pre-existing live strategy. The strategy is described as day-0 settlement capture using observation rather than model forecast.
+Registry marks `settlement_capture` live, with `allowed_market_phases: [settlement_day]`, `allowed_directions: [buy_yes, buy_no]`, LOW/HIGH metric support live under the Day0 absorbing hard-fact gates, and topology `[point, finite_range]`. It is a pre-existing live strategy. The strategy is described as day-0 settlement capture using observation rather than model forecast.
 
 ### 5.2 Correct mathematical identity
 

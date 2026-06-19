@@ -241,6 +241,14 @@ def _decimal_text_is_zero(value: Any) -> bool:
     return parsed.is_finite() and parsed == 0
 
 
+def _decimal_or_none(value: Any) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
 def _finite_decimal_text(value: Any) -> str:
     try:
         parsed = Decimal(str(value))
@@ -1253,46 +1261,80 @@ def _validate_review_venue_order_live_payload(
         raise ValueError("review live-order clearance payload requires reason=review_cleared_venue_order_live")
     if payload.get("command_id") != command_id:
         raise ValueError("review live-order clearance payload command_id must match appended command")
-    if payload.get("proof_class") != "cancel_unknown_venue_order_live":
+    proof_class = payload.get("proof_class")
+    if proof_class not in {
+        "cancel_unknown_venue_order_live",
+        "acked_submit_venue_order_live",
+    }:
         raise ValueError("review live-order clearance proof_class is not supported")
-    if payload.get("side_effect_boundary_crossed") != "unknown":
-        raise ValueError("review live-order clearance requires side_effect_boundary_crossed=unknown")
-    if payload.get("sdk_cancel_attempted") != "unknown":
-        raise ValueError("review live-order clearance requires sdk_cancel_attempted=unknown")
+    if proof_class == "cancel_unknown_venue_order_live":
+        if payload.get("side_effect_boundary_crossed") != "unknown":
+            raise ValueError("review live-order clearance requires side_effect_boundary_crossed=unknown")
+        if payload.get("sdk_cancel_attempted") != "unknown":
+            raise ValueError("review live-order clearance requires sdk_cancel_attempted=unknown")
+    else:
+        if payload.get("side_effect_boundary_crossed") is not True:
+            raise ValueError("post-ACK live-order clearance requires side_effect_boundary_crossed=true")
+        if payload.get("sdk_submit_attempted") is not True:
+            raise ValueError("post-ACK live-order clearance requires sdk_submit_attempted=true")
     required_predicates = payload.get("required_predicates")
     if not isinstance(required_predicates, dict):
         raise ValueError("review live-order clearance requires required_predicates")
-    required_true = (
-        "latest_event_is_cancel_replace_blocked",
-        "semantic_cancel_status_cancel_unknown",
-        "requires_m5_reconcile",
-        "venue_order_id_present",
-        "venue_order_id_matches_point_read",
-        "point_order_status_live",
-        "point_order_matched_size_not_positive",
-        "no_trade_facts",
-    )
+    if proof_class == "cancel_unknown_venue_order_live":
+        required_true = (
+            "latest_event_is_cancel_replace_blocked",
+            "semantic_cancel_status_cancel_unknown",
+            "requires_m5_reconcile",
+            "venue_order_id_present",
+            "venue_order_id_matches_point_read",
+            "point_order_status_live",
+            "point_order_matched_size_not_positive",
+            "no_trade_facts",
+        )
+    else:
+        required_true = (
+            "latest_event_is_review_required",
+            "review_reason_post_ack_persistence_failure",
+            "venue_order_id_present",
+            "venue_order_id_matches_live_proof",
+            "authenticated_live_order_seen",
+            "latest_order_fact_live",
+            "point_order_matched_size_not_positive",
+            "no_trade_facts",
+        )
     missing = [name for name in required_true if required_predicates.get(name) is not True]
     if missing:
         raise ValueError(f"review live-order clearance predicates are not proven true: {missing}")
     actual_predicates = _actual_review_venue_order_live_predicates(conn, command_id, payload)
-    actual_failures = [name for name, ok in actual_predicates.items() if not ok]
+    actual_failures = [name for name in required_true if not actual_predicates.get(name)]
     if actual_failures:
         raise ValueError(f"review live-order clearance DB predicates failed: {actual_failures}")
     proof = payload.get("venue_order_live_proof")
     if not isinstance(proof, dict):
         raise ValueError("review live-order clearance requires venue_order_live_proof")
-    for key in ("source", "observed_at", "venue_order_id", "point_order_status"):
+    for key in ("source", "observed_at", "venue_order_id"):
         if not str(proof.get(key) or "").strip():
             raise ValueError(f"review live-order clearance proof missing {key}")
-    if proof.get("source") != "authenticated_clob_point_order_read":
+    if proof_class == "cancel_unknown_venue_order_live" and not str(proof.get("point_order_status") or "").strip():
+        raise ValueError("review live-order clearance proof missing point_order_status")
+    allowed_sources = (
+        {"authenticated_clob_point_order_read"}
+        if proof_class == "cancel_unknown_venue_order_live"
+        else {"authenticated_clob_user_or_point_order_read"}
+    )
+    if proof.get("source") not in allowed_sources:
         raise ValueError("review live-order clearance requires authenticated point order proof")
     source = payload.get("source_proof")
     if not isinstance(source, dict):
         raise ValueError("review live-order clearance requires source_proof")
     if source.get("source_function") not in {"command_recovery._reconcile_row", "operator_review"}:
         raise ValueError("review live-order clearance source_function is not supported")
-    if source.get("source_reason") != "cancel_unknown_venue_order_live":
+    expected_source_reason = (
+        "cancel_unknown_venue_order_live"
+        if proof_class == "cancel_unknown_venue_order_live"
+        else "acked_submit_venue_order_live"
+    )
+    if source.get("source_reason") != expected_source_reason:
         raise ValueError("review live-order clearance source_reason is not supported")
 
 
@@ -1314,6 +1356,14 @@ def _validate_review_no_exposure_payload(
     proof_class = payload.get("proof_class")
     if proof_class == "cancel_unknown_terminal_no_fill":
         _validate_review_cancel_unknown_no_fill_payload(
+            conn=conn,
+            current_state=current_state,
+            payload=payload,
+            command_id=command_id,
+        )
+        return
+    if proof_class == "acked_submit_terminal_no_fill":
+        _validate_review_acked_submit_terminal_no_fill_payload(
             conn=conn,
             current_state=current_state,
             payload=payload,
@@ -1594,6 +1644,181 @@ def _validate_review_cancel_unknown_no_fill_payload(
         raise ValueError("cancel-unknown no-fill source_reason is unsupported")
 
 
+def _validate_review_acked_submit_terminal_no_fill_payload(
+    *,
+    conn: sqlite3.Connection,
+    current_state: str,
+    payload: dict,
+    command_id: str,
+) -> None:
+    if current_state != "REVIEW_REQUIRED":
+        raise ValueError("acked-submit no-fill clearance is only legal from REVIEW_REQUIRED")
+    if payload.get("side_effect_boundary_crossed") is not True:
+        raise ValueError("acked-submit no-fill clearance requires side_effect_boundary_crossed=true")
+    if payload.get("sdk_submit_attempted") is not True:
+        raise ValueError("acked-submit no-fill clearance requires sdk_submit_attempted=true")
+    required_predicates = payload.get("required_predicates")
+    if not isinstance(required_predicates, dict):
+        raise ValueError("acked-submit no-fill clearance requires required_predicates")
+    required_true = (
+        "latest_event_is_review_required",
+        "review_reason_post_ack_persistence_failure",
+        "venue_order_id_present",
+        "terminal_order_fact_latest",
+        "terminal_order_fact_no_fill",
+        "no_trade_facts",
+        "no_matching_open_orders",
+        "no_matching_trades",
+        "no_positive_position_projection",
+    )
+    missing = [name for name in required_true if required_predicates.get(name) is not True]
+    if missing:
+        raise ValueError(f"acked-submit no-fill predicates are not proven true: {missing}")
+    with _row_factory_as(conn, sqlite3.Row):
+        command = conn.execute(
+            """
+            SELECT command_id, position_id, decision_id, market_id, token_id, side, price, size, created_at, venue_order_id
+              FROM venue_commands
+             WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd
+              FROM position_current
+             WHERE position_id = (SELECT position_id FROM venue_commands WHERE command_id = ?)
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        latest_event = conn.execute(
+            """
+            SELECT event_type, payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        fact = conn.execute(
+            """
+            SELECT fact_id, venue_order_id, state, matched_size, local_sequence
+              FROM venue_order_facts
+             WHERE fact_id = ?
+               AND command_id = ?
+            """,
+            (payload.get("terminal_order_fact_id"), command_id),
+        ).fetchone()
+        latest_fact = conn.execute(
+            """
+            SELECT fact_id, venue_order_id, state, matched_size, local_sequence
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    if command is None or not str(command["venue_order_id"] or "").strip():
+        raise ValueError("acked-submit no-fill clearance requires command venue_order_id")
+    if latest_event is None or latest_event["event_type"] != "REVIEW_REQUIRED":
+        raise ValueError("acked-submit no-fill clearance requires latest REVIEW_REQUIRED")
+    try:
+        latest_payload = json.loads(str(latest_event["payload_json"] or "{}"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("acked-submit no-fill latest payload is invalid") from exc
+    if not isinstance(latest_payload, dict):
+        raise ValueError("acked-submit no-fill latest payload is invalid")
+    latest_reason = latest_payload.get("reason")
+    allowed_reasons = {
+        "entry_ack_persistence_failed_after_side_effect",
+        "exit_ack_persistence_failed_after_side_effect",
+    }
+    if latest_reason not in allowed_reasons:
+        raise ValueError("acked-submit no-fill clearance only supports post-ACK persistence failures")
+    if fact is None:
+        raise ValueError("acked-submit no-fill clearance requires terminal order fact")
+    if latest_fact is None or int(fact["fact_id"]) != int(latest_fact["fact_id"]):
+        raise ValueError("acked-submit no-fill terminal order fact must be latest")
+    if str(fact["venue_order_id"] or "") != str(command["venue_order_id"] or ""):
+        raise ValueError("acked-submit no-fill terminal order fact venue_order_id mismatch")
+    if str(fact["state"] or "") not in {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}:
+        raise ValueError("acked-submit no-fill terminal order fact state is invalid")
+    try:
+        if Decimal(str(fact["matched_size"] or "0")) != Decimal("0"):
+            raise ValueError("acked-submit no-fill terminal order fact matched_size must be zero")
+    except (InvalidOperation, TypeError) as exc:
+        raise ValueError("acked-submit no-fill terminal order fact matched_size is invalid") from exc
+    if _review_clearance_fact_count(conn, "venue_trade_facts", command_id) != 0:
+        raise ValueError("acked-submit no-fill clearance found trade facts")
+    if current is not None:
+        try:
+            shares = Decimal(str(current["shares"] or "0"))
+            cost_basis = Decimal(str(current["cost_basis_usd"] or "0"))
+        except (InvalidOperation, TypeError) as exc:
+            raise ValueError("acked-submit no-fill position exposure is invalid") from exc
+        if shares != Decimal("0") or cost_basis != Decimal("0"):
+            raise ValueError("acked-submit no-fill clearance requires no positive position projection")
+    venue_proof = payload.get("venue_absence_proof")
+    if not isinstance(venue_proof, dict):
+        raise ValueError("acked-submit no-fill clearance requires venue_absence_proof")
+    if venue_proof.get("owner_scope") != "authenticated_funder":
+        raise ValueError("acked-submit no-fill clearance requires authenticated_funder owner_scope")
+    for key in ("open_orders_checked", "trades_checked", "open_orders_query_complete", "trades_query_complete"):
+        if venue_proof.get(key) is not True:
+            raise ValueError(f"acked-submit no-fill clearance requires {key}=true")
+    if not str(venue_proof.get("pagination_scope") or "").strip():
+        raise ValueError("acked-submit no-fill clearance requires pagination_scope")
+    if int(venue_proof.get("matching_open_order_count", -1)) != 0:
+        raise ValueError("acked-submit no-fill clearance found matching open orders")
+    if int(venue_proof.get("matching_trade_count", -1)) != 0:
+        raise ValueError("acked-submit no-fill clearance found matching trades")
+    for key in ("command_id", "market_id", "token_id", "side"):
+        if str(venue_proof.get(key) or "") != str(command[key] or ""):
+            raise ValueError(f"acked-submit no-fill venue_absence_proof {key} does not match command")
+    for key in ("price", "size"):
+        try:
+            proof_value = Decimal(str(venue_proof.get(key)))
+            command_value = Decimal(str(command[key]))
+        except (InvalidOperation, TypeError) as exc:
+            raise ValueError(f"acked-submit no-fill venue_absence_proof {key} is invalid") from exc
+        if proof_value != command_value:
+            raise ValueError(f"acked-submit no-fill venue_absence_proof {key} does not match command")
+    observed_at = _review_clearance_parse_utc(venue_proof.get("observed_at"))
+    cleared_at = _review_clearance_parse_utc(payload.get("cleared_at"))
+    window_start = _review_clearance_parse_utc(venue_proof.get("time_window_start"))
+    window_end = _review_clearance_parse_utc(venue_proof.get("time_window_end"))
+    command_created_at = _review_clearance_parse_utc(command["created_at"])
+    if (
+        observed_at is None
+        or cleared_at is None
+        or window_start is None
+        or window_end is None
+        or command_created_at is None
+    ):
+        raise ValueError("acked-submit no-fill clearance requires parseable proof times")
+    age_seconds = (cleared_at - observed_at).total_seconds()
+    if age_seconds < -5 or _freshness_registry.evaluate("venue_clearance", age_seconds) >= FreshnessLevel.STALE:
+        raise ValueError("acked-submit no-fill venue proof is stale")
+    if window_start > command_created_at or window_end < observed_at:
+        raise ValueError("acked-submit no-fill time window does not cover command through venue read")
+    source = payload.get("source_proof")
+    if not isinstance(source, dict):
+        raise ValueError("acked-submit no-fill clearance requires source_proof")
+    for key in ("source_commit", "source_function", "source_reason"):
+        if not str(source.get(key) or "").strip():
+            raise ValueError(f"acked-submit no-fill source_proof missing {key}")
+    if source.get("source_function") != "command_recovery._reconcile_row":
+        raise ValueError("acked-submit no-fill source_function is not supported")
+    if source.get("source_reason") != "acked_submit_terminal_no_fill":
+        raise ValueError("acked-submit no-fill source_reason is unsupported")
+    review_proof = payload.get("review_required_proof")
+    if not isinstance(review_proof, dict) or review_proof.get("reason") != latest_reason:
+        raise ValueError("acked-submit no-fill review reason mismatch")
+
+
 def _validate_review_confirmed_fill_payload(
     *,
     conn: sqlite3.Connection,
@@ -1610,6 +1835,8 @@ def _validate_review_confirmed_fill_payload(
     if proof_class not in {
         "prior_fill_confirmed_event_with_positive_trade_fact",
         "cancel_unknown_confirmed_trade_with_positive_trade_fact",
+        "recovery_no_venue_order_id_confirmed_trade",
+        "matched_cancel_with_confirmed_held_projection",
     }:
         raise ValueError("review confirmed-fill clearance proof_class is not supported")
     required_predicates = payload.get("required_predicates")
@@ -1621,6 +1848,23 @@ def _validate_review_confirmed_fill_payload(
             "semantic_cancel_status_cancel_unknown",
             "requires_m5_reconcile",
             "positive_trade_fact",
+        )
+    elif proof_class == "recovery_no_venue_order_id_confirmed_trade":
+        required_true = (
+            "latest_event_is_review_required",
+            "review_reason_recovery_no_venue_order_id",
+            "positive_trade_fact",
+            "maker_order_token_matches_command",
+            "maker_order_not_open",
+            "venue_size_quantization_residual_lt_0_01",
+        )
+    elif proof_class == "matched_cancel_with_confirmed_held_projection":
+        required_true = (
+            "latest_event_is_cancel_replace_blocked",
+            "cancel_response_not_canceled_because_matched",
+            "positive_trade_facts",
+            "residual_size_is_dust",
+            "active_projection_matches_confirmed_fill",
         )
     else:
         required_true = (
@@ -1643,6 +1887,8 @@ def _validate_review_confirmed_fill_payload(
         "PolymarketUserChannelIngestor._handle_trade",
         "operator_review",
         "command_recovery._review_required_cancel_unknown_live_order_recovery",
+        "command_recovery._reconcile_row",
+        "command_recovery.reconcile_matched_cancel_review_required_entries",
     }:
         raise ValueError("review confirmed-fill clearance source_function is not supported")
     if not str(source.get("source_commit") or "").strip():
@@ -1916,6 +2162,87 @@ def _actual_review_confirmed_fill_predicates(
             """,
             (command_id, trade_id, venue_order_id),
         ).fetchone()
+        aggregate_trade_rows = conn.execute(
+            """
+            WITH canonical_trade_fact AS (
+                SELECT ranked.*
+                  FROM (
+                        SELECT scored.*,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY command_id, trade_id
+                                   ORDER BY proof_rank DESC, local_sequence DESC
+                               ) AS canonical_rank
+                          FROM (
+                                SELECT fact.*,
+                                       CASE
+                                           WHEN UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
+                                                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 500
+                                           WHEN UPPER(COALESCE(fact.state, '')) = 'MINED'
+                                                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 450
+                                           WHEN UPPER(COALESCE(fact.state, '')) = 'MATCHED'
+                                                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 400
+                                           WHEN CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                                           THEN 300
+                                           ELSE 100
+                                       END AS proof_rank
+                                  FROM venue_trade_facts fact
+                               ) scored
+                       ) ranked
+                 WHERE ranked.canonical_rank = 1
+            )
+            SELECT filled_size
+              FROM canonical_trade_fact
+             WHERE command_id = ?
+               AND venue_order_id = ?
+               AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+            """,
+            (command_id, venue_order_id),
+        ).fetchall()
+        order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+               AND venue_order_id = ?
+             ORDER BY
+               CASE
+                 WHEN UPPER(COALESCE(state, '')) IN ('MATCHED', 'FILLED')
+                      AND CAST(COALESCE(matched_size, '0') AS REAL) > 0
+                      AND CAST(COALESCE(remaining_size, '0') AS REAL) = 0
+                 THEN 600
+                 WHEN UPPER(COALESCE(state, '')) IN ('PARTIALLY_MATCHED', 'PARTIAL')
+                      AND CAST(COALESCE(matched_size, '0') AS REAL) > 0
+                 THEN 400
+                 WHEN UPPER(COALESCE(state, '')) IN ('LIVE', 'OPEN', 'RESTING')
+                 THEN 200
+                 ELSE 100
+               END DESC,
+               local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id, venue_order_id),
+        ).fetchone()
+        command = conn.execute(
+            "SELECT position_id FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        position_rows = conn.execute(
+            """
+            SELECT phase, chain_state, shares, chain_shares
+              FROM position_current
+             WHERE order_id = ?
+                OR position_id = ?
+             ORDER BY updated_at DESC
+            """,
+            (
+                venue_order_id,
+                str(command["position_id"] or "") if command is not None else "",
+            ),
+        ).fetchall()
     latest_event_type = str(events[-1]["event_type"] or "") if events else ""
     prior_fill_confirmed = False
     for event in events[:-1]:
@@ -1936,6 +2263,59 @@ def _actual_review_confirmed_fill_predicates(
         and _decimal_text_equal(filled_size, trade_fact["filled_size"])
         and _decimal_text_equal(fill_price, trade_fact["fill_price"])
     )
+    aggregate_filled = Decimal("0")
+    aggregate_count = 0
+    for row in aggregate_trade_rows:
+        size = _decimal_or_none(row["filled_size"])
+        if size is None or size <= 0:
+            continue
+        aggregate_filled += size
+        aggregate_count += 1
+    payload_filled = _decimal_or_none(filled_size)
+    order_residual = _decimal_or_none(order_fact["remaining_size"]) if order_fact is not None else None
+    residual_is_dust = (
+        order_residual is not None
+        and Decimal("0") <= order_residual <= Decimal("0.011")
+    )
+    active_projection_matches = False
+    if payload_filled is not None:
+        for row in position_rows:
+            if str(row["phase"] or "") not in {"active", "day0_window", "pending_exit"}:
+                continue
+            if str(row["chain_state"] or "") not in {"synced", "chain_present", "exit_pending_missing"}:
+                continue
+            chain_shares = _decimal_or_none(row["chain_shares"])
+            if chain_shares is not None:
+                if abs(chain_shares - payload_filled) > Decimal("0.02"):
+                    continue
+                active_projection_matches = True
+                break
+            shares = _decimal_or_none(row["shares"])
+            if shares is None or abs(shares - payload_filled) > Decimal("0.01"):
+                continue
+            active_projection_matches = True
+            break
+    cancel_outcome = latest_payload.get("cancel_outcome")
+    cancel_outcome = cancel_outcome if isinstance(cancel_outcome, dict) else {}
+    cancel_text = " ".join(
+        str(value or "")
+        for value in (
+            latest_payload.get("reason"),
+            latest_payload.get("semantic_cancel_status"),
+            cancel_outcome.get("status"),
+            cancel_outcome.get("errorMsg"),
+            cancel_outcome.get("errorMessage"),
+            cancel_outcome.get("message"),
+        )
+    ).lower()
+    aggregate_positive_trade_facts = (
+        aggregate_count > 0
+        and payload_filled is not None
+        and abs(aggregate_filled - payload_filled) <= Decimal("0.000001")
+    )
+    required_predicates = payload.get("required_predicates")
+    if not isinstance(required_predicates, dict):
+        required_predicates = {}
     return {
         "latest_event_is_review_required": latest_event_type == "REVIEW_REQUIRED",
         "latest_event_is_cancel_replace_blocked": latest_event_type == "CANCEL_REPLACE_BLOCKED",
@@ -1944,8 +2324,20 @@ def _actual_review_confirmed_fill_predicates(
         ),
         "requires_m5_reconcile": latest_payload.get("requires_m5_reconcile") is True,
         "review_reason_supported": review_reason == "ws_trade_lifecycle_regression_or_economic_drift",
+        "review_reason_recovery_no_venue_order_id": review_reason == "recovery_no_venue_order_id",
         "prior_fill_confirmed_event": prior_fill_confirmed,
         "positive_trade_fact": positive_trade_fact,
+        "positive_trade_facts": aggregate_positive_trade_facts,
+        "cancel_response_not_canceled_because_matched": (
+            "not_canceled" in cancel_text and "matched" in cancel_text
+        ),
+        "residual_size_is_dust": residual_is_dust,
+        "active_projection_matches_confirmed_fill": active_projection_matches,
+        "maker_order_token_matches_command": required_predicates.get("maker_order_token_matches_command") is True,
+        "maker_order_not_open": required_predicates.get("maker_order_not_open") is True,
+        "venue_size_quantization_residual_lt_0_01": (
+            required_predicates.get("venue_size_quantization_residual_lt_0_01") is True
+        ),
     }
 
 
@@ -1995,7 +2387,15 @@ def _actual_review_venue_order_live_predicates(
     proof = proof if isinstance(proof, dict) else {}
     point_order = proof.get("point_order")
     point_order = point_order if isinstance(point_order, dict) else {}
+    latest_order_fact = proof.get("latest_order_fact")
+    latest_order_fact = latest_order_fact if isinstance(latest_order_fact, dict) else {}
+    matching_open_orders = proof.get("matching_open_orders")
+    matching_open_orders = matching_open_orders if isinstance(matching_open_orders, list) else []
     command_venue_order_id = str(command["venue_order_id"] or "").strip() if command is not None else ""
+    matching_open_order_id_matches = any(
+        _venue_order_id_from_payload(order if isinstance(order, dict) else {}) == command_venue_order_id
+        for order in matching_open_orders
+    )
     proof_venue_order_id = str(
         proof.get("venue_order_id")
         or point_order.get("orderID")
@@ -2010,6 +2410,9 @@ def _actual_review_venue_order_live_predicates(
         or point_order.get("state")
         or ""
     ).upper()
+    latest_fact_state = str(latest_order_fact.get("state") or "").upper()
+    latest_fact_venue_order_id = str(latest_order_fact.get("venue_order_id") or "").strip()
+    matching_open_order_seen = bool(matching_open_orders) and matching_open_order_id_matches
     matched_size = (
         proof.get("matched_size")
         if proof.get("matched_size") not in (None, "")
@@ -2020,11 +2423,20 @@ def _actual_review_venue_order_live_predicates(
             or point_order.get("filled_size")
         )
     )
+    latest_reason = str(latest_payload.get("reason") or "")
     return {
         "latest_event_is_cancel_replace_blocked": (
             latest is not None
             and latest["event_type"] == "CANCEL_REPLACE_BLOCKED"
         ),
+        "latest_event_is_review_required": (
+            latest is not None
+            and latest["event_type"] == "REVIEW_REQUIRED"
+        ),
+        "review_reason_post_ack_persistence_failure": latest_reason in {
+            "entry_ack_persistence_failed_after_side_effect",
+            "exit_ack_persistence_failed_after_side_effect",
+        },
         "semantic_cancel_status_cancel_unknown": (
             str(latest_payload.get("semantic_cancel_status") or "").upper() == "CANCEL_UNKNOWN"
         ),
@@ -2034,7 +2446,30 @@ def _actual_review_venue_order_live_predicates(
             bool(command_venue_order_id)
             and command_venue_order_id == proof_venue_order_id
         ),
+        "venue_order_id_matches_live_proof": (
+            bool(command_venue_order_id)
+            and (
+                command_venue_order_id == proof_venue_order_id
+                or matching_open_order_id_matches
+                or latest_fact_venue_order_id == command_venue_order_id
+            )
+        ),
         "point_order_status_live": point_status in {"LIVE", "OPEN", "RESTING"},
+        "latest_order_fact_live": (
+            bool(command_venue_order_id)
+            and latest_fact_venue_order_id == command_venue_order_id
+            and latest_fact_state in {"LIVE", "OPEN", "RESTING"}
+            and not _optional_decimal_positive(latest_order_fact.get("matched_size"))
+        ),
+        "authenticated_live_order_seen": (
+            matching_open_order_seen
+            or (
+                bool(command_venue_order_id)
+                and latest_fact_venue_order_id == command_venue_order_id
+                and latest_fact_state in {"LIVE", "OPEN", "RESTING"}
+            )
+            or point_status in {"LIVE", "OPEN", "RESTING"}
+        ),
         "point_order_matched_size_not_positive": not _optional_decimal_positive(matched_size),
         "no_trade_facts": _review_clearance_fact_count(conn, "venue_trade_facts", command_id) == 0,
     }

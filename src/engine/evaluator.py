@@ -102,8 +102,18 @@ from src.signal.day0_high_nowcast_signal import (
     Day0HighNowcastSignal,
     NotApplicableHorizon as _NowcastNotApplicableHorizon,
 )
+from src.signal.day0_low_distribution import (
+    build_pre_day0_low_empirical_conditioning,
+    load_pre_day0_low_empirical_model,
+    pre_day0_low_empirical_live_policy,
+)
 from src.signal.day0_window import remaining_member_extrema_for_day0
-from src.signal.ensemble_signal import EnsembleSignal, p_raw_vector_from_maxes, select_hours_for_target_date
+from src.signal.ensemble_signal import (
+    EnsembleSignal,
+    analytic_p_raw_vector_from_maxes,
+    p_raw_vector_from_maxes,
+    select_hours_for_target_date,
+)
 from src.control.control_plane import get_edge_threshold_multiplier
 from src.riskguard.policy import StrategyPolicy, resolve_strategy_policy
 from src.signal.model_agreement import (
@@ -124,8 +134,8 @@ from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
 from src.strategy.family_exclusive_dedup import (
     FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
+    buy_no_native_quote_evidence_enabled,
     build_weather_family_decision,
-    native_multibin_buy_no_shadow_enabled,
 )
 from src.strategy.kelly import (
     _unified_uncertainty_budget_enabled,
@@ -186,6 +196,9 @@ DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
     # fast_obs_source_for_city + faithfulness gate in day0_fast_obs.py).
     # Only fires when WU result is absent/stale/coverage-incomplete.
     "wu_icao": frozenset({"wu_api", "metar_fast_lane"}),
+    # Hong Kong has no valid WU/VHHH route; the live Day0 monitor source is the
+    # HKO native accumulator only.
+    "hko": frozenset({"hko_hourly_accumulator"}),
 }
 DAY0_EXECUTABLE_OBSERVATION_MAX_AGE_HOURS = 1.0
 DAY0_EXECUTABLE_OBSERVATION_FUTURE_TOLERANCE_SECONDS = 60.0
@@ -1160,16 +1173,19 @@ def _day0_observation_quality_rejection_reason(
     temperature_metric: MetricIdentity,
     *,
     decision_time: datetime | None,
+    allow_incomplete_window_bound: bool = False,
 ) -> str | None:
     # review5.23 P1-1: fail-closed on incomplete coverage window.
     # WINDOW_INCOMPLETE means the WU data doesn't start at/near local-day midnight;
-    # high_so_far / low_so_far cannot be claimed as local-day extrema.
+    # high_so_far / low_so_far cannot be claimed as complete local-day extrema.
+    # Held-position monitor may still use the observed value as a one-sided
+    # Day0 bound: HIGH has an observed floor; LOW has an observed ceiling.
     obs_coverage = str(
         getattr(observation, "coverage_status", None)
         or (observation.get("coverage_status") if isinstance(observation, dict) else None)
         or ""
     ).strip().upper()
-    if obs_coverage == "WINDOW_INCOMPLETE":
+    if obs_coverage == "WINDOW_INCOMPLETE" and not allow_incomplete_window_bound:
         return (
             f"Day0 observation coverage window is incomplete: city={city.name} "
             "first_sample_time is outside the local-day-start grace window; "
@@ -3406,8 +3422,8 @@ def _resolve_unified_entry_bias_native(
     and ``monitor_refresh._resolve_unified_exit_bias_native``.
 
     Returns the native-unit per-city bias SHIFT to subtract from member extrema BEFORE p_raw,
-    or None. Flag-gated by ``feature_flags.exit_bias_family_unify_enabled`` (default OFF →
-    None → byte-identical to today). When ON, reads the SAME populated VERIFIED family the
+    or None. The live flag ``feature_flags.exit_bias_family_unify_enabled`` keeps entry,
+    evaluator, and monitor on the same populated VERIFIED family the
     reactor entry uses (``event_reactor_adapter._EDLI_BIAS_FAMILY`` = 'edli_per_city_v1')
     with the reactor's EXACT read shape (month=target_month, target_month=target_month,
     authority='VERIFIED', lead_bucket=None) — the legacy ft read shape (month=0,
@@ -3505,6 +3521,8 @@ def evaluate_candidate(
     # When True, the calibration step below uses identity-Platt (A4 lockstep) so this
     # entry path's belief matches the EDLI reactor entry belief. Default False → unchanged.
     _unified_bias_applied = False
+    _pre_day0_low_carryover_context: dict | None = None
+    _pre_day0_low_carryover_applied = False
     selected_method = (
         EntryMethod.DAY0_OBSERVATION.value
         if is_day0_mode
@@ -4280,6 +4298,130 @@ def evaluate_candidate(
             entry_validations = ["ens_fetch", "mc_instrument_noise"]
             if _unified_bias_applied:
                 entry_validations.append("exit_bias_family_unify")
+        if temperature_metric.is_low() and decision_time is not None:
+            try:
+                decision_time_utc = decision_time.astimezone(timezone.utc)
+                lead_hours_pre_day0 = lead_hours_to_date_start(
+                    target_d,
+                    city.timezone,
+                    decision_time_utc,
+                )
+                from src.data.day0_fast_obs import get_fast_obs_emitter
+
+                empirical_model = load_pre_day0_low_empirical_model()
+                empirical_policy = pre_day0_low_empirical_live_policy(empirical_model)
+                if empirical_policy is None:
+                    raise RuntimeError("pre-Day0 LOW empirical model policy unavailable")
+                max_lead_hours, trailing_lookback_hours, model_policy_basis = empirical_policy
+
+                if 0.0 < lead_hours_pre_day0 <= max_lead_hours:
+
+                    low_window = get_fast_obs_emitter().latest_pre_day0_low_window(
+                        city,
+                        target_d.isoformat(),
+                        as_of=decision_time_utc,
+                        lookback_hours=trailing_lookback_hours,
+                        max_lead_hours=max_lead_hours,
+                    )
+                    if low_window is not None:
+                        obs_age_minutes = max(
+                            0.0,
+                            (
+                                decision_time_utc
+                                - low_window.last_obs_time.astimezone(timezone.utc)
+                            ).total_seconds()
+                            / 60.0,
+                        )
+                        low_age_minutes = max(
+                            0.0,
+                            (
+                                decision_time_utc
+                                - low_window.low_obs_time.astimezone(timezone.utc)
+                            ).total_seconds()
+                            / 60.0,
+                        )
+                        conditioning = build_pre_day0_low_empirical_conditioning(
+                            member_mins=np.asarray(analysis_member_extrema, dtype=float),
+                            window_low=low_window.window_low,
+                            lead_hours_to_target_start=lead_hours_pre_day0,
+                            unit=city.settlement_unit,
+                            city_name=city.name,
+                            model=empirical_model,
+                        )
+                        if conditioning is not None:
+                            empirical_p_raw = analytic_p_raw_vector_from_maxes(
+                                conditioning.conditioned_member_mins,
+                                city,
+                                settlement_semantics,
+                                bins,
+                            )
+                            if _valid_probability_vector(empirical_p_raw, len(bins)):
+                                p_raw = empirical_p_raw
+                                _pre_day0_low_carryover_applied = True
+                                _pre_day0_low_carryover_context = {
+                                    "belief_source": "pre_day0_low_empirical_carryover",
+                                    "belief_kind": "empirical_residual_conditioning",
+                                    "calibration_status": "EMPIRICAL_RESIDUAL_MODEL_VERIFIED",
+                                    "live_probability_applied": True,
+                                    "hard_fact": False,
+                                    "absorbing": False,
+                                    "metric": "low",
+                                    "target_date": target_d.isoformat(),
+                                    "model_version": conditioning.model_version,
+                                    "residual_scope": conditioning.residual_scope,
+                                    "residual_source": conditioning.residual_source,
+                                    "residual_sample_count": int(
+                                        conditioning.residual_sample_count
+                                    ),
+                                    "holdout_nll": (
+                                        float(conditioning.holdout_nll)
+                                        if conditioning.holdout_nll is not None
+                                        else None
+                                    ),
+                                    "residual_quantile_count": int(
+                                        conditioning.residual_quantiles.size
+                                    ),
+                                    "lead_bucket_hours": int(conditioning.lead_bucket_hours),
+                                    "max_lead_hours": float(max_lead_hours),
+                                    "trailing_lookback_hours": float(
+                                        conditioning.trailing_lookback_hours
+                                    ),
+                                    "model_policy_basis": model_policy_basis,
+                                    "source": "aviationweather_metar",
+                                    "station_id": low_window.station_id,
+                                    "unit": low_window.unit,
+                                    "window_start_time": low_window.window_start_time.isoformat(),
+                                    "target_start_time": low_window.target_start_time.isoformat(),
+                                    "window_low": float(low_window.window_low),
+                                    "current_temp": float(low_window.current_temp),
+                                    "low_obs_time": low_window.low_obs_time.isoformat(),
+                                    "last_obs_time": low_window.last_obs_time.isoformat(),
+                                    "last_receipt_time": (
+                                        low_window.last_receipt_time.isoformat()
+                                        if low_window.last_receipt_time is not None
+                                        else None
+                                    ),
+                                    "sample_count": int(low_window.sample_count),
+                                    "lead_hours_to_target_start": float(
+                                        conditioning.lead_hours_to_target_start
+                                    ),
+                                    "observation_age_minutes": float(obs_age_minutes),
+                                    "low_age_minutes": float(low_age_minutes),
+                                    "empirical_probability_by_bin_label": {
+                                        str(getattr(b, "label", i)): float(empirical_p_raw[i])
+                                        for i, b in enumerate(bins)
+                                    },
+                                    "calibration_policy": "identity_platt_empirical_residual_model",
+                                }
+                                entry_validations.append("pre_day0_low_empirical_carryover")
+            except Exception as exc:
+                logger.warning(
+                    "PRE_DAY0_LOW_CARRYOVER_SKIPPED city=%s target_date=%s exc=%s: %s",
+                    city.name,
+                    target_d.isoformat(),
+                    type(exc).__name__,
+                    exc,
+                )
         day0_forecast_context = None
         lead_days_for_calibration = lead_days
 
@@ -4635,6 +4777,17 @@ def evaluate_candidate(
         _tot = float(_arr.sum())
         p_cal = (_arr / _tot) if _tot > 0.0 else _arr
         entry_validations.extend(["identity_platt_bias_unify", "normalization"])
+    elif _pre_day0_low_carryover_applied:
+        # Late T-1 LOW carryover changes the p_raw signal domain by mixing a
+        # qualified observation feature into the forecast vector. Existing
+        # Platt rows were fit on unconditioned forecast p_raw, so keep the
+        # conditioned probability as the calibrated entry belief. The maturity
+        # gate below still requires a live calibrator bucket to exist.
+        _authority_verified = True
+        _arr = np.asarray(p_raw, dtype=float)
+        _tot = float(_arr.sum())
+        p_cal = (_arr / _tot) if _tot > 0.0 else _arr
+        entry_validations.extend(["identity_platt_pre_day0_low_empirical", "normalization"])
     elif cal is not None:
         p_cal = calibrate_and_normalize(
             p_raw,
@@ -4723,22 +4876,20 @@ def evaluate_candidate(
         [None] * len(bins) if _evaluator_eqe_enabled() else None
     )
     try:
-        # The legacy flag name says "multibin", but the authority rule is now
-        # broader: every executable buy_no needs native NO-token quote evidence.
-        probe_native_no_quotes = native_multibin_buy_no_shadow_enabled()
+        probe_native_no_quotes = buy_no_native_quote_evidence_enabled()
     except ValueError as exc:
         return [EdgeDecision(
             False,
             decision_id=_decision_id(),
             rejection_stage="RISK_REJECTED",
-            rejection_reasons=[NoTradeReason.NATIVE_MULTIBIN_BUY_NO_FLAG_INVALID.value],
+            rejection_reasons=[NoTradeReason.BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID.value],
             availability_status="CONFIG_INVALID",
             selected_method=selected_method,
-            applied_validations=[*entry_validations, "native_multibin_buy_no_flag_invalid"],
+            applied_validations=[*entry_validations, "buy_no_native_quote_evidence_flag_invalid"],
             decision_snapshot_id=snapshot_id,
             p_raw=p_raw,
             p_cal=p_cal,
-            rejection_reason_enum=NoTradeReason.NATIVE_MULTIBIN_BUY_NO_FLAG_INVALID,
+            rejection_reason_enum=NoTradeReason.BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID,
             rejection_reason_detail=str(exc),
         )]
     native_no_quote_unavailable_labels: list[str] = []
@@ -5281,7 +5432,11 @@ def evaluate_candidate(
             else None
         ),
         bootstrap_signal_type=(
-            "day0_observation_fused" if is_day0_mode else "generic_ensemble"
+            "day0_observation_fused"
+            if is_day0_mode
+            else "pre_day0_low_carryover"
+            if _pre_day0_low_carryover_applied
+            else "generic_ensemble"
         ),
         # K1: legacy evaluator path (not the EDLI event-bound live-q seam). The K1
         # sharpness gate targets the EDLI live path; here it is exempt so behaviour is
@@ -5302,6 +5457,8 @@ def evaluate_candidate(
     )
     if day0_forecast_context is not None:
         forecast_context["day0"] = day0_forecast_context
+    if _pre_day0_low_carryover_context is not None:
+        forecast_context["pre_day0_low_carryover"] = _pre_day0_low_carryover_context
     forecast_issue_time = _snapshot_issue_time_value(ens_result)
     forecast_valid_time = _snapshot_valid_time_value(target_date, ens_result)
     forecast_fetch_time = _snapshot_time_value(ens_result.get("fetch_time"))

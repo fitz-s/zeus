@@ -1,9 +1,12 @@
 # Created: 2026-06-03
-# Last reused or audited: 2026-06-03
+# Last reused or audited: 2026-06-08
 # Authority basis: review finding P1-1 (fix/review-findings-2026-06-03)
 #                  Confirmed P1-1 canary blocker: scan_authority overloaded with trigger reason
 #                  → capture_executable_market_snapshot raises on non-VERIFIED → dead refresh path
-# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+#                  2026-06-08 system_decomposition_plan §8 Step 3: _edli_market_channel_refresh_kwargs
+#                  lifted from src.main to src.ingest.price_channel_ingest (P3). Contract unchanged;
+#                  producer-side boundary is now price_channel_ingest → market_scanner.
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: Relationship tests guarding the main.py → market_scanner boundary; enforces that scan_authority is always "VERIFIED" and the trigger reason is carried separately (P1-1 fix).
 # Reuse: Confirm scan_authority contract + capture_executable_market_snapshot schema still match before relying on test as evidence.
 """Relationship tests: main.py _edli_market_channel_refresh_kwargs → market_scanner boundary.
@@ -116,7 +119,7 @@ class _FakeClob:
 def test_market_channel_refresh_uses_verified_authority():
     """_edli_market_channel_refresh_kwargs must set scan_authority=VERIFIED and
     carry the EDLI trigger as refresh_reason metadata (not in scan_authority)."""
-    from src.main import _edli_market_channel_refresh_kwargs
+    from src.ingest.price_channel_ingest import _edli_market_channel_refresh_kwargs
 
     class _FakeAction:
         reason = "PRICE_CHANGE"
@@ -152,7 +155,7 @@ def test_market_channel_refresh_inserts_snapshot():
     """refresh_executable_market_substrate_snapshots called with VERIFIED scan_authority
     (via the helper kwargs) inserts at least one snapshot and records refresh_reason."""
     import src.data.market_scanner as ms
-    from src.main import _edli_market_channel_refresh_kwargs
+    from src.ingest.price_channel_ingest import _edli_market_channel_refresh_kwargs
 
     conn = _make_conn()
 

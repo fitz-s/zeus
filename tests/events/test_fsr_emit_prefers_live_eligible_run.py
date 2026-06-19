@@ -41,7 +41,7 @@ def _hermetic_flags(monkeypatch: Any) -> None:
     no forecast_posteriors; the filter is orthogonal to the election law)."""
     # Wave-1 2026-06-12: coverage fairness is unconditional (flag deleted) — no patch needed.
     monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
         lambda: False,
     )
     monkeypatch.setattr(

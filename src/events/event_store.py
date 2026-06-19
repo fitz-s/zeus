@@ -21,6 +21,55 @@ from src.events.opportunity_event import OpportunityEvent
 # carries the same FSR-shaped city/target payload and gets the same timeliness floor. Literal here
 # (mirrors src.events.continuous_redecision.REDECISION_EVENT_TYPE) to avoid an import cycle.
 _FORECAST_DECISION_EVENT_TYPES = frozenset({"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"})
+_NO_VALUE_REFUTATION_EVENT_TYPES = _FORECAST_DECISION_EVENT_TYPES | frozenset(
+    {"DAY0_EXTREME_UPDATED"}
+)
+_TERMINAL_NO_VALUE_REFUTATION_SQL = """
+    (
+        rejection_stage = 'TRADE_SCORE'
+        AND (
+            rejection_reason IN ('TRADE_SCORE_NON_POSITIVE', 'TRADE_SCORE_BLOCKED')
+         OR rejection_reason LIKE 'TRADE_SCORE_NON_POSITIVE:%'
+         OR rejection_reason LIKE 'TRADE_SCORE_BLOCKED:%'
+         OR rejection_reason = 'FDR_REJECTED'
+         OR rejection_reason LIKE 'FDR_REJECTED:%'
+         OR rejection_reason LIKE 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:%'
+        )
+    )
+ OR (
+        rejection_stage = 'EXECUTION_RECEIPT'
+        AND (
+            rejection_reason LIKE 'TAKER_QUALITY_PROOF_NOT_PASSED:%'
+         OR rejection_reason LIKE 'entry_taker_quality:%'
+        )
+    )
+ OR (
+        rejection_stage = 'EXECUTOR_EXPRESSIBILITY'
+        AND (
+            rejection_reason LIKE 'EDLI_LIVE_CERTIFICATE_BUILD_FAILED:NO_SUBMIT_CERTIFICATE_REJECTED:%'
+        )
+    )
+"""
+
+
+def _no_value_refutation_event_types_compatible(
+    active_event_type: str, regret_event_type: str
+) -> bool:
+    active = str(active_event_type or "").strip()
+    regret = str(regret_event_type or "").strip()
+    if active in _FORECAST_DECISION_EVENT_TYPES:
+        return not regret or regret in _FORECAST_DECISION_EVENT_TYPES
+    if active == "DAY0_EXTREME_UPDATED":
+        return regret == "DAY0_EXTREME_UPDATED"
+    return bool(active and regret and active == regret)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+        (table,),
+    ).fetchone()
+    return row is not None
 
 
 class EventStoreSchemaError(RuntimeError):
@@ -95,12 +144,9 @@ class EventStore:
     ) -> list[OpportunityEvent]:
         """Fetch pending events in deterministic replay/inference order.
 
-        ``day0_is_tradeable`` (default True = historical behaviour) controls the
-        scope-aware claim tier: under ``edli_live_scope='day0_shadow'`` a
-        DAY0_EXTREME_UPDATED event can only ever produce DAY0_SCOPE_SHADOW_ONLY,
-        so the caller passes False to DEMOTE day0 below tradeable
-        FORECAST_SNAPSHOT_READY and stop the shadow flood from starving tradeable
-        forecast families (2026-06-11 live incident). The tier authority lives in
+        ``day0_is_tradeable`` (default True = production behaviour) controls the
+        scope-aware claim tier for test/replay callers. Production live scope
+        keeps Day0 tradeable. The tier authority lives in
         ``src.events.event_priority.claim_tier_case_sql`` — one ordering law,
         shared with the emit-priority constants, never a magic number here.
 
@@ -240,13 +286,12 @@ class EventStore:
             FROM candidates c
             ORDER BY
               -- Tier 0: DAY0_EXTREME_UPDATED hard facts — realized observations are the freshest
-              --         actionable alpha source, BUT ONLY while day0 is a tradeable lane. Under
-              --         day0_shadow (day0_is_tradeable=False) the Tier-0 clause is omitted and
-              --         day0 falls to Tier 2 so shadow-only events never starve tradeable FSR.
+              --         actionable alpha source while day0 is a tradeable lane. Test/replay callers
+              --         can pass day0_is_tradeable=False to omit the Tier-0 clause.
               -- Tier 1: window-complete FORECAST_SNAPSHOT_READY — direct receipt candidates.
               --         Run-level PARTIAL can still carry a COMPLETE/LIVE_ELIGIBLE
               --         target window, so source_run completeness is not the queue authority.
-              -- Tier 2: Other decision-trigger events (incl. shadow-only day0) — still actionable
+              -- Tier 2: Other decision-trigger events — still actionable
               --         or cheaply dead-letterable; must not be starved by market-channel.
               -- Tier 3: Market-channel cache-hydration events (BEST_BID_ASK_CHANGED, BOOK_SNAPSHOT,
               --         NEW_MARKET_DISCOVERED) — they get rejected NO_DIRECT_STALE_TRADE immediately
@@ -457,6 +502,57 @@ class EventStore:
             )
         return len(expired_ids)
 
+    def archive_orphan_processing_rows(self, *, batch_limit: int = 5_000) -> int:
+        """Expire active processing rows whose immutable event row is missing.
+
+        ``opportunity_events`` is the append-only provenance row. A mutable
+        ``opportunity_event_processing`` row without that parent can never be
+        claimed, re-decided, or converted into an order because every money-path
+        reader joins back to the event payload. Leaving such rows in
+        ``pending``/``processing`` pollutes active working-set counts and keeps
+        maintenance queries scanning dead IDs. Mark only the mutable row
+        ``expired``; do not delete anything, so the anomaly remains auditable.
+        """
+
+        self._require_world_event_tables()
+        rows = self.conn.execute(
+            """
+            SELECT p.event_id
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              LEFT JOIN opportunity_events e
+                ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status IN ('pending', 'processing')
+               AND e.event_id IS NULL
+             ORDER BY p.updated_at ASC, p.event_id ASC
+             LIMIT ?
+            """,
+            (self.consumer_name, batch_limit),
+        ).fetchall()
+        event_ids = [str(row[0]) for row in rows]
+        if not event_ids:
+            return 0
+
+        now = _utc_now()
+        _CHUNK = 500
+        for chunk_start in range(0, len(event_ids), _CHUNK):
+            chunk = event_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       last_error = 'ORPHAN_EVENT_ROW_MISSING',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id IN ({placeholders})
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, self.consumer_name, *chunk),
+            )
+        return len(event_ids)
+
     # Channel event types that carry a per-token price-update stream and are
     # subject to the superseded-keep-latest sweep. NEW_MARKET_DISCOVERED is
     # included because a re-discovered market replaces prior discovery events
@@ -627,10 +723,13 @@ class EventStore:
 
         Day0 companion to ``archive_superseded_channel_events`` (2026-06-15). A
         ``DAY0_EXTREME_UPDATED`` event is a realized-extreme observation update for a
-        forecast family ``(city, target_date, metric)``. Each newer reading supersedes
-        the older ones for that family (the running max/min only advances; only the
-        latest observation is actionable) — but day0 events were in NEITHER the expiry
-        nor the channel-supersession sweep, so stale duplicates piled up (measured
+        forecast family ``(city, target_date, metric)``. The actionable value is the
+        absorbing running extreme, not the latest publication clock: high keeps the
+        maximum rounded value seen for the local day; low keeps the minimum. A later
+        API window or daemon restart must never make a local-day high/low regress
+        (Chengdu 2026-06-17: 25C crossing followed by a shorter-window 24C event).
+        Day0 events were in NEITHER the expiry nor the channel-supersession sweep, so
+        stale duplicates piled up (measured
         2026-06-15: 1972 pending day0 rows across only 152 families, ~13/family). Under
         scope ``forecast_plus_day0`` day0 claims at Tier 0, so this stale pileup is
         claimed ahead of — and starves — the tradeable FORECAST_SNAPSHOT_READY (spine)
@@ -638,10 +737,11 @@ class EventStore:
 
         INVARIANT (superseded-keep-latest): for each ``(city, target_date, metric)``
         family in the active working set (``pending``/``processing`` only), keep the
-        row(s) with ``MAX(available_at)`` and mark every older row ``'expired'``. Day0
-        carries NO ``token_id``, so the family tuple is the supersession key (the
-        token-keyed channel sweep does not apply). Ties at MAX(available_at) are all
-        kept (never archive on a duplicate-timestamp ambiguity).
+        row(s) carrying the absorbing extreme across the full persisted family:
+        ``MAX(rounded_value)`` for high and ``MIN(rounded_value)`` for low. Day0 carries
+        NO ``token_id``, so the family tuple is the supersession key (the token-keyed
+        channel sweep does not apply). Ties at the absorbing extreme are all kept
+        (never archive on a duplicate-value ambiguity).
 
         Past-LOCAL-DAY day0 events are removed separately by
         ``archive_expired_candidates`` (which now covers day0); this sweep dedups the
@@ -683,8 +783,10 @@ class EventStore:
         if not candidate_rows:
             return 0
 
-        # Step 2: per family key in the candidate batch, find the keeper(s). The keeper
-        # may be outside the batch; preserving it is what makes a small batch safe.
+        # Step 2: per family key in the candidate batch, find the absorbing keeper(s).
+        # The keeper may be outside the batch or already terminal from the older
+        # latest-by-clock rule; in that case active regressed rows are still expired so
+        # the queue cannot keep reprocessing a lower high / higher low as "latest".
         candidate_keys = {
             (str(row[1]), str(row[2]), str(row[3]))
             for row in candidate_rows
@@ -692,9 +794,17 @@ class EventStore:
         }
         keeper_ids: set[str] = set()
         for city, target_date, metric in candidate_keys:
-            max_row = self.conn.execute(
+            agg = "MAX" if metric == "high" else "MIN"
+            value_expr = (
+                "CAST(COALESCE("
+                "json_extract(e.payload_json, '$.rounded_value'), "
+                "json_extract(e.payload_json, '$.high_so_far'), "
+                "json_extract(e.payload_json, '$.low_so_far')"
+                ") AS REAL)"
+            )
+            extreme_row = self.conn.execute(
                 """
-                SELECT MAX(e.available_at)
+                SELECT {agg}({value_expr})
                   FROM opportunity_events e INDEXED BY idx_opportunity_events_fsr_target_date
                   JOIN opportunity_event_processing p
                     ON p.event_id = e.event_id
@@ -703,13 +813,13 @@ class EventStore:
                    AND json_extract(e.payload_json, '$.target_date') = ?
                    AND json_extract(e.payload_json, '$.city') = ?
                    AND json_extract(e.payload_json, '$.metric') = ?
-                   AND p.processing_status IN ('pending', 'processing')
-                """,
+                   AND {value_expr} IS NOT NULL
+                """.format(agg=agg, value_expr=value_expr),
                 (self.consumer_name, target_date, city, metric),
             ).fetchone()
-            if max_row is None or max_row[0] is None:
+            if extreme_row is None or extreme_row[0] is None:
                 continue
-            max_available_at = str(max_row[0])
+            extreme_value = float(extreme_row[0])
             keeper_rows = self.conn.execute(
                 """
                 SELECT e.event_id
@@ -721,10 +831,14 @@ class EventStore:
                    AND json_extract(e.payload_json, '$.target_date') = ?
                    AND json_extract(e.payload_json, '$.city') = ?
                    AND json_extract(e.payload_json, '$.metric') = ?
-                   AND e.available_at = ?
+                   AND CAST(COALESCE(
+                         json_extract(e.payload_json, '$.rounded_value'),
+                         json_extract(e.payload_json, '$.high_so_far'),
+                         json_extract(e.payload_json, '$.low_so_far')
+                       ) AS REAL) = ?
                    AND p.processing_status IN ('pending', 'processing')
                 """,
-                (self.consumer_name, target_date, city, metric, max_available_at),
+                (self.consumer_name, target_date, city, metric, extreme_value),
             ).fetchall()
             keeper_ids.update(str(row[0]) for row in keeper_rows)
 
@@ -825,6 +939,7 @@ class EventStore:
             """
             SELECT
                 e.event_id,
+                e.event_type,
                 e.entity_key,
                 json_extract(e.payload_json, '$.city') AS city,
                 json_extract(e.payload_json, '$.target_date') AS target_date,
@@ -834,7 +949,7 @@ class EventStore:
                 ON e.event_id = p.event_id
              WHERE p.consumer_name = ?
                AND p.processing_status IN ('pending', 'processing')
-               AND e.event_type = 'FORECAST_SNAPSHOT_READY'
+               AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
                AND e.entity_key IS NOT NULL
              ORDER BY e.available_at ASC, e.received_at ASC, e.event_id ASC
              LIMIT ?
@@ -844,15 +959,16 @@ class EventStore:
         if not candidate_rows:
             return 0
 
-        _FsrPruneKey = tuple[str, str, str, str] | tuple[str, str]
+        _FsrPruneKey = tuple[str, str, str, str, str] | tuple[str, str, str]
 
         def _prune_key(row: sqlite3.Row | tuple) -> _FsrPruneKey:
-            city = str(row[2] or "").strip()
-            target_date = str(row[3] or "").strip()
-            metric = str(row[4] or "").strip()
+            event_type = str(row[1] or "").strip()
+            city = str(row[3] or "").strip()
+            target_date = str(row[4] or "").strip()
+            metric = str(row[5] or "").strip()
             if city and target_date and metric:
-                return ("family", city, target_date, metric)
-            return ("entity", str(row[1] or ""))
+                return ("family", event_type, city, target_date, metric)
+            return ("entity", event_type, str(row[2] or ""))
 
         candidate_keys = {
             key for row in candidate_rows if (key := _prune_key(row))[-1]
@@ -860,7 +976,7 @@ class EventStore:
         keeper_ids: set[str] = set()
         for prune_key in candidate_keys:
             if prune_key[0] == "family":
-                _, city, target_date, metric = prune_key
+                _, event_type, city, target_date, metric = prune_key
                 key_predicate = (
                     "json_extract(e.payload_json, '$.city') = ? "
                     "AND json_extract(e.payload_json, '$.target_date') = ? "
@@ -868,7 +984,7 @@ class EventStore:
                 )
                 key_params = (city, target_date, metric)
             else:
-                _, entity_key = prune_key
+                _, event_type, entity_key = prune_key
                 key_predicate = "e.entity_key = ?"
                 key_params = (entity_key,)
             keeper_row = self.conn.execute(
@@ -878,7 +994,7 @@ class EventStore:
                   JOIN opportunity_event_processing p
                     ON p.event_id = e.event_id
                    AND p.consumer_name = ?
-                 WHERE e.event_type = 'FORECAST_SNAPSHOT_READY'
+                 WHERE e.event_type = ?
                    AND {key_predicate}
                    AND p.processing_status IN ('pending', 'processing')
                  ORDER BY
@@ -891,9 +1007,9 @@ class EventStore:
                    e.available_at DESC,
                    e.received_at DESC,
                    e.event_id DESC
-                 LIMIT 1
+                LIMIT 1
                 """,
-                (self.consumer_name, *key_params),
+                (self.consumer_name, event_type, *key_params),
             ).fetchone()
             if keeper_row is not None:
                 keeper_ids.add(str(keeper_row[0]))
@@ -920,6 +1036,170 @@ class EventStore:
                 (now, now, self.consumer_name, *chunk),
             )
         return len(superseded_ids)
+
+    def archive_recent_no_value_refuted_events(
+        self,
+        *,
+        decision_time: str,
+        batch_limit: int = 5_000,
+    ) -> int:
+        """Expire already-queued events refuted by same-evidence terminal no-trade.
+
+        Emit-time suppression stops newly minted FSR/Day0 rows after a full
+        economics no-value decision. It cannot clean rows that were already
+        queued before the no-trade receipt was written. Those stale rows keep
+        burning bounded reactor proof budget on the same evidence. This sweep
+        closes that gap by mutating only ``opportunity_event_processing`` while
+        preserving the append-only ``opportunity_events`` provenance.
+
+        Same-evidence is deliberately narrow: same city/target/metric plus
+        matching payload hash or causal snapshot id. Forecast ordinary FSR and
+        ``EDLI_REDECISION_PENDING`` share one evidence family; Day0 remains a
+        separate observation lane and only Day0 no-value can refute Day0. Unlike
+        emit-time suppression, this is not limited to the short cooldown window:
+        if an old row is still queued and the same evidence was terminally
+        refuted after that evidence became available, the row is stale.
+        """
+
+        self._require_world_event_tables()
+        if not _table_exists(self.conn, "no_trade_regret_events"):
+            return 0
+
+        parsed_decision_time = _parse_utc(decision_time)
+        event_types = sorted(_NO_VALUE_REFUTATION_EVENT_TYPES)
+        type_placeholders = ",".join("?" * len(event_types))
+        candidate_rows = self.conn.execute(
+            f"""
+            SELECT
+                e.event_id,
+                e.event_type,
+                json_extract(e.payload_json, '$.city') AS city,
+                json_extract(e.payload_json, '$.target_date') AS target_date,
+                json_extract(e.payload_json, '$.metric') AS metric,
+                e.causal_snapshot_id,
+                e.payload_hash,
+                e.available_at,
+                e.created_at
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status IN ('pending', 'processing')
+               AND e.event_type IN ({type_placeholders})
+               AND json_extract(e.payload_json, '$.city') IS NOT NULL
+               AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
+               AND json_extract(e.payload_json, '$.metric') IS NOT NULL
+             ORDER BY e.available_at ASC, e.received_at ASC, e.event_id ASC
+             LIMIT ?
+            """,
+            (
+                self.consumer_name,
+                *event_types,
+                batch_limit,
+            ),
+        ).fetchall()
+        if not candidate_rows:
+            return 0
+
+        evidence_floor = min(
+            str(row[7] or row[8] or "") for row in candidate_rows if row[7] or row[8]
+        )
+        if not evidence_floor:
+            return 0
+
+        regret_rows = self.conn.execute(
+            f"""
+            SELECT n.city,
+                   n.target_date,
+                   n.metric,
+                   n.event_id,
+                   n.rejection_reason,
+                   n.created_at,
+                   n.causal_snapshot_id AS regret_causal_snapshot_id,
+                   e.causal_snapshot_id AS regret_event_causal_snapshot_id,
+                   e.payload_hash AS regret_payload_hash,
+                   e.event_type AS regret_event_type
+             FROM no_trade_regret_events n
+              LEFT JOIN opportunity_events e
+                ON e.event_id = n.event_id
+             WHERE n.created_at >= ?
+               AND n.created_at <= ?
+               AND ({_TERMINAL_NO_VALUE_REFUTATION_SQL})
+             ORDER BY n.created_at DESC
+            """,
+            (evidence_floor, parsed_decision_time.isoformat()),
+        ).fetchall()
+        if not regret_rows:
+            return 0
+
+        regrets_by_family: dict[tuple[str, str, str], list[sqlite3.Row | tuple]] = {}
+        for regret in regret_rows:
+            key = (
+                str(regret[0] or "").strip(),
+                str(regret[1] or "").strip(),
+                str(regret[2] or "").strip(),
+            )
+            if all(key):
+                regrets_by_family.setdefault(key, []).append(regret)
+
+        refuted: list[tuple[str, str]] = []
+        for row in candidate_rows:
+            active_event_id = str(row[0] or "").strip()
+            active_event_type = str(row[1] or "").strip()
+            city = str(row[2] or "").strip()
+            target_date = str(row[3] or "").strip()
+            metric = str(row[4] or "").strip()
+            causal_snapshot_id = str(row[5] or "").strip()
+            payload_hash = str(row[6] or "").strip()
+            if not (active_event_id and city and target_date and metric):
+                continue
+            for regret in regrets_by_family.get((city, target_date, metric), []):
+                source_event_id = str(regret[3] or "").strip()
+                reason = str(regret[4] or "")
+                prior_causal = str(regret[7] or regret[6] or "").strip()
+                prior_payload_hash = str(regret[8] or "").strip()
+                regret_event_type = str(regret[9] or "").strip()
+                if not _no_value_refutation_event_types_compatible(
+                    active_event_type, regret_event_type
+                ):
+                    continue
+                evidence_match = ""
+                if payload_hash and prior_payload_hash and payload_hash == prior_payload_hash:
+                    evidence_match = "payload_hash"
+                elif causal_snapshot_id and prior_causal and causal_snapshot_id == prior_causal:
+                    evidence_match = "causal_snapshot_id"
+                if not evidence_match:
+                    continue
+                refuted.append(
+                    (
+                        active_event_id,
+                        (
+                            "RECENT_NO_VALUE_REFUTATION:"
+                            f"{evidence_match}:{source_event_id}:{reason}"
+                        )[:500],
+                    )
+                )
+                break
+
+        if not refuted:
+            return 0
+
+        now = _utc_now()
+        for event_id, last_error in refuted:
+            self.conn.execute(
+                """
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       updated_at = ?,
+                       last_error = ?
+                 WHERE consumer_name = ?
+                   AND event_id = ?
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, last_error, self.consumer_name, event_id),
+            )
+        return len(refuted)
 
     @staticmethod
     def _strictly_past_in_tz(

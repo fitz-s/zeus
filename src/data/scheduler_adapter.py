@@ -156,7 +156,15 @@ def build_job_specs(owner_daemon: Optional[str] = None) -> list[JobBuildSpec]:
         # frontier / singleton, but its hand-coded scheduler is never rebuilt — so its jobs must
         # not be emitted as build specs. Long-running jobs (the user-WS thread) are not add_job'able
         # at all. Either would, if built, double-schedule a live producer.
-        if j.owner_daemon == "main" or j.dispatch_kind == "long_running":
+        # PROCESS-TOPOLOGY REFACTOR P2/P4 (2026-06-08, system_decomposition_plan §8 Step 1/2):
+        # the substrate-observer daemon (P2, owner of the lifted market_discovery) and the
+        # post-trade-capital daemon (P4, owner of the lifted harvester) are ALSO hand-coded
+        # schedulers (src/ingest/substrate_observer_daemon.py, src/ingest/post_trade_capital_daemon.py),
+        # COVERED for inventory but never registry-built — skip them for the same reason as
+        # "main", else build_job_specs() would emit a double-scheduling build spec for a job the
+        # daemon already hand-registers.
+        if j.owner_daemon in ("main", "substrate_observer", "post_trade_capital") \
+                or j.dispatch_kind == "long_running":
             continue
         if not j.registry_built:
             # COVER vs BUILD at job grain (2026-06-11): daemon-scheduled on a dedicated lane

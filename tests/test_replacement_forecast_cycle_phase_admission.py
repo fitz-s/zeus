@@ -2,14 +2,14 @@
 # Last reused or audited: 2026-06-10
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (06/18Z intermediate
 #   cycles differ in skill/bias from 00/12Z synoptic cycles; de-bias trained ~99% 00Z so
-#   intermediate-phase posteriors are produced + readiness-stamped but held SHADOW-ONLY for
-#   live admission until a settlement-graded comparison licenses them; flag default OFF).
+#   intermediate-phase posteriors are excluded from live authority until a settlement-graded
+#   comparison licenses them; flag default OFF).
 """Relationship test across the materializer->bundle-reader boundary for CYCLE PHASE.
 
 The invariant being pinned is a CROSS-MODULE property, not a single function's output:
 the phase the materializer records in provenance_json.cycle_phase (synoptic for 00/12Z,
 intermediate for 06/18Z) must drive the bundle reader's live-admission decision. A synoptic
-posterior binds; an intermediate posterior is BLOCKED for live (shadow-only) by default and
+posterior binds; a legacy intermediate posterior row is BLOCKED for live by default and
 only admitted when the operator flag flips. A pre-tag legacy row (no cycle_phase key) must
 fall back to the source_cycle_time hour and be classified fail-closed.
 """
@@ -208,12 +208,12 @@ def test_synoptic_phase_binds_live() -> None:
 
 
 def test_intermediate_phase_blocked_live_by_default() -> None:
-    """A tagged 18Z intermediate posterior is SHADOW-ONLY (blocked) when the flag is default OFF."""
+    """A tagged 18Z legacy posterior row is not live-admissible when the flag is default OFF."""
     conn = _conn()
     posterior_id = _insert_posterior(conn, source_cycle_time=_dt(6, 6), cycle_phase="intermediate")
     result = _read(conn, posterior_id)
     assert result.ok is False
-    assert result.reason_code == "REPLACEMENT_0_1_LIVE_AUTHORITY_INTERMEDIATE_CYCLE_SHADOW_ONLY"
+    assert result.reason_code == "REPLACEMENT_0_1_LIVE_AUTHORITY_INTERMEDIATE_CYCLE_UNLICENSED"
 
 
 def test_intermediate_phase_admitted_when_flag_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -241,4 +241,4 @@ def test_legacy_untagged_row_classified_by_source_cycle_hour() -> None:
     assert classify_cycle_phase(_dt(6, 6)) == "intermediate"
     result = _read(conn, posterior_id)
     assert result.ok is False
-    assert result.reason_code == "REPLACEMENT_0_1_LIVE_AUTHORITY_INTERMEDIATE_CYCLE_SHADOW_ONLY"
+    assert result.reason_code == "REPLACEMENT_0_1_LIVE_AUTHORITY_INTERMEDIATE_CYCLE_UNLICENSED"

@@ -1,6 +1,11 @@
 # Created: 2026-05-24
-# Last reused or audited: 2026-05-24
+# Last reused or audited: 2026-06-08 (Step 4 CLEANUP: purge the stale ``wu_daily`` references
+#   from the module docstrings — the order-daemon WU collector spec was deleted by §8 Step 4,
+#   so the doc must not still advertise a ``main``-owned wu_daily job; data-ingest's
+#   ingest_k2_daily_obs is the sole live WU owner. Earlier same-day: P3 lift repointed the
+#   user-WS ingestor dispatch-kind doc-comment from src.main to src.ingest.price_channel_ingest.)
 # Authority basis: operator "Zeus Data Ingest + Collection Efficiency Refactor" spec §7
+#   + docs/architecture/system_decomposition_plan.md §8 Step 3 (P3 price-channel lift)
 #   (Job registry) + §4 (scheduler/ownership map); docs/operations/current/plans/data_temporal_kernel/PLAN.md;
 #   extracted from src/ingest_main.py + src/ingest/forecast_live_daemon.py add_job() calls (2026-05-24).
 """Machine-readable inventory of every data-collection job — PR3 + PR #329 review B.
@@ -9,7 +14,10 @@ SCOPE: this registry now covers ALL THREE daemons' data-collection jobs —
 ``src/ingest_main.py``, ``src/ingest/forecast_live_daemon.py`` (the K2 ingest daemons) AND the
 data-collection jobs of ``src/main.py`` (the trading daemon): ``market_discovery`` (Gamma
 topology + CLOB executable snapshots), ``venue_heartbeat``, the user-WS ingestor (a long-running
-thread, ``dispatch_kind='long_running'``), ``harvester``, ``wu_daily``. The trading-cycle modes
+thread, ``dispatch_kind='long_running'``), ``harvester``. (The order daemon's ``wu_daily``
+collector was REMOVED by system_decomposition_plan §8 Step 4 — data-ingest's ``ingest_k2_daily_obs``
+is now the SOLE live owner of WU daily observations; no ``main``-owned WU spec remains.) The
+trading-cycle modes
 (opening_hunt / day0_capture / imminent_open_capture / update_reaction) and the execution/chain
 ops (redeem_* / wrap_* / deployment_freshness / heartbeat) are NOT data collection and are NOT
 registered here — they are the explicit non-collection set in data_collection_inventory.py.
@@ -39,8 +47,11 @@ from typing import Literal, Optional
 Role = Literal["live", "backfill", "shadow", "settlement", "derived", "diagnostic"]
 Executor = Literal["default", "fast"]  # the CURRENT two APScheduler executors in ingest_main
 # How the daemon dispatches the job (PR #329 review B; advisor point 2). The user-WS ingestor is
-# NOT an add_job — it is a long-running thread (src/main._start_user_channel_ingestor_if_enabled),
-# so frontier/singleton coverage must model it without pretending it is a scheduled job.
+# NOT an add_job — it is a long-running thread. As of the process-topology refactor
+# (system_decomposition_plan §8 Step 3, P3, 2026-06-08) it was LIFTED out of the order daemon
+# into src/ingest/price_channel_ingest._start_user_channel_ingestor_if_enabled (started by the
+# P3 price-channel-ingest daemon), so frontier/singleton coverage must model it as a
+# long_running thread on the price_channel daemon, not pretend it is a scheduled src.main job.
 DispatchKind = Literal["scheduled", "long_running", "startup"]
 
 # Data family for cross-source coverage (PR #329 review C). Each family has its OWN truth table /
@@ -132,7 +143,7 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   misfire_grace_time=240,
                   notes="operator directive 2026-06-11: weather downloading lives in ITS OWN "
                         "daemon (data-ingest), decoupled from forecast-live/trading restarts. "
-                        "Probe-resolved per-leg raw-input fetch + bayes_precision_fusion extras; first fire "
+                        "Probe-resolved anchor raw-input fetch + bayes_precision_fusion extras; first fire "
                         "IMMEDIATE at boot (next_run_time=now), then every 5min."),
     SourceJobSpec("ingest_opendata_daily_mx2t6", "ingest_main", "live", "default", True,
                   source_id="ecmwf_open_data", callable_ref="_opendata_mx2t6_cycle", owner_gated=True,
@@ -211,17 +222,17 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
     # registry, so they must not enter the boot-assert expected set. Registered here for
     # the inventory mirror (--check) + frontier/singleton coverage only.
     SourceJobSpec("replacement_forecast_download", "forecast_live_daemon", "live", "default", False,
-                  source_ids=("ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km"),
+                  source_ids=("openmeteo_ecmwf_ifs_9km",),
                   callable_ref="_replacement_forecast_download_job",
                   misfire_grace_time=3600, family="forecast", registry_built=False,
-                  notes="probe-resolved AIFS+OM raw-input pre-fetch; cron at publish times; "
+                  notes="probe-resolved OpenMeteo anchor raw-input pre-fetch; cron at publish times; "
                         "runs on dedicated replacement_download executor lane"),
     SourceJobSpec("replacement_forecast_download_startup_catch_up", "forecast_live_daemon", "backfill", "default", False,
-                  source_ids=("ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km"),
+                  source_ids=("openmeteo_ecmwf_ifs_9km",),
                   callable_ref="_replacement_forecast_download_job",
                   dispatch_kind="startup", family="forecast", registry_built=False,
                   notes="one-shot date trigger 90s after boot; same download job as cron path"),
-    SourceJobSpec("replacement_forecast_shadow_materialize", "forecast_live_daemon", "shadow", "default", True,
+    SourceJobSpec("replacement_forecast_live_materialize", "forecast_live_daemon", "live", "default", True,
                   callable_ref="_replacement_forecast_materialize_job",
                   misfire_grace_time=120, family="forecast", registry_built=False,
                   notes="interval-driven seed_discovery→seed→materialize on already-downloaded "
@@ -239,33 +250,63 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
 # jobs too (it previously excluded them). These are COVERED for inventory/frontier/singleton —
 # src/main keeps its hand-coded scheduler (only ingest_main + forecast_live build-from-registry;
 # the trading loop is NOT rebuilt). Only the operator-listed data-collection surfaces are here:
-# market_discovery, venue_heartbeat, user-WS, harvester, wu_daily. The trading-cycle modes
+# market_discovery, venue_heartbeat, user-WS, harvester. (wu_daily was REMOVED — §8 Step 4 dedup;
+# data-ingest's ingest_k2_daily_obs is the sole live WU owner.) The trading-cycle modes
 # (opening_hunt/day0_capture/imminent_open_capture/update_reaction) and the execution/chain ops
 # (redeem_*/wrap_*/deployment_freshness/heartbeat) are NOT data collection — they are declared as
 # the explicit non-collection set in scripts/data_collection_inventory.py, not registered here.
 # ---------------------------------------------------------------------------
 _SRC_MAIN: tuple[SourceJobSpec, ...] = (
-    SourceJobSpec("market_discovery", "main", "live", "default", True,
+    # PROCESS-TOPOLOGY REFACTOR P2 (2026-06-08, system_decomposition_plan §8 Step 1):
+    # market_discovery was LIFTED out of the order daemon (`main`) into its own process,
+    # the P2 substrate observer. owner_daemon is repointed to "substrate_observer" so the
+    # data_collection_inventory orphan-check resolves _market_discovery_cycle against the
+    # new daemon (src/data/substrate_observer.py via src/ingest/substrate_observer_daemon.py)
+    # instead of the now-callable-less src/main.py.
+    SourceJobSpec("market_discovery", "substrate_observer", "live", "default", True,
                   source_id="polymarket_gamma", source_ids=("polymarket_gamma", "polymarket_clob"),
                   callable_ref="_market_discovery_cycle", family="executable_market",
-                  notes="Gamma topology + CLOB executable-market snapshots -> trade DB"),
+                  notes="Gamma topology + CLOB executable-market snapshots -> trade DB "
+                        "(lifted to the P2 substrate-observer daemon, 2026-06-08)"),
     SourceJobSpec("venue_heartbeat", "main", "live", "default", False,
                   source_id="polymarket_clob", callable_ref="_start_venue_heartbeat_loop_if_needed",
                   family="venue_user_ws", file_only=True,
                   notes="CLOB auth/readiness/venue status loop starter; writes venue-status state"),
-    SourceJobSpec("harvester", "main", "derived", "default", True,
+    # PROCESS-TOPOLOGY REFACTOR P4 (2026-06-08, system_decomposition_plan §8 Step 2):
+    # the harvester resolver was LIFTED out of the order daemon (`main`) into the P4
+    # post-trade-capital daemon. owner_daemon repointed to "post_trade_capital" so the
+    # data_collection_inventory orphan-check resolves _harvester_cycle against the new daemon
+    # (src/execution/post_trade_capital.py via src/ingest/post_trade_capital_daemon.py)
+    # instead of the now-import-only src/main.py reference.
+    SourceJobSpec("harvester", "post_trade_capital", "derived", "default", True,
                   source_id="polymarket_gamma", callable_ref="_harvester_cycle", family=None,
                   notes="trading-side P&L resolver: READS forecasts.settlements (produced by "
                         "ingest_harvester_truth_writer) + writes decision_log. CONSUMER of settlement "
                         "truth, NOT a producer — so it does not own the settlement family (verified "
-                        "2026-05-24: producer/consumer split, not dual-production)."),
-    SourceJobSpec("wu_daily", "main", "live", "default", True,
-                  source_id="wu_icao_history", callable_ref="_wu_daily_dispatch", family="observation",
-                  notes="K2 WU daily observation collection; WuDailyScheduler gates per-city"),
-    SourceJobSpec("user_ws_ingestor", "main", "live", "default", True,
+                        "2026-05-24: producer/consumer split, not dual-production). Lifted to the P4 "
+                        "post-trade-capital daemon, 2026-06-08."),
+    # PROCESS-TOPOLOGY REFACTOR STEP 4 (2026-06-08, system_decomposition_plan §8 Step 4): the
+    # `main`-owned wu_daily SourceJobSpec (callable_ref="_wu_daily_dispatch") was REMOVED — the
+    # order daemon no longer collects WU daily observations. It was a VERIFIED-DUPLICATE of the
+    # data-ingest collector (ingest_k2_daily_obs -> daily_obs_append.daily_tick), which remains
+    # the SOLE live owner of the (observation, wu_icao_history) family/source. Keeping a stale
+    # spec here would mirror a deleted callable (an orphan the data_collection_inventory
+    # mirror-gate surfaces), so the entry is deleted, not repointed. The OPERATOR OWNERSHIP
+    # DECISION that was pending in _KNOWN_OPEN_DUPLICATE_LIVE_OWNERS (remove main.wu_daily vs add
+    # a lock to run_wu_daily_dispatch) is hereby RESOLVED as "ingest_main owns WU daily".
+    # PROCESS-TOPOLOGY REFACTOR P3 (2026-06-08, system_decomposition_plan §8 Step 3): the
+    # user-channel WS ingestor was LIFTED out of the order daemon (`main`) into its own
+    # process, the P3 price-channel-ingest daemon. owner_daemon is repointed to
+    # "price_channel" so the data_collection_inventory orphan-check resolves
+    # _start_user_channel_ingestor_if_enabled against the new daemon
+    # (src/ingest/price_channel_ingest.py via src/ingest/price_channel_daemon.py). The WS
+    # thread is the ws_gap_guard latch WRITER; lifting it kills the reduce_only-forever
+    # latch in the order daemon (§9).
+    SourceJobSpec("user_ws_ingestor", "price_channel", "live", "default", True,
                   source_id="polymarket_user_ws", callable_ref="_start_user_channel_ingestor_if_enabled",
                   dispatch_kind="long_running", family="venue_user_ws",
-                  notes="long-running THREAD (not add_job): user-channel WS -> market_events order/trade facts"),
+                  notes="long-running THREAD (not add_job): user-channel WS -> market_events order/trade "
+                        "facts (lifted to the P3 price-channel-ingest daemon, 2026-06-08)"),
 )
 
 JOB_REGISTRY: dict[str, SourceJobSpec] = {
@@ -318,7 +359,7 @@ def live_producing_jobs() -> list[SourceJobSpec]:
 _ACKNOWLEDGED_SAFE_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {
     # ingest_main.ingest_replacement_availability_poll probes provider publication state and
     # triggers lightweight extras fetches; forecast_live_daemon.replacement_forecast_download
-    # does the heavy AIFS+OM raw-input pre-fetch.  Both touch openmeteo_ecmwf_ifs_9km as a
+    # does the OpenMeteo anchor raw-input pre-fetch.  Both touch openmeteo_ecmwf_ifs_9km as a
     # source, but they are complementary operations on a shared source — not a competing
     # authority conflict.  The poll runs in the data-ingest daemon (independent of trading
     # restarts); the download runs in the forecast-live daemon on a dedicated lane.  Verified
@@ -332,21 +373,16 @@ _ACKNOWLEDGED_SAFE_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {
 }
 
 _KNOWN_OPEN_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {
-    # ACTIVE_DUPLICATE verified 2026-05-24 (sonnet forensic). Both live daemons collect WU daily
-    # observations for the same wu_icao city set: ingest_main.ingest_k2_daily_obs (under
-    # acquire_lock('daily_obs')) AND main.wu_daily -> run_wu_daily_dispatch (NO lock). The POSIX
-    # file lock gates ingest_main against itself only; main's path never acquires it -> zero mutual
-    # exclusion. observations upsert (ON CONFLICT DO UPDATE) prevents row duplication but BOTH fire
-    # WU API fetches per city per hour (quota) and the later writer silently overwrites
-    # rebuild_run_id/provenance. Self-acknowledged at src/data/wu_scheduler.py:132-135 as the
-    # "cluster-L duplicate-tick design issue". OPERATOR DECISION PENDING: which daemon owns WU
-    # daily collection — remove main.wu_daily (ingest_main owns collection) vs add the lock to
-    # run_wu_daily_dispatch. main.wu_daily was added 2026-05-18 (Cluster-L), so the fix direction
-    # has live-cadence history that must be confirmed before removal.
-    ("observation", "wu_icao_history"): (
-        "ACTIVE_DUPLICATE: ingest_main.ingest_k2_daily_obs + main.wu_daily both collect WU daily; "
-        "operator ownership decision pending (remove main.wu_daily vs add lock)"
-    ),
+    # RESOLVED 2026-06-08 (system_decomposition_plan §8 Step 4): the WU daily active-duplicate
+    # — ("observation", "wu_icao_history"), produced live by BOTH ingest_main.ingest_k2_daily_obs
+    # AND main.wu_daily -> run_wu_daily_dispatch — is FIXED. main.wu_daily was removed from the
+    # order daemon (_wu_daily_dispatch + its add_job + its registry SourceJobSpec deleted). The
+    # ownership decision (pending since 2026-05-24) is closed: data-ingest is the SOLE live owner.
+    # The wu_icao slice was RE-VERIFIED set-equivalent before removal (identical iteration/filter/
+    # gate/target/writer; idempotent writer => zero coverage loss; the per-hour double WU-API
+    # fetch + rebuild_run_id clobber are gone). Per the gate's contract, a resolved duplicate
+    # vanishes from BOTH the live detection map AND this known-open list, so the entry is removed.
+    # Empty again until the next triaged duplicate is logged (an UNTRACKED dup fails the E gate).
 }
 
 

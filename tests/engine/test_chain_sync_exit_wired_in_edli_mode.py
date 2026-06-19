@@ -1,10 +1,14 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-05-31
+# Last reused/audited: 2026-06-08
 # Authority basis: Blocker #56 diagnosis /tmp/exit_chain_dx.md — chain_sync +
+#   2026-06-08 (system_decomposition_plan §8 Step 3, P3 lift): removed the obsolete
+#   _start_user_channel_ingestor_if_enabled boot stub from the fake-scheduler harness —
+#   that WS ingestor THREAD was lifted to src.ingest.price_channel_daemon and the order
+#   daemon no longer starts it at boot (the symbol is gone from src.main). The chain-sync /
+#   exit-monitor wiring asserted by these tests is unchanged.
 #   exit_monitor must fire under EDLI modes, not just legacy_cron. Relationship
 #   test: proves scheduler wiring at the boot path, not just unit logic.
-"""Relationship test: chain_sync_and_exit_monitor job is wired into BOTH
-legacy_cron AND EDLI_EVENT_DRIVEN_MODES.
+"""Relationship test: exit_monitor job is wired into live and legacy_cron.
 
 ROOT that this test guards against (Blocker #56):
   - run_chain_sync + execute_monitoring_phase were only reachable through
@@ -59,8 +63,18 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
     monkeypatch.setattr(main, "_startup_freshness_check", lambda: None)
     monkeypatch.setattr(main, "_assert_live_safe_strategies_or_exit", lambda: None)
     monkeypatch.setattr(main, "_boot_deployment_freshness_auto_resume", lambda: None)
-    monkeypatch.setattr(main, "_startup_wallet_check", lambda: None)
-    monkeypatch.setattr(main, "_start_user_channel_ingestor_if_enabled", lambda: None)
+    monkeypatch.setattr(main, "_assert_edli_stage_readiness", lambda _cfg: None)
+    monkeypatch.setattr(main, "_edli_boot_fill_bridge_recovery", lambda: None)
+    monkeypatch.setattr(main, "_edli_boot_settlement_redeem_recovery", lambda: None)
+    # _startup_wallet_check is called as _startup_wallet_check(bankroll_record=...) at the
+    # current boot site, so the stub must accept arbitrary args/kwargs (pre-existing harness
+    # drift: a no-arg lambda raised TypeError before the scheduler was ever built).
+    monkeypatch.setattr(main, "_startup_wallet_check", lambda *a, **kw: None)
+    # P3 lift (system_decomposition_plan §8 Step 3): the user-channel WS ingestor THREAD
+    # (_start_user_channel_ingestor_if_enabled) was lifted out of src.main into
+    # src.ingest.price_channel_daemon. The order-daemon boot no longer starts it (and the
+    # symbol no longer exists on src.main), so there is nothing to stub here — patching a
+    # now-absent attribute raised AttributeError. The boot harness no longer references it.
     monkeypatch.setattr(main, "_check_s1_without_s2_sla", lambda: None)
     monkeypatch.setattr(main, "_assert_cascade_liveness_contract", lambda _scheduler: None)
     monkeypatch.setattr(main, "init_schema_trade_only", lambda _conn: None)
@@ -112,39 +126,53 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates):
 # ---------------------------------------------------------------------------
 
 
-def test_chain_sync_exit_monitor_registered_in_edli_shadow_no_submit(monkeypatch):
-    """RED→GREEN: chain_sync_and_exit_monitor must be registered in edli_shadow_no_submit.
+def test_exit_monitor_registered_in_edli_live(monkeypatch):
+    """The exit-monitor job must be registered in edli_live.
 
     This is the primary blocker #56 wiring gap: EDLI mode never registered
     the chain-sync or exit-monitoring job, so chain_shares stayed NULL forever.
+
+    PROCESS-TOPOLOGY REFACTOR P4 (2026-06-08, system_decomposition_plan §8 Step 2): the
+    former bundled `chain_sync_and_exit_monitor` job was SPLIT — the chain-sync READ phase
+    moved to the P4 post-trade-capital daemon (job id `chain_sync_read`) and the exit-SUBMIT
+    phase STAYS in the order daemon as `exit_monitor`. This test now asserts the EXIT phase
+    is wired in P1; the P4-side chain-sync registration is asserted in
+    tests/test_p4_post_trade_capital_lift.py.
     """
     scheduler, _ = _run_main_with_fake_scheduler(
         monkeypatch,
         {
             "enabled": True,
-            "live_execution_mode": "edli_shadow_no_submit",
-            "reactor_mode": "live_no_submit",
+            "live_execution_mode": "edli_live",
+            "reactor_mode": "live",
             "event_writer_enabled": True,
             "forecast_snapshot_trigger_enabled": True,
             "day0_extreme_trigger_enabled": False,
             "day0_hard_fact_live_enabled": False,
-            "market_channel_ingestor_enabled": False,
-            "edli_user_channel_reconcile_enabled": False,
-            "real_order_submit_enabled": False,
+                "market_channel_ingestor_enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "real_order_submit_enabled": True,
+                "durable_submit_outbox_enabled": True,
         },
     )
     job_ids = {job.id for job in scheduler.jobs}
-    assert "chain_sync_and_exit_monitor" in job_ids, (
-        "chain_sync_and_exit_monitor must be registered under edli_shadow_no_submit "
-        "(Blocker #56: chain_shares NULL 101/101 because this job was never wired)"
+    assert "exit_monitor" in job_ids, (
+        "exit_monitor (the exit-SUBMIT phase that STAYS in P1 after the P4 chain-sync lift) "
+        "must be registered under edli_shadow_no_submit so exit monitoring runs in EDLI mode"
+    )
+    # And the bundled chain-sync job id must be GONE from the order daemon (chain-sync lifted).
+    assert "chain_sync_and_exit_monitor" not in job_ids, (
+        "the bundled chain_sync_and_exit_monitor job id must no longer be registered in the "
+        "order daemon — chain-sync was lifted to P4; only the exit phase (exit_monitor) stays"
     )
 
 
 def test_chain_sync_exit_monitor_registered_in_legacy_cron_no_regression(monkeypatch):
-    """chain_sync_and_exit_monitor must ALSO be registered in legacy_cron.
+    """The exit-monitor job must ALSO be registered in legacy_cron.
 
     Guards against the fix accidentally breaking the legacy path that
-    previously had chain sync embedded inside run_cycle().
+    previously had chain sync embedded inside run_cycle(). Post-P4 the exit phase
+    (exit_monitor) is what stays in P1; chain-sync moved to the P4 daemon.
     """
     scheduler, _ = _run_main_with_fake_scheduler(
         monkeypatch,
@@ -162,25 +190,20 @@ def test_chain_sync_exit_monitor_registered_in_legacy_cron_no_regression(monkeyp
         },
     )
     job_ids = {job.id for job in scheduler.jobs}
-    assert "chain_sync_and_exit_monitor" in job_ids, (
-        "chain_sync_and_exit_monitor must remain registered in legacy_cron "
-        "so both modes get chain truth sync + exit monitoring"
+    assert "exit_monitor" in job_ids, (
+        "exit_monitor must remain registered in legacy_cron so the exit-SUBMIT phase runs "
+        "(chain truth sync now comes from the P4 post-trade-capital daemon)"
     )
 
 
 def test_edli_event_driven_modes_set_includes_shadow_no_submit():
-    """EDLI_EVENT_DRIVEN_MODES must include edli_shadow_no_submit.
+    """EDLI_EVENT_DRIVEN_MODES contains only the live event-driven mode.
 
-    Structural guard: if someone removes edli_shadow_no_submit from the set,
-    the wiring test above would be testing a different condition. This verifies
-    that the set relationship holds so the wiring gate is meaningful.
+    Shadow/submit-disabled bridge are experiment/archive semantics and must not be
+    treated as live scheduler modes.
     """
     import src.main as main
-    assert "edli_shadow_no_submit" in main.EDLI_EVENT_DRIVEN_MODES
-    assert "edli_submit_disabled_bridge" in main.EDLI_EVENT_DRIVEN_MODES
-    # Wave-2 item 5: canary collapsed into edli_live (the only event-driven live mode).
-    assert "edli_live_canary" not in main.EDLI_EVENT_DRIVEN_MODES
-    assert "edli_live" in main.EDLI_EVENT_DRIVEN_MODES
+    assert main.EDLI_EVENT_DRIVEN_MODES == {"edli_live"}
 
 
 def test_shadow_safety_execute_monitoring_phase_accepts_exit_order_submit_enabled():

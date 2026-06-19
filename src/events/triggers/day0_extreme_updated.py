@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.config import runtime_cities_by_name
+from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.event_priority import day0_emit_priority
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, OpportunityEvent, make_day0_extreme_updated_event
@@ -36,7 +38,7 @@ class Day0HardFactGate:
             and self.metric_match_status == "MATCH"
             and self.rounding_status == "MATCH"
             and self.source_authorized_status == "AUTHORIZED"
-            and self.live_authority_status == "LIVE_AUTHORITY"
+            and normalize_day0_live_authority_status(self.live_authority_status) == "live"
         )
 
 
@@ -73,7 +75,9 @@ def build_day0_extreme_updated_event(
         metric_match_status=str(observation.get("metric_match_status", "UNKNOWN")),
         rounding_status=str(observation.get("rounding_status", "UNKNOWN")),
         source_authorized_status=str(observation.get("source_authorized_status", "UNKNOWN")),
-        live_authority_status=str(observation.get("live_authority_status", "UNKNOWN")),
+        live_authority_status=normalize_day0_live_authority_status(
+            observation.get("live_authority_status"),
+        ),
     )
     entity_key = "|".join((payload.city, payload.target_date, payload.metric, payload.station_id))
     return make_day0_extreme_updated_event(
@@ -84,22 +88,25 @@ def build_day0_extreme_updated_event(
         payload=payload,
         causal_snapshot_id=str(observation.get("observation_context_id") or ""),
         # Emission-priority half of the 2026-06-11 anti-starvation fix. This is a
-        # WITHIN-TIER sub-sort (the scope-aware claim tier in fetch_pending is the
-        # cross-tier authority); under day0_shadow we still stamp the lower
-        # PRIORITY_DAY0_SHADOW so the two surfaces agree. Single source of truth:
-        # src.events.event_priority.day0_emit_priority.
+        # WITHIN-TIER sub-sort; fetch_pending owns the cross-tier authority.
+        # Single source of truth: src.events.event_priority.day0_emit_priority.
         priority=day0_emit_priority(day0_is_tradeable=day0_is_tradeable),
     )
 
 
 class Day0ExtremeUpdatedTrigger:
-    def __init__(self, writer: EventWriter, *, day0_is_tradeable: bool = True) -> None:
+    def __init__(
+        self,
+        writer: EventWriter,
+        *,
+        day0_is_tradeable: bool = True,
+        suppress_recent_no_value_refutations: bool = False,
+    ) -> None:
         self._writer = writer
         # Stamp the scope-aware emission priority (2026-06-11 anti-starvation).
-        # Default True = historical priority=PRIORITY_DAY0_TRADEABLE. The caller in
-        # main.py passes False under edli_live_scope='day0_shadow' so shadow-only
-        # day0 events sub-sort below tradeable forecast candidates.
+        # Production live uses the default True; False is for tests/replay.
         self._day0_is_tradeable = day0_is_tradeable
+        self._suppress_recent_no_value_refutations = suppress_recent_no_value_refutations
 
     def emit_from_observation(
         self,
@@ -116,6 +123,32 @@ class Day0ExtremeUpdatedTrigger:
             received_at=received_at,
             day0_is_tradeable=self._day0_is_tradeable,
         )
+        return self._writer.write(event)
+
+    def _write_observation_if_admitted(
+        self,
+        *,
+        observation: dict[str, Any],
+        settlement_semantics: Any,
+        decision_time: datetime,
+        received_at: str,
+    ) -> EventWriteResult | None:
+        event = build_day0_extreme_updated_event(
+            observation=observation,
+            settlement_semantics=settlement_semantics,
+            decision_time=decision_time,
+            received_at=received_at,
+            day0_is_tradeable=self._day0_is_tradeable,
+        )
+        if self._suppress_recent_no_value_refutations:
+            from src.events.continuous_redecision import recent_no_value_event_refutation
+
+            if recent_no_value_event_refutation(
+                self._writer.conn,
+                event,
+                decision_time=decision_time,
+            ) is not None:
+                return None
         return self._writer.write(event)
 
     def scan_authority_rows(
@@ -167,14 +200,14 @@ class Day0ExtremeUpdatedTrigger:
                 should_emit = True
             if should_emit:
                 semantics = settlement_semantics(observation) if callable(settlement_semantics) else settlement_semantics
-                results.append(
-                    self.emit_from_observation(
-                        observation=observation,
-                        settlement_semantics=semantics,
-                        decision_time=decision_time,
-                        received_at=received_at,
-                    )
+                result = self._write_observation_if_admitted(
+                    observation=observation,
+                    settlement_semantics=semantics,
+                    decision_time=decision_time,
+                    received_at=received_at,
                 )
+                if result is not None:
+                    results.append(result)
         return results
 
     def scan_observation_instants_rows(
@@ -188,7 +221,7 @@ class Day0ExtremeUpdatedTrigger:
     ) -> list[EventWriteResult]:
         """Emit Day0 events from canonical live observation_instants rows.
 
-        EDLI day0 shadow needs the current observation stream. The older
+        Day0 live redecision needs the current observation stream. The older
         settlement_day_observation_authority catch-up table is written only by
         the legacy cycle path and can be stale or empty while live observation
         ingestion is healthy. This scanner reads the canonical world
@@ -205,6 +238,7 @@ class Day0ExtremeUpdatedTrigger:
             "target_date",
             "source",
             "timezone_name",
+            "local_timestamp",
             "utc_timestamp",
             "imported_at",
             "running_max",
@@ -220,6 +254,7 @@ class Day0ExtremeUpdatedTrigger:
         if not required_columns.issubset(columns):
             return []
         decision_iso = decision_time.astimezone(UTC).isoformat()
+        target_floor = _local_target_date_scan_floor(decision_time)
         rows = _dict_rows(
             observation_conn,
             f"""
@@ -242,9 +277,10 @@ class Day0ExtremeUpdatedTrigger:
                     MIN(source_role) AS source_role
                 FROM {table}
                 WHERE target_date IS NOT NULL
-                  AND target_date >= date(?)
+                  AND target_date >= ?
                   AND utc_timestamp <= ?
                   AND imported_at <= ?
+                  AND substr(local_timestamp, 1, 10) = target_date
                   AND (running_max IS NOT NULL OR running_min IS NOT NULL)
                   AND authority IN ('VERIFIED', 'ICAO_STATION_NATIVE')
                   AND COALESCE(training_allowed, 0) = 1
@@ -260,7 +296,7 @@ class Day0ExtremeUpdatedTrigger:
             ORDER BY observation_available_at DESC, observation_time DESC
             LIMIT ?
             """,
-            (decision_iso, decision_iso, decision_iso, max(1, int(limit))),
+            (target_floor, decision_iso, decision_iso, max(1, int(limit))),
         )
         results: list[EventWriteResult] = []
         # CHANGE-GATE (2026-06-15 firehose fix). The GROUP BY recomputes
@@ -275,12 +311,14 @@ class Day0ExtremeUpdatedTrigger:
         # carries no new decision; a price-driven re-decision is EDLI_REDECISION_PENDING,
         # not a day0 re-emit. The in-call watermark is advanced on each emit so two
         # source rows for one family in the same batch cannot double-emit one extreme.
-        high_water, low_water = self._emitted_extreme_watermarks(decision_iso)
+        high_water, low_water = self._emitted_extreme_watermarks(target_floor)
         for row in reversed(rows):
             for metric in ("high", "low"):
                 try:
                     observation = observation_instant_row_to_day0_observation(row, metric=metric)
                 except ValueError:
+                    continue
+                if normalize_day0_live_authority_status(observation.get("live_authority_status")) != "live":
                     continue
                 key = (
                     str(observation.get("city") or ""),
@@ -298,14 +336,14 @@ class Day0ExtremeUpdatedTrigger:
                     if cur is None or (prior is not None and float(cur) >= prior):
                         continue
                 semantics = settlement_semantics(observation) if callable(settlement_semantics) else settlement_semantics
-                results.append(
-                    self.emit_from_observation(
-                        observation=observation,
-                        settlement_semantics=semantics,
-                        decision_time=decision_time,
-                        received_at=received_at,
-                    )
+                result = self._write_observation_if_admitted(
+                    observation=observation,
+                    settlement_semantics=semantics,
+                    decision_time=decision_time,
+                    received_at=received_at,
                 )
+                if result is not None:
+                    results.append(result)
                 if metric == "high":
                     high_water[key] = float(cur)
                 else:
@@ -313,7 +351,7 @@ class Day0ExtremeUpdatedTrigger:
         return results
 
     def _emitted_extreme_watermarks(
-        self, decision_iso: str
+        self, target_floor: str
     ) -> tuple[dict[tuple[str, str, str], float], dict[tuple[str, str, str], float]]:
         """Per (city, target_date, station_id) high-/low-water marks over ALREADY-emitted
         DAY0_EXTREME_UPDATED events, scoped to non-past target dates.
@@ -329,7 +367,6 @@ class Day0ExtremeUpdatedTrigger:
         low_water: dict[tuple[str, str, str], float] = {}
         try:
             conn = self._writer.conn
-            target_floor = decision_iso[:10]
             rows = conn.execute(
                 """
                 SELECT json_extract(payload_json, '$.city')        AS c,
@@ -385,7 +422,10 @@ def authority_row_to_observation(row: dict[str, Any]) -> dict[str, Any]:
         "source_authorized_status": (
             "AUTHORIZED" if row.get("source_authorized_for_settlement") == 1 else "UNKNOWN"
         ),
-        "live_authority_status": payload.get("live_authority_status", "OBSERVABILITY_ONLY"),
+        "live_authority_status": normalize_day0_live_authority_status(
+            payload.get("live_authority_status"),
+            default="blocked",
+        ),
         "settlement_unit": payload.get("settlement_unit") or payload.get("measurement_unit"),
         "settlement_precision": payload.get("settlement_precision") or payload.get("precision"),
         "rounding_rule": payload.get("rounding_rule"),
@@ -410,18 +450,31 @@ def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: 
     raw_value = high_so_far if metric == "high" else low_so_far
     if not city or not target_date or not station_id or raw_value is None:
         raise ValueError("observation_instants row missing required Day0 fields")
+    city_config = runtime_cities_by_name().get(city)
+    expected_timezone = str(getattr(city_config, "timezone", "") or "") if city_config else ""
+    observed_timezone = str(row.get("timezone_name") or "")
     local_date_status, dst_status = _observation_local_date_status(
         observation_time=observation_time,
-        city_timezone=str(row.get("timezone_name") or ""),
+        city_timezone=expected_timezone or observed_timezone,
         target_date=target_date,
     )
+    if city_config and observed_timezone and observed_timezone != expected_timezone:
+        local_date_status = "MISMATCH"
     unit = str(row.get("temp_unit") or "").upper()
+    expected_unit = str(getattr(city_config, "settlement_unit", "") or "").upper() if city_config else ""
     verified = str(row.get("authority") or "").upper() == "VERIFIED"
     trusted_native = str(row.get("authority") or "").upper() == "ICAO_STATION_NATIVE"
     source = str(row.get("source") or "")
-    source_match = "MATCH" if source else "MISMATCH"
-    station_match = "MATCH" if station_id else "MISMATCH"
-    rounding_status = "MATCH" if unit else "MISMATCH"
+    if city_config:
+        source_type = str(getattr(city_config, "settlement_source_type", "") or "")
+        expected_station = _expected_station_for_city(city_config)
+        source_match = "MATCH" if _source_matches_config(source, source_type) else "MISMATCH"
+        station_match = "MATCH" if _station_matches(station_id, expected_station) else "MISMATCH"
+        rounding_status = "MATCH" if unit == expected_unit else "MISMATCH"
+    else:
+        source_match = "MATCH" if source else "MISMATCH"
+        station_match = "MATCH" if station_id else "MISMATCH"
+        rounding_status = "MATCH" if unit else "MISMATCH"
     source_role = str(row.get("source_role") or "")
     training_allowed = int(row.get("training_allowed") or 0) == 1
     causality_ok = str(row.get("causality_status") or "") == "OK"
@@ -439,13 +492,13 @@ def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: 
         else "UNAUTHORIZED"
     )
     live_authority = (
-        "LIVE_AUTHORITY"
+            "live"
         if (
             source_authorized == "AUTHORIZED"
             and local_date_status == "MATCH"
             and dst_status == "UNAMBIGUOUS"
         )
-        else "NON_LIVE_AUTHORITY"
+            else "blocked"
     )
     return {
         "city": city,
@@ -484,12 +537,12 @@ def observation_context_to_live_observation(
     observation: Any,
     observation_context_id: str = "",
 ) -> dict[str, Any]:
-    """Convert a Day0ObservationContext into a live-authority EDLI observation.
+    """Convert a Day0ObservationContext into a live EDLI observation.
 
     This is the online source hook: it consumes the actual observation object
     returned by the settlement-bound Day0 provider path. The separate
     settlement_day_observation_authority scanner remains catch-up/evidence and
-    defaults to OBSERVABILITY_ONLY.
+    defaults to blocked.
     """
 
     observation_time = str(getattr(observation, "observation_time", "") or "")
@@ -525,7 +578,7 @@ def observation_context_to_live_observation(
         else "UNAUTHORIZED"
     )
     live_authority_status = (
-        "LIVE_AUTHORITY"
+        "live"
         if (
             available_at
             and source_match_status == "MATCH"
@@ -536,7 +589,7 @@ def observation_context_to_live_observation(
             and rounding_status == "MATCH"
             and source_authorized_status == "AUTHORIZED"
         )
-        else "NON_LIVE_AUTHORITY"
+        else "blocked"
     )
     raw_value = getattr(observation, "high_so_far", None) if str(metric) == "high" else getattr(observation, "low_so_far", None)
     if raw_value is None:
@@ -571,6 +624,32 @@ def observation_context_to_live_observation(
 
 def _station_matches(station_id: str, expected_station: str) -> bool:
     return station_id == expected_station or station_id.startswith(f"{expected_station}:")
+
+
+def _expected_station_for_city(city: Any) -> str:
+    if city is None:
+        return ""
+    if str(getattr(city, "settlement_source_type", "") or "") == "hko":
+        return "HKO"
+    return str(getattr(city, "wu_station", "") or "").strip().upper()
+
+
+def _source_matches_config(source: str, settlement_source_type: str) -> bool:
+    src = str(source or "").strip().lower()
+    source_type = str(settlement_source_type or "").strip().lower()
+    if source_type == "wu_icao":
+        return src == "wu_icao_history" or src.startswith("wu_icao_history_")
+    if source_type == "noaa":
+        return src.startswith("ogimet_metar_")
+    if source_type == "hko":
+        return src == "hko_daily_api" or src.startswith("hko_daily_api_")
+    return False
+
+
+def _local_target_date_scan_floor(decision_time: datetime) -> str:
+    """Earliest local target date that can still be live at this UTC decision time."""
+
+    return (decision_time.astimezone(UTC).date() - timedelta(days=1)).isoformat()
 
 
 def _observation_local_date_status(*, observation_time: str, city_timezone: str, target_date: str) -> tuple[str, str]:

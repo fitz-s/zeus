@@ -1,9 +1,10 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-17
 # Authority basis: FIX A wiring antibody for incident 0b5c305e26524042 (Milan 24C
 #   first fill); docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md. Replays
-#   the incident family through _generate_candidate_proofs (the live proof seam) and
-#   asserts the traded candidate is now unconstructable.
+#   the incident family through _generate_candidate_proofs (the live proof seam),
+#   asserts the traded candidate is now unconstructable, and pins the 2026-06-17
+#   Day0 near-settled price gate for true-but-unexploitable 0.999 entries.
 """Milan-incident replay: the proof seam rejects the traded candidate at DIRECTION_LAW.
 
 Relationship under test: posterior provenance (anchor_value_c /
@@ -136,6 +137,73 @@ def _run(with_fusion_center: bool = True):
             decision_time=datetime(2026, 6, 10, 2, 57, tzinfo=timezone.utc),
         )
     return {(p.candidate.condition_id, p.direction): p for p in proofs}
+
+
+def test_day0_absorbing_no_at_999_is_untradeable_before_selection():
+    """A true Day0 absorbing NO belief is not itself a trade opportunity when the
+    available entry price is already 0.999. The proof must carry the deterministic
+    near-settled rejection instead of entering selection with a tiny positive EV."""
+
+    candidate = MarketTopologyCandidate(
+        city="Shanghai",
+        target_date="2026-06-18",
+        metric="low",
+        condition_id="cond-25",
+        yes_token_id="cond-25-yes",
+        no_token_id="cond-25-no",
+        bin=Bin(low=25.0, high=25.0, unit="C", label="25°C"),
+    )
+    family = types.SimpleNamespace(
+        candidates=(candidate,),
+        city="Shanghai",
+        target_date="2026-06-18",
+        metric="low",
+    )
+    lcb = QlcbByDirection()
+    lcb[("cond-25", "buy_yes")] = QlcbProvenance(
+        q_lcb=0.0, calibration_source="SETTLEMENT_ISOTONIC"
+    )
+    lcb[("cond-25", "buy_no")] = QlcbProvenance(
+        q_lcb=1.0, calibration_source="SETTLEMENT_ISOTONIC"
+    )
+    p_values = {("cond-25", "buy_yes"): 1.0, ("cond-25", "buy_no"): 0.0}
+    generated_prefilter = {("cond-25", "buy_yes"): True, ("cond-25", "buy_no"): True}
+    mock_return = (
+        {"cond-25": 0.0},
+        lcb,
+        p_values,
+        generated_prefilter,
+        {
+            "p_cal_vector_hash": "day0-hard-fact",
+            "p_live_vector_hash": "day0-hard-fact",
+            "probability_authority": "day0_absorbing_hard_fact",
+        },
+    )
+    sentinel = object()
+    with patch(
+        "src.engine.event_reactor_adapter._live_yes_probabilities",
+        return_value=mock_return,
+    ):
+        proofs = _generate_candidate_proofs(
+            event=types.SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            payload={},
+            family=family,
+            snapshot_rows=[_row("cond-25", "0.001", "0.999")],
+            trade_conn=sentinel,
+            forecast_conn=sentinel,
+            calibration_conn=sentinel,
+            decision_time=datetime(2026, 6, 17, 16, 10, tzinfo=timezone.utc),
+        )
+
+    by_side = {(p.candidate.condition_id, p.direction): p for p in proofs}
+    no_proof = by_side[("cond-25", "buy_no")]
+    assert no_proof.q_lcb_5pct == 1.0
+    assert no_proof.execution_price is not None
+    assert float(no_proof.execution_price.value) == 0.999
+    assert no_proof.missing_reason is not None
+    assert no_proof.missing_reason.startswith("ADMISSION_NEAR_SETTLED_PRICE:")
+    assert no_proof.trade_score == 0.0
+    assert no_proof.passed_prefilter is False
 
 
 def test_incident_24c_buy_yes_unconstructable_at_direction_law():

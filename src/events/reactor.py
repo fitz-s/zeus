@@ -49,6 +49,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from src.decision_kernel import claims
+from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.event_store import EventStore
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
 from src.state.db import world_write_mutex
@@ -158,7 +159,7 @@ LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({
     "POST_SUBMIT_UNKNOWN",
 })
 EXECUTION_RECEIPT_TERMINAL_STATUSES = DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES | LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES
-EDLI_PROCESSING_REACTOR_MODES = frozenset({"live", "live_no_submit", "submit_disabled_live_bridge"})
+EDLI_PROCESSING_REACTOR_MODES = frozenset({"live", "live_no_submit"})
 # Continuous re-decision resurrection (2026-06-12): the forecast decision lane includes the
 # price-driven re-decision type. Mirrors src.engine.event_reactor_adapter._FORECAST_DECISION_EVENT_TYPES
 # and src.events.continuous_redecision.REDECISION_EVENT_TYPE (literal here to avoid an import cycle:
@@ -308,7 +309,7 @@ class EventSubmissionReceipt:
     # attribute EMOS-cells vs maze-cells per city — the PROMOTE evidence.
     q_source: str | None = None
     strategy_key: str | None = None
-    # Shadow-only Opportunity Book selector evidence. Omitted from receipt_json
+    # Telemetry-only Opportunity Book selector evidence. Omitted from receipt_json
     # when None so pre-book receipts keep byte-identical hashes.
     opportunity_book: dict[str, Any] | None = None
     replacement_forecast: dict[str, Any] | None = None
@@ -384,13 +385,12 @@ class EventSubmissionReceipt:
     #                          full-pass its reason names the degrade cause that drove
     #                          the selector off the live lane (NO_SUBMIT_ADAPTER_LANE:
     #                          <cause>), NEVER the default literal.
-    #   "SHADOW"            — day0 force_shadow path (DAY0_SCOPE_SHADOW_ONLY).
     # This is DECISION provenance (which lane decided), not transport metadata, so it
     # IS serialized into receipt_json. None on legacy / pre-stamp receipts; omit-when-
     # None in receipt_json keeps existing receipt_hash byte-stable, and readers MUST
     # tolerate its absence (only NEW writes carry/enforce it).
     submit_lane: str | None = None
-    # C2 SELECTION SHRINKAGE SHADOW (task #60, 2026-06-13). The trading-path
+    # C2 SELECTION SHRINKAGE TELEMETRY (task #60, 2026-06-13). The trading-path
     # FDR/BH gate consumes degenerate {0,1} p-values (a no-op multiplicity
     # correction; event_reactor_adapter.py:9854/9876) and, even with continuous
     # p-values, mutually-exclusive bins violate PRDS so BH is invalid and FDR is
@@ -405,8 +405,10 @@ class EventSubmissionReceipt:
     #   edge_shrunk_posterior_sd — posterior SD of the shrunk edge.
     #   selection_authority      — which gate DECIDED: "BH_FDR" (flag OFF, the
     #                              current behavior) | "EB_SHRINKAGE" (flag ON).
-    # When the replacement flag is OFF these are SHADOW-only (computed + stamped,
-    # selection unchanged). DECISION provenance, so serialized into receipt_json;
+    # These are DECISION provenance fields. Current live selection remains unchanged
+    # unless selection_authority explicitly records an EB_SHRINKAGE gate result; the
+    # fields are serialized into receipt_json so later attribution can audit the
+    # selected order without feeding this data back into the same decision.
     # None on legacy / gate-reject receipts; omit-when-None keeps existing
     # receipt_hash byte-stable, mirroring submit_lane / envelope_json travel.
     lfsr: float | None = None
@@ -450,10 +452,8 @@ class ReactorConfig:
     # admitted ONLY if its honest (q_lcb-based) after-cost EV-per-dollar clears
     # Scope-aware claim tier (2026-06-11 anti-starvation). True (default) =
     # historical behaviour: DAY0_EXTREME_UPDATED ranks at the top claim tier
-    # (realized obs = freshest tradeable alpha). False = day0 is shadow-only
-    # (edli_live_scope='day0_shadow'); the reactor demotes DAY0_EXTREME_UPDATED
-    # below tradeable FORECAST_SNAPSHOT_READY so the shadow flood cannot starve
-    # tradeable forecast families out of the per-cycle proof budget. Derived from
+    # (realized obs = freshest tradeable alpha). False is reserved for tests or
+    # historical replay scopes where Day0 is not a live entry lane. Derived from
     # the scope via src.events.event_priority.day0_is_tradeable_for_scope.
     day0_is_tradeable: bool = True
     # SUBMIT-LANE INVARIANT (silent-trade-kill antibody 2026-06-12). The SAME
@@ -744,11 +744,6 @@ class OpportunityEventReactor:
                 # cycle.
                 if budget is not None and (time.monotonic() - cycle_start) >= budget:
                     return result
-                # JIT pre-warm THIS family's executable snapshot fresh, in-cycle, immediately
-                # before deciding it (outside any txn — the prior unit committed). Closes the
-                # end-of-cycle-drain timing bug where a refreshed book goes stale across the ~60s
-                # cycle gap before re-decision (212k EXECUTABLE_SNAPSHOT_BLOCKED requeues/day).
-                self._prewarm_event_family_snapshot(event)
                 self._process_event_unit(event, decision_time=decision_time, result=result)
                 if remaining is not None:
                     remaining -= 1
@@ -1154,53 +1149,6 @@ class OpportunityEventReactor:
             return None
         return (city, target_date, metric)
 
-    def _prewarm_event_family_snapshot(self, event: OpportunityEvent) -> None:
-        """JIT pre-warm THIS event's executable snapshot IMMEDIATELY BEFORE its decision, so it
-        satisfies the freshness gate THIS cycle instead of perpetually requeuing on the
-        end-of-cycle self-heal.
-
-        THE TIMING BUG THIS CLOSES (#122 / GOAL #83 — measured live 2026-06-16: 212,159
-        EXECUTABLE_SNAPSHOT_BLOCKED requeues/day, the dominant cross-suppressor by 40x). The
-        always-decidable drain (:meth:`_drain_substrate_refreshes`) refreshes a blocked family's
-        book at the END of the reactor cycle, but the family is re-decided at the START of the
-        NEXT cycle ~60s later — past the snapshot freshness window (30s) — so the just-captured
-        book is stale again at decision time and the family requeues FOREVER. Capturing the book
-        in the SAME cycle, immediately before the gate, makes the snapshot < the freshness window
-        old when the gate reads it, so it PASSES and the family reaches the decision spine. The
-        49-city pending set vs ~21-city/cycle warm coverage made the tail of cities depend ENTIRELY
-        on this (broken) self-heal; the pre-warm decouples a family's freshness from warm-cycle
-        coverage. NOT a window loosening (settlement-honest 30s gate is untouched): it makes the
-        book genuinely fresh, it does not relax what "fresh" means.
-
-        Runs OUTSIDE any txn: the loop body's prior unit-of-work has committed + released before
-        this call (the no-network-in-txn law — the SAME guarantee the end-of-cycle drain relies
-        on). Debounced via the SHARED ``_family_refresh_last_at`` + ``_FAMILY_REFRESH_DEBOUNCE_SECONDS``
-        (= freshness window / 2): a family refreshed within that window is skipped (its book is
-        still fresh), so a single fetch serves both the pre-warm and the drain and there is no
-        double-fetch. Fail-soft: a refresher failure (or absent refresher, e.g. tests) is swallowed
-        and the gate simply fails closed and requeues as before — byte-identical to pre-invariant
-        behavior when ``_family_snapshot_refresher`` is None.
-        """
-        refresher = self._family_snapshot_refresher
-        if refresher is None:
-            return
-        family = self._family_identity(event)
-        if family is None:
-            return
-        city, target_date, metric = family
-        key = f"{city}|{target_date}|{metric}"
-        now = time.monotonic()
-        prev = self._family_refresh_last_at.get(key)
-        if prev is not None and (now - prev) < _FAMILY_REFRESH_DEBOUNCE_SECONDS:
-            return  # refreshed within the window — the book is still fresh, no re-fetch
-        # Mark BEFORE the call (debounce spaces ATTEMPTS, not successes), so a slow/failing
-        # refresh still debounces the end-of-cycle drain off this family.
-        self._family_refresh_last_at[key] = now
-        try:
-            refresher(city=city, target_date=target_date, metric=metric)
-        except Exception:  # noqa: BLE001 — pre-warm is best-effort; gate fails closed if still stale
-            pass
-
     def _record_substrate_block(
         self, event: OpportunityEvent, *, kind: str
     ) -> None:
@@ -1578,12 +1526,17 @@ class OpportunityEventReactor:
                 family_id=str(belief.get("family_id") or ""),
                 city=str(belief.get("city") or ""),
                 target_date=str(belief.get("target_date") or ""),
+                temperature_metric=str(
+                    belief.get("temperature_metric") or belief.get("metric") or ""
+                ),
                 snapshot_id=str(belief.get("snapshot_id") or ""),
                 calibrator_model_hash=str(belief.get("calibrator_model_hash") or "identity"),
                 bin_labels=list(belief.get("bin_labels") or []),
                 p_posterior_vec=list(belief.get("p_posterior_vec") or []),
                 recorded_at=decision_time.astimezone(UTC).isoformat(),
                 condition_ids=list(belief.get("condition_ids") or []),
+                q_lcb_yes_vec=list(belief.get("q_lcb_yes_vec") or []),
+                q_lcb_no_vec=list(belief.get("q_lcb_no_vec") or []),
             )
         except Exception:  # noqa: BLE001 — belief cache is non-critical; never break the decision
             import logging as _logging
@@ -1639,7 +1592,7 @@ class OpportunityEventReactor:
             #
             # The gate now DEFERS to the reader: coverage PARTIAL/BLOCKED passes
             # THROUGH; when nothing eligible exists the adapter rejects honestly
-            # with the full reason chain (REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_
+            # with the full reason chain (REPLACEMENT_0_1_LIVE_BUNDLE_
             # BLOCKED + provenance envelope) — the certificate contract reads its
             # statuses from the SERVED bundle at proof time, never from this event
             # payload. Dead-letter remains ONLY for structurally junk payloads
@@ -1739,36 +1692,6 @@ class OpportunityEventReactor:
                 receipt=receipt,
                 decision_time=decision_time,
             )
-        # DAY0-SHADOW-RECEIPT DUAL-PERSIST (day0-shadow-receipt-enrichment, 2026-06-10).
-        # A DAY0_SCOPE_SHADOW_ONLY receipt carries the full pipeline decision content
-        # (q_live, q_lcb_5pct, direction, bin_label, trade_score) but proof_accepted=False
-        # so _receipt_money_path_blocker (TRADE_SCORE branch) would route it exclusively to
-        # _write_regret / no_trade_regret_events — bypassing edli_no_submit_receipts.
-        # The shadow comparator (day0_remaining_day_adapter) reads edli_no_submit_receipts,
-        # so it can NEVER see the shadow decision content without this dual-persist.
-        #
-        # Fix: for DAY0_SCOPE_SHADOW_ONLY + NO_SUBMIT, persist to edli_no_submit_receipts
-        # via insert_shadow_idempotent (which skips the proof_accepted guard but enforces
-        # side_effect_status="NO_SUBMIT" + reason="DAY0_SCOPE_SHADOW_ONLY"), then let the
-        # normal money-path blocker route it through _write_regret for no_trade_regret_events.
-        # This is the ONLY place that bypasses proof_accepted; the structural no-submit
-        # guarantee (side_effect_status, reason, proof_accepted=False) is never relaxed.
-        if (
-            receipt.reason == "DAY0_SCOPE_SHADOW_ONLY"
-            and receipt.side_effect_status == "NO_SUBMIT"
-        ):
-            try:
-                self._no_submit_receipt_ledger.insert_shadow_idempotent(
-                    receipt, decision_time=decision_time
-                )
-            except Exception:  # noqa: BLE001 — fail-soft: shadow persist failure never blocks regret write
-                import logging as _logging
-
-                _logging.getLogger("zeus.events.reactor").warning(
-                    "DAY0_SCOPE_SHADOW_ONLY shadow receipt persist to edli_no_submit_receipts "
-                    "failed (fail-soft); regret write continues",
-                    exc_info=True,
-                )
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt, self._config)
         if proof_stage is not None:
             return self._reject_or_retry_post_submit(
@@ -1964,7 +1887,7 @@ class OpportunityEventReactor:
     ) -> str | None:
         # ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12): a family blocked because
         # its replacement posterior is STALE or ABSENT (the adapter raises
-        # REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING / ..._BUNDLE_BLOCKED) is a REFRESHABLE
+        # REPLACEMENT_0_1_LIVE_READINESS_MISSING / ..._BUNDLE_BLOCKED) is a REFRESHABLE
         # SUBSTRATE block — the belief substrate needs re-materialization, not an endless requeue
         # against an unchanging posterior. Record it for the end-of-cycle drain, which enqueues a
         # single-family cycle-advance reseed (outside any txn, debounced, fail-soft). The
@@ -2071,6 +1994,44 @@ class OpportunityEventReactor:
         envelope_json = self._build_regret_envelope_json(
             event, stage, reason, receipt=receipt, decision_time=decision_time, payload=payload
         )
+        family_level_all_rejected = str(reason or "").startswith(
+            "EVENT_BOUND_ALL_CANDIDATES_REJECTED:"
+        )
+        condition_id = _receipt_or_payload(receipt, payload, "condition_id")
+        token_id = _receipt_or_payload(receipt, payload, "token_id")
+        outcome_label = _receipt_or_payload(receipt, payload, "outcome_label")
+        bin_label = _receipt_or_payload(receipt, payload, "bin_label")
+        direction = _receipt_or_payload(receipt, payload, "direction")
+        q_live = _optional_float(_receipt_or_payload(receipt, payload, "q_live"))
+        q_lcb_5pct = _optional_float(_receipt_or_payload(receipt, payload, "q_lcb_5pct"))
+        c_fee_adjusted = _optional_float(
+            _receipt_or_payload(receipt, payload, "c_fee_adjusted")
+        )
+        c_cost_95pct = _optional_float(
+            _receipt_or_payload(receipt, payload, "c_cost_95pct")
+        )
+        p_fill_lcb = _optional_float(_receipt_or_payload(receipt, payload, "p_fill_lcb"))
+        trade_score = _optional_float(_receipt_or_payload(receipt, payload, "trade_score"))
+        native_quote_available = _optional_bool(
+            _receipt_or_payload(receipt, payload, "native_quote_available")
+        )
+        executable_snapshot_id = _receipt_or_payload(
+            receipt, payload, "executable_snapshot_id"
+        )
+        if family_level_all_rejected:
+            condition_id = None
+            token_id = None
+            outcome_label = None
+            bin_label = None
+            direction = None
+            q_live = None
+            q_lcb_5pct = None
+            c_fee_adjusted = None
+            c_cost_95pct = None
+            p_fill_lcb = None
+            trade_score = None
+            native_quote_available = None
+            executable_snapshot_id = None
         self._regret_ledger.insert_idempotent(
             NoTradeRegretEvent(
                 event_id=event.event_id,
@@ -2079,9 +2040,9 @@ class OpportunityEventReactor:
                 regret_bucket=_regret_bucket_for(reason),  # type: ignore[arg-type]
                 envelope_json=envelope_json,
                 market_slug=payload.get("market_slug"),
-                condition_id=_receipt_or_payload(receipt, payload, "condition_id"),
-                token_id=_receipt_or_payload(receipt, payload, "token_id"),
-                outcome_label=_receipt_or_payload(receipt, payload, "outcome_label"),
+                condition_id=condition_id,
+                token_id=token_id,
+                outcome_label=outcome_label,
                 decision_time=decision_time.astimezone(UTC).isoformat() if decision_time is not None else None,
                 city=_receipt_or_payload(receipt, payload, "city"),
                 target_date=_receipt_or_payload(receipt, payload, "target_date"),
@@ -2089,22 +2050,22 @@ class OpportunityEventReactor:
                 observation_time=payload.get("observation_time"),
                 decision_seq=_optional_int(payload.get("decision_seq")),
                 family_id=_receipt_or_payload(receipt, payload, "family_id"),
-                bin_label=_receipt_or_payload(receipt, payload, "bin_label"),
-                direction=_receipt_or_payload(receipt, payload, "direction"),
-                q_live=_optional_float(_receipt_or_payload(receipt, payload, "q_live")),
-                q_lcb_5pct=_optional_float(_receipt_or_payload(receipt, payload, "q_lcb_5pct")),
-                c_fee_adjusted=_optional_float(_receipt_or_payload(receipt, payload, "c_fee_adjusted")),
-                c_cost_95pct=_optional_float(_receipt_or_payload(receipt, payload, "c_cost_95pct")),
-                p_fill_lcb=_optional_float(_receipt_or_payload(receipt, payload, "p_fill_lcb")),
-                trade_score=_optional_float(_receipt_or_payload(receipt, payload, "trade_score")),
-                native_quote_available=_optional_bool(_receipt_or_payload(receipt, payload, "native_quote_available")),
+                bin_label=bin_label,
+                direction=direction,
+                q_live=q_live,
+                q_lcb_5pct=q_lcb_5pct,
+                c_fee_adjusted=c_fee_adjusted,
+                c_cost_95pct=c_cost_95pct,
+                p_fill_lcb=p_fill_lcb,
+                trade_score=trade_score,
+                native_quote_available=native_quote_available,
                 source_status=_receipt_or_payload(receipt, payload, "source_status"),
                 family_complete=_optional_bool(_receipt_or_payload(receipt, payload, "family_complete")),
                 hypothetical_order_type=payload.get("hypothetical_order_type"),
                 hypothetical_fill_status=payload.get("hypothetical_fill_status"),
                 hypothetical_fill_price=_optional_float(payload.get("hypothetical_fill_price")),
                 causal_snapshot_id=event.causal_snapshot_id,
-                executable_snapshot_id=_receipt_or_payload(receipt, payload, "executable_snapshot_id"),
+                executable_snapshot_id=executable_snapshot_id,
             )
         )
 
@@ -2460,6 +2421,10 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # --- _receipt_money_path_blocker terminal bases (reactor.py) ---
     "EDLI_REAL_ORDER_SIDE_EFFECT_FORBIDDEN",
     "EDLI_REAL_ORDER_SUBMIT_DISABLED",
+    # Duplicate active live order suppression is a correct final disposition for
+    # this event: the existing live order owns the family until it fills/cancels.
+    # Requeueing the same event only clogs the redecision lane.
+    "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED",
     "TRADE_SCORE_BLOCKED",
     "EDLI_KELLY_PROOF_MISSING",
     "EDLI_KELLY_COST_BASIS_MISSING",
@@ -2500,6 +2465,11 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # Genuine intra-cycle execution races (PRICE_MOVED / MODE_FLIPPED) are classified
     # later at the SUBMIT stage under their own transient bases and are unaffected.
     "QKERNEL_SPINE_NO_TRADE",
+    # Structural event-type contract violations are terminal for the event. They
+    # cannot become valuable by re-running the same payload and must not clog
+    # continuous redecision.
+    "unsupported live candidate event type",
+    "unsupported EDLI event type for inference",
 })
 
 
@@ -2620,6 +2590,11 @@ def _is_transient_money_path_reason(reason: str | None) -> bool:
 # (e.g. wrapped in a stage prefix) still counts — the belief substrate is the root cause.
 _POSTERIOR_STALENESS_REASON_BASES = frozenset(
     {
+        "REPLACEMENT_0_1_LIVE_READINESS_MISSING",
+        "REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED",
+        # Pre-cutover queued/durable reason bases. These are read-boundary
+        # compatibility only; producers now emit the LIVE_READINESS/BUNDLE names
+        # above. Old rows still need the same single-family reseed cure.
         "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
         "REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED",
     }
@@ -2646,7 +2621,7 @@ def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:
         and payload.get("metric_match_status") == "MATCH"
         and payload.get("rounding_status") == "MATCH"
         and payload.get("source_authorized_status", "AUTHORIZED") == "AUTHORIZED"
-        and payload.get("live_authority_status") == "LIVE_AUTHORITY"
+        and normalize_day0_live_authority_status(payload.get("live_authority_status")) == "live"
     )
 
 

@@ -290,11 +290,15 @@ def _final_execution_intent_from_payload(final_payload: dict):
         correlation_key=str(final_payload["final_intent_id"]),
         decision_source_context=decision_source_context,
         passive_maker_context=passive_maker_context,
+        taker_quality_proof=(
+            final_payload.get("taker_quality_proof") if is_taker else None
+        ),
     )
 
 
 def _executor_order_result_to_submit_result(result, *, started_at: str) -> EventBoundExecutorSubmitResult:
     status = str(getattr(result, "status", "") or "").lower()
+    result_reason = str(getattr(result, "reason", None) or "")
     raw_response = {
         "status": getattr(result, "status", None),
         "reason": getattr(result, "reason", None),
@@ -307,8 +311,12 @@ def _executor_order_result_to_submit_result(result, *, started_at: str) -> Event
         reason = "OK"
         reconcile = False
     elif status in {"rejected", "cancelled"}:
-        receipt_status = "REJECTED"
-        reason = str(getattr(result, "reason", None) or "EXECUTOR_REJECTED")
+        reason = result_reason or "EXECUTOR_REJECTED"
+        receipt_status = (
+            "PRE_SUBMIT_ERROR"
+            if _executor_rejection_is_pre_submit(reason)
+            else "REJECTED"
+        )
         reconcile = False
     elif status == "unknown_side_effect":
         receipt_status = "POST_SUBMIT_UNKNOWN"
@@ -329,6 +337,25 @@ def _executor_order_result_to_submit_result(result, *, started_at: str) -> Event
         venue_call_started=receipt_status in {"SUBMITTED", "REJECTED", "TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"},
         venue_ack_received=receipt_status in {"SUBMITTED", "REJECTED"},
         side_effect_known=receipt_status in {"SUBMITTED", "REJECTED", "PRE_SUBMIT_ERROR"},
+    )
+
+
+def _executor_rejection_is_pre_submit(reason: str) -> bool:
+    """True when an executor rejection happened before any venue call.
+
+    These are designed local gates at the existing executor boundary. They must
+    reject the order, but they must not masquerade as venue rejects/ACKs in EDLI
+    status pulses or aggregate side-effect evidence.
+    """
+
+    text = str(reason or "")
+    return text.startswith(
+        (
+            "entry_cooldown:",
+            "duplicate_entry_same_token:",
+            "executable_snapshot_gate:",
+            "pre_submit_collateral_reservation_failed:",
+        )
     )
 
 

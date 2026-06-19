@@ -2,7 +2,11 @@
 # Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-17
 # Purpose: R3 M3 Polymarket user-channel WS ingest and fail-closed gap guard antibodies.
 # Reuse: Run when user WebSocket ingest, U2 venue facts, or submit gap guards change.
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-06-08
+# P3 lift (system_decomposition_plan §8 Step 3): the user-channel WS auto-derive
+#   helpers (_auto_derive_user_channel_condition_ids etc.) moved from src.main to
+#   src.ingest.price_channel_ingest. The auto-derive relationship tests below import
+#   the helper from the new host; the market_scanner / forecasts-DB seam is unchanged.
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml;
 #                  PR 37 review: clean-reconnect proof ignores resolved history
 #                  while preserving active side-effect state;
@@ -172,7 +176,7 @@ def test_user_channel_auto_derive_uses_market_events_fallback_when_scanner_empty
 ):
     """Relationship: M3 WS boot reads canonical market_events when live scan is empty."""
 
-    from src import main as zeus_main
+    from src.ingest import price_channel_ingest as zeus_main
 
     db_path = tmp_path / "forecasts.db"
     setup = sqlite3.connect(db_path)
@@ -223,7 +227,7 @@ def test_user_channel_auto_derive_bad_fallback_age_env_still_fails_soft(
 ):
     """Relationship: bad fallback config cannot crash the M3 WS boot path."""
 
-    from src import main as zeus_main
+    from src.ingest import price_channel_ingest as zeus_main
 
     db_path = tmp_path / "forecasts.db"
     setup = sqlite3.connect(db_path)
@@ -271,7 +275,7 @@ def test_user_channel_auto_derive_scans_gamma_by_default_when_persisted_ids_miss
 ):
     """Relationship: one-shot WS boot must not default-latch to an empty subscription set."""
 
-    from src import main as zeus_main
+    from src.ingest import price_channel_ingest as zeus_main
 
     db_path = tmp_path / "forecasts.db"
     setup = sqlite3.connect(db_path)
@@ -312,7 +316,7 @@ def test_user_channel_auto_derive_respects_disabled_boot_gamma_scan(
 ):
     """Relationship: operators can still keep scanner work out of boot explicitly."""
 
-    from src import main as zeus_main
+    from src.ingest import price_channel_ingest as zeus_main
 
     db_path = tmp_path / "forecasts.db"
     setup = sqlite3.connect(db_path)

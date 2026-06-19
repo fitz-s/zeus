@@ -1,33 +1,21 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
-# Authority basis: operator directive 2026-06-11 ~08:30Z (queue priority starvation —
-#   day0-shadow DAY0_EXTREME_UPDATED events crowding tradeable 2026-06-12 FSR families
-#   out of the reactor claim under edli_live_scope='day0_shadow'). Single shared
-#   location for opportunity-event priority constants — no magic numbers at call sites.
+# Last reused or audited: 2026-06-18
+# Authority basis: live Day0 and forecast events share one production execution
+#   lane. Single shared location for opportunity-event priority constants — no
+#   magic numbers at call sites.
 """Opportunity-event priority constants and the scope-aware claim-tier authority.
 
 THE CATEGORY THIS MODULE MAKES UNCONSTRUCTABLE
 ----------------------------------------------
 A claim-ordering decision encoded as a magic integer at a call site, and a
-"day0 is always the freshest alpha" assumption baked statically into the queue
-tier — which is FALSE the moment ``edli_live_scope='day0_shadow'`` makes a
-DAY0_EXTREME_UPDATED event a pure shadow that can NEVER produce an order.
-
-The live incident (2026-06-11): under ``day0_shadow`` the reactor's
-``fetch_pending`` tier CASE ranked DAY0_EXTREME_UPDATED at Tier 0 (highest),
-ahead of tradeable FORECAST_SNAPSHOT_READY (Tier 1). A flood of day0-scope
-shadow events (which can only ever yield DAY0_SCOPE_SHADOW_ONLY receipts) was
-claimed first every cycle, starving the per-cycle proof budget so tradeable
-06-12 forecast families — including two that had reached the FINAL submit gate —
-sat behind ~98 pending shadow rows with inflow exceeding drain.
+"Day0 is always the freshest alpha" assumption baked statically into the queue
+tier.
 
 THE STRUCTURAL DECISION
 -----------------------
-Day0 is the freshest *tradeable* alpha ONLY when day0 is a tradeable lane
-(scope ``forecast_plus_day0``). Under ``day0_shadow`` it is shadow-only and must
-NOT preempt tradeable forecast families. The claim tier is therefore
-SCOPE-AWARE: ``day0_is_tradeable`` flips DAY0_EXTREME_UPDATED between the
-top tier (tradeable) and a tier strictly below tradeable FSR (shadow).
+Day0 is the freshest *tradeable* alpha only when Day0 is a tradeable lane
+(production scope ``forecast_plus_day0``). The claim tier is therefore
+scope-aware for tests/replay, while production keeps Day0 tradeable.
 
 The integer priority on each event (``opportunity_events.priority``) is a
 SUB-SORT within a tier — it cannot reorder across tiers. Both surfaces (the
@@ -45,7 +33,7 @@ from typing import Final
 # These are a SUB-SORT WITHIN a claim tier (see CLAIM_TIER_CASE_SQL below): the
 # tier CASE dominates, then ``e.priority DESC`` breaks ties inside a tier. So a
 # higher integer here only wins among events in the SAME tier — it can never
-# promote a shadow-only event past a tradeable one (that is the tier's job).
+# promote a non-tradeable event past a tradeable one (that is the tier's job).
 # ---------------------------------------------------------------------------
 
 # Tradeable FORECAST_SNAPSHOT_READY families that are COMPLETE + LIVE_ELIGIBLE:
@@ -60,31 +48,27 @@ PRIORITY_FORECAST_INCOMPLETE: Final[int] = 0
 # (edli_live_scope='forecast_plus_day0'): realized observation, freshest alpha.
 PRIORITY_DAY0_TRADEABLE: Final[int] = 60
 
-# DAY0_EXTREME_UPDATED emitted while day0 is SHADOW-ONLY
-# (edli_live_scope='day0_shadow'): can only ever produce DAY0_SCOPE_SHADOW_ONLY,
-# so it must sub-sort below every tradeable candidate and never starve them.
-PRIORITY_DAY0_SHADOW: Final[int] = 10
+# Reserved low priority for non-tradeable Day0 scopes in tests or historical
+# replay only. Production live scope is forecast_plus_day0.
+PRIORITY_DAY0_NON_TRADEABLE: Final[int] = 10
 
 
 def day0_emit_priority(*, day0_is_tradeable: bool) -> int:
     """Priority to stamp on a DAY0_EXTREME_UPDATED event at emit time.
 
-    ``day0_is_tradeable`` is derived from ``edli_live_scope``: True for
-    ``forecast_plus_day0`` (day0 can submit), False for ``day0_shadow`` (day0 is
-    shadow-only). The emission-priority half of the anti-starvation fix.
+    ``day0_is_tradeable`` is derived from ``edli_live_scope``. Production live
+    uses ``forecast_plus_day0`` so Day0 can submit through the same live lane.
     """
-    return PRIORITY_DAY0_TRADEABLE if day0_is_tradeable else PRIORITY_DAY0_SHADOW
+    return PRIORITY_DAY0_TRADEABLE if day0_is_tradeable else PRIORITY_DAY0_NON_TRADEABLE
 
 
 def day0_is_tradeable_for_scope(edli_live_scope: str | None) -> bool:
     """True iff a DAY0_EXTREME_UPDATED event could lawfully reach a submit path
-    under ``edli_live_scope`` — i.e. day0 is a TRADEABLE lane, not shadow-only.
+    under ``edli_live_scope``.
 
     Single source of truth for the scope→tradeability mapping shared by the
     emitter (priority stamp) and the reactor (claim-tier selection). Any scope
-    other than the day0-tradeable lane is treated as NON-tradeable for day0
-    (fail-closed: a forecast_only or unknown scope never submits a day0 event,
-    so it must never let day0 preempt tradeable forecast families either).
+    other than the Day0-tradeable lane is treated as non-tradeable for Day0.
     """
     return str(edli_live_scope or "") == "forecast_plus_day0"
 
@@ -93,10 +77,10 @@ def day0_is_tradeable_for_scope(edli_live_scope: str | None) -> bool:
 # (redecide-block fix 2026-06-16). The escalation cancel job emits a
 # FORECAST_SNAPSHOT_READY for a JUST-CANCELLED, ARMED family using a source that
 # starts with this prefix; the claim-tier CASE keys off it (plus the event_type)
-# to rank ONLY those re-decisions at Tier 0 — below the 49-deep per-city
-# round-robin. No other emitter uses this prefix, so the lane is exact.
-# EDLI_REDECISION_PENDING is DORMANT (hard-blocked at 6+ dispatch sites); routing
-# through FSR avoids patching every site while keeping the Tier-0 identity.
+# to rank ONLY those escalation re-decisions at Tier 0. Ordinary continuous
+# EDLI_REDECISION_PENDING is now also Tier 0, but via its own event-type clause:
+# the screen owns current edge/rest/held admission, while this prefix remains the
+# exact identity of the separate just-cancelled escalation path.
 ESCALATION_CROSS_SOURCE_PREFIX: Final[str] = "escalation_cross-"
 
 
@@ -115,17 +99,21 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
          next certified decision crosses as TAKER_ESCALATED_AFTER_REST. Routed
          through the FSR path (not the dormant EDLI_REDECISION_PENDING type) so
          the full dispatch chain processes it without hard-block gaps. This is a
-         confirmed-armed, settlement-proven +EV cross, NOT a shadow, so it ranks
+         confirmed-armed, settlement-proven +EV cross, NOT non-tradeable telemetry, so it ranks
          ABOVE the entire per-city round-robin and fires on the next cycle instead
          of waiting ~2-3h for the 49-deep rotation (redecide-block fix
          2026-06-16). Evaluated FIRST and INDEPENDENT of ``day0_is_tradeable`` —
          it is a bounded, self-extinguishing set (one event per confirmed cancel),
          never a flood, so it cannot starve the round-robin.
+      0  EDLI_REDECISION_PENDING — continuous redecision rows admitted by the
+         screen after current positive-entry/held-position pruning. These are
+         live money-at-risk or confirmed-positive-value rechecks, so they must
+         not wait behind the ordinary FSR discovery round-robin.
       0  DAY0_EXTREME_UPDATED  — ONLY when ``day0_is_tradeable`` (realized obs is
          the freshest actionable alpha and must not sit behind forecast backlog).
       1  FORECAST_SNAPSHOT_READY that is COMPLETE + LIVE_ELIGIBLE — the direct
          tradeable order candidates.
-      2  Other decision-trigger events (incl. shadow-only DAY0_EXTREME_UPDATED
+      2  Other decision-trigger events (incl. non-tradeable DAY0_EXTREME_UPDATED
          when NOT ``day0_is_tradeable``) — still actionable/dead-letterable but
          must never starve a tradeable forecast family.
       3  Market-channel cache-hydration events — rejected immediately; demoted
@@ -137,16 +125,20 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
     byte-identical to the historical authority. The escalation-origin Tier-0
     clause is ALWAYS present (independent of the day0 scope).
 
-    NON-ESCALATION FAIRNESS IS UNTOUCHED: the escalation clause matches ONLY a
+    NON-REDECISION FAIRNESS IS UNTOUCHED: the escalation clause matches ONLY a
     FORECAST_SNAPSHOT_READY whose source begins with ``escalation_cross-``. A
     regular FSR (source ``forecast_snapshot_ready_trigger`` or ``cycle-*``) does
-    NOT match and stays Tier 1. Every other event (continuous-redecision
-    EDLI_REDECISION_PENDING, day0, channel) evaluates EXACTLY as before, so the
-    2026-06-11 per-city round-robin law holds verbatim for all of them.
+    NOT match and stays Tier 1. Continuous EDLI_REDECISION_PENDING now shares
+    Tier 0 because admission is owned by the screen's current edge/rest/held
+    pruning; ordinary FSR still uses the 2026-06-11 per-city round-robin law.
     """
     escalation_tier0_clause = (
         "WHEN e.event_type = 'FORECAST_SNAPSHOT_READY'\n"
         "                 AND e.source LIKE '" + ESCALATION_CROSS_SOURCE_PREFIX + "%'\n"
+        "                THEN 0\n              "
+    )
+    redecision_tier0_clause = (
+        "WHEN e.event_type = 'EDLI_REDECISION_PENDING'\n"
         "                THEN 0\n              "
     )
     day0_tier0_clause = (
@@ -157,6 +149,7 @@ def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
     return (
         "CASE\n              "
         + escalation_tier0_clause
+        + redecision_tier0_clause
         + day0_tier0_clause
         + "WHEN e.event_type = 'FORECAST_SNAPSHOT_READY'\n"
         "                 AND json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'\n"

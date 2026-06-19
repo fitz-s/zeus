@@ -528,6 +528,55 @@ def test_chain_reconciliation_phantom_void_persists_canonical_projection(tmp_pat
     assert events[0]["details"]["reason"] == "PHANTOM_NOT_ON_CHAIN"
 
 
+def test_chain_reconciliation_does_not_void_chain_observed_aggregate_lot():
+    """A lot already carrying the token aggregate chain observation is not phantom.
+
+    Regression for 2026-06-17 Shenzhen: an older buy_no lot was corrected to the
+    aggregate NO-token balance, then a newer same-token lot appeared in the
+    runtime portfolio. LIFO aggregate allocation saw the corrected older lot as
+    too large and voided it even though the token was present on chain.
+    """
+
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+
+    token = "tok-no-aggregate"
+    older = _make_position(
+        trade_id="older-aggregate-lot",
+        state="holding",
+        chain_state="synced",
+        direction="buy_no",
+        token_id="tok-yes",
+        no_token_id=token,
+        shares=31.5,
+        chain_shares=31.5,
+        chain_verified_at="2026-06-17T16:26:14+00:00",
+        entered_at="2026-06-17T16:21:58+00:00",
+        order_id="older-order",
+    )
+    newer = _make_position(
+        trade_id="newer-lot",
+        state="holding",
+        chain_state="synced",
+        direction="buy_no",
+        token_id="tok-yes",
+        no_token_id=token,
+        shares=15.5,
+        entered_at="2026-06-17T16:23:12+00:00",
+        order_id="newer-order",
+    )
+
+    portfolio = PortfolioState(positions=[older, newer])
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id=token, size=31.5, avg_price=0.74, condition_id="cond-no")],
+    )
+
+    assert stats["voided"] == 0
+    assert stats["skipped_aggregate_allocation_existing_chain_observation"] == 1
+    assert older.state == "holding"
+    assert newer.state == "holding"
+
+
 def test_chain_reconciliation_phantom_void_allows_legacy_unknown_phase_before(tmp_path):
     """Relationship: legacy runtime states can still be canonically voided."""
 

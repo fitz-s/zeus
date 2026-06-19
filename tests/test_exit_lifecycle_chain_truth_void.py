@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Lifecycle: created=2026-05-19; last_reviewed=2026-06-18; last_reused=2026-06-18
 # Purpose: Antibody tests for chain-truth-based exit_lifecycle void sync
 # Reuse: pytest tests/test_exit_lifecycle_chain_truth_void.py
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-19
+# Last reused or audited: 2026-06-18
 # Authority basis: PR #189 — chain canonical via balanceOf for pending_exit
 """Antibody tests for ghost pending_exit chain-truth void sync.
 
@@ -66,7 +66,7 @@ def _make_position(**kwargs) -> Position:
         exit_retry_count=0,
         last_exit_error="",
         next_exit_retry_at="",
-        strategy_key="test_strategy",
+        strategy_key="opening_inertia",
         env="live",
         temperature_metric="high",
     )
@@ -243,6 +243,284 @@ class TestChainTruthRetryOnPositiveBalance:
             f"exit_retry_count should be >= 1 after retry, got {pos.exit_retry_count}"
         )
 
+    def test_raw_ctf_dust_balance_enters_dust_hold_not_retry(self, monkeypatch):
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        pos = _make_position(
+            trade_id="london-dust-test",
+            token_id=_ASSET_ID_LONDON,
+            condition_id=_CONDITION_ID_LONDON,
+            city="London",
+            shares=5.06,
+            exit_retry_count=0,
+        )
+        portfolio = _make_portfolio(pos)
+
+        result = handle_exit_pending_missing(
+            portfolio,
+            pos,
+            conn=None,
+            rpc_call=_rpc_returning(10_000),
+        )
+
+        assert result["action"] == "dust_hold"
+        assert pos.exit_state == "backoff_exhausted"
+        assert pos.exit_retry_count == 0
+        assert "chain_balance_units=10000" in pos.last_exit_error
+        assert "chain_balance_shares=0.01" in pos.last_exit_error
+        assert "chain_balance=10000" not in pos.last_exit_error
+
+    def test_raw_ctf_dust_balance_is_idempotent_when_already_held(self, monkeypatch):
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        pos = _make_position(
+            trade_id="london-dust-repeat-test",
+            token_id=_ASSET_ID_LONDON,
+            condition_id=_CONDITION_ID_LONDON,
+            city="London",
+            shares=5.06,
+            exit_state="backoff_exhausted",
+            exit_reason="EXIT_CHAIN_DUST_STILL_HELD",
+            exit_retry_count=7,
+            last_exit_error="",
+        )
+        portfolio = _make_portfolio(pos)
+
+        result = handle_exit_pending_missing(
+            portfolio,
+            pos,
+            conn=None,
+            rpc_call=_rpc_returning(10_000),
+        )
+
+        assert result["action"] == "dust_hold"
+        assert pos.exit_state == "backoff_exhausted"
+        assert pos.exit_retry_count == 7
+        assert pos.next_exit_retry_at == ""
+        assert pos.last_exit_error.startswith("chain_balance_units=10000;")
+
+    def test_raw_ctf_dust_balance_is_idempotent_from_prior_db_event(self, monkeypatch):
+        from src.state.db import init_schema
+
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        try:
+            first = _make_position(
+                trade_id="london-dust-db-repeat-test",
+                token_id=_ASSET_ID_LONDON,
+                condition_id=_CONDITION_ID_LONDON,
+                city="London",
+                shares=5.06,
+                exit_retry_count=0,
+            )
+            portfolio = _make_portfolio(first)
+
+            handle_exit_pending_missing(
+                portfolio,
+                first,
+                conn=conn,
+                rpc_call=_rpc_returning(10_000),
+            )
+            before = conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_REJECTED'
+                """,
+                (first.trade_id,),
+            ).fetchone()[0]
+            first_current = conn.execute(
+                """
+                SELECT shares, chain_shares, phase
+                  FROM position_current
+                 WHERE position_id = ?
+                """,
+                (first.trade_id,),
+            ).fetchone()
+            assert first_current["phase"] == "pending_exit"
+            assert first_current["shares"] == pytest.approx(0.01)
+            assert first_current["chain_shares"] == pytest.approx(0.01)
+
+            conn.execute(
+                """
+                UPDATE position_current
+                   SET shares = 5.06,
+                       chain_shares = 0.0,
+                       cost_basis_usd = 3.7444,
+                       size_usd = 3.7444,
+                       chain_cost_basis_usd = NULL,
+                       chain_avg_price = NULL
+                 WHERE position_id = ?
+                """,
+                (first.trade_id,),
+            )
+
+            hydrated_without_exit_state = _make_position(
+                trade_id=first.trade_id,
+                token_id=_ASSET_ID_LONDON,
+                condition_id=_CONDITION_ID_LONDON,
+                city="London",
+                shares=5.06,
+                exit_state="",
+                exit_reason="",
+                exit_retry_count=0,
+            )
+            handle_exit_pending_missing(
+                portfolio,
+                hydrated_without_exit_state,
+                conn=conn,
+                rpc_call=_rpc_returning(10_000),
+            )
+            after = conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_REJECTED'
+                """,
+                (first.trade_id,),
+            ).fetchone()[0]
+
+            assert before == 1
+            assert after == before
+            assert hydrated_without_exit_state.exit_state == "backoff_exhausted"
+            current = conn.execute(
+                """
+                SELECT shares, chain_shares, cost_basis_usd, size_usd,
+                       chain_cost_basis_usd, chain_avg_price, phase
+                  FROM position_current
+                 WHERE position_id = ?
+                """,
+                (first.trade_id,),
+            ).fetchone()
+            assert current["phase"] == "pending_exit"
+            assert current["shares"] == pytest.approx(0.01)
+            assert current["chain_shares"] == pytest.approx(0.01)
+            assert current["cost_basis_usd"] < 0.01
+            assert current["size_usd"] < 0.01
+            assert current["chain_cost_basis_usd"] == pytest.approx(0.001)
+            assert current["chain_avg_price"] == pytest.approx(0.10)
+            correction = conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'CHAIN_SIZE_CORRECTED'
+                """,
+                (first.trade_id,),
+            ).fetchone()[0]
+            assert correction == 1
+        finally:
+            conn.close()
+
+    def test_raw_ctf_dust_balance_is_idempotent_after_chain_correction_event(self, monkeypatch):
+        from src.engine.lifecycle_events import build_chain_size_corrected_canonical_write
+        from src.state.db import append_many_and_project, init_schema
+
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        try:
+            pos = _make_position(
+                trade_id="london-dust-db-correction-repeat-test",
+                token_id=_ASSET_ID_LONDON,
+                condition_id=_CONDITION_ID_LONDON,
+                city="London",
+                shares=5.06,
+            )
+            portfolio = _make_portfolio(pos)
+
+            handle_exit_pending_missing(
+                portfolio,
+                pos,
+                conn=conn,
+                rpc_call=_rpc_returning(10_000),
+            )
+            events, projection = build_chain_size_corrected_canonical_write(
+                pos,
+                local_shares_before=5.06,
+                sequence_no=3,
+                phase_after="pending_exit",
+                source_module="test",
+            )
+            append_many_and_project(conn, events, projection)
+            before = conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_REJECTED'
+                """,
+                (pos.trade_id,),
+            ).fetchone()[0]
+
+            reloaded = _make_position(
+                trade_id=pos.trade_id,
+                token_id=_ASSET_ID_LONDON,
+                condition_id=_CONDITION_ID_LONDON,
+                city="London",
+                shares=0.01,
+                chain_shares=0.01,
+                exit_state="",
+                exit_reason="",
+                exit_retry_count=7,
+            )
+            result = handle_exit_pending_missing(
+                portfolio,
+                reloaded,
+                conn=conn,
+                rpc_call=_rpc_returning(10_000),
+            )
+            after = conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_REJECTED'
+                """,
+                (pos.trade_id,),
+            ).fetchone()[0]
+
+            assert result["action"] == "dust_hold"
+            assert before == 1
+            assert after == before
+            assert reloaded.exit_state == "backoff_exhausted"
+            assert reloaded.order_status == "backoff_exhausted"
+        finally:
+            conn.close()
+
+    def test_dust_hold_projection_reloads_backoff_exhausted(self, monkeypatch):
+        from src.state.db import init_schema
+        from src.state.portfolio import _position_from_projection_row
+
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        try:
+            pos = _make_position(
+                trade_id="london-dust-reload-test",
+                token_id=_ASSET_ID_LONDON,
+                condition_id=_CONDITION_ID_LONDON,
+                city="London",
+                shares=5.06,
+                order_status="filled",
+            )
+            handle_exit_pending_missing(
+                _make_portfolio(pos),
+                pos,
+                conn=conn,
+                rpc_call=_rpc_returning(10_000),
+            )
+            row = conn.execute(
+                "SELECT * FROM position_current WHERE position_id = ?",
+                (pos.trade_id,),
+            ).fetchone()
+
+            assert row["order_status"] == "backoff_exhausted"
+            reloaded = _position_from_projection_row(dict(row), current_mode="live")
+            assert reloaded.exit_state == "backoff_exhausted"
+            assert reloaded.order_status == "backoff_exhausted"
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Antibody 3: RPC failure → action == ignore (fail-open, no destructive action)
@@ -332,7 +610,7 @@ class TestNullConditionIdFail:
             "target_date": "2026-05-20",
             "bin_label": "30-31",
             "direction": "buy_yes",
-            "unit": "celsius",
+            "unit": "C",
             "size_usd": 1.21,
             "shares": 12.1,
             "cost_basis_usd": 1.21,
@@ -343,7 +621,7 @@ class TestNullConditionIdFail:
             "last_monitor_market_price": None,
             "decision_snapshot_id": None,
             "entry_method": "live",
-            "strategy_key": "test_strategy",
+            "strategy_key": "opening_inertia",
             "edge_source": None,
             "discovery_mode": None,
             "chain_state": "local_only",
@@ -504,7 +782,9 @@ class TestAbiEncodeBalanceOf:
 # ---------------------------------------------------------------------------
 
 def _build_minimal_db() -> sqlite3.Connection:
-    """Build a minimal in-memory SQLite DB with position_events and position_current tables."""
+    """Build an in-memory DB using the current canonical trade schema."""
+    from src.state.db import init_schema
+
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -553,15 +833,7 @@ def _build_minimal_db() -> sqlite3.Connection:
             chain_avg_price REAL,
             chain_cost_basis_usd REAL,
             chain_seen_at TEXT,
-            chain_absence_at TEXT,
-            -- BUG #128 (SEV1, 2026-06-02): durable realized-P&L columns now part
-            -- of CANONICAL_POSITION_CURRENT_COLUMNS; the upsert INSERT lists them
-            -- so this minimal fixture must declare them too.
-            realized_pnl_usd REAL,
-            exit_price REAL,
-            settlement_price REAL,
-            settled_at TEXT,
-            exit_reason TEXT
+            chain_absence_at TEXT
         );
         CREATE TABLE IF NOT EXISTS position_events (
             event_id TEXT PRIMARY KEY,

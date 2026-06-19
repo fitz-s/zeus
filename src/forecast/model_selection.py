@@ -1,15 +1,17 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
-# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (source identities, DEDUP icon_seamless==icon_d2),
-#   §4 algorithm steps (1) eligible / (2) provider reps / (3) alias dedup, §7 antibodies
-#   ("regional-outside-domain (polygon)", "icon_seamless==icon_d2 (alias dedup)"); F4.
+# Last reused or audited: 2026-06-17
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (source identities), §4 algorithm steps
+#   (1) eligible / (2) provider reps, §7 antibodies ("regional-outside-domain (polygon)"); F4.
 #   BAYES_PRECISION_FUSION_PROOF_RESULT.md: regional SHADOW-ONLY/DEFER, polygon tightened (open question #3).
-"""F4 model selection — decorrelated provider reps, alias dedup, regional polygon gate.
+#   2026-06-17: icon_seamless REMOVED from candidate set — it was the alias-dedup probe (bit-
+#   identical to icon_d2 inside the EU nest). The probe is no longer needed because icon_seamless
+#   is simply never fetched or fused; dropped_aliases will always be empty.
+"""F4 model selection — decorrelated provider reps, regional polygon gate.
 
 THE STRUCTURAL ANTIBODIES (Fitz #1: K structural decisions, not N if-statements):
 
   1. DECORRELATED PROVIDER REPS — ONE representative per physical provider family
-     (spec §4 step 2): ECMWF anchor + GFS(NOAA) + DWD-ICON + GEM(CMC) + JMA. Each is a
+     (spec §4 step 2): ECMWF anchor + GFS(NOAA) + DWD-ICON + GEM(CMC) + UKMO. Each is a
      structurally-decorrelated error source; the fusion's Sigma down-weights residual
      correlation, but we never feed two reps of the SAME provider as if independent.
      The DWD/ICON family in particular ships THREE instruments — icon_d2 (2km EU nest),
@@ -20,11 +22,7 @@ THE STRUCTURAL ANTIBODIES (Fitz #1: K structural decisions, not N if-statements)
      This makes the DWD-family triple-count CATEGORY impossible (BLOCKER 9), not just the
      one Paris instance.
 
-  2. ALIAS DEDUP — icon_seamless is BIT-IDENTICAL to icon_d2 inside the EU nest (spec §3 /
-     proof _dedup_bit_identity). Feeding both double-counts one instrument. The dedup drops
-     icon_seamless whenever it is an alias of icon_d2 (corr > 0.995 AND mean|delta| < eps).
-
-  3. REGIONAL POLYGON GATE — icon_d2 enters ONLY inside the Central-EU polygon at lead <= 1;
+  2. REGIONAL POLYGON GATE — icon_d2 enters ONLY inside the Central-EU polygon at lead <= 1;
      arome ONLY inside the France polygon. Out-of-polygon -> ABSENT (zero-leak). The gate is
      point-in-polygon over the city settlement coordinate, composed with the runtime
      data-presence gate (a regional that is in-polygon but failed to fetch is simply dropped
@@ -59,16 +57,53 @@ ANCHOR_MODEL = "ecmwf_ifs"
 UKMO_GLOBAL_MODEL = "ukmo_global_deterministic_10km"
 NBM_MODEL = "ncep_nbm_conus"
 UKMO_UK_MODEL = "ukmo_uk_deterministic_2km"
+# 2026-06-17 PRECISION-INPUT FIX (operator directive: "the data we use is 9km level and the
+# regional data is even more precise; your 25 and 15 and the not-precise cell is breaking the
+# fusion calculation"; "no 25km model we don't use them and don't download"). Settlement-graded
+# evidence (state/zeus-forecasts.db, recent settled WU highs, previous-runs raw bias — NO
+# statistical correction): the coarse globals run ~1-2C cold vs settlement (gfs_global -0.86;
+# gem_global similar coarse-cell cold; icon_global -1.08; ukmo_global -1.10) while the
+# high-resolution station-resolving models are near-zero raw bias (gfs_hrrr 3km CONUS +0.004
+# MAE 1.33; gem_hrdps 2.5km N-America +0.86; the in-EU icon_d2/arome/ukmo_uk already in the set,
+# all ~0 bias).
+#   gfs_hrrr — NOAA HRRR 3km CONUS deterministic. The NCEP-family rep in-CONUS.
+#   gem_hrdps_continental — CMC HRDPS 2.5km North-America deterministic. The CMC-family rep
+#     in N-America.
+# 2026-06-17 COARSE-GLOBAL REMOVAL (this commit): gfs_global (0.25°/25km) and gem_global (~15km)
+# are DROPPED from selection entirely — not merely suppressed in-CONUS. Removing them from
+# DECORR_GLOBALS removes them from GLOBAL_LIKELIHOOD_MODELS and hence from
+# bayes_precision_fusion_download.BAYES_PRECISION_FUSION_EXTRA_MODELS, so they are no longer
+# fused AND no longer downloaded (forward single_runs + previous_runs both stop; the existing
+# de-bias history rows age out). CONSEQUENCE: NCEP is repped ONLY by gfs_hrrr/ncep_nbm (CONUS)
+# and CMC ONLY by gem_hrdps (N-America); OUTSIDE those nest domains NCEP/CMC have NO rep and are
+# structurally absent — the domain-aware completeness contract
+# (replacement_fusion_upgrade_trigger.expected_provider_families_for_city) does NOT expect them
+# there, so a non-CONUS/non-NA city is COMPLETE on {DWD, JMA, UKMO} (+ ECMWF anchor) with no
+# phantom upgrade loop. icon_global/ukmo_global remain the always-global reps.
+# 2026-06-17 JMA DROP (operator, settlement-graded): jma_seamless is the COLDEST/least-precise
+# declared global — recent lead-1 day-ahead settlement raw bias -1.46, MAE 2.124 (n=1002), worse
+# than the just-dropped gfs_global (1.696) and far worse than the 9km anchor (1.309) and the
+# regional nests (icon_eu 1.062). It is the ONLY JMA-family member, so dropping it removes the
+# JMA decorrelated family entirely → the contract reduces to {NCEP, DWD, CMC, UKMO} + the ECMWF
+# anchor. (Caveat on record: the historical residuals were measured at the pre-2026-06-17 coords,
+# so part of jma's cold may be coarse-cell offshore-snap; the finer model-subset combinations are
+# to be RE-TESTED on clean post-coord-fix settled data — operator-deferred.) This also thins
+# decorrelation diversity (JMA was the only non-Western global); accepted pending that re-test.
+GFS_HRRR_MODEL = "gfs_hrrr"
+GEM_HRDPS_MODEL = "gem_hrdps_continental"
 DECORR_GLOBALS = (
-    "gfs_global",
     "icon_global",
-    "gem_global",
-    "jma_seamless",
     UKMO_GLOBAL_MODEL,
 )
 ICON_EU_MODEL = "icon_eu"
 GLOBAL_LIKELIHOOD_MODELS = DECORR_GLOBALS + (ICON_EU_MODEL, NBM_MODEL)
-REGIONAL_MODELS = ("icon_d2", "meteofrance_arome_france_hd", UKMO_UK_MODEL)
+REGIONAL_MODELS = (
+    "icon_d2",
+    "meteofrance_arome_france_hd",
+    UKMO_UK_MODEL,
+    GFS_HRRR_MODEL,
+    GEM_HRDPS_MODEL,
+)
 
 # Spec §4(2) provider representatives. Each PHYSICAL provider family contributes exactly ONE
 # instrument to a fusion — the same single-rep doctrine that already governs "icon_d2 in-domain
@@ -81,18 +116,21 @@ REGIONAL_MODELS = ("icon_d2", "meteofrance_arome_france_hd", UKMO_UK_MODEL)
 # tuple is ordered highest-resolution-first; selection walks it and keeps the first eligible.
 ICON_FAMILY = ("icon_d2", ICON_EU_MODEL, "icon_global")
 # 2026-06-09: the SAME single-rep mechanism, two more instances (one mechanism, K<<N):
-#   NCEP family — NBM is an NCEP blend INCLUDING GFS; in-CONUS it is the family rep and
-#   gfs_global is suppressed as a provider duplicate; outside CONUS NBM is ineligible and
-#   gfs_global carries the family. This kills the NBM<->GFS correlation double-count.
-NCEP_FAMILY = (NBM_MODEL, "gfs_global")
+#   NCEP/NOAA family — gfs_hrrr 3km CONUS nest and ncep_nbm ~13km CONUS blend are the SAME NOAA
+#   physics at different scopes; feeding two as independent double-counts one error source.
+#   gfs_hrrr (3km, +0.004 raw bias) is the most-specific NOAA rep — in-CONUS it carries the
+#   family and ncep_nbm is suppressed as a provider dup. 2026-06-17 COARSE-GLOBAL REMOVAL: the
+#   0.25°/25km gfs_global is no longer in the family — OUTSIDE CONUS both members are
+#   domain-ineligible, so NCEP has NO rep there (structurally absent, not expected).
+NCEP_FAMILY = (GFS_HRRR_MODEL, NBM_MODEL)
 #   UKMO family — the UKV 2km nest and the 10km global are the same Met Office physics; in
 #   the UK the 2km nest is the rep (ukmo_global suppressed), elsewhere the global carries it.
 UKMO_FAMILY = (UKMO_UK_MODEL, UKMO_GLOBAL_MODEL)
-PROVIDER_FAMILIES = (ICON_FAMILY, NCEP_FAMILY, UKMO_FAMILY)
-
-# Alias dedup thresholds (spec §3: corr > 0.995 AND mean|delta| < eps).
-ALIAS_CORR_THRESHOLD = 0.995
-ALIAS_MEAN_ABS_DELTA_EPS = 0.05  # degC
+#   CMC/GEM family (2026-06-17) — repped ONLY by the HRDPS 2.5km North-America nest. The GDPS
+#   ~15km global (gem_global) was DROPPED in the coarse-global removal, so OUTSIDE N-America CMC
+#   has NO rep (structurally absent, not expected). In-domain the 2.5km nest carries the family.
+GEM_FAMILY = (GEM_HRDPS_MODEL,)
+PROVIDER_FAMILIES = (ICON_FAMILY, NCEP_FAMILY, UKMO_FAMILY, GEM_FAMILY)
 
 # Which regional model each domain key in the polygon config governs.
 # icon_eu has its OWN ICON-EU 7km-nest polygon (2026-06-09 fix) — it is domain-gated like the
@@ -102,10 +140,15 @@ _REGIONAL_DOMAIN_KEY = {
     "meteofrance_arome_france_hd": "meteofrance_arome_france_hd",
     ICON_EU_MODEL: ICON_EU_MODEL,
     # 2026-06-09 PROMOTION (operator-directed): ncep_nbm_conus is the domain-gated NCEP-family
-    # CONUS rep (suppresses gfs_global in-domain); ukmo_uk_deterministic_2km is the London
-    # regional expert (UKMO-family rep in the UK). Both gated by their own config polygons.
+    # CONUS blend (suppressed by gfs_hrrr when the 3km nest is present); ukmo_uk_deterministic_2km
+    # is the London regional expert (UKMO-family rep in the UK). Both gated by their own polygons.
     "ncep_nbm_conus": "ncep_nbm_conus",
     "ukmo_uk_deterministic_2km": "ukmo_uk_deterministic_2km",
+    # 2026-06-17 precision-input fix: high-res CONUS / N-America regional experts, each gated by
+    # its own physical-domain polygon (config/model_domain_polygons.yaml). gfs_hrrr is the NOAA
+    # 3km nest; gem_hrdps_continental is the CMC 2.5km nest.
+    GFS_HRRR_MODEL: GFS_HRRR_MODEL,
+    GEM_HRDPS_MODEL: GEM_HRDPS_MODEL,
 }
 
 
@@ -227,11 +270,12 @@ def is_alias(
     series_a: Sequence[float],
     series_b: Sequence[float],
     *,
-    corr_threshold: float = ALIAS_CORR_THRESHOLD,
-    mean_abs_delta_eps: float = ALIAS_MEAN_ABS_DELTA_EPS,
+    corr_threshold: float = 0.995,
+    mean_abs_delta_eps: float = 0.05,
 ) -> bool:
-    """Spec §3 alias test: two series are the same instrument iff corr > threshold AND
-    mean|delta| < eps. Used to drop icon_seamless when it is bit-identical to icon_d2."""
+    """Alias test: two series are the same instrument iff corr > threshold AND mean|delta| < eps.
+    Retained as a utility but is no longer called by select_models (icon_seamless was removed
+    from the candidate set on 2026-06-17 — the probe is no longer needed)."""
     n = min(len(series_a), len(series_b))
     if n == 0:
         return False
@@ -248,7 +292,9 @@ class SelectedModelSet:
     ``likelihood_globals``: the decorrelated global reps present today (likelihood terms).
     ``regional_experts``: in-domain regional experts that passed the polygon + lead gate.
     ``anchor_present``: whether the ecmwf_ifs 0.1 anchor (prior) is available.
-    ``dropped_aliases``: models removed by alias dedup (e.g. icon_seamless).
+    ``dropped_aliases``: models removed by alias dedup. Always empty since icon_seamless was
+        removed from the candidate set (2026-06-17) — retained so the field is present in
+        provenance JSON for callers that read it.
     ``excluded_regionals``: regionals dropped by the polygon/lead gate (out-of-domain).
     ``dropped_provider_dups``: present+otherwise-eligible models suppressed because another
         instrument of the SAME physical provider family already represents it in the fusion
@@ -281,29 +327,20 @@ def select_models(
     alias_series: Mapping[str, Sequence[float]] | None = None,
     polygons: Mapping[str, DomainPolygon] | None = None,
 ) -> SelectedModelSet:
-    """Apply §4 steps (1)-(3): eligibility, decorrelated provider reps, alias dedup, regional
-    polygon gate. ``present_models`` maps model_name -> today's value for the models that
-    successfully fetched (fail-soft drop already applied upstream). ``alias_series`` maps
-    model_name -> a short recent value series used for the icon_seamless==icon_d2 alias test.
+    """Apply §4 steps (1)-(2): eligibility, decorrelated provider reps, regional polygon gate.
+    ``present_models`` maps model_name -> today's value for the models that successfully fetched
+    (fail-soft drop already applied upstream). ``alias_series`` is accepted for caller
+    compatibility but ignored — the alias-dedup probe (icon_seamless) was removed from the
+    candidate set on 2026-06-17 and is never present.
 
     Selection order is deterministic (spec order) so the EMOS model_set_hash is stable.
     """
     present = set(present_models)
-    series = dict(alias_series or {})
 
     anchor_present = ANCHOR_MODEL in present
 
-    # ---- alias dedup: drop icon_seamless when it is an alias of icon_d2 ----
+    # dropped_aliases is always empty (icon_seamless removed from candidate set 2026-06-17).
     dropped_aliases: list[str] = []
-    if "icon_seamless" in present:
-        d2_series = series.get("icon_d2")
-        seam_series = series.get("icon_seamless")
-        if d2_series is not None and seam_series is not None and is_alias(d2_series, seam_series):
-            dropped_aliases.append("icon_seamless")
-        elif "icon_d2" in present and d2_series is None and seam_series is None:
-            # No series to test, but both present and spec declares them bit-identical in EU
-            # -> conservatively dedup (never double-count the DWD-EU regional rep).
-            dropped_aliases.append("icon_seamless")
 
     # ---- regional polygon + lead gate (run FIRST: an in-domain regional becomes its provider
     #      family's representative, so its eligibility decides which globals it suppresses) ----
@@ -346,8 +383,8 @@ def select_models(
     # The FIRST eligible member (most-specific-first) is the family rep; every other PRESENT
     # global-scope member of the family is suppressed as a provider duplicate — a second
     # eligible rep AND a present-but-ineligible member both count (e.g. icon_eu out-of-EU must
-    # never ride alongside icon_global; NBM must never ride alongside gfs_global). Regional
-    # non-reps are simply absent (out-of-polygon -> excluded_regionals), never "global dups".
+    # never ride alongside icon_global; ncep_nbm must never ride alongside gfs_hrrr in-CONUS).
+    # Regional non-reps are simply absent (out-of-polygon -> excluded_regionals), never "global dups".
     def _family_member_eligible(member: str) -> bool:
         if member in dropped_aliases:
             return False

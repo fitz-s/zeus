@@ -100,6 +100,18 @@ def _make_snapshot(orderbook: dict, *, min_order_size: str = "1.0") -> object:
     return executable_snapshot_from_row(_make_sqlite_row(row))
 
 
+def _passing_taker_quality_proof() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "passed": True,
+        "taker_fee_adjusted_edge": "0.05",
+        "taker_expected_profit_usd": "0.50",
+        "maker_expected_profit_usd": "0.10",
+        "incremental_expected_profit_usd": "0.40",
+        "model_confidence": "0.90",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -382,9 +394,11 @@ class TestFOKSizeToDepthCertBuilder:
             best_ask=0.80,
             available_crossable_shares=5.5,         # ← available depth
             sweep_expected_fill_price=0.80,         # ← sweep VWAP
+            taker_quality_proof=_passing_taker_quality_proof(),
         )
 
         payload = cert.payload
+        assert payload["taker_quality_proof"]["passed"] is True
         # Size must be capped at 5.5 (not 6.25)
         assert payload["size"] <= 5.5 + 0.01, (
             f"size={payload['size']} should be ≤ 5.5 (available_crossable_shares)"
@@ -463,9 +477,11 @@ class TestFOKSizeToDepthCertBuilder:
             best_ask=0.82,
             available_crossable_shares=5.5,
             sweep_expected_fill_price="0.80",
+            taker_quality_proof=_passing_taker_quality_proof(),
         )
 
         assert cert.payload["limit_price"] == pytest.approx(0.82)
         assert cert.payload["expected_fill_price_before_fee"] == "0.80"
         assert cert.payload["max_slippage_bps"] == pytest.approx(250.0)
+        assert cert.payload["taker_quality_proof"]["passed"] is True
         assert validate_final_intent_cert_for_existing_executor(cert)

@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-20
+# Lifecycle: created=2026-04-27; last_reviewed=2026-06-17; last_reused=2026-06-17
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-20
+# Last reused/audited: 2026-06-17
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -38,9 +38,11 @@ from src.control.heartbeat_supervisor import (
     install_dedicated_heartbeat_http_timeout,
     run_heartbeat_keeper,
     write_heartbeat_keeper_status,
+    _describe_heartbeat_exception,
 )
 from src.state.db import init_schema
 from src.venue.polymarket_v2_adapter import HeartbeatAck
+import src.data.substrate_observer as substrate_observer
 
 
 class FakeHeartbeatAdapter:
@@ -170,10 +172,32 @@ def test_default_heartbeat_timeout_derives_below_one_second_cadence(monkeypatch)
     assert 0.0 < timeout < cadence
 
 
+def test_request_exception_status_keeps_transport_cause():
+    """Opaque SDK request exceptions must still leave repairable operator evidence."""
+
+    root = TimeoutError("connect timed out")
+    exc = RuntimeError("PolyApiException[status_code=None, error_message=Request exception!]")
+    exc.__cause__ = root
+
+    got = _describe_heartbeat_exception(exc)
+
+    assert "RuntimeError: PolyApiException" in got
+    assert "cause=TimeoutError: connect timed out" in got
+
+
 def test_heartbeat_timeout_env_cannot_cover_full_cadence(monkeypatch):
     monkeypatch.setenv("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS", "5")
 
-    with pytest.raises(ValueError, match="shorter than heartbeat cadence"):
+    with pytest.raises(ValueError, match="no longer than half"):
+        heartbeat_http_timeout_seconds_from_env(5)
+
+
+def test_heartbeat_timeout_env_cannot_consume_most_of_cadence(monkeypatch):
+    """A 4s timeout on a 5s cadence leaves too little lease recovery margin."""
+
+    monkeypatch.setenv("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS", "4")
+
+    with pytest.raises(ValueError, match="no longer than half"):
         heartbeat_http_timeout_seconds_from_env(5)
 
 
@@ -337,6 +361,35 @@ def test_one_miss_degraded_two_misses_lost():
     assert lost.health is HeartbeatHealth.LOST
     assert lost.consecutive_failures == 2
     assert "miss-2" in (lost.last_error or "")
+
+
+def test_lost_generic_request_failure_attempts_empty_chain_recovery_but_keeps_gtc_blocked():
+    """A long generic request-exception streak can mean the client missed a
+    server-side rotation without receiving an Invalid Heartbeat ID body. Once the
+    lease is already LOST, empty-chain recovery is safer than pinning forever to
+    a stale local id; resting orders still stay blocked through the lease-gap
+    window after recovery."""
+    adapter = FakeHeartbeatAdapter([
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-1"}),
+        RuntimeError("request miss-1"),
+        RuntimeError("request miss-2"),
+        HeartbeatAck(ok=True, raw={"heartbeat_id": "id-recovered"}),
+    ])
+    supervisor = HeartbeatSupervisor(adapter, cadence_seconds=5)
+
+    assert _run(supervisor.run_once()).health is HeartbeatHealth.HEALTHY
+    degraded = _run(supervisor.run_once())
+    recovered = _run(supervisor.run_once())
+
+    assert degraded.health is HeartbeatHealth.DEGRADED
+    assert recovered.health is HeartbeatHealth.HEALTHY
+    assert recovered.consecutive_failures == 0
+    assert recovered.heartbeat_id == "id-recovered"
+    assert recovered.lease_gap_suspected_until is not None
+    assert recovered.resting_order_safe() is False
+    assert supervisor.gate_for_order_type("GTC") is False
+    assert supervisor.gate_for_order_type("FOK") is True
+    assert adapter.heartbeat_ids == ["", "id-1", "id-1", ""]
 
 
 @pytest.mark.skip(reason="auto-pause tombstone retired 2026-05-04 — _write_failclosed_tombstone is now a no-op")
@@ -1429,8 +1482,11 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
         "_ensure_venue_read_side_adapter",
         lambda: (_ for _ in ()).throw(AssertionError("market_discovery must use public CLOB read client")),
     )
+    # P2: force STALE substrate so the producer-local staleness gate falls through to capture
+    # (a prior test's successful cycle may leave a fresh time.monotonic() in this global).
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
 
-    main._market_discovery_cycle()
+    substrate_observer._market_discovery_cycle()
 
     assert ("find", 0.0) in calls
     refresh_calls = [call for call in calls if call[0] == "refresh"]
@@ -1484,10 +1540,13 @@ def test_market_discovery_scheduler_runs_while_cycle_lock_is_held(monkeypatch):
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
     monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
+    # P2: force STALE substrate so the staleness gate falls through to capture (the cycle is
+    # decoupled from main._cycle_lock — a P1 cycle-lock held must not block this producer).
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
 
     assert main._cycle_lock.acquire(blocking=False)
     try:
-        main._market_discovery_cycle()
+        substrate_observer._market_discovery_cycle()
     finally:
         main._cycle_lock.release()
 
@@ -1504,15 +1563,18 @@ def test_market_discovery_scheduler_defers_only_when_previous_refresh_runs(monke
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("self-overlap must not scan")),
     )
 
-    assert main._market_discovery_lock.acquire(blocking=False)
+    assert substrate_observer._market_discovery_lock.acquire(blocking=False)
     try:
-        main._market_discovery_cycle()
+        substrate_observer._market_discovery_cycle()
     finally:
-        main._market_discovery_lock.release()
+        substrate_observer._market_discovery_lock.release()
 
 
 def test_user_channel_auto_derive_prefers_persisted_ids_and_skips_boot_gamma_scan(monkeypatch):
-    from src import main
+    # P3 lift (system_decomposition_plan §8 Step 3): _auto_derive_user_channel_condition_ids
+    # + _market_events_user_channel_condition_ids moved from src.main to
+    # src.ingest.price_channel_ingest. Both the patch target and the call repoint together.
+    from src.ingest import price_channel_ingest as main
     import src.data.market_scanner as market_scanner
 
     monkeypatch.delenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", raising=False)
@@ -1527,7 +1589,9 @@ def test_user_channel_auto_derive_prefers_persisted_ids_and_skips_boot_gamma_sca
 
 
 def test_user_channel_auto_derive_returns_empty_without_boot_gamma_opt_in(monkeypatch):
-    from src import main
+    # P3 lift (system_decomposition_plan §8 Step 3): auto-derive helpers moved to
+    # src.ingest.price_channel_ingest; patch target + call repoint together.
+    from src.ingest import price_channel_ingest as main
     import src.data.market_scanner as market_scanner
 
     monkeypatch.delenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", raising=False)

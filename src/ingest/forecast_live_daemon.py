@@ -42,14 +42,14 @@ FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID = "forecast_live_opendata_safe_cycle_poll"
 FORECAST_LIVE_HEARTBEAT_JOB_ID = "forecast_live_heartbeat"
 FORECAST_LIVE_SOURCE_HEALTH_JOB_ID = "forecast_live_source_health_probe"
 # Operator Point-1 directive 2026-06-08: BAYES_PRECISION_FUSION/replacement forecast PRODUCTION jobs moved here
-# from the live-trading daemon. The heavy ~365MB AIFS ensemble download must run on THIS data
-# daemon, never on the trading process. These ids are registered OUTSIDE the OpenData registry
+# from the live-trading daemon. Current live production fetches OpenMeteo anchor inputs on
+# this data daemon, never on the trading process. These ids are registered OUTSIDE the OpenData registry
 # job-set (after the registry/cutover/legacy scheduler is built), on their own dedicated
 # executor lane, so they ALWAYS run (they ARE the replacement production — under the OpenData
 # cutover they MUST run, not be filtered out) and never contend with the heartbeat or OpenData
-# lanes. The functions themselves are flag-gated (no-op when the shadow flag is off).
+# lanes. The functions themselves are live-authority gated (no-op when trade authority is off).
 REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID = "replacement_forecast_download"
-REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID = "replacement_forecast_shadow_materialize"
+REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID = "replacement_forecast_live_materialize"
 REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_catch_up"
 REPLACEMENT_AVAILABILITY_POLL_JOB_ID = "replacement_cycle_availability_poll"
 ANCHOR_META_CROSS_CHECK_JOB_ID = "anchor_meta_stamp_cross_check"
@@ -120,7 +120,7 @@ def _opendata_jobs_disabled_by_replacement_cutover() -> bool:
     try:
         from src.config import settings
 
-        cfg = getattr(settings, "_data", {}).get("replacement_forecast_shadow", {})
+        cfg = getattr(settings, "_data", {}).get("replacement_forecast_live", {})
         if isinstance(cfg, dict):
             return _truthy(cfg.get("disable_legacy_opendata_forecast_live_jobs"))
     except Exception as exc:
@@ -898,35 +898,33 @@ def forecast_live_job_specs(
 
 # ---------------------------------------------------------------------------
 # Replacement-forecast PRODUCTION jobs (operator Point-1 directive 2026-06-08).
-# Moved here from the live-trading daemon (src/main.py). The heavy ~365MB AIFS
-# ensemble download (~11.5 min) must run on THIS data daemon, on a dedicated lane,
-# event-driven at publish time — never inline on the trading process.
+# Moved here from the live-trading daemon (src/main.py). Replacement raw-input
+# download must run on THIS data daemon, on a dedicated lane, event-driven at
+# publish time — never inline on the trading process.
 # ---------------------------------------------------------------------------
 
 
-def _replacement_forecast_shadow_enabled() -> bool:
-    """The single shadow flag the moved production functions already check. Used here only to
-    log whether the registered jobs will do work; the functions THEMSELVES re-check this flag
-    and no-op when it is off, so registration is always safe."""
+def _replacement_forecast_live_runtime_enabled() -> bool:
+    """Whether the registered replacement production jobs will do live runtime work."""
     try:
         from src.data.replacement_forecast_production import (
             _replacement_forecast_runtime_flags_from_settings,
         )
+        from src.data.replacement_forecast_runtime_policy import LIVE_FLAG
 
         flags = _replacement_forecast_runtime_flags_from_settings()
-        return bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False))
+        return bool(flags.get(LIVE_FLAG, False))
     except Exception as exc:  # noqa: BLE001 - never block boot on a flag read
-        logger.warning("replacement-forecast shadow flag read failed (treating as off): %s", exc)
+        logger.warning("replacement-forecast live runtime flag read failed (treating as off): %s", exc)
         return False
 
 
 @_scheduler_job(REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID)
 def _replacement_forecast_download_job() -> None:
-    """EVENT-DRIVEN raw-input PRE-FETCH (the heavy ~365MB AIFS ensemble + OpenMeteo download).
+    """EVENT-DRIVEN raw-input PRE-FETCH (OpenMeteo anchor download).
 
     Fires at each cycle's publish time (00Z/12Z + release_lag) plus once shortly after boot.
-    Delegates to the shared production function, which is flag-gated and fail-soft. This is the
-    ONLY place the heavy AIFS fetch runs now (moved off the live-trading daemon)."""
+    Delegates to the shared production function, which is flag-gated and fail-soft."""
     from src.data.replacement_forecast_production import _replacement_forecast_download_cycle
 
     # Call the undecorated inner so the moved function's own @_scheduler_job (which records
@@ -962,29 +960,29 @@ def _replacement_cycle_availability_poll_job() -> None:
 def _replacement_forecast_materialize_job() -> None:
     """LIGHT seed_discovery -> seed -> materialize on already-downloaded manifests (no download).
 
-    Interval-driven; delegates to the shared production function, which is flag-gated and
+    Interval-driven; delegates to the shared production function, which is live-authority gated and
     fail-soft."""
     from src.data.replacement_forecast_production import (
-        _replacement_forecast_shadow_materialize_cycle,
+        _replacement_forecast_live_materialize_cycle,
     )
 
-    _replacement_forecast_shadow_materialize_cycle()
+    _replacement_forecast_live_materialize_cycle()
 
 
-def _replacement_forecast_shadow_cfg() -> dict:
-    """The ``replacement_forecast_shadow`` settings section via the shared production module's
+def _replacement_forecast_live_cfg() -> dict:
+    """The ``replacement_forecast_live`` settings section via the shared production module's
     single config reader (one source for ``download_release_lag_hours`` /
     ``materialization_interval_min``, identical to the values the moved production functions
     resolve)."""
     from src.data.replacement_forecast_production import _settings_section
 
-    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    cfg = _settings_section("replacement_forecast_live", {}) or {}
     return cfg if isinstance(cfg, dict) else {}
 
 
 def _replacement_forecast_publish_cron_hours() -> tuple[int, ...]:
     """The four daily UTC hours when a model cycle becomes available = (cycle + release_lag) %% 24
-    for EACH of the four AIFS-ENS cycles {00Z, 06Z, 12Z, 18Z}. With the default 14h release lag
+    for each of the four OpenMeteo anchor cycles {00Z, 06Z, 12Z, 18Z}. With the default 14h release lag
     that is 14:00 / 20:00 / 02:00 / 08:00 UTC (matching
     scripts.download_replacement_forecast_current_targets._source_available_at).
 
@@ -992,8 +990,8 @@ def _replacement_forecast_publish_cron_hours() -> tuple[int, ...]:
     06Z/18Z cycles in steady state — the 06Z/18Z raw inputs only ever arrived via daemon-restart
     boot catch-ups. That left a ~12h dead zone (02:10Z->14:10Z UTC) where readiness (3h TTL)
     expired for nearly all scopes and the live engine had zero certified candidates (10h
-    production dead-zone incident 2026-06-10). All four cycles share the SAME publication lag
-    (one AIFS-ENS product), so the per-cycle hour is just (cycle_hour + release_lag) %% 24.
+    production dead-zone incident 2026-06-10). The per-cycle hour is
+    (cycle_hour + release_lag) %% 24.
 
     Scheduling all four is SAFE even if a cron fires before its cycle is actually published: the
     download job ALWAYS resolves the newest *available* cycle via
@@ -1003,12 +1001,12 @@ def _replacement_forecast_publish_cron_hours() -> tuple[int, ...]:
     no-ops a fire whose newest-available cycle is already downloaded. A premature fire therefore
     re-resolves to the current cycle and skips cleanly rather than downloading a not-yet-published
     cycle."""
-    release_lag_hours = float(_replacement_forecast_shadow_cfg().get("download_release_lag_hours") or 14.0)
+    release_lag_hours = float(_replacement_forecast_live_cfg().get("download_release_lag_hours") or 14.0)
     return tuple(int((cycle_hour + release_lag_hours) % 24) for cycle_hour in (0, 6, 12, 18))
 
 
 def _replacement_forecast_materialize_interval_minutes() -> int:
-    return int(_replacement_forecast_shadow_cfg().get("materialization_interval_min") or 5)
+    return int(_replacement_forecast_live_cfg().get("materialization_interval_min") or 5)
 
 
 def _register_replacement_forecast_production_jobs(
@@ -1080,9 +1078,9 @@ def _register_replacement_forecast_production_jobs(
     )
     logger.info(
         "replacement-forecast production jobs registered (download cron hour=%s min=10 + boot "
-        "catch-up; materialize interval=%dmin; lane=%s; shadow_enabled=%s)",
+        "catch-up; materialize interval=%dmin; lane=%s; live_runtime_enabled=%s)",
         cron_hours, materialize_minutes, REPLACEMENT_FORECAST_EXECUTOR_LANE,
-        _replacement_forecast_shadow_enabled(),
+        _replacement_forecast_live_runtime_enabled(),
     )
 
 
@@ -1107,8 +1105,8 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
     specs = forecast_live_job_specs(startup_run_date=startup_run_date)
 
     # Operator Point-1 directive 2026-06-08: a DEDICATED executor lane for the replacement-
-    # forecast production jobs, present in EVERY scheduler branch below, so the heavy ~365MB
-    # AIFS ensemble download never contends with the heartbeat or OpenData lanes. The
+    # forecast production jobs, present in EVERY scheduler branch below, so the replacement
+    # anchor download never contends with the heartbeat or OpenData lanes. The
     # replacement jobs are registered (after each branch builds its scheduler) on this lane.
     def _replacement_production_executor() -> dict[str, object]:
         # Two SEPARATE single-worker lanes: the heavy download must never serialize ahead of

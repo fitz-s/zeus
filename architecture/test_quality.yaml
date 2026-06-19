@@ -54,7 +54,7 @@ tests:
     protects: [MP-SCH-001, MP-ECO-001]
     falsifying_proof:
       type: negative_fixture
-      description: "day0_shadow edli_live_scope admits day0 (no DAY0_OUT_OF_SCOPE_FOR_PR332) while forecast_only stays byte-identical, AND grants no submit authority of its own — scope is orthogonal to the arm axis (real_order_submit_enabled). Mutating day0_shadow to imply/inject an arm flag, or to admit day0 under forecast_only, fails."
+      description: "EDLI production has a single live scope, forecast_plus_day0. Mutating day0_shadow, forecast_only, or any unknown scope back into an admissible execution scope fails before proof build or submit."
   tests/money_path/test_edli_live_canary.py:
     category: money_path
     protects: [MP-SCH-001, MP-SCH-002, MP-ECO-001]

@@ -119,7 +119,11 @@ def test_fused_q_build_raises_mode_build_failed_gate_rejects(monkeypatch) -> Non
 
     prov = _materialize_provenance(conn)
     assert prov["replacement_q_mode"] == "FUSED_Q_BUILD_FAILED"
-    assert prov["q_shape"] == "aifs_member_votes_soft_anchor", "must fail CLOSED to soft-anchor q"
+    # AIFS DROPPED (operator directive 2026-06-17): a total integrator failure (both the certified
+    # fused-q shape AND the fused-center-only Normal use bin_probability_settlement) must NEVER serve
+    # the cold 0.8-AIFS soft-anchor q — the row carries the honest uniform placeholder seed instead.
+    assert prov["q_shape"] != "aifs_member_votes_soft_anchor", "must NOT fail to the cold AIFS soft-anchor q"
+    assert prov["q_shape"] == "uniform_placeholder_pending_fused"
     # a build failure must not leave a stale floor flag set
     assert prov["settlement_sigma_floor_applied"] is False
 
