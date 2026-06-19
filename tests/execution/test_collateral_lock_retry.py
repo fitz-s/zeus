@@ -107,6 +107,42 @@ def test_fresh_snapshot_reused_without_adapter_fetch(monkeypatch):
     assert out["details"]["reused_fresh_snapshot"] is True
 
 
+def test_entry_refresh_wrapper_reuses_fresh_sidecar_snapshot(monkeypatch):
+    from src.execution.executor import _refresh_entry_collateral_snapshot_for_submit
+    from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=1_000_000,
+            pusd_allowance_micro=1_000_000,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime.now(timezone.utc),
+            authority_tier="CHAIN",
+        )
+    )
+
+    class ClientShouldNotBeConstructed:
+        def __init__(self, *args, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("fresh sidecar collateral snapshot should not refresh")
+
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        ClientShouldNotBeConstructed,
+    )
+
+    out = _refresh_entry_collateral_snapshot_for_submit(conn)
+    assert out["allowed"] is True
+    assert out["details"]["action"] == "entry_submit"
+    assert out["details"]["reused_fresh_snapshot"] is True
+
+
 def test_exit_refresh_wrapper_retries_transient_lock(monkeypatch):
     calls = {"n": 0}
 

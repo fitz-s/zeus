@@ -1208,7 +1208,11 @@ def _refresh_entry_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> d
     """Refresh collateral truth synchronously on the submit path before preflight."""
     from src.execution.collateral import refresh_collateral_snapshot_for_submit
 
-    return refresh_collateral_snapshot_for_submit(conn, action="entry_submit")
+    return refresh_collateral_snapshot_for_submit(
+        conn,
+        action="entry_submit",
+        reuse_fresh_snapshot=True,
+    )
 
 
 def _refresh_exit_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> dict:
