@@ -10964,6 +10964,7 @@ def _replacement_family_coverage_verdict(
     family,
     forecast_conn: sqlite3.Connection,
     lcb_by_direction,
+    coverage_cache: dict | None = None,
 ):
     """Settlement-backward coverage VERDICT for the family scope (flag-INDEPENDENT read).
 
@@ -11023,6 +11024,7 @@ def _replacement_family_coverage_verdict(
                 direction="buy_yes",
                 claimed_q_lcb=claimed,
                 fail_closed_on_fault=fail_closed,
+                coverage_cache=coverage_cache,
             )
             verdict = settlement_backward_coverage_check(
                 city=family.city, metric=metric, season=season,
@@ -11631,6 +11633,7 @@ def _replacement_authority_probability_and_fdr_proof(
             else (0.0 if no_edge_lcb_positive else 1.0)
         )
         prefilter[(condition_id, "buy_no")] = bool(no_edge_lcb_positive)
+    coverage_cache: dict = {}
     # K3 settlement-backward coverage is a live safety gate. It only ever lowers an
     # unlicensed q_lcb; INSUFFICIENT_DATA is a typed no-shrink verdict, while structural
     # coverage-authority faults fail closed instead of serving an unlicensed bound.
@@ -11638,6 +11641,7 @@ def _replacement_authority_probability_and_fdr_proof(
         family=family,
         forecast_conn=conn,
         lcb_by_direction=lcb_by_direction,
+        coverage_cache=coverage_cache,
     )
     # CERT BRIDGE (2026-06-10, funnel #1 unlock) — stamp the replacement calibration
     # credential onto the threaded `payload` so `_calibration_authority_payload_and_clock`
@@ -11654,6 +11658,7 @@ def _replacement_authority_probability_and_fdr_proof(
         family=family,
         forecast_conn=conn,
         lcb_by_direction=lcb_by_direction,
+        coverage_cache=coverage_cache,
     )
     _credential = _build_replacement_calibration_credential(
         replacement_bundle=replacement_bundle,
@@ -12051,6 +12056,7 @@ def _canonical_probability_and_fdr_proof(
         family=family,
         forecast_conn=conn,
         lcb_by_direction=lcb_by_direction,
+        coverage_cache={},
     )
 
     from src.strategy.live_inference.inference_engine import InferenceInputs, evaluate_live_bins
@@ -14020,6 +14026,7 @@ def _per_day_claimed_qlcb_by_date(
     metric: str,
     direction: str,
     band_template: str | None,
+    coverage_cache: dict | None = None,
 ):
     """Per-day ACTUAL claimed q_lcb history for ONE (city, metric, direction, band).
 
@@ -14044,11 +14051,40 @@ def _per_day_claimed_qlcb_by_date(
     fail-CLOSED fault distinction lives in ``_settlement_coverage_observations`` over the
     AUTHORITATIVE settlement_outcomes read, not here.
     """
-    import json as _json
-
     if not band_template:
         return {}
-    out: dict[str, float] = {}
+    want_city = str(city)
+    want_metric = str(metric).lower()
+    want_direction = str(direction)
+    if coverage_cache is not None:
+        cache_key = ("claimed_qlcb_by_band", want_city, want_metric, want_direction)
+        cached = coverage_cache.get(cache_key)
+        if cached is None:
+            cached = _claimed_qlcb_by_band_for_scope(
+                city=want_city,
+                metric=want_metric,
+                direction=want_direction,
+            )
+            coverage_cache[cache_key] = cached
+        return dict(cached.get(band_template, {}))
+    by_band = _claimed_qlcb_by_band_for_scope(
+        city=want_city,
+        metric=want_metric,
+        direction=want_direction,
+    )
+    return dict(by_band.get(band_template, {}))
+
+
+def _claimed_qlcb_by_band_for_scope(
+    *,
+    city: str,
+    metric: str,
+    direction: str,
+) -> dict[str, dict[str, float]]:
+    """Load per-day claimed q_lcb grouped by band for one city/metric/direction."""
+    import json as _json
+
+    out: dict[str, dict[str, float]] = {}
     try:
         from src.state.db import get_world_connection_read_only
 
@@ -14058,34 +14094,43 @@ def _per_day_claimed_qlcb_by_date(
     try:
         rows = conn.execute(
             "SELECT receipt_json, q_lcb_5pct, created_at FROM edli_no_submit_receipts "
-            "WHERE direction = ? AND q_lcb_5pct IS NOT NULL ORDER BY created_at ASC",
-            (str(direction),),
+            "WHERE direction = ? AND q_lcb_5pct IS NOT NULL "
+            "AND json_extract(receipt_json, '$.city') = ? "
+            "AND lower(COALESCE(json_extract(receipt_json, '$.metric'), '')) = ? "
+            "ORDER BY created_at ASC",
+            (str(direction), str(city), str(metric).lower()),
         ).fetchall()
     except Exception:
-        rows = []
+        try:
+            rows = conn.execute(
+                "SELECT receipt_json, q_lcb_5pct, created_at FROM edli_no_submit_receipts "
+                "WHERE direction = ? AND q_lcb_5pct IS NOT NULL ORDER BY created_at ASC",
+                (str(direction),),
+            ).fetchall()
+        except Exception:
+            rows = []
     finally:
         try:
             conn.close()
         except Exception:
             pass
-    want_city = str(city)
-    want_metric = str(metric).lower()
     for receipt_json, qlcb, _created_at in rows:
         try:
             doc = _json.loads(receipt_json)
         except Exception:
             continue
-        if str(doc.get("city") or "") != want_city:
+        if str(doc.get("city") or "") != str(city):
             continue
-        if str(doc.get("metric") or "").lower() != want_metric:
+        if str(doc.get("metric") or "").lower() != str(metric).lower():
             continue
-        if _coverage_band_template(doc.get("bin_label")) != band_template:
+        row_band_template = _coverage_band_template(doc.get("bin_label"))
+        if not row_band_template:
             continue
         target_date = doc.get("target_date")
         if not target_date:
             continue
         try:
-            out[str(target_date)] = float(qlcb)
+            out.setdefault(row_band_template, {})[str(target_date)] = float(qlcb)
         except (TypeError, ValueError):
             continue
     return out
@@ -14100,6 +14145,7 @@ def _settlement_coverage_observations(
     direction: str,
     claimed_q_lcb: float,
     fail_closed_on_fault: bool = False,
+    coverage_cache: dict | None = None,
 ):
     """Build the (PER-DAY claimed_q_lcb, won) CALIBRATION stream for ONE (bin, direction).
 
@@ -14149,18 +14195,29 @@ def _settlement_coverage_observations(
     # thin (RULE 1), never a structural fault. The fail-closed distinction is over the
     # AUTHORITATIVE settlement_outcomes read below.
     claimed_by_date = _per_day_claimed_qlcb_by_date(
-        city=city, metric=metric, direction=direction, band_template=band_template
+        city=city,
+        metric=metric,
+        direction=direction,
+        band_template=band_template,
+        coverage_cache=coverage_cache,
     )
     if not claimed_by_date:
         return obs
     try:
-        rows = forecast_conn.execute(
-            "SELECT target_date, settlement_value, settlement_unit FROM settlement_outcomes "
-            "WHERE city = ? AND temperature_metric = ? "
-            "AND settlement_value IS NOT NULL AND settlement_unit IS NOT NULL "
-            "AND authority = 'VERIFIED'",
-            (str(city), str(metric).lower()),
-        ).fetchall()
+        settlement_cache_key = ("settlement_outcomes", str(city), str(metric).lower())
+        rows = None
+        if coverage_cache is not None:
+            rows = coverage_cache.get(settlement_cache_key)
+        if rows is None:
+            rows = forecast_conn.execute(
+                "SELECT target_date, settlement_value, settlement_unit FROM settlement_outcomes "
+                "WHERE city = ? AND temperature_metric = ? "
+                "AND settlement_value IS NOT NULL AND settlement_unit IS NOT NULL "
+                "AND authority = 'VERIFIED'",
+                (str(city), str(metric).lower()),
+            ).fetchall()
+            if coverage_cache is not None:
+                coverage_cache[settlement_cache_key] = rows
     except Exception as exc:
         # A failed settlement_outcomes EXECUTION is a structural read/schema fault, NOT thin
         # data. Fail closed when the safety gate is on; else keep the legacy inert default.
@@ -14202,6 +14259,7 @@ def _maybe_apply_settlement_coverage_to_lcb(
     family,
     forecast_conn: sqlite3.Connection,
     lcb_by_direction,
+    coverage_cache: dict | None = None,
 ) -> None:
     """K3 (Phase-2): shrink an UNLICENSED q_lcb to its realized settlement rate.
 
@@ -14278,6 +14336,7 @@ def _maybe_apply_settlement_coverage_to_lcb(
                     direction=direction,
                     claimed_q_lcb=claimed,
                     fail_closed_on_fault=True,
+                    coverage_cache=coverage_cache,
                 )
                 verdict = settlement_backward_coverage_check(
                     city=family.city, metric=metric, season=season,
