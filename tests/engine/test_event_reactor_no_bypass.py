@@ -3460,6 +3460,32 @@ def test_runtime_bankroll_for_sizing_uses_total_equity_not_spendable_cash(monkey
     assert _runtime_free_cash_usd(cached_only=True) == pytest.approx(241.0)
 
 
+def test_runtime_bankroll_accepts_collateral_snapshot_canonical_source(monkeypatch):
+    """The live daemon consumes wallet truth warmed from the capital sidecar."""
+    from src.engine.event_reactor_adapter import (
+        _runtime_bankroll_usd,
+        _runtime_free_cash_usd,
+    )
+    from src.runtime import bankroll_provider
+    from src.runtime.bankroll_provider import BankrollOfRecord
+
+    monkeypatch.setattr(
+        bankroll_provider,
+        "cached",
+        lambda **_kwargs: BankrollOfRecord(
+            value_usd=1045.0,
+            spendable_cash_usd=245.0,
+            equity_for_new_entry_sizing_usd=1045.0,
+            fetched_at="2026-06-19T21:00:00+00:00",
+            source="collateral_ledger_snapshot",
+            authority="canonical",
+        ),
+    )
+
+    assert _runtime_bankroll_usd(cached_only=True) == pytest.approx(1045.0)
+    assert _runtime_free_cash_usd(cached_only=True) == pytest.approx(245.0)
+
+
 def test_runtime_bankroll_basis_excludes_blip_held_phantom(monkeypatch):
     """Data-provenance antibody (Fitz #4): under a positions blip the basis uses the
     phantom-EXCLUDED equity_for_new_entry_sizing_usd, NOT value_usd (which HOLDS the

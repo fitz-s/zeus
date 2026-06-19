@@ -16043,10 +16043,28 @@ def _runtime_bankroll_usd(*, cached_only: bool = False) -> float:
         # populate cached(); the prior self-heal that called current() here re-introduced a
         # per-decision live wallet fetch and is removed (#45).
         raise ValueError("bankroll_provider_unavailable")
-    if bankroll.authority != "canonical" or bankroll.source != "polymarket_wallet":
+    if not _bankroll_record_is_canonical(bankroll):
         raise ValueError("bankroll_provider_not_canonical")
     sizing_equity, _free_cash = _bankroll_sizing_basis_and_free_cash(bankroll)
     return sizing_equity
+
+
+def _bankroll_record_is_canonical(bankroll: object) -> bool:
+    """Whether a bankroll record is the live wallet truth source.
+
+    The trading daemon no longer performs wallet RPC in the reactor. The
+    post-trade-capital sidecar writes CHAIN collateral snapshots and
+    ``bankroll_provider.warm_from_collateral_snapshot`` imports that durable
+    truth into the in-process cache. Both records are canonical; the difference
+    is transport, not authority.
+    """
+
+    if getattr(bankroll, "authority", None) != "canonical":
+        return False
+    return str(getattr(bankroll, "source", "") or "") in {
+        "polymarket_wallet",
+        "collateral_ledger_snapshot",
+    }
 
 
 def _bankroll_sizing_basis_and_free_cash(bankroll) -> tuple[float, float | None]:
@@ -16113,7 +16131,7 @@ def _runtime_free_cash_usd(*, cached_only: bool = True) -> float | None:
     )
     if bankroll is None:
         return None
-    if bankroll.authority != "canonical" or bankroll.source != "polymarket_wallet":
+    if not _bankroll_record_is_canonical(bankroll):
         return None
     try:
         _basis, free_cash = _bankroll_sizing_basis_and_free_cash(bankroll)

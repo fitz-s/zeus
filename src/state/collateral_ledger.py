@@ -317,10 +317,7 @@ class CollateralLedger:
 
     def snapshot(self) -> CollateralSnapshot:
         loaded = self._load_latest_snapshot()
-        if loaded is not None and (
-            self._snapshot is None
-            or _is_newer_snapshot(loaded, self._snapshot)
-        ):
+        if loaded is not None:
             self._snapshot = loaded
         if self._snapshot is None:
             return CollateralSnapshot(
@@ -553,20 +550,38 @@ class CollateralLedger:
             with self._connection_scope() as conn:
                 if conn is None:
                     return None
-                row = conn.execute(
+                rows = conn.execute(
                     """
                     SELECT *
                       FROM collateral_ledger_snapshots
                      ORDER BY id DESC
-                     LIMIT 1
+                     LIMIT 32
                     """
-                ).fetchone()
+                ).fetchall()
+                has_active_ctf_exposure = _has_active_ctf_exposure(conn)
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc):
                 return None
             raise
-        if row is None:
+        if not rows:
             return None
+
+        snapshots = [self._snapshot_from_row(row) for row in rows]
+        latest = snapshots[0]
+        for snapshot in snapshots:
+            if snapshot.authority_tier == "DEGRADED":
+                continue
+            if not _snapshot_is_fresh_enough_for_cache(snapshot):
+                continue
+            if has_active_ctf_exposure and not snapshot.ctf_token_balances:
+                continue
+            return snapshot
+        for snapshot in snapshots:
+            if snapshot.authority_tier != "DEGRADED" and _snapshot_is_fresh_enough_for_cache(snapshot):
+                return snapshot
+        return latest
+
+    def _snapshot_from_row(self, row: sqlite3.Row) -> CollateralSnapshot:
         raw = dict(row)
         try:
             captured_at = datetime.fromisoformat(str(raw["captured_at"]).replace("Z", "+00:00"))
@@ -650,8 +665,35 @@ def _snapshot_time(snapshot: CollateralSnapshot) -> datetime:
     return captured_at.astimezone(timezone.utc)
 
 
-def _is_newer_snapshot(candidate: CollateralSnapshot, current: CollateralSnapshot) -> bool:
-    return _snapshot_time(candidate) > _snapshot_time(current)
+def _snapshot_is_fresh_enough_for_cache(snapshot: CollateralSnapshot) -> bool:
+    age_seconds = (datetime.now(timezone.utc) - _snapshot_time(snapshot)).total_seconds()
+    return age_seconds <= (COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS + COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS)
+
+
+def _has_active_ctf_exposure(conn: sqlite3.Connection) -> bool:
+    """Whether live position truth still requires non-empty CTF inventory.
+
+    Intermittent position-enumeration misses in the collateral sidecar must not
+    publish an empty token map over a recent non-empty CHAIN snapshot while local
+    chain-synced positions remain open. If the projection table is unavailable,
+    this ledger keeps its generic behavior and does not infer exposure.
+    """
+
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM position_current
+             WHERE COALESCE(CAST(chain_shares AS REAL), CAST(shares AS REAL), 0.0) > 0.0
+               AND phase NOT IN (
+                    'settled', 'economically_closed', 'voided', 'quarantined', 'admin_closed'
+               )
+             LIMIT 1
+            """
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return row is not None
 
 
 def release_reservation_for_command_state(
