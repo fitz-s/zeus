@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -2229,6 +2231,91 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     assert witness.balance_allowance_authority_id == "polymarket_wallet_readonly"
     assert witness.balance_allowance_status == "OK"
     assert clob_timeouts == [2.5, 2.5]
+
+
+def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
+    import src.main as main
+    import src.control.heartbeat_supervisor as heartbeat_supervisor
+    import src.control.ws_gap_guard as ws_gap_guard
+    import src.data.polymarket_client as polymarket_client
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            token_id TEXT,
+            quote_seen_at TEXT,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence
+            (token_id, quote_seen_at, book_hash_before, best_bid_before, best_ask_before)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("yes-1", "2026-05-25T11:59:59.950000+00:00", "book-hash-1", 0.39, 0.41),
+    )
+    monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"entry": {"allow_submit": True}})
+    monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
+    monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "0.05")
+    release = threading.Event()
+
+    class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def v2_preflight(self):
+            return {"ok": True}
+
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_collateral_payload(self):
+            release.wait(timeout=5.0)
+            return {
+                "pusd_balance_micro": 25_000_000,
+                "pusd_allowance_micro": 25_000_000,
+            }
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+        conn,
+        {
+            "pre_submit_max_quote_age_ms": 1000,
+            "pre_submit_balance_allowance_check_enabled": True,
+        },
+    )
+    final_intent = SimpleNamespace(
+        payload={
+            "token_id": "yes-1",
+            "side": "BUY",
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+            "notional_usd": 5.0,
+        }
+    )
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="timeout_guard: pre_submit_collateral_payload"):
+            provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
+    finally:
+        release.set()
+        conn.close()
+
+    assert time.monotonic() - started < 1.0
 
 
 def test_main_pre_submit_jit_book_provider_uses_short_http_timeout(monkeypatch):

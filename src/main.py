@@ -7833,6 +7833,16 @@ def _edli_pre_submit_clob_timeout_seconds() -> float:
     return value
 
 
+def _edli_run_pre_submit_clob_call(label: str, fn):
+    from src.runtime.timeout_guard import run_with_timeout
+
+    return run_with_timeout(
+        fn,
+        seconds=_edli_pre_submit_clob_timeout_seconds(),
+        label=f"pre_submit_{label}",
+    )
+
+
 def _edli_pre_submit_jit_book_quote_provider():
     """Build the just-in-time single-token ``/book`` fetcher for the pre-submit
     authority (GATE #84). Returns a ``token_id -> dict`` callable that pulls the
@@ -7848,7 +7858,10 @@ def _edli_pre_submit_jit_book_quote_provider():
         from src.data.polymarket_client import PolymarketClient
 
         with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
-            return clob.get_orderbook_snapshot(token_id)
+            return _edli_run_pre_submit_clob_call(
+                "jit_book",
+                lambda: clob.get_orderbook_snapshot(token_id),
+            )
 
     return _fetch
 
@@ -8198,7 +8211,13 @@ def _edli_pre_submit_authority_provider_from_world_conn(
             from src.data.polymarket_client import PolymarketClient
 
             with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
-                collateral_payload_cache = dict(clob._ensure_v2_adapter().get_collateral_payload())
+                adapter = clob._ensure_v2_adapter()
+                collateral_payload_cache = dict(
+                    _edli_run_pre_submit_clob_call(
+                        "collateral_payload",
+                        adapter.get_collateral_payload,
+                    )
+                )
         return collateral_payload_cache
 
     def _provider(final_intent, _executable_snapshot, decision_time):
@@ -8324,7 +8343,7 @@ def _edli_venue_connectivity_authority_summary(checked_at: datetime) -> dict[str
     from src.data.polymarket_client import PolymarketClient
 
     with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
-        clob.v2_preflight()
+        _edli_run_pre_submit_clob_call("venue_preflight", clob.v2_preflight)
     return {
         "authority_id": "polymarket_v2_preflight",
         "allow_submit": True,
@@ -8350,7 +8369,11 @@ def _edli_balance_allowance_status(
     notional = float(intent.get("notional_usd") or 0.0)
     if collateral_payload is None:
         with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
-            collateral = clob._ensure_v2_adapter().get_collateral_payload()
+            adapter = clob._ensure_v2_adapter()
+            collateral = _edli_run_pre_submit_clob_call(
+                "collateral_payload",
+                adapter.get_collateral_payload,
+            )
     else:
         collateral = collateral_payload
     if side == "BUY":
