@@ -1361,17 +1361,7 @@ def test_actionable_payload_persists_qkernel_execution_economics():
     from src.engine import event_reactor_adapter as adapter
 
     event = _forecast_event()
-    qkernel_cert = {
-        "source": "qkernel_spine",
-        "candidate_id": "DIRECT_NO:bin-1",
-        "route_id": "DIRECT_NO:bin-1@proof",
-        "payoff_q_lcb": 0.72,
-        "edge_lcb": 0.17,
-        "delta_u_at_min": 0.01,
-        "optimal_stake_usd": "15.39",
-        "optimal_delta_u": 0.03,
-        "cost": 0.55,
-    }
+    qkernel_cert = _qkernel_execution_cert()
     receipt = replace(
         _accepted_receipt(event),
         q_source="qkernel_spine",
@@ -1389,6 +1379,101 @@ def test_actionable_payload_persists_qkernel_execution_economics():
 
     assert payload["q_source"] == "qkernel_spine"
     assert payload["qkernel_execution_economics"] == qkernel_cert
+
+
+@pytest.mark.parametrize(
+    "bad_cert",
+    [
+        None,
+        {},
+        {"source": "qkernel_spine"},
+        {
+            "source": "qkernel_spine",
+            "candidate_id": "DIRECT_NO:bin-1",
+            "route_id": "DIRECT_NO:bin-1@proof",
+            "payoff_q_lcb": 0.72,
+            "edge_lcb": 0.17,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "15.39",
+            "optimal_delta_u": 0.03,
+            "cost": 0.55,
+            "side": "NO",
+        },
+    ],
+)
+def test_live_execution_command_requires_qkernel_execution_economics_for_qkernel_receipt(bad_cert):
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = replace(
+        _accepted_receipt(event),
+        q_source="qkernel_spine",
+        qkernel_execution_economics=bad_cert,
+        opportunity_book=_opportunity_book_with_qkernel_cert(bad_cert),
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_QKERNEL_.*INVALID"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
+
+
+def test_live_execution_command_requires_qkernel_book_certificate_match():
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    receipt_cert = _qkernel_execution_cert(payoff_q_lcb=0.72)
+    book_cert = _qkernel_execution_cert(payoff_q_lcb=0.73)
+    accepted = replace(
+        _accepted_receipt(event),
+        q_source="qkernel_spine",
+        qkernel_execution_economics=receipt_cert,
+        opportunity_book=_opportunity_book_with_qkernel_cert(book_cert),
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_QKERNEL_EXECUTION_ECONOMICS_MISMATCH"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
+
+
+def test_qkernel_taker_quality_uses_guarded_payoff_lcb_not_receipt_q_lcb():
+    from src.engine import event_reactor_adapter as adapter
+
+    proof = adapter._build_event_bound_taker_quality_proof(
+        actionable_payload={
+            "q_source": "qkernel_spine",
+            "direction": "buy_yes",
+            "q_live": 0.90,
+            "q_lcb_5pct": 0.90,
+            "qkernel_execution_economics": _qkernel_execution_cert(payoff_q_lcb=0.30),
+            "live_cap_reserved_notional_usd": 10.0,
+            "proof_maker_limit_price": 0.45,
+            "proof_ev_maker": 0.01,
+        },
+        order_mode="TAKER",
+        fresh_best_bid=0.49,
+        fresh_best_ask=0.50,
+    )
+
+    assert proof is not None
+    assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
+    assert proof["passed"] is False
+    assert float(proof["taker_fee_adjusted_edge"]) < 0.0
 
 
 def test_live_execution_command_requires_opportunity_book_selection_match():
@@ -2662,6 +2747,40 @@ def _accepted_receipt(event, *, execution_mode_intent="TAKER", maker_limit_price
         },
         decision_proof_bundle=object(),
     )
+
+
+def _qkernel_execution_cert(**overrides):
+    cert = {
+        "source": "qkernel_spine",
+        "candidate_id": "DIRECT_YES:bin-1",
+        "route_id": "DIRECT_YES:bin-1@proof",
+        "payoff_q_lcb": 0.72,
+        "edge_lcb": 0.17,
+        "delta_u_at_min": 0.01,
+        "optimal_stake_usd": "15.39",
+        "optimal_delta_u": 0.03,
+        "cost": 0.55,
+        "side": "YES",
+        "bin_id": "bin-1",
+    }
+    cert.update(overrides)
+    return cert
+
+
+def _opportunity_book_with_qkernel_cert(qkernel_cert):
+    return {
+        "selected_candidate_id": "candidate-1",
+        "actual_receipt_selected_candidate_id": "candidate-1",
+        "candidates": [
+            {
+                "candidate_id": "candidate-1",
+                "condition_id": "condition-1",
+                "token_id": "yes-1",
+                "direction": "buy_yes",
+                "qkernel_execution_economics": qkernel_cert,
+            }
+        ],
+    }
 
 
 def _command_cert_bundle():

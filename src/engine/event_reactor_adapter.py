@@ -1158,6 +1158,106 @@ def _assert_event_bound_receipt_live_authority(receipt: EventSubmissionReceipt) 
             f"selected={selected}:receipt_candidate={receipt_candidate_id}:"
             f"condition_id={receipt.condition_id}:token_id={receipt.token_id}:direction={receipt.direction}"
         )
+    _assert_receipt_qkernel_execution_economics(receipt, book, selected)
+
+
+def _valid_qkernel_execution_economics_payload(
+    cert: Any,
+    *,
+    direction: str | None = None,
+) -> Mapping[str, Any] | None:
+    if not isinstance(cert, Mapping):
+        return None
+    if not _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS.issubset(cert.keys()):
+        return None
+    if str(cert.get("source") or "") != "qkernel_spine":
+        return None
+    if not str(cert.get("candidate_id") or "").strip():
+        return None
+    route_id = str(cert.get("route_id") or "").strip()
+    if not route_id:
+        return None
+    side = str(cert.get("side") or "").strip().upper()
+    native_side = _native_curve_side_for_direction(str(direction or ""))
+    if side and native_side is not None and side != native_side:
+        return None
+    if route_id.startswith("DIRECT_YES:") and native_side not in {None, "YES"}:
+        return None
+    if route_id.startswith("DIRECT_NO:") and native_side not in {None, "NO"}:
+        return None
+    if not (route_id.startswith("DIRECT_YES:") or route_id.startswith("DIRECT_NO:")):
+        return None
+    for key in (
+        "payoff_q_lcb",
+        "edge_lcb",
+        "delta_u_at_min",
+        "optimal_delta_u",
+        "cost",
+    ):
+        try:
+            value = float(cert.get(key))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+    try:
+        optimal_stake = float(cert.get("optimal_stake_usd"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(optimal_stake):
+        return None
+    try:
+        payoff_q_lcb = float(cert.get("payoff_q_lcb"))
+        cost = float(cert.get("cost"))
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 <= payoff_q_lcb <= 1.0):
+        return None
+    if not (0.0 <= cost <= 1.0):
+        return None
+    return cert
+
+
+def _selected_opportunity_book_candidate(
+    book: Mapping[str, object],
+    selected_candidate_id: str,
+) -> Mapping[str, Any] | None:
+    candidates = book.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        if str(candidate.get("candidate_id") or "").strip() == selected_candidate_id:
+            return candidate
+    return None
+
+
+def _assert_receipt_qkernel_execution_economics(
+    receipt: EventSubmissionReceipt,
+    book: Mapping[str, object],
+    selected_candidate_id: str,
+) -> Mapping[str, Any] | None:
+    if str(receipt.q_source or "").strip() != "qkernel_spine":
+        return None
+    receipt_cert = _valid_qkernel_execution_economics_payload(
+        receipt.qkernel_execution_economics,
+        direction=receipt.direction,
+    )
+    if receipt_cert is None:
+        raise ValueError("EDLI_LIVE_QKERNEL_EXECUTION_ECONOMICS_INVALID")
+    selected_candidate = _selected_opportunity_book_candidate(book, selected_candidate_id)
+    if selected_candidate is None:
+        raise ValueError("EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_MISSING")
+    book_cert = _valid_qkernel_execution_economics_payload(
+        selected_candidate.get("qkernel_execution_economics"),
+        direction=receipt.direction,
+    )
+    if book_cert is None:
+        raise ValueError("EDLI_LIVE_QKERNEL_BOOK_EXECUTION_ECONOMICS_INVALID")
+    if stable_hash(dict(book_cert)) != stable_hash(dict(receipt_cert)):
+        raise ValueError("EDLI_LIVE_QKERNEL_EXECUTION_ECONOMICS_MISMATCH")
+    return receipt_cert
 
 
 def _opportunity_book_candidate_id_for_receipt(
@@ -4245,7 +4345,27 @@ def _build_event_bound_taker_quality_proof(
         return None
     direction = str(actionable_payload.get("direction") or "")
     touch = fresh_best_ask if direction.startswith("buy_") else fresh_best_bid
-    q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
+    q_lcb_source = "q_lcb_5pct"
+    if str(actionable_payload.get("q_source") or "").strip() == "qkernel_spine":
+        qkernel_cert = _valid_qkernel_execution_economics_payload(
+            actionable_payload.get("qkernel_execution_economics"),
+            direction=direction,
+        )
+        if qkernel_cert is None:
+            return {
+                "schema_version": 1,
+                "passed": False,
+                "reason": "qkernel_execution_economics_missing_or_invalid",
+                "model_confidence": "0",
+                "taker_fee_adjusted_edge": "0",
+                "taker_expected_profit_usd": "0",
+                "maker_expected_profit_usd": "0",
+                "incremental_expected_profit_usd": "0",
+            }
+        q_lcb = _optional_float(qkernel_cert.get("payoff_q_lcb"))
+        q_lcb_source = "qkernel_execution_economics.payoff_q_lcb"
+    else:
+        q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
     q_live = _optional_float(actionable_payload.get("q_live"))
     notional = _optional_float(
         actionable_payload.get("live_cap_reserved_notional_usd")
@@ -4319,6 +4439,7 @@ def _build_event_bound_taker_quality_proof(
         "fresh_touch_fee": str(fee_dec),
         "notional_usd": str(notional_dec),
         "maker_context_source": "proof_mode_ev",
+        "q_lcb_source": q_lcb_source,
     }
 
 
@@ -7762,30 +7883,20 @@ def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] 
     """
     if not _proof_uses_qkernel_spine(proof):
         return None
-    cert = getattr(proof, "qkernel_execution_economics", None)
-    if not isinstance(cert, Mapping):
-        return None
-    if not _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS.issubset(cert.keys()):
-        return None
-    if str(cert.get("source") or "") != "qkernel_spine":
-        return None
-    if not str(cert.get("candidate_id") or "").strip():
-        return None
-    route_id = str(cert.get("route_id") or "").strip()
-    if not route_id:
-        return None
-    side = str(cert.get("side") or "").strip().upper()
-    native_side = _native_curve_side_for_direction(str(getattr(proof, "direction", "") or ""))
-    if side and native_side is not None and side != native_side:
+    cert = _valid_qkernel_execution_economics_payload(
+        getattr(proof, "qkernel_execution_economics", None),
+        direction=str(getattr(proof, "direction", "") or ""),
+    )
+    if cert is None:
         return None
     bin_id = str(cert.get("bin_id") or "").strip()
     if bin_id and bin_id != _candidate_bin_id(proof):
         return None
+    route_id = str(cert.get("route_id") or "").strip()
+    native_side = _native_curve_side_for_direction(str(getattr(proof, "direction", "") or ""))
     if route_id.startswith("DIRECT_YES:") and native_side != "YES":
         return None
     if route_id.startswith("DIRECT_NO:") and native_side != "NO":
-        return None
-    if not (route_id.startswith("DIRECT_YES:") or route_id.startswith("DIRECT_NO:")):
         return None
     return cert
 
