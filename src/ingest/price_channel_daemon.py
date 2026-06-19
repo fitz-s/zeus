@@ -161,6 +161,7 @@ def _write_price_channel_heartbeat() -> None:
 
 def main() -> None:
     global _scheduler
+    from apscheduler.executors.pool import ThreadPoolExecutor as APSchedulerThreadPoolExecutor
     from apscheduler.schedulers.blocking import BlockingScheduler
 
     # Logging split: INFO/DEBUG → stdout (.log), WARNING+ → stderr (.err) — daemon parity.
@@ -186,6 +187,7 @@ def main() -> None:
     # The lifted producers from the trading-lane-free module. Importing this module does
     # NOT pull in src.main / src.engine — failure-domain isolation (criterion 3).
     from src.ingest.price_channel_ingest import (
+        _edli_held_quote_refresh_cycle,
         _edli_market_channel_ingestor_cycle,
         _edli_user_channel_reconcile_cycle,
         _start_user_channel_ingestor_if_enabled,
@@ -223,7 +225,14 @@ def main() -> None:
     # SIGTERM → graceful shutdown.
     signal.signal(signal.SIGTERM, _graceful_shutdown)
 
-    _scheduler = BlockingScheduler(timezone=timezone.utc)
+    _scheduler = BlockingScheduler(
+        timezone=timezone.utc,
+        executors={
+            "default": APSchedulerThreadPoolExecutor(max_workers=2),
+            "held_quote": APSchedulerThreadPoolExecutor(max_workers=1),
+            "heartbeat": APSchedulerThreadPoolExecutor(max_workers=1),
+        },
+    )
 
     # PRODUCER 1: start the persistent user-channel WS ingestor THREAD. This is the
     # ws_gap_guard latch WRITER — running it HERE (not in the order daemon) is the
@@ -252,6 +261,19 @@ def main() -> None:
         max_instances=1,
         coalesce=True,
     )
+    # PRODUCER 2A: held-position quote witness refresh. This must not share executor
+    # capacity with broad user-channel reconcile or market-substrate scans; monitor/
+    # redecision preflight is keyed to these rows for open exposure.
+    _scheduler.add_job(
+        _scheduler_job("edli_held_quote_refresh")(_edli_held_quote_refresh_cycle),
+        "interval",
+        seconds=60,
+        id="edli_held_quote_refresh",
+        max_instances=1,
+        coalesce=True,
+        executor="held_quote",
+        next_run_time=datetime.now(timezone.utc),
+    )
     # PRODUCER 3: user-channel/reconcile + durable fill bridge (1-min).
     _scheduler.add_job(
         _scheduler_job("edli_user_channel_reconcile")(_edli_user_channel_reconcile_cycle),
@@ -270,6 +292,7 @@ def main() -> None:
         id="price_channel_ingest_heartbeat",
         max_instances=1,
         coalesce=True,
+        executor="heartbeat",
         next_run_time=datetime.now(timezone.utc),
     )
 

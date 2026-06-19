@@ -1398,6 +1398,34 @@ def _edli_refresh_held_position_quote_evidence() -> dict:
             world_conn.close()
 
 
+def _edli_held_quote_refresh_cycle() -> dict:
+    """Scheduler entry point for held-position quote freshness.
+
+    This is deliberately separate from ``_edli_market_channel_ingestor_cycle``:
+    the market-channel/user-channel lanes can spend minutes in broad reconcile
+    or substrate scans, but held exposure needs bounded quote evidence refresh
+    before monitor/redecision can safely resume.
+    """
+
+    from src.observability.scheduler_health import _write_scheduler_health
+
+    try:
+        result = _edli_refresh_held_position_quote_evidence()
+    except Exception as exc:  # noqa: BLE001
+        _write_scheduler_health(
+            "edli_held_quote_refresh",
+            failed=True,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    _write_scheduler_health(
+        "edli_held_quote_refresh",
+        failed=False,
+        extra=result,
+    )
+    return result
+
+
 def _edli_market_channel_ingestor_cycle() -> None:
     """EDLI market-channel online data-service bootstrap.
 
@@ -1412,11 +1440,6 @@ def _edli_market_channel_ingestor_cycle() -> None:
         return
     global _edli_market_channel_thread
     if _edli_market_channel_thread is not None and _edli_market_channel_thread.is_alive():
-        try:
-            held_refresh = _edli_refresh_held_position_quote_evidence()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("EDLI held-position quote refresh failed (non-fatal): %s", exc)
-            held_refresh = {"held_quote_refresh_error": f"{type(exc).__name__}: {exc}"}
         _write_scheduler_health(
             "edli_market_channel_ingestor",
             failed=False,
@@ -1424,7 +1447,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                 "thread": "alive",
                 "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
                 "fill_authority": "user_channel_or_reconcile_only",
-                **held_refresh,
+                "held_quote_refresh": "delegated_to_edli_held_quote_refresh",
             },
         )
         return
