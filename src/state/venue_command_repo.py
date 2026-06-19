@@ -3222,9 +3222,52 @@ def find_unresolved_commands(conn: sqlite3.Connection) -> Iterable[dict]:
     values = tuple(state.value for state in _IN_FLIGHT_STATES)
     placeholders = ",".join("?" for _ in values)
     with _row_factory_as(conn, sqlite3.Row):
+        has_envelopes = _review_clearance_table_exists(conn, "venue_submission_envelopes")
+        has_snapshots = _review_clearance_table_exists(conn, "executable_market_snapshots")
+        env_select = (
+            """
+            env.condition_id AS env_condition_id,
+            env.yes_token_id AS env_yes_token_id,
+            env.no_token_id AS env_no_token_id,
+            env.selected_outcome_token_id AS env_selected_outcome_token_id,
+            env.outcome_label AS env_outcome_label,
+            """
+            if has_envelopes
+            else ""
+        )
+        env_join = (
+            "LEFT JOIN venue_submission_envelopes env ON env.envelope_id = cmd.envelope_id"
+            if has_envelopes
+            else ""
+        )
+        snapshot_select = (
+            """
+            snap.condition_id AS snapshot_condition_id,
+            snap.yes_token_id AS snapshot_yes_token_id,
+            snap.no_token_id AS snapshot_no_token_id,
+            snap.selected_outcome_token_id AS snapshot_selected_outcome_token_id,
+            snap.outcome_label AS snapshot_outcome_label,
+            """
+            if has_snapshots
+            else ""
+        )
+        snapshot_join = (
+            "LEFT JOIN executable_market_snapshots snap ON snap.snapshot_id = cmd.snapshot_id"
+            if has_snapshots
+            else ""
+        )
         rows = conn.execute(
-            "SELECT * FROM venue_commands "
-            f"WHERE state IN ({placeholders})",
+            f"""
+            SELECT
+              cmd.*,
+              {env_select}
+              {snapshot_select}
+              cmd.command_id AS command_id
+            FROM venue_commands cmd
+            {env_join}
+            {snapshot_join}
+            WHERE cmd.state IN ({placeholders})
+            """,
             values,
         ).fetchall()
     return [_row_to_dict(r) for r in rows]

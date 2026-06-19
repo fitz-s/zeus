@@ -3815,7 +3815,7 @@ def _append_entry_order_voided_projection(
     append_many_and_project(conn, [event], projection)
 
 
-def _entry_projection_is_pending_zero_exposure(
+def _ensure_entry_projection_is_pending_zero_exposure(
     conn: sqlite3.Connection,
     *,
     command: dict,
@@ -3823,7 +3823,29 @@ def _entry_projection_is_pending_zero_exposure(
 ) -> bool:
     try:
         current = _position_current_for_terminal_order(conn, command=command, order_id=order_id)
-    except (MissingPositionCurrentForTerminalOrder, ValueError):
+    except MissingPositionCurrentForTerminalOrder:
+        try:
+            _append_live_entry_projection_repair(
+                conn,
+                candidate={
+                    **command,
+                    "order_fact_venue_order_id": order_id,
+                    "order_fact_observed_at": command.get("updated_at") or _now_iso(),
+                },
+            )
+            current = _position_current_for_terminal_order(
+                conn,
+                command=command,
+                order_id=order_id,
+            )
+        except Exception as exc:
+            logger.info(
+                "recovery: command %s terminal no-fill projection repair unavailable: %s",
+                command.get("command_id"),
+                exc,
+            )
+            return False
+    except ValueError:
         return False
     return (
         str(current.get("phase") or "") == "pending_entry"
@@ -5557,7 +5579,7 @@ def _review_required_cancel_unknown_live_order_recovery(
                 (cmd.command_id,),
             ).fetchone()
         )
-        if not _entry_projection_is_pending_zero_exposure(
+        if not _ensure_entry_projection_is_pending_zero_exposure(
             conn,
             command=command,
             order_id=venue_order_id,
@@ -5815,7 +5837,7 @@ def _review_required_cancel_unknown_live_order_recovery(
                     (cmd.command_id,),
                 ).fetchone()
             )
-            if not _entry_projection_is_pending_zero_exposure(
+            if not _ensure_entry_projection_is_pending_zero_exposure(
                 conn,
                 command=command,
                 order_id=venue_order_id,
@@ -6326,6 +6348,19 @@ def _review_required_post_ack_terminal_no_fill_recovery(
     sp_name = f"sp_post_ack_no_fill_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
+        if not _ensure_entry_projection_is_pending_zero_exposure(
+            conn,
+            command=command,
+            order_id=venue_order_id,
+        ):
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.info(
+                "recovery: command %s REVIEW_REQUIRED post-ACK stayed "
+                "(terminal no-fill proof but entry projection is not zero-exposure pending)",
+                cmd.command_id,
+            )
+            return "stayed"
         append_event(
             conn,
             command_id=cmd.command_id,
@@ -6333,26 +6368,21 @@ def _review_required_post_ack_terminal_no_fill_recovery(
             occurred_at=now,
             payload=payload,
         )
-        if _entry_projection_is_pending_zero_exposure(
+        _append_entry_order_voided_projection(
             conn,
             command=command,
-            order_id=venue_order_id,
-        ):
-            _append_entry_order_voided_projection(
-                conn,
-                command=command,
-                order_fact={
-                    **command,
-                    "order_fact_id": terminal_fact_id,
-                    "order_fact_state": latest_fact.get("state"),
-                    "order_fact_observed_at": latest_fact.get("observed_at") or now,
-                    "order_fact_venue_order_id": venue_order_id,
-                    "order_fact_remaining_size": latest_fact.get("remaining_size") or "0",
-                    "order_fact_matched_size": latest_fact.get("matched_size") or "0",
-                    "order_fact_source": latest_fact.get("source") or "REST",
-                },
-                occurred_at=now,
-            )
+            order_fact={
+                **command,
+                "order_fact_id": terminal_fact_id,
+                "order_fact_state": latest_fact.get("state"),
+                "order_fact_observed_at": latest_fact.get("observed_at") or now,
+                "order_fact_venue_order_id": venue_order_id,
+                "order_fact_remaining_size": latest_fact.get("remaining_size") or "0",
+                "order_fact_matched_size": latest_fact.get("matched_size") or "0",
+                "order_fact_source": latest_fact.get("source") or "REST",
+            },
+            occurred_at=now,
+        )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
