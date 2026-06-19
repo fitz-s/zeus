@@ -31,9 +31,10 @@ Bounded per tick by the fair-cursor budget (Wave1B precedent — count only WRIT
 numeric drop-cap on the candidate set).
 
 Idempotency: cycle_advance_enqueues UNIQUE(city, target_date, metric, target_cycle_time). A scope is
-re-enqueued AT MOST ONCE per target-cycle advance — a still-unmaterialized seed (manifest absent,
-subprocess pending) never loops; the NEXT fresher cycle gets its own distinct marker. Fail-soft
-throughout: any per-scope error is logged and skipped; the function never raises into the poll.
+re-enqueued AT MOST ONCE per target-cycle advance once a real seed exists. A typed gap row
+(manifest absent) is healable: when the same target cycle's artifact later appears, the row is
+updated with the seed file instead of blocking the repair. Fail-soft throughout: any per-scope error
+is logged and skipped; the function never raises into the poll.
 """
 from __future__ import annotations
 
@@ -252,13 +253,16 @@ def _already_enqueued(
     metric: str,
     target_cycle_iso: str,
 ) -> bool:
-    """True iff a re-materialization was already enqueued for this exact (scope, target-cycle). The
-    marker is the idempotency bound. Fail-open toward NOT-enqueued only on read error (the UNIQUE
-    index still prevents a duplicate physical row)."""
+    """True iff a real re-materialization seed already exists for this exact target cycle.
+
+    A ``CYCLE_LEG_ARTIFACT_MISSING`` row is a visible, typed gap marker, not a terminal enqueue.
+    Returning False for that row lets the next tick heal it when the same target cycle's artifact
+    finally lands; ``_record_enqueue`` updates the marker in place under the UNIQUE bound.
+    """
     try:
         row = conn.execute(
             """
-            SELECT 1 FROM cycle_advance_enqueues
+            SELECT seed_file, reason FROM cycle_advance_enqueues
             WHERE city = ? AND target_date = ? AND metric = ? AND target_cycle_time = ?
             LIMIT 1
             """,
@@ -266,7 +270,13 @@ def _already_enqueued(
         ).fetchone()
     except Exception:
         return False
-    return row is not None
+    if row is None:
+        return False
+    seed_file = str((row["seed_file"] if hasattr(row, "keys") else row[0]) or "")
+    reason = str((row["reason"] if hasattr(row, "keys") else row[1]) or "")
+    if not seed_file and reason.startswith("CYCLE_LEG_ARTIFACT_MISSING:"):
+        return False
+    return True
 
 
 def _record_enqueue(
@@ -310,7 +320,39 @@ def _record_enqueue(
             reason,
         ),
     )
-    return conn.total_changes > before
+    if conn.total_changes > before:
+        return True
+    if seed_file:
+        update_before = conn.total_changes
+        conn.execute(
+            """
+            UPDATE cycle_advance_enqueues
+               SET enqueued_at = ?,
+                   consumed_cycle_time = ?,
+                   held_position = ?,
+                   seed_file = ?,
+                   reason = ?
+             WHERE city = ?
+               AND target_date = ?
+               AND metric = ?
+               AND target_cycle_time = ?
+               AND seed_file IS NULL
+               AND COALESCE(reason, '') LIKE 'CYCLE_LEG_ARTIFACT_MISSING:%'
+            """,
+            (
+                datetime.now(tz=UTC).isoformat(),
+                consumed_cycle_iso,
+                1 if held_position else 0,
+                seed_file,
+                reason,
+                city,
+                target_date,
+                metric,
+                target_cycle_iso,
+            ),
+        )
+        return conn.total_changes > update_before
+    return False
 
 
 def enqueue_cycle_advance_reseeds(
@@ -574,12 +616,11 @@ def enqueue_single_family_cycle_advance_reseed(
     computed_at: datetime | None = None,
 ) -> dict[str, object]:
     """ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12). Single-family variant of
-    ``enqueue_cycle_advance_reseeds``: when the reactor finds ONE family blocked on a STALE/absent
-    replacement posterior, re-materialize THAT family's posterior onto the freshest materializable
-    cycle — no plan scan, no fan-out. Same comparison (``scope_needs_cycle_advance``), same seed
-    builder, same idempotency marker (``cycle_advance_enqueues`` UNIQUE(scope, target_cycle)) as
-    the poll-lane batch variant, so a family already enqueued by the poll never double-enqueues
-    here and vice-versa.
+    ``enqueue_cycle_advance_reseeds``: when the reactor/monitor finds ONE family blocked on a
+    STALE or ABSENT replacement posterior, materialize THAT family's posterior onto the freshest
+    materializable cycle — no plan scan, no fan-out. Same seed builder, same idempotency marker
+    (``cycle_advance_enqueues`` UNIQUE(scope, target_cycle)) as the poll-lane batch variant, so a
+    family already enqueued by the poll never double-enqueues here and vice-versa.
 
     Fail-soft throughout: any error returns a status dict, never raises into the reactor cycle.
     Returns a compact report ({status, enqueued, seed_file, ...}).
@@ -640,18 +681,12 @@ def enqueue_single_family_cycle_advance_reseed(
         verdict = scope_needs_cycle_advance(
             conn, city=city, target_date=target_date, metric=metric, freshest_cycle=freshest
         )
-        if not verdict["needs_advance"]:
-            # No newer cycle than the one the posterior already consumed: the staleness is not a
-            # missed-cycle gap this lane can cure (e.g. no posterior exists yet — that is the
-            # fresh-seed discovery's job, not re-materialization). Honest no-op.
-            report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
-            report["consumed_cycle"] = verdict["consumed_cycle"]
-            return report
-        consumed_cycle_iso = str(verdict["consumed_cycle"])
-        target_cycle_iso = str(verdict["target_cycle"])
-        # FINDING 2 (external review 2026-06-12): re-check at FAMILY SCOPE. The verdict used the
-        # universe-wide freshest cycle, which can falsely claim advance when a leg's raw artifact is
-        # missing for THIS family. Same single authority, narrowed to scope.
+        consumed_cycle_iso = (
+            str(verdict["consumed_cycle"])
+            if verdict.get("consumed_cycle") is not None
+            else "NO_LIVE_POSTERIOR"
+        )
+        target_cycle_iso = str(verdict["target_cycle"] or freshest.isoformat())
         family_cycle, missing_legs = family_materializable_cycle(
             manifests,
             city=city,
@@ -682,6 +717,69 @@ def enqueue_single_family_cycle_advance_reseed(
             report["status"] = "CYCLE_ADVANCE_LEG_ARTIFACT_MISSING"
             report["reason"] = reason
             report["consumed_cycle"] = consumed_cycle_iso
+            report["target_cycle"] = target_cycle_iso
+            return report
+        if not verdict["needs_advance"]:
+            if verdict.get("consumed_cycle") is not None:
+                # No newer cycle than the one the posterior already consumed: the staleness is not a
+                # missed-cycle gap this lane can cure. Honest no-op.
+                report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
+                report["consumed_cycle"] = verdict["consumed_cycle"]
+                return report
+            if family_cycle is None:
+                report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
+                report["consumed_cycle"] = None
+                return report
+            target_cycle_iso = family_cycle.isoformat()
+            if _already_enqueued(
+                conn, city=city, target_date=target_date, metric=metric, target_cycle_iso=target_cycle_iso
+            ):
+                report["status"] = "CYCLE_ADVANCE_ALREADY_ENQUEUED"
+                return report
+            seed_file = _build_and_write_advance_seed(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                manifests=manifests,
+                raw_dir=raw_dir,
+                seed_path=seed_path,
+                computed_at=now,
+                build_seed=build_replacement_forecast_materialization_seed,
+                latest_baseline_coverage=latest_baseline_coverage_for_replacement_seed,
+                market_bins=market_bins_for_replacement_seed,
+                write_seed=write_seed,
+                latest_manifest=_latest_manifest,
+                manifest_path_value=_manifest_path_value,
+                manifest_base_dir=_manifest_base_dir,
+                resolve_path=_resolve_path,
+                seed_name=_seed_name,
+                expected_identity=expected_replacement_dependency_identity_by_role,
+                upgrade_trigger="missing_live_posterior_reseed",
+            )
+            if seed_file is None:
+                report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
+                return report
+            inserted = _record_enqueue(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                consumed_cycle_iso="NO_LIVE_POSTERIOR",
+                target_cycle_iso=target_cycle_iso,
+                held_position=False,
+                seed_file=str(seed_file),
+                reason="MISSING_LIVE_POSTERIOR",
+            )
+            conn.commit()
+            report["enqueued"] = bool(inserted)
+            report["status"] = (
+                "CYCLE_ADVANCE_FIRST_MATERIALIZATION_ENQUEUED"
+                if inserted
+                else "CYCLE_ADVANCE_ALREADY_ENQUEUED"
+            )
+            report["seed_file"] = str(seed_file)
+            report["consumed_cycle"] = None
             report["target_cycle"] = target_cycle_iso
             return report
         if family_cycle is None or family_cycle <= consumed_cycle_dt(consumed_cycle_iso):
@@ -715,6 +813,7 @@ def enqueue_single_family_cycle_advance_reseed(
             resolve_path=_resolve_path,
             seed_name=_seed_name,
             expected_identity=expected_replacement_dependency_identity_by_role,
+            upgrade_trigger="newer_cycle_ingested",
         )
         if seed_file is None:
             report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
@@ -766,6 +865,7 @@ def _build_and_write_advance_seed(
     resolve_path,
     seed_name,
     expected_identity,
+    upgrade_trigger: str = "newer_cycle_ingested",
 ) -> Path | None:
     """Build one re-materialization seed for a scope using the existing seed-builder pieces and
     write it into seed_dir. Returns the seed Path, or None when the required manifests/context are
@@ -810,7 +910,7 @@ def _build_and_write_advance_seed(
     # Honest re-materialization provenance: this seed exists because a NEWER cycle landed, not a
     # fresh first materialization. Threaded into provenance_json so the posterior records WHY.
     seed_payload: dict[str, object] = dict(seed_result.seed)
-    seed_payload["upgrade_trigger"] = "newer_cycle_ingested"
+    seed_payload["upgrade_trigger"] = upgrade_trigger
     seed_file = seed_path / seed_name(
         {"city": city, "target_date": target_date, "temperature_metric": metric},
         computed_at=computed_at,

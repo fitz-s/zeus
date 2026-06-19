@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-06-19
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 # Lifecycle: created=2026-05-19; last_reviewed=2026-06-17; last_reused=2026-06-17
@@ -206,6 +206,29 @@ def test_mode_specific_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
     assert result["surfaces"]["run_mode"]["ok"] is False
     assert result["surfaces"]["run_mode"]["issue"] == (
         "RUN_MODE_FAILED[run_mode:opening_hunt]: exchange reconcile stuck"
+    )
+
+
+def test_bpf_capture_failed_yields_forecast_pipeline_degraded(tmp_path: Path) -> None:
+    sd = tmp_path
+    _setup_healthy_state(sd)
+    health_path = sd / "scheduler_jobs_health.json"
+    scheduler = json.loads(health_path.read_text())
+    scheduler["bayes_precision_fusion_capture"] = {
+        "status": "FAILED",
+        "last_failure_reason": "global models unavailable",
+        "last_run_at": _now_iso(-5),
+    }
+    _write(health_path, scheduler)
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["healthy"] is False
+    assert result["status"] == "DEGRADED"
+    assert "forecast_pipeline" in result["failing_surfaces"]
+    assert result["surfaces"]["forecast_pipeline"]["ok"] is False
+    assert "bayes_precision_fusion_capture" in (
+        result["surfaces"]["forecast_pipeline"]["issue"] or ""
     )
 
 

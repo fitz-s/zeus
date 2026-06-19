@@ -43,11 +43,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping
 
+from src.data.replacement_forecast_readiness import (
+    LIVE_RUNTIME_LAYER,
+    SOURCE_ID as LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_AGE_HOURS = 9.0
 BELIEF_SOURCE_TABLE = "forecast_posteriors"
 SELECTED_METHOD_REPLACEMENT_POSTERIOR = "replacement_posterior"
+LIVE_REPLACEMENT_POSTERIOR_METHOD = LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID
 
 _WS_RE = re.compile(r"\s+")
 
@@ -72,17 +78,25 @@ class ReplacementBelief:
     source_cycle_time: str | None = None
     source_cycle_age_hours: float | None = None
     freshness_basis: str = "computed_at"
-    runtime_layer: str = "live"
+    runtime_layer: str = LIVE_RUNTIME_LAYER
+    source_id: str | None = None
+    posterior_method: str | None = None
 
     def freshness_validation(self) -> str:
         state = "fresh" if self.fresh else "stale"
+        authority = ""
+        if self.source_id or self.posterior_method:
+            authority = (
+                f";source_id={self.source_id or ''};"
+                f"posterior_method={self.posterior_method or ''}"
+            )
         if self.source_cycle_age_hours is not None:
             return (
                 f"belief_source={self.source_table};age_h={self.age_hours:.2f};"
                 f"source_cycle_age_h={self.source_cycle_age_hours:.2f};"
-                f"basis={self.freshness_basis};{state}"
+                f"basis={self.freshness_basis}{authority};{state}"
             )
-        return f"belief_source={self.source_table};age_h={self.age_hours:.2f};{state}"
+        return f"belief_source={self.source_table};age_h={self.age_hours:.2f}{authority};{state}"
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -169,16 +183,35 @@ def load_replacement_belief(
             if "source_cycle_time" in columns
             else "NULL AS source_cycle_time"
         )
+        source_id_expr = "source_id" if "source_id" in columns else "NULL AS source_id"
+        posterior_method_expr = (
+            "posterior_method"
+            if "posterior_method" in columns
+            else "NULL AS posterior_method"
+        )
+        authority_predicates: list[str] = []
+        authority_params: list[object] = [city, target_date, temperature_metric]
+        if "source_id" in columns:
+            authority_predicates.append("source_id = ?")
+            authority_params.append(LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID)
+        if "posterior_method" in columns:
+            authority_predicates.append("posterior_method = ?")
+            authority_params.append(LIVE_REPLACEMENT_POSTERIOR_METHOD)
+        authority_sql = ""
+        if authority_predicates:
+            authority_sql = " AND " + " AND ".join(authority_predicates)
         row = conn.execute(
             f"""
-            SELECT posterior_id, computed_at, q_json, {source_cycle_expr}, runtime_layer
+            SELECT posterior_id, computed_at, q_json, {source_cycle_expr}, runtime_layer,
+                   {source_id_expr}, {posterior_method_expr}
             FROM forecast_posteriors
             WHERE city = ? AND target_date = ? AND temperature_metric = ?
-              AND runtime_layer = 'live'
+              AND runtime_layer = ?
+              {authority_sql}
             ORDER BY datetime(computed_at) DESC, posterior_id DESC
             LIMIT 1
             """,
-            (city, target_date, temperature_metric),
+            tuple([*authority_params[:3], LIVE_RUNTIME_LAYER, *authority_params[3:]]),
         ).fetchone()
     except sqlite3.Error as exc:
         logger.warning("position_belief: posterior read failed: %s", exc)
@@ -243,6 +276,10 @@ def load_replacement_belief(
         source_cycle_age_hours=source_cycle_age_hours,
         freshness_basis=freshness_basis,
         runtime_layer=str(row["runtime_layer"]),
+        source_id=(str(row["source_id"]) if row["source_id"] is not None else None),
+        posterior_method=(
+            str(row["posterior_method"]) if row["posterior_method"] is not None else None
+        ),
     )
 
 

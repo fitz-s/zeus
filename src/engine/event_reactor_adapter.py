@@ -1851,20 +1851,23 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
                 command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
+                certificate_decision_time = command.header.decision_time
                 assert executor_submit is not None
-                submit_result = executor_submit(final_intent, command)
+                submit_result = _normalize_event_bound_executor_submit_result(
+                    executor_submit(final_intent, command)
+                )
                 if submit_result.venue_call_started:
                     _append_venue_submit_attempted_aggregate_event(
                         live_cap_conn or trade_conn,
                         command,
-                        decision_time=decision_time.astimezone(UTC),
+                        decision_time=certificate_decision_time,
                     )
                     _live_submit_count[0] += 1
                 if submit_result.venue_ack_received:
                     _live_ack_count[0] += 1  # FIX-4 venue_acks: count actual ACKs
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
-                    decision_time=decision_time.astimezone(UTC),
+                    decision_time=certificate_decision_time,
                     status=submit_result.status,
                     reason_code=submit_result.reason_code,
                     submit_started_at=submit_result.submit_started_at,
@@ -1882,7 +1885,7 @@ def event_bound_live_adapter_from_trade_conn(
                     command,
                     receipt_cert,
                     submit_result=submit_result,
-                    decision_time=decision_time.astimezone(UTC),
+                    decision_time=certificate_decision_time,
                 )
                 transition_cert = _transition_live_cap_after_submit(
                     command_certificates,
@@ -1890,7 +1893,7 @@ def event_bound_live_adapter_from_trade_conn(
                     command,
                     receipt_cert,
                     submit_result,
-                    decision_time=decision_time.astimezone(UTC),
+                    decision_time=certificate_decision_time,
                 )
                 certificates = command_certificates + (receipt_cert, transition_cert)
                 side_effect_status = submit_result.status
@@ -3973,9 +3976,10 @@ def _build_submit_disabled_live_certificates(
         pre_submit_authority_provider=pre_submit_authority_provider,
     )
     command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
+    certificate_decision_time = command.header.decision_time
     receipt_cert = build_execution_receipt_certificate(
         execution_command_cert=command,
-        decision_time=decision_time,
+        decision_time=certificate_decision_time,
         status="SUBMIT_DISABLED",
         reason_code="REAL_ORDER_SUBMIT_DISABLED",
     )
@@ -3983,9 +3987,48 @@ def _build_submit_disabled_live_certificates(
         command_certificates,
         receipt_cert,
         live_cap_conn,
-        decision_time=decision_time,
+        decision_time=certificate_decision_time,
     )
     return command_certificates + (receipt_cert, transition_cert)
+
+
+def _normalize_event_bound_executor_submit_result(
+    result: EventBoundExecutorSubmitResult,
+) -> EventBoundExecutorSubmitResult:
+    status = str(result.status or "").strip().upper()
+    venue_call_started = bool(result.venue_call_started)
+    venue_ack_received = bool(result.venue_ack_received)
+    reconciliation_followup_required = bool(result.reconciliation_followup_required)
+    side_effect_known = bool(result.side_effect_known)
+
+    if status in {"SUBMITTED", "REJECTED", "TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
+        venue_call_started = True
+    if status in {"SUBMITTED", "REJECTED"}:
+        venue_ack_received = True
+        side_effect_known = True
+    if status in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
+        reconciliation_followup_required = True
+    if status == "POST_SUBMIT_UNKNOWN":
+        side_effect_known = False
+    if status == "PRE_SUBMIT_ERROR":
+        venue_call_started = False
+        venue_ack_received = False
+        side_effect_known = True
+
+    if (
+        venue_call_started == result.venue_call_started
+        and venue_ack_received == result.venue_ack_received
+        and reconciliation_followup_required == result.reconciliation_followup_required
+        and side_effect_known == result.side_effect_known
+    ):
+        return result
+    return dataclass_replace(
+        result,
+        venue_call_started=venue_call_started,
+        venue_ack_received=venue_ack_received,
+        reconciliation_followup_required=reconciliation_followup_required,
+        side_effect_known=side_effect_known,
+    )
 
 
 # Sentinel prefix the caller (process_pending submit body) recognizes to map a
@@ -4230,6 +4273,7 @@ def _build_live_execution_command_certificates(
     )
     _assert_event_bound_receipt_live_authority(receipt)
     proof_bundle = receipt.decision_proof_bundle
+    decision_time = _live_certificate_decision_time_from_proof_bundle(decision_time, proof_bundle)
     compile_result = DecisionCompiler().compile_no_submit(
         event,
         decision_time=decision_time,
@@ -6295,6 +6339,64 @@ def _required_cert(certs: tuple[DecisionCertificate, ...], certificate_type: str
         if cert.certificate_type == certificate_type:
             return cert
     raise ValueError(f"missing required certificate: {certificate_type}")
+
+
+_NO_SUBMIT_PROOF_EVIDENCE_FIELDS: tuple[str, ...] = (
+    "source_truth",
+    "market_topology",
+    "family_closure",
+    "forecast_authority",
+    "calibration",
+    "model_config",
+    "belief",
+    "executable_snapshot",
+    "quote_feasibility",
+    "cost_model",
+    "pre_trade_evidence",
+    "candidate_evidence",
+    "testing_protocol",
+    "fdr",
+    "kelly_dry_run",
+    "risk_level",
+)
+
+
+def _utc_datetime_or_none(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+    if isinstance(value, str) and value:
+        return _parse_utc(value)
+    return None
+
+
+def _live_certificate_decision_time_from_proof_bundle(
+    decision_time: datetime,
+    proof_bundle: NoSubmitProofBundle | None,
+) -> datetime:
+    """Return the earliest lawful certificate time for the proof bundle.
+
+    Event redecision can be triggered by an older durable event and then re-read
+    fresher forecast/quote/topology evidence before the final submit seam. The
+    verifier is correct to reject any parent evidence after the certificate
+    decision_time; the adapter must therefore generate the live certificate chain
+    at the max time when all selected parents were actually available.
+    """
+
+    resolved = _utc_datetime_or_none(decision_time) or datetime.now(UTC)
+    if proof_bundle is None:
+        return resolved
+    for field_name in _NO_SUBMIT_PROOF_EVIDENCE_FIELDS:
+        evidence = getattr(proof_bundle, field_name, None)
+        if not isinstance(evidence, AuthorityEvidence):
+            continue
+        clock = evidence.clock
+        for attr in ("source_available_at", "agent_received_at", "persisted_at"):
+            value = _utc_datetime_or_none(getattr(clock, attr, None))
+            if value is not None and value > resolved:
+                resolved = value
+    return resolved
 
 
 def _require_snapshot_hash(snapshot: object) -> str:
@@ -10148,15 +10250,18 @@ def _family_existing_exposure_for_selection_by_bin_id(
     onto the ALREADY-selected bin — a post-selection sizing input), this attributes
     each open committed position to its OWN family bin by matching the position's
     ``condition_id`` to the family candidate's ``condition_id``, keyed by
-    ``_candidate_bin_id`` so it lines up with the candidates' bins.
+    ``_candidate_bin_id`` so it lines up with the candidates' bins. The
+    attribution must be direction-aware: a buy_yes position pays on its own bin,
+    while a buy_no position pays on every other family outcome, including OUTSIDE.
 
     Scope (what is honestly attributable per-bin at selection): COMMITTED open
-    positions carry a ``condition_id`` that maps to exactly one family bin, so their
-    ``effective_cost_basis_usd`` is the per-bin exposure ``A_y`` the concave ΔU
-    objective shrinks against. Same-cycle reservations are city-keyed with NO bin
-    identity, so they are NOT fabricated onto a bin here — the post-selection
-    recapture already nets them by city. Returns ``{}`` (flat baseline, prior
-    behavior byte-for-byte) when no provider is wired or no open position matches a
+    positions carry a ``condition_id`` that maps to exactly one family bin, so
+    their ``effective_cost_basis_usd`` is projected through the same payoff
+    geometry as ``FamilyPayoffMatrix`` before the concave ΔU objective shrinks
+    against it. Same-cycle reservations are city-keyed with NO bin identity, so
+    they are NOT fabricated onto a bin here — the post-selection recapture
+    already nets them by city. Returns ``{}`` (flat baseline, prior behavior
+    byte-for-byte) when no provider is wired or no open position matches a
     family bin's condition_id.
     """
     if portfolio_state_provider is None:
@@ -10178,6 +10283,9 @@ def _family_existing_exposure_for_selection_by_bin_id(
         state = portfolio_state_provider()
         if state is None:
             return {}
+        all_family_outcomes = tuple(dict.fromkeys(bin_id_by_condition.values())) + (
+            utility_ranker.OUTSIDE_OUTCOME,
+        )
         exposure_by_bin: dict[str, float] = {}
         for pos in get_open_positions(state):
             cond = str(getattr(pos, "condition_id", "") or "")
@@ -10185,8 +10293,17 @@ def _family_existing_exposure_for_selection_by_bin_id(
             if bin_id is None:
                 continue
             committed = float(_runtime_open_exposure_usd(pos))
-            if committed > 0.0:
-                exposure_by_bin[bin_id] = exposure_by_bin.get(bin_id, 0.0) + committed
+            if committed <= 0.0:
+                continue
+            direction = str(getattr(pos, "direction", "") or "").strip()
+            if direction == "buy_no":
+                outcome_ids = tuple(
+                    outcome for outcome in all_family_outcomes if outcome != bin_id
+                )
+            else:
+                outcome_ids = (bin_id,)
+            for outcome_id in outcome_ids:
+                exposure_by_bin[outcome_id] = exposure_by_bin.get(outcome_id, 0.0) + committed
         return exposure_by_bin
     except (TypeError, ValueError, ImportError):
         return {}

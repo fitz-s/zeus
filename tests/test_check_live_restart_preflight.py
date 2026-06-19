@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Lifecycle: created=2026-06-18; last_reviewed=2026-06-19; last_reused=2026-06-19
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -102,6 +102,11 @@ def _patch_paths(monkeypatch, tmp_path):
     scheduler_health.write_text(
         json.dumps(
             {
+                "bayes_precision_fusion_capture": {
+                    "status": "OK",
+                    "last_run_at": now,
+                    "last_success_at": now,
+                },
                 "replacement_forecast_download": {
                     "status": "OK",
                     "last_run_at": now,
@@ -252,6 +257,11 @@ def test_preflight_blocks_unhealthy_replacement_forecast_sidecar(monkeypatch, tm
     preflight.SCHEDULER_HEALTH_PATH.write_text(
         json.dumps(
             {
+                "bayes_precision_fusion_capture": {
+                    "status": "OK",
+                    "last_run_at": fresh.isoformat(),
+                    "last_success_at": fresh.isoformat(),
+                },
                 "replacement_forecast_download": {
                     "status": "OK",
                     "last_run_at": fresh.isoformat(),
@@ -275,6 +285,40 @@ def test_preflight_blocks_unhealthy_replacement_forecast_sidecar(monkeypatch, tm
     assert sidecar["ok"] is False
     assert sidecar["evidence"]["risky"][0]["risk"] == "latest_scheduler_outcome_failed"
     assert "trade_authority_status" in sidecar["evidence"]["risky"][0]["last_failure_reason"]
+
+
+def test_preflight_blocks_unhealthy_bpf_capture_scheduler_job(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_trade_db(trade_db).close()
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    forecasts.commit()
+    forecasts.close()
+    health = json.loads(preflight.SCHEDULER_HEALTH_PATH.read_text())
+    health["bayes_precision_fusion_capture"] = {
+        "status": "FAILED",
+        "last_run_at": fresh.isoformat(),
+        "last_failure_at": fresh.isoformat(),
+        "last_failure_reason": "global_models_unavailable",
+    }
+    preflight.SCHEDULER_HEALTH_PATH.write_text(json.dumps(health))
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    sidecar = next(c for c in result["checks"] if c["name"] == "forecast_sidecar_health")
+    assert sidecar["ok"] is False
+    assert sidecar["evidence"]["risky"][0]["job"] == "bayes_precision_fusion_capture"
+    assert sidecar["evidence"]["risky"][0]["risk"] == "scheduler_job_failed"
 
 
 def test_preflight_blocks_forecast_live_heartbeat_missing_replacement_jobs(monkeypatch, tmp_path):
@@ -445,6 +489,75 @@ def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tm
     belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
     assert belief["ok"] is False
     assert belief["evidence"]["risky"][0]["risk"] == "stale_live_belief"
+
+
+def test_preflight_accepts_missing_belief_when_single_family_reseed_is_materializable(
+    monkeypatch, tmp_path
+):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    _add_identity_columns(trade)
+    _init_sidecar_surfaces_for_identity(
+        trade,
+        now=fresh,
+        condition_id="cond-sh",
+        yes_token_id="tok-sh-yes",
+        no_token_id="tok-sh-no",
+    )
+    label = "Will the highest temperature in Shanghai be 31°C on June 19?"
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric, bin_label,
+            direction, shares, chain_shares, order_status, exit_reason,
+            exit_retry_count, next_exit_retry_at, last_monitor_prob,
+            last_monitor_prob_is_fresh, last_monitor_market_price,
+            last_monitor_market_price_is_fresh, updated_at,
+            condition_id, token_id, no_token_id
+        ) VALUES (
+            'sh-pos', 'day0_window', 'Shanghai', '2026-06-19', 'high',
+            ?, 'buy_no', 5.0, 5.0, 'filled', NULL, 0, NULL,
+            0.84, 0, 0.72, 1, '2026-06-19T01:00:00+00:00',
+            'cond-sh', 'tok-sh-yes', 'tok-sh-no'
+        )
+        """,
+        (label,),
+    )
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    monkeypatch.setattr(
+        preflight,
+        "_single_family_reseed_repair_evidence",
+        lambda item: {
+            **item,
+            "risk": "missing_live_belief_repairable_by_single_family_reseed",
+            "family_materializable_cycle": "2026-06-18T18:00:00+00:00",
+            "write_performed": False,
+        },
+    )
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is True
+    belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
+    assert belief["ok"] is True
+    assert belief["evidence"]["risky"] == []
+    assert belief["evidence"]["repairable"][0]["position_id"] == "sh-pos"
 
 
 def test_preflight_passes_when_sidecars_and_live_surfaces_are_fresh(monkeypatch, tmp_path):

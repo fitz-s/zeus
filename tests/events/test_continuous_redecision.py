@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-06-19
 # Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, critic-resolved) +
 #   GOAL #36 expanded (continuous entry+exit, evidence-gated). RED-first relationship tests for the
 #   continuous re-decision contract. These pin the cache (P1) + cheap-screen/enqueue (P2) API BEFORE
@@ -348,6 +348,61 @@ def test_entry_redecision_reader_treats_18z_runtime_layer_live_as_live():
         metric="high",
         decision_time="2026-05-31T20:00:00+00:00",
     ) == "2026-05-31T18:00:00+00:00"
+
+
+def test_entry_redecision_latest_cycle_ignores_deprecated_aifs_residue():
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            computed_at TEXT,
+            runtime_layer TEXT,
+            source_id TEXT,
+            posterior_method TEXT
+        )
+        """
+    )
+    forecasts.executemany(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, source_available_at, computed_at, runtime_layer,
+            source_id, posterior_method
+        ) VALUES (?, 'Wuhan', '2026-06-01', 'high', ?, ?, ?, 'live', ?, ?)
+        """,
+        [
+            (
+                1,
+                "2026-05-31T12:00:00+00:00",
+                "2026-05-31T13:00:00+00:00",
+                "2026-05-31T13:05:00+00:00",
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
+            ),
+            (
+                2,
+                "2026-05-31T18:00:00+00:00",
+                "2026-05-31T19:00:00+00:00",
+                "2026-05-31T19:05:00+00:00",
+                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+            ),
+        ],
+    )
+
+    assert cr._latest_posterior_source_cycle_for_family(
+        forecasts,
+        city="Wuhan",
+        target_date="2026-06-01",
+        metric="high",
+        decision_time="2026-05-31T20:00:00+00:00",
+    ) == "2026-05-31T12:00:00+00:00"
 
 
 def test_entry_redecision_ignores_non_live_posterior_cycle():

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Lifecycle: created=2026-06-18; last_reviewed=2026-06-19; last_reused=2026-06-19
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-06-19
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -56,7 +56,12 @@ SIDECAR_HEARTBEATS = (
     ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
     ("post_trade_capital_daemon", "daemon-heartbeat-post-trade-capital.json"),
 )
-REPLACEMENT_SIDECAR_JOBS = (
+REPLACEMENT_SCHEDULER_HEALTH_JOBS = (
+    "bayes_precision_fusion_capture",
+    "replacement_forecast_download",
+    "replacement_forecast_live_materialize",
+)
+REPLACEMENT_HEARTBEAT_JOBS = (
     "replacement_forecast_download",
     "replacement_forecast_live_materialize",
 )
@@ -505,7 +510,7 @@ def _forecast_sidecar_health() -> CheckResult:
     scheduler_health = _read_json(SCHEDULER_HEALTH_PATH)
     job_evidence: dict[str, Any] = {}
     risky: list[dict[str, Any]] = []
-    for job_name in REPLACEMENT_SIDECAR_JOBS:
+    for job_name in REPLACEMENT_SCHEDULER_HEALTH_JOBS:
         entry = scheduler_health.get(job_name)
         if not isinstance(entry, dict):
             risky.append({"job": job_name, "risk": "missing_scheduler_health_entry"})
@@ -570,7 +575,7 @@ def _forecast_sidecar_health() -> CheckResult:
         )
     heartbeat_jobs_raw = heartbeat.get("jobs")
     heartbeat_jobs = set(heartbeat_jobs_raw) if isinstance(heartbeat_jobs_raw, list) else set()
-    missing_heartbeat_jobs = sorted(set(REPLACEMENT_SIDECAR_JOBS) - heartbeat_jobs)
+    missing_heartbeat_jobs = sorted(set(REPLACEMENT_HEARTBEAT_JOBS) - heartbeat_jobs)
     if missing_heartbeat_jobs:
         risky.append(
             {
@@ -769,11 +774,73 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     )
 
 
+def _single_family_reseed_repair_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Read-only proof that the production single-family reseed lane can repair missing belief.
+
+    This does not enqueue or materialize. It verifies the same materializable-family condition the
+    live reseed path will use after restart: a current raw manifest exists for this exact
+    (city, target_date, metric), so a missing posterior can be first-materialized automatically.
+    """
+    try:
+        from src.data.replacement_cycle_advance_trigger import (
+            family_materializable_cycle,
+            freshest_materializable_cycle,
+        )
+        from src.data.replacement_forecast_production import (
+            _replacement_forecast_live_materialization_queue_config,
+        )
+        from src.data.replacement_forecast_seed_discovery import (
+            _latest_manifest,
+            _load_manifests,
+        )
+        from src.data.replacement_forecast_source_run_identity import (
+            expected_replacement_dependency_identity_by_role,
+        )
+
+        cfg = _replacement_forecast_live_materialization_queue_config()
+        raw_manifest_dir = cfg.get("raw_manifest_dir")
+        if raw_manifest_dir is None:
+            return None
+        now = datetime.now(timezone.utc)
+        manifests = _load_manifests(Path(str(raw_manifest_dir)), computed_at=now)
+        from src.state.db import _connect
+
+        conn = _connect(Path(FORECAST_DB), write_class="live")
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            freshest = freshest_materializable_cycle(conn)
+            family_cycle, missing = family_materializable_cycle(
+                manifests,
+                city=str(item["city"]),
+                target_date=str(item["target_date"]),
+                metric=str(item["temperature_metric"]),
+                expected_identity=expected_replacement_dependency_identity_by_role,
+                latest_manifest=_latest_manifest,
+            )
+        finally:
+            conn.close()
+        if family_cycle is None:
+            return None
+        evidence = {
+            **item,
+            "risk": "missing_live_belief_repairable_by_single_family_reseed",
+            "freshest_materializable_cycle": None if freshest is None else freshest.isoformat(),
+            "family_materializable_cycle": family_cycle.isoformat(),
+            "missing_legs": [list(row) for row in missing],
+            "repair_lane": "enqueue_single_family_cycle_advance_reseed",
+            "write_performed": False,
+        }
+        return evidence
+    except Exception:
+        return None
+
+
 def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
     from src.engine.position_belief import load_replacement_belief, monitor_belief_max_age_hours
 
     risky: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
+    repairable: list[dict[str, Any]] = []
     settlement_recoverable: list[dict[str, Any]] = []
     max_age = monitor_belief_max_age_hours()
     settlement_truth = _verified_settlement_truth_for(rows)
@@ -820,6 +887,10 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
             db_path=str(FORECAST_DB),
         )
         if belief is None:
+            repair = _single_family_reseed_repair_evidence(item)
+            if repair is not None:
+                repairable.append(repair)
+                continue
             risky.append({**item, "risk": "missing_live_belief"})
             continue
         evidence = {
@@ -839,12 +910,13 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
     return CheckResult(
         "held_position_belief_coverage",
         not risky,
-        "all active held positions have fresh live belief or verified settlement recovery"
+        "all active held positions have fresh live belief, verified settlement recovery, or repairable reseed"
         if not risky
         else "active held positions have stale/missing live belief or blocked settlement recovery",
         {
             "risky": risky,
             "covered": covered,
+            "repairable": repairable,
             "settlement_recoverable": settlement_recoverable,
             "max_age_hours": max_age,
             "harvester_live_enabled": harvester_enabled,

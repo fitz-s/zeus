@@ -1,5 +1,5 @@
 # Created: 2026-06-15
-# Last reused or audited: 2026-06-16
+# Last reused or audited: 2026-06-19
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
 #   corrections docs/rebuild/consult_review_pr409_round2.md §1/§3/§5. RED-on-revert
 #   tests for the FOUR live-path blockers in the q-kernel integration bridge, folding
@@ -539,7 +539,53 @@ def test_reactor_seam_passes_real_exposure_into_selection():
 
     src = inspect.getsource(era)
     assert "_family_existing_exposure_for_selection_by_bin_id(" in src
-    assert "extra_exposure_by_bin_id=(_spine_selection_exposure or None)" in src
+    assert "extra_exposure_by_bin_id=(_selection_exposure or None)" in src
+
+
+def test_selection_exposure_projects_buy_no_to_non_own_outcomes(monkeypatch):
+    """Existing NO exposure must follow NO payoff geometry before family selection.
+
+    A buy_no position on bin i wins on every outcome except i. Mapping that
+    exposure onto i itself inverts the risk shape and lets the family selector
+    add sibling NO legs as if they were diversifying the position.
+    """
+    from types import SimpleNamespace
+
+    import src.state.portfolio as portfolio
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    bin_by_condition = {}
+    for proof in proofs:
+        bin_by_condition.setdefault(proof.candidate.condition_id, era._candidate_bin_id(proof))
+
+    monkeypatch.setattr(portfolio, "get_open_positions", lambda state: state.positions)
+    monkeypatch.setattr(portfolio, "_runtime_open_exposure_usd", lambda pos: pos.exposure)
+    state = SimpleNamespace(
+        positions=[
+            SimpleNamespace(condition_id="cond-1", direction="buy_no", exposure=12.0)
+        ]
+    )
+
+    exposure = era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=lambda: state,
+        family=family,
+    )
+
+    own_bin = bin_by_condition["cond-1"]
+    assert own_bin not in exposure
+    assert exposure[utility_ranker.OUTSIDE_OUTCOME] == 12.0
+    for cond, bin_id in bin_by_condition.items():
+        if cond == "cond-1":
+            continue
+        assert exposure[bin_id] == 12.0
 
 
 # ===========================================================================

@@ -1,6 +1,9 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12 (external review FINDING 2: per-family materializable-cycle
+# Last reused or audited: 2026-06-19 (external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
+# Lifecycle: created=2026-06-12; last_reviewed=2026-06-19; last_reused=2026-06-19
+# Purpose: Relationship tests for consumed-cycle monotonicity and single-family BPF reseed repair.
+# Reuse: Run when replacement cycle-advance, materialization reseed, or freshness gates change.
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
 #   docs/authority/regime_unification_2026-06-12.md §U2; docs/evidence/freshness/
 #   2026-06-12_forecast_freshness_truth.md §Q3/§Q4). Relationship-first pins for:
@@ -28,6 +31,7 @@ from src.data.replacement_cycle_advance_trigger import (
     freshest_materializable_cycle,
     scope_needs_cycle_advance,
 )
+import src.data.replacement_cycle_advance_trigger as cycle_advance
 from src.data.replacement_forecast_source_run_identity import (
     expected_replacement_dependency_identity_by_role,
 )
@@ -366,6 +370,117 @@ def test_cycle_advance_marker_reason_column_persists() -> None:
     ).fetchone()
     assert row["seed_file"] is None, "a gap row carries no seed_file (it never materialized)"
     assert row["reason"] == reason
+
+
+def test_cycle_advance_gap_marker_heals_to_seed_when_artifact_arrives() -> None:
+    """A typed missing-leg marker is not terminal. When the same target cycle becomes
+    materializable, recording the seed updates the gap row in place under the UNIQUE scope key."""
+    conn = _conn()
+    target_cycle = "2026-06-12T12:00:00+00:00"
+    reason = f"CYCLE_LEG_ARTIFACT_MISSING:openmeteo_ecmwf_ifs_9km@{target_cycle}"
+    conn.execute(
+        """
+        INSERT INTO cycle_advance_enqueues
+            (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+             held_position, seed_file, reason)
+        VALUES ('t', 'CityB', '2026-06-13', 'high', '2026-06-12T06:00:00+00:00',
+                ?, 0, NULL, ?)
+        """,
+        (target_cycle, reason),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="CityB",
+        target_date="2026-06-13",
+        metric="high",
+        target_cycle_iso=target_cycle,
+    ) is False
+
+    inserted = cycle_advance._record_enqueue(
+        conn,
+        city="CityB",
+        target_date="2026-06-13",
+        metric="high",
+        consumed_cycle_iso="2026-06-12T06:00:00+00:00",
+        target_cycle_iso=target_cycle,
+        held_position=True,
+        seed_file="CityB.seed.json",
+        reason=None,
+    )
+    conn.commit()
+    assert inserted is True
+    row = conn.execute(
+        "SELECT held_position, seed_file, reason FROM cycle_advance_enqueues WHERE city = 'CityB'"
+    ).fetchone()
+    assert row["held_position"] == 1
+    assert row["seed_file"] == "CityB.seed.json"
+    assert row["reason"] is None
+
+
+def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypatch) -> None:
+    """Always-decidable repair: a held family with no BPF posterior is a first materialization,
+    not CYCLE_ADVANCE_NOT_NEEDED."""
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    cycle = datetime(2026, 6, 18, 12, tzinfo=UTC)
+    _insert_artifact(
+        conn,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        cycle_iso=cycle.isoformat(),
+    )
+    conn.close()
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (cycle, ()),
+    )
+
+    def _fake_build_seed(_conn_arg, **kwargs):
+        path = Path(kwargs["seed_path"]) / "Shanghai.2026-06-19.high.seed.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"upgrade_trigger": kwargs.get("upgrade_trigger")}),
+            encoding="utf-8",
+        )
+        return path
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _fake_build_seed)
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Shanghai",
+        target_date="2026-06-19",
+        metric="high",
+        computed_at=datetime(2026, 6, 19, 1, tzinfo=UTC),
+    )
+
+    assert report["status"] == "CYCLE_ADVANCE_FIRST_MATERIALIZATION_ENQUEUED"
+    assert report["enqueued"] is True
+    seed_file = Path(str(report["seed_file"]))
+    assert json.loads(seed_file.read_text(encoding="utf-8")) == {
+        "upgrade_trigger": "missing_live_posterior_reseed",
+    }
+
+    check = sqlite3.connect(db_path)
+    check.row_factory = sqlite3.Row
+    row = check.execute(
+        """
+        SELECT consumed_cycle_time, target_cycle_time, seed_file, reason
+        FROM cycle_advance_enqueues
+        WHERE city = 'Shanghai' AND target_date = '2026-06-19' AND metric = 'high'
+        """
+    ).fetchone()
+    check.close()
+    assert row["consumed_cycle_time"] == "NO_LIVE_POSTERIOR"
+    assert row["target_cycle_time"] == cycle.isoformat()
+    assert row["seed_file"] == str(seed_file)
+    assert row["reason"] == "MISSING_LIVE_POSTERIOR"
 
 
 # ===========================================================================

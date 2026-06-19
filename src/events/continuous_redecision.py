@@ -32,6 +32,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from src.contracts.probability_arithmetic import one_minus
+from src.data.replacement_forecast_readiness import (
+    SOURCE_ID as LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+)
 from src.events.opportunity_event import OpportunityEvent
 
 
@@ -1484,6 +1487,12 @@ def _latest_posterior_source_cycle_for_family(
     predicates = ["city = ?", "target_date = ?", "temperature_metric = ?"]
     params: list[object] = [city, target_date, metric]
     predicates.append("runtime_layer = 'live'")
+    if "source_id" in columns:
+        predicates.append("source_id = ?")
+        params.append(LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID)
+    if "posterior_method" in columns:
+        predicates.append("posterior_method = ?")
+        params.append(LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID)
     if "source_available_at" in columns:
         predicates.append("source_available_at <= ?")
         params.append(decision_time)

@@ -1220,64 +1220,28 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
     """Overlay the spine decision's economics onto the selected reactor proof.
 
     The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` / ``trade_score`` /
-    ``execution_price`` etc. off the proof. The spine's selection is the authority now,
-    so the receipt-facing q / edge / trade_score are restamped from the spine's
-    selected ``CandidateEconomics`` (point fair value, robust edge_lcb, optimal ΔU).
-    The executable identity (row / token / execution_price / native_quote_available)
-    is LEFT UNCHANGED — the spine selected this exact executable leg, and the submit
-    pipeline re-authorizes it at submit time. Returns a NEW proof (frozen dataclass
-    replace) so the original tuple is untouched.
+    ``execution_price`` etc. off the proof. The spine is the selection authority, but
+    its payoff-space fair value is not a replacement for the receipt-facing
+    selected-side probability authority. Preserve ``q_posterior`` and ``q_lcb_5pct``;
+    overlay only the spine's selected edge/score provenance. The executable identity
+    (row / token / execution_price / native_quote_available) is LEFT UNCHANGED — the
+    spine selected this exact executable leg, and the submit pipeline re-authorizes it
+    at submit time. Returns a NEW proof (frozen dataclass replace) so the original
+    tuple is untouched.
     """
     from dataclasses import replace
 
     selected = decision.selected
     if selected is None:
         return proof
-    # The spine's point fair value (q @ payoff) is the decision's q for this leg; its
-    # edge_lcb is the robust lower bound; optimal_delta_u is the ΔU. Restamp the
-    # receipt-facing fields; keep the executable identity.
-    try:
-        new_q = float(selected.q_dot_payoff)
-    except Exception:  # noqa: BLE001
-        new_q = float(getattr(proof, "q_posterior", 0.0))
     try:
         new_trade_score = float(selected.point_ev)
     except Exception:  # noqa: BLE001
         new_trade_score = float(getattr(proof, "trade_score", 0.0))
     overlay: dict[str, Any] = {
-        "q_posterior": new_q,
         "trade_score": new_trade_score,
         "q_source": "qkernel_spine",
     }
-    # q_lcb_5pct: map the spine's GENUINE robust lower bound into q-space so the legacy
-    # submit pipeline's per-side gate (q_lcb <= q_point, event_reactor_adapter
-    # _native_side_candidate_from_proof) and its binary-Kelly sizing
-    # (f* = (q_lcb - cost)/(1 - cost)) both run on the spine's robust economics, not on
-    # a stale probability-space q_lcb that inverts against the payoff-space q_posterior.
-    #
-    # The spine's vector economics (src/decision/payoff_vector.py) are:
-    #   q_dot_payoff = q @ payoff                       (point fair value, pre-cost)
-    #   point_ev     = q_dot_payoff - cost              (point edge)
-    #   edge_lcb     = quantile(samples @ payoff - cost, alpha)
-    #              = quantile(samples @ payoff) - cost  (robust edge lower bound)
-    # The proof's q_posterior is restamped to q_dot_payoff above, so q_point = q_dot_payoff
-    # = point_ev + cost. Setting
-    #   q_lcb = edge_lcb + cost = quantile(samples @ payoff)
-    # recovers the robust LOWER BOUND of the same payoff-space fair value as the q_point.
-    # `cost` (CandidateEconomics.cost, a typed ExecutionPrice in probability_units) is the
-    # SAME all-in per-share cost the legacy edge/Kelly subtract, so the legacy edge
-    # `q_lcb - cost` reproduces the spine's own `edge_lcb` exactly, and binary Kelly sizes
-    # on edge_lcb/(1-cost) — the robust lower bound, never the point and never the raw
-    # probability. This PRESERVES the robustness margin (it is NOT a clamp-to-point):
-    # because edge_lcb <= point_ev, we get q_lcb <= q_point, strict whenever
-    # edge_lcb < point_ev (the real robust gap), so q_lcb < q_point survives.
-    try:
-        cost_value = float(selected.cost.value)
-        edge_lcb_value = float(selected.edge_lcb)
-        new_q_lcb = max(0.0, min(1.0, edge_lcb_value + cost_value))  # clamp01
-        overlay["q_lcb_5pct"] = new_q_lcb
-    except Exception:  # noqa: BLE001 — missing/typeless economics: leave q_lcb_5pct unchanged
-        pass
     try:
         return replace(proof, **overlay)
     except Exception:  # noqa: BLE001 — if the proof is not a replaceable dataclass, return as-is

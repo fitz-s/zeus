@@ -2526,6 +2526,19 @@ def monitor_probability_refresh(
         except Exception:
             _day0_metric = None
         _stamp_day0_remaining_window_belief(refresh_pos, metric=_day0_metric)
+    if (
+        _would_use_day0_lane
+        and getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None) is not True
+    ):
+        _append_monitor_validation(
+            refresh_pos,
+            "day0_observation_unavailable:replacement_belief_reseed",
+        )
+        _enqueue_single_family_belief_reseed_failsoft(
+            city=str(pos.city),
+            target_date=str(pos.target_date),
+            metric=resolve_position_metric(pos)[0],
+        )
     return (
         current_p_posterior,
         refresh_pos,
