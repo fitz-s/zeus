@@ -1,21 +1,23 @@
 # Created: 2026-06-04
-# Last reused/audited: 2026-06-05
+# Last reused/audited: 2026-06-19
 # Authority basis: operator directive 2026-06-04 — prune superseded channel
 #                  events (BEST_BID_ASK_CHANGED / BOOK_SNAPSHOT) from the active
 #                  working set. Companion to tests/events/test_archive_expired_sweep.py
 #                  (FSR per-city-tz sweep). Same append-only provenance contract:
 #                  only opportunity_event_processing.processing_status is mutated.
-"""RED→GREEN relationship antibody for the superseded-channel-event sweep.
+"""RED→GREEN relationship antibody for legacy pending channel-event sweeps.
 
-The defect: fetch_pending JOINs ~1.7M pending channel-event rows every cycle.
+The historical defect: fetch_pending JOINed ~1.7M pending channel-event rows every cycle.
 1743 distinct token_ids each have ~990 pending BEST_BID_ASK_CHANGED events;
 only the LATEST per (event_type, token_id) is actionable — every older one is
 superseded state. The reactor rejects them all as NO_DIRECT_STALE_TRADE but still
 pays the full JOIN/ORDER BY cost for every one.
 
-Structural fix: mark processing row 'expired' for all but the latest
-available_at per (event_type, token_id). Same append-only contract as the FSR
-sweep — immutable opportunity_events rows never deleted.
+Current structural fix: new market-channel cache events are initialized as
+``ignored`` at the write boundary. These tests intentionally construct legacy
+``pending`` rows to prove the historical backlog sweep still works. Same
+append-only contract as the FSR sweep — immutable opportunity_events rows never
+deleted.
 
 These tests pin the cross-module invariant:
 
@@ -116,6 +118,29 @@ def _status_of(conn: sqlite3.Connection, event_id: str, consumer: str = "edli_re
     return row[0] if row else "MISSING"
 
 
+def _insert_legacy_pending(store: EventStore, event) -> bool:
+    """Insert a channel event, then restore the pre-2026-06-19 legacy pending state."""
+
+    inserted = store.insert_or_ignore(event)
+    store.conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'pending',
+               processed_at = NULL,
+               last_error = NULL,
+               updated_at = ?
+         WHERE consumer_name = ?
+           AND event_id = ?
+        """,
+        (
+            "2026-06-04T00:00:00+00:00",
+            store.consumer_name,
+            event.event_id,
+        ),
+    )
+    return inserted
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -139,7 +164,7 @@ def test_superseded_older_events_archived_only_latest_kept():
         for i in range(5)
     ]
     for ev in events:
-        store.insert_or_ignore(ev)
+        _insert_legacy_pending(store, ev)
 
     archived = store.archive_superseded_channel_events()
 
@@ -167,7 +192,7 @@ def test_latest_event_never_archived():
         "BEST_BID_ASK_CHANGED", token_id, "0xcond2",
         "2026-06-04T20:00:00+00:00",
     )
-    store.insert_or_ignore(latest)
+    _insert_legacy_pending(store, latest)
 
     archived = store.archive_superseded_channel_events()
     assert archived == 0, "a single event (the latest by definition) must not be archived"
@@ -191,7 +216,7 @@ def test_multiple_tokens_independent_survival():
             for j in range(3)
         ]
         for ev in evs:
-            store.insert_or_ignore(ev)
+            _insert_legacy_pending(store, ev)
         latest_ids.append(evs[-1].event_id)
 
     archived = store.archive_superseded_channel_events()
@@ -214,7 +239,7 @@ def test_scan_volume_drops_after_channel_sweep():
                 "BEST_BID_ASK_CHANGED", f"tok-{t}", f"0xcond-{t}",
                 f"2026-06-04T{j:02d}:00:00+00:00", seq=t * 10 + j,
             )
-            store.insert_or_ignore(ev)
+            _insert_legacy_pending(store, ev)
 
     before = _pending_count(conn)
     assert before == 40
@@ -237,7 +262,7 @@ def test_channel_sweep_idempotent():
     store = EventStore(conn)
 
     for j in range(5):
-        store.insert_or_ignore(
+        _insert_legacy_pending(store,
             _channel_event(
                 "BEST_BID_ASK_CHANGED", "tok-idem", "0xcidem",
                 f"2026-06-04T{j:02d}:00:00+00:00", seq=j,
@@ -268,7 +293,7 @@ def test_batch_limited_sweep_preserves_keeper_outside_batch():
             f"2026-06-04T{j:02d}:00:00+00:00",
             seq=j,
         )
-        store.insert_or_ignore(event)
+        _insert_legacy_pending(store, event)
         events.append(event)
 
     first = store.archive_superseded_channel_events(batch_limit=3)
@@ -341,8 +366,8 @@ def test_already_terminal_events_not_touched():
     tok = "tok-terminal"
     old = _channel_event("BEST_BID_ASK_CHANGED", tok, "0xcterm", "2026-06-04T10:00:00+00:00")
     new = _channel_event("BEST_BID_ASK_CHANGED", tok, "0xcterm", "2026-06-04T11:00:00+00:00", seq=1)
-    store.insert_or_ignore(old)
-    store.insert_or_ignore(new)
+    _insert_legacy_pending(store, old)
+    _insert_legacy_pending(store, new)
 
     # Manually mark old as already processed (terminal).
     store.mark_processed(old.event_id)
@@ -360,7 +385,7 @@ def test_book_snapshot_events_also_swept():
 
     tok = "tok-snap"
     for j in range(4):
-        store.insert_or_ignore(
+        _insert_legacy_pending(store,
             _channel_event(
                 "BOOK_SNAPSHOT", tok, "0xcsnap",
                 f"2026-06-04T{j:02d}:00:00+00:00", seq=j,
@@ -386,7 +411,7 @@ def test_channel_cache_events_can_be_ignored_after_ingestion():
         _channel_event("BOOK_SNAPSHOT", "tok-ignore-2", "0xignore", "2026-06-04T00:01:00+00:00"),
     ]
     for event in events:
-        store.insert_or_ignore(event)
+        _insert_legacy_pending(store, event)
 
     ignored = store.ignore_channel_cache_events(batch_limit=10)
 
@@ -408,7 +433,7 @@ def test_ignore_channel_cache_events_keeps_missing_token_fail_closed():
         payload={"condition_id": "0xmissing", "event_type": "BOOK_SNAPSHOT"},
         priority=0,
     )
-    store.insert_or_ignore(event)
+    _insert_legacy_pending(store, event)
 
     ignored = store.ignore_channel_cache_events(batch_limit=10)
 
@@ -443,7 +468,7 @@ def test_tied_latest_available_at_rows_are_all_kept():
         seq=2,
     )
     for event in (older, latest_a, latest_b):
-        store.insert_or_ignore(event)
+        _insert_legacy_pending(store, event)
 
     archived = store.archive_superseded_channel_events()
 
@@ -492,7 +517,7 @@ def test_keeper_query_uses_channel_token_index():
     # that a tiny table would choose.
     for tok in range(20):
         for j in range(50):
-            store.insert_or_ignore(
+            _insert_legacy_pending(store,
                 _channel_event(
                     "BEST_BID_ASK_CHANGED",
                     f"tok-plan-{tok}",
@@ -549,7 +574,7 @@ def test_candidate_query_uses_processing_status_index():
     store = EventStore(conn)
     for tok in range(20):
         for j in range(50):
-            store.insert_or_ignore(
+            _insert_legacy_pending(store,
                 _channel_event(
                     "BEST_BID_ASK_CHANGED",
                     f"tok-candidate-plan-{tok}",
@@ -591,7 +616,7 @@ def test_fetch_pending_query_uses_processing_status_index():
     store = EventStore(conn)
     for tok in range(20):
         for j in range(50):
-            store.insert_or_ignore(
+            _insert_legacy_pending(store,
                 _channel_event(
                     "BEST_BID_ASK_CHANGED",
                     f"tok-fetch-plan-{tok}",

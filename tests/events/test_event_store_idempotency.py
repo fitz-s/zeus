@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-18
+# Last reused/audited: 2026-06-19
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
@@ -10,7 +10,11 @@ import sqlite3
 import pytest
 
 from src.events.event_store import EventStore, EventStoreSchemaError
-from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
+from src.events.opportunity_event import (
+    ForecastSnapshotReadyPayload,
+    MarketBookEventPayload,
+    make_opportunity_event,
+)
 from src.state.db import init_schema
 
 
@@ -59,6 +63,29 @@ def _event(snapshot_id: str, priority: int, available_at: str, received_at: str)
         causal_snapshot_id=snapshot_id,
         payload=_payload(snapshot_id),
         priority=priority,
+    )
+
+
+def _channel_event(event_type: str = "BEST_BID_ASK_CHANGED"):
+    available_at = "2026-05-24T04:15:00+00:00"
+    payload = MarketBookEventPayload(
+        condition_id="0xcondition",
+        token_id="token-yes",
+        outcome_label="YES",
+        event_type=event_type,
+        quote_seen_at=available_at,
+        best_bid=0.44,
+        best_ask=0.56,
+    )
+    return make_opportunity_event(
+        event_type=event_type,
+        entity_key=f"0xcondition:token-yes:{event_type}",
+        source="market_channel",
+        observed_at=available_at,
+        available_at=available_at,
+        received_at=available_at,
+        payload=payload,
+        priority=0,
     )
 
 
@@ -155,6 +182,38 @@ def test_insert_or_ignore_duplicate():
     assert store.insert_or_ignore(event) is False
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM opportunity_event_processing").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["BEST_BID_ASK_CHANGED", "BOOK_SNAPSHOT", "NEW_MARKET_DISCOVERED"],
+)
+def test_channel_cache_events_are_immutable_inputs_not_pending_reactor_work(event_type: str):
+    conn = _world_conn()
+    store = EventStore(conn)
+    event = _channel_event(event_type)
+
+    assert store.insert_or_ignore(event) is True
+
+    event_row = conn.execute(
+        "SELECT event_type, payload_json FROM opportunity_events WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    processing_row = conn.execute(
+        """
+        SELECT processing_status, processed_at, last_error
+          FROM opportunity_event_processing
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+
+    assert event_row["event_type"] == event_type
+    assert json.loads(event_row["payload_json"])["token_id"] == "token-yes"
+    assert processing_row["processing_status"] == "ignored"
+    assert processing_row["processed_at"]
+    assert processing_row["last_error"] == "MARKET_CHANNEL_CACHE_EVENT_NOT_DECISION_TRIGGER"
+    assert store.fetch_pending(decision_time="2026-05-24T05:00:00+00:00") == []
 
 
 def test_processing_state_separate_from_event_row():

@@ -1,5 +1,5 @@
 # Created: 2026-06-04
-# Last reused/audited: 2026-06-11
+# Last reused/audited: 2026-06-19
 # Authority basis: Operator P1 2026-06-04 — channel-sweep keeper query index-back
 #                  (category-kill of 85s json_extract full-scan); Step-3 batch UPDATE.
 #                  2026-06-11 operator throughput/fairness directive — fetch_pending
@@ -129,13 +129,30 @@ class EventStore:
 
         inserted = cur.rowcount == 1
         if inserted:
+            now = _utc_now()
+            if event.event_type in self._CHANNEL_EVENT_TYPES:
+                processing_status = "ignored"
+                processed_at = now
+                last_error = "MARKET_CHANNEL_CACHE_EVENT_NOT_DECISION_TRIGGER"
+            else:
+                processing_status = "pending"
+                processed_at = None
+                last_error = None
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO opportunity_event_processing (
-                    consumer_name, event_id, processing_status, attempt_count, updated_at
-                ) VALUES (?, ?, 'pending', 0, ?)
+                    consumer_name, event_id, processing_status, attempt_count,
+                    processed_at, last_error, updated_at
+                ) VALUES (?, ?, ?, 0, ?, ?, ?)
                 """,
-                (self.consumer_name, event.event_id, _utc_now()),
+                (
+                    self.consumer_name,
+                    event.event_id,
+                    processing_status,
+                    processed_at,
+                    last_error,
+                    now,
+                ),
             )
         return inserted
 
@@ -292,10 +309,10 @@ class EventStore:
               --         Run-level PARTIAL can still carry a COMPLETE/LIVE_ELIGIBLE
               --         target window, so source_run completeness is not the queue authority.
               -- Tier 2: Other decision-trigger events — still actionable
-              --         or cheaply dead-letterable; must not be starved by market-channel.
-              -- Tier 3: Market-channel cache-hydration events (BEST_BID_ASK_CHANGED, BOOK_SNAPSHOT,
-              --         NEW_MARKET_DISCOVERED) — they get rejected NO_DIRECT_STALE_TRADE immediately
-              --         but can accumulate to 300k+; without explicit demotion they starve all FSR.
+              --         or cheaply dead-letterable. Market-channel cache-hydration
+              --         events are intentionally excluded from fetch_pending and
+              --         initialized as ignored at the write boundary; they are quote
+              --         cache / feasibility inputs, not submit-reactor work.
               c._claim_tier ASC,
               -- FAIRNESS (primary cross-city key): one event per city before any
               -- city's second event. A budget of K reaches K distinct cities/cycle;

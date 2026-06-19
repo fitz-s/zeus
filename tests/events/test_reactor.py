@@ -259,7 +259,7 @@ def test_market_channel_event_not_direct_reactor_input():
     assert result.rejected == 0
     assert rejected == []
     assert submitted == []
-    assert _processing_status(_conn, event.event_id) == "pending"
+    assert _processing_status(_conn, event.event_id) == "ignored"
 
 
 def _retry_reactor(store, snapshot_present: dict):
