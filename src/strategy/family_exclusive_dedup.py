@@ -115,6 +115,7 @@ MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = "mutually_exclusive_family_dedup"
 # the enum to land. See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave 4.
 FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED = "family_portfolio_loss_cap_exceeded"
 FAMILY_REJECTION_STAGE = "ANTI_CHURN"
+_SAME_FAMILY_MONITOR_OWNED_REASON_BASE = "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED"
 
 
 @dataclass(frozen=True)
@@ -1063,6 +1064,7 @@ def optimize_exclusive_outcome_portfolio(
     market_family_id: str = "",
     min_legs: int = 1,
     max_legs: int = 1,
+    allow_same_family_monitor_owned: bool = False,
 ) -> ExclusiveOutcomePortfolio | None:
     """Build a payoff-vector family portfolio before scalar order sizing."""
 
@@ -1071,7 +1073,10 @@ def optimize_exclusive_outcome_portfolio(
     executable_edges = [
         edge
         for edge in edges
-        if _edge_family_candidate_rejection_reason(edge) is None
+        if _edge_family_candidate_rejection_reason(
+            edge,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+        ) is None
     ]
     if not executable_edges:
         return None
@@ -1302,11 +1307,22 @@ def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
         return f"BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID:{exc}"
 
 
-def _edge_family_candidate_rejection_reason(edge: Any) -> str | None:
+def _same_family_monitor_owned_reason(reason: object) -> bool:
+    text = str(reason or "").strip()
+    return text.startswith(_SAME_FAMILY_MONITOR_OWNED_REASON_BASE)
+
+
+def _edge_family_candidate_rejection_reason(
+    edge: Any,
+    *,
+    allow_same_family_monitor_owned: bool = False,
+) -> str | None:
     """Return the upstream candidate blocker the family optimizer must honor."""
 
     missing_reason = str(getattr(edge, "missing_reason", "") or "").strip()
     if missing_reason:
+        if allow_same_family_monitor_owned and _same_family_monitor_owned_reason(missing_reason):
+            return None
         return missing_reason
     if getattr(edge, "admitted", None) is False:
         return "FAMILY_CANDIDATE_NOT_ADMITTED"

@@ -2901,7 +2901,8 @@ def _apply_family_monitor_overlay(
 
     This is live monitor logic over already-refreshed held-side probabilities and
     held-side bids. It does not read replay/shadow data and it never creates a
-    new entry; it only prevents a single leg from liquidating when the current
+    new entry; it records the current family value evidence for every held
+    position and only prevents a single leg from liquidating when the current
     family vector's hold value dominates its direct-sell value.
     """
 
@@ -2912,8 +2913,6 @@ def _apply_family_monitor_overlay(
         pass
 
     family_positions = _family_monitor_positions(portfolio, pos)
-    if len(family_positions) < 2:
-        return should_exit, exit_reason
 
     key = _family_monitor_key(pos)
     payload: dict[str, object] = {

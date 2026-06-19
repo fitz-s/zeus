@@ -3919,6 +3919,72 @@ def test_family_monitor_overlay_suppresses_single_leg_statistical_exit_and_persi
     assert payload["family_redecision"]["family_hold_value_usd"] > payload["family_redecision"]["family_direct_sell_value_usd"]
 
 
+def test_single_leg_monitor_records_family_redecision_value_payload():
+    """A single held leg still needs continuous hold-vs-sell evidence in receipts."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="single-family-monitor",
+        city="Paris",
+        target_date="2026-06-20",
+        temperature_metric="low",
+        bin_label="19C",
+        direction="buy_no",
+        shares=5.06,
+        entry_price=0.75,
+        p_posterior=0.80,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-18T23:55:00+00:00"
+    pos.last_monitor_prob = 0.78
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.73
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.73
+    pos.last_monitor_best_ask = 0.75
+    pos.last_monitor_edge = 0.05
+    portfolio = _make_portfolio(pos)
+    hold_decision = ExitDecision(
+        False,
+        reason="CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        selected_method="replacement_posterior",
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=portfolio,
+        pos=pos,
+        exit_decision=hold_decision,
+        should_exit=False,
+        exit_reason=hold_decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "CI_OVERLAP_HOLD"
+    assert summary["family_redecision_overlay_evaluated"] == 1
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=2,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        source_module="tests/test_single_leg_monitor_redecision",
+        exit_decision=hold_decision,
+        final_should_exit=should_exit,
+        final_exit_reason=reason,
+    )
+    payload = json.loads(events[0]["payload_json"])
+    family = payload["family_redecision"]
+    assert family["position_count"] == 1
+    assert family["decision"] == "FAMILY_OVERLAY_NO_OVERRIDE"
+    assert family["family_hold_value_usd"] == pytest.approx(5.06 * 0.78)
+    assert family["family_direct_sell_value_usd"] == pytest.approx(5.06 * 0.73)
+
+
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     """A same-cycle `<6h` crossing must not refresh through the old non-Day0 path.
 

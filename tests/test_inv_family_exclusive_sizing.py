@@ -1170,6 +1170,87 @@ def test_family_optimizer_honors_live_admission_and_qlcb_before_payoff_selection
     assert portfolio.capital_efficiency > 0.0
 
 
+def test_family_optimizer_allows_same_family_monitor_owned_only_for_redecision() -> None:
+    """Held-family candidates are position-management inputs, not new entries."""
+
+    def edge(label: str, idx: int, direction: str, price: float, q: float, q_lcb: float, *, reason: str = ""):
+        return SimpleNamespace(
+            bin=Bin(low=idx, high=idx, unit="C", label=label),
+            support_index=idx,
+            direction=direction,
+            entry_price=price,
+            p_posterior=q,
+            q_lcb_5pct=q_lcb,
+            forward_edge=q_lcb - price,
+            admitted=False if reason else True,
+            missing_reason=reason,
+        )
+
+    no_29 = edge(
+        "29C",
+        0,
+        "buy_no",
+        0.79,
+        0.10,
+        0.10,
+        reason="OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED:position_id=held-29",
+    )
+    yes_30 = edge(
+        "30C",
+        1,
+        "buy_yes",
+        0.27,
+        0.80,
+        0.35,
+        reason="OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED:position_id=held-29",
+    )
+    blocked_same_token = edge(
+        "31C",
+        2,
+        "buy_no",
+        0.80,
+        0.10,
+        0.10,
+        reason="OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED:position_id=held-31",
+    )
+    blocked_capital = edge(
+        "32C",
+        3,
+        "buy_yes",
+        0.02,
+        0.03,
+        0.03,
+        reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+    )
+
+    default_portfolio = optimize_exclusive_outcome_portfolio(
+        [no_29, yes_30],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        min_legs=1,
+        max_legs=2,
+    )
+    assert default_portfolio is None
+
+    redecision_portfolio = optimize_exclusive_outcome_portfolio(
+        [no_29, yes_30, blocked_same_token, blocked_capital],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        min_legs=1,
+        max_legs=2,
+        allow_same_family_monitor_owned=True,
+    )
+
+    assert redecision_portfolio is not None
+    assert redecision_portfolio.selected_legs == (yes_30,)
+    assert no_29 in redecision_portfolio.candidate_legs
+    assert yes_30 in redecision_portfolio.candidate_legs
+    assert blocked_same_token not in redecision_portfolio.candidate_legs
+    assert blocked_capital not in redecision_portfolio.candidate_legs
+
+
 def test_runtime_family_dedup_ranks_by_expected_net_profit_not_size_usd() -> None:
     bins = {s[2]: s for s in _BIN_SPECS}
     big_low_utility = _trade_decision(

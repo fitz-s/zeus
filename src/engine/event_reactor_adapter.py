@@ -629,6 +629,10 @@ _ENTRY_HELD_POSITION_REASON_BASE = "OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED"
 _ENTRY_HELD_FAMILY_REASON_BASE = "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED"
 
 
+def _is_entry_held_family_reason(reason: object) -> bool:
+    return str(reason or "").strip().startswith(_ENTRY_HELD_FAMILY_REASON_BASE)
+
+
 def _durable_live_cap_final_intent_token(final_intent_id: str) -> str:
     token = str(final_intent_id or "").rsplit(":", 1)[-1].strip()
     return token if token and token != str(final_intent_id or "") else ""
@@ -2279,6 +2283,7 @@ def _build_event_bound_no_submit_receipt_core(
 
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
+    allow_same_family_monitor_owned = event.event_type == "EDLI_REDECISION_PENDING"
     if forecast_conn is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="FORECAST_AUTHORITY_CONNECTION_MISSING")
     if topology_conn is None:
@@ -2572,24 +2577,21 @@ def _build_event_bound_no_submit_receipt_core(
     _spine_flag_on = qkernel_spine_enabled()
     _is_day0_event = event.event_type in _DAY0_LANE_EVENT_TYPES
     _spine_eligible_event = event.event_type in _FORECAST_DECISION_EVENT_TYPES
+    # Fix #4 generalized: pass REAL current per-bin family exposure into the
+    # ΔU SELECTION before the instrument is chosen. A flat/empty baseline can
+    # pick a leg the account is already heavy in; re-sizing after selection
+    # cannot repair a wrong instrument choice.
+    _selection_exposure = _family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=portfolio_state_provider,
+        family=family,
+    )
     if _spine_flag_on and _spine_eligible_event and not _is_day0_event:
-        # Fix #4 (consult_review_pr409.md §5/§6 "current exposure not in route
-        # selection"): pass the REAL current per-bin family exposure into the spine's
-        # ΔU SELECTION. The spine picks the new leg by argmax ΔU over the whole family,
-        # so a flat/empty baseline lets it choose a leg the account is already heavy in
-        # — and re-sizing the chosen leg afterward cannot repair a wrong INSTRUMENT
-        # choice. The per-bin exposure attributes each open committed position to its own
-        # family bin by condition_id (NOT collapsed onto one bin), so the concave ΔU
-        # objective shrinks the legs the book already holds before the argmax.
-        _spine_selection_exposure = _family_existing_exposure_for_selection_by_bin_id(
-            proofs=proofs,
-            portfolio_state_provider=portfolio_state_provider,
-            family=family,
-        )
         _spine_entry_proofs = _selection_scoped_proofs(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=trade_conn,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         )
         if not _spine_entry_proofs:
             proof = None
@@ -2606,7 +2608,7 @@ def _build_event_bound_no_submit_receipt_core(
                 exposure_builder=_robust_marginal_utility_exposure,
                 baseline_usd_provider=_robust_marginal_utility_baseline_usd,
                 per_bin_yes_q_lcb=_per_bin_yes_q_lcb(proofs),
-                extra_exposure_by_bin_id=(_spine_selection_exposure or None),
+                extra_exposure_by_bin_id=(_selection_exposure or None),
             )
             proof = _spine_result.selected_proof
             _spine_no_trade_reason = _spine_result.no_trade_reason
@@ -2616,6 +2618,8 @@ def _build_event_bound_no_submit_receipt_core(
             proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=trade_conn,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+            extra_exposure_by_bin_id=(_selection_exposure or None),
         )
     opportunity_book = _opportunity_book_from_proofs(
         event_id=event.event_id,
@@ -2624,6 +2628,7 @@ def _build_event_bound_no_submit_receipt_core(
         selected_proof=proof,
         locked_opportunity_conn=locked_opportunity_conn,
         held_position_conn=trade_conn,
+        allow_same_family_monitor_owned=allow_same_family_monitor_owned,
     )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
@@ -2838,6 +2843,7 @@ def _build_event_bound_no_submit_receipt_core(
                     selected_proof=proof,
                     locked_opportunity_conn=locked_opportunity_conn,
                     held_position_conn=trade_conn,
+                    allow_same_family_monitor_owned=allow_same_family_monitor_owned,
                 )
                 if execution_price is None or row is None:
                     return EventSubmissionReceipt(
@@ -3229,6 +3235,7 @@ def _build_event_bound_no_submit_receipt_core(
                 # leg scoped OUT of selection falsely reverses the chosen leg.
                 locked_opportunity_conn=locked_opportunity_conn,
                 held_position_conn=trade_conn,
+                allow_same_family_monitor_owned=allow_same_family_monitor_owned,
                 stake_floor_out=_stake_floor_provenance,
                 free_cash_usd=free_cash_usd,
             )
@@ -3562,7 +3569,12 @@ def _build_event_bound_no_submit_receipt_core(
 # size-capped projection of exactly the fate-relevant fields.
 _CANDIDATE_BOOK_FIELDS: tuple[str, ...] = (
     "candidate_id",
+    "family_id",
+    "condition_id",
+    "token_id",
     "bin_label",
+    "support_index",
+    "bin_id",
     "direction",
     "q_posterior",
     "q_lcb_5pct",
@@ -7789,6 +7801,8 @@ def _candidate_evaluation_from_proof(
     family_id: str,
     proof: _CandidateProof,
     kelly_size_usd: float = 0.0,
+    support_index: int | None = None,
+    bin_id: str | None = None,
 ) -> CandidateEvaluation:
     """Derive the legacy CandidateEvaluation RECEIPT from the materialized candidate.
 
@@ -7816,6 +7830,8 @@ def _candidate_evaluation_from_proof(
     row = proof.row or {}
     candidate = proof.candidate
     bin_obj = getattr(candidate, "bin", None)
+    if bin_id is None:
+        bin_id = _candidate_bin_id(proof)
     return CandidateEvaluation(
         # Identity sourced from the materialized NativeSideCandidate (single
         # candidate object) so the receipt and the candidate cannot drift.
@@ -7825,6 +7841,8 @@ def _candidate_evaluation_from_proof(
         token_id=native_candidate.token_id,
         direction=str(proof.direction or ""),
         bin_label=getattr(bin_obj, "label", None),
+        support_index=support_index,
+        bin_id=bin_id,
         execution_price=execution_price,
         # Diagnostic q fields record what the proof TESTED on this side (the S2
         # robust authority). A no-trade NativeSideCandidate carries no q authority
@@ -7882,6 +7900,7 @@ def _selection_scoped_proofs(
     proofs: tuple[_CandidateProof, ...],
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
 ) -> tuple[_CandidateProof, ...]:
     executable = [proof for proof in proofs if proof.execution_price is not None]
     # FIX A/B hardening (2026-06-10 Milan-24C incident): a priced proof that an
@@ -7892,7 +7911,15 @@ def _selection_scoped_proofs(
     # TRADE_SCORE_NON_POSITIVE submit gate — never a bad order, but it STARVED
     # the legitimate admitted sibling of its selection. Gate-rejected proofs are
     # unrankable, not merely unsubmittable.
-    executable = [proof for proof in executable if proof.missing_reason is None]
+    executable = [
+        proof
+        for proof in executable
+        if proof.missing_reason is None
+        or (
+            allow_same_family_monitor_owned
+            and _is_entry_held_family_reason(proof.missing_reason)
+        )
+    ]
     tradeable_limit = [
         proof
         for proof in executable
@@ -7916,11 +7943,14 @@ def _selection_scoped_proofs(
         elif scoped:
             return ()
     if held_position_conn is not None:
-        unheld = [
-            proof
-            for proof in scoped
-            if _entry_held_position_reason_for_proof(held_position_conn, proof) is None
-        ]
+        unheld: list[_CandidateProof] = []
+        for proof in scoped:
+            reason = _entry_held_position_reason_for_proof(held_position_conn, proof)
+            if reason is None:
+                unheld.append(proof)
+                continue
+            if allow_same_family_monitor_owned and _is_entry_held_family_reason(reason):
+                unheld.append(proof)
         if unheld:
             scoped = unheld
         elif scoped:
@@ -7933,6 +7963,7 @@ def _opportunity_book_proofs_with_selection_rejections(
     proofs: tuple[_CandidateProof, ...],
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
 ) -> tuple[_CandidateProof, ...]:
     excluded_by_id: dict[str, str] = {}
     selected_ids = {
@@ -7941,6 +7972,7 @@ def _opportunity_book_proofs_with_selection_rejections(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=held_position_conn,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         )
     }
     for proof in proofs:
@@ -7960,6 +7992,8 @@ def _opportunity_book_proofs_with_selection_rejections(
                 held_position_conn,
                 proof,
             )
+            if allow_same_family_monitor_owned and _is_entry_held_family_reason(reason):
+                reason = None
         if reason is not None:
             excluded_by_id[proof_id] = reason
     if not excluded_by_id:
@@ -8001,6 +8035,7 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     ("DIRECTION_LAW_BIN_FORECAST_MISMATCH", "direction_law"),
     ("ADMISSION_WIN_RATE_FLOOR", "win_rate_floor"),
     ("ADMISSION_LCB_CONSISTENCY", "lcb_consistency"),
+    (_ENTRY_HELD_FAMILY_REASON_BASE, "held_family_monitor_owned"),
     (_ENTRY_HELD_POSITION_REASON_BASE, "held_position_monitor_owned"),
     # Genuinely-no-book classes (proof had execution_price None): the maker-quote
     # lane's own-ask-empty marker, plus the structural pre-pricing misses.
@@ -8108,20 +8143,29 @@ def _opportunity_book_from_proofs(
     selected_proof: _CandidateProof | None = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
 ) -> OpportunityBook:
     # The per-candidate kelly_size_usd is a DISPLAY field only (S4): the pre-
     # selection scalar-Kelly pass that used to populate it is retired; the live
     # stake is the marginal-utility ranker's optimal_stake_usd on the winning leg.
     # The receipt's display kelly_size_usd defaults to 0.0 for non-winning siblings.
+    support_index_by_bin_id: dict[str, int] = {}
+    for proof in proofs:
+        bin_id = _candidate_bin_id(proof)
+        if bin_id not in support_index_by_bin_id:
+            support_index_by_bin_id[bin_id] = len(support_index_by_bin_id)
     evaluations = tuple(
         _candidate_evaluation_from_proof(
             family_id=family_id,
             proof=proof,
+            support_index=support_index_by_bin_id.get(_candidate_bin_id(proof)),
+            bin_id=_candidate_bin_id(proof),
         )
         for proof in _opportunity_book_proofs_with_selection_rejections(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=held_position_conn,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         )
     )
     # The live decision is the ΔU ranker's pick (selected_proof). The book RECORDS
@@ -9720,6 +9764,8 @@ def _family_rank_reversed_at_recapture(
     all_proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
+    extra_exposure_by_bin_id: Mapping[str, float] | None = None,
 ) -> bool:
     """True iff the FRESH-curve re-rank no longer makes ``selected_proof`` primary.
 
@@ -9752,6 +9798,7 @@ def _family_rank_reversed_at_recapture(
         proofs=tuple(all_proofs),
         locked_opportunity_conn=locked_opportunity_conn,
         held_position_conn=held_position_conn,
+        allow_same_family_monitor_owned=allow_same_family_monitor_owned,
     )
     if not scoped:
         # Nothing survives selection scoping on the fresh set (all locked / untradeable):
@@ -9762,6 +9809,7 @@ def _family_rank_reversed_at_recapture(
         executable=list(scoped),
         family_key=family_key,
         per_bin_yes_q_lcb=per_bin_yes_q_lcb,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
     )
     if fresh_primary is None:
         # Whole family no-trades on the fresh curves -> not a rank reversal; the
@@ -9783,6 +9831,7 @@ def _evaluate_submit_recapture_for_selected(
     forecast_still_current: bool,
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
     stake_floor_out: dict[str, object] | None = None,
     order_rests_at_admitted_price: bool = False,
     free_cash_usd: float | None = None,
@@ -9880,6 +9929,8 @@ def _evaluate_submit_recapture_for_selected(
         all_proofs=all_proofs,
         locked_opportunity_conn=locked_opportunity_conn,
         held_position_conn=held_position_conn,
+        allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
     ):
         return (
             SubmitRecaptureDecision(
@@ -10147,6 +10198,8 @@ def _selected_candidate_proof(
     *,
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
+    extra_exposure_by_bin_id: Mapping[str, float] | None = None,
 ) -> _CandidateProof | None:
     """Pick the single live primary leg via the bin-selection ΔU ranker (§14.7).
 
@@ -10184,6 +10237,7 @@ def _selected_candidate_proof(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=held_position_conn,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         )
     )
     if not executable:
@@ -10205,6 +10259,7 @@ def _selected_candidate_proof(
         executable=executable,
         family_key=family_key,
         per_bin_yes_q_lcb=per_bin_yes_q_lcb,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
     )
 
 
