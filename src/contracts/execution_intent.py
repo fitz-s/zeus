@@ -460,13 +460,17 @@ def quantize_submit_shares_for_venue_at_most(
 
     if shares <= Decimal("0"):
         raise ValueError("submitted_shares must be positive")
+    quantum = Decimal("0.01")
+    quantized = (shares / quantum).to_integral_value(rounding=ROUND_FLOOR) * quantum
+    if quantized <= Decimal("0"):
+        raise ValueError(
+            "unable to quantize submitted shares to venue amount precision within bounds"
+        )
     if not (
         str(direction).startswith("buy_")
         and str(order_type or "").strip().upper() in {"FOK", "FAK"}
     ):
-        return _quantize_submit_shares(direction, shares)
-    quantum = Decimal("0.01")
-    quantized = (shares / quantum).to_integral_value(rounding=ROUND_FLOOR) * quantum
+        return quantized
     while quantized > Decimal("0"):
         if (
             venue_submit_amount_precision_error(
@@ -497,7 +501,13 @@ def _submitted_shares_from_cost_basis(
             cost_basis.requested_size_value
             / cost_basis.expected_fill_price_before_fee
         )
-    return _quantize_submit_shares(cost_basis.direction, raw_shares)
+    return quantize_submit_shares_for_venue_at_most(
+        cost_basis.direction,
+        raw_shares,
+        final_limit_price=cost_basis.final_limit_price,
+        order_type=order_type,
+        tick_size=cost_basis.tick_size,
+    )
 
 
 def _fee_adjusted_price(
@@ -1966,9 +1976,12 @@ class FinalExecutionIntent:
         if self.size_kind == "shares" and self.submitted_shares != self.size_value:
             raise ValueError("submitted_shares must match share-sized final intent")
         if self.size_kind == "notional_usd":
-            expected_submitted_shares = _quantize_submit_shares(
+            expected_submitted_shares = quantize_submit_shares_for_venue_at_most(
                 self.direction,
                 self.size_value / self.expected_fill_price_before_fee,
+                final_limit_price=self.final_limit_price,
+                order_type=self.order_type,
+                tick_size=self.tick_size,
             )
             if self.submitted_shares != expected_submitted_shares:
                 raise ValueError(

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Lifecycle: created=2026-06-18; last_reviewed=2026-06-19; last_reused=2026-06-19
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-06-19
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import plistlib
 import sqlite3
 import subprocess
 import sys
@@ -35,19 +37,37 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from check_data_pipeline_live_e2e import _connect_live_readonly
 
-TRADE_DB = ROOT / "state" / "zeus_trades.db"
-WORLD_DB = ROOT / "state" / "zeus-world.db"
-FORECAST_DB = ROOT / "state" / "zeus-forecasts.db"
 SETTINGS_PATH = ROOT / "config" / "settings.json"
-STATE_DIR = ROOT / "state"
+STATE_DIR = Path(
+    os.environ.get("ZEUS_LIVE_PREFLIGHT_STATE_DIR")
+    or os.environ.get("ZEUS_STATE_DIR")
+    or ROOT / "state"
+).expanduser().resolve()
+TRADE_DB = Path(os.environ.get("ZEUS_TRADE_DB") or STATE_DIR / "zeus_trades.db")
+WORLD_DB = Path(os.environ.get("ZEUS_WORLD_DB") or STATE_DIR / "zeus-world.db")
+FORECAST_DB = Path(os.environ.get("ZEUS_FORECAST_DB") or STATE_DIR / "zeus-forecasts.db")
+SCHEDULER_HEALTH_PATH = STATE_DIR / "scheduler_jobs_health.json"
+FORECAST_LIVE_HEARTBEAT_PATH = STATE_DIR / "forecast-live-heartbeat.json"
+LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
 DUST_SHARE_LIMIT = 0.01
 SIDECAR_HEARTBEAT_MAX_AGE_SECONDS = 180.0
 EXECUTION_FEASIBILITY_MAX_AGE_SECONDS = 180.0
 EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS = 600.0
+FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS = 120.0
+REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS = 1800.0
 SIDECAR_HEARTBEATS = (
     ("substrate_observer_daemon", "daemon-heartbeat-substrate-observer.json"),
     ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
     ("post_trade_capital_daemon", "daemon-heartbeat-post-trade-capital.json"),
+)
+REPLACEMENT_SCHEDULER_HEALTH_JOBS = (
+    "bayes_precision_fusion_capture",
+    "replacement_forecast_download",
+    "replacement_forecast_live_materialize",
+)
+REPLACEMENT_HEARTBEAT_JOBS = (
+    "replacement_forecast_download",
+    "replacement_forecast_live_materialize",
 )
 
 
@@ -97,6 +117,82 @@ def _settings() -> dict[str, Any]:
         return json.loads(SETTINGS_PATH.read_text())
     except Exception:
         return {}
+
+
+def _qkernel_spine_cutover_check(cfg: dict[str, Any]) -> CheckResult:
+    flags = cfg.get("feature_flags") if isinstance(cfg.get("feature_flags"), dict) else {}
+    enabled = flags.get("qkernel_spine_enabled")
+    ok = enabled is True
+    return CheckResult(
+        "qkernel_spine_cutover",
+        ok,
+        "qkernel spine is enabled" if ok else "qkernel spine is not enabled for live restart",
+        {
+            "settings_path": str(SETTINGS_PATH),
+            "feature_flags.qkernel_spine_enabled": enabled,
+        },
+    )
+
+
+def _family_portfolio_single_leg_check() -> CheckResult:
+    try:
+        from src.strategy.family_exclusive_dedup import (
+            ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE,
+            _family_portfolio_max_legs,
+        )
+
+        max_legs = _family_portfolio_max_legs()
+        raw = os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE)
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            "family_portfolio_single_leg_cutover",
+            False,
+            "family portfolio max-legs check failed",
+            {"error": str(exc)},
+        )
+    ok = max_legs == 1
+    return CheckResult(
+        "family_portfolio_single_leg_cutover",
+        ok,
+        (
+            "live family portfolio execution is constrained to one leg"
+            if ok
+            else "live family portfolio max_legs exceeds 1 without portfolio execution state machine"
+        ),
+        {
+            "env": ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE,
+            "raw_value": raw,
+            "effective_max_legs": max_legs,
+        },
+    )
+
+
+def _qlcb_reliability_artifact_check() -> CheckResult:
+    try:
+        from src.decision import qlcb_reliability_guard as qlcb_guard
+
+        qlcb_guard._QLCB_OOF_RELIABILITY_PATH = str(STATE_DIR / "qlcb_oof_reliability.json")
+        qlcb_guard.reset_reliability_cache()
+        evidence = qlcb_guard.reliability_artifact_status()
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            "qlcb_reliability_artifact",
+            False,
+            "qLCB reliability artifact health check failed",
+            {"error": str(exc)},
+        )
+    status = str(evidence.get("status") or "")
+    ok = status == "ACTIVE_VALID"
+    return CheckResult(
+        "qlcb_reliability_artifact",
+        ok,
+        (
+            "qLCB reliability artifact is active-valid"
+            if ok
+            else "qLCB reliability artifact is not active-valid for live restart"
+        ),
+        evidence,
+    )
 
 
 def _parse_dt(raw: object) -> datetime | None:
@@ -443,6 +539,156 @@ def _executable_substrate_exposure_freshness(
     return {"scoped_exposure_count": len(exposures), "risky": risky, "covered": covered}
 
 
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _harvester_live_enabled() -> tuple[bool, dict[str, Any]]:
+    """Return whether the restart target will run the settlement P&L resolver.
+
+    The preflight usually runs from an operator shell, not inside launchd, so the
+    shell environment alone is not enough evidence. Prefer the current process
+    env when present, then inspect the launchd plist that owns src.main.
+    """
+    env_value = os.environ.get("ZEUS_HARVESTER_LIVE_ENABLED")
+    evidence: dict[str, Any] = {
+        "env_value": env_value,
+        "plist_path": str(LIVE_TRADING_PLIST_PATH),
+        "plist_value": None,
+        "source": "env" if env_value is not None else "plist",
+    }
+    if env_value is not None:
+        return env_value == "1", evidence
+
+    try:
+        with LIVE_TRADING_PLIST_PATH.open("rb") as handle:
+            payload = plistlib.load(handle)
+    except Exception as exc:
+        evidence["plist_error"] = str(exc)
+        return False, evidence
+    env_vars = payload.get("EnvironmentVariables")
+    plist_value = None
+    if isinstance(env_vars, dict):
+        plist_value = env_vars.get("ZEUS_HARVESTER_LIVE_ENABLED")
+    evidence["plist_value"] = plist_value
+    return str(plist_value or "") == "1", evidence
+
+
+def _forecast_sidecar_health() -> CheckResult:
+    now = datetime.now(timezone.utc)
+    current_git_head = _git_head()
+    heartbeat = _read_json(FORECAST_LIVE_HEARTBEAT_PATH)
+    heartbeat_at = _parse_dt(heartbeat.get("written_at") or heartbeat.get("timestamp"))
+    heartbeat_age = None
+    if heartbeat_at is not None:
+        heartbeat_age = (now - heartbeat_at).total_seconds()
+
+    scheduler_health = _read_json(SCHEDULER_HEALTH_PATH)
+    job_evidence: dict[str, Any] = {}
+    risky: list[dict[str, Any]] = []
+    for job_name in REPLACEMENT_SCHEDULER_HEALTH_JOBS:
+        entry = scheduler_health.get(job_name)
+        if not isinstance(entry, dict):
+            risky.append({"job": job_name, "risk": "missing_scheduler_health_entry"})
+            job_evidence[job_name] = None
+            continue
+        status = str(entry.get("status") or "")
+        last_success = _parse_dt(entry.get("last_success_at"))
+        last_failure = _parse_dt(entry.get("last_failure_at"))
+        last_started = _parse_dt(entry.get("last_started_at") or entry.get("last_run_at"))
+        running_age = None
+        if last_started is not None:
+            running_age = (now - last_started).total_seconds()
+        item = {
+            "status": status,
+            "last_run_at": entry.get("last_run_at"),
+            "last_started_at": entry.get("last_started_at"),
+            "last_success_at": entry.get("last_success_at"),
+            "last_failure_at": entry.get("last_failure_at"),
+            "last_failure_reason": entry.get("last_failure_reason"),
+            "running_age_seconds": running_age,
+        }
+        job_evidence[job_name] = item
+        if status == "FAILED":
+            risky.append({"job": job_name, "risk": "scheduler_job_failed", **item})
+            continue
+        if status == "RUNNING":
+            if last_started is None:
+                risky.append({"job": job_name, "risk": "scheduler_job_running_start_missing", **item})
+            elif running_age is None or running_age < 0.0:
+                risky.append({"job": job_name, "risk": "scheduler_job_running_clock_invalid", **item})
+            elif running_age > REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS:
+                risky.append({"job": job_name, "risk": "scheduler_job_running_stale", **item})
+            continue
+        if status != "OK":
+            risky.append({"job": job_name, "risk": "scheduler_job_not_ok", **item})
+            continue
+        if last_failure is not None and (last_success is None or last_failure > last_success):
+            risky.append({"job": job_name, "risk": "latest_scheduler_outcome_failed", **item})
+
+    heartbeat_ok = (
+        str(heartbeat.get("daemon") or "") == "forecast-live"
+        and heartbeat_age is not None
+        and 0.0 <= heartbeat_age <= FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS
+    )
+    if not heartbeat_ok:
+        risky.append(
+            {
+                "job": "forecast-live-heartbeat",
+                "risk": "forecast_live_heartbeat_stale_or_missing",
+                "heartbeat_age_seconds": heartbeat_age,
+                "heartbeat": heartbeat,
+            }
+        )
+    if str(heartbeat.get("git_head") or "") != current_git_head:
+        risky.append(
+            {
+                "job": "forecast-live-heartbeat",
+                "risk": "forecast_live_code_head_mismatch",
+                "heartbeat_git_head": heartbeat.get("git_head"),
+                "current_git_head": current_git_head,
+            }
+        )
+    heartbeat_jobs_raw = heartbeat.get("jobs")
+    heartbeat_jobs = set(heartbeat_jobs_raw) if isinstance(heartbeat_jobs_raw, list) else set()
+    missing_heartbeat_jobs = sorted(set(REPLACEMENT_HEARTBEAT_JOBS) - heartbeat_jobs)
+    if missing_heartbeat_jobs:
+        risky.append(
+            {
+                "job": "forecast-live-heartbeat",
+                "risk": "forecast_live_heartbeat_missing_replacement_jobs",
+                "missing_jobs": missing_heartbeat_jobs,
+                "heartbeat_jobs": sorted(heartbeat_jobs),
+            }
+        )
+
+    ok = not risky
+    return CheckResult(
+        "forecast_sidecar_health",
+        ok,
+        "forecast sidecar heartbeat and replacement jobs are healthy"
+        if ok
+        else "forecast sidecar heartbeat or replacement production jobs are unhealthy",
+        {
+            "heartbeat_path": str(FORECAST_LIVE_HEARTBEAT_PATH),
+            "heartbeat_age_seconds": heartbeat_age,
+            "heartbeat": heartbeat,
+            "current_git_head": current_git_head,
+            "scheduler_health_path": str(SCHEDULER_HEALTH_PATH),
+            "jobs": job_evidence,
+            "risky": risky,
+            "heartbeat_max_age_seconds": FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS,
+            "replacement_sidecar_running_max_age_seconds": (
+                REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS
+            ),
+        },
+    )
+
+
 def _posterior_summary() -> CheckResult:
     now = datetime.now(timezone.utc)
     with _connect_live_ro() as conn:
@@ -515,6 +761,63 @@ def _open_positions() -> list[Any]:
         )
 
 
+def _verified_settlement_truth_for(rows: list[sqlite3.Row]) -> dict[tuple[str, str, str], dict[str, Any]]:
+    keys: set[tuple[str, str, str]] = set()
+    for row in rows:
+        if row["phase"] not in {"active", "day0_window"}:
+            continue
+        city = str(row["city"] or "").strip()
+        target_date = str(row["target_date"] or "").strip()
+        metric = str(row["temperature_metric"] or "high").strip().lower()
+        if city and target_date and metric in {"high", "low"}:
+            keys.add((city, target_date, metric))
+    if not keys:
+        return {}
+
+    truth: dict[tuple[str, str, str], dict[str, Any]] = {}
+    key_list = sorted(keys)
+    with _connect_live_ro() as conn:
+        for offset in range(0, len(key_list), 250):
+            batch = key_list[offset: offset + 250]
+            placeholders = ",".join(["(?, ?, ?)"] * len(batch))
+            params: list[str] = []
+            for city, target_date, metric in batch:
+                params.extend([city, target_date, metric])
+            try:
+                fetched = conn.execute(
+                    f"""
+                    SELECT city, target_date, COALESCE(temperature_metric, 'high') AS temperature_metric,
+                           market_slug, winning_bin, authority, settlement_source,
+                           settlement_value, settled_at
+                      FROM forecasts.settlement_outcomes
+                     WHERE authority = 'VERIFIED'
+                       AND (city, target_date, COALESCE(temperature_metric, 'high')) IN ({placeholders})
+                     ORDER BY datetime(settled_at) DESC
+                    """,
+                    params,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return truth
+            for row in fetched:
+                key = (
+                    str(row["city"] or ""),
+                    str(row["target_date"] or ""),
+                    str(row["temperature_metric"] or "high").lower(),
+                )
+                truth.setdefault(
+                    key,
+                    {
+                        "market_slug": row["market_slug"],
+                        "winning_bin": row["winning_bin"],
+                        "authority": row["authority"],
+                        "settlement_source": row["settlement_source"],
+                        "settlement_value": row["settlement_value"],
+                        "settled_at": row["settled_at"],
+                    },
+                )
+    return truth
+
+
 def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     risky: list[dict[str, Any]] = []
     tolerated: list[dict[str, Any]] = []
@@ -551,15 +854,109 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     )
 
 
+def _single_family_reseed_repair_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Read-only proof that the production single-family reseed lane can repair missing belief.
+
+    This does not enqueue or materialize. It verifies the same materializable-family condition the
+    live reseed path will use after restart: a current raw manifest exists for this exact
+    (city, target_date, metric), so a missing posterior can be first-materialized automatically.
+    """
+    try:
+        from src.data.replacement_cycle_advance_trigger import (
+            family_materializable_cycle,
+            freshest_materializable_cycle,
+        )
+        from src.data.replacement_forecast_production import (
+            _replacement_forecast_live_materialization_queue_config,
+        )
+        from src.data.replacement_forecast_seed_discovery import (
+            _latest_manifest,
+            _load_manifests,
+        )
+        from src.data.replacement_forecast_source_run_identity import (
+            expected_replacement_dependency_identity_by_role,
+        )
+
+        cfg = _replacement_forecast_live_materialization_queue_config()
+        raw_manifest_dir = cfg.get("raw_manifest_dir")
+        if raw_manifest_dir is None:
+            return None
+        now = datetime.now(timezone.utc)
+        manifests = _load_manifests(Path(str(raw_manifest_dir)), computed_at=now)
+        from src.state.db import _connect
+
+        conn = _connect(Path(FORECAST_DB), write_class="live")
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            freshest = freshest_materializable_cycle(conn)
+            family_cycle, missing = family_materializable_cycle(
+                manifests,
+                city=str(item["city"]),
+                target_date=str(item["target_date"]),
+                metric=str(item["temperature_metric"]),
+                expected_identity=expected_replacement_dependency_identity_by_role,
+                latest_manifest=_latest_manifest,
+            )
+        finally:
+            conn.close()
+        if family_cycle is None:
+            return None
+        evidence = {
+            **item,
+            "risk": "missing_live_belief_repairable_by_single_family_reseed",
+            "freshest_materializable_cycle": None if freshest is None else freshest.isoformat(),
+            "family_materializable_cycle": family_cycle.isoformat(),
+            "missing_legs": [list(row) for row in missing],
+            "repair_lane": "enqueue_single_family_cycle_advance_reseed",
+            "write_performed": False,
+        }
+        return evidence
+    except Exception:
+        return None
+
+
 def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
     from src.engine.position_belief import load_replacement_belief, monitor_belief_max_age_hours
 
     risky: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
+    repairable: list[dict[str, Any]] = []
+    settlement_recoverable: list[dict[str, Any]] = []
     max_age = monitor_belief_max_age_hours()
+    settlement_truth = _verified_settlement_truth_for(rows)
+    harvester_enabled, harvester_evidence = _harvester_live_enabled()
     for row in rows:
         if row["phase"] == "pending_exit":
             continue
+        item = {
+            "position_id": row["position_id"],
+            "phase": row["phase"],
+            "city": row["city"],
+            "target_date": row["target_date"],
+            "temperature_metric": row["temperature_metric"],
+            "bin_label": row["bin_label"],
+            "direction": row["direction"],
+        }
+        settlement = settlement_truth.get(
+            (
+                str(row["city"] or ""),
+                str(row["target_date"] or ""),
+                str(row["temperature_metric"] or "high").lower(),
+            )
+        )
+        if settlement is not None:
+            evidence = {
+                **item,
+                "risk": "verified_settlement_pending_harvester_recovery",
+                "settlement": settlement,
+                "harvester_live_enabled": harvester_enabled,
+            }
+            if harvester_enabled:
+                settlement_recoverable.append(evidence)
+                continue
+            risky.append({**evidence, "risk": "settled_position_harvester_disabled"})
+            continue
+
         belief = load_replacement_belief(
             city=str(row["city"] or ""),
             target_date=str(row["target_date"] or ""),
@@ -569,15 +966,11 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
             max_age_hours=max_age,
             db_path=str(FORECAST_DB),
         )
-        item = {
-            "position_id": row["position_id"],
-            "city": row["city"],
-            "target_date": row["target_date"],
-            "temperature_metric": row["temperature_metric"],
-            "bin_label": row["bin_label"],
-            "direction": row["direction"],
-        }
         if belief is None:
+            repair = _single_family_reseed_repair_evidence(item)
+            if repair is not None:
+                repairable.append(repair)
+                continue
             risky.append({**item, "risk": "missing_live_belief"})
             continue
         evidence = {
@@ -593,12 +986,36 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
         }
         covered.append(evidence)
         if not belief.fresh:
+            repair = _single_family_reseed_repair_evidence({**item, **evidence})
+            if repair is not None:
+                repairable.append(
+                    {
+                        **repair,
+                        "risk": "stale_live_belief_repairable_by_single_family_reseed",
+                        "posterior_id": belief.posterior_id,
+                        "computed_at": belief.computed_at,
+                        "age_hours": belief.age_hours,
+                        "source_cycle_age_hours": belief.source_cycle_age_hours,
+                        "freshness_basis": belief.freshness_basis,
+                    }
+                )
+                continue
             risky.append({**evidence, "risk": "stale_live_belief"})
     return CheckResult(
         "held_position_belief_coverage",
         not risky,
-        "all active held positions have fresh live belief" if not risky else "active held positions have stale/missing live belief",
-        {"risky": risky, "covered": covered, "max_age_hours": max_age},
+        "all active held positions have fresh live belief, verified settlement recovery, or repairable reseed"
+        if not risky
+        else "active held positions have stale/missing live belief or blocked settlement recovery",
+        {
+            "risky": risky,
+            "covered": covered,
+            "repairable": repairable,
+            "settlement_recoverable": settlement_recoverable,
+            "max_age_hours": max_age,
+            "harvester_live_enabled": harvester_enabled,
+            "harvester_evidence": harvester_evidence,
+        },
     )
 
 
@@ -619,6 +1036,10 @@ def evaluate() -> dict[str, Any]:
             "real order submit config read",
             {"edli.real_order_submit_enabled": real_submit},
         ),
+        _qkernel_spine_cutover_check(cfg),
+        _family_portfolio_single_leg_check(),
+        _qlcb_reliability_artifact_check(),
+        _forecast_sidecar_health(),
         _posterior_summary(),
         *_sidecar_heartbeat_checks(),
         _executable_substrate_freshness_check(rows),

@@ -1,8 +1,11 @@
 # Created: 2026-06-16
-# Last audited: 2026-06-16
+# Last reused or audited: 2026-06-19
+# Lifecycle: created=2026-06-16; last_reviewed=2026-06-19; last_reused=2026-06-19
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
+# Purpose: Relationship tests for BPF extras coverage completeness and fixpoint termination.
+# Reuse: Run when replacement_forecast_production BPF extras capture, coverage, or cycle selection changes.
 """Coverage-aware BPF extras self-healing gate (_extras_cycle_incomplete) + termination.
 
 These tests pin the 2026-06-16 fix that replaced the coverage-BLIND flat row-count gate
@@ -126,6 +129,9 @@ def _redirect_health(tmp_path, monkeypatch):
 def _cfg_with_db(tmp_path, monkeypatch):
     db = _make_forecast_db(tmp_path)
     monkeypatch.setattr(prod, "_probe_resolved_available_cycle", lambda: _CYCLE)
+    monkeypatch.setattr(
+        prod, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda: _CYCLE
+    )
     monkeypatch.setattr(
         "src.data.replacement_forecast_current_target_plan.build_replacement_forecast_current_target_plan",
         lambda *a, **k: _plan_full_two_leads(),
@@ -299,6 +305,9 @@ def _wire_poll(monkeypatch, tmp_path, *, download_report):
     monkeypatch.setattr(rca, "probe_openmeteo_single_run_available", lambda c, **k: c <= _CYCLE)
     monkeypatch.setattr(prod, "_per_leg_downloaded_cycle", lambda d, sid: _CYCLE)
     monkeypatch.setattr(prod, "_probe_resolved_available_cycle", lambda: _CYCLE)
+    monkeypatch.setattr(
+        prod, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda: _CYCLE
+    )
     monkeypatch.setattr(
         "src.data.replacement_forecast_current_target_plan.build_replacement_forecast_current_target_plan",
         lambda *a, **k: _plan_full_two_leads(),

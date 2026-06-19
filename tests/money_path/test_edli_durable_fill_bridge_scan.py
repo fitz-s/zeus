@@ -117,6 +117,7 @@ def _seed_confirmed_fill_aggregate(
     token_id: str = "0xNOTOKEN",
     filled_size: float = 120.0,
     avg_fill_price: float = 0.42,
+    execution_command_id: str | None = None,
 ) -> None:
     """Persist a FILL_CONFIRMED aggregate WITHOUT a position_current row.
 
@@ -147,10 +148,25 @@ def _seed_confirmed_fill_aggregate(
         },
         source_authority="decision_kernel",
     )
+    sequence = 2
+    if execution_command_id:
+        _insert_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=sequence,
+            event_type="ExecutionCommandCreated",
+            payload={
+                "event_id": aggregate_id.split(":")[0],
+                "final_intent_id": aggregate_id.split(":")[-1],
+                "execution_command_id": execution_command_id,
+            },
+            source_authority="engine_adapter",
+        )
+        sequence += 1
     _insert_event(
         conn,
         aggregate_id=aggregate_id,
-        sequence=2,
+        sequence=sequence,
         event_type="UserTradeObserved",
         payload={
             "event_id": aggregate_id.split(":")[0],
@@ -259,6 +275,87 @@ class TestDurableFillBridgeScan:
             (position_id,),
         ).fetchone()[0]
         assert entry_events == 1, "idempotency: no duplicate ENTRY position_events"
+
+    def test_existing_position_scan_repairs_stale_venue_command_position_link(self):
+        """Already-bridged EDLI fills still need command-journal convergence.
+
+        Live regression: position_current existed under the canonical EDLI id,
+        while venue_commands.position_id still held a pre-bridge short id. The
+        durable scan used to skip immediately on the existing position row,
+        leaving command/PnL/redecision joins split.
+        """
+        from src.events.edli_position_bridge import edli_bridge_position_id
+        from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
+
+        conn = _make_conn()
+        aggregate_id = "evtMF1d:fiMF1d"
+        execution_command_id = "edli_exec_cmd:evtMF1d:fiMF1d"
+        _seed_confirmed_fill_aggregate(
+            conn,
+            aggregate_id=aggregate_id,
+            execution_command_id=execution_command_id,
+        )
+        position_id = edli_bridge_position_id(aggregate_id)
+        conn.execute(
+            """INSERT INTO position_current
+               (position_id, phase, trade_id, strategy_key, updated_at, temperature_metric)
+               VALUES (?, 'active', ?, 'opening_inertia', '2026-06-01T00:00:00+00:00', 'high')""",
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, last_event_id, created_at, updated_at,
+                review_required_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
+            """,
+            (
+                "cmd-mf1d",
+                "snap-mf1d",
+                "env-mf1d",
+                "short-mf1d",
+                execution_command_id,
+                "idem-mf1d",
+                "ENTRY",
+                "mkt-MF1",
+                "0xNOTOKEN",
+                "BUY",
+                120.0,
+                0.42,
+                "vo-MF1",
+                "FILLED",
+                "2026-06-01T00:00:00+00:00",
+                "2026-06-01T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+        bridged = _edli_durable_fill_bridge_scan(
+            conn,
+            now=datetime(2026, 6, 1, 0, 5, tzinfo=timezone.utc),
+        )
+        conn.commit()
+
+        assert bridged == 0
+        command = conn.execute(
+            "SELECT position_id, updated_at FROM venue_commands WHERE command_id = 'cmd-mf1d'"
+        ).fetchone()
+        assert command["position_id"] == position_id
+        assert command["updated_at"] == "2026-06-01T00:05:00+00:00"
+        provenance = conn.execute(
+            """
+            SELECT event_type, payload_json
+              FROM provenance_envelope_events
+             WHERE subject_type = 'command'
+               AND subject_id = 'cmd-mf1d'
+               AND event_type = 'POSITION_LINK_REPAIRED'
+            """
+        ).fetchone()
+        assert provenance is not None
+        assert "short-mf1d" in provenance["payload_json"]
+        assert position_id in provenance["payload_json"]
 
     def test_non_confirmed_fill_is_not_bridged(self):
         """A MATCHED-only aggregate (no FILL_CONFIRMED) must NOT be bridged — the

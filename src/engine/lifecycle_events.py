@@ -625,6 +625,9 @@ def build_monitor_refreshed_canonical_write(
         "condition_id": getattr(position, "condition_id", ""),
         "phase_after": phase_after,
     }
+    family_redecision = getattr(position, "_monitor_family_redecision", None)
+    if family_redecision:
+        payload_dict["family_redecision"] = family_redecision
     if exit_decision is not None:
         should_exit = (
             bool(final_should_exit)

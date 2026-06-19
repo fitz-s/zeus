@@ -59,6 +59,8 @@ class CandidateEvaluation:
     taker_forbidden_reason: str | None = None
     maker_fill_probability: float | None = None
     maker_fill_probability_source: str | None = None
+    support_index: int | None = None
+    bin_id: str | None = None
 
     @property
     def robust_ev_per_dollar(self) -> float:
@@ -184,6 +186,8 @@ class CandidateEvaluation:
             "token_id": self.token_id,
             "direction": self.direction,
             "bin_label": self.bin_label,
+            "support_index": self.support_index,
+            "bin_id": self.bin_id,
             "execution_price": self.execution_price,
             "q_posterior": self.q_posterior,
             "q_lcb_5pct": self.q_lcb_5pct,

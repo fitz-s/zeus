@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-06-19
 # Authority basis: K4.0b(a) probe-resolved availability poll; task #30 run-selection
 #   single authority (2026-06-11 incident: guessed now-lag clock requested unpublished
 #   12Z/18Z runs, rung-2 meta refusal aborted the whole download->materialize cycle,
@@ -9,9 +9,9 @@
 Category killed: any production lane deriving "which run to fetch" from wall-clock
 minus a release-lag constant. The guess factory (``_parse_cycle(None, ...)``) is dead
 code-path; the production module may not reference it at all; the capture lane and the
-current-target download lane both resolve through ``_probe_resolved_available_cycle``;
-the anchor availability probe mirrors EVERY downloader transport rung (a rung the probe
-cannot see is a rung the run-selection authority starves).
+current-target download lane resolves through ``_probe_resolved_available_cycle``;
+the BPF extras lane resolves through its own single-runs transport probe; and
+neither lane may fall back to a guessed release-lag clock.
 """
 from __future__ import annotations
 
@@ -93,6 +93,29 @@ def test_probe_resolved_authority_returns_newest_pair_complete_cycle(monkeypatch
     )
 
 
+def test_bpf_extras_probe_uses_single_runs_transport_not_anchor_bucket(monkeypatch) -> None:
+    import src.data.replacement_cycle_availability as availability
+    import src.data.replacement_forecast_production as production
+
+    cycle_12z = datetime(2026, 6, 11, 12, 0, tzinfo=UTC)
+    cycle_18z = datetime(2026, 6, 11, 18, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(
+        availability,
+        "probe_openmeteo_single_run_available",
+        lambda c, **kw: c <= cycle_12z,
+    )
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: D102
+            return datetime(2026, 6, 11, 20, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(production, "datetime", _FrozenDatetime)
+    assert production._probe_resolved_bayes_precision_fusion_extras_cycle() == cycle_12z
+    assert production._probe_resolved_bayes_precision_fusion_extras_cycle() != cycle_18z
+
+
 def test_download_job_skips_with_receipt_when_probes_unresolved(monkeypatch, tmp_path) -> None:
     """No anchor-complete cycle provable -> the job returns a skip receipt and the
     downloader is NEVER invoked with a guessed cycle."""
@@ -125,7 +148,9 @@ def test_bayes_precision_fusion_capture_lane_skips_with_receipt_when_probes_unre
     monkeypatch.setitem(
         cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_capture_enabled", True
     )
-    monkeypatch.setattr(production, "_probe_resolved_available_cycle", lambda: None)
+    monkeypatch.setattr(
+        production, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda: None
+    )
     report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         {"forecast_db": "zeus-forecasts.db"}
     )
@@ -199,6 +224,15 @@ def test_availability_poll_also_feeds_the_extras_lane(monkeypatch, tmp_path) -> 
     )
     monkeypatch.setattr(
         production, "_per_leg_downloaded_cycle", lambda db, sid: cycle
+    )
+    monkeypatch.setattr(
+        production, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda: cycle
+    )
+    monkeypatch.setattr(
+        production, "_extras_cycle_incomplete", lambda cfg, extras_cycle=None: True
+    )
+    monkeypatch.setattr(
+        production, "_record_extras_fixpoint", lambda cfg, extras_cycle, *, written: None
     )
     extras_calls: list[dict] = []
 

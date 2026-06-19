@@ -2,24 +2,24 @@
 # Last reused or audited: 2026-05-27
 # Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave4 +
 # Lifecycle: created=2026-05-27; last_reviewed=2026-05-27; last_reused=never
-# Purpose: Wave 4 — Stage B family-portfolio activation gates
-# Reuse: Mode-aware env split (shadow vs live), worst-case loss cap rejection, preselect-vs-build consistency, R4-style ELG dominance under new helpers.
+# Purpose: Wave 4 — live family-portfolio activation gates
+# Reuse: live env override, worst-case loss cap rejection, preselect-vs-build consistency, R4-style ELG dominance under new helpers.
 #                  src/strategy/family_exclusive_dedup.py:909 (optimize_exclusive_outcome_portfolio)
-"""Wave 4: Stage B family-portfolio optimizer activation gates.
+"""Wave 4: family-portfolio optimizer activation gates.
 
-Stage B optimizer (``optimize_exclusive_outcome_portfolio``) already existed
-pre-Wave-4 but was config-pinned to single-leg behaviour. Wave 4 wires the
-mode-aware env-var split (shadow vs live), enforces an optional worst-case
-loss cap, and makes ``preselect_single_family_edge_before_kelly`` honour
-``max_legs > 1`` so both family-collapse hooks agree.
+The optimizer (``optimize_exclusive_outcome_portfolio``) already existed
+pre-Wave-4 but was not the live default. Wave 4 wires the
+    live env var, enforces an optional worst-case loss cap, and makes
+    ``preselect_single_family_edge_before_kelly`` honour the same payoff-vector
+    optimizer as ``build_weather_family_decision``.
 
 These tests pin the activation contract:
 
-  - default behaviour (no env, no cap) MATCHES Stage A — single-leg pre-Kelly
-    preselect; no behaviour change for legacy callers.
-  - shadow tier env var ONLY activates Stage B in shadow mode (live unchanged).
-  - live tier env var ONLY activates Stage B in live mode.
-  - loss cap rejection falls back to Stage A single-leg.
+  - default behaviour (no env, no cap) activates the live payoff-vector optimizer
+    in constrained single-leg mode.
+  - live tier env var can still expand optimizer search for non-restart research,
+    but restart preflight blocks live max_legs > 1 until portfolio execution exists.
+  - loss cap rejection falls back to the deterministic single-leg safety selector.
   - R4 regression: optimizer ELG(2-leg) >= ELG(1-leg) on a favourable
     partition (codifies Wave 1's R4 contract under the new helpers).
 """
@@ -32,8 +32,8 @@ import pytest
 
 from src.strategy.family_exclusive_dedup import (
     ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE,
-    ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW,
     ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD,
+    DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE,
     _family_portfolio_max_legs,
     _family_portfolio_max_loss_usd,
     optimize_exclusive_outcome_portfolio,
@@ -67,34 +67,24 @@ def _edge(label: str, *, posterior: float, entry: float, direction: str = "buy_y
 # ---------------------------------------------------------------------------
 
 class TestMaxLegsHelper:
-    def test_default_max_legs_is_1_when_env_unset(self, monkeypatch):
+    def test_default_max_legs_constrains_live_restart_to_single_leg(self, monkeypatch):
         monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, raising=False)
-        monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, raising=False)
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
-            assert _family_portfolio_max_legs() == 1
-        with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="shadow"):
+            assert _family_portfolio_max_legs() == DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE
             assert _family_portfolio_max_legs() == 1
 
-    def test_shadow_env_only_activates_in_shadow_mode(self, monkeypatch):
-        monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, "2")
-        monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, raising=False)
-        with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="shadow"):
-            assert _family_portfolio_max_legs() == 2
+    def test_live_env_can_explicitly_expand_non_restart_search(self, monkeypatch):
+        monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "1")
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
             assert _family_portfolio_max_legs() == 1
-
-    def test_live_env_activates_after_candidate_outcome_elg(self, monkeypatch):
         monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "2")
-        monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, raising=False)
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
             assert _family_portfolio_max_legs() == 2
-        with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="shadow"):
-            assert _family_portfolio_max_legs() == 1
 
-    def test_invalid_value_floors_to_1(self, monkeypatch):
+    def test_invalid_value_falls_back_to_live_default(self, monkeypatch):
         monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "not_a_number")
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
-            assert _family_portfolio_max_legs() == 1
+            assert _family_portfolio_max_legs() == DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE
         monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "-3")
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
             assert _family_portfolio_max_legs() == 1
@@ -123,9 +113,8 @@ class TestLossCapHelper:
 # ---------------------------------------------------------------------------
 
 class TestPreselectMaxLegsConsistency:
-    def test_default_keeps_one_leg_when_max_legs_is_1(self, monkeypatch):
-        monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, raising=False)
-        monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, raising=False)
+    def test_explicit_single_leg_env_keeps_one_leg(self, monkeypatch):
+        monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "1")
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
             edges = [
                 _edge("bin_a", posterior=0.55, entry=0.40, direction="buy_yes"),
@@ -138,16 +127,13 @@ class TestPreselectMaxLegsConsistency:
                 temperature_metric="high",
                 enabled=True,
             )
-            assert len(kept) == 1, "Stage A default must keep one leg only"
+            assert len(kept) == 1
             assert len(drops) == 1
 
-    def test_shadow_promotion_keeps_two_legs_when_env_set_and_partition_favours(
-        self, monkeypatch
-    ):
-        monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, "2")
+    def test_default_live_optimizer_evaluates_single_leg_family_intent(self, monkeypatch):
         monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, raising=False)
         monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD, raising=False)
-        with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="shadow"):
+        with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
             edges = [
                 _edge("bin_a", posterior=0.55, entry=0.30, direction="buy_yes"),
                 _edge("bin_a", posterior=0.50, entry=0.20, direction="buy_no"),
@@ -159,9 +145,7 @@ class TestPreselectMaxLegsConsistency:
                 temperature_metric="high",
                 enabled=True,
             )
-            # Stage B optimum on this favourable partition should keep both legs.
-            assert len(kept) >= 1
-            # At minimum, it must not regress to fewer-than-Stage-A
+            assert len(kept) == 1
             assert len(kept) + len(drops) == len(edges)
 
 
@@ -184,11 +168,12 @@ class TestLossCapRejection:
         assert p is not None
         assert p.max_loss_usd >= 0.0
 
-    def test_loss_cap_below_portfolio_max_loss_falls_back_to_stage_a(
+    def test_loss_cap_below_portfolio_max_loss_falls_back_to_single_leg_safety(
         self, monkeypatch
     ):
-        # Set cap below any realistic portfolio loss so Stage B path returns None
-        # and preselect_single_family_edge_before_kelly falls through to Stage A.
+        # Set cap below any realistic portfolio loss so the optimizer returns
+        # None and preselect_single_family_edge_before_kelly falls through to
+        # the single-leg safety selector.
         monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "2")
         monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD, "0.0001")
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
@@ -203,10 +188,10 @@ class TestLossCapRejection:
                 temperature_metric="high",
                 enabled=True,
             )
-            # When the cap forces a Stage B reject, the function falls through
-            # to the Stage A single-leg selection. We only assert the fallback
-            # path runs without raising; behaviour is the Stage A invariant
-            # already covered by other R4/family tests.
+            # When the cap forces an optimizer reject, the function falls
+            # through to the single-leg safety selection. We only assert the
+            # safety path runs without raising; exact ranking is covered by
+            # other R4/family tests.
             assert isinstance(kept, list)
             assert isinstance(drops, list)
             assert len(kept) + len(drops) == len(edges)

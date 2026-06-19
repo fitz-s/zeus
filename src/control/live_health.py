@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-06-19
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 #
@@ -23,6 +23,11 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 STATUS_FRESH_BUDGET_SECONDS = 300  # 5 minutes — consistent with heartbeat budget
+FORECAST_PIPELINE_HEALTH_JOBS = (
+    "bayes_precision_fusion_capture",
+    "replacement_forecast_download",
+    "replacement_forecast_live_materialize",
+)
 
 
 def _state_dir(override: Optional[Path]) -> Path:
@@ -91,6 +96,37 @@ def _has_text_value(payload: dict, *keys: str) -> bool:
         if isinstance(value, str) and value.strip():
             return True
     return False
+
+
+def _forecast_pipeline_surface(scheduler_health: Optional[dict]) -> dict:
+    """Replacement/BPF forecast production status from scheduler health.
+
+    The live daemon can be healthy while the forecast sidecar is alive but not
+    producing usable BPF inputs. Only current replacement/BPF production jobs are
+    considered here; older disabled OpenData job remnants remain outside this
+    surface to avoid turning history into a live blocker.
+    """
+
+    if scheduler_health is None:
+        return {"ok": True, "issue": None, "checked_jobs": []}
+    checked: list[str] = []
+    failed: list[tuple[str, dict]] = []
+    for job in FORECAST_PIPELINE_HEALTH_JOBS:
+        entry = scheduler_health.get(job)
+        if not isinstance(entry, dict):
+            continue
+        checked.append(job)
+        if str(entry.get("status", "")).upper() == "FAILED":
+            failed.append((job, entry))
+    if failed:
+        job, entry = sorted(failed)[0]
+        reason = entry.get("last_failure_reason") or "unknown"
+        return {
+            "ok": False,
+            "issue": f"FORECAST_PIPELINE_FAILED[{job}]: {reason}",
+            "checked_jobs": checked,
+        }
+    return {"ok": True, "issue": None, "checked_jobs": checked}
 
 
 def _business_plane_surface(status_summary: Optional[dict]) -> dict:
@@ -351,12 +387,13 @@ def compute_composite_live_health(
 ) -> dict:
     """Compute and persist composite live-health status.
 
-    Consults five surfaces:
+    Consults six surfaces:
       1. heartbeat — daemon-heartbeat.json (alive + fresh timestamp)
       2. venue_heartbeat — external CLOB heartbeat/order-safety keeper
       3. run_mode  — scheduler_jobs_health.json entry for "_run_mode" job
-      4. status_summary — status_summary.json top-level timestamp freshness
-      5. execution_capability — entry/exit side-effect gate
+      4. forecast_pipeline — current replacement/BPF scheduler health
+      5. status_summary — status_summary.json top-level timestamp freshness
+      6. execution_capability — entry/exit side-effect gate
 
     Writes state/live_health_composite.json atomically.
 
@@ -465,6 +502,16 @@ def compute_composite_live_health(
         )
 
     # ------------------------------------------------------------------ #
+    forecast_surface = _forecast_pipeline_surface(sj_data)
+    surfaces["forecast_pipeline"] = forecast_surface
+    if not forecast_surface["ok"]:
+        failing.append("forecast_pipeline")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "forecast_pipeline",
+            forecast_surface["issue"],
+        )
+
     # Surface 4: status_summary freshness                                 #
     # ------------------------------------------------------------------ #
     ss_path = sd / "status_summary.json"

@@ -1,31 +1,34 @@
-# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-06-18
+# Lifecycle: created=2026-05-20; last_reviewed=2026-06-18; last_reused=2026-06-18
 # Purpose: Relationship antibody (Fitz §3) — mutually-exclusive weather bins
 #          (one city/date/metric partition) must NOT emit independent live
-#          orders. P0-1 STAGE A single-best entry gate.
+#          scalar orders; live selection must use family payoff efficiency.
+# Reuse: Run when family-exclusive optimization, weather bin portfolio selection, or live
+#        family fallback semantics change.
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive weather
-#                  family sizing), STAGE A.
+#                  family sizing), family portfolio optimizer.
 
 """Relationship test: INV-family-exclusive-sizing.
 
 Cross-module relationship under test:
     evaluator emits N EdgeDecision(should_trade=True) for one
-    (city, target_date, metric) weather market (a PARTITION — exactly one bin
-    resolves YES)  →  cycle_runtime's family gate  →  the executor.
+    (city, target_date, metric) weather market (a PARTITION - exactly one bin
+    resolves YES) -> family portfolio selection -> the executor.
 
-Invariant (the cross-boundary property): when several mutually-exclusive bins
-of the SAME family pass family-wise FDR, AT MOST ONE may flow to the executor
-as should_trade=True. The dropped bins must carry an auditable
-``mutually_exclusive_family_dedup`` reason string. Single-bin families are
-unchanged (byte-identical to legacy per-edge path).
+Invariant (the cross-boundary property): mutually-exclusive bins may not cross
+into execution as unrelated scalar orders. The live selector must choose the
+best payoff/capital-efficient family portfolio. When no first-class portfolio
+intent exists, the second-line safety gate may collapse scalar siblings and the
+dropped bins must carry an auditable ``mutually_exclusive_family_dedup`` reason
+string. Single-bin families are unchanged.
 
 Why a relationship test, not a function test: the over-allocation bug lives at
 the MOMENT a per-bin decision list crosses from the evaluator into the
-execution loop — neither module is individually wrong, the relationship across
+execution loop - neither module is individually wrong, the relationship across
 the boundary is. Per Fitz §3 this is authored RED before implementation.
 
-RED→GREEN protocol (recorded for the opus critic):
+RED->GREEN protocol (recorded for the opus critic):
   * ``test_legacy_baseline_emits_three_independent_orders`` pins the CURRENT
-    (pre-gate / gate-disabled) behavior: family-wise FDR selects 3 bins →
+    (pre-gate / gate-disabled) behavior: family-wise FDR selects 3 bins ->
     3 should_trade=True. This is the RED state the gate must fix.
   * ``test_same_city_date_metric_...`` asserts the REQUIRED post-gate behavior:
     exactly 1 should_trade for the family + 2 dropped bins carrying the dedup
@@ -110,6 +113,33 @@ def _bin_edge(spec, *, entry_price: float, forward_edge: float) -> BinEdge:
     )
 
 
+def _celsius_edge(
+    *,
+    label: str,
+    support_index: int,
+    direction: str,
+    entry_price: float,
+    p_posterior: float,
+    forward_edge: float,
+) -> BinEdge:
+    value = int(label.removesuffix("C").removesuffix("°"))
+    return BinEdge(
+        bin=Bin(low=value, high=value, unit="C", label=label),
+        direction=direction,
+        edge=forward_edge,
+        ci_lower=0.02,
+        ci_upper=0.18,
+        p_model=p_posterior,
+        p_market=entry_price,
+        p_posterior=p_posterior,
+        entry_price=entry_price,
+        p_value=0.01,
+        vwmp=entry_price,
+        forward_edge=forward_edge,
+        support_index=support_index,
+    )
+
+
 def _trade_decision(
     spec,
     *,
@@ -135,7 +165,7 @@ def _trade_decision(
 def _family_after_fdr() -> list[EdgeDecision]:
     """The 3 bins family-wise FDR selects (20-21, 22-23, 26+) all as trades.
 
-    Differentiated executable economics so single-best selection is unambiguous:
+    Differentiated executable economics so emergency single-leg ranking is unambiguous:
     22-23°F has the largest expected-net-profit proxy.
     """
     bins = {s[2]: s for s in _BIN_SPECS}
@@ -151,9 +181,9 @@ def _count_trades(decisions: list[EdgeDecision]) -> int:
 
 
 def test_legacy_baseline_emits_three_independent_orders() -> None:
-    """RED baseline: gate OFF == current production == 3 independent orders.
+    """RED baseline: gate OFF == legacy bug == 3 independent scalar orders.
 
-    Pins the over-allocation bug so the GREEN test's delta (3 → 1) is provably
+    Pins the over-allocation bug so the GREEN test's delta (3 -> 1) is provably
     the gate's effect, not a fixture artifact.
     """
     decisions = _family_after_fdr()
@@ -166,7 +196,7 @@ def test_legacy_baseline_emits_three_independent_orders() -> None:
     )
     assert _count_trades(out) == 3, (
         "legacy/gate-disabled path must preserve all 3 FDR-selected bins "
-        "(this is the bug the STAGE A gate fixes)"
+        "(this is the bug the family safety gate fixes)"
     )
     assert all(
         MUTUALLY_EXCLUSIVE_FAMILY_DEDUP not in (d.rejection_reasons or [])
@@ -177,7 +207,7 @@ def test_legacy_baseline_emits_three_independent_orders() -> None:
 def test_same_city_date_metric_mutually_exclusive_bins_do_not_emit_independent_live_orders(
     caplog,
 ) -> None:
-    """REQUIRED live-mode behavior: exactly 1 entry per exclusive family.
+    """Safety-gate behavior when scalar entries arrive without portfolio intent.
 
     With the gate ON, the 3 FDR-selected mutually-exclusive bins collapse to
     exactly 1 should_trade=True (the single family utility winner) and
@@ -203,7 +233,7 @@ def test_same_city_date_metric_mutually_exclusive_bins_do_not_emit_independent_l
         f"mutually-exclusive family must emit exactly 1 live entry, got {len(trades)}"
     )
 
-    # The survivor is the single best by family expected-net-profit proxy.
+    # The survivor is the emergency single-leg safety winner.
     kept = trades[0]
     assert kept.edge is not None and kept.edge.bin.label == "22-23°F", (
         f"single_best must be the highest-size_usd bin; kept {kept.edge.bin.label!r}"
@@ -297,8 +327,8 @@ def test_open_pending_active_family_exposure_blocks_fdr_selected_hypothesis_with
     If a prior cycle already opened one bin for the same city/date/metric
     family, a later FDR-selected hypothesis for a different bin is still only
     a statistical selection, not an executable family portfolio selection. It
-    must be rejected before executor submission unless a FamilyPortfolioOptimizer
-    portfolio intent is present.
+    must be rejected before executor submission unless a typed rebalance intent
+    names the existing exposure it is allowed to touch.
     """
     bins = {s[2]: s for s in _BIN_SPECS}
     new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
@@ -327,7 +357,7 @@ def test_open_pending_active_family_exposure_blocks_fdr_selected_hypothesis_with
     assert rejected.rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
     assert rejected.rejection_reason_detail is not None
     assert "existing_exposure_bin='20-21°F'" in rejected.rejection_reason_detail
-    assert "no family portfolio intent" in rejected.rejection_reason_detail
+    assert "no scoped rebalance intent" in rejected.rejection_reason_detail
     assert "FDR" not in rejected.rejection_stage
 
 
@@ -393,10 +423,10 @@ def test_unknown_market_family_exposure_blocks_conservatively() -> None:
 
 
 @pytest.mark.parametrize("blocking_phase", ["open", "pending", "active"])
-def test_family_portfolio_optimizer_intent_is_the_only_existing_exposure_bypass(
+def test_existing_exposure_blocks_without_scoped_rebalance(
     blocking_phase: str,
 ) -> None:
-    """FamilyPortfolioOptimizer intent, not FDR selection, can own multi-bin execution."""
+    """A same-family exposure blocks unless a typed rebalance names it."""
     bins = {s[2]: s for s in _BIN_SPECS}
     new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
     new_bin.fdr_family_size = len(_BIN_SPECS)
@@ -414,14 +444,12 @@ def test_family_portfolio_optimizer_intent_is_the_only_existing_exposure_bypass(
         target_date=TARGET_DATE,
         temperature_metric=METRIC,
         existing_exposures=[exposure],
-        family_portfolio_intent=True,
         enabled=True,
     )
 
-    assert _count_trades(out) == 1
-    assert out[0].should_trade is True
-    assert out[0].rejection_stage == ""
-    assert out[0].rejection_reasons == []
+    assert _count_trades(out) == 0
+    assert out[0].should_trade is False
+    assert out[0].rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
 
 
 def test_portfolio_positions_project_to_weather_family_exposure_read_model() -> None:
@@ -804,8 +832,8 @@ def test_trade_db_family_exposure_does_not_let_stale_envelope_mask_snapshot_iden
     ]
 
 
-def test_family_portfolio_intent_allows_optimizer_owned_multi_bin_execution() -> None:
-    """Stage A only blocks independent bins, not an explicit family portfolio."""
+def test_same_family_exposure_requires_scoped_rebalance_id() -> None:
+    """A same-family entry without scoped rebalance id cannot add conflicting exposure."""
     bins = {s[2]: s for s in _BIN_SPECS}
     new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
     exposure = WeatherFamilyExposure(
@@ -821,18 +849,43 @@ def test_family_portfolio_intent_allows_optimizer_owned_multi_bin_execution() ->
         target_date=TARGET_DATE,
         temperature_metric=METRIC,
         existing_exposures=[exposure],
-        family_portfolio_intent=True,
+        enabled=True,
+    )
+
+    assert _count_trades(out) == 0
+    assert out[0].should_trade is False
+    assert out[0].rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
+    assert "no scoped rebalance intent" in out[0].rejection_reason_detail
+
+
+def test_scoped_rebalance_intent_may_touch_named_existing_exposure() -> None:
+    """Only an explicit rebalance exposure id can remove the existing-position block."""
+
+    bins = {s[2]: s for s in _BIN_SPECS}
+    new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
+    exposure = WeatherFamilyExposure(
+        key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+        bin_label="20-21°F",
+        phase="active",
+        position_id="pos-existing-1",
+    )
+
+    out = dedup_mutually_exclusive_families(
+        [new_bin],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        existing_exposures=[exposure],
+        family_portfolio_allowed_exposure_ids=["pos-existing-1"],
         enabled=True,
     )
 
     assert _count_trades(out) == 1
     assert out[0].should_trade is True
-    assert out[0].rejection_stage == ""
-    assert out[0].rejection_reasons == []
 
 
 def test_family_preselection_happens_before_projected_exposure_mutation() -> None:
-    """Pre-Kelly relationship: only one FDR sibling enters scalar sizing."""
+    """Pre-Kelly relationship: family optimizer runs before scalar sizing."""
 
     bins = {s[2]: s for s in _BIN_SPECS}
     low_price_tail = _bin_edge(bins["26°F or above"], entry_price=0.02, forward_edge=0.02)
@@ -847,9 +900,9 @@ def test_family_preselection_happens_before_projected_exposure_mutation() -> Non
         enabled=True,
     )
 
-    assert selected == [mid_bin]
-    assert {d.dropped_bin for d in dropped} == {"26°F or above", "20-21°F"}
-    assert all(d.kept_bin == "22-23°F" for d in dropped)
+    assert selected == [low_price_tail]
+    assert {d.dropped_bin for d in dropped} == {"22-23°F", "20-21°F"}
+    assert all(d.kept_bin == "26°F or above" for d in dropped)
 
 
 def test_weather_family_decision_is_first_class_single_leg_intent() -> None:
@@ -866,18 +919,17 @@ def test_weather_family_decision_is_first_class_single_leg_intent() -> None:
     )
 
     assert family_decision is not None
-    assert family_decision.family_portfolio_intent is True
     assert family_decision.portfolio.family_key == WeatherFamilyKey(CITY, TARGET_DATE, METRIC)
     assert family_decision.portfolio.selected_leg is low_price_tail
     assert family_decision.portfolio.selected_legs == (low_price_tail,)
-    assert family_decision.portfolio.fallback_candidate_legs == (low_price_tail, mid_bin)
+    assert family_decision.portfolio.fallback_candidate_legs == (low_price_tail,)
     assert family_decision.portfolio.objective.startswith("expected_log_growth_payoff_vector")
     assert family_decision.portfolio.payoff_matrix
-    assert family_decision.dropped == ()
+    assert [d.dropped_bin for d in family_decision.dropped] == ["22-23°F"]
 
 
-def test_family_decision_retains_ranked_fallback_candidates_before_execution_viability() -> None:
-    """Primary leg failure must not erase sibling legs before executable reprice."""
+def test_family_decision_does_not_emit_scalar_fallback_siblings_as_live_decisions() -> None:
+    """Scalar fallback alternatives need a typed ordered intent before they may submit."""
 
     bins = {s[2]: s for s in _BIN_SPECS}
     low_price_tail = _bin_edge(bins["26°F or above"], entry_price=0.02, forward_edge=0.02)
@@ -895,12 +947,12 @@ def test_family_decision_retains_ranked_fallback_candidates_before_execution_via
 
     assert family_decision is not None
     assert family_decision.portfolio.selected_leg is low_price_tail
-    assert family_decision.portfolio.fallback_candidate_legs == (
-        low_price_tail,
-        mid_bin,
-        side_bin,
-    )
-    assert [d.dropped_bin for d in family_decision.dropped] == ["19°F or below"]
+    assert family_decision.portfolio.fallback_candidate_legs == (low_price_tail,)
+    assert [d.dropped_bin for d in family_decision.dropped] == [
+        "22-23°F",
+        "20-21°F",
+        "19°F or below",
+    ]
 
 
 def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monkeypatch) -> None:
@@ -929,16 +981,16 @@ def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monke
 
     assert family_decision is not None
     assert family_decision.portfolio.selected_leg is fallback_buy_yes
-    assert family_decision.portfolio.fallback_candidate_legs == (
-        fallback_buy_yes,
-        best_buy_yes,
-    )
-    assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
+    assert family_decision.portfolio.fallback_candidate_legs == (fallback_buy_yes,)
+    assert [d.dropped_bin for d in family_decision.dropped] == [
+        "26°F or above",
+        "22-23°F",
+    ]
     assert family_decision.dropped[0].rejection_reason == "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED"
 
 
 def test_family_decision_all_live_disabled_buy_no_does_not_self_drop(monkeypatch) -> None:
-    """If no executable sibling exists, blocked diagnostics must not mark the selected leg dropped."""
+    """If no executable sibling exists, a blocked sibling must not mark the selected leg dropped."""
 
     flags = dict(evaluator_module.settings["feature_flags"])
     flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = True
@@ -965,12 +1017,12 @@ def test_family_decision_all_live_disabled_buy_no_does_not_self_drop(monkeypatch
 
     assert family_decision is not None
     assert family_decision.portfolio.selected_leg is buy_no_a
-    assert family_decision.portfolio.fallback_candidate_legs == (buy_no_a, buy_no_b)
-    assert family_decision.dropped == ()
+    assert family_decision.portfolio.fallback_candidate_legs == (buy_no_a,)
+    assert [d.dropped_bin for d in family_decision.dropped] == ["20-21°F"]
 
 
-def test_runtime_dedup_preserves_ranked_fallback_candidates_until_submit() -> None:
-    """Fallback candidates stay attemptable; runtime submits at most one later."""
+def test_runtime_dedup_collapses_scalar_fallback_candidates_before_submit() -> None:
+    """Ranked scalar fallbacks are not one execution intent and must not all submit."""
 
     decisions = _family_after_fdr()
     for rank, decision in enumerate(decisions, start=1):
@@ -985,9 +1037,29 @@ def test_runtime_dedup_preserves_ranked_fallback_candidates_until_submit() -> No
         enabled=True,
     )
 
-    assert _count_trades(out) == 3
+    assert _count_trades(out) == 1
+    assert sum(d.rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP for d in out) == 2
+
+
+def test_runtime_dedup_preserves_multi_leg_portfolio_selected_legs() -> None:
+    """Selected legs from one coherent portfolio may pass together."""
+
+    decisions = _family_after_fdr()[:2]
+    for decision in decisions:
+        decision.family_fallback_rank = 1
+        decision.family_fallback_candidate_count = len(decisions)
+        decision.family_portfolio_leg_role = "portfolio_selected"
+
+    out = dedup_mutually_exclusive_families(
+        decisions,
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=True,
+    )
+
+    assert _count_trades(out) == 2
     assert all(d.rejection_stage == "" for d in out)
-    assert all("family_ranked_executable_fallback" in d.applied_validations for d in out)
 
 
 def test_family_fallback_sizing_does_not_accumulate_sibling_exposure() -> None:
@@ -1035,6 +1107,427 @@ def test_family_portfolio_can_select_explicit_multi_leg_payoff_vector() -> None:
     assert len(portfolio.posterior_vector) == 3
     assert len(portfolio.leg_weights) == 2
     assert portfolio.expected_log_growth > 0
+
+
+def test_family_optimizer_rejects_capital_dominated_no_basket_for_center_yes() -> None:
+    """Shanghai-style partition: two sibling NO legs are not valid if center YES dominates."""
+
+    no_29 = _celsius_edge(
+        label="29°C",
+        support_index=0,
+        direction="buy_no",
+        entry_price=0.79,
+        p_posterior=0.90,
+        forward_edge=0.05,
+    )
+    yes_30 = _celsius_edge(
+        label="30°C",
+        support_index=1,
+        direction="buy_yes",
+        entry_price=0.27,
+        p_posterior=0.80,
+        forward_edge=0.10,
+    )
+    no_31 = _celsius_edge(
+        label="31°C",
+        support_index=2,
+        direction="buy_no",
+        entry_price=0.80,
+        p_posterior=0.90,
+        forward_edge=0.05,
+    )
+
+    portfolio = optimize_exclusive_outcome_portfolio(
+        [no_29, yes_30, no_31],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        min_legs=1,
+        max_legs=2,
+    )
+
+    assert portfolio is not None
+    assert portfolio.selected_legs == (yes_30,)
+    assert portfolio.posterior_vector == (
+        pytest.approx(0.10),
+        pytest.approx(0.80),
+        pytest.approx(0.10),
+    )
+
+
+def test_family_optimizer_scores_full_omega_with_non_candidate_residual_outcome() -> None:
+    """Non-candidate outcomes remain in Ω; candidates are instruments, not the partition."""
+
+    no_29 = _celsius_edge(
+        label="29°C",
+        support_index=0,
+        direction="buy_no",
+        entry_price=0.79,
+        p_posterior=0.90,
+        forward_edge=0.05,
+    )
+    yes_30 = _celsius_edge(
+        label="30°C",
+        support_index=1,
+        direction="buy_yes",
+        entry_price=0.27,
+        p_posterior=0.80,
+        forward_edge=0.10,
+    )
+    no_31 = _celsius_edge(
+        label="31°C",
+        support_index=2,
+        direction="buy_no",
+        entry_price=0.80,
+        p_posterior=0.90,
+        forward_edge=0.05,
+    )
+
+    portfolio = optimize_exclusive_outcome_portfolio(
+        [no_29, yes_30, no_31],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        outcome_probabilities=[0.08, 0.74, 0.08, 0.10],
+        min_legs=1,
+        max_legs=2,
+    )
+
+    assert portfolio is not None
+    assert portfolio.selected_legs == (yes_30,)
+    assert portfolio.outcome_support_indices == (0, 1, 2, 3)
+    assert portfolio.posterior_vector == (
+        pytest.approx(0.08),
+        pytest.approx(0.74),
+        pytest.approx(0.08),
+        pytest.approx(0.10),
+    )
+    assert len(portfolio.payoff_matrix) == 4
+
+
+def test_family_optimizer_fails_closed_on_explicit_probability_missing_candidate_support() -> None:
+    """Explicit live probability vectors must cover every executable candidate support."""
+
+    yes_29 = _celsius_edge(
+        label="29°C",
+        support_index=0,
+        direction="buy_yes",
+        entry_price=0.35,
+        p_posterior=0.50,
+        forward_edge=0.15,
+    )
+    no_30 = _celsius_edge(
+        label="30°C",
+        support_index=1,
+        direction="buy_no",
+        entry_price=0.40,
+        p_posterior=0.70,
+        forward_edge=0.30,
+    )
+
+    portfolio = optimize_exclusive_outcome_portfolio(
+        [yes_29, no_30],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        outcome_probabilities={0: 1.0},
+        min_legs=1,
+        max_legs=1,
+    )
+
+    assert portfolio is None
+
+
+def test_family_optimizer_fails_closed_on_explicit_probability_mass_drift() -> None:
+    """Explicit live probability vectors are source-of-truth q, not normalizable hints."""
+
+    yes_29 = _celsius_edge(
+        label="29°C",
+        support_index=0,
+        direction="buy_yes",
+        entry_price=0.35,
+        p_posterior=0.50,
+        forward_edge=0.15,
+    )
+    no_30 = _celsius_edge(
+        label="30°C",
+        support_index=1,
+        direction="buy_no",
+        entry_price=0.40,
+        p_posterior=0.70,
+        forward_edge=0.30,
+    )
+
+    portfolio = optimize_exclusive_outcome_portfolio(
+        [yes_29, no_30],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        outcome_probabilities=[0.45, 0.15],
+        min_legs=1,
+        max_legs=1,
+    )
+
+    assert portfolio is None
+
+
+def test_family_optimizer_full_omega_flips_truncated_candidate_renormalization() -> None:
+    """Residual settlement mass can make the optimal leg different from candidate-subset math."""
+
+    yes_29 = _celsius_edge(
+        label="29°C",
+        support_index=0,
+        direction="buy_yes",
+        entry_price=0.35,
+        p_posterior=0.50,
+        forward_edge=0.15,
+    )
+    no_30 = _celsius_edge(
+        label="30°C",
+        support_index=1,
+        direction="buy_no",
+        entry_price=0.40,
+        p_posterior=0.70,
+        forward_edge=0.30,
+    )
+
+    truncated = optimize_exclusive_outcome_portfolio(
+        [yes_29, no_30],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        min_legs=1,
+        max_legs=1,
+    )
+    full_omega = optimize_exclusive_outcome_portfolio(
+        [yes_29, no_30],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        outcome_probabilities=[0.45, 0.15, 0.40],
+        min_legs=1,
+        max_legs=1,
+    )
+
+    assert truncated is not None
+    assert full_omega is not None
+    assert truncated.selected_legs == (yes_29,)
+    assert full_omega.selected_legs == (no_30,)
+    assert full_omega.outcome_support_indices == (0, 1, 2)
+
+
+def test_preselection_rejects_shanghai_no_basket_for_center_yes_by_default(monkeypatch) -> None:
+    """Default live preselection must choose the capital-efficient center YES,
+    not collapse two dominated NO legs into one arbitrary NO."""
+
+    monkeypatch.delenv("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", raising=False)
+    no_29 = _celsius_edge(
+        label="29°C",
+        support_index=0,
+        direction="buy_no",
+        entry_price=0.79,
+        p_posterior=0.90,
+        forward_edge=0.05,
+    )
+    yes_30 = _celsius_edge(
+        label="30°C",
+        support_index=1,
+        direction="buy_yes",
+        entry_price=0.27,
+        p_posterior=0.80,
+        forward_edge=0.10,
+    )
+    no_31 = _celsius_edge(
+        label="31°C",
+        support_index=2,
+        direction="buy_no",
+        entry_price=0.80,
+        p_posterior=0.90,
+        forward_edge=0.05,
+    )
+
+    selected, dropped = preselect_single_family_edge_before_kelly(
+        [no_29, yes_30, no_31],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        outcome_probabilities=[0.10, 0.80, 0.10],
+        enabled=True,
+    )
+
+    assert selected == [yes_30]
+    assert {drop.dropped_bin for drop in dropped} == {"29°C", "31°C"}
+
+
+def test_multi_leg_family_decision_executes_selected_portfolio_not_scalar_fallbacks(
+    monkeypatch,
+) -> None:
+    """A multi-leg optimized portfolio must not be collapsed into a one-leg fallback queue."""
+
+    monkeypatch.setenv("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", "2")
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge_a = _bin_edge(bins["20-21°F"], entry_price=0.20, forward_edge=0.20)
+    edge_b = _bin_edge(bins["22-23°F"], entry_price=0.20, forward_edge=0.20)
+    scalar_fallback = _bin_edge(bins["26°F or above"], entry_price=0.70, forward_edge=0.01)
+
+    family_decision = build_weather_family_decision(
+        [edge_a, edge_b, scalar_fallback],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=True,
+    )
+
+    assert family_decision is not None
+    assert family_decision.portfolio.selected_legs == (edge_a, edge_b)
+    assert family_decision.portfolio.fallback_candidate_legs == (edge_a, edge_b)
+    assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
+
+
+def test_family_optimizer_honors_live_admission_and_qlcb_before_payoff_selection() -> None:
+    """Rejected tail lottery legs must not re-enter through family optimization."""
+
+    def edge(label: str, idx: int, direction: str, price: float, q: float, q_lcb: float, *, admitted: bool, reason: str = ""):
+        return SimpleNamespace(
+            bin=Bin(low=idx, high=idx, unit="C", label=label),
+            support_index=idx,
+            direction=direction,
+            entry_price=price,
+            p_posterior=q,
+            q_lcb_5pct=q_lcb,
+            forward_edge=q_lcb - price,
+            admitted=admitted,
+            missing_reason=reason,
+        )
+
+    rejected_tail_yes = edge(
+        "34C+",
+        0,
+        "buy_yes",
+        0.006,
+        0.014,
+        0.014,
+        admitted=False,
+        reason="DIRECTION_LAW_BIN_FORECAST_MISMATCH",
+    )
+    rejected_tiny_tail_yes = edge(
+        "24C or below",
+        1,
+        "buy_yes",
+        0.004,
+        0.001,
+        0.001,
+        admitted=False,
+        reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+    )
+    live_yes = edge(
+        "30C",
+        2,
+        "buy_yes",
+        0.27,
+        0.80,
+        0.35,
+        admitted=True,
+    )
+
+    portfolio = optimize_exclusive_outcome_portfolio(
+        [rejected_tail_yes, rejected_tiny_tail_yes, live_yes],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        min_legs=1,
+        max_legs=2,
+    )
+
+    assert portfolio is not None
+    assert portfolio.selected_legs == (live_yes,)
+    assert rejected_tail_yes not in portfolio.candidate_legs
+    assert rejected_tiny_tail_yes not in portfolio.candidate_legs
+    assert portfolio.posterior_vector == (pytest.approx(1.0),)
+    assert portfolio.cost_vector == (0.27,)
+    assert portfolio.capital_cost_usd == pytest.approx(0.27)
+    assert portfolio.capital_efficiency > 0.0
+
+
+def test_family_optimizer_allows_same_family_monitor_owned_only_for_redecision() -> None:
+    """Held-family candidates are position-management inputs, not new entries."""
+
+    def edge(label: str, idx: int, direction: str, price: float, q: float, q_lcb: float, *, reason: str = ""):
+        return SimpleNamespace(
+            bin=Bin(low=idx, high=idx, unit="C", label=label),
+            support_index=idx,
+            direction=direction,
+            entry_price=price,
+            p_posterior=q,
+            q_lcb_5pct=q_lcb,
+            forward_edge=q_lcb - price,
+            admitted=False if reason else True,
+            missing_reason=reason,
+        )
+
+    no_29 = edge(
+        "29C",
+        0,
+        "buy_no",
+        0.79,
+        0.10,
+        0.10,
+        reason="OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED:position_id=held-29",
+    )
+    yes_30 = edge(
+        "30C",
+        1,
+        "buy_yes",
+        0.27,
+        0.80,
+        0.35,
+        reason="OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED:position_id=held-29",
+    )
+    blocked_same_token = edge(
+        "31C",
+        2,
+        "buy_no",
+        0.80,
+        0.10,
+        0.10,
+        reason="OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED:position_id=held-31",
+    )
+    blocked_capital = edge(
+        "32C",
+        3,
+        "buy_yes",
+        0.02,
+        0.03,
+        0.03,
+        reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+    )
+
+    default_portfolio = optimize_exclusive_outcome_portfolio(
+        [no_29, yes_30],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        min_legs=1,
+        max_legs=2,
+    )
+    assert default_portfolio is None
+
+    redecision_portfolio = optimize_exclusive_outcome_portfolio(
+        [no_29, yes_30, blocked_same_token, blocked_capital],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        min_legs=1,
+        max_legs=2,
+        allow_same_family_monitor_owned=True,
+    )
+
+    assert redecision_portfolio is not None
+    assert redecision_portfolio.selected_legs == (yes_30,)
+    assert no_29 in redecision_portfolio.candidate_legs
+    assert yes_30 in redecision_portfolio.candidate_legs
+    assert blocked_same_token not in redecision_portfolio.candidate_legs
+    assert blocked_capital not in redecision_portfolio.candidate_legs
 
 
 def test_runtime_family_dedup_ranks_by_expected_net_profit_not_size_usd() -> None:

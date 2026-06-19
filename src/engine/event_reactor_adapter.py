@@ -394,6 +394,11 @@ class _CandidateProof:
     # +edge cheap trades was removed from the live path; this records the signal for
     # settlement-graded study without touching the live decision.
     unlicensed_tail_coverage_telemetry: bool = False
+    # qkernel spine execution economics certificate. This is deliberately separate from
+    # q_posterior / q_lcb_5pct, which remain receipt-facing selected-side probability
+    # fields. When q_source == "qkernel_spine", submit sizing consumes this guarded
+    # payoff-space economics payload instead of rebuilding stake from proof q_lcb.
+    qkernel_execution_economics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -627,6 +632,10 @@ _ENTRY_HELD_POSITION_BLOCKING_PHASES = frozenset(
 )
 _ENTRY_HELD_POSITION_REASON_BASE = "OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED"
 _ENTRY_HELD_FAMILY_REASON_BASE = "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED"
+
+
+def _is_entry_held_family_reason(reason: object) -> bool:
+    return str(reason or "").strip().startswith(_ENTRY_HELD_FAMILY_REASON_BASE)
 
 
 def _durable_live_cap_final_intent_token(final_intent_id: str) -> str:
@@ -1847,20 +1856,23 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
                 command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
+                certificate_decision_time = command.header.decision_time
                 assert executor_submit is not None
-                submit_result = executor_submit(final_intent, command)
+                submit_result = _normalize_event_bound_executor_submit_result(
+                    executor_submit(final_intent, command)
+                )
                 if submit_result.venue_call_started:
                     _append_venue_submit_attempted_aggregate_event(
                         live_cap_conn or trade_conn,
                         command,
-                        decision_time=decision_time.astimezone(UTC),
+                        decision_time=certificate_decision_time,
                     )
                     _live_submit_count[0] += 1
                 if submit_result.venue_ack_received:
                     _live_ack_count[0] += 1  # FIX-4 venue_acks: count actual ACKs
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
-                    decision_time=decision_time.astimezone(UTC),
+                    decision_time=certificate_decision_time,
                     status=submit_result.status,
                     reason_code=submit_result.reason_code,
                     submit_started_at=submit_result.submit_started_at,
@@ -1878,7 +1890,7 @@ def event_bound_live_adapter_from_trade_conn(
                     command,
                     receipt_cert,
                     submit_result=submit_result,
-                    decision_time=decision_time.astimezone(UTC),
+                    decision_time=certificate_decision_time,
                 )
                 transition_cert = _transition_live_cap_after_submit(
                     command_certificates,
@@ -1886,7 +1898,7 @@ def event_bound_live_adapter_from_trade_conn(
                     command,
                     receipt_cert,
                     submit_result,
-                    decision_time=decision_time.astimezone(UTC),
+                    decision_time=certificate_decision_time,
                 )
                 certificates = command_certificates + (receipt_cert, transition_cert)
                 side_effect_status = submit_result.status
@@ -2279,6 +2291,7 @@ def _build_event_bound_no_submit_receipt_core(
 
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
+    allow_same_family_monitor_owned = event.event_type == "EDLI_REDECISION_PENDING"
     if forecast_conn is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="FORECAST_AUTHORITY_CONNECTION_MISSING")
     if topology_conn is None:
@@ -2572,24 +2585,21 @@ def _build_event_bound_no_submit_receipt_core(
     _spine_flag_on = qkernel_spine_enabled()
     _is_day0_event = event.event_type in _DAY0_LANE_EVENT_TYPES
     _spine_eligible_event = event.event_type in _FORECAST_DECISION_EVENT_TYPES
+    # Fix #4 generalized: pass REAL current per-bin family exposure into the
+    # ΔU SELECTION before the instrument is chosen. A flat/empty baseline can
+    # pick a leg the account is already heavy in; re-sizing after selection
+    # cannot repair a wrong instrument choice.
+    _selection_exposure = _family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=portfolio_state_provider,
+        family=family,
+    )
     if _spine_flag_on and _spine_eligible_event and not _is_day0_event:
-        # Fix #4 (consult_review_pr409.md §5/§6 "current exposure not in route
-        # selection"): pass the REAL current per-bin family exposure into the spine's
-        # ΔU SELECTION. The spine picks the new leg by argmax ΔU over the whole family,
-        # so a flat/empty baseline lets it choose a leg the account is already heavy in
-        # — and re-sizing the chosen leg afterward cannot repair a wrong INSTRUMENT
-        # choice. The per-bin exposure attributes each open committed position to its own
-        # family bin by condition_id (NOT collapsed onto one bin), so the concave ΔU
-        # objective shrinks the legs the book already holds before the argmax.
-        _spine_selection_exposure = _family_existing_exposure_for_selection_by_bin_id(
-            proofs=proofs,
-            portfolio_state_provider=portfolio_state_provider,
-            family=family,
-        )
         _spine_entry_proofs = _selection_scoped_proofs(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=trade_conn,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         )
         if not _spine_entry_proofs:
             proof = None
@@ -2606,7 +2616,7 @@ def _build_event_bound_no_submit_receipt_core(
                 exposure_builder=_robust_marginal_utility_exposure,
                 baseline_usd_provider=_robust_marginal_utility_baseline_usd,
                 per_bin_yes_q_lcb=_per_bin_yes_q_lcb(proofs),
-                extra_exposure_by_bin_id=(_spine_selection_exposure or None),
+                extra_exposure_by_bin_id=(_selection_exposure or None),
             )
             proof = _spine_result.selected_proof
             _spine_no_trade_reason = _spine_result.no_trade_reason
@@ -2616,6 +2626,8 @@ def _build_event_bound_no_submit_receipt_core(
             proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=trade_conn,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+            extra_exposure_by_bin_id=(_selection_exposure or None),
         )
     opportunity_book = _opportunity_book_from_proofs(
         event_id=event.event_id,
@@ -2624,6 +2636,7 @@ def _build_event_bound_no_submit_receipt_core(
         selected_proof=proof,
         locked_opportunity_conn=locked_opportunity_conn,
         held_position_conn=trade_conn,
+        allow_same_family_monitor_owned=allow_same_family_monitor_owned,
     )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
@@ -2838,6 +2851,7 @@ def _build_event_bound_no_submit_receipt_core(
                     selected_proof=proof,
                     locked_opportunity_conn=locked_opportunity_conn,
                     held_position_conn=trade_conn,
+                    allow_same_family_monitor_owned=allow_same_family_monitor_owned,
                 )
                 if execution_price is None or row is None:
                     return EventSubmissionReceipt(
@@ -3229,6 +3243,7 @@ def _build_event_bound_no_submit_receipt_core(
                 # leg scoped OUT of selection falsely reverses the chosen leg.
                 locked_opportunity_conn=locked_opportunity_conn,
                 held_position_conn=trade_conn,
+                allow_same_family_monitor_owned=allow_same_family_monitor_owned,
                 stake_floor_out=_stake_floor_provenance,
                 free_cash_usd=free_cash_usd,
             )
@@ -3562,7 +3577,12 @@ def _build_event_bound_no_submit_receipt_core(
 # size-capped projection of exactly the fate-relevant fields.
 _CANDIDATE_BOOK_FIELDS: tuple[str, ...] = (
     "candidate_id",
+    "family_id",
+    "condition_id",
+    "token_id",
     "bin_label",
+    "support_index",
+    "bin_id",
     "direction",
     "q_posterior",
     "q_lcb_5pct",
@@ -3961,9 +3981,10 @@ def _build_submit_disabled_live_certificates(
         pre_submit_authority_provider=pre_submit_authority_provider,
     )
     command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
+    certificate_decision_time = command.header.decision_time
     receipt_cert = build_execution_receipt_certificate(
         execution_command_cert=command,
-        decision_time=decision_time,
+        decision_time=certificate_decision_time,
         status="SUBMIT_DISABLED",
         reason_code="REAL_ORDER_SUBMIT_DISABLED",
     )
@@ -3971,9 +3992,48 @@ def _build_submit_disabled_live_certificates(
         command_certificates,
         receipt_cert,
         live_cap_conn,
-        decision_time=decision_time,
+        decision_time=certificate_decision_time,
     )
     return command_certificates + (receipt_cert, transition_cert)
+
+
+def _normalize_event_bound_executor_submit_result(
+    result: EventBoundExecutorSubmitResult,
+) -> EventBoundExecutorSubmitResult:
+    status = str(result.status or "").strip().upper()
+    venue_call_started = bool(result.venue_call_started)
+    venue_ack_received = bool(result.venue_ack_received)
+    reconciliation_followup_required = bool(result.reconciliation_followup_required)
+    side_effect_known = bool(result.side_effect_known)
+
+    if status in {"SUBMITTED", "REJECTED", "TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
+        venue_call_started = True
+    if status in {"SUBMITTED", "REJECTED"}:
+        venue_ack_received = True
+        side_effect_known = True
+    if status in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
+        reconciliation_followup_required = True
+    if status == "POST_SUBMIT_UNKNOWN":
+        side_effect_known = False
+    if status == "PRE_SUBMIT_ERROR":
+        venue_call_started = False
+        venue_ack_received = False
+        side_effect_known = True
+
+    if (
+        venue_call_started == result.venue_call_started
+        and venue_ack_received == result.venue_ack_received
+        and reconciliation_followup_required == result.reconciliation_followup_required
+        and side_effect_known == result.side_effect_known
+    ):
+        return result
+    return dataclass_replace(
+        result,
+        venue_call_started=venue_call_started,
+        venue_ack_received=venue_ack_received,
+        reconciliation_followup_required=reconciliation_followup_required,
+        side_effect_known=side_effect_known,
+    )
 
 
 # Sentinel prefix the caller (process_pending submit body) recognizes to map a
@@ -4218,6 +4278,7 @@ def _build_live_execution_command_certificates(
     )
     _assert_event_bound_receipt_live_authority(receipt)
     proof_bundle = receipt.decision_proof_bundle
+    decision_time = _live_certificate_decision_time_from_proof_bundle(decision_time, proof_bundle)
     compile_result = DecisionCompiler().compile_no_submit(
         event,
         decision_time=decision_time,
@@ -6285,6 +6346,64 @@ def _required_cert(certs: tuple[DecisionCertificate, ...], certificate_type: str
     raise ValueError(f"missing required certificate: {certificate_type}")
 
 
+_NO_SUBMIT_PROOF_EVIDENCE_FIELDS: tuple[str, ...] = (
+    "source_truth",
+    "market_topology",
+    "family_closure",
+    "forecast_authority",
+    "calibration",
+    "model_config",
+    "belief",
+    "executable_snapshot",
+    "quote_feasibility",
+    "cost_model",
+    "pre_trade_evidence",
+    "candidate_evidence",
+    "testing_protocol",
+    "fdr",
+    "kelly_dry_run",
+    "risk_level",
+)
+
+
+def _utc_datetime_or_none(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+    if isinstance(value, str) and value:
+        return _parse_utc(value)
+    return None
+
+
+def _live_certificate_decision_time_from_proof_bundle(
+    decision_time: datetime,
+    proof_bundle: NoSubmitProofBundle | None,
+) -> datetime:
+    """Return the earliest lawful certificate time for the proof bundle.
+
+    Event redecision can be triggered by an older durable event and then re-read
+    fresher forecast/quote/topology evidence before the final submit seam. The
+    verifier is correct to reject any parent evidence after the certificate
+    decision_time; the adapter must therefore generate the live certificate chain
+    at the max time when all selected parents were actually available.
+    """
+
+    resolved = _utc_datetime_or_none(decision_time) or datetime.now(UTC)
+    if proof_bundle is None:
+        return resolved
+    for field_name in _NO_SUBMIT_PROOF_EVIDENCE_FIELDS:
+        evidence = getattr(proof_bundle, field_name, None)
+        if not isinstance(evidence, AuthorityEvidence):
+            continue
+        clock = evidence.clock
+        for attr in ("source_available_at", "agent_received_at", "persisted_at"):
+            value = _utc_datetime_or_none(getattr(clock, attr, None))
+            if value is not None and value > resolved:
+                resolved = value
+    return resolved
+
+
 def _require_snapshot_hash(snapshot: object) -> str:
     """Return executable_snapshot_hash from a hydrated snapshot; raise if absent."""
     if snapshot is None:
@@ -7552,6 +7671,90 @@ def _proof_probability_uncertainty(
     )
 
 
+_QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
+    {
+        "source",
+        "candidate_id",
+        "route_id",
+        "payoff_q_lcb",
+        "edge_lcb",
+        "delta_u_at_min",
+        "optimal_stake_usd",
+        "optimal_delta_u",
+        "cost",
+    }
+)
+
+
+def _proof_uses_qkernel_spine(proof: "_CandidateProof") -> bool:
+    return str(getattr(proof, "q_source", "") or "") == "qkernel_spine"
+
+
+def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] | None:
+    """Return the qkernel guarded execution-economics certificate, if valid.
+
+    ``q_source == "qkernel_spine"`` is an execution authority switch: the submit path
+    may size only from the guarded qkernel certificate. Missing or malformed
+    certificates therefore return ``None`` and the caller must fail closed rather than
+    fall back to legacy proof-qLCB sizing.
+    """
+    if not _proof_uses_qkernel_spine(proof):
+        return None
+    cert = getattr(proof, "qkernel_execution_economics", None)
+    if not isinstance(cert, Mapping):
+        return None
+    if not _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS.issubset(cert.keys()):
+        return None
+    if str(cert.get("source") or "") != "qkernel_spine":
+        return None
+    if not str(cert.get("candidate_id") or "").strip():
+        return None
+    route_id = str(cert.get("route_id") or "").strip()
+    if not route_id:
+        return None
+    side = str(cert.get("side") or "").strip().upper()
+    native_side = _native_curve_side_for_direction(str(getattr(proof, "direction", "") or ""))
+    if side and native_side is not None and side != native_side:
+        return None
+    bin_id = str(cert.get("bin_id") or "").strip()
+    if bin_id and bin_id != _candidate_bin_id(proof):
+        return None
+    if route_id.startswith("DIRECT_YES:") and native_side != "YES":
+        return None
+    if route_id.startswith("DIRECT_NO:") and native_side != "NO":
+        return None
+    if not (route_id.startswith("DIRECT_YES:") or route_id.startswith("DIRECT_NO:")):
+        return None
+    return cert
+
+
+def _qkernel_execution_float(
+    proof: "_CandidateProof",
+    key: str,
+) -> float | None:
+    cert = _qkernel_execution_economics(proof)
+    if cert is None:
+        return None
+    value = cert.get(key)
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out):
+        return None
+    return out
+
+
+def _qkernel_execution_q_lcb(proof: "_CandidateProof") -> float | None:
+    """The guarded payoff-space lower bound the qkernel selected and sized on."""
+    q_lcb = _qkernel_execution_float(proof, "payoff_q_lcb")
+    if q_lcb is None:
+        return None
+    if not (0.0 <= q_lcb <= 1.0):
+        return None
+    return q_lcb
+
+
 def _native_side_cost_curve_from_execution_price(
     *,
     proof: _CandidateProof,
@@ -7743,6 +7946,9 @@ def _native_side_candidate_from_proof(
 
     q_point = float(proof.q_posterior)
     q_lcb = float(proof.q_lcb_5pct)
+    qkernel_q_lcb = _qkernel_execution_q_lcb(proof)
+    if qkernel_q_lcb is not None:
+        q_lcb = qkernel_q_lcb
 
     # §13 / Hidden #2 live no-trade gate: q_lcb is INVALID when it is out of
     # [0, 1] or EXCEEDS q_point (a lower-confidence bound above the point estimate
@@ -7789,6 +7995,8 @@ def _candidate_evaluation_from_proof(
     family_id: str,
     proof: _CandidateProof,
     kelly_size_usd: float = 0.0,
+    support_index: int | None = None,
+    bin_id: str | None = None,
 ) -> CandidateEvaluation:
     """Derive the legacy CandidateEvaluation RECEIPT from the materialized candidate.
 
@@ -7816,6 +8024,8 @@ def _candidate_evaluation_from_proof(
     row = proof.row or {}
     candidate = proof.candidate
     bin_obj = getattr(candidate, "bin", None)
+    if bin_id is None:
+        bin_id = _candidate_bin_id(proof)
     return CandidateEvaluation(
         # Identity sourced from the materialized NativeSideCandidate (single
         # candidate object) so the receipt and the candidate cannot drift.
@@ -7825,6 +8035,8 @@ def _candidate_evaluation_from_proof(
         token_id=native_candidate.token_id,
         direction=str(proof.direction or ""),
         bin_label=getattr(bin_obj, "label", None),
+        support_index=support_index,
+        bin_id=bin_id,
         execution_price=execution_price,
         # Diagnostic q fields record what the proof TESTED on this side (the S2
         # robust authority). A no-trade NativeSideCandidate carries no q authority
@@ -7882,6 +8094,7 @@ def _selection_scoped_proofs(
     proofs: tuple[_CandidateProof, ...],
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
 ) -> tuple[_CandidateProof, ...]:
     executable = [proof for proof in proofs if proof.execution_price is not None]
     # FIX A/B hardening (2026-06-10 Milan-24C incident): a priced proof that an
@@ -7892,7 +8105,15 @@ def _selection_scoped_proofs(
     # TRADE_SCORE_NON_POSITIVE submit gate — never a bad order, but it STARVED
     # the legitimate admitted sibling of its selection. Gate-rejected proofs are
     # unrankable, not merely unsubmittable.
-    executable = [proof for proof in executable if proof.missing_reason is None]
+    executable = [
+        proof
+        for proof in executable
+        if proof.missing_reason is None
+        or (
+            allow_same_family_monitor_owned
+            and _is_entry_held_family_reason(proof.missing_reason)
+        )
+    ]
     tradeable_limit = [
         proof
         for proof in executable
@@ -7916,11 +8137,14 @@ def _selection_scoped_proofs(
         elif scoped:
             return ()
     if held_position_conn is not None:
-        unheld = [
-            proof
-            for proof in scoped
-            if _entry_held_position_reason_for_proof(held_position_conn, proof) is None
-        ]
+        unheld: list[_CandidateProof] = []
+        for proof in scoped:
+            reason = _entry_held_position_reason_for_proof(held_position_conn, proof)
+            if reason is None:
+                unheld.append(proof)
+                continue
+            if allow_same_family_monitor_owned and _is_entry_held_family_reason(reason):
+                unheld.append(proof)
         if unheld:
             scoped = unheld
         elif scoped:
@@ -7933,6 +8157,7 @@ def _opportunity_book_proofs_with_selection_rejections(
     proofs: tuple[_CandidateProof, ...],
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
 ) -> tuple[_CandidateProof, ...]:
     excluded_by_id: dict[str, str] = {}
     selected_ids = {
@@ -7941,6 +8166,7 @@ def _opportunity_book_proofs_with_selection_rejections(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=held_position_conn,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         )
     }
     for proof in proofs:
@@ -7960,6 +8186,8 @@ def _opportunity_book_proofs_with_selection_rejections(
                 held_position_conn,
                 proof,
             )
+            if allow_same_family_monitor_owned and _is_entry_held_family_reason(reason):
+                reason = None
         if reason is not None:
             excluded_by_id[proof_id] = reason
     if not excluded_by_id:
@@ -8001,6 +8229,7 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     ("DIRECTION_LAW_BIN_FORECAST_MISMATCH", "direction_law"),
     ("ADMISSION_WIN_RATE_FLOOR", "win_rate_floor"),
     ("ADMISSION_LCB_CONSISTENCY", "lcb_consistency"),
+    (_ENTRY_HELD_FAMILY_REASON_BASE, "held_family_monitor_owned"),
     (_ENTRY_HELD_POSITION_REASON_BASE, "held_position_monitor_owned"),
     # Genuinely-no-book classes (proof had execution_price None): the maker-quote
     # lane's own-ask-empty marker, plus the structural pre-pricing misses.
@@ -8108,20 +8337,29 @@ def _opportunity_book_from_proofs(
     selected_proof: _CandidateProof | None = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
 ) -> OpportunityBook:
     # The per-candidate kelly_size_usd is a DISPLAY field only (S4): the pre-
     # selection scalar-Kelly pass that used to populate it is retired; the live
     # stake is the marginal-utility ranker's optimal_stake_usd on the winning leg.
     # The receipt's display kelly_size_usd defaults to 0.0 for non-winning siblings.
+    support_index_by_bin_id: dict[str, int] = {}
+    for proof in proofs:
+        bin_id = _candidate_bin_id(proof)
+        if bin_id not in support_index_by_bin_id:
+            support_index_by_bin_id[bin_id] = len(support_index_by_bin_id)
     evaluations = tuple(
         _candidate_evaluation_from_proof(
             family_id=family_id,
             proof=proof,
+            support_index=support_index_by_bin_id.get(_candidate_bin_id(proof)),
+            bin_id=_candidate_bin_id(proof),
         )
         for proof in _opportunity_book_proofs_with_selection_rejections(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=held_position_conn,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         )
     )
     # The live decision is the ΔU ranker's pick (selected_proof). The book RECORDS
@@ -9526,6 +9764,132 @@ def _robust_marginal_utility_stake_and_price(
     # Wave-1 2026-06-12: the DAY0 EXPOSURE CAP kernel bound is DELETED (operator no-caps
     # law). max_stake is governed by the fractional-Kelly budget + concentration ceiling +
     # free-cash bound ONLY — no day0-specific notional clamp.
+    qkernel_cert = _qkernel_execution_economics(selected_proof)
+    if qkernel_cert is None and _proof_uses_qkernel_spine(selected_proof):
+        # qkernel-spine proofs deliberately preserve q_posterior/q_lcb_5pct as
+        # receipt provenance. They are not execution-sizing authority. If the
+        # guarded qkernel execution certificate is missing or malformed, fail closed
+        # instead of falling through to the legacy scorer that would size from those
+        # preserved proof fields.
+        return 0.0, None
+    if qkernel_cert is not None:
+        qkernel_q_lcb = _qkernel_execution_q_lcb(selected_proof)
+        qkernel_cost = _qkernel_execution_float(selected_proof, "cost")
+        qkernel_edge = _qkernel_execution_float(selected_proof, "edge_lcb")
+        qkernel_optimal_delta_u = _qkernel_execution_float(
+            selected_proof, "optimal_delta_u"
+        )
+        qkernel_delta_u_at_min = _qkernel_execution_float(
+            selected_proof, "delta_u_at_min"
+        )
+        try:
+            qkernel_optimal_stake = Decimal(
+                str(qkernel_cert.get("optimal_stake_usd"))
+            )
+        except (ArithmeticError, TypeError, ValueError):
+            qkernel_optimal_stake = Decimal("0")
+        if (
+            qkernel_q_lcb is None
+            or qkernel_cost is None
+            or qkernel_edge is None
+            or qkernel_optimal_delta_u is None
+            or qkernel_delta_u_at_min is None
+            or qkernel_edge <= 0.0
+            or qkernel_optimal_delta_u <= 0.0
+            or qkernel_optimal_stake <= Decimal("0")
+        ):
+            return 0.0, None
+
+        selected_candidate = _native_side_candidate_from_proof(
+            family_key=family_key, proof=selected_proof
+        )
+        if (
+            not selected_candidate.is_tradeable
+            or selected_candidate.executable_cost_curve is None
+        ):
+            return 0.0, None
+
+        chosen = min(qkernel_optimal_stake, max_stake)
+        if chosen <= Decimal("0"):
+            return 0.0, None
+
+        if free_cash_usd is not None and float(free_cash_usd) >= 0.0:
+            _free_cash = Decimal(str(free_cash_usd))
+            if chosen > _free_cash:
+                chosen = _free_cash
+                if stake_floor_out is not None:
+                    stake_floor_out["stake_floor"] = "FREE_CASH_BOUND"
+                    stake_floor_out["stake_floor_free_cash_usd"] = float(_free_cash)
+                if chosen <= Decimal("0"):
+                    return 0.0, None
+
+        try:
+            min_order_price = selected_candidate.executable_cost_curve.avg_cost_for_shares(
+                selected_candidate.executable_cost_curve.min_order_size
+            )
+            min_order_usd = (
+                Decimal(str(min_order_price.value))
+                * selected_candidate.executable_cost_curve.min_order_size
+            )
+        except (ArithmeticError, TypeError, ValueError, ExecutionPriceContractError):
+            return 0.0, None
+        if min_order_usd > Decimal("0") and chosen < min_order_usd:
+            _ev_positive_at_min = float(qkernel_delta_u_at_min) > 0.0
+            _fits_free_cash = (
+                free_cash_usd is None
+                or min_order_usd <= Decimal(str(free_cash_usd))
+            )
+            if _ev_positive_at_min and _fits_free_cash:
+                chosen = min_order_usd
+                if stake_floor_out is not None:
+                    stake_floor_out["stake_floor"] = "VENUE_MIN_ORDER"
+                    stake_floor_out["stake_floor_min_order_usd"] = float(min_order_usd)
+                    stake_floor_out["stake_floor_delta_u_at_min_order"] = float(
+                        qkernel_delta_u_at_min
+                    )
+            else:
+                _why = (
+                    "ev_non_positive_at_venue_minimum"
+                    if not _ev_positive_at_min
+                    else "venue_minimum_exceeds_free_cash_bound"
+                )
+                _free_cash_str = (
+                    f"{float(free_cash_usd):.6f}" if free_cash_usd is not None else "None"
+                )
+                raise _StakeBelowMinOrder(
+                    f"chosen stake {float(chosen):.6f} USD below venue min order "
+                    f"{float(min_order_usd):.6f} USD; reason={_why}; "
+                    f"delta_u_at_min_order={float(qkernel_delta_u_at_min):.6g}, "
+                    f"free_cash_usd={_free_cash_str} "
+                    "(qkernel guarded execution economics; NOT an edge reversal)"
+                )
+
+        try:
+            price = _chosen_stake_execution_price(
+                selected_candidate.executable_cost_curve,
+                chosen,
+            )
+        except ValueError as exc:
+            if "min_order_size" in str(exc) or "below" in str(exc):
+                raise _StakeBelowMinOrder(
+                    f"qkernel chosen-stake pricing rejected below min order: {exc}"
+                ) from exc
+            return 0.0, None
+        except (ArithmeticError, ExecutionPriceContractError):
+            return 0.0, None
+        if stake_floor_out is not None:
+            stake_floor_out["qkernel_execution_economics"] = {
+                "payoff_q_lcb": float(qkernel_q_lcb),
+                "edge_lcb": float(qkernel_edge),
+                "optimal_stake_usd": float(qkernel_optimal_stake),
+                "optimal_delta_u": float(qkernel_optimal_delta_u),
+                "route_id": qkernel_cert.get("route_id"),
+                "candidate_id": qkernel_cert.get("candidate_id"),
+                "guard_basis": qkernel_cert.get("q_lcb_guard_basis"),
+                "guard_cell_key": qkernel_cert.get("q_lcb_guard_cell_key"),
+            }
+        return float(chosen), price
+
     scored, proof_by_hypothesis = _score_family_candidates_by_robust_marginal_utility(
         executable=list(all_proofs),
         family_key=family_key,
@@ -9720,6 +10084,8 @@ def _family_rank_reversed_at_recapture(
     all_proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
+    extra_exposure_by_bin_id: Mapping[str, float] | None = None,
 ) -> bool:
     """True iff the FRESH-curve re-rank no longer makes ``selected_proof`` primary.
 
@@ -9752,6 +10118,7 @@ def _family_rank_reversed_at_recapture(
         proofs=tuple(all_proofs),
         locked_opportunity_conn=locked_opportunity_conn,
         held_position_conn=held_position_conn,
+        allow_same_family_monitor_owned=allow_same_family_monitor_owned,
     )
     if not scoped:
         # Nothing survives selection scoping on the fresh set (all locked / untradeable):
@@ -9762,6 +10129,7 @@ def _family_rank_reversed_at_recapture(
         executable=list(scoped),
         family_key=family_key,
         per_bin_yes_q_lcb=per_bin_yes_q_lcb,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
     )
     if fresh_primary is None:
         # Whole family no-trades on the fresh curves -> not a rank reversal; the
@@ -9783,6 +10151,7 @@ def _evaluate_submit_recapture_for_selected(
     forecast_still_current: bool,
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
     stake_floor_out: dict[str, object] | None = None,
     order_rests_at_admitted_price: bool = False,
     free_cash_usd: float | None = None,
@@ -9880,6 +10249,8 @@ def _evaluate_submit_recapture_for_selected(
         all_proofs=all_proofs,
         locked_opportunity_conn=locked_opportunity_conn,
         held_position_conn=held_position_conn,
+        allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
     ):
         return (
             SubmitRecaptureDecision(
@@ -10097,15 +10468,18 @@ def _family_existing_exposure_for_selection_by_bin_id(
     onto the ALREADY-selected bin — a post-selection sizing input), this attributes
     each open committed position to its OWN family bin by matching the position's
     ``condition_id`` to the family candidate's ``condition_id``, keyed by
-    ``_candidate_bin_id`` so it lines up with the candidates' bins.
+    ``_candidate_bin_id`` so it lines up with the candidates' bins. The
+    attribution must be direction-aware: a buy_yes position pays on its own bin,
+    while a buy_no position pays on every other family outcome, including OUTSIDE.
 
     Scope (what is honestly attributable per-bin at selection): COMMITTED open
-    positions carry a ``condition_id`` that maps to exactly one family bin, so their
-    ``effective_cost_basis_usd`` is the per-bin exposure ``A_y`` the concave ΔU
-    objective shrinks against. Same-cycle reservations are city-keyed with NO bin
-    identity, so they are NOT fabricated onto a bin here — the post-selection
-    recapture already nets them by city. Returns ``{}`` (flat baseline, prior
-    behavior byte-for-byte) when no provider is wired or no open position matches a
+    positions carry a ``condition_id`` that maps to exactly one family bin, so
+    their ``effective_cost_basis_usd`` is projected through the same payoff
+    geometry as ``FamilyPayoffMatrix`` before the concave ΔU objective shrinks
+    against it. Same-cycle reservations are city-keyed with NO bin identity, so
+    they are NOT fabricated onto a bin here — the post-selection recapture
+    already nets them by city. Returns ``{}`` (flat baseline, prior behavior
+    byte-for-byte) when no provider is wired or no open position matches a
     family bin's condition_id.
     """
     if portfolio_state_provider is None:
@@ -10127,6 +10501,9 @@ def _family_existing_exposure_for_selection_by_bin_id(
         state = portfolio_state_provider()
         if state is None:
             return {}
+        all_family_outcomes = tuple(dict.fromkeys(bin_id_by_condition.values())) + (
+            utility_ranker.OUTSIDE_OUTCOME,
+        )
         exposure_by_bin: dict[str, float] = {}
         for pos in get_open_positions(state):
             cond = str(getattr(pos, "condition_id", "") or "")
@@ -10134,8 +10511,17 @@ def _family_existing_exposure_for_selection_by_bin_id(
             if bin_id is None:
                 continue
             committed = float(_runtime_open_exposure_usd(pos))
-            if committed > 0.0:
-                exposure_by_bin[bin_id] = exposure_by_bin.get(bin_id, 0.0) + committed
+            if committed <= 0.0:
+                continue
+            direction = str(getattr(pos, "direction", "") or "").strip()
+            if direction == "buy_no":
+                outcome_ids = tuple(
+                    outcome for outcome in all_family_outcomes if outcome != bin_id
+                )
+            else:
+                outcome_ids = (bin_id,)
+            for outcome_id in outcome_ids:
+                exposure_by_bin[outcome_id] = exposure_by_bin.get(outcome_id, 0.0) + committed
         return exposure_by_bin
     except (TypeError, ValueError, ImportError):
         return {}
@@ -10147,6 +10533,8 @@ def _selected_candidate_proof(
     *,
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
+    allow_same_family_monitor_owned: bool = False,
+    extra_exposure_by_bin_id: Mapping[str, float] | None = None,
 ) -> _CandidateProof | None:
     """Pick the single live primary leg via the bin-selection ΔU ranker (§14.7).
 
@@ -10184,6 +10572,7 @@ def _selected_candidate_proof(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=held_position_conn,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         )
     )
     if not executable:
@@ -10205,6 +10594,7 @@ def _selected_candidate_proof(
         executable=executable,
         family_key=family_key,
         per_bin_yes_q_lcb=per_bin_yes_q_lcb,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
     )
 
 

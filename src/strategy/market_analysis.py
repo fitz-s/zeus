@@ -660,26 +660,12 @@ class MarketAnalysis:
                         )
                     )
 
-            # Buy NO requires an independently materialized NO-side posterior.
-            # The legacy YES-complement construction is forbidden in live money.
+            # Buy NO uses the same mutually-exclusive family posterior in held
+            # side: q_no = P(settlement outside this bin) = 1 - q_yes. The
+            # conservative NO evidence is not the forbidden ``1 - q_lcb_yes``;
+            # _bootstrap_bin_no takes the lower tail of the complement samples
+            # from the same forecast sample producer.
             if self.supports_buy_no_edges(i):
-                trace.append(
-                    EdgeScanTrace(
-                        support_index=i,
-                        bin_label=b.label,
-                        executable=True,
-                        direction="buy_no",
-                        p_posterior=0.0,
-                        p_market=self.buy_no_market_price(i),
-                        raw_edge=None,
-                        ci_lower=None,
-                        ci_upper=None,
-                        p_value=None,
-                        decision="buy_no_independent_no_posterior_missing",
-                        native_quote_available=True,
-                    )
-                )
-                continue
                 # DIRECTION LAW (operator, load-bearing): buy_no ⟺ bin ≠ forecast.
                 # Our forecast bin is argmax(p_posterior) — the single outcome we predict most
                 # likely. A buy_no on THAT bin bets against our own forecast = wrong side by
@@ -707,9 +693,9 @@ class MarketAnalysis:
                         )
                     )
                     continue  # wrong-side by the direction law — never construct it
-                p_model_no = 0.0
+                p_model_no = 1.0 - float(self.p_cal[i])
                 p_market_no = self.buy_no_market_price(i)
-                p_post_no = 0.0
+                p_post_no = 1.0 - float(self.p_posterior[i])
                 # K2 (PR #348 P0-3): hard-veto NO-side too when EQE reliability
                 # is THIN_BOOK / CROSSED.
                 eqe_no = (
@@ -1097,14 +1083,45 @@ class MarketAnalysis:
     def _bootstrap_bin_no(
         self, bin_idx: int, n: int
     ) -> tuple[float, float, float]:
-        """Double bootstrap CI for buy_no direction. Same procedure, inverted."""
+        """Double bootstrap CI for buy_no direction from complement samples."""
         if not self.supports_buy_no_edges(bin_idx):
             raise ValueError(f"buy_no bootstrap requires executable NO-side market price for bin index {bin_idx}")
         cache_key = ("no", bin_idx, n)
         if cache_key in self._bootstrap_cache:
             return self._bootstrap_cache[cache_key]
+
+        q_no_samples = 1.0 - self.forecast_yes_probability_samples(bin_idx, n)
+        bootstrap_edges = np.zeros(n)
+        for i in range(n):
+            c_b = float(self.buy_no_market_price(bin_idx))
+            if self._entry_quote_evidence_no is not None:
+                eqe = self._entry_quote_evidence_no[bin_idx]
+                if eqe is not None and float(eqe.cost_uncertainty) > 0.0:
+                    c_b = float(eqe.all_in_entry_price) + self._cost_rng.normal(
+                        0.0,
+                        float(eqe.cost_uncertainty),
+                    )
+                    c_b = float(np.clip(c_b, P_CLAMP_LOW, P_CLAMP_HIGH))
+                elif eqe is not None:
+                    c_b = float(eqe.all_in_entry_price)
+            bootstrap_edges[i] = q_no_samples[i] - c_b
+
+        p_value = float(np.mean(bootstrap_edges <= 0))
+        ci_lo = float(np.percentile(bootstrap_edges, 5))
+        ci_hi = float(np.percentile(bootstrap_edges, 95))
+
         c_b_point = float(self.buy_no_market_price(bin_idx))
-        result = (-c_b_point, -c_b_point, 1.0)
+        if self._entry_quote_evidence_no is not None:
+            eqe = self._entry_quote_evidence_no[bin_idx]
+            if eqe is not None:
+                c_b_point = float(eqe.all_in_entry_price)
+        q_no_point = 1.0 - float(self.p_posterior[bin_idx])
+        q_no_ceiling = min(q_no_point, 1.0 - self._no_certain_yes_floor(bin_idx))
+        point_edge_ceiling = q_no_ceiling - c_b_point
+        ci_lo = min(ci_lo, point_edge_ceiling)
+        ci_hi = max(ci_hi, ci_lo)
+
+        result = (ci_lo, ci_hi, p_value)
         self._bootstrap_cache[("no", bin_idx, n)] = result
         return result
 

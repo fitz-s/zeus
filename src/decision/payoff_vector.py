@@ -100,7 +100,7 @@ scalar transform in place):
 
 THE SCALAR IS TELEMETRY (spec lines 793-802, 1184). ``CandidateEconomics.q_dot_payoff``
 records ``q @ payoff`` (the point fair value) and a derived scalar ``q - price`` edge
-is available ONLY as a logged diagnostic via :func:`scalar_trade_score`. The live
+is available ONLY as logged telemetry via :func:`scalar_trade_score`. The live
 candidate pass (:func:`live_candidate_passes`) selects on the VECTOR quantities
 (``edge_lcb > 0`` AND ``delta_u_at_min > 0`` AND ``optimal_delta_u > 0`` AND executable
 route AND direction-law proof present AND market coherence accepted). The scalar score
@@ -379,6 +379,79 @@ def _draw_to_pi(
     return pi
 
 
+def _validate_guarded_payoff_q_lcb(guarded_payoff_q_lcb: float | None) -> float | None:
+    if guarded_payoff_q_lcb is None:
+        return None
+    q = float(guarded_payoff_q_lcb)
+    if not (0.0 <= q <= 1.0):
+        raise PayoffVectorError(
+            f"DEGENERATE_GUARDED_PAYOFF_Q_LCB: {q!r} (need 0 <= q <= 1)"
+        )
+    return q
+
+
+def _candidate_guarded_pi(
+    candidate: NativeSideCandidate,
+    matrix: FamilyPayoffMatrix,
+    base_pi: Mapping[str, float],
+    *,
+    guarded_payoff_q_lcb: float,
+) -> dict[str, float]:
+    """Candidate-local conservative outcome distribution for a guarded payoff qLCB.
+
+    qLCB reliability evidence is side-specific: it licenses the candidate payoff's win
+    probability lower bound ``q_safe``; it is not a new parameter-posterior draw matrix and
+    must not be serialized as one. This function therefore builds the effective π consumed
+    by robust ΔU directly:
+
+      * YES_i: own-bin win mass is ``q_safe``; the remaining loss mass is spread over every
+        other outcome proportional to the draw's original non-own mass.
+      * NO_i: own-bin loss mass is ``1 - q_safe``; the win mass ``q_safe`` is spread over
+        every other outcome proportional to the draw's original non-own mass.
+
+    This is the same side-conservative idea as ``effective_outcome_pi`` for NO, extended to
+    YES when empirical OOF evidence deflates the served qLCB. The point forecast μ and the
+    global ``JointQBand`` remain untouched; only this candidate's economics consume the
+    guarded lower-bound view.
+    """
+    q_safe = _validate_guarded_payoff_q_lcb(guarded_payoff_q_lcb)
+    assert q_safe is not None  # for type checkers
+    own_bin = candidate.bin_id
+    if own_bin not in matrix.outcomes:
+        raise PayoffVectorError(
+            f"candidate bin {own_bin!r} is not a family outcome {matrix.outcomes}"
+        )
+    others = [y for y in matrix.outcomes if y != own_bin]
+    if not others:
+        raise PayoffVectorError(
+            "candidate-local guarded π needs at least one losing/winning other outcome"
+        )
+
+    if candidate.side == "YES":
+        own_mass = q_safe
+        other_mass = 1.0 - q_safe
+    else:
+        own_mass = 1.0 - q_safe
+        other_mass = q_safe
+
+    other_total = sum(float(base_pi.get(y, 0.0)) for y in others)
+    eff: dict[str, float] = {own_bin: own_mass}
+    if other_total <= 0.0:
+        share = other_mass / len(others)
+        for y in others:
+            eff[y] = share
+    else:
+        for y in others:
+            eff[y] = other_mass * float(base_pi.get(y, 0.0)) / other_total
+
+    total = sum(eff.values())
+    if total <= 0.0:
+        raise PayoffVectorError("candidate-local guarded π is degenerate")
+    if abs(total - 1.0) > 1e-12:
+        eff = {y: p / total for y, p in eff.items()}
+    return {y: float(eff.get(y, 0.0)) for y in matrix.outcomes}
+
+
 class _PreparedSizing:
     """Stake-INDEPENDENT precompute for the robust-ΔU stake sweep (performance only).
 
@@ -416,10 +489,12 @@ class _PreparedSizing:
         matrix: FamilyPayoffMatrix,
         exposure: PortfolioExposureVector,
         alpha: float,
+        guarded_payoff_q_lcb: float | None = None,
     ) -> None:
         self.candidate = candidate
         self.matrix = matrix
         self.alpha = alpha
+        q_guard = _validate_guarded_payoff_q_lcb(guarded_payoff_q_lcb)
         outcomes = list(matrix.outcomes)
         self.outcomes = outcomes
         # Existing wealth A_y per outcome (Decimal — the ruin check and the log are taken
@@ -432,7 +507,13 @@ class _PreparedSizing:
         Pi = np.zeros((n_draws, n_out), dtype=float)
         for k in range(n_draws):
             pi = _draw_to_pi(samples[k, :], omega, matrix)
-            eff_pi = effective_outcome_pi(candidate, matrix, pi)
+            eff_pi = (
+                _candidate_guarded_pi(
+                    candidate, matrix, pi, guarded_payoff_q_lcb=q_guard
+                )
+                if q_guard is not None
+                else effective_outcome_pi(candidate, matrix, pi)
+            )
             for j, y in enumerate(outcomes):
                 Pi[k, j] = float(eff_pi.get(y, 0.0))
         self._Pi = Pi
@@ -479,6 +560,7 @@ def robust_delta_u(
     matrix: FamilyPayoffMatrix,
     exposure: PortfolioExposureVector,
     alpha: float | None = None,
+    guarded_payoff_q_lcb: float | None = None,
 ) -> float:
     """Robust ΔU at ``stake_usd`` — the alpha-quantile of ΔU across band draws (785-789).
 
@@ -513,7 +595,13 @@ def robust_delta_u(
     # same alpha-quantile (see :class:`_PreparedSizing`). `_delta_u_at_stake` is retained as
     # the single-π reference the equivalence test pins this against.
     prepared = _PreparedSizing(
-        candidate, band=band, omega=omega, matrix=matrix, exposure=exposure, alpha=a
+        candidate,
+        band=band,
+        omega=omega,
+        matrix=matrix,
+        exposure=exposure,
+        alpha=a,
+        guarded_payoff_q_lcb=guarded_payoff_q_lcb,
     )
     return prepared.robust_at(stake_usd)
 
@@ -557,6 +645,7 @@ def optimize_vector_stake(
     exposure: PortfolioExposureVector,
     max_stake_usd: Decimal | None = None,
     alpha: float | None = None,
+    guarded_payoff_q_lcb: float | None = None,
 ) -> tuple[Decimal, float, float]:
     """``s* = argmax_s robust_delta_u(candidate, s)`` (spec line 791).
 
@@ -595,7 +684,13 @@ def optimize_vector_stake(
     # whole reason the sweep is now cheap — see :class:`_PreparedSizing`). Identical numbers
     # to calling robust_delta_u per stake, ~grid× less work.
     prepared = _PreparedSizing(
-        candidate, band=band, omega=omega, matrix=matrix, exposure=exposure, alpha=a
+        candidate,
+        band=band,
+        omega=omega,
+        matrix=matrix,
+        exposure=exposure,
+        alpha=a,
+        guarded_payoff_q_lcb=guarded_payoff_q_lcb,
     )
 
     def _ru(stake: Decimal) -> float:
@@ -654,13 +749,15 @@ def compute_candidate_economics(
     exposure: PortfolioExposureVector,
     max_stake_usd: Decimal | None = None,
     alpha: float | None = None,
+    guarded_payoff_q_lcb: float | None = None,
 ) -> CandidateEconomics:
     """Compute one candidate's Arrow-Debreu edge + vector-argmax size (spec 759-791).
 
     Combines the two corrected transformations into the candidate's economics:
 
       * the VECTOR edge (``point_ev`` = ``q @ payoff - cost``; ``edge_lcb`` =
-        ``quantile(band.samples @ payoff - cost, alpha)``); and
+        ``quantile(band.samples @ payoff - cost, alpha)`` or, when the empirical qLCB
+        reliability guard supplied a candidate-local lower bound, ``q_safe - cost``); and
       * the VECTOR size (``optimal_stake_usd`` = ``argmax_s robust_delta_u``;
         ``optimal_delta_u`` / ``delta_u_at_min`` the robust ΔU at s* / min-order).
 
@@ -670,6 +767,10 @@ def compute_candidate_economics(
     ``sizing_candidate`` is the ``NativeSideCandidate`` that carries the executable cost
     curve the ΔU stake-sweep walks (the family-ranker candidate object); it MUST be the
     same side and bin as ``candidate_route`` (a NO route is sized with a NO candidate).
+
+    ``guarded_payoff_q_lcb`` is a candidate-local reliability lower bound on this route's
+    payoff probability. It does not move point q / μ and does not mutate the global band;
+    it makes edge_lcb and robust ΔU consume the same conservative side-specific q_safe.
     """
     payoff = np.asarray(candidate_route.payoff_vector, dtype=float)
     _validate_alignment(payoff, joint_q, band)
@@ -688,7 +789,12 @@ def compute_candidate_economics(
     cost = _route_cost_value(candidate_route.route_cost)
     q_dot = point_fair_value(joint_q, payoff)
     point_ev = q_dot - cost
-    edge_lcb = edge_lower_bound(band, payoff, cost, alpha=alpha)
+    q_guard = _validate_guarded_payoff_q_lcb(guarded_payoff_q_lcb)
+    edge_lcb = (
+        float(q_guard) - cost
+        if q_guard is not None
+        else edge_lower_bound(band, payoff, cost, alpha=alpha)
+    )
 
     optimal_stake, optimal_delta_u, delta_u_at_min = optimize_vector_stake(
         sizing_candidate,
@@ -698,6 +804,7 @@ def compute_candidate_economics(
         exposure=exposure,
         max_stake_usd=max_stake_usd,
         alpha=alpha,
+        guarded_payoff_q_lcb=q_guard,
     )
 
     return CandidateEconomics(
@@ -737,8 +844,8 @@ def live_candidate_passes(
         market coherence accepted
 
     EVERY condition is a vector / structural quantity. The scalar ``q - price`` trade
-    score is NOT one of them — :func:`scalar_trade_score` exists ONLY as a logged
-    telemetry diagnostic and is never read here. So the bad selection (promoting on a
+    score is NOT one of them — :func:`scalar_trade_score` exists ONLY as logged
+    telemetry and is never read here. So the bad selection (promoting on a
     scalar ``q_i - price`` that ignores the rest of the payoff vector and the family
     exposure) is unconstructable: the only inputs to the pass are the vector edge_lcb,
     the vector ΔU at min and at s*, the route's executability, the direction-law proof,

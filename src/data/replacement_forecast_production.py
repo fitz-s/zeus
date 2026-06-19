@@ -185,6 +185,26 @@ def _probe_resolved_available_cycle() -> datetime | None:
     return newest_complete_cycle(availability)
 
 
+def _probe_resolved_bayes_precision_fusion_extras_cycle() -> datetime | None:
+    """Newest cycle fetchable by the BPF extras transport itself.
+
+    The anchor lane can use a ladder (single-runs, model meta, bucket). BPF
+    extras are persisted from the Open-Meteo single-runs API, so an anchor-only
+    bucket/meta cycle is not enough proof that extras can fetch the same run.
+    """
+    from src.data.replacement_cycle_availability import (  # noqa: PLC0415
+        newest_complete_cycle,
+        probe_openmeteo_single_run_available,
+        resolve_anchor_cycle_availability,
+    )
+
+    availability = resolve_anchor_cycle_availability(
+        datetime.now(timezone.utc),
+        probe_anchor=probe_openmeteo_single_run_available,
+    )
+    return newest_complete_cycle(availability)
+
+
 def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
     if not bool(cfg.get("download_current_targets_enabled", False)):
         return None
@@ -287,13 +307,11 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
         )
 
         release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
-        # RUN-SELECTION AUTHORITY (2026-06-11): the capture cycle is the SAME probe-resolved
-        # anchor cycle the Open-Meteo lane fetches — fusion binds same-cycle rows, so
-        # capture at a guessed (now − lag) cycle either targets an unpublished run (every
-        # extras fetch 400s, high-water froze at 06-10T06Z, q_lcb stayed NULL on every fresh
-        # posterior) or a stale one. Per-model publication gaps inside the cycle stay
-        # fail-soft in the downloader (per-row skip).
-        cycle = _probe_resolved_available_cycle()
+        # RUN-SELECTION AUTHORITY (2026-06-19): the capture cycle is the newest cycle
+        # provably fetchable by the BPF extras transport itself. The anchor lane can
+        # advance through meta/bucket before the single-runs API serves the same run;
+        # extras must not follow that anchor-only cycle and then fail every target.
+        cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
         if cycle is None:
             return {"status": "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"}
 
@@ -495,9 +513,10 @@ def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = No
          monotone bounded sequence -> finite re-runs. This distinguishes "not yet captured but
          servable -> re-run" (written>0 keeps healing) from "unservable -> complete-with-gap".
       B. CROSS-CYCLE ROLLOVER (makes complete-with-gap safe). The probe is keyed to
-         ``_probe_resolved_available_cycle()`` — the newest anchor-complete cycle on the fixed
-         00/06/12/18Z grid (replacement_cycle_availability.py:47), monotone in publish order.
-         Within ~6h the next cycle publishes, the probe advances to C', the latch (keyed on C's
+         ``_probe_resolved_bayes_precision_fusion_extras_cycle()`` — the newest cycle the
+         BPF extras single-runs transport itself can serve on the fixed 00/06/12/18Z grid
+         (replacement_cycle_availability.py:47), monotone in publish order. Within ~6h the
+         next single-runs cycle publishes, the probe advances to C', the latch (keyed on C's
          ISO) goes stale, and C' is healed from scratch. A permanently-unservable scope thus
          halts looping for C but never poisons C+1.
          => INVARIANT: for any cycle C the fan-out runs on finitely many ticks — bounded by
@@ -506,7 +525,7 @@ def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = No
     """
     try:
         if cycle is None:
-            cycle = _probe_resolved_available_cycle()
+            cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
         if cycle is None:
             return True  # no cycle known; fail-open
         cov = _extras_coverage_missing(cfg, cycle)
@@ -669,9 +688,8 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     # never key to a cycle the gate didn't evaluate (the sub-second re-resolve race). The
     # fan-out re-resolves internally for its OWN target build; momentary disagreement costs at
     # most one benign extra pass and self-corrects next tick.
-    _extras_cycle = _probe_resolved_available_cycle()
-    _fresh_leg_fetched = fetch_anchor_cycle is not None
-    _should_run_extras = _fresh_leg_fetched or _extras_cycle_incomplete(cfg, _extras_cycle)
+    _extras_cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
+    _should_run_extras = _extras_cycle_incomplete(cfg, _extras_cycle)
     if _should_run_extras:
         bayes_precision_fusion_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
         if bayes_precision_fusion_report is not None:

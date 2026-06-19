@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-06-19
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
 #   719/719 monitor refreshes with last_monitor_prob_is_fresh=False while the
 #   entry authority forecast_posteriors was live and had re-ranked the held bin
@@ -37,6 +37,7 @@ import pytest
 from src.contracts import EntryMethod
 from src.engine.position_belief import (
     DEFAULT_MAX_AGE_HOURS,
+    LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
     SELECTED_METHOD_REPLACEMENT_POSTERIOR,
     ReplacementBelief,
     load_replacement_belief,
@@ -57,7 +58,23 @@ def forecasts_db(tmp_path):
             posterior_id TEXT, city TEXT, target_date TEXT,
             temperature_metric TEXT, computed_at TEXT, q_json TEXT,
             source_cycle_time TEXT,
-            runtime_layer TEXT
+            runtime_layer TEXT,
+            source_id TEXT,
+            posterior_method TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            endpoint TEXT,
+            coverage_status TEXT,
+            captured_at TEXT,
+            source_available_at TEXT
         )
         """
     )
@@ -68,10 +85,11 @@ def forecasts_db(tmp_path):
 
 def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             target_date="2026-06-12", metric="high", source_cycle_time=None,
-            runtime_layer="live"):
+            runtime_layer="live", source_id=LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+            posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"):
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
             posterior_id,
             city,
@@ -81,6 +99,30 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             json.dumps(q),
             source_cycle_time,
             runtime_layer,
+            source_id,
+            posterior_method,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_raw(db_path, *, source_cycle_time, city="Karachi",
+                target_date="2026-06-12", metric="high",
+                endpoint="single_runs", coverage_status="COVERED",
+                captured_at=None, source_available_at=None):
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?,?)",
+        (
+            city,
+            target_date,
+            metric,
+            source_cycle_time,
+            endpoint,
+            coverage_status,
+            captured_at,
+            source_available_at,
         ),
     )
     conn.commit()
@@ -151,6 +193,61 @@ class TestLoadReplacementBelief:
         assert belief.posterior_id == "live"
         assert belief.q_yes_bin == pytest.approx(0.20)
 
+    def test_newer_deprecated_aifs_row_cannot_override_live_bpf_authority(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="bpf",
+            computed_at=(NOW - timedelta(hours=2)).isoformat(),
+            q={BIN: 0.20},
+        )
+        _insert(
+            forecasts_db,
+            posterior_id="aifs-residue",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.80},
+            source_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+            posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        )
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.posterior_id == "bpf"
+        assert belief.q_yes_bin == pytest.approx(0.20)
+        assert belief.source_id == LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID
+        assert belief.posterior_method == "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
+
+    def test_live_bpf_source_accepts_non_source_posterior_method(self, forecasts_db):
+        """posterior_method is provenance, not live-authority identity."""
+        _insert(
+            forecasts_db,
+            posterior_id="bpf-method",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            q={BIN: 0.34},
+            source_id=LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+            posterior_method="the_path_bayes_precision_fusion",
+        )
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.posterior_id == "bpf-method"
+        assert belief.q_yes_bin == pytest.approx(0.34)
+        assert belief.source_id == LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID
+        assert belief.posterior_method == "the_path_bayes_precision_fusion"
+
+    def test_only_deprecated_aifs_rows_fail_closed(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="aifs-residue",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.80},
+            source_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+            posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        )
+
+        assert _load(forecasts_db) is None
+
     def test_only_non_live_rows_fail_closed(self, forecasts_db):
         _insert(
             forecasts_db,
@@ -187,6 +284,35 @@ class TestLoadReplacementBelief:
         assert belief.fresh is True
         assert belief.freshness_basis == "source_cycle_time"
         assert belief.source_cycle_age_hours == pytest.approx(24.0)
+
+    def test_newer_raw_cycle_marks_posterior_stale_until_materialized(self, forecasts_db):
+        """Monitor authority must not treat an older posterior as fresh when
+        newer live-input raw cycles already exist for the same family."""
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+            q={BIN: 0.242},
+        )
+        _insert_raw(
+            forecasts_db,
+            source_cycle_time=(NOW - timedelta(hours=6)).isoformat(),
+            captured_at=(NOW - timedelta(hours=5, minutes=30)).isoformat(),
+            source_available_at=(NOW - timedelta(hours=5, minutes=45)).isoformat(),
+        )
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.fresh is False
+        assert belief.freshness_basis == "source_cycle_time_raw_model_forecasts_lag"
+        assert belief.latest_raw_cycle_time == (NOW - timedelta(hours=6)).isoformat()
+        assert belief.raw_cycle_lag_hours == pytest.approx(6.0)
+        validation = belief.freshness_validation()
+        assert "latest_raw_cycle_time=" in validation
+        assert "raw_cycle_lag_h=6.00" in validation
+        assert validation.endswith(";stale")
 
     def test_source_cycle_clock_still_fails_closed_after_bound(self, forecasts_db):
         _insert(
@@ -640,12 +766,14 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
             "city": "Karachi", "target_date": "2026-06-12", "metric": "high",
         }
 
-    def test_legacy_day0_window_position_keeps_day0_lane(self, monkeypatch):
+    def test_legacy_day0_window_position_reseeds_when_day0_lane_not_fresh(self, monkeypatch):
         """The day0 nowcast lane remains EXEMPT from the widened guard: a legacy
         day0_window position over a wu_icao settlement city still falls through to
         its refresher (day0 settlement-day observation is a distinct authority, not
         a forecast-belief substitution). This pins that the widening did NOT
-        swallow the day0 lane."""
+        swallow the day0 lane. If that day0 authority is unavailable/not fresh,
+        the same-family BPF reseed still fires so the held position does not stay
+        blind until settlement."""
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb
 
@@ -669,9 +797,37 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
         pos.entry_method = "day0_observation"  # routes _would_use_day0_lane True
         mr.monitor_probability_refresh(pos, conn=None, city=object(), target_d=None)
 
-        # The day0-exempt branch was taken: NOT suppressed, no fault, no reseed.
+        # The day0-exempt branch was taken: NOT suppressed and no legacy fault,
+        # but the unavailable day0 authority triggers the BPF repair lane.
         assert "legacy_belief_substitution_suppressed" not in pos.applied_validations
         assert "BELIEF_AUTHORITY_FAULT" not in pos.applied_validations
+        assert "day0_observation_unavailable:replacement_belief_reseed" in pos.applied_validations
+        assert reseeds == [
+            {"city": "Karachi", "target_date": "2026-06-12", "metric": "high"}
+        ]
+
+    def test_fresh_day0_window_position_does_not_reseed(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: self._stale_belief())
+
+        def fake_day0_refresh(**kw):
+            setattr(kw["position"], mr._MONITOR_PROBABILITY_FRESH_ATTR, True)
+            return 0.5, []
+
+        monkeypatch.setattr(mr, "_refresh_day0_observation", fake_day0_refresh)
+        reseeds = []
+        monkeypatch.setattr(
+            mr, "_enqueue_single_family_belief_reseed_failsoft",
+            lambda **kw: reseeds.append(kw),
+        )
+
+        pos = self._edli_pos(trade_id="legacy-trade-79")
+        pos.entry_method = "day0_observation"
+        _, _, is_fresh = mr.monitor_probability_refresh(pos, conn=None, city=object(), target_d=None)
+
+        assert is_fresh is True
         assert reseeds == []
 
 

@@ -395,7 +395,7 @@ class DecisionReceipt:
     def spine_hash(self) -> str:
         """Stable hash of the spine (canonical JSON of the 19 columns).
 
-        Observability handle for shadow comparison / drift detection — never gates.
+        Observability handle for non-gating comparison / drift detection — never gates.
         """
         payload = json.dumps(self.to_row(), sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()

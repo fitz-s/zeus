@@ -109,23 +109,22 @@ def build_final_intent_certificate_from_actionable(
                 f"DEPTH_BELOW_MIN_ORDER_SIZE: available_crossable_shares="
                 f"{available_crossable_shares:.4f} < min_order_size={min_order_size:.4f}"
             )
-    if order_spec.mode == "TAKER":
-        quantized_size = quantize_submit_shares_for_venue_at_most(
-            str(action["direction"]),
-            Decimal(str(size)),
-            final_limit_price=Decimal(str(limit_price)),
-            order_type=order_spec.time_in_force,
-            tick_size=tick_size,
-        )
-        if available_crossable_shares is not None:
-            available_depth = Decimal(str(available_crossable_shares))
-            if quantized_size > available_depth:
-                raise ValueError(
-                    "DEPTH_BELOW_VENUE_QUANTIZED_SIZE:"
-                    f"available_crossable_shares={available_depth}:"
-                    f"venue_quantized_shares={quantized_size}"
-                )
-        size = float(quantized_size)
+    quantized_size = quantize_submit_shares_for_venue_at_most(
+        str(action["direction"]),
+        Decimal(str(size)),
+        final_limit_price=Decimal(str(limit_price)),
+        order_type=order_spec.time_in_force,
+        tick_size=tick_size,
+    )
+    if order_spec.mode == "TAKER" and available_crossable_shares is not None:
+        available_depth = Decimal(str(available_crossable_shares))
+        if quantized_size > available_depth:
+            raise ValueError(
+                "DEPTH_BELOW_VENUE_QUANTIZED_SIZE:"
+                f"available_crossable_shares={available_depth}:"
+                f"venue_quantized_shares={quantized_size}"
+            )
+    size = float(quantized_size)
     notional = size * limit_price
     expected_fill_price = float(
         sweep_expected_fill_price

@@ -583,7 +583,7 @@ class TestExecutor:
             expected_fill_price_before_fee=Decimal("0.325"),
             size_value=Decimal("3.30"),
             snapshot_top_ask=Decimal("0.325"),
-            submitted_shares=Decimal("10.16"),
+            submitted_shares=Decimal("10.00"),
         )
         captured = {}
 
@@ -602,9 +602,9 @@ class TestExecutor:
         result = execute_final_intent(final_intent, conn=_TEST_CONN)
 
         assert result.status == "pending"
-        assert captured["shares"] == pytest.approx(10.16)
+        assert captured["shares"] == pytest.approx(10.00)
         assert captured["intent"].limit_price == pytest.approx(0.33)
-        assert captured["intent"].target_size_usd == pytest.approx(10.16 * 0.33)
+        assert captured["intent"].target_size_usd == pytest.approx(10.00 * 0.33)
 
     def test_execute_final_intent_rejects_buy_notional_below_venue_minimum(self, monkeypatch):
         final_intent = _final_execution_intent(
@@ -1344,7 +1344,8 @@ class TestExecutor:
             token_id="yes-token-rounded-depth-final",
             final_limit_price=Decimal("0.33"),
             size_value=Decimal("5.00"),
-            ask_size="15.1516",
+            ask_size="14.9999",
+            submitted_shares=Decimal("15.00"),
         )
 
         with pytest.raises(ValueError, match="executable depth validation failed"):

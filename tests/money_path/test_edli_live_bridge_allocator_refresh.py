@@ -325,3 +325,24 @@ def test_held_position_monitor_refreshes_allocator_before_exit_monitor():
     assert source.index("_refresh_global_allocator_for_held_position_monitor(") < source.index(
         "_execute_monitoring_phase("
     )
+
+
+def test_chain_sync_read_lane_cannot_submit_exits():
+    """Restart safety: the chain-sync read lane cannot submit exits."""
+    import inspect
+
+    import src.main as main
+    from src.execution import post_trade_capital
+
+    chain_source = inspect.getsource(post_trade_capital.chain_sync_read_cycle)
+    exit_source = inspect.getsource(main._exit_monitor_cycle)
+
+    assert "_run_chain_sync(portfolio, clob, conn)" in chain_source
+    assert "conn.commit()" in chain_source
+    assert "_execute_monitoring_phase(" not in chain_source
+    assert "exit_order_submit_enabled" not in chain_source
+
+    assert 'mode="exit_monitor"' in exit_source
+    assert "_execute_monitoring_phase(" in exit_source
+    assert "exit_order_submit_enabled=real_order_submit_enabled" in exit_source
+    assert "_run_chain_sync(" not in exit_source

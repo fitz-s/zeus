@@ -67,10 +67,11 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_harvester_scheduler_fails_closed_without_legacy_integrated_fallback():
     """Trading daemon must not fall back to integrated truth-writing harvester."""
     source = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
+    sidecar_source = (ROOT / "src" / "execution" / "post_trade_capital.py").read_text(encoding="utf-8")
 
     assert "from src.execution.harvester import run_harvester" not in source
     assert "result = run_harvester()" not in source
-    assert "resolver_unavailable_fail_closed" in source
+    assert "resolver_unavailable_fail_closed" in sidecar_source
 
 
 def test_settlement_readers_filter_verified_authority_before_downstream_use():
@@ -3836,6 +3837,155 @@ def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monke
     conn.close()
 
 
+def test_family_monitor_overlay_suppresses_single_leg_statistical_exit_and_persists_payload():
+    """Same-family holdings must not liquidate one leg before family value is checked."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos_a = _make_position(
+        trade_id="family-monitor-a",
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        bin_label="29C",
+        direction="buy_no",
+        shares=7.0,
+        entry_price=0.79,
+        p_posterior=0.84,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos_b = _make_position(
+        trade_id="family-monitor-b",
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        bin_label="31C",
+        direction="buy_no",
+        shares=5.55,
+        entry_price=0.80,
+        p_posterior=0.85,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    for pos, prob, bid in ((pos_a, 0.86, 0.71), (pos_b, 0.83, 0.75)):
+        pos.last_monitor_at = "2026-06-18T23:25:00+00:00"
+        pos.last_monitor_prob = prob
+        pos.last_monitor_prob_is_fresh = True
+        pos.last_monitor_market_price = bid
+        pos.last_monitor_market_price_is_fresh = True
+        pos.last_monitor_best_bid = bid
+        pos.last_monitor_best_ask = min(0.99, bid + 0.02)
+        pos.last_monitor_edge = prob - bid
+        pos.applied_validations = ["replacement_posterior", "ci_separated_reversal"]
+
+    portfolio = _make_portfolio(pos_a, pos_b)
+    single_leg_exit = ExitDecision(
+        True,
+        reason="CI_SEPARATED_REVERSAL (entry=0.8900, current=0.8600)",
+        trigger="CI_SEPARATED_REVERSAL",
+        selected_method="replacement_posterior",
+        applied_validations=["replacement_posterior", "ci_separated_reversal"],
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=portfolio,
+        pos=pos_a,
+        exit_decision=single_leg_exit,
+        should_exit=True,
+        exit_reason=single_leg_exit.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
+    assert summary["family_redecision_single_leg_exits_suppressed"] == 1
+    assert "family_hold_dominates_single_leg_exit" in pos_a.applied_validations
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos_a,
+        sequence_no=4,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        source_module="tests/test_family_monitor_overlay",
+        exit_decision=single_leg_exit,
+        final_should_exit=should_exit,
+        final_exit_reason=reason,
+    )
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["exit_decision_should_exit"] is False
+    assert payload["exit_decision_reason"] == "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
+    assert payload["family_redecision"]["decision"] == "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
+    assert payload["family_redecision"]["family_hold_value_usd"] > payload["family_redecision"]["family_direct_sell_value_usd"]
+
+
+def test_single_leg_monitor_records_family_redecision_value_payload():
+    """A single held leg still needs continuous hold-vs-sell evidence in receipts."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="single-family-monitor",
+        city="Paris",
+        target_date="2026-06-20",
+        temperature_metric="low",
+        bin_label="19C",
+        direction="buy_no",
+        shares=5.06,
+        entry_price=0.75,
+        p_posterior=0.80,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-18T23:55:00+00:00"
+    pos.last_monitor_prob = 0.78
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.73
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.73
+    pos.last_monitor_best_ask = 0.75
+    pos.last_monitor_edge = 0.05
+    portfolio = _make_portfolio(pos)
+    hold_decision = ExitDecision(
+        False,
+        reason="CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        selected_method="replacement_posterior",
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=portfolio,
+        pos=pos,
+        exit_decision=hold_decision,
+        should_exit=False,
+        exit_reason=hold_decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "CI_OVERLAP_HOLD"
+    assert summary["family_redecision_overlay_evaluated"] == 1
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=2,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        source_module="tests/test_single_leg_monitor_redecision",
+        exit_decision=hold_decision,
+        final_should_exit=should_exit,
+        final_exit_reason=reason,
+    )
+    payload = json.loads(events[0]["payload_json"])
+    family = payload["family_redecision"]
+    assert family["position_count"] == 1
+    assert family["decision"] == "FAMILY_OVERLAY_NO_OVERRIDE"
+    assert family["family_hold_value_usd"] == pytest.approx(5.06 * 0.78)
+    assert family["family_direct_sell_value_usd"] == pytest.approx(5.06 * 0.73)
+
+
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     """A same-cycle `<6h` crossing must not refresh through the old non-Day0 path.
 
@@ -3967,8 +4117,8 @@ def test_day0_window_refresh_uses_day0_observation_semantics(monkeypatch):
     assert pos.last_monitor_market_price == pytest.approx(0.41)
 
 
-def test_day0_wu_observation_unavailable_falls_back_to_forecast_origin_monitor(monkeypatch):
-    """Forecast-origin day0 positions stay monitorable when WU has no current observation."""
+def test_day0_wu_observation_unavailable_reseeds_without_forecast_fallback(monkeypatch):
+    """A missing Day0 observation must not borrow legacy forecast freshness."""
     from src.contracts import EntryMethod
     from src.contracts.exceptions import ObservationUnavailableError
     from src.engine import monitor_refresh
@@ -3996,12 +4146,15 @@ def test_day0_wu_observation_unavailable_falls_back_to_forecast_origin_monitor(m
         observed_methods.append(position.entry_method)
         if position.entry_method == EntryMethod.DAY0_OBSERVATION.value:
             raise ObservationUnavailableError("wu observation unavailable")
-        position.selected_method = position.entry_method
-        position.applied_validations = [position.entry_method, "q_source:emos"]
-        monitor_refresh._set_monitor_probability_fresh(position, True)
-        return 0.66
+        raise AssertionError("legacy forecast monitor fallback must not run")
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
+    reseeds = []
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_enqueue_single_family_belief_reseed_failsoft",
+        lambda **kw: reseeds.append(kw),
+    )
 
     p, refresh_pos, fresh = monitor_refresh.monitor_probability_refresh(
         pos,
@@ -4012,14 +4165,17 @@ def test_day0_wu_observation_unavailable_falls_back_to_forecast_origin_monitor(m
 
     assert observed_methods == [
         EntryMethod.DAY0_OBSERVATION.value,
-        EntryMethod.ENS_MEMBER_COUNTING.value,
     ]
-    assert p == pytest.approx(0.66)
-    assert refresh_pos is pos
-    assert fresh is True
-    assert pos.selected_method == EntryMethod.ENS_MEMBER_COUNTING.value
-    assert "day0_observation_unavailable:forecast_monitor_fallback" in pos.applied_validations
-    assert "q_source:emos" in pos.applied_validations
+    assert p == pytest.approx(pos.p_posterior)
+    assert refresh_pos is not pos
+    assert refresh_pos.entry_method == EntryMethod.DAY0_OBSERVATION.value
+    assert fresh is False
+    assert "day0_observation_unavailable:replacement_belief_reseed" in refresh_pos.applied_validations
+    assert all("forecast_monitor_fallback" not in v for v in refresh_pos.applied_validations)
+    assert "q_source:emos" not in refresh_pos.applied_validations
+    assert reseeds == [
+        {"city": "Chicago", "target_date": "2026-04-01", "metric": "high"}
+    ]
 
 
 def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):

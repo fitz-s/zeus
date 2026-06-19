@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-05-25
+# Last reused/audited: 2026-06-19
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
 from __future__ import annotations
 
@@ -415,6 +415,60 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
     assert command.payload["aggregate_execution_command_event_hash"] == events[4]["event_hash"]
     assert transition.payload["aggregate_cap_transition_event_hash"] == events[5]["event_hash"]
     assert projection["current_state"] == "CAP_TRANSITIONED"
+
+
+def test_submit_disabled_bridge_uses_latest_parent_evidence_time_for_redecision():
+    from src.decision_kernel import claims
+    from src.decision_kernel.compiler import DecisionCompiler, EvidenceClock
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    event_decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    refreshed_evidence_time = event_decision_time + timedelta(minutes=2)
+    accepted = _accepted_receipt(event)
+    proof_bundle = build_test_no_submit_proof_bundle(
+        event,
+        accepted,
+        decision_time=event_decision_time,
+    )
+    proof_bundle = replace(
+        proof_bundle,
+        quote_feasibility=replace(
+            proof_bundle.quote_feasibility,
+            clock=EvidenceClock(
+                refreshed_evidence_time,
+                refreshed_evidence_time,
+                refreshed_evidence_time,
+            ),
+        ),
+    )
+    accepted = replace(accepted, decision_proof_bundle=proof_bundle)
+
+    direct = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=event_decision_time,
+        proof_bundle=proof_bundle,
+    )
+    assert direct.status == "REJECTED"
+    assert "after decision_time" in (direct.failures[0].reason_detail or "")
+
+    certificates = adapter._build_submit_disabled_live_certificates(
+        event=event,
+        receipt=accepted,
+        decision_time=event_decision_time,
+        live_cap_conn=conn,
+        pre_submit_authority_provider=_pre_submit_authority_provider,
+    )
+
+    command = _required_cert(certificates, claims.EXECUTION_COMMAND)
+    receipt_cert = _required_cert(certificates, claims.EXECUTION_RECEIPT)
+    transition = _required_cert(certificates, claims.LIVE_CAP_TRANSITION)
+    assert command.header.decision_time == refreshed_evidence_time
+    assert receipt_cert.header.decision_time == refreshed_evidence_time
+    assert transition.header.decision_time == refreshed_evidence_time
 
 
 def _seed_active_family_order(conn, *, aggregate_id="aggregate-1", plan_updates=None):

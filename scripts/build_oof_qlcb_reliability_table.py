@@ -1,36 +1,49 @@
-# Created: 2026-06-18
-# Last audited: 2026-06-18
+# Lifecycle: created=2026-06-18; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Purpose: Build the generated side-aware OOF q_lcb reliability artifact for live guard serving.
+# Reuse: Run when rebuilding the q_lcb OOF reliability artifact or changing guard cell schema.
 # Authority basis: docs/evidence/coarse_global_removal/FINAL_no_shadow_execution_flow_2026-06-18.md
 #   §"THE q_lcb RELIABILITY GUARD" + src/decision/qlcb_reliability_guard.py (the LIVE guard:
-#   cell scheme, QLCB_BUCKET_EDGES, lead_bucket, cell_key). Operator task: build the OFFLINE
-#   OOF reliability table that ACTIVATES the RAW q_lcb reliability guard. RAW no-de-bias law:
-#   the center is the live RAW diagonal 1/E[r^2] 2nd-moment center (src/forecast/center.py:
-#   raw_second_moment_weights + weighted_huber_location); q_lcb reproduces the production
-#   build_joint_q_band draw loop (src/probability/joint_q_band.py) over the production
-#   settlement-preimage integrator (src/calibration/emos.bin_probability_settlement) threaded
-#   with each city's production rounding_rule (src/contracts/settlement_semantics).
+#   cell scheme, QLCB_BUCKET_EDGES, lead_bucket, cell_key). Operator task ("两个都做"): build the
+#   OFFLINE OOF reliability table that ACTIVATES the RAW q_lcb reliability guard — across BOTH
+#   settlement metrics (high/low) and ALL lead buckets (L1/L2_3/L4P), keyed by the REFINED 0.05
+#   bucket grid. RAW no-de-bias law: the center is the live RAW diagonal 1/E[r^2] 2nd-moment
+#   center (src/forecast/center.py: raw_second_moment_weights + weighted_huber_location) over the
+#   LIVE per-city select_models set + ECMWF anchor (src/forecast/model_selection.select_models —
+#   so the coarse globals / jma / icon_seamless dropped from the live fusion are NEVER centred);
+#   q_lcb reproduces the production build_joint_q_band draw loop over the production settlement-
+#   preimage integrator (src/calibration/emos.bin_probability_settlement, vectorized + validated
+#   byte-equal to the scalar primitive at startup) threaded with each city's production
+#   rounding_rule (src/contracts/settlement_semantics). The emitted cells are side-aware:
+#   YES grades bin hit-rate; NO grades complement hit-rate for the exact NO claim.
 #
 # This script WRITES ONLY state/qlcb_oof_reliability.json (a generated artifact, NOT a *.db).
 # It opens state/zeus-forecasts.db READ-ONLY immutable. It modifies NO src/ code.
 """Build the OOF q_lcb reliability table (rolling-origin, strictly-prior training only).
 
-For each (city, target_date) lead-1 prediction in /tmp/unbiased_test_forecasts.json:
-  1. Build the RAW diagonal-precision center over the present raw members using ONLY
-     strictly-PRIOR (target_date - 1d and earlier) per-model residual history -> the same
-     production center (raw_second_moment_weights + weighted_huber_location). sigma = the
-     train-RMSE of that center over the strictly-prior window (the realized-floor width).
-  2. Build a complete integer-degree MECE Omega around the member envelope, integrated under
-     the city's production rounding_rule settlement preimage.
-  3. Reproduce build_joint_q_band: 4000 parameter-posterior draws (mu ~ N(mu*, center_se),
-     sigma floored), per-draw simplex bin integration, marginal alpha=0.05 quantile -> q_lcb
-     per bin. The point joint q gives the modal (argmax-mass) bin.
-  4. For each bin: cell = cell_key(metric, lead_days=1, bin_position, q_lcb[bin]); tally
-     n += 1, hits += (settled_value in this bin). hit_rate = hits / n per cell.
+For each (metric, lead, city, target_date) prediction in /tmp/multilead_forecasts.json:
+  1. Resolve the LIVE fusion member set: select_models(present, lat, lon, lead).used_models
+     (decorrelated globals + in-domain regional reps + the ECMWF anchor). Coarse globals /
+     jma_seamless / icon_seamless are absent from the live set and so are never centred.
+  2. Build the RAW diagonal-precision center over those members using ONLY strictly-PRIOR
+     (target_date - 1d and earlier) per-model residual history -> production center
+     (raw_second_moment_weights + weighted_huber_location). sigma = the train-RMSE of that center
+     over the strictly-prior window (the realized-floor width).
+  3. Build a complete integer-degree MECE Omega around the member envelope, integrated under the
+     city's production rounding_rule settlement preimage.
+  4. Reproduce build_joint_q_band: N_DRAWS parameter-posterior draws (mu ~ N(mu*, center_se),
+     sigma floored), per-draw simplex bin integration, marginal alpha-quantile -> q_lcb per
+     YES bin and q_lcb over each NO complement. The point joint q gives the modal
+     (argmax-mass) bin.
+  5. For each bin and executable side: cell = cell_key(metric, lead_days, side, bin_position,
+     q_lcb[side, bin]); tally n += 1. YES hits when settlement is in the bin; NO hits when
+     settlement is outside the bin. Cells MERGE across leads by lead_bucket (L1/L2_3/L4P) and
+     across the two source aggregations by metric.
 
 Production-equivalence relied on (documented in the report): the full PredictiveDistribution /
-OutcomeSpace / venue-family stack is NOT wired standalone; instead the SAME integrator, the
-SAME center weights, the SAME rounding-rule preimage, and the SAME draw_mu/draw_sigma/marginal-
-quantile algebra the live band uses are driven directly over a reconstructed complete Omega.
+OutcomeSpace / venue-family stack is NOT wired standalone; instead the SAME integrator, the SAME
+center weights, the SAME rounding-rule preimage, the SAME select_models set, and the SAME
+draw_mu/draw_sigma/marginal-quantile algebra the live band uses are driven directly over a
+reconstructed complete Omega.
 """
 from __future__ import annotations
 
@@ -40,46 +53,34 @@ import os
 import sqlite3
 import sys
 from collections import defaultdict
-from datetime import date, timedelta
 
 import numpy as np
+from scipy.stats import norm as _norm
 
 # --- production primitives (imported, never re-implemented) -------------------
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.calibration.emos import bin_probability_settlement  # settlement-preimage integrator
+from src.contracts.settlement_semantics import settlement_preimage_offsets
 from src.forecast.center import raw_second_moment_weights, weighted_huber_location
-from src.decision.qlcb_reliability_guard import (  # the LIVE guard cell scheme
-    cell_key,
-    lead_bucket,
-    qlcb_bucket,
-)
+from src.forecast.model_selection import select_models
+from src.decision.qlcb_reliability_guard import cell_key, lead_bucket  # the LIVE guard cell scheme
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FORECASTS_PATH = "/tmp/unbiased_test_forecasts.json"
+FORECASTS_PATH = "/tmp/multilead_forecasts.json"
 DB_PATH = os.path.join(REPO, "state", "zeus-forecasts.db")
 OUT_PATH = os.path.join(REPO, "state", "qlcb_oof_reliability.json")
-
-# These forecasts are lead-1 daily-HIGH forecasts (forecast made 1 day before target).
-METRIC = "high"
-LEAD_DAYS = 1.0
 
 # Band reproduction constants — byte-identical to src/probability/joint_q_band.py.
 N_DRAWS = 4000
 ALPHA = 0.05
 _SIGMA_POSITIVE_FLOOR = 1e-6
-# draw_sigma dispersion: 0.25 * model_dispersion capped at 0.25 * served (joint_q_band).
-# Standalone we set model_dispersion = the strictly-prior member spread (weighted), matching
-# sigma_authority.model_dispersion_sigma's _weighted_spread basis; the cap keeps it modest.
+MIN_PRIOR_FOR_RMSE = 3   # need a few prior days before a center RMSE is meaningful
+OMEGA_PAD = 12           # degrees of integer bins beyond the member envelope each side
 
-# Minimum strictly-prior training rows before a model carries a raw-2nd-moment signal.
-# The center helper already shrinks thin models toward equal weight (n<MIN_TRAIN), so we keep
-# ALL models with >=1 prior obs but pass their true (raw_m2, n) so the production EB shrink runs.
-MIN_PRIOR_FOR_RMSE = 3  # need a few prior days before a center RMSE is meaningful
-
-# Omega construction: integer bins from (floor(min_member)-PAD) to (ceil(max_member)+PAD),
-# open shoulders at each end so the partition is complete over (-inf, +inf).
-OMEGA_PAD = 12  # degrees of integer bins beyond the member envelope each side
+# Metrics and the leads fetched (previous_dayN -> lead_bucket via the guard's lead_bucket()).
+METRICS = ("high", "low")
+LEADS = (1, 2, 3, 5, 7)
 
 
 def _c_to_native(value_c: float, unit: str) -> float:
@@ -87,8 +88,6 @@ def _c_to_native(value_c: float, unit: str) -> float:
 
 
 def _center_se_native(members_native: np.ndarray) -> float:
-    """Center-parameter SE = spread / sqrt(n) (sigma_authority.center_parameter_se_sigma,
-    the no-fused-sd branch: standard error of the member mean)."""
     arr = np.asarray(members_native, dtype=float)
     if arr.size < 2:
         return 0.0
@@ -98,7 +97,6 @@ def _center_se_native(members_native: np.ndarray) -> float:
 
 
 def _model_disp_native(members_native: np.ndarray) -> float:
-    """Member dispersion (weighted spread proxy) = sample std, native unit."""
     arr = np.asarray(members_native, dtype=float)
     if arr.size < 2:
         return 0.0
@@ -106,77 +104,95 @@ def _model_disp_native(members_native: np.ndarray) -> float:
     return s if math.isfinite(s) and s > 0.0 else 0.0
 
 
-def load_settlements(con: sqlite3.Connection):
-    """{(city, date): (settled_native, unit, source_type)} for metric=high, settled rows."""
-    cur = con.cursor()
-    rows = cur.execute(
+def load_settlements(con: sqlite3.Connection, metric: str):
+    """{(city, date): (settled_native, unit, source_type)} for VERIFIED settled rows of metric."""
+    rows = con.execute(
         "SELECT city, target_date, settlement_value, unit, settlement_source_type "
         "FROM settlements WHERE temperature_metric=? AND settlement_value IS NOT NULL "
         "AND unit IS NOT NULL",
-        (METRIC,),
+        (metric,),
     ).fetchall()
-    out = {}
-    for city, td, val, unit, stype in rows:
-        out[(city, td)] = (float(val), unit, (stype or ""))
-    return out
+    return {(c, td): (float(v), u, (s or "")) for c, td, v, u, s in rows}
 
 
 def rounding_rule_for(source_type: str) -> str:
-    """Production rule (settlement_semantics.for_city): hko -> oracle_truncate, else wmo."""
     return "oracle_truncate" if str(source_type).lower() == "hko" else "wmo_half_up"
 
 
-def build_omega(members_native: np.ndarray, rounding_rule: str):
-    """A complete integer-degree MECE partition (list of (lo, hi) native, None=open shoulder).
-
-    Interior bins are single-integer bins (lo==hi==t); the two ends are open shoulders so the
-    partition covers (-inf, +inf). Integrated under bin_probability_settlement with the city
-    rounding_rule, so the preimage (symmetric WMO vs asymmetric HK truncate) matches production.
-    """
+def build_omega(members_native: np.ndarray):
+    """Complete integer-degree MECE partition: open-low shoulder, single-integer interior, open-high."""
     lo_i = int(math.floor(float(np.min(members_native)))) - OMEGA_PAD
     hi_i = int(math.ceil(float(np.max(members_native)))) + OMEGA_PAD
-    bins = []
-    # open-low shoulder: (None, lo_i)
-    bins.append((None, float(lo_i)))
+    bins = [(None, float(lo_i))]
     for t in range(lo_i + 1, hi_i):
-        bins.append((float(t), float(t)))  # interior single-integer bin
-    # open-high shoulder: (hi_i, None)
+        bins.append((float(t), float(t)))
     bins.append((float(hi_i), None))
     return bins
 
 
-def integrate_q(mu: float, sigma: float, bins, rounding_rule: str) -> np.ndarray:
-    """One simplex row: integrate every bin over its settlement preimage, clip>=0, q/q.sum().
+def _edges_for(bins, rounding_rule: str):
+    """Pre-resolve per-bin (lower, upper) integration edges in native units. None shoulder -> +-inf."""
+    low_off, high_off = settlement_preimage_offsets(rounding_rule, half_step=0.5)
+    lower = np.empty(len(bins), dtype=float)
+    upper = np.empty(len(bins), dtype=float)
+    for i, (lo, hi) in enumerate(bins):
+        lower[i] = -np.inf if lo is None else (float(lo) + low_off)
+        upper[i] = np.inf if hi is None else (float(hi) + high_off)
+    return lower, upper
 
-    Byte-equivalent to build_joint_q's single transform (clip then ONE normalization)."""
-    probs = []
-    for lo, hi in bins:
-        p = bin_probability_settlement(mu, sigma, lo, hi, rounding_rule=rounding_rule)
-        probs.append(p)
-    q = np.clip(np.asarray(probs, dtype=float), 0.0, None)
-    total = float(q.sum())
-    if not math.isfinite(total) or total <= 0.0:
-        return None
-    return q / total
+
+def integrate_q_vec(mu_arr: np.ndarray, sigma_arr: np.ndarray, lower: np.ndarray, upper: np.ndarray):
+    """Vectorized settlement-preimage integration + per-row simplex renorm.
+
+    mass[k,i] = Phi((upper[i]-mu_k)/sig_k) - Phi((lower[i]-mu_k)/sig_k), clip>=0, then q = q/q.sum
+    per row.  Byte-equivalent (validated < 1e-9 at startup) to looping bin_probability_settlement
+    per (draw, bin); rows whose mass sums to <= 0 are returned as all-NaN (caller drops them).
+    """
+    mu = np.asarray(mu_arr, dtype=float).reshape(-1, 1)
+    sig = np.asarray(sigma_arr, dtype=float).reshape(-1, 1)
+    zu = (upper.reshape(1, -1) - mu) / sig
+    zl = (lower.reshape(1, -1) - mu) / sig
+    mass = _norm.cdf(zu) - _norm.cdf(zl)
+    np.clip(mass, 0.0, None, out=mass)
+    totals = mass.sum(axis=1, keepdims=True)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        q = mass / totals
+    bad = (~np.isfinite(totals.ravel())) | (totals.ravel() <= 0.0)
+    q[bad, :] = np.nan
+    return q
+
+
+def _validate_vectorized_integrator():
+    """Assert integrate_q_vec == the scalar production primitive (both rules) before any build."""
+    for rule in ("wmo_half_up", "oracle_truncate"):
+        bins = [(None, 60.0)] + [(float(t), float(t)) for t in range(61, 80)] + [(80.0, None)]
+        lower, upper = _edges_for(bins, rule)
+        mus = np.array([62.3, 70.0, 75.9])
+        sigs = np.array([0.7, 2.4, 1.1])
+        vec = integrate_q_vec(mus, sigs, lower, upper)
+        for r, (mu, sig) in enumerate(zip(mus, sigs)):
+            probs = np.array(
+                [bin_probability_settlement(mu, sig, lo, hi, rounding_rule=rule) for lo, hi in bins]
+            )
+            probs = np.clip(probs, 0.0, None)
+            ref = probs / probs.sum()
+            diff = float(np.max(np.abs(vec[r] - ref)))
+            assert diff < 1e-9, f"vectorized integrator diverges ({rule}, row {r}): {diff:g}"
+    print("vectorized integrator validated == scalar bin_probability_settlement (<1e-9)", flush=True)
 
 
 def bin_of_value(settled_native: float, bins, rounding_rule: str) -> int:
-    """Index of the bin whose SETTLEMENT label the settled value rounds into.
-
-    The settled value is the realized integer label; we find the interior bin (lo==hi==label)
-    or the shoulder that contains it. Settlement rounding: wmo_half_up=floor(x+0.5),
-    oracle_truncate/floor=floor(x)."""
     if rounding_rule in ("oracle_truncate", "floor"):
         label = math.floor(settled_native + 1e-9)
     elif rounding_rule == "ceil":
         label = math.ceil(settled_native - 1e-9)
-    else:  # wmo_half_up
+    else:
         label = math.floor(settled_native + 0.5 + 1e-9)
     for i, (lo, hi) in enumerate(bins):
-        if lo is None:  # open-low shoulder: label <= hi
+        if lo is None:
             if label <= int(hi):
                 return i
-        elif hi is None:  # open-high shoulder: label >= lo
+        elif hi is None:
             if label >= int(lo):
                 return i
         else:
@@ -185,203 +201,211 @@ def bin_of_value(settled_native: float, bins, rounding_rule: str) -> int:
     return -1
 
 
-def main() -> int:
-    with open(FORECASTS_PATH, "r", encoding="utf-8") as fh:
-        forecasts = json.load(fh)["forecasts"]
+def _raw_m2_for(city, model, td, by_date, settlements, unit):
+    """Strictly-prior mean squared RAW residual (native) + n for one model at origin td."""
+    sq = []
+    for qtd in sorted(by_date.keys()):
+        if qtd >= td:
+            break
+        if (city, qtd) not in settlements:
+            continue
+        qm = by_date.get(qtd, {})
+        if model not in qm:
+            continue
+        qset_native = settlements[(city, qtd)][0]
+        qunit = settlements[(city, qtd)][1]
+        r = _c_to_native(float(qm[model]), qunit) - qset_native
+        sq.append(r * r)
+    return (float(np.mean(sq)), len(sq)) if sq else (None, 0)
 
-    con = sqlite3.connect(f"file:{DB_PATH}?immutable=1", uri=True)
-    settlements = load_settlements(con)
-    con.close()
 
-    # cell -> [n, hits]
-    cells: dict[str, list[int]] = defaultdict(lambda: [0, 0])
-    n_predictions = 0
-    n_skipped_no_settle = 0
-    n_skipped_thin = 0
+def _live_member_ids(present, lat, lon, lead):
+    """The LIVE fusion member set: select_models(...).used_models (anchor + globals + regionals).
 
-    rng_seed_base = 0
+    used_models already includes the ECMWF anchor iff it is present (anchor_present), matching the
+    materializer's "anchor as a member" center. Raises loudly on a genuine select_models failure
+    (never swallows -> a silent member-set drop would miscalibrate the cell); an empty set (no
+    anchor + no eligible model present that day) returns [] and the caller skips the cell as thin.
+    """
+    sel = select_models(present_models=present, lat=lat, lon=lon, lead_days=int(lead))
+    return [m for m in sel.used_models if m in present]
 
-    for city in sorted(forecasts.keys()):
-        by_date = forecasts[city]
+
+def process_metric_lead(metric, lead, fc_block, settlements, cities_cfg, cells, ctr):
+    """Walk every (city, target_date); tally q_lcb reliability cells for this metric+lead."""
+    rng_seed = ctr["rng_seed"]
+    for city in sorted(fc_block.keys()):
+        cfg = cities_cfg.get(city)
+        if cfg is None:
+            continue
+        lat, lon = float(cfg.lat), float(cfg.lon)
+        by_date = {d: dict(ms) for d, ms in fc_block[city].items()}
         dates = sorted(by_date.keys())
-        # Per-model strictly-prior residual history accumulator: model -> list of (sq_resid)
-        # We rebuild residuals walk-forward: for each target_date, train = all PRIOR dates with
-        # a settlement, residual = forecast(model, prior_date) - settled_native(prior_date).
         for td in dates:
             if (city, td) not in settlements:
-                n_skipped_no_settle += 1
+                ctr["skipped_no_settle"] += 1
                 continue
             settled_native, unit, stype = settlements[(city, td)]
             rule = rounding_rule_for(stype)
 
-            members_today = by_date[td]  # {model: value_c}
-            if not members_today:
+            present = {m: float(v) for m, v in by_date.get(td, {}).items()}
+            model_ids = _live_member_ids(present, lat, lon, lead)
+            if len(model_ids) < 1:
+                ctr["skipped_thin"] += 1
                 continue
 
-            # --- strictly-prior raw 2nd-moment per model (target_date and later EXCLUDED) ----
-            raw_m2_and_n: dict[str, tuple[float | None, int]] = {}
-            for model, val_c in members_today.items():
-                sq = []
-                for ptd in dates:
-                    if ptd >= td:
-                        break  # strictly-prior only
-                    if (city, ptd) not in settlements:
-                        continue
-                    pmembers = by_date.get(ptd, {})
-                    if model not in pmembers:
-                        continue
-                    pset_native, punit, _ = settlements[(city, ptd)]
-                    # forecast is degC; convert to the settlement native unit for the residual.
-                    fc_native = _c_to_native(float(pmembers[model]), punit)
-                    r = fc_native - pset_native
-                    sq.append(r * r)
-                if sq:
-                    raw_m2_and_n[model] = (float(np.mean(sq)), len(sq))
-                else:
-                    raw_m2_and_n[model] = (None, 0)
+            # center weights from strictly-prior raw 2nd moments over the LIVE member set
+            raw_m2 = {m: _raw_m2_for(city, m, td, by_date, settlements, unit) for m in model_ids}
+            members_native = np.asarray([_c_to_native(present[m], unit) for m in model_ids], dtype=float)
+            weights_map = raw_second_moment_weights(raw_m2, unit=unit)
+            weights = np.asarray([weights_map.get(m, 0.0) for m in model_ids], dtype=float)
+            if weights.sum() <= 0.0:
+                ctr["skipped_thin"] += 1
+                continue
+            mu_star = float(weighted_huber_location(members_native, weights))
 
-            # Member values in the settlement native unit (forecast degC -> native).
-            model_ids = list(members_today.keys())
-            members_native = np.asarray(
-                [_c_to_native(float(members_today[m]), unit) for m in model_ids], dtype=float
-            )
-
-            # --- RAW diagonal-precision center (production helper) -------------------------
-            w_by_model = raw_second_moment_weights(
-                {m: raw_m2_and_n[m] for m in model_ids}, unit=unit
-            )
-            weights = np.asarray([w_by_model[m] for m in model_ids], dtype=float)
-            mu_star = weighted_huber_location(members_native, weights)
-
-            # --- sigma = train-RMSE of the center over the strictly-prior window ----------
-            # The realized-floor width: RMSE of (center_prior - settled_prior) across prior days
-            # where the center is the SAME weighted-Huber center recomputed on prior members.
+            # sigma = strictly-prior train-RMSE of the SAME (re-derived prior-of-prior) center
             prior_sq = []
             for ptd in dates:
                 if ptd >= td:
                     break
                 if (city, ptd) not in settlements:
                     continue
-                pmembers = by_date.get(ptd, {})
-                pmodels = [m for m in pmembers if m in raw_m2_and_n]
+                pres_p = {m: float(v) for m, v in by_date.get(ptd, {}).items()}
+                pmodels = _live_member_ids(pres_p, lat, lon, lead)
                 if not pmodels:
                     continue
                 pset_native, punit, _ = settlements[(city, ptd)]
-                pmembers_native = np.asarray(
-                    [_c_to_native(float(pmembers[m]), punit) for m in pmodels], dtype=float
-                )
-                # strictly-prior 2nd moments for the center AT ptd (re-derive prior-of-prior)
-                pm2 = {}
-                for m in pmodels:
-                    psq = []
-                    for qtd in dates:
-                        if qtd >= ptd:
-                            break
-                        if (city, qtd) not in settlements:
-                            continue
-                        qm = by_date.get(qtd, {})
-                        if m not in qm:
-                            continue
-                        qset_native, qunit, _ = settlements[(city, qtd)]
-                        rr = _c_to_native(float(qm[m]), qunit) - qset_native
-                        psq.append(rr * rr)
-                    pm2[m] = (float(np.mean(psq)), len(psq)) if psq else (None, 0)
-                pw = raw_second_moment_weights(pm2, unit=unit)
-                pweights = np.asarray([pw[m] for m in pmodels], dtype=float)
-                pmu = weighted_huber_location(pmembers_native, pweights)
+                pmembers = np.asarray([_c_to_native(pres_p[m], punit) for m in pmodels], dtype=float)
+                pm2 = {m: _raw_m2_for(city, m, ptd, by_date, settlements, unit) for m in pmodels}
+                pw_map = raw_second_moment_weights(pm2, unit=unit)
+                pw = np.asarray([pw_map.get(m, 0.0) for m in pmodels], dtype=float)
+                if pw.sum() <= 0.0:
+                    continue
+                pmu = float(weighted_huber_location(pmembers, pw))
                 prior_sq.append((pmu - pset_native) ** 2)
-
             if len(prior_sq) < MIN_PRIOR_FOR_RMSE:
-                n_skipped_thin += 1
+                ctr["skipped_thin"] += 1
                 continue
             sigma = float(math.sqrt(np.mean(prior_sq)))
             if not math.isfinite(sigma) or sigma <= 0.0:
-                n_skipped_thin += 1
+                ctr["skipped_thin"] += 1
                 continue
 
             center_se = _center_se_native(members_native)
             model_disp = _model_disp_native(members_native)
 
-            # --- build Omega + the band (reproduce build_joint_q_band) ---------------------
-            bins = build_omega(members_native, rule)
+            bins = build_omega(members_native)
             settled_bin = bin_of_value(settled_native, bins, rule)
             if settled_bin < 0:
-                # settled value outside the padded Omega -> widen would be needed; skip rare case
-                n_skipped_thin += 1
+                ctr["skipped_thin"] += 1
                 continue
+            lower, upper = _edges_for(bins, rule)
 
-            # point joint q (the served distribution; modal = argmax mass).
-            point_q = integrate_q(mu_star, sigma, bins, rule)
-            if point_q is None:
-                n_skipped_thin += 1
+            # point joint q (served distribution; modal = argmax mass)
+            point = integrate_q_vec(np.array([mu_star]), np.array([max(sigma, _SIGMA_POSITIVE_FLOOR)]),
+                                    lower, upper)[0]
+            if not np.all(np.isfinite(point)):
+                ctr["skipped_thin"] += 1
                 continue
-            modal_idx = int(np.argmax(point_q))
+            modal_idx = int(np.argmax(point))
 
-            # draw matrix: mu_k ~ N(mu*, center_se); sigma_k floored. Deterministic seed.
-            rng = np.random.default_rng(rng_seed_base)
-            rng_seed_base += 1
+            # draws: mu_k ~ N(mu*, center_se); sigma_k floored at the realized sigma (band law)
+            rng = np.random.default_rng(rng_seed)
+            rng_seed += 1
             disp = min(0.25 * abs(model_disp), 0.25 * abs(sigma)) if sigma > 0 else 0.0
-            floor = max(_SIGMA_POSITIVE_FLOOR, 0.0)  # realized floor == sigma already (no sub)
-            n_bins = len(bins)
-            samples = np.empty((N_DRAWS, n_bins), dtype=float)
-            kept = 0
-            for k in range(N_DRAWS):
-                mu_k = mu_star if center_se <= 0.0 else float(rng.normal(mu_star, center_se))
-                if disp <= 0.0:
-                    sigma_k = max(sigma, floor)
-                else:
-                    sigma_k = max(float(rng.normal(sigma, disp)), max(sigma * 0.0, floor))
-                    # floor at the realized sigma so no draw goes sub-realized (band law).
-                    sigma_k = max(sigma_k, _SIGMA_POSITIVE_FLOOR)
-                q_k = integrate_q(mu_k, sigma_k, bins, rule)
-                if q_k is None:
-                    continue
-                samples[kept, :] = q_k
-                kept += 1
-            if kept < int(0.5 * N_DRAWS):
-                n_skipped_thin += 1
+            mu_k = (np.full(N_DRAWS, mu_star) if center_se <= 0.0
+                    else rng.normal(mu_star, center_se, N_DRAWS))
+            if disp <= 0.0:
+                sig_k = np.full(N_DRAWS, max(sigma, _SIGMA_POSITIVE_FLOOR))
+            else:
+                sig_k = np.maximum(rng.normal(sigma, disp, N_DRAWS), _SIGMA_POSITIVE_FLOOR)
+            qmat = integrate_q_vec(mu_k, sig_k, lower, upper)
+            good = np.isfinite(qmat).all(axis=1)
+            if int(good.sum()) < int(0.5 * N_DRAWS):
+                ctr["skipped_thin"] += 1
                 continue
-            samples = samples[:kept, :]
-            q_lcb = np.quantile(samples, ALPHA, axis=0)  # marginal 5th percentile per bin
+            q_lcb = np.quantile(qmat[good], ALPHA, axis=0)  # marginal alpha-quantile per YES bin
+            q_lcb_no = np.quantile(1.0 - qmat[good], ALPHA, axis=0)
 
-            # --- tally each bin into its reliability cell ----------------------------------
-            n_predictions += 1
-            for i, (lo, hi) in enumerate(bins):
-                band_q = float(q_lcb[i])
+            ctr["n_predictions"] += 1
+            for i in range(len(bins)):
                 bin_position = "modal" if i == modal_idx else "nonmodal"
-                key = cell_key(
-                    metric=METRIC,
-                    lead_days=LEAD_DAYS,
+                yes_key = cell_key(
+                    metric=metric,
+                    lead_days=float(lead),
+                    side="YES",
                     bin_position=bin_position,
-                    q_lcb=band_q,
+                    q_lcb=float(q_lcb[i]),
                 )
-                cells[key][0] += 1
+                cells[yes_key][0] += 1
                 if i == settled_bin:
-                    cells[key][1] += 1
+                    cells[yes_key][1] += 1
 
-    # --- write the artifact -------------------------------------------------------------
-    out_cells = {}
-    for key, (n, hits) in cells.items():
-        if n <= 0:
-            continue
-        out_cells[key] = {"n": int(n), "hit_rate": float(hits) / float(n)}
+                no_key = cell_key(
+                    metric=metric,
+                    lead_days=float(lead),
+                    side="NO",
+                    bin_position=bin_position,
+                    q_lcb=float(q_lcb_no[i]),
+                )
+                cells[no_key][0] += 1
+                if i != settled_bin:
+                    cells[no_key][1] += 1
+    ctr["rng_seed"] = rng_seed
 
+
+def main() -> int:
+    _validate_vectorized_integrator()
+
+    with open(FORECASTS_PATH, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    fc = data["forecasts"]
+
+    from src.config import cities_by_name
+    cities_cfg = dict(cities_by_name)
+
+    con = sqlite3.connect(f"file:{DB_PATH}?immutable=1", uri=True)
+    settlements_by_metric = {m: load_settlements(con, m) for m in METRICS}
+    con.close()
+
+    cells = defaultdict(lambda: [0, 0])
+    ctr = {"n_predictions": 0, "skipped_no_settle": 0, "skipped_thin": 0, "rng_seed": 0}
+
+    for metric in METRICS:
+        sett = settlements_by_metric[metric]
+        for lead in LEADS:
+            block = fc.get(metric, {}).get(str(lead))
+            if not block:
+                continue
+            before = ctr["n_predictions"]
+            process_metric_lead(metric, lead, block, sett, cities_cfg, cells, ctr)
+            print(f"  {metric} lead={lead} ({lead_bucket(float(lead))}): "
+                  f"+{ctr['n_predictions']-before} predictions", flush=True)
+
+    out_cells = {k: {"n": int(n), "hit_rate": float(h) / float(n)}
+                 for k, (n, h) in cells.items() if n > 0}
     artifact = {
         "meta": {
+            "schema_version": 2,
             "built_at": "2026-06-18",
-            "n_predictions": int(n_predictions),
+            "n_predictions": int(ctr["n_predictions"]),
             "n_cells": len(out_cells),
-            "center_method": "RAW_DIAGONAL_2ND_MOMENT (raw_second_moment_weights + "
-            "weighted_huber_location); sigma=strictly-prior center train-RMSE",
+            "metrics": list(METRICS),
+            "leads": list(LEADS),
+            "center_method": "RAW_DIAGONAL_2ND_MOMENT over select_models().used_models + ECMWF "
+            "anchor (raw_second_moment_weights + weighted_huber_location); sigma=strictly-prior "
+            "center train-RMSE",
             "band": f"build_joint_q_band-equivalent: n_draws={N_DRAWS}, alpha={ALPHA}, "
-            "draw_mu~N(mu*,center_se), draw_sigma floored, per-draw simplex integ, "
-            "marginal alpha-quantile",
-            "metric": METRIC,
-            "lead_days": LEAD_DAYS,
-            "source": "/tmp/unbiased_test_forecasts.json + state/zeus-forecasts.db "
-            "(immutable RO); strictly-prior rolling-origin training",
-            "n_skipped_no_settle": int(n_skipped_no_settle),
-            "n_skipped_thin": int(n_skipped_thin),
+            "draw_mu~N(mu*,center_se), draw_sigma floored, per-draw simplex integ (vectorized, "
+            "validated ==scalar), marginal alpha-quantile",
+            "bucket_grid": "QLCB_BUCKET_EDGES (refined uniform 0.05) imported from the live guard",
+            "cell_key_schema": "metric|lead_bucket|side|bin_position|q_lcb_bucket",
+            "side_semantics": "YES hit = settled in bin; NO hit = settled outside bin, with NO q_lcb computed as alpha-quantile of 1-q_bin draws",
+            "source": "/tmp/multilead_forecasts.json (land-coord previous-runs corpus) + "
+            "state/zeus-forecasts.db (immutable RO); strictly-prior rolling-origin training",
+            "n_skipped_no_settle": int(ctr["skipped_no_settle"]),
+            "n_skipped_thin": int(ctr["skipped_thin"]),
         },
         "cells": out_cells,
     }
@@ -390,8 +414,8 @@ def main() -> int:
 
     total_n = sum(c["n"] for c in out_cells.values())
     print(f"WROTE {OUT_PATH}")
-    print(f"n_predictions={n_predictions} cells={len(out_cells)} total_n={total_n}")
-    print(f"skipped_no_settle={n_skipped_no_settle} skipped_thin={n_skipped_thin}")
+    print(f"n_predictions={ctr['n_predictions']} cells={len(out_cells)} total_n={total_n}")
+    print(f"skipped_no_settle={ctr['skipped_no_settle']} skipped_thin={ctr['skipped_thin']}")
     return 0
 
 

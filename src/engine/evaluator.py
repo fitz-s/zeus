@@ -525,6 +525,8 @@ class EdgeDecision:
     rejection_reason_detail: Optional[str] = None
     family_fallback_rank: int = 0
     family_fallback_candidate_count: int = 0
+    family_portfolio_selected_leg_count: int = 0
+    family_portfolio_leg_role: str = ""
 
     # OBS-AUTHORITY-FOUNDATION (2026-05-23): FK to the
     # settlement_day_observation_authority row captured at decision time for
@@ -675,9 +677,12 @@ def _projects_exposure_during_family_fallback_sizing(
     *,
     family_fallback_rank: int,
     family_fallback_candidate_count: int,
+    family_portfolio_leg_role: str = "",
 ) -> bool:
     """Fallback siblings are mutually exclusive attempts, not additive exposure."""
 
+    if str(family_portfolio_leg_role or "") == "portfolio_selected":
+        return True
     return not (
         int(family_fallback_candidate_count or 0) > 1
         and int(family_fallback_rank or 0) > 0
@@ -5640,20 +5645,35 @@ def evaluate_candidate(
         target_date=target_date,
         temperature_metric=temperature_metric.temperature_metric,
         market_family_id=_entry_forecast_market_family(candidate, temperature_metric),
+        outcome_probabilities=p_cal,
     )
     family_preselection_drops = list(family_decision.dropped) if family_decision else []
     family_fallback_rank_by_edge_id: dict[int, int] = {}
+    family_portfolio_role_by_edge_id: dict[int, str] = {}
+    family_portfolio_selected_leg_count = 0
     family_fallback_candidate_count = 0
     if family_decision is not None:
         fallback_candidates = tuple(
             getattr(family_decision.portfolio, "fallback_candidate_legs", ())
             or family_decision.portfolio.selected_legs
         )
+        selected_leg_ids = {
+            id(edge) for edge in getattr(family_decision.portfolio, "selected_legs", ())
+        }
+        family_portfolio_selected_leg_count = len(selected_leg_ids)
         filtered = list(fallback_candidates)
         family_fallback_candidate_count = len(fallback_candidates)
         family_fallback_rank_by_edge_id = {
             id(edge): rank
             for rank, edge in enumerate(fallback_candidates, start=1)
+        }
+        family_portfolio_role_by_edge_id = {
+            id(edge): (
+                "portfolio_selected"
+                if id(edge) in selected_leg_ids
+                else "fallback_alternative"
+            )
+            for edge in fallback_candidates
         }
     family_preselection_rejections: list[EdgeDecision] = []
     for drop in family_preselection_drops:
@@ -5708,11 +5728,14 @@ def evaluate_candidate(
         _decisions_before_edge = len(decisions)
         decision_validations = list(entry_validations)
         family_fallback_rank = family_fallback_rank_by_edge_id.get(id(edge), 0)
+        family_portfolio_leg_role = family_portfolio_role_by_edge_id.get(id(edge), "")
         family_fallback_candidate = (
             family_fallback_candidate_count > 1
             and family_fallback_rank > 0
         )
-        if family_fallback_candidate:
+        if family_portfolio_leg_role == "portfolio_selected":
+            decision_validations.append("family_portfolio_selected_leg")
+        elif family_fallback_candidate:
             decision_validations.append("family_fallback_risk_not_cumulative")
         if edge.support_index is None:
             decisions.append(EdgeDecision(
@@ -6586,10 +6609,13 @@ def evaluate_candidate(
             execution_fee_rate=fee_rate,
             family_fallback_rank=family_fallback_rank,
             family_fallback_candidate_count=family_fallback_candidate_count,
+            family_portfolio_selected_leg_count=family_portfolio_selected_leg_count,
+            family_portfolio_leg_role=family_portfolio_leg_role,
         ))
         if _projects_exposure_during_family_fallback_sizing(
             family_fallback_rank=family_fallback_rank,
             family_fallback_candidate_count=family_fallback_candidate_count,
+            family_portfolio_leg_role=family_portfolio_leg_role,
         ):
             projected_total_exposure_usd += size
             projected_city_exposure_usd[city.name] += size

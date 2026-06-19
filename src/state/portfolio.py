@@ -827,6 +827,58 @@ class Position:
         in lifecycle, risk, or monitor logic."""
         return self.city == QUARANTINE_SENTINEL
 
+    def _sell_value_exceeds_hold_value(
+        self,
+        *,
+        current_p_posterior: float,
+        best_bid: Optional[float],
+        hours_to_settlement: Optional[float],
+        applied: list[str],
+        portfolio_positions: tuple = (),
+        bankroll: Optional[float] = None,
+    ) -> Optional[bool]:
+        """Return whether immediate sale beats held EV; None means no proof."""
+
+        if not ExitContext._is_finite(best_bid):
+            applied.append("best_bid_unavailable")
+            return None
+        shares = self.effective_shares
+        if shares <= 0:
+            applied.append("effective_shares_unavailable")
+            return None
+        applied.append("ev_gate")
+        executable_bid = float(best_bid)
+        if hold_value_exit_costs_enabled():
+            applied.append("hold_value_exit_costs_enabled")
+            if hours_to_settlement is None or hours_to_settlement < 0.0:
+                applied.append("hold_value_hours_unknown_time_cost_zero")
+            _crowding = _compute_exit_correlation_crowding(
+                this_cluster=self.cluster,
+                portfolio_positions=portfolio_positions,
+                bankroll=bankroll,
+                shares=shares,
+                best_bid=executable_bid,
+                crowding_rate=exit_correlation_crowding_rate(),
+            )
+            if _crowding > 0.0:
+                applied.append("hold_value_correlation_crowding_applied")
+            hold_value = HoldValue.compute_with_exit_costs(
+                shares=shares,
+                current_p_posterior=current_p_posterior,
+                best_bid=executable_bid,
+                hours_to_settlement=hours_to_settlement,
+                fee_rate=exit_fee_rate(),
+                daily_hurdle_rate=exit_daily_hurdle_rate(),
+                correlation_crowding=_crowding,
+            )
+        else:
+            hold_value = HoldValue.compute(
+                gross_value=shares * current_p_posterior,
+                fee_cost=0.0,
+                time_cost=0.0,
+            )
+        return shares * executable_bid > hold_value.net_value
+
     def evaluate_exit(self, exit_context: ExitContext) -> ExitDecision:
         """Position knows how to exit ITSELF. Monitor just calls this.
 
@@ -1124,16 +1176,61 @@ class Position:
             current_held = float(exit_context.fresh_prob)
             below = current_held < float(exit_context.entry_posterior) - _CI_SEP_EPS
             if separated and below:
-                if forward_edge > 0.0:
+                evidence_edge = conservative_forward_edge(
+                    forward_edge,
+                    self.entry_ci_width,
+                )
+                edge_threshold = (
+                    buy_no_edge_threshold(self.entry_ci_width)
+                    if self.direction == "buy_no"
+                    else buy_yes_edge_threshold(self.entry_ci_width)
+                )
+                applied.append("ci_threshold")
+                if evidence_edge >= edge_threshold:
                     self.neg_edge_count = 0
-                    applied.append("ci_separated_positive_edge_hold")
+                    if forward_edge > 0.0:
+                        hold_reason = "CI_SEPARATED_POSITIVE_EDGE_HOLD"
+                        applied.append("ci_separated_positive_edge_hold")
+                    else:
+                        hold_reason = "CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD"
+                        applied.append("ci_separated_edge_within_threshold_hold")
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
                         False,
-                        "CI_SEPARATED_POSITIVE_EDGE_HOLD",
+                        hold_reason,
                         selected_method=self.selected_method or self.entry_method,
                         applied_validations=list(self.applied_validations),
-                        trigger="CI_SEPARATED_POSITIVE_EDGE_HOLD",
+                        trigger=hold_reason,
+                    )
+                sell_value_dominates = self._sell_value_exceeds_hold_value(
+                    current_p_posterior=current_held,
+                    best_bid=exit_context.best_bid,
+                    hours_to_settlement=exit_context.hours_to_settlement,
+                    applied=applied,
+                    portfolio_positions=exit_context.portfolio_positions,
+                    bankroll=exit_context.bankroll,
+                )
+                if sell_value_dominates is False:
+                    self.neg_edge_count = 0
+                    applied.append("ci_separated_hold_value_dominates")
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        False,
+                        "CI_SEPARATED_HOLD_VALUE_DOMINATES",
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                        trigger="CI_SEPARATED_HOLD_VALUE_DOMINATES",
+                    )
+                if sell_value_dominates is None:
+                    self.neg_edge_count = 0
+                    applied.append("ci_separated_exit_context_incomplete_hold")
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        False,
+                        "CI_SEPARATED_EXIT_CONTEXT_INCOMPLETE_HOLD",
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                        trigger="CI_SEPARATED_EXIT_CONTEXT_INCOMPLETE_HOLD",
                     )
                 # Disjoint AND moved against the held side → genuine evidence reversal → EXIT.
                 self.neg_edge_count = 0

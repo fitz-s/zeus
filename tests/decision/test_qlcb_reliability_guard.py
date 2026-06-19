@@ -11,8 +11,10 @@
     abstained=True.
   * a THIN cell (n < N_MIN) ⇒ abstained even if the point hit-rate looks high (Wilson lower
     bound on a thin sample is conservative AND the N_MIN gate fires).
-  * an UNKNOWN cell (artifact absent / cell not in table) ⇒ INERT pass-through (q_safe ==
-    band_q_lcb, trade=True, NOT abstained) — byte-identical to pre-guard behavior.
+  * an UNKNOWN cell with no artifact ⇒ INERT pass-through (q_safe == band_q_lcb, trade=True,
+    NOT abstained) — byte-identical to pre-guard behavior.
+  * a MISSING cell inside an active artifact ⇒ abstain; an active live artifact cannot silently
+    authorize a side/bin it did not grade.
 
 Reverting the guard to "serve band.q_lcb unconditionally" makes the abstain cases RED.
 """
@@ -43,11 +45,11 @@ def test_well_calibrated_cell_serves_min_band_and_Lg():
     # band_q_lcb of 0.72 (bucket [0.7, 0.8) -> floor 0.7). L_g for 0.85 over n=500 is ~0.82.
     band_q_lcb = 0.72
     bucket_idx, bucket_floor = qlcb_bucket(band_q_lcb)
-    key = f"high|L1|modal|qb{bucket_idx}"
+    key = f"high|L1|YES|modal|qb{bucket_idx}"
     table = {key: (500, 0.85)}
     v = apply_guard(
         band_q_lcb=band_q_lcb, metric="high", lead_days=1.0,
-        bin_position="modal", reliability_table=table,
+        side="YES", bin_position="modal", reliability_table=table,
     )
     assert v.trade is True
     assert v.abstained is False
@@ -62,11 +64,11 @@ def test_miscalibrated_cell_abstains_q_safe_zero():
     # band_q_lcb of 0.72 -> L_g << floor -> NOT licensed -> abstain, q_safe = 0.
     band_q_lcb = 0.72
     bucket_idx, _floor = qlcb_bucket(band_q_lcb)
-    key = f"high|L1|modal|qb{bucket_idx}"
+    key = f"high|L1|YES|modal|qb{bucket_idx}"
     table = {key: (500, 0.55)}
     v = apply_guard(
         band_q_lcb=band_q_lcb, metric="high", lead_days=1.0,
-        bin_position="modal", reliability_table=table,
+        side="YES", bin_position="modal", reliability_table=table,
     )
     assert v.abstained is True
     assert v.trade is False
@@ -77,11 +79,11 @@ def test_thin_cell_abstains_even_with_high_point_rate():
     # n < N_MIN -> the N_MIN gate fires regardless of the point hit-rate -> abstain.
     band_q_lcb = 0.72
     bucket_idx, _floor = qlcb_bucket(band_q_lcb)
-    key = f"high|L1|modal|qb{bucket_idx}"
+    key = f"high|L1|YES|modal|qb{bucket_idx}"
     table = {key: (N_MIN - 1, 1.0)}  # perfect but thin
     v = apply_guard(
         band_q_lcb=band_q_lcb, metric="high", lead_days=1.0,
-        bin_position="modal", reliability_table=table,
+        side="YES", bin_position="modal", reliability_table=table,
     )
     assert v.abstained is True
     assert v.q_safe == 0.0
@@ -91,12 +93,75 @@ def test_unknown_cell_is_inert_passthrough():
     # Empty table (artifact absent / cell unseen) -> INERT: serve band_q_lcb, trade=True.
     v = apply_guard(
         band_q_lcb=0.61, metric="high", lead_days=1.0,
-        bin_position="nonmodal", reliability_table={},
+        side="YES", bin_position="nonmodal", reliability_table={},
     )
     assert v.basis == "INERT"
     assert v.abstained is False
     assert v.trade is True
     assert v.q_safe == 0.61
+
+
+def test_injected_active_empty_table_abstains():
+    """An active artifact with zero usable cells is not the same as artifact absence."""
+
+    v = apply_guard(
+        band_q_lcb=0.61,
+        metric="high",
+        lead_days=1.0,
+        side="YES",
+        bin_position="nonmodal",
+        reliability_table={},
+        reliability_artifact_active=True,
+    )
+
+    assert v.basis == "OOF_WILSON_95_MISSING_CELL"
+    assert v.abstained is True
+    assert v.trade is False
+    assert v.q_safe == 0.0
+
+
+def test_missing_cell_inside_active_table_abstains():
+    # Once an artifact is active, an unseen side-aware cell is not authority.
+    active_table = {"high|L1|YES|modal|qb1": (500, 0.5)}
+    v = apply_guard(
+        band_q_lcb=0.76,
+        metric="high",
+        lead_days=1.0,
+        side="NO",
+        bin_position="nonmodal",
+        reliability_table=active_table,
+    )
+    assert v.basis == "OOF_WILSON_95_MISSING_CELL"
+    assert v.abstained is True
+    assert v.trade is False
+    assert v.q_safe == 0.0
+
+
+def test_side_specific_cell_required_for_no_claim():
+    band_q_lcb = 0.72
+    bucket_idx, _bucket_floor = qlcb_bucket(band_q_lcb)
+    yes_only = {f"high|L1|YES|nonmodal|qb{bucket_idx}": (500, 0.90)}
+    no_missing = apply_guard(
+        band_q_lcb=band_q_lcb,
+        metric="high",
+        lead_days=1.0,
+        side="NO",
+        bin_position="nonmodal",
+        reliability_table=yes_only,
+    )
+    assert no_missing.abstained is True
+
+    no_table = {f"high|L1|NO|nonmodal|qb{bucket_idx}": (500, 0.90)}
+    no_licensed = apply_guard(
+        band_q_lcb=band_q_lcb,
+        metric="high",
+        lead_days=1.0,
+        side="NO",
+        bin_position="nonmodal",
+        reliability_table=no_table,
+    )
+    assert no_licensed.abstained is False
+    assert no_licensed.basis == "OOF_WILSON_95"
 
 
 def test_guard_is_inert_when_artifact_absent_default_load(tmp_path, monkeypatch):
@@ -109,4 +174,21 @@ def test_guard_is_inert_when_artifact_absent_default_load(tmp_path, monkeypatch)
     v = apply_guard(band_q_lcb=0.88, metric="low", lead_days=2.0, bin_position="modal")
     assert v.basis == "INERT"
     assert v.q_safe == 0.88
+    guard_mod.reset_reliability_cache()
+
+
+def test_present_malformed_artifact_is_active_fail_closed(tmp_path, monkeypatch):
+    artifact = tmp_path / "qlcb_oof_reliability.json"
+    artifact.write_text("{not-json")
+    monkeypatch.setattr(guard_mod, "_QLCB_OOF_RELIABILITY_PATH", str(artifact))
+    guard_mod.reset_reliability_cache()
+
+    v = apply_guard(band_q_lcb=0.88, metric="low", lead_days=2.0, bin_position="modal")
+
+    assert v.basis == "OOF_WILSON_95_MISSING_CELL"
+    assert v.abstained is True
+    assert v.q_safe == 0.0
+    status = guard_mod.reliability_artifact_status()
+    assert status["active"] is True
+    assert status["status"] == "ACTIVE_INVALID"
     guard_mod.reset_reliability_cache()

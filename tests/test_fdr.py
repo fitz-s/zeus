@@ -527,7 +527,6 @@ class TestSelectionFamilySubstrate:
             "41°F or higher",
         ]
 
-    @pytest.mark.skip(reason="DEAD_TEST 2026-06-10: scan_full_hypothesis_family buy_no path was eliminated by commit 16c35e7445 (Make YES and NO probability authority independent) — buy_no hypotheses are blocked until independent native-NO posteriors are wired; the unconditional `continue` at market_analysis_family_scan.py:111 prevents any buy_no FullFamilyHypothesis from being appended")
     def test_multi_bin_full_family_scan_uses_native_no_market_price(self):
         class FakeAnalysis:
             bins = [
@@ -562,7 +561,6 @@ class TestSelectionFamilySubstrate:
         # explicitly — EP does not equal a bare float (PR #348 Blocker 1).
         assert float(no_hypotheses[0].entry_price) == 0.55
 
-    @pytest.mark.skip(reason="DEAD_TEST 2026-06-10: MarketAnalysis.find_edges() buy_no path eliminated by commit 16c35e7445 — `if self.supports_buy_no_edges(i): ... continue` at market_analysis.py:706-723 short-circuits before computing p_post_no=1-p_yes (that complement formula is explicitly forbidden); test expects a buy_no edge from find_edges() which no longer fires without independent native-NO posterior")
     def test_market_analysis_multi_bin_buy_no_requires_native_no_quote(self):
         bins = [
             Bin(low=None, high=67, unit="F", label="67°F or lower"),
@@ -629,7 +627,6 @@ class TestSelectionFamilySubstrate:
         with pytest.raises(ValueError, match="requires"):
             dedup_module.buy_no_native_quote_evidence_submit_enabled()
 
-    @pytest.mark.skip(reason="DEAD_TEST 2026-06-10: _bootstrap_bin_no CI test depends on find_edges()/family scan emitting a buy_no edge; both paths short-circuit (market_analysis.py:723 and family_scan.py:111) before computing the bootstrap CI for buy_no; no independent native-NO posterior → no buy_no edge emitted → CI assertion never reached")
     def test_multi_bin_buy_no_bootstrap_uses_native_no_market_price(self, monkeypatch):
         bins = [
             Bin(low=None, high=67, unit="F", label="67°F or lower"),
@@ -659,7 +656,6 @@ class TestSelectionFamilySubstrate:
         assert ci_hi == pytest.approx(0.25)
         assert p_value == 0.0
 
-    @pytest.mark.skip(reason="DEAD_TEST 2026-06-10: scan_full_hypothesis_family buy_no path blocked by unconditional continue at family_scan.py:111 (16c35e7445); expects 4 hypotheses (2 yes + 2 no) but only yes hypotheses are emitted; FakeAnalysis.supports_buy_no_edges also has old zero-arg signature incompatible with current idx-param call")
     def test_binary_full_family_scan_keeps_executable_buy_no(self):
         class FakeAnalysis:
             bins = [
@@ -668,10 +664,14 @@ class TestSelectionFamilySubstrate:
             ]
             p_cal = np.array([0.45, 0.55])
             p_market = np.array([0.55, 0.45])
+            p_market_no = np.array([0.45, 0.55])
             p_posterior = np.array([0.40, 0.60])
 
-            def supports_buy_no_edges(self):
+            def supports_buy_no_edges(self, idx=None):
                 return True
+
+            def buy_no_market_price(self, idx):
+                return float(self.p_market_no[idx])
 
             def _bootstrap_bin(self, idx, n):
                 return (0.01, 0.05, 0.001)
@@ -853,7 +853,6 @@ class TestSelectionFamilySubstrate:
         assert family_strategy_key == ""
         assert sorted(hypothesis_strategy_keys) == ["", "center_buy"]
 
-    @pytest.mark.skip(reason="DEAD_TEST 2026-06-10: test expects buy_no EdgeDecision (direction='buy_no', rejection_stage='SIZING_TOO_SMALL') from evaluate_candidate, but the buy_no edge-scan path in MarketAnalysis.find_edges() is short-circuited since commit 16c35e7445; result is FDR_FILTERED (no edge found) instead of SIZING_TOO_SMALL; the complement-formula buy_no posterior is forbidden and no independent native-NO posterior is wired in this test")
     def test_evaluate_candidate_materializes_selection_facts(self, tmp_path, monkeypatch):
         # T2.g CLOSED 2026-04-24: explicit ensemble_snapshots fixture row
         # with boundary_ambiguous=0 replaces the prior natural-empty-v2

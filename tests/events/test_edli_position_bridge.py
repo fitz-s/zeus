@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
@@ -176,7 +177,11 @@ def test_red_confirmed_fill_produces_no_position_current_without_bridge(conn):
 
 def test_green_bridge_materializes_one_correct_position(conn):
     aggregate_id = _seed_confirmed_buy_no_aggregate(conn)
-    result = materialize_position_current_from_edli_fill(conn, aggregate_id)
+    result = materialize_position_current_from_edli_fill(
+        conn,
+        aggregate_id,
+        now=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
     assert result is not None
     assert result["created"] is True
 
@@ -219,6 +224,73 @@ def test_green_bridge_materializes_one_correct_position(conn):
         (row["position_id"],),
     ).fetchall()
     assert [r[0] for r in ev] == ["POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED", "ENTRY_ORDER_FILLED"]
+
+
+def test_bridge_relinks_venue_command_decision_id_to_canonical_position(conn):
+    aggregate_id = _seed_confirmed_buy_no_aggregate(conn)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
+        """,
+        (
+            "cmd-short-1",
+            "snap-1",
+            "env-1",
+            "stale-short-position",
+            EXECUTION_COMMAND_ID,
+            "idem-bridge-command-link-1",
+            "ENTRY",
+            CONDITION_ID,
+            ELECTED_NO_TOKEN,
+            "BUY",
+            16.75,
+            0.42,
+            VENUE_ORDER_ID,
+            "FILLED",
+            "2026-06-01T11:59:58+00:00",
+            "2026-06-01T11:59:58+00:00",
+        ),
+    )
+
+    result = materialize_position_current_from_edli_fill(
+        conn,
+        aggregate_id,
+        now=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result is not None
+    canonical_position_id = result["position_id"]
+    command = conn.execute(
+        "SELECT position_id, updated_at FROM venue_commands WHERE command_id = 'cmd-short-1'"
+    ).fetchone()
+    assert command["position_id"] == canonical_position_id
+    assert command["updated_at"] == "2026-06-01T12:00:00+00:00"
+
+    fact = conn.execute(
+        "SELECT command_id, posted_at FROM execution_fact WHERE intent_id = ?",
+        (FINAL_INTENT_ID,),
+    ).fetchone()
+    assert fact["command_id"] == "cmd-short-1"
+    assert fact["posted_at"] == "2026-06-01T11:59:58+00:00"
+
+    provenance = conn.execute(
+        """
+        SELECT event_type, payload_json, source
+          FROM provenance_envelope_events
+         WHERE subject_type = 'command'
+           AND subject_id = 'cmd-short-1'
+           AND event_type = 'POSITION_LINK_REPAIRED'
+        """
+    ).fetchone()
+    assert provenance is not None
+    assert provenance["source"] == "WS_USER"
+    assert "stale-short-position" in provenance["payload_json"]
+    assert canonical_position_id in provenance["payload_json"]
 
 
 def test_green_bridge_buy_yes_places_token_on_token_id(conn):
@@ -364,6 +436,68 @@ def test_same_order_duplicate_aggregate_absorbs_existing_open_row(conn):
 
     assert replay["created"] is False
     assert replay["position_id"] == first["position_id"]
+    assert after_count == before_count
+
+
+def test_same_order_duplicate_preserves_chain_corrected_size(conn):
+    first_aggregate = _seed_confirmed_buy_no_aggregate(conn, aggregate_id="agg-edli-chain-a")
+    first = materialize_position_current_from_edli_fill(conn, first_aggregate)
+    assert first["created"] is True
+
+    second_aggregate = _seed_confirmed_buy_no_aggregate(conn, aggregate_id="agg-edli-chain-b")
+    second = materialize_position_current_from_edli_fill(conn, second_aggregate)
+    assert second["position_id"] == first["position_id"]
+
+    before_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MANUAL_OVERRIDE_APPLIED'
+           AND source_module = 'src.events.edli_position_bridge'
+        """,
+        (first["position_id"],),
+    ).fetchone()[0]
+
+    conn.execute(
+        """
+        UPDATE position_current
+           SET shares = 5.13,
+               cost_basis_usd = 3.6936,
+               size_usd = 3.6936,
+               entry_price = 0.72,
+               chain_state = 'synced',
+               chain_shares = 5.13,
+               chain_avg_price = 0.72,
+               chain_cost_basis_usd = 3.6936
+         WHERE position_id = ?
+        """,
+        (first["position_id"],),
+    )
+
+    replay = materialize_position_current_from_edli_fill(conn, second_aggregate)
+    row = conn.execute(
+        "SELECT shares, cost_basis_usd, size_usd, entry_price, chain_state, chain_shares "
+        "FROM position_current WHERE position_id = ?",
+        (first["position_id"],),
+    ).fetchone()
+    after_count = conn.execute(
+        """
+        SELECT COUNT(*) FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MANUAL_OVERRIDE_APPLIED'
+           AND source_module = 'src.events.edli_position_bridge'
+        """,
+        (first["position_id"],),
+    ).fetchone()[0]
+
+    assert replay["created"] is False
+    assert replay["position_id"] == first["position_id"]
+    assert row["chain_state"] == "synced"
+    assert row["chain_shares"] == pytest.approx(5.13)
+    assert row["shares"] == pytest.approx(5.13)
+    assert row["cost_basis_usd"] == pytest.approx(3.6936)
+    assert row["size_usd"] == pytest.approx(3.6936)
+    assert row["entry_price"] == pytest.approx(0.72)
     assert after_count == before_count
 
 

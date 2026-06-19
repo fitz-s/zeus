@@ -1,6 +1,6 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-05-23
-# Lifecycle: created=2026-05-14; last_reviewed=2026-05-23; last_reused=2026-05-23
+# Last reused/audited: 2026-06-18
+# Lifecycle: created=2026-05-14; last_reviewed=2026-06-18; last_reused=2026-06-18
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction); a0d51d480b507f324 root-cause (ECMWF 00z ingest schedule fix — add 12z triggers, update FORECAST_LIVE_JOB_IDS).
 # Purpose: Relationship tests for the forecast-live daemon boundary — job registry, lock semantics, journaling, and source-health probe.
 # Reuse: Run when forecast_live_daemon.py job specs, run_opendata_track, or job journaling logic changes.
@@ -149,6 +149,89 @@ def test_forecast_live_replacement_cutover_heartbeat_payload_names_active_jobs(m
     assert payload["jobs"] == [FORECAST_LIVE_HEARTBEAT_JOB_ID]
 
 
+def test_forecast_live_heartbeat_payload_uses_registered_scheduler_jobs(monkeypatch, tmp_path) -> None:
+    import src.ingest.forecast_live_daemon as forecast_live_daemon
+    from src.ingest.forecast_live_daemon import (
+        REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID,
+        REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
+        _write_forecast_live_heartbeat,
+    )
+
+    class _Job:
+        def __init__(self, job_id: str) -> None:
+            self.id = job_id
+
+    class _Scheduler:
+        def get_jobs(self):
+            return [
+                _Job("forecast_live_heartbeat"),
+                _Job(REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID),
+                _Job(REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID),
+            ]
+
+    monkeypatch.setattr(forecast_live_daemon, "_scheduler", _Scheduler())
+    heartbeat_path = tmp_path / "forecast-live-heartbeat.json"
+
+    _write_forecast_live_heartbeat(
+        heartbeat_path=heartbeat_path,
+        status="scheduler_ready",
+        now_utc=datetime(2026, 6, 18, 22, 0, tzinfo=timezone.utc),
+    )
+
+    payload = json.loads(heartbeat_path.read_text())
+    assert payload["jobs"] == [
+        "forecast_live_heartbeat",
+        REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID,
+        REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
+    ]
+
+
+def test_scheduler_job_marks_started_before_success(monkeypatch) -> None:
+    import src.observability.scheduler_health as scheduler_health
+    from src.ingest.forecast_live_daemon import _scheduler_job
+
+    writes: list[dict[str, object]] = []
+
+    def _record(job_name: str, **kwargs: object) -> None:
+        writes.append({"job_name": job_name, **kwargs})
+
+    monkeypatch.setattr(scheduler_health, "_write_scheduler_health", _record)
+
+    @_scheduler_job("example_long_job")
+    def _job() -> None:
+        writes.append({"job_name": "example_long_job", "inside_job": True})
+
+    _job()
+
+    assert writes == [
+        {"job_name": "example_long_job", "failed": False, "started": True},
+        {"job_name": "example_long_job", "inside_job": True},
+        {"job_name": "example_long_job", "failed": False, "reason": None},
+    ]
+
+
+def test_replacement_materialize_job_calls_undecorated_production_inner(monkeypatch) -> None:
+    """A nested scheduler wrapper must not convert production failure into OK health."""
+
+    import src.data.replacement_forecast_production as production
+    from src.ingest.forecast_live_daemon import _replacement_forecast_materialize_job
+
+    calls: list[str] = []
+
+    def _outer_wrapper() -> None:
+        calls.append("outer")
+
+    def _inner_job() -> None:
+        calls.append("inner")
+
+    _outer_wrapper.__wrapped__ = _inner_job  # type: ignore[attr-defined]
+    monkeypatch.setattr(production, "_replacement_forecast_live_materialize_cycle", _outer_wrapper)
+
+    _replacement_forecast_materialize_job.__wrapped__()
+
+    assert calls == ["inner"]
+
+
 def test_forecast_live_heartbeat_write_shape(tmp_path) -> None:
     from src.ingest.forecast_live_daemon import (
         FORECAST_LIVE_HEARTBEAT_JOB_ID,
@@ -168,6 +251,7 @@ def test_forecast_live_heartbeat_write_shape(tmp_path) -> None:
     assert payload["timestamp"] == "2026-05-14T09:30:00+00:00"
     assert payload["written_at"] == "2026-05-14T09:30:00+00:00"
     assert payload["cadence_seconds"] == 30
+    assert isinstance(payload["git_head"], str)
     assert FORECAST_LIVE_HEARTBEAT_JOB_ID in payload["jobs"]
     assert isinstance(payload["pid"], int)
 

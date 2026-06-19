@@ -1684,6 +1684,85 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
     return [_dict_row(row) for row in rows]
 
 
+def _filled_entry_position_link_repair_candidates(conn: sqlite3.Connection) -> list[dict]:
+    required = {
+        "venue_commands",
+        "venue_trade_facts",
+        "position_current",
+        "venue_submission_envelopes",
+        "executable_market_snapshots",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return []
+    sql = "WITH " + _canonical_trade_fact_cte() + """,
+        entry_fill AS (
+            SELECT fact.command_id,
+                   COUNT(*) AS fill_fact_count,
+                   SUM(CAST(fact.filled_size AS REAL)) AS filled_size,
+                   MAX(fact.observed_at) AS observed_at
+              FROM canonical_trade_fact fact
+             WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+             GROUP BY fact.command_id
+        )
+        SELECT cmd.command_id,
+               cmd.position_id,
+               cmd.venue_order_id,
+               cmd.token_id,
+               cmd.state,
+               entry_fill.fill_fact_count,
+               entry_fill.filled_size,
+               entry_fill.observed_at AS fill_observed_at,
+               existing_pc.position_id AS canonical_position_id,
+               existing_pc.phase AS canonical_phase
+          FROM venue_commands cmd
+          JOIN entry_fill
+            ON entry_fill.command_id = cmd.command_id
+          LEFT JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+          LEFT JOIN venue_submission_envelopes env
+            ON env.envelope_id = cmd.envelope_id
+          LEFT JOIN executable_market_snapshots snap
+            ON snap.snapshot_id = cmd.snapshot_id
+          JOIN position_current existing_pc
+            ON existing_pc.position_id != cmd.position_id
+           AND COALESCE(existing_pc.order_id, '') != ''
+           AND lower(existing_pc.order_id) = lower(cmd.venue_order_id)
+           AND (
+               COALESCE(existing_pc.token_id, '') = cmd.token_id
+               OR COALESCE(existing_pc.no_token_id, '') = cmd.token_id
+               OR (
+                   COALESCE(existing_pc.condition_id, '') != ''
+                   AND COALESCE(existing_pc.condition_id, '') = COALESCE(env.condition_id, snap.condition_id, cmd.market_id, '')
+               )
+           )
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND cmd.state IN ('FILLED', 'PARTIAL')
+           AND cmd.venue_order_id IS NOT NULL
+           AND cmd.venue_order_id != ''
+           AND pc.position_id IS NULL
+         ORDER BY entry_fill.observed_at, cmd.command_id, existing_pc.updated_at DESC
+        """
+    rows = [_dict_row(row) for row in conn.execute(sql).fetchall()]
+    by_command: dict[str, list[dict]] = {}
+    for row in rows:
+        by_command.setdefault(str(row.get("command_id") or ""), []).append(row)
+    candidates: list[dict] = []
+    for command_id, matches in by_command.items():
+        unique_positions = {
+            str(match.get("canonical_position_id") or "")
+            for match in matches
+            if str(match.get("canonical_position_id") or "")
+        }
+        first = dict(matches[0])
+        first["canonical_match_count"] = len(unique_positions)
+        if len(unique_positions) == 1:
+            first["canonical_position_id"] = next(iter(unique_positions))
+        candidates.append(first)
+    return candidates
+
+
 def _latest_unprojected_live_entry_candidates(conn: sqlite3.Connection) -> list[dict]:
     required = {
         "venue_commands",
@@ -1818,7 +1897,10 @@ def _decision_log_trade_case_for_command(
                 or (token_id and str(case.get("token_id") or "") == token_id)
             ):
                 return case, int(record.get("id") or 0)
-    return _edli_trade_case_for_command(conn, command, client=client), None
+    edli_case = _edli_trade_case_for_command(conn, command, client=client)
+    if edli_case:
+        return edli_case, None
+    return _snapshot_trade_case_for_command(conn, command, client=client), None
 
 
 def _edli_event_id_from_decision_id(decision_id: str) -> str:
@@ -1868,7 +1950,7 @@ def _market_event_identity_for_condition(conn: sqlite3.Connection, condition_id:
         return {}
     row = conn.execute(
         f"""
-        SELECT city, target_date, range_label, outcome
+        SELECT city, target_date, range_label, outcome, temperature_metric
          FROM {ref}
          WHERE condition_id = ?
          ORDER BY rowid DESC
@@ -1877,6 +1959,105 @@ def _market_event_identity_for_condition(conn: sqlite3.Connection, condition_id:
         (condition_id,),
     ).fetchone()
     return _dict_row(row)
+
+
+def _direction_from_command_tokens(command: dict) -> str:
+    selected_token_id = str(command.get("token_id") or "").strip()
+    yes_token_id = str(command.get("env_yes_token_id") or command.get("snapshot_yes_token_id") or "").strip()
+    no_token_id = str(command.get("env_no_token_id") or command.get("snapshot_no_token_id") or "").strip()
+    if selected_token_id and selected_token_id == yes_token_id:
+        return "buy_yes"
+    if selected_token_id and selected_token_id == no_token_id:
+        return "buy_no"
+    outcome_label = str(
+        command.get("env_outcome_label") or command.get("snapshot_outcome_label") or ""
+    ).strip().upper()
+    if outcome_label == "YES":
+        return "buy_yes"
+    if outcome_label == "NO":
+        return "buy_no"
+    decision_tail = str(command.get("decision_id") or "").rsplit(":", 1)[-1].strip().lower()
+    if decision_tail in {"buy_yes", "buy_no"}:
+        return decision_tail
+    return ""
+
+
+def _snapshot_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, client=None) -> dict:
+    """Recover non-Day0 entry identity from immutable command envelope/snapshot rows.
+
+    This is the third repair authority after decision_log and EDLI certificates.
+    It only fires when the command's pre-submit envelope / executable snapshot
+    prove token identity and forecasts.market_events proves market identity.
+    Same-UTC-day commands stay fail-closed so Day0 settlement_capture fills are
+    not misclassified as opening_inertia.
+    """
+
+    condition_id = str(
+        command.get("env_condition_id")
+        or command.get("snapshot_condition_id")
+        or command.get("market_id")
+        or ""
+    ).strip()
+    yes_token_id = str(command.get("env_yes_token_id") or command.get("snapshot_yes_token_id") or "").strip()
+    no_token_id = str(command.get("env_no_token_id") or command.get("snapshot_no_token_id") or "").strip()
+    selected_token_id = str(command.get("token_id") or "").strip()
+    direction = _direction_from_command_tokens(command)
+    if not (
+        condition_id
+        and yes_token_id
+        and no_token_id
+        and selected_token_id
+        and direction in {"buy_yes", "buy_no"}
+    ):
+        return {}
+    expected_selected = no_token_id if direction == "buy_no" else yes_token_id
+    if selected_token_id != expected_selected:
+        return {}
+
+    market_event = _market_event_identity_for_condition(conn, condition_id)
+    city = str(market_event.get("city") or "").strip()
+    target_date = str(market_event.get("target_date") or "").strip()
+    bin_label = str(market_event.get("range_label") or market_event.get("outcome") or "").strip()
+    metric = str(market_event.get("temperature_metric") or "").strip().lower()
+    created_at = str(command.get("created_at") or "").strip()
+    if not (city and target_date and bin_label and metric in {"high", "low"}):
+        if not bin_label:
+            clob_identity = _clob_market_identity_for_command(
+                client,
+                condition_id=condition_id,
+                yes_token_id=yes_token_id,
+                no_token_id=no_token_id,
+            )
+            bin_label = str(clob_identity.get("bin_label") or "").strip()
+        if not (city and target_date and bin_label and metric in {"high", "low"}):
+            return {}
+    if created_at[:10] and target_date <= created_at[:10]:
+        return {}
+
+    strategy_key = "opening_inertia" if direction == "buy_no" else "center_buy"
+    return {
+        "trade_id": str(command.get("position_id") or ""),
+        "decision_id": str(command.get("decision_id") or ""),
+        "token_id": yes_token_id,
+        "no_token_id": no_token_id,
+        "city": city,
+        "target_date": target_date,
+        "bin_label": bin_label,
+        "range_label": bin_label,
+        "direction": direction,
+        "strategy_key": strategy_key,
+        "strategy": strategy_key,
+        "temperature_metric": metric,
+        "unit": "",
+        "selected_method": "ens_member_counting",
+        "entry_method": "ens_member_counting",
+        "edge_source": strategy_key,
+        "discovery_mode": "opening_hunt",
+        "cluster": city,
+        "p_posterior": 0.0,
+        "decision_snapshot_id": str(command.get("snapshot_id") or ""),
+        "size_usd": None,
+    }
 
 
 def _event_bound_strategy_key_from_payload(payload: dict) -> str:
@@ -2803,6 +2984,53 @@ def reconcile_filled_entry_projection_repairs(conn: sqlite3.Connection, client=N
             conn.execute("RELEASE SAVEPOINT " + sp_name)
             logger.error(
                 "recovery: filled entry projection repair failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def reconcile_filled_entry_position_link_repairs(conn: sqlite3.Connection) -> dict:
+    """Relink filled ENTRY commands to an already-materialized position row."""
+
+    from src.state.venue_command_repo import repair_command_position_link_if_orphaned
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _filled_entry_position_link_repair_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        canonical_position_id = str(candidate.get("canonical_position_id") or "")
+        if int(candidate.get("canonical_match_count") or 0) != 1 or not canonical_position_id:
+            logger.warning(
+                "recovery: filled entry position-link repair skipped command %s: "
+                "ambiguous canonical matches=%s",
+                command_id,
+                candidate.get("canonical_match_count"),
+            )
+            summary["stayed"] += 1
+            continue
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+        sp_name = f"sp_filled_entry_link_{safe_command_id}"
+        conn.execute("SAVEPOINT " + sp_name)
+        try:
+            advanced = repair_command_position_link_if_orphaned(
+                conn,
+                command_id=command_id,
+                canonical_position_id=canonical_position_id,
+                occurred_at=str(candidate.get("fill_observed_at") or _now_iso()),
+                reason="filled_entry_existing_order_token_projection",
+            )
+            conn.execute("RELEASE SAVEPOINT " + sp_name)
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT " + sp_name)
+            conn.execute("RELEASE SAVEPOINT " + sp_name)
+            logger.error(
+                "recovery: filled entry position-link repair failed for command %s: %s",
                 command_id,
                 exc,
             )
@@ -4244,6 +4472,49 @@ def _resolve_m5_local_orphan_findings(
         SELECT finding_id
           FROM exchange_reconcile_findings
          WHERE kind = 'local_orphan_order'
+           AND subject_id = ?
+           AND resolved_at IS NULL
+         ORDER BY recorded_at, finding_id
+        """,
+        (venue_order_id,),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    resolved = 0
+    for row in rows:
+        conn.execute(
+            """
+            UPDATE exchange_reconcile_findings
+               SET resolved_at = ?, resolution = ?, resolved_by = ?
+             WHERE finding_id = ?
+               AND resolved_at IS NULL
+            """,
+            (
+                resolved_at,
+                resolution,
+                "src.execution.command_recovery",
+                str(_dict_row(row)["finding_id"]),
+            ),
+        )
+        resolved += 1
+    return resolved
+
+
+def _resolve_m5_exchange_ghost_findings(
+    conn: sqlite3.Connection,
+    *,
+    venue_order_id: str,
+    resolved_at: str,
+    resolution: str,
+) -> int:
+    if not _table_exists(conn, "exchange_reconcile_findings"):
+        return 0
+    rows = conn.execute(
+        """
+        SELECT finding_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
            AND subject_id = ?
            AND resolved_at IS NULL
          ORDER BY recorded_at, finding_id
@@ -6641,6 +6912,22 @@ def _raw_matches_command_exposure(raw: dict, command: dict) -> bool:
     return _decimal_matches(raw_size, command.get("size"))
 
 
+def _raw_matches_command_submit_identity(raw: dict, command: dict) -> bool:
+    token_id = str(command.get("token_id") or "")
+    if not token_id or not _raw_mentions_token(raw, token_id):
+        return False
+    raw_side = str(raw.get("side") or "").upper()
+    if raw_side != str(command.get("side") or "").upper():
+        return False
+    if not _decimal_matches(raw.get("price"), command.get("price")):
+        return False
+    raw_size = raw.get("original_size") or raw.get("size") or raw.get("matched_amount")
+    if not _decimal_matches(raw_size, command.get("size")):
+        return False
+    status = _order_status(raw)
+    return not status or status in _LIVE_ORDER_STATUSES
+
+
 def _summarize_venue_match(raw: dict) -> dict:
     return {
         "id": raw.get("id") or raw.get("order_id") or raw.get("taker_order_id"),
@@ -6867,6 +7154,176 @@ def clear_review_required_no_venue_exposure(
         payload=payload,
     )
     return payload
+
+
+def _review_required_no_venue_live_order_recovery(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+    client,
+) -> str:
+    events = _command_events(conn, cmd.command_id)
+    latest_reason = _latest_review_required_payload(events).get("reason")
+    if latest_reason != "recovery_no_venue_order_id":
+        return "stayed"
+    if str(cmd.venue_order_id or "").strip():
+        return "stayed"
+    command = _dict_row(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (cmd.command_id,),
+        ).fetchone()
+    )
+    try:
+        open_orders = [_raw_payload(order) for order in _client_open_orders(client)]
+        trades = [_raw_payload(trade) for trade in _client_trades(client)]
+    except Exception as exc:  # noqa: BLE001 - recovery should retry on venue read failure.
+        logger.warning(
+            "recovery: command %s REVIEW_REQUIRED no-venue live-order proof read failed: %s",
+            cmd.command_id,
+            exc,
+        )
+        return "error"
+
+    matching_open_orders = [
+        raw
+        for raw in open_orders
+        if _raw_matches_command_submit_identity(raw, command)
+    ]
+    if len(matching_open_orders) != 1:
+        if len(matching_open_orders) > 1:
+            logger.warning(
+                "recovery: command %s REVIEW_REQUIRED no-venue stayed; "
+                "ambiguous matching open orders=%d",
+                cmd.command_id,
+                len(matching_open_orders),
+            )
+        return "stayed"
+
+    matching_trades = _matching_trades_for_command(
+        client,
+        command,
+        trades=trades,
+    )
+    if matching_trades:
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED no-venue stayed; "
+            "matching trades=%d require fill authority",
+            cmd.command_id,
+            len(matching_trades),
+        )
+        return "stayed"
+
+    order = dict(matching_open_orders[0])
+    venue_order_id = str(_extract_order_id(order) or "").strip()
+    status = _order_status(order) or "LIVE"
+    matched_size = _point_order_matched_size(order)
+    if not venue_order_id or status not in _LIVE_ORDER_STATUSES or not _decimal_is_zero(matched_size):
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED no-venue stayed; "
+            "order_id=%s status=%s matched_size=%s",
+            cmd.command_id,
+            venue_order_id or "<missing>",
+            status or "UNKNOWN",
+            matched_size,
+        )
+        return "stayed"
+
+    now = _now_iso()
+    order_summary = _summarize_venue_match(order)
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_venue_order_live",
+        "command_id": cmd.command_id,
+        "venue_order_id": venue_order_id,
+        "proof_class": "recovery_no_venue_order_id_live_order",
+        "side_effect_boundary_crossed": True,
+        "sdk_submit_attempted": True,
+        "required_predicates": {
+            "latest_event_is_review_required": True,
+            "review_reason_recovery_no_venue_order_id": True,
+            "venue_order_id_absent_before_recovery": True,
+            "proof_venue_order_id_present": True,
+            "unique_matching_open_order": True,
+            "matching_open_order_matches_command": True,
+            "authenticated_live_order_seen": True,
+            "point_order_matched_size_not_positive": True,
+            "no_matching_trades": True,
+            "no_trade_facts": _count_facts(conn, "venue_trade_facts", cmd.command_id) == 0,
+        },
+        "venue_order_live_proof": {
+            "source": "authenticated_clob_user_open_orders_read",
+            "owner_scope": "authenticated_funder",
+            "observed_at": now,
+            "venue_order_id": venue_order_id,
+            "point_order_status": status,
+            "matched_size": matched_size,
+            "matching_open_order_count": 1,
+            "matching_trade_count": 0,
+            "matching_open_orders": [order_summary],
+            "point_order": order,
+        },
+        "source_proof": {
+            "source_function": "command_recovery._reconcile_row",
+            "source_reason": "recovery_no_venue_order_id_live_order",
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": now,
+    }
+    safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
+    sp_name = f"sp_no_venue_live_order_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        append_event(
+            conn,
+            command_id=cmd.command_id,
+            event_type=CommandEventType.REVIEW_CLEARED_VENUE_ORDER_LIVE.value,
+            occurred_at=now,
+            payload=payload,
+        )
+        append_order_fact(
+            conn,
+            venue_order_id=venue_order_id,
+            command_id=cmd.command_id,
+            state="RESTING" if status == "RESTING" else "LIVE",
+            remaining_size=str(order.get("size") or order.get("remaining_size") or command.get("size") or ""),
+            matched_size=matched_size,
+            source="REST",
+            observed_at=now,
+            venue_timestamp=now,
+            raw_payload_hash=_canonical_payload_hash(
+                {
+                    "source": "command_recovery_no_venue_live_order",
+                    "command_id": cmd.command_id,
+                    "venue_order_id": venue_order_id,
+                    "exchange_order": order,
+                }
+            ),
+            raw_payload_json={
+                "source": "command_recovery_no_venue_live_order",
+                "command_id": cmd.command_id,
+                "venue_order_id": venue_order_id,
+                "exchange_order": order,
+            },
+        )
+        _resolve_m5_exchange_ghost_findings(
+            conn,
+            venue_order_id=venue_order_id,
+            resolved_at=now,
+            resolution="command_recovery_no_venue_live_order_adopted",
+        )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    logger.info(
+        "recovery: command %s REVIEW_REQUIRED no-venue -> ACKED "
+        "(venue_order_id=%s status=%s)",
+        cmd.command_id,
+        venue_order_id,
+        status,
+    )
+    return "advanced"
 
 
 def clear_review_required_confirmed_fill(
@@ -7270,6 +7727,9 @@ def _reconcile_row(
             if outcome != "stayed":
                 return outcome
             outcome = _review_required_confirmed_trade_recovery(conn, cmd, client)
+            if outcome != "stayed":
+                return outcome
+            outcome = _review_required_no_venue_live_order_recovery(conn, cmd, client)
             if outcome != "stayed":
                 return outcome
             return _review_required_no_venue_exposure_recovery(conn, cmd, client)
@@ -7832,6 +8292,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += live_entry_repair_summary["stayed"]
         summary["errors"] += live_entry_repair_summary["errors"]
 
+        filled_entry_link_summary = reconcile_filled_entry_position_link_repairs(conn)
+        summary["filled_entry_position_link_repair"] = filled_entry_link_summary
+        summary["advanced"] += filled_entry_link_summary["advanced"]
+        summary["stayed"] += filled_entry_link_summary["stayed"]
+        summary["errors"] += filled_entry_link_summary["errors"]
+
         filled_entry_repair_summary = reconcile_filled_entry_projection_repairs(conn, client=client)
         summary["filled_entry_projection_repair"] = filled_entry_repair_summary
         summary["advanced"] += filled_entry_repair_summary["advanced"]
@@ -8112,6 +8578,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
              _reconcile_venue_command_absence_sync, "venue_command_absence_sync")
     _client_pass("live_entry_projection_repair",
                  reconcile_live_entry_projection_repairs, "live_entry_projection_repair", client_kw=True)
+    _db_pass("filled_entry_position_link_repair",
+             reconcile_filled_entry_position_link_repairs, "filled_entry_position_link_repair")
     _client_pass("filled_entry_projection_repair",
                  reconcile_filled_entry_projection_repairs, "filled_entry_projection_repair", client_kw=True)
     _db_pass("filled_entry_position_lot_repair",

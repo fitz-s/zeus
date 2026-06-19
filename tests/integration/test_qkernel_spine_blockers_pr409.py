@@ -1,5 +1,5 @@
 # Created: 2026-06-15
-# Last reused or audited: 2026-06-16
+# Lifecycle: created=2026-06-15; last_reviewed=2026-06-19; last_reused=2026-06-19
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
 #   corrections docs/rebuild/consult_review_pr409_round2.md §1/§3/§5. RED-on-revert
 #   tests for the FOUR live-path blockers in the q-kernel integration bridge, folding
@@ -45,6 +45,32 @@ DECISION_TIME = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
 def _fast_band_draws(monkeypatch):
     """Lower the band draw count for a fast, deterministic smoke (logic unchanged)."""
     monkeypatch.setattr(bridge, "SPINE_BAND_DRAWS", 400, raising=False)
+
+
+def _install_sigma_floor_artifact(monkeypatch, tmp_path, *, sigma_floor_c: float = 1.0):
+    """Install a minimal settlement sigma-floor artifact for tests that need a real floor."""
+
+    from src.calibration import emos as emos_mod
+
+    path = tmp_path / "settlement_sigma_floor.json"
+    path.write_text(
+        json.dumps(
+            {
+                "_meta": {"k_default": 1.0},
+                "cells": {
+                    f"{CITY}|JJA|{METRIC}": {
+                        "sigma_floor_c": sigma_floor_c,
+                        "n": 100,
+                        "window": "test-fixture",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(emos_mod, "_SIGMA_FLOOR_PATH", path)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", None)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +189,38 @@ def _three_bin_family(*, event_type="FORECAST_SNAPSHOT_READY"):
     return family, bins
 
 
+def _five_bin_center_family(*, event_type="FORECAST_SNAPSHOT_READY"):
+    bins = [
+        Bin(low=None, high=18.0, unit="C", label="18C or below"),
+        Bin(low=19.0, high=19.0, unit="C", label="19C"),
+        Bin(low=20.0, high=20.0, unit="C", label="20C"),
+        Bin(low=21.0, high=21.0, unit="C", label="21C"),
+        Bin(low=22.0, high=None, unit="C", label="22C or above"),
+    ]
+    candidates = tuple(
+        _candidate(condition_id=f"cond-center-{i}", yes_token=f"yes-center-{i}",
+                   no_token=f"no-center-{i}", bin_obj=b)
+        for i, b in enumerate(bins)
+    )
+    family = EventBoundCandidateFamily(
+        family_id="edli_family_center_yes_regression",
+        event_id="evt-center-yes-regression",
+        event_type=event_type,
+        city=CITY,
+        target_date=TARGET_DATE,
+        metric=METRIC,
+        condition_ids=tuple(c.condition_id for c in candidates),
+        yes_token_ids=tuple(c.yes_token_id for c in candidates),
+        no_token_ids=tuple(c.no_token_id for c in candidates),
+        bins=tuple(bins),
+        candidates=candidates,
+        causal_snapshot_id="snap-center-yes-regression",
+        market_topology_source="executable_market_snapshots",
+        binding_hash="hash-center-yes-regression",
+    )
+    return family, bins
+
+
 def _proofs_for(family, *, yes_asks, no_asks, q_by_bin, q_lcb_by_bin, neg_risk=0,
                 no_ask_present=True, no_execution_prices=None):
     proofs = []
@@ -235,7 +293,7 @@ def _drive(family, proofs, payload, *, decision_time=DECISION_TIME, extra_exposu
 # ===========================================================================
 # BLOCKER 1 — live==replay forecast-case (source-cycle, emos_season, 24h bucket).
 # ===========================================================================
-def test_live_bridge_forecast_case_matches_arm_replay():
+def test_live_bridge_forecast_case_matches_arm_replay(monkeypatch, tmp_path):
     """The live bridge ForecastCase season / metric / lead-bucket / regime match the
     ARM-replay case construction, built from the FORECAST SOURCE CYCLE (not
     decision_time), and the served sigma floor is a non-None REALIZED floor.
@@ -250,6 +308,8 @@ def test_live_bridge_forecast_case_matches_arm_replay():
     from src.forecast.forecast_case_factory import DEFAULT_REGIME_KEY, REPLAY_LEAD_HOURS
     from src.forecast.sigma_authority import lead_bucket_for, realized_sigma_floor
     from src.forecast.types import ForecastCase
+
+    _install_sigma_floor_artifact(monkeypatch, tmp_path)
 
     family, _bins = _three_bin_family()
     cycle = _dt.datetime.fromisoformat(SOURCE_CYCLE_TIME_UTC.replace("Z", "+00:00"))
@@ -423,6 +483,57 @@ def test_direct_route_edge_uses_proof_execution_price_not_ask():
         assert float(route.avg_cost.value) == pytest.approx(float(proof.execution_price.value))
 
 
+def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkeypatch, tmp_path):
+    """Shanghai-style direct selection: licensed cheap modal YES beats adjacent NO substitutes.
+
+    The live qkernel v1 route surface is direct-only. It still must choose the best executable
+    native leg when evidence supports the center YES; it must not drift into "just buy one
+    adjacent NO" because old family/guard wiring made YES disappear.
+    """
+    from src.decision import qlcb_reliability_guard as guard_mod
+
+    _install_sigma_floor_artifact(monkeypatch, tmp_path)
+
+    reliability_cells: dict[str, tuple[int, float]] = {}
+    for lead in ("L1", "L2_3", "L4P"):
+        for side in ("YES", "NO"):
+            for pos in ("modal", "nonmodal"):
+                for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
+                    reliability_cells[f"high|{lead}|{side}|{pos}|qb{qb}"] = (1000, 0.95)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
+
+    family, _bins = _five_bin_center_family()
+    proofs = _proofs_for(
+        family,
+        # YES mids are coherent with the live sigma-floor distribution around 20C.
+        yes_asks=[0.13, 0.24, 0.27, 0.24, 0.13],
+        no_asks=[0.87, 0.76, 0.73, 0.76, 0.87],
+        q_by_bin=[0.12, 0.23, 0.30, 0.23, 0.12],
+        q_lcb_by_bin=[0.08, 0.18, 0.25, 0.18, 0.08],
+        no_execution_prices=[0.87, 0.74, 0.73, 0.74, 0.87],
+    )
+    payload = _payload(mu=20.0, sigma=0.05, members=[20, 20, 20, 20, 20])
+
+    result = _drive(family, proofs, payload)
+
+    assert result.no_trade_reason is None
+    assert result.selected_proof is not None
+    assert result.selected_proof.direction == "buy_yes"
+    assert result.selected_proof.candidate.bin.label == "20C"
+    assert result.decision is not None
+    assert result.decision.market_coherence.status == "COHERENT"
+    selected = result.decision.selected
+    assert selected is not None
+    selected_decision = next(
+        d for d in result.decision.candidate_decisions
+        if d.economics.candidate_id == selected.candidate_id
+    )
+    assert selected_decision.q_lcb_guard_basis == "OOF_WILSON_95"
+    assert selected_decision.q_lcb_guard_cell_key.startswith("high|L2_3|YES|modal|")
+
+
 def test_non_direct_selection_is_refused_as_typed_no_trade():
     """If the spine ever selects a non-direct (synthetic/arb) route, the bridge refuses it
     as NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE rather than single-leg-mapping it.
@@ -539,25 +650,62 @@ def test_reactor_seam_passes_real_exposure_into_selection():
 
     src = inspect.getsource(era)
     assert "_family_existing_exposure_for_selection_by_bin_id(" in src
-    assert "extra_exposure_by_bin_id=(_spine_selection_exposure or None)" in src
+    assert "extra_exposure_by_bin_id=(_selection_exposure or None)" in src
+
+
+def test_selection_exposure_projects_buy_no_to_non_own_outcomes(monkeypatch):
+    """Existing NO exposure must follow NO payoff geometry before family selection.
+
+    A buy_no position on bin i wins on every outcome except i. Mapping that
+    exposure onto i itself inverts the risk shape and lets the family selector
+    add sibling NO legs as if they were diversifying the position.
+    """
+    from types import SimpleNamespace
+
+    import src.state.portfolio as portfolio
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    bin_by_condition = {}
+    for proof in proofs:
+        bin_by_condition.setdefault(proof.candidate.condition_id, era._candidate_bin_id(proof))
+
+    monkeypatch.setattr(portfolio, "get_open_positions", lambda state: state.positions)
+    monkeypatch.setattr(portfolio, "_runtime_open_exposure_usd", lambda pos: pos.exposure)
+    state = SimpleNamespace(
+        positions=[
+            SimpleNamespace(condition_id="cond-1", direction="buy_no", exposure=12.0)
+        ]
+    )
+
+    exposure = era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=lambda: state,
+        family=family,
+    )
+
+    own_bin = bin_by_condition["cond-1"]
+    assert own_bin not in exposure
+    assert exposure[utility_ranker.OUTSIDE_OUTCOME] == 12.0
+    for cond, bin_id in bin_by_condition.items():
+        if cond == "cond-1":
+            continue
+        assert exposure[bin_id] == 12.0
 
 
 # ===========================================================================
-# BLOCKER 5 — the spine->legacy overlay must map the spine's GENUINE robust
-# lower bound into q_lcb_5pct (q-space), so the legacy submit pipeline's
-# per-side gate (q_lcb <= q_point) and binary-Kelly sizing run on the spine's
-# robust economics. The bug: the overlay restamped q_posterior to the payoff-
-# space q_dot_payoff (~0.052 for a neg-risk buy_no) but LEFT q_lcb_5pct at its
-# original PROBABILITY-space value (~0.990), so q_lcb (0.990) > q_point (0.052)
-# fired Q_LCB_INVALID in _native_side_candidate_from_proof, routing EVERY spine
-# submit to the missing-recapture branch ("no fresh executable snapshot").
-#
-# CORRECT FIX: q_lcb_5pct = clamp01(edge_lcb + cost). Because the legacy edge is
-# `q_lcb - all_in_cost` and the spine's own robust edge is `edge_lcb`, setting
-# q_lcb = edge_lcb + cost makes the legacy edge reproduce edge_lcb exactly, and
-# PRESERVES the robustness margin (q_lcb <= q_point, strict when edge_lcb <
-# point_ev) — it is NOT a clamp-to-point. RED if q_lcb is left unset (still the
-# payoff-space value) OR hard-clamped to q_point (= q_dot_payoff).
+# BLOCKER 5 — the spine->legacy overlay must not write payoff-space economics into
+# receipt-facing selected-side probability fields. qkernel is the selection authority, but
+# q_posterior/q_lcb_5pct remain the reactor proof's selected-side probability contract.
+# Writing q_dot_payoff/edge_lcb+cost into those fields created Milan-style contradictions
+# where a buy_yes proof carried a NO-like lower bound. The overlay updates selection score
+# provenance only.
 # ===========================================================================
 def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev):
     """A minimal spine ``CandidateEconomics`` for the overlay."""
@@ -617,6 +765,30 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     assert new_proof.q_posterior == pytest.approx(0.80)
     assert new_proof.q_lcb_5pct == pytest.approx(0.990)
     assert new_proof.trade_score == pytest.approx(0.050)
+    assert new_proof.q_source == "qkernel_spine"
+    assert new_proof.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(
+        0.052
+    )
+    assert new_proof.qkernel_execution_economics["edge_lcb"] == pytest.approx(0.05)
+    assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
+
+
+def test_overlay_failure_returns_none_instead_of_original_proof():
+    """A qkernel overlay wiring fault must become no-trade, not an unguarded proof."""
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.052, point_ev=0.050
+    )
+    proof = SimpleNamespace(
+        q_source=None,
+        q_posterior=0.80,
+        q_lcb_5pct=0.99,
+        trade_score=0.01,
+    )
+    decision = SimpleNamespace(selected=economics, candidate_decisions=())
+
+    assert bridge._overlay_spine_economics_onto_proof(proof, decision) is None
 
 
 def test_overlay_does_not_create_milan_buy_yes_probability_contradiction():

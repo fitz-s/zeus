@@ -1,9 +1,9 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-21
+# Last reused or audited: 2026-06-18
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive weather
-#                  family sizing), STAGE A; Fitz §1 (structural decision > patch).
+#                  family sizing), Fitz §1 (structural decision > patch).
 
-"""P0-1 STAGE A — emergency mutually-exclusive family entry gate.
+"""Mutually-exclusive weather-family portfolio selection.
 
 A weather market for one ``(city, target_date, temperature_metric)`` is a
 PARTITION: exactly one temperature bin resolves YES. The bins are NOT
@@ -13,35 +13,18 @@ BH cutoff as ``should_trade=True``, and the cycle runtime submitted each as an
 INDEPENDENT scalar-Kelly live order → ~Nx over-allocation on one underlying
 event.
 
-This module is the STAGE A emergency gate (Stage B replaces it with the full
-``ExclusiveOutcomePortfolio`` / ``WeatherFamilyDecision`` object). When the env
-flag ``ZEUS_LIVE_MAX_ONE_ENTRY_PER_WEATHER_FAMILY`` is ON (default "1"), for
-each family with >=2 ``should_trade=True`` bins, exactly ONE bin survives —
-the single best by **executable net EV after fees + spread + depth + family
-cap** — and the rest are flipped to ``should_trade=False`` carrying the
-auditable ``MUTUALLY_EXCLUSIVE_FAMILY_DEDUP`` reason string.
+The live path uses ``optimize_exclusive_outcome_portfolio`` through
+``preselect_single_family_edge_before_kelly`` / ``build_weather_family_decision``.
+That optimizer compares buy-YES and native buy-NO by the same payoff-vector
+objective, so dominated sibling-NO exposure loses to a capital-efficient center
+YES when the payoff is equivalent. Multi-leg portfolio search remains available
+only by explicit operator override; the live default is single-leg until the
+execution layer has a tested stake-vector/partial-fill portfolio state machine.
 
-STAGE A is PURE RUNTIME GATING — no schema change (per the operator spec). The
-dropped-bin audit trail is the reason STRING in ``rejection_reasons`` +
-``rejection_stage`` + ``rejection_reason_detail`` + a structured log line; it
-does NOT set ``rejection_reason_enum``. Rationale: the ``no_trade_events`` DB
-CHECK clause is built dynamically from the ``NoTradeReason`` enum at table
-creation, so adding an enum member changes the schema hash (SCHEMA_VERSION
-bump + re-pin) and would be rejected by the baked-in CHECK on already-created
-SV15 DBs. Persisting the enum is therefore deferred to Stage B (the
-architectural-object PR that already carries a DB migration). The spec wording
-("record NoTradeReason ... so it's auditable, e.g. MUTUALLY_EXCLUSIVE_FAMILY_DEDUP")
-is satisfied by the string-level audit. SEE the SCAFFOLD report — this is the
-flagged brief-premise conflict (brief said "no schema change" AND "add to enum";
-both cannot hold, runtime-gating wins for Stage A).
-
-Selection-metric provenance: Stage A now has two hooks. The primary
-``preselect_single_family_edge_before_kelly`` hook runs in the evaluator before
-scalar Kelly/risk sizing and ranks by ``BinEdge.forward_edge`` so dropped
-siblings cannot mutate projected exposure. The cycle-runtime
-``dedup_mutually_exclusive_families`` hook remains a second-line safety net for
-legacy/mixed callers and still ranks already-sized ``EdgeDecision`` objects by
-``size_usd``. Stage B replaces both with a first-class family payoff optimizer.
+``dedup_mutually_exclusive_families`` remains a second-line runtime safety net
+for legacy/mixed callers and existing-exposure conflicts. It prevents scalar
+independent orders from leaking to the executor when no first-class family
+portfolio intent exists.
 
 Fail-safe: this gate can only REMOVE entries (set should_trade False). It never
 adds, resizes, or re-enables a decision, so it can never increase exposure.
@@ -49,6 +32,7 @@ adds, resizes, or re-enables a decision, so it can never increase exposure.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import combinations
 import logging
@@ -66,39 +50,33 @@ _DEFAULT = "1"  # ON by default (live-money fail-safe).
 BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_ENABLED"
 BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_ENABLED"
 
-# Wave 4 (2026-05-27): Stage B family-portfolio optimizer activation.
-# Two-tier env var split so operator can promote multi-leg sizing through
-# shadow first (observability) before live (live capital). Default 1 on both
-# tiers keeps the Stage A single-leg gate behaviour as the fail-safe.
+# Wave 4 (2026-05-27), live repair 2026-06-19: the full-omega family optimizer
+# is live, but live execution is constrained to single-leg selection by default.
+# Multi-leg portfolios require a separate execution state machine for legging,
+# partial fills, UNKNOWN recovery, and stake-vector optimization; until then an
+# explicit env override is test/research only and blocked by restart preflight.
 ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = "ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS"
-ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW = "ZEUS_SHADOW_FAMILY_PORTFOLIO_MAX_LEGS"
-# Hard cap on a Stage B portfolio's worst-case loss (USD). When set, the
+DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = 1
+# Hard cap on a family portfolio's worst-case loss (USD). When set, the
 # optimizer rejects portfolios with ``max_loss_usd > cap`` (returns None) so
-# the caller falls back to Stage A single-leg. Default None = no cap (relies
+# the caller falls back to the single-leg safety selector. Default None = no cap (relies
 # on per-leg Kelly + portfolio_heat to bound exposure).
 ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD = "ZEUS_FAMILY_PORTFOLIO_MAX_LOSS_USD"
 
 
 def _family_portfolio_max_legs() -> int:
-    """Mode-aware max_legs for the Stage B family portfolio optimizer.
+    """Live max_legs for the Stage B family portfolio optimizer.
 
-    Wave 4 (2026-05-27): operator promotes shadow → live by flipping the
-    matching env var. Defaults to 1 on both tiers (Stage A behaviour). Unknown
-    or invalid values fall back to 1 (fail-safe).
-
-    The live tier now honors the live max-leg env after ``optimize_exclusive_outcome_portfolio``
-    moved from an average-edge proxy to candidate-outcome expected log growth.
+    Unknown or invalid values fall back to the live default.
     """
-    mode = get_mode()
-    if mode == "shadow":
-        try:
-            return max(1, int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_SHADOW, "1")))
-        except (TypeError, ValueError):
-            return 1
     try:
-        return max(1, int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "1")))
+        raw = os.environ.get(
+            ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE,
+            str(DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE),
+        )
+        return max(1, int(raw))
     except (TypeError, ValueError):
-        return 1
+        return DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE
 
 
 def _family_portfolio_max_loss_usd() -> float | None:
@@ -118,17 +96,18 @@ def _family_portfolio_max_loss_usd() -> float | None:
 from src.contracts.no_trade_reason import NoTradeReason
 from src.config import get_mode, settings
 
-# Audit reason string for dropped bins. Stage B promotes this into the
-# NoTradeReason enum while keeping the string stable for older artifacts.
+# Audit reason string for dropped bins.
 MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = "mutually_exclusive_family_dedup"
-# X2 fix (Copilot review of PR #348): audit-trail string for the Wave 4 loss-cap
-# rejection path. NoTradeReason enum bump is deferred until the next DB-migration
-# PR (SV15 CHECK constraint requires schema_version bump + re-pin) — the string
-# constant matches the MUTUALLY_EXCLUSIVE_FAMILY_DEDUP pattern so operators can
-# grep / aggregate Stage B → Stage A fall-backs from logs without waiting for
-# the enum to land. See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave 4.
+# X2 fix (Copilot review of PR #348): audit-trail string for the Wave 4
+# loss-cap rejection path. NoTradeReason enum bump is deferred until the next
+# DB-migration PR (SV15 CHECK constraint requires schema_version bump + re-pin).
+# The string constant matches the MUTUALLY_EXCLUSIVE_FAMILY_DEDUP pattern so
+# operators can grep / aggregate optimizer loss-cap fallbacks from logs.
+# See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md
+# section Wave 4.
 FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED = "family_portfolio_loss_cap_exceeded"
 FAMILY_REJECTION_STAGE = "ANTI_CHURN"
+_SAME_FAMILY_MONITOR_OWNED_REASON_BASE = "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED"
 
 
 @dataclass(frozen=True)
@@ -171,8 +150,16 @@ class FamilyPortfolioLeg:
     bin_label: str
     support_index: int
     cost: float
-    posterior: float
+    outcome_probability: float
     direction: str
+
+
+@dataclass(frozen=True)
+class FamilyOutcome:
+    """One settlement outcome in the complete family partition."""
+
+    support_index: int
+    probability: float
 
 
 @dataclass(frozen=True)
@@ -197,7 +184,10 @@ class ExclusiveOutcomePortfolio:
     posterior_vector: tuple[float, ...] = ()
     cost_vector: tuple[float, ...] = ()
     leg_weights: tuple[float, ...] = ()
+    outcome_support_indices: tuple[int, ...] = ()
     expected_log_growth: float = 0.0
+    capital_cost_usd: float = 0.0
+    capital_efficiency: float = 0.0
     max_loss_usd: float = 0.0
     fallback_candidate_legs: tuple[Any, ...] = ()
 
@@ -214,7 +204,6 @@ class WeatherFamilyDecision:
 
     portfolio: ExclusiveOutcomePortfolio
     dropped: tuple[FamilyPreselectionDrop, ...]
-    family_portfolio_intent: bool = True
 
 
 _BLOCKING_EXPOSURE_PHASES = frozenset(
@@ -865,7 +854,7 @@ def _has_conflicting_existing_exposure(
 
 
 def family_gate_enabled() -> bool:
-    """True when the STAGE A one-entry-per-family gate is ON.
+    """True when the scalar family safety gate is ON.
 
     Default ON ("1"). Disabled only by an explicit ``"0"`` / ``"false"`` /
     ``"no"`` / ``"off"`` (case-insensitive). Any other value (including the
@@ -934,10 +923,31 @@ def _edge_cost(edge: Any) -> float:
 
 def _edge_posterior(edge: Any) -> float:
     try:
-        posterior = float(getattr(edge, "p_posterior", 0.0) or getattr(edge, "p_model", 0.0) or 0.0)
+        q_lcb = getattr(edge, "q_lcb_5pct", None)
+        posterior = float(
+            q_lcb
+            if q_lcb is not None
+            else getattr(edge, "p_posterior", 0.0) or getattr(edge, "p_model", 0.0) or 0.0
+        )
     except (TypeError, ValueError):
         posterior = 0.0
     return max(0.0, min(1.0, posterior))
+
+
+def _edge_outcome_probability(edge: Any) -> float:
+    """Return settlement probability for this leg's own support outcome.
+
+    ``BinEdge.p_posterior`` is held-side probability. For ``buy_yes`` that is
+    already P(this bin settles YES); for ``buy_no`` it is P(this bin does NOT
+    settle YES). The family payoff matrix is indexed by settlement outcomes, so
+    NO legs must be inverted before building the outcome probability vector.
+    """
+
+    held_side_probability = _edge_posterior(edge)
+    direction = str(getattr(edge, "direction", "") or "").lower()
+    if direction == "buy_no":
+        return max(0.0, min(1.0, 1.0 - held_side_probability))
+    return held_side_probability
 
 
 def _edge_bin_label(edge: Any) -> str:
@@ -962,62 +972,127 @@ def _portfolio_payoff_for_leg(
     outcome_support_index: int,
     leg: FamilyPortfolioLeg,
 ) -> float:
-    """Return profit per dollar staked for one leg in one family outcome."""
+    """Return dollar profit for one share of one leg in one family outcome."""
 
     cost = leg.cost
     if cost <= 0.0 or cost >= 1.0:
-        return -1.0
+        return -cost
     direction = leg.direction.lower()
     leg_wins = outcome_support_index == leg.support_index
     if direction == "buy_yes":
-        return ((1.0 - cost) / cost) if leg_wins else -1.0
+        return (1.0 - cost) if leg_wins else -cost
     if direction == "buy_no":
-        return -1.0 if leg_wins else ((1.0 - cost) / cost)
+        return -cost if leg_wins else (1.0 - cost)
     return _edge_family_selection_score(leg.edge)
 
 
-def _normalize_posterior_vector(legs: list[FamilyPortfolioLeg]) -> tuple[float, ...]:
-    raw = [max(0.0, leg.posterior) for leg in legs]
+def _normalize_probability_values(values: Sequence[float]) -> tuple[float, ...]:
+    raw = [max(0.0, float(value)) for value in values]
     total = sum(raw)
     if total <= 0.0:
-        return tuple(1.0 / len(legs) for _ in legs) if legs else ()
+        return tuple(1.0 / len(raw) for _ in raw) if raw else ()
     return tuple(value / total for value in raw)
+
+
+def _outcome_support_from_probabilities(
+    outcome_probabilities: Mapping[int, float] | Sequence[float] | None,
+    legs: list[FamilyPortfolioLeg],
+) -> tuple[FamilyOutcome, ...]:
+    """Return the complete settlement support used by the family optimizer.
+
+    Candidate legs are executable instruments. They are not the outcome space. Live callers
+    pass the full calibrated family probability vector so non-executable / non-candidate bins
+    keep their loss states in the payoff matrix. Legacy unit callers that omit the vector fall
+    back to the old leg-derived support, which is acceptable only outside the live evaluator
+    seam.
+    """
+
+    support_probability: dict[int, float] = {}
+    explicit = outcome_probabilities is not None
+    if outcome_probabilities is not None:
+        if isinstance(outcome_probabilities, Mapping):
+            iterator = outcome_probabilities.items()
+        else:
+            iterator = enumerate(outcome_probabilities)
+        for raw_index, raw_probability in iterator:
+            try:
+                support_index = int(raw_index)
+                probability = float(raw_probability)
+            except (TypeError, ValueError):
+                continue
+            if support_index < 0 or not math.isfinite(probability):
+                continue
+            support_probability[support_index] = max(0.0, probability)
+
+    if explicit:
+        leg_support = {leg.support_index for leg in legs}
+        if not leg_support.issubset(set(support_probability)):
+            return ()
+        total = sum(support_probability.values())
+        if not math.isfinite(total) or abs(total - 1.0) > 1e-6:
+            return ()
+
+    if not support_probability:
+        for leg in legs:
+            support_probability[leg.support_index] = max(
+                support_probability.get(leg.support_index, 0.0),
+                leg.outcome_probability,
+            )
+    else:
+        for leg in legs:
+            support_probability.setdefault(leg.support_index, 0.0)
+
+    if not support_probability:
+        return ()
+
+    ordered_indices = tuple(sorted(support_probability))
+    normalized = _normalize_probability_values(
+        [support_probability[index] for index in ordered_indices]
+    )
+    return tuple(
+        FamilyOutcome(support_index=index, probability=probability)
+        for index, probability in zip(ordered_indices, normalized)
+    )
 
 
 def _score_portfolio_combo(
     legs: list[FamilyPortfolioLeg],
+    outcomes: tuple[FamilyOutcome, ...],
     selected_indexes: tuple[int, ...],
     *,
     log_growth_fraction: float = 0.01,
-) -> tuple[float, float, float, tuple[tuple[float, ...], ...], tuple[float, ...], tuple[float, ...]]:
-    """Score a candidate portfolio by expected log growth over the family vector."""
+) -> tuple[float, float, float, float, float, tuple[tuple[float, ...], ...], tuple[float, ...], tuple[float, ...]]:
+    """Score a candidate portfolio by capital-aware family payoff."""
 
     selected = [legs[i] for i in selected_indexes]
-    posterior_vector = _normalize_posterior_vector(legs)
+    posterior_vector = tuple(outcome.probability for outcome in outcomes)
     if not selected or not posterior_vector:
-        return (-math.inf, 0.0, 0.0, (), (), ())
+        return (-math.inf, 0.0, 0.0, 0.0, 0.0, (), (), ())
 
     leg_weights = tuple(1.0 / len(selected) for _ in selected)
+    capital_cost = sum(max(0.0, leg.cost) for leg in selected)
     payoff_rows: list[tuple[float, ...]] = []
     outcome_returns: list[float] = []
-    for outcome_leg in legs:
+    for outcome in outcomes:
         row = tuple(
             _portfolio_payoff_for_leg(
-                outcome_support_index=outcome_leg.support_index,
+                outcome_support_index=outcome.support_index,
                 leg=selected_leg,
             )
             for selected_leg in selected
         )
         payoff_rows.append(row)
-        outcome_returns.append(sum(weight * payoff for weight, payoff in zip(leg_weights, row)))
+        outcome_returns.append(sum(row))
 
     expected_net_profit = sum(
         probability * outcome_return
         for probability, outcome_return in zip(posterior_vector, outcome_returns)
     )
+    capital_efficiency = expected_net_profit / capital_cost if capital_cost > 0.0 else -math.inf
     expected_log_growth = 0.0
     for probability, outcome_return in zip(posterior_vector, outcome_returns):
-        growth = 1.0 + log_growth_fraction * outcome_return
+        normalized_return = outcome_return / capital_cost if capital_cost > 0.0 else outcome_return
+        growth = 1.0 + log_growth_fraction * normalized_return
         if growth <= 0.0:
             expected_log_growth = -math.inf
             break
@@ -1025,10 +1100,36 @@ def _score_portfolio_combo(
     return (
         expected_log_growth,
         expected_net_profit,
+        capital_cost,
+        capital_efficiency,
         min(outcome_returns),
         tuple(payoff_rows),
         posterior_vector,
         leg_weights,
+    )
+
+
+def _portfolio_dominated(
+    candidate: tuple[float, tuple[float, ...]],
+    challenger: tuple[float, tuple[float, ...]],
+) -> bool:
+    """Return True when challenger is no-more-costly and pays at least as well in every outcome."""
+
+    candidate_capital, candidate_returns = candidate
+    challenger_capital, challenger_returns = challenger
+    if len(candidate_returns) != len(challenger_returns):
+        return False
+    if challenger_capital > candidate_capital + 1e-9:
+        return False
+    payoff_not_worse = all(
+        challenger_return >= candidate_return - 1e-9
+        for challenger_return, candidate_return in zip(challenger_returns, candidate_returns)
+    )
+    if not payoff_not_worse:
+        return False
+    return challenger_capital < candidate_capital - 1e-9 or any(
+        challenger_return > candidate_return + 1e-9
+        for challenger_return, candidate_return in zip(challenger_returns, candidate_returns)
     )
 
 
@@ -1039,12 +1140,24 @@ def optimize_exclusive_outcome_portfolio(
     target_date: str,
     temperature_metric: str,
     market_family_id: str = "",
+    outcome_probabilities: Mapping[int, float] | Sequence[float] | None = None,
     min_legs: int = 1,
     max_legs: int = 1,
+    allow_same_family_monitor_owned: bool = False,
 ) -> ExclusiveOutcomePortfolio | None:
     """Build a payoff-vector family portfolio before scalar order sizing."""
 
     if not edges:
+        return None
+    executable_edges = [
+        edge
+        for edge in edges
+        if _edge_family_candidate_rejection_reason(
+            edge,
+            allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+        ) is None
+    ]
+    if not executable_edges:
         return None
     legs = sorted(
         [
@@ -1053,18 +1166,23 @@ def optimize_exclusive_outcome_portfolio(
                 bin_label=_edge_bin_label(edge),
                 support_index=_edge_support_index(edge, idx),
                 cost=_edge_cost(edge),
-                posterior=_edge_posterior(edge),
+                outcome_probability=_edge_outcome_probability(edge),
                 direction=str(getattr(edge, "direction", "") or ""),
             )
-            for idx, edge in enumerate(edges)
+            for idx, edge in enumerate(executable_edges)
         ],
         key=lambda leg: (leg.support_index, leg.bin_label),
     )
+    outcomes = _outcome_support_from_probabilities(outcome_probabilities, legs)
+    if not outcomes:
+        return None
     max_legs = max(1, min(int(max_legs or 1), len(legs)))
     min_legs = max(1, min(int(min_legs or 1), max_legs))
-    best_key: tuple[float, float, float, float, tuple[int, ...]] | None = None
+    best_key: tuple[float, float, float, float, float, float, tuple[int, ...]] | None = None
     best_payload: tuple[
         tuple[int, ...],
+        float,
+        float,
         float,
         float,
         float,
@@ -1073,37 +1191,118 @@ def optimize_exclusive_outcome_portfolio(
         tuple[float, ...],
         tuple[float, ...],
     ] | None = None
+    payloads: list[
+        tuple[
+            tuple[int, ...],
+            float,
+            float,
+            float,
+            float,
+            float,
+            float,
+            tuple[float, ...],
+            tuple[tuple[float, ...], ...],
+            tuple[float, ...],
+            tuple[float, ...],
+        ]
+    ] = []
     for width in range(min_legs, max_legs + 1):
         for selected_indexes in combinations(range(len(legs)), width):
-            expected_log_growth, expected_net_profit, max_loss, payoff_matrix, posterior_vector, weights = (
-                _score_portfolio_combo(legs, selected_indexes)
+            (
+                expected_log_growth,
+                expected_net_profit,
+                capital_cost,
+                capital_efficiency,
+                max_loss,
+                payoff_matrix,
+                posterior_vector,
+                weights,
+            ) = (
+                _score_portfolio_combo(legs, outcomes, selected_indexes)
             )
+            if not payoff_matrix:
+                continue
             edge_selection_utility = sum(
                 _edge_family_selection_score(legs[idx].edge) for idx in selected_indexes
             ) / float(width)
-            key = (
-                expected_log_growth,
-                expected_net_profit,
-                edge_selection_utility,
-                -float(width),
-                tuple(-_edge_support_index(legs[idx].edge, idx) for idx in selected_indexes),
-            )
-            if best_key is None or key > best_key:
-                best_key = key
-                best_payload = (
+            outcome_returns = tuple(sum(row) for row in payoff_matrix)
+            payloads.append(
+                (
                     selected_indexes,
                     edge_selection_utility,
                     expected_log_growth,
                     expected_net_profit,
+                    capital_cost,
+                    capital_efficiency,
                     max_loss,
+                    outcome_returns,
                     payoff_matrix,
                     posterior_vector,
                     weights,
                 )
+            )
+    for payload in payloads:
+        (
+            selected_indexes,
+            edge_selection_utility,
+            expected_log_growth,
+            expected_net_profit,
+            capital_cost,
+            capital_efficiency,
+            max_loss,
+            outcome_returns,
+            payoff_matrix,
+            posterior_vector,
+            weights,
+        ) = payload
+        if any(
+            other is not payload
+            and _portfolio_dominated(
+                (capital_cost, outcome_returns),
+                (other[4], other[7]),
+            )
+            for other in payloads
+        ):
+            continue
+        width = len(selected_indexes)
+        key = (
+            expected_log_growth,
+            expected_net_profit,
+            capital_efficiency,
+            -capital_cost,
+            edge_selection_utility,
+            -float(width),
+            tuple(-_edge_support_index(legs[idx].edge, idx) for idx in selected_indexes),
+        )
+        if best_key is None or key > best_key:
+            best_key = key
+            best_payload = (
+                selected_indexes,
+                edge_selection_utility,
+                expected_log_growth,
+                expected_net_profit,
+                capital_cost,
+                capital_efficiency,
+                max_loss,
+                payoff_matrix,
+                posterior_vector,
+                weights,
+            )
 
     if best_payload is None:
         return None
-    selected_indexes, edge_selection_utility, expected_log_growth, expected_net_profit, max_loss, payoff_matrix, posterior_vector, weights = best_payload
+    (
+        selected_indexes,
+        edge_selection_utility,
+        expected_log_growth,
+        expected_net_profit,
+        capital_cost,
+        capital_efficiency,
+        max_loss,
+        payoff_matrix,
+        posterior_vector,
+        weights,
+    ) = best_payload
     selected_legs = tuple(legs[idx].edge for idx in selected_indexes)
     selected_leg = selected_legs[0]
     selected_cost_vector = tuple(legs[idx].cost for idx in selected_indexes)
@@ -1111,7 +1310,7 @@ def optimize_exclusive_outcome_portfolio(
         family_key=_family_key(city, target_date, temperature_metric, market_family_id),
         selected_leg=selected_leg,
         selected_legs=selected_legs,
-        candidate_legs=tuple(edges),
+        candidate_legs=tuple(executable_edges),
         candidate_leg_descriptors=tuple(legs),
         selection_score=edge_selection_utility,
         expected_net_profit_usd=expected_net_profit,
@@ -1121,7 +1320,10 @@ def optimize_exclusive_outcome_portfolio(
         posterior_vector=posterior_vector,
         cost_vector=selected_cost_vector,
         leg_weights=weights,
+        outcome_support_indices=tuple(outcome.support_index for outcome in outcomes),
         expected_log_growth=expected_log_growth,
+        capital_cost_usd=capital_cost,
+        capital_efficiency=capital_efficiency,
         max_loss_usd=abs(min(0.0, max_loss)),
     )
 
@@ -1175,6 +1377,9 @@ def buy_no_native_quote_evidence_submit_enabled() -> bool:
 def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
     """Return structural live-execution reason before a leg consumes fallback rank."""
 
+    structural = _edge_family_candidate_rejection_reason(edge)
+    if structural:
+        return structural
     if get_mode() != "live":
         return None
     if str(getattr(edge, "direction", "") or "") != "buy_no":
@@ -1185,12 +1390,35 @@ def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
         return f"BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG_INVALID:{exc}"
 
 
+def _same_family_monitor_owned_reason(reason: object) -> bool:
+    text = str(reason or "").strip()
+    return text.startswith(_SAME_FAMILY_MONITOR_OWNED_REASON_BASE)
+
+
+def _edge_family_candidate_rejection_reason(
+    edge: Any,
+    *,
+    allow_same_family_monitor_owned: bool = False,
+) -> str | None:
+    """Return the upstream candidate blocker the family optimizer must honor."""
+
+    missing_reason = str(getattr(edge, "missing_reason", "") or "").strip()
+    if missing_reason:
+        if allow_same_family_monitor_owned and _same_family_monitor_owned_reason(missing_reason):
+            return None
+        return missing_reason
+    if getattr(edge, "admitted", None) is False:
+        return "FAMILY_CANDIDATE_NOT_ADMITTED"
+    return None
+
+
 def preselect_single_family_edge_before_kelly(
     edges: list[Any],
     *,
     city: str,
     target_date: str,
     temperature_metric: str,
+    outcome_probabilities: Mapping[int, float] | Sequence[float] | None = None,
     enabled: bool | None = None,
 ) -> tuple[list[Any], list[FamilyPreselectionDrop]]:
     """Collapse one mutually-exclusive weather family before scalar Kelly.
@@ -1205,48 +1433,48 @@ def preselect_single_family_edge_before_kelly(
     if not enabled or len(edges) < 2:
         return edges, []
 
-    # Wave 4 (2026-05-27): when Stage B is activated via env (max_legs > 1),
-    # honour the multi-leg optimum here too so the pre-Kelly preselection
-    # path stays consistent with build_weather_family_decision. Stage A
-    # single-leg fallback is preserved when max_legs == 1 (default).
+    # The family portfolio optimizer is the live selector, including when max_legs is explicitly set
+    # to 1 for emergency single-leg rollback. This keeps pre-Kelly selection
+    # and build_weather_family_decision on the same payoff-vector objective.
     max_legs = _family_portfolio_max_legs()
-    if max_legs > 1:
-        portfolio = optimize_exclusive_outcome_portfolio(
-            edges,
-            city=city,
-            target_date=target_date,
-            temperature_metric=temperature_metric,
-            max_legs=max_legs,
-        )
-        loss_cap = _family_portfolio_max_loss_usd()
-        if portfolio is not None and (
-            loss_cap is None or float(portfolio.max_loss_usd) <= loss_cap
-        ):
-            selected_ids = {id(edge) for edge in portfolio.selected_legs}
-            kept: list[Any] = [edge for edge in edges if id(edge) in selected_ids]
-            kept_labels = ",".join(_edge_bin_label(edge) for edge in kept)
-            kept_score = float(portfolio.selection_score)
-            drops_b: list[FamilyPreselectionDrop] = []
-            for edge in edges:
-                if id(edge) in selected_ids:
-                    continue
-                drops_b.append(
-                    FamilyPreselectionDrop(
-                        edge=edge,
-                        dropped_bin=_edge_bin_label(edge),
-                        kept_bin=kept_labels,
-                        family_selection_score=_edge_family_selection_score(edge),
-                        kept_family_selection_score=kept_score,
-                    )
+    portfolio = optimize_exclusive_outcome_portfolio(
+        edges,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+        outcome_probabilities=outcome_probabilities,
+        max_legs=max_legs,
+    )
+    loss_cap = _family_portfolio_max_loss_usd()
+    if portfolio is not None and (
+        loss_cap is None or float(portfolio.max_loss_usd) <= loss_cap
+    ):
+        selected_ids = {id(edge) for edge in portfolio.selected_legs}
+        kept: list[Any] = [edge for edge in edges if id(edge) in selected_ids]
+        kept_labels = ",".join(_edge_bin_label(edge) for edge in kept)
+        kept_score = float(portfolio.selection_score)
+        drops_b: list[FamilyPreselectionDrop] = []
+        for edge in edges:
+            if id(edge) in selected_ids:
+                continue
+            drops_b.append(
+                FamilyPreselectionDrop(
+                    edge=edge,
+                    dropped_bin=_edge_bin_label(edge),
+                    kept_bin=kept_labels,
+                    family_selection_score=_edge_family_selection_score(edge),
+                    kept_family_selection_score=kept_score,
                 )
-                logger.info(
-                    "[FAMILY_PORTFOLIO_STAGE_B_PRE_KELLY] family=%s|%s|%s "
-                    "max_legs=%d kept=%s dropped_bin=%r",
-                    city, target_date, temperature_metric, max_legs,
-                    kept_labels, _edge_bin_label(edge),
-                )
-            return kept, drops_b
-        # Optimizer returned None OR loss cap exceeded → fall through to Stage A
+            )
+            logger.info(
+                "[FAMILY_PORTFOLIO_STAGE_B_PRE_KELLY] family=%s|%s|%s "
+                "max_legs=%d kept=%s dropped_bin=%r",
+                city, target_date, temperature_metric, max_legs,
+                kept_labels, _edge_bin_label(edge),
+            )
+        return kept, drops_b
+    # Optimizer returned None OR loss cap exceeded -> fall through to the
+    # deterministic single-leg safety selector.
 
     best = max(edges, key=_edge_preselection_key)
     best_bin = ""
@@ -1294,9 +1522,10 @@ def build_weather_family_decision(
     target_date: str,
     temperature_metric: str,
     market_family_id: str = "",
+    outcome_probabilities: Mapping[int, float] | Sequence[float] | None = None,
     enabled: bool | None = None,
 ) -> WeatherFamilyDecision | None:
-    """Build the single-leg family decision consumed before scalar Kelly."""
+    """Build the family portfolio decision consumed before scalar Kelly."""
 
     gate_enabled = family_gate_enabled() if enabled is None else enabled
     if not gate_enabled:
@@ -1315,9 +1544,7 @@ def build_weather_family_decision(
         candidate_edges = executable_candidate_edges
         excluded_blocked_edges = blocked_edges
 
-    # Wave 4 (2026-05-27): mode-aware max_legs (shadow tier separate from live)
-    # so operator can observe Stage B multi-leg behaviour in shadow before
-    # promoting to live capital.
+    # Wave 4 (2026-05-27): max_legs controls the live family portfolio optimizer.
     max_legs = _family_portfolio_max_legs()
     try:
         fallback_candidate_count = int(
@@ -1331,28 +1558,39 @@ def build_weather_family_decision(
         target_date=target_date,
         temperature_metric=temperature_metric,
         market_family_id=market_family_id,
+        outcome_probabilities=outcome_probabilities,
         max_legs=max_legs,
     )
     if portfolio is None:
         return None
     # Wave 4: hard-cap on worst-case family loss. When the cap is set and the
-    # optimizer's portfolio exceeds it, return None so the caller falls back
-    # to the Stage A single-leg path. Fail-open (no cap) when env unset.
+    # optimizer's portfolio exceeds it, return None so the caller can use the
+    # deterministic single-leg safety selector. Fail-open (no cap) when env unset.
     loss_cap = _family_portfolio_max_loss_usd()
     if loss_cap is not None and float(portfolio.max_loss_usd) > loss_cap:
         logger.warning(
             "[%s] city=%s target=%s metric=%s "
-            "max_loss_usd=%.4f > cap=%.4f — falling back to Stage A",
+            "max_loss_usd=%.4f > cap=%.4f - falling back to single-leg safety selector",
             FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED.upper(),
             city, target_date, temperature_metric,
             float(portfolio.max_loss_usd), loss_cap,
         )
         return None
     ranked_edges = sorted(candidate_edges, key=_edge_preselection_key, reverse=True)
-    primary = portfolio.selected_leg
-    fallback_candidates = [primary]
-    fallback_candidates.extend(edge for edge in ranked_edges if edge is not primary)
-    fallback_candidates = fallback_candidates[: max(1, min(fallback_candidate_count, len(fallback_candidates)))]
+    selected_legs = list(portfolio.selected_legs)
+    if len(selected_legs) > 1:
+        # A multi-leg family portfolio is a coherent payoff vector. Ranked
+        # scalar siblings are not interchangeable fallback legs for it; replacing
+        # one selected leg requires re-optimizing the portfolio, not appending the
+        # old scalar fallback queue.
+        fallback_candidates = selected_legs
+    else:
+        # A scalar entry has no first-class ordered-alternative intent today.
+        # Emitting ranked sibling fallbacks as separate should_trade decisions lets
+        # the submit loop race a second same-family order after an unknown first
+        # attempt. Keep only the optimized leg until ordered alternatives are a
+        # typed execution-intent primitive.
+        fallback_candidates = [portfolio.selected_leg]
     portfolio = ExclusiveOutcomePortfolio(
         family_key=portfolio.family_key,
         selected_leg=portfolio.selected_leg,
@@ -1371,7 +1609,10 @@ def build_weather_family_decision(
         posterior_vector=portfolio.posterior_vector,
         cost_vector=portfolio.cost_vector,
         leg_weights=portfolio.leg_weights,
+        outcome_support_indices=portfolio.outcome_support_indices,
         expected_log_growth=portfolio.expected_log_growth,
+        capital_cost_usd=portfolio.capital_cost_usd,
+        capital_efficiency=portfolio.capital_efficiency,
         max_loss_usd=portfolio.max_loss_usd,
     )
     selected_set = set(id(edge) for edge in portfolio.fallback_candidate_legs)
@@ -1404,7 +1645,7 @@ def build_weather_family_decision(
 
 
 def _pick_best_index(decisions: list["EdgeDecision"], idxs: list[int]) -> int:
-    """Return the index (into ``decisions``) of the single best family member.
+    """Return the index of the best emergency single-leg family member.
 
     Best = highest ``(size_usd, forward_edge)``; on a full economic tie the
     lexicographically smallest ``decision_id`` wins (stable, deterministic).
@@ -1434,14 +1675,13 @@ def dedup_mutually_exclusive_families(
     market_family_id: str = "",
     enabled: bool | None = None,
     existing_exposures: Iterable[Any] | None = None,
-    family_portfolio_intent: bool = False,
+    family_portfolio_allowed_exposure_ids: Iterable[str] | None = None,
 ) -> list["EdgeDecision"]:
-    """STAGE A gate: keep only the single best entry per exclusive family.
+    """Second-line safety gate for scalar entries in an exclusive family.
 
     Mutates the passed ``EdgeDecision`` objects in place (sets
     ``should_trade=False`` + ``rejection_stage`` + ``rejection_reasons`` string
-    + ``rejection_reason_detail`` on dropped bins; the ``rejection_reason_enum``
-    is left untouched — STAGE A is pure runtime gating, no schema-derived CHECK)
+    + ``rejection_reason_detail`` on dropped bins)
     and returns the same list for caller convenience.
 
     Args:
@@ -1460,10 +1700,11 @@ def dedup_mutually_exclusive_families(
         existing_exposures: optional current-cycle read model of already
             open/pending/active exposure keyed by ``WeatherFamilyKey``. When a
             different bin already has exposure, new independent entries for the
-            same family are blocked unless ``family_portfolio_intent`` is true.
-        family_portfolio_intent: true only when a first-class family portfolio
-            optimizer emitted the executable portfolio intent. FDR-selected
-            hypotheses alone are not a portfolio intent.
+            same family are blocked unless a typed rebalance intent explicitly
+            names the existing exposure id.
+        family_portfolio_allowed_exposure_ids: position/command ids that a
+            typed monitor/rebalance intent is explicitly allowed to touch. New
+            entry intents pass none, so existing same-family exposure blocks.
 
     Returns:
         The same ``decisions`` list (mutated in place when the gate fires).
@@ -1474,11 +1715,16 @@ def dedup_mutually_exclusive_families(
         return decisions
 
     key = _family_key(city, target_date, temperature_metric, market_family_id)
-    blocking_exposures = (
-        []
-        if family_portfolio_intent
-        else _blocking_exposures_for_key(existing_exposures, key)
-    )
+    allowed_exposure_ids = {
+        str(value).strip()
+        for value in (family_portfolio_allowed_exposure_ids or ())
+        if str(value).strip()
+    }
+    blocking_exposures = [
+        exposure
+        for exposure in _blocking_exposures_for_key(existing_exposures, key)
+        if str(_field(exposure, "position_id", "") or "").strip() not in allowed_exposure_ids
+    ]
     if blocking_exposures:
         for d in decisions:
             if not getattr(d, "should_trade", False):
@@ -1497,7 +1743,7 @@ def dedup_mutually_exclusive_families(
                 f"dropped_bin={_decision_bin_label(d)!r} "
                 f"existing_exposure_bin={existing_label!r} "
                 f"existing_position_id={existing_position!r} "
-                f"({ENV_FLAG}=1; existing family exposure; no family portfolio intent)"
+                f"({ENV_FLAG}=1; existing family exposure; no scoped rebalance intent)"
             )
             logger.info(
                 "[MUTUALLY_EXCLUSIVE_FAMILY_DEDUP] family=%s|%s|%s dropped_bin=%r "
@@ -1526,18 +1772,36 @@ def dedup_mutually_exclusive_families(
             # Single-bin (or single-entry) family: untouched — byte-identical
             # to the legacy per-edge path. No regression.
             continue
-        if all(
-            int(getattr(decisions[i], "family_fallback_candidate_count", 0) or 0) > 1
+        portfolio_selected = [
+            i
             for i in idxs
-        ):
-            for i in idxs:
+            if int(getattr(decisions[i], "family_fallback_candidate_count", 0) or 0) > 1
+            and str(getattr(decisions[i], "family_portfolio_leg_role", "") or "")
+            == "portfolio_selected"
+        ]
+        if portfolio_selected:
+            selected_set = set(portfolio_selected)
+            for i in portfolio_selected:
                 validations = getattr(decisions[i], "applied_validations", None)
                 if isinstance(validations, list) and "family_ranked_executable_fallback" not in validations:
                     validations.append("family_ranked_executable_fallback")
+            for i in idxs:
+                if i in selected_set:
+                    continue
+                d = decisions[i]
+                d.should_trade = False
+                d.rejection_stage = FAMILY_REJECTION_STAGE
+                d.rejection_reasons = [MUTUALLY_EXCLUSIVE_FAMILY_DEDUP]
+                d.rejection_reason_enum = NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
+                d.rejection_reason_detail = (
+                    f"family={city}|{target_date}|{temperature_metric} "
+                    f"dropped_bin={_decision_bin_label(d)!r} "
+                    "(portfolio selected legs only; scalar fallback alternative not live)"
+                )
             logger.info(
                 "[MUTUALLY_EXCLUSIVE_FAMILY_FALLBACK_CANDIDATES] family=%s candidate_count=%d",
                 "|".join(key),
-                len(idxs),
+                len(portfolio_selected),
             )
             continue
         best_i = _pick_best_index(decisions, idxs)
@@ -1564,7 +1828,7 @@ def dedup_mutually_exclusive_families(
                 f"dropped_bin={dropped_label!r} kept_bin={best_label!r} "
                 f"kept_size_usd={kept_size:.2f} "
                 f"kept_expected_net_profit_usd={_decision_family_selection_score(best):.6f} "
-                f"({ENV_FLAG}=1; Stage-B single-leg family decision)"
+                f"({ENV_FLAG}=1; scalar family safety gate; no portfolio intent)"
             )
             logger.info(
                 "[MUTUALLY_EXCLUSIVE_FAMILY_DEDUP] family=%s|%s|%s dropped_bin=%r "

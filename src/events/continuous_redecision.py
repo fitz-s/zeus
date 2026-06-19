@@ -19,10 +19,10 @@
 # NO new table: the belief cache reuses the already-registered probability_trace_fact (synthesized
 # 'edli_belief:' decision_id; trace_status='complete') plus an additive condition_ids_json column
 # (idempotent ALTER in db.py; column-subset-safe). The act-once-per-edge dedup is IN-MEMORY
-# (reactor-held acted_state dict), not a table. SHADOW-safe: never submits an order — only screens
-# cached belief × fresh price and returns re-decisions for the reactor to route through the EXISTING
-# pending cert path (so _refresh_pending_family_snapshots fires just-in-time → fresh price; critic
-# SEV-1 stale-price hole closed structurally).
+# (reactor-held acted_state dict), not a table. Submit-safe: never submits an order directly; it
+# screens cached belief × fresh price and returns re-decisions for the reactor to route through the
+# existing pending cert path (so _refresh_pending_family_snapshots fires just-in-time → fresh price;
+# critic SEV-1 stale-price hole closed structurally).
 """Continuous re-decision: cached belief × fresh price → cheap edge screen → enqueue + evidence exit."""
 from __future__ import annotations
 
@@ -32,6 +32,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from src.contracts.probability_arithmetic import one_minus
+from src.data.replacement_forecast_readiness import (
+    SOURCE_ID as LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+)
 from src.events.opportunity_event import OpportunityEvent
 
 
@@ -182,7 +185,7 @@ class RecentNoValueEventRefutation:
 @dataclass(frozen=True)
 class RepriceDecision:
     """§4.5 (Dimension 3) cancel/re-place decision for a RESTING order. ``action`` is one of
-    {CANCEL_REPLACE, CANCEL_EXIT}; ``reason`` is the evidence class. SHADOW-safe — the
+    {CANCEL_REPLACE, CANCEL_EXIT}; ``reason`` is the evidence class. Submit-safe: the
     reactor routes this back through the existing cert path; this module never submits."""
     family_id: str
     bin_label: str
@@ -592,7 +595,41 @@ def latest_cached_belief(conn: sqlite3.Connection, *, family_id: str) -> CachedB
     return _row_to_belief(latest)
 
 
-def _all_latest_beliefs(conn: sqlite3.Connection) -> list[CachedBelief]:
+def _decision_time_utc(decision_time: str | datetime | None) -> datetime | None:
+    if decision_time is None:
+        return None
+    try:
+        dt = decision_time if isinstance(decision_time, datetime) else _parse(str(decision_time))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _belief_venue_closed(belief: CachedBelief, *, decision_time_utc: datetime | None) -> bool:
+    if decision_time_utc is None:
+        return False
+    metric = str(belief.metric or _metric_from_family_id(belief.family_id) or "").strip()
+    if metric not in {"high", "low"}:
+        return False
+    try:
+        from src.strategy.market_phase import family_venue_closed
+
+        return family_venue_closed(
+            city=str(belief.city or "").strip(),
+            target_date=str(belief.target_date or "").strip(),
+            now_utc=decision_time_utc,
+        )
+    except Exception:
+        return False
+
+
+def _all_latest_beliefs(
+    conn: sqlite3.Connection,
+    *,
+    decision_time: str | datetime | None = None,
+) -> list[CachedBelief]:
     cols = "decision_id, recorded_at, city, target_date, bin_labels_json, p_posterior_json"
     if _has_condition_ids_column(conn):
         cols += ", condition_ids_json"
@@ -608,11 +645,14 @@ def _all_latest_beliefs(conn: sqlite3.Connection) -> list[CachedBelief]:
         (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX)),
     ).fetchall()
     rows = sorted(rows, key=lambda row: str(row["recorded_at"] or ""), reverse=True)
+    decision_time_utc = _decision_time_utc(decision_time)
     seen: set[RedecisionScreenKey] = set()
     out: list[CachedBelief] = []
     for row in rows:
         belief = _row_to_belief(row)
         if belief is None:
+            continue
+        if _belief_venue_closed(belief, decision_time_utc=decision_time_utc):
             continue
         dedupe_key: RedecisionScreenKey = _stable_family_screen_key(belief) or (
             belief.family_id,
@@ -645,7 +685,10 @@ def enqueue_live_redecisions(
     """
     dt = _parse(decision_time)
     out: list[EnqueuedRedecision] = []
-    for belief in beliefs if beliefs is not None else _all_latest_beliefs(conn):
+    for belief in beliefs if beliefs is not None else _all_latest_beliefs(
+        conn,
+        decision_time=decision_time,
+    ):
         family_key = _stable_family_screen_key(belief)
         for idx, label in enumerate(belief.bin_labels):
             if idx >= len(belief.p_posterior_vec):
@@ -1275,6 +1318,16 @@ def _freshest_executable_price_rows_by_condition(
         if not condition_id or condition_id in seen:
             continue
         seen.add(condition_id)
+        predicates = ["condition_id = ?"]
+        if "enable_orderbook" in cols:
+            predicates.append("COALESCE(enable_orderbook, 1) = 1")
+        if "active" in cols:
+            predicates.append("COALESCE(active, 1) = 1")
+        if "closed" in cols:
+            predicates.append("COALESCE(closed, 0) = 0")
+        if "accepting_orders" in cols:
+            predicates.append("COALESCE(accepting_orders, 1) = 1")
+        where_clause = " AND ".join(predicates)
         condition_rows = trade_conn.execute(
             """
             SELECT condition_id,
@@ -1286,10 +1339,10 @@ def _freshest_executable_price_rows_by_condition(
                    no_token_id,
                    {outcome_select}
               FROM executable_market_snapshots
-             WHERE condition_id = ?
+             WHERE {where_clause}
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 12
-            """.format(outcome_select=outcome_select),
+            """.format(outcome_select=outcome_select, where_clause=where_clause),
             (condition_id,),
         ).fetchall()
         rows.extend(condition_rows)
@@ -1383,7 +1436,7 @@ def screen_entry_redecisions(
 
     Pure read on both DBs. NO HTTP, NO writes. The reactor's scheduler job owns ``acted_state``."""
     if beliefs is None:
-        beliefs = _all_latest_beliefs(world_conn)
+        beliefs = _all_latest_beliefs(world_conn, decision_time=decision_time)
     # Collect every condition_id referenced by a cached belief (one price read for the batch).
     all_cids: set[str] = set()
     for belief in beliefs:
@@ -1434,6 +1487,9 @@ def _latest_posterior_source_cycle_for_family(
     predicates = ["city = ?", "target_date = ?", "temperature_metric = ?"]
     params: list[object] = [city, target_date, metric]
     predicates.append("runtime_layer = 'live'")
+    if "source_id" in columns:
+        predicates.append("source_id = ?")
+        params.append(LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID)
     if "source_available_at" in columns:
         predicates.append("source_available_at <= ?")
         params.append(decision_time)
