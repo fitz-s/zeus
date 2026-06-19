@@ -111,6 +111,60 @@ _SUBSTRATE_REFRESH_CURSOR = 0
 # DO have topology — the fresh_executable_city_count 0-oscillation. Module-global
 # (mirrors _SUBSTRATE_REFRESH_CURSOR); resets on restart (cold re-warm is fine).
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
+
+
+def _substrate_refresh_family_text_key(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return " ".join(text.replace("-", " ").replace("_", " ").split())
+
+
+def _substrate_refresh_city_alias_to_name() -> dict[str, str]:
+    from src.config import cities_by_name as _refresh_cities_by_name
+
+    alias_to_name: dict[str, str] = {}
+    for _city in _refresh_cities_by_name.values():
+        for _surface in (
+            _city.name,
+            *_city.aliases,
+            *_city.slug_names,
+        ):
+            _key = _substrate_refresh_family_text_key(_surface)
+            if _key:
+                alias_to_name[_key] = _city.name
+    return alias_to_name
+
+
+def _substrate_refresh_canonical_city_name(city: object) -> str:
+    raw = str(city or "").strip()
+    return _substrate_refresh_city_alias_to_name().get(
+        _substrate_refresh_family_text_key(raw),
+        raw,
+    )
+
+
+def _substrate_refresh_canonical_metric(metric: object) -> str:
+    text = _substrate_refresh_family_text_key(metric)
+    if text in {"low", "lowest", "min", "minimum"} or text.startswith("lowest "):
+        return "low"
+    if text in {"high", "highest", "max", "maximum"} or text.startswith("highest "):
+        return "high"
+    return text
+
+
+def _substrate_refresh_family_key(
+    city: object,
+    target_date: object,
+    metric: object,
+) -> tuple[str, str, str]:
+    return (
+        _substrate_refresh_family_text_key(
+            _substrate_refresh_canonical_city_name(city)
+        ),
+        str(target_date or "").strip(),
+        _substrate_refresh_canonical_metric(metric),
+    )
+
+
 # New-listing scout (FIX 3c): condition_ids discovered by the 60s scout that have
 # not yet been seen at the head of the substrate-warmer rotation.  The warmer
 # reads + clears this set and prepends matching families so new markets are warmed
@@ -2850,39 +2904,14 @@ def _refresh_pending_family_snapshots(
 
     from src.config import cities_by_name as _refresh_cities_by_name
 
-    def _refresh_family_text_key(value: object) -> str:
-        text = str(value or "").strip().lower()
-        return " ".join(text.replace("-", " ").replace("_", " ").split())
-
-    _refresh_city_alias_to_name: dict[str, str] = {}
-    for _city in _refresh_cities_by_name.values():
-        for _surface in (
-            _city.name,
-            *_city.aliases,
-            *_city.slug_names,
-        ):
-            _key = _refresh_family_text_key(_surface)
-            if _key:
-                _refresh_city_alias_to_name[_key] = _city.name
-
     def _canonical_refresh_city_name(city: object) -> str:
-        raw = str(city or "").strip()
-        return _refresh_city_alias_to_name.get(_refresh_family_text_key(raw), raw)
+        return _substrate_refresh_canonical_city_name(city)
 
     def _canonical_refresh_metric(metric: object) -> str:
-        text = _refresh_family_text_key(metric)
-        if text in {"low", "lowest", "min", "minimum"} or text.startswith("lowest "):
-            return "low"
-        if text in {"high", "highest", "max", "maximum"} or text.startswith("highest "):
-            return "high"
-        return text
+        return _substrate_refresh_canonical_metric(metric)
 
     def _refresh_family_key(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
-        return (
-            _refresh_family_text_key(_canonical_refresh_city_name(city)),
-            str(target_date or "").strip(),
-            _canonical_refresh_metric(metric),
-        )
+        return _substrate_refresh_family_key(city, target_date, metric)
 
     pending_families: list[tuple[str, str, str]] = []
     for row in pending_rows:
@@ -5486,6 +5515,9 @@ def _edli_event_reactor_cycle() -> None:
         # selected row exists but is price-stale.
         _reactor_family_snapshot_refresher = _edli_reactor_family_snapshot_refresher()
         _reactor_cycle_advance_enqueuer = _edli_reactor_cycle_advance_enqueuer()
+        _reactor_family_market_absence_provider = (
+            _edli_reactor_family_market_absence_provider()
+        )
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -5573,6 +5605,9 @@ def _edli_event_reactor_cycle() -> None:
             # Held-position families are refreshed FIRST (money at risk); NO liquidity ordering
             # (operator correction 2026-06-12). Fail-soft read-only provider on zeus_trades.
             held_family_provider=_edli_reactor_held_family_provider(),
+            # Current Gamma-empty/no-listed-market proof terminalizes only the blocked event; a
+            # future event for the same family can still process if the venue lists later.
+            family_market_absence_provider=_reactor_family_market_absence_provider,
             config=ReactorConfig(
                 reactor_mode=reactor_mode,
                 real_order_submit_enabled=real_order_submit_enabled,
@@ -7923,6 +7958,23 @@ def _edli_reactor_family_snapshot_refresher():
                 pass
 
     return _refresh
+
+
+def _edli_reactor_family_market_absence_provider():
+    """Build the reactor's live venue-listing absence proof provider.
+
+    The only authority this provider exposes is the daemon warm lane's current Gamma-empty backoff:
+    a family was explicitly probed and Gamma returned no event list / no parseable listed market for
+    that exact (city, target_date, metric). Plain missing topology, lock-busy, time-boxed probes, or
+    network errors do not set the backoff and therefore do not terminalize reactor events.
+    """
+
+    def _is_absent(*, city, target_date, metric, **_ignored):
+        key = _substrate_refresh_family_key(city, target_date, metric)
+        until = _GAMMA_EMPTY_BACKOFF_UNTIL.get(key, 0.0)
+        return until > time.monotonic()
+
+    return _is_absent
 
 
 def _edli_reactor_held_family_provider():

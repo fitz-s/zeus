@@ -596,6 +596,7 @@ class OpportunityEventReactor:
         family_snapshot_refresher: "Callable[..., bool] | None" = None,
         cycle_advance_enqueuer: "Callable[..., bool] | None" = None,
         held_family_provider: "Callable[[], frozenset[tuple[str, str, str]]] | None" = None,
+        family_market_absence_provider: "Callable[..., bool] | None" = None,
     ) -> None:
         self._store = store
         self._source_truth_gate = source_truth_gate
@@ -627,6 +628,12 @@ class OpportunityEventReactor:
         # no held bias, pure fair rotation). The reactor owns zeus-world only; this provider is
         # injected (it reads zeus_trades.position_current) so the reactor never opens a trades conn.
         self._held_family_provider = held_family_provider
+        # Live venue-listing absence proof, injected from the daemon warm lane. This is deliberately
+        # narrower than "no cached topology": it may return True only after the Gamma/topology
+        # refresher has current evidence that the family has no listed Polymarket market. The reactor
+        # uses it to stop infinite EXECUTABLE_SNAPSHOT_BLOCKED retries for untradeable families while
+        # preserving normal retry behavior for locks, stale books, or not-yet-harvested probes.
+        self._family_market_absence_provider = family_market_absence_provider
         # Per-family debounce: family-key -> last successful refresh-attempt monotonic time. The
         # window is DERIVED from the snapshot freshness window (half of it), never a magic number.
         self._family_refresh_last_at: dict[str, float] = {}
@@ -1059,6 +1066,10 @@ class OpportunityEventReactor:
         if venue_closed is not None:
             return venue_closed
 
+        venue_not_listed = self._venue_market_not_listed_horizon(event)
+        if venue_not_listed is not None:
+            return venue_not_listed
+
         # (a) Timeliness floor — reuse the store's single authority. _is_timely
         # returns True for non-forecast-decision events (no floor) and for any
         # event still within its tradeable window; only a strictly-past
@@ -1135,6 +1146,42 @@ class OpportunityEventReactor:
         if phase in (MarketPhase.POST_TRADING, MarketPhase.RESOLVED):
             return ("MARKET_VENUE_CLOSED", f"venue market phase {phase.value} (F1 12:00-UTC close)")
         return None
+
+    def _venue_market_not_listed_horizon(
+        self, event: OpportunityEvent
+    ) -> tuple[str, str] | None:
+        """Terminal horizon for a family proven unlisted by the live venue-discovery lane.
+
+        This is not a topology-cache miss. It fires only for an executable-snapshot block whose
+        injected provider has current Gamma-empty/no-listed-market evidence for this exact
+        (city, target_date, metric). Network failures, lock contention, time-box misses, stale books,
+        and missing providers return None so the event keeps requeueing.
+        """
+        if self._family_market_absence_provider is None:
+            return None
+        last_reason = self._transient_requeue_reasons.get(event.event_id)
+        if last_reason != "EXECUTABLE_SNAPSHOT_BLOCKED":
+            return None
+        family = self._family_identity(event)
+        if family is None:
+            return None
+        city, target_date, metric = family
+        try:
+            absent = bool(
+                self._family_market_absence_provider(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                )
+            )
+        except Exception:
+            return None
+        if not absent:
+            return None
+        return (
+            "VENUE_MARKET_NOT_LISTED",
+            f"Gamma/topology has no listed Polymarket market for {city}/{target_date}/{metric}",
+        )
 
     @staticmethod
     def _family_identity(event: OpportunityEvent) -> tuple[str, str, str] | None:
