@@ -33,7 +33,7 @@ import time
 import faulthandler
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -2441,9 +2441,15 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
     from src.execution.maker_rest_escalation import OPEN_REST_FACT_STATES
 
     try:
+        command_cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+        }
+        token_select = "token_id" if "token_id" in command_cols else "'' AS token_id"
+        snapshot_select = "snapshot_id" if "snapshot_id" in command_cols else "'' AS snapshot_id"
         commands = trade_conn.execute(
-            """
-            SELECT command_id, position_id, venue_order_id
+            f"""
+            SELECT command_id, position_id, venue_order_id, {token_select}, {snapshot_select}
               FROM venue_commands
              WHERE intent_kind = 'ENTRY'
                AND venue_order_id IS NOT NULL
@@ -2475,8 +2481,7 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
         if fact is None or str(fact[0] or "") not in open_states:
             continue
         position_id = str(row[1] or "")
-        if not position_id:
-            continue
+        family: tuple[str, str, str] | None = None
         try:
             pos = trade_conn.execute(
                 """
@@ -2487,20 +2492,141 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
                  LIMIT 1
                 """,
                 (position_id,),
-            ).fetchone()
+            ).fetchone() if position_id else None
         except Exception:  # noqa: BLE001
-            continue
-        if pos is None:
-            continue
-        family = (
-            str(pos[0] or "").strip(),
-            str(pos[1] or "").strip(),
-            str(pos[2] or "").strip(),
-        )
-        if all(family) and family not in seen:
+            pos = None
+        if pos is not None:
+            family = (
+                str(pos[0] or "").strip(),
+                str(pos[1] or "").strip(),
+                str(pos[2] or "").strip(),
+            )
+        if not family or not all(family):
+            family = _open_rest_family_from_snapshot(
+                trade_conn,
+                token_id=str(row[3] or ""),
+                snapshot_id=str(row[4] or ""),
+            )
+        if family and all(family) and family not in seen:
             seen.add(family)
             out.append(family)
     return out
+
+
+def _open_rest_family_from_snapshot(
+    trade_conn,
+    *,
+    token_id: str,
+    snapshot_id: str,
+) -> tuple[str, str, str] | None:
+    """Resolve an ACKED rest's family even before position_current projection exists."""
+
+    try:
+        snap_cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()
+        }
+    except Exception:  # noqa: BLE001
+        return None
+    slug_cols = [col for col in ("event_id", "event_slug") if col in snap_cols]
+    if not slug_cols:
+        return None
+    select_slug = slug_cols[0] if len(slug_cols) == 1 else "COALESCE(" + ", ".join(slug_cols) + ")"
+    predicates: list[str] = []
+    params: list[str] = []
+    if snapshot_id and "snapshot_id" in snap_cols:
+        predicates.append("snapshot_id = ?")
+        params.append(snapshot_id)
+    if token_id:
+        for col in ("selected_outcome_token_id", "yes_token_id", "no_token_id"):
+            if col in snap_cols:
+                predicates.append(f"{col} = ?")
+                params.append(token_id)
+    if not predicates:
+        return None
+    snapshot_order = "CASE WHEN snapshot_id = ? THEN 0 ELSE 1 END" if "snapshot_id" in snap_cols else "1"
+    query_params = [*params]
+    if "snapshot_id" in snap_cols:
+        query_params.append(snapshot_id)
+    try:
+        row = trade_conn.execute(
+            f"""
+            SELECT {select_slug} AS market_slug
+              FROM executable_market_snapshots
+             WHERE {" OR ".join(predicates)}
+             ORDER BY
+               {snapshot_order},
+               captured_at DESC
+             LIMIT 1
+            """,
+            tuple(query_params),
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    if row is None:
+        return None
+    return _weather_family_from_market_slug(str(row[0] or ""))
+
+
+def _weather_family_from_market_slug(slug: str) -> tuple[str, str, str] | None:
+    text = str(slug or "").strip().lower()
+    prefixes = (
+        ("highest-temperature-in-", "high"),
+        ("lowest-temperature-in-", "low"),
+    )
+    metric = ""
+    rest = ""
+    for prefix, candidate_metric in prefixes:
+        if text.startswith(prefix):
+            metric = candidate_metric
+            rest = text[len(prefix):]
+            break
+    if not rest or "-on-" not in rest:
+        return None
+    city_slug, date_slug = rest.rsplit("-on-", 1)
+    parts = date_slug.split("-")
+    if len(parts) != 3:
+        return None
+    month_name, day_text, year_text = parts
+    month_map = {
+        "january": 1,
+        "february": 2,
+        "march": 3,
+        "april": 4,
+        "may": 5,
+        "june": 6,
+        "july": 7,
+        "august": 8,
+        "september": 9,
+        "october": 10,
+        "november": 11,
+        "december": 12,
+    }
+    try:
+        target_date = date(
+            int(year_text),
+            month_map[month_name],
+            int(day_text),
+        ).isoformat()
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        from src.config import runtime_cities_by_name
+
+        city_by_slug: dict[str, str] = {}
+        for name, city in runtime_cities_by_name().items():
+            aliases = set(getattr(city, "slug_names", ()) or ())
+            aliases.add(str(name).lower().replace(" ", "-"))
+            aliases.add(str(getattr(city, "name", name)).lower().replace(" ", "-"))
+            for alias in aliases:
+                if alias:
+                    city_by_slug[str(alias).lower()] = str(getattr(city, "name", name) or name)
+        city = city_by_slug.get(city_slug)
+    except Exception:  # noqa: BLE001
+        city = None
+    if not city:
+        city = city_slug.replace("-", " ").title()
+    return (city, target_date, metric)
 
 
 def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str) -> bool:
