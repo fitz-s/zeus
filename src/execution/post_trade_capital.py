@@ -148,17 +148,11 @@ def chain_sync_read_cycle() -> None:
         except Exception:  # noqa: BLE001
             pass
 
-    # Status-summary freshness pulse (release-gate surface). In EDLI event-driven modes the
-    # order daemon's run_cycle() never fires, so this pulse keeps state/status_summary.json
-    # fresh from the live read model. Moved here WITH the chain-sync job (it was emitted in
-    # the same former cycle). Non-fatal.
-    try:
-        from src.observability.status_summary import write_cycle_pulse
-        write_cycle_pulse(summary)
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "chain_sync_read: status pulse failed (non-fatal): %s", exc, exc_info=True
-        )
+    # status_summary.json is owned by the live trading daemon. This sidecar lacks the
+    # process-local heartbeat/risk/collateral singletons required to compute execution
+    # capability, so writing a pulse here would overwrite the daemon's true gate state
+    # with false UNCONFIGURED blockers. Chain-sync liveness is reported through
+    # scheduler_jobs_health.json instead.
 
 
 # ---------------------------------------------------------------------------
