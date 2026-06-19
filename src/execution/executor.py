@@ -1994,6 +1994,145 @@ def _current_command_state_value(conn: sqlite3.Connection, command_id: str) -> s
         return str(row[0])
 
 
+def _submit_ack_already_persisted(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    order_id: str,
+) -> bool:
+    try:
+        row = conn.execute(
+            """
+            SELECT state, venue_order_id
+              FROM venue_commands
+             WHERE command_id = ?
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    try:
+        state = str(row["state"] or "")
+        venue_order_id = str(row["venue_order_id"] or "")
+    except Exception:
+        state = str(row[0] or "")
+        venue_order_id = str(row[1] or "")
+    if state not in {"ACKED", "PARTIAL", "FILLED"} or venue_order_id != order_id:
+        return False
+    try:
+        rows = conn.execute(
+            """
+            SELECT payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = 'SUBMIT_ACKED'
+             ORDER BY sequence_no DESC
+            """,
+            (command_id,),
+        ).fetchall()
+    except Exception:
+        return False
+    for event in rows:
+        try:
+            raw = event["payload_json"]
+        except Exception:
+            raw = event[0]
+        try:
+            payload = json.loads(str(raw or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict) and str(payload.get("venue_order_id") or "") == order_id:
+            return True
+    return False
+
+
+def _order_fact_already_persisted(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    order_id: str,
+) -> bool:
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_order_facts
+             WHERE command_id = ?
+               AND venue_order_id = ?
+             LIMIT 1
+            """,
+            (command_id, order_id),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _trade_fact_already_persisted(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    trade_id: str,
+) -> bool:
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_trade_facts
+             WHERE command_id = ?
+               AND trade_id = ?
+             LIMIT 1
+            """,
+            (command_id, trade_id),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _command_event_already_persisted(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    event_type: str,
+    order_id: str,
+    trade_id: str | None = None,
+) -> bool:
+    try:
+        rows = conn.execute(
+            """
+            SELECT payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = ?
+             ORDER BY sequence_no DESC
+            """,
+            (command_id, event_type),
+        ).fetchall()
+    except Exception:
+        return False
+    for event in rows:
+        try:
+            raw = event["payload_json"]
+        except Exception:
+            raw = event[0]
+        try:
+            payload = json.loads(str(raw or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("venue_order_id") or "") != order_id:
+            continue
+        if trade_id is not None and str(payload.get("trade_id") or "") != trade_id:
+            continue
+        return True
+    return False
+
+
 def _retry_persist_on_db_lock(
     conn: sqlite3.Connection,
     persist_fn,
@@ -5060,91 +5199,114 @@ def _live_order(
         # unknown_side_effect (which trips the governor kill-switch). See
         # _retry_persist_on_db_lock.
         def _persist_entry_ack_facts() -> None:
-            append_event(
+            ack_already_persisted = _submit_ack_already_persisted(
                 conn,
                 command_id=command_id,
-                event_type="SUBMIT_ACKED",
-                occurred_at=ack_time,
-                payload={
-                    "venue_order_id": order_id,
-                    "venue_status": str(result.get("status") or ""),
-                    "order_type": order_type,
-                    **final_envelope_payload,
-                },
+                order_id=order_id,
             )
-            append_order_fact(
-                conn,
-                venue_order_id=order_id,
-                command_id=command_id,
-                state=order_fact_state,
-                remaining_size=remaining_size,
-                matched_size=matched_size,
-                source="REST",
-                observed_at=ack_time,
-                # C4 telemetry-truth: REST ACK response carries no server matchTime;
-                # venue_timestamp=None (honest absence). ack_time is Zeus receipt
-                # wall-clock only, labelled via observed_at.
-                venue_timestamp=None,
-                raw_payload_hash=_canonical_payload_hash(
-                    {
-                        "command_id": command_id,
-                        "venue_order_id": order_id,
-                        "submit_result": result,
-                    }
-                ),
-                raw_payload_json={
-                    "venue_order_id": order_id,
-                    "submit_result": _jsonable_payload(result),
-                    "source": "place_limit_order_ack",
-                },
-            )
-            if fill_event_type and fill_trade_id:
-                append_trade_fact(
+            if not ack_already_persisted:
+                append_event(
                     conn,
-                    trade_id=fill_trade_id,
+                    command_id=command_id,
+                    event_type="SUBMIT_ACKED",
+                    occurred_at=ack_time,
+                    payload={
+                        "venue_order_id": order_id,
+                        "venue_status": str(result.get("status") or ""),
+                        "order_type": order_type,
+                        **final_envelope_payload,
+                    },
+                )
+            if not _order_fact_already_persisted(
+                conn,
+                command_id=command_id,
+                order_id=order_id,
+            ):
+                append_order_fact(
+                    conn,
                     venue_order_id=order_id,
                     command_id=command_id,
-                    state="MATCHED",
-                    filled_size=matched_size,
-                    fill_price=fill_price,
+                    state=order_fact_state,
+                    remaining_size=remaining_size,
+                    matched_size=matched_size,
                     source="REST",
                     observed_at=ack_time,
-                    # C4 telemetry-truth: REST ACK carry no server matchTime;
-                    # venue_timestamp=None (honest absence). Real match time
-                    # arrives via the WS user-channel (matchtime field).
+                    # C4 telemetry-truth: REST ACK response carries no server matchTime;
+                    # venue_timestamp=None (honest absence). ack_time is Zeus receipt
+                    # wall-clock only, labelled via observed_at.
                     venue_timestamp=None,
-                    tx_hash=fill_tx_hash,
                     raw_payload_hash=_canonical_payload_hash(
                         {
                             "command_id": command_id,
                             "venue_order_id": order_id,
-                            "trade_id": fill_trade_id,
-                            "fill_evidence": fill_evidence,
+                            "submit_result": result,
                         }
                     ),
                     raw_payload_json={
                         "venue_order_id": order_id,
-                        "trade_id": fill_trade_id,
                         "submit_result": _jsonable_payload(result),
-                        "fill_evidence": _jsonable_payload(fill_evidence),
-                        "source": "place_limit_order_matched_submit",
+                        "source": "place_limit_order_ack",
                     },
                 )
-                append_event(
+            if fill_event_type and fill_trade_id:
+                if not _trade_fact_already_persisted(
+                    conn,
+                    command_id=command_id,
+                    trade_id=fill_trade_id,
+                ):
+                    append_trade_fact(
+                        conn,
+                        trade_id=fill_trade_id,
+                        venue_order_id=order_id,
+                        command_id=command_id,
+                        state="MATCHED",
+                        filled_size=matched_size,
+                        fill_price=fill_price,
+                        source="REST",
+                        observed_at=ack_time,
+                        # C4 telemetry-truth: REST ACK carry no server matchTime;
+                        # venue_timestamp=None (honest absence). Real match time
+                        # arrives via the WS user-channel (matchtime field).
+                        venue_timestamp=None,
+                        tx_hash=fill_tx_hash,
+                        raw_payload_hash=_canonical_payload_hash(
+                            {
+                                "command_id": command_id,
+                                "venue_order_id": order_id,
+                                "trade_id": fill_trade_id,
+                                "fill_evidence": fill_evidence,
+                            }
+                        ),
+                        raw_payload_json={
+                            "venue_order_id": order_id,
+                            "trade_id": fill_trade_id,
+                            "submit_result": _jsonable_payload(result),
+                            "fill_evidence": _jsonable_payload(fill_evidence),
+                            "source": "place_limit_order_matched_submit",
+                        },
+                    )
+                if not _command_event_already_persisted(
                     conn,
                     command_id=command_id,
                     event_type=fill_event_type,
-                    occurred_at=ack_time,
-                    payload={
-                        "reason": "place_limit_order_matched_submit",
-                        "venue_order_id": order_id,
-                        "trade_id": fill_trade_id,
-                        "filled_size": matched_size,
-                        "fill_price": fill_price,
-                        "tx_hash": fill_tx_hash,
-                        **final_envelope_payload,
-                    },
-                )
+                    order_id=order_id,
+                    trade_id=fill_trade_id,
+                ):
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type=fill_event_type,
+                        occurred_at=ack_time,
+                        payload={
+                            "reason": "place_limit_order_matched_submit",
+                            "venue_order_id": order_id,
+                            "trade_id": fill_trade_id,
+                            "filled_size": matched_size,
+                            "fill_price": fill_price,
+                            "tx_hash": fill_tx_hash,
+                            **final_envelope_payload,
+                        },
+                    )
             # P1-1: durable commit independent of _own_conn — codereview-may19-2
             # ACK/order/trade facts must persist immediately regardless of whether
             # the caller provided an external connection. A crash after SDK ACK

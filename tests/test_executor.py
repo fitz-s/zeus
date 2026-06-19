@@ -862,7 +862,13 @@ class TestExecutor:
         assert captured["order_type"] == "FOK"
 
     def test_entry_ack_persistence_failure_returns_unknown_not_pending(self, monkeypatch):
-        final_intent = _final_execution_intent()
+        final_intent = _final_execution_intent(
+            final_limit_price=Decimal("0.33"),
+            snapshot_top_ask=Decimal("0.34"),
+            order_policy="post_only_passive_limit",
+            order_type="GTC",
+            post_only=True,
+        )
 
         class DummyClient:
             def __init__(self):
@@ -882,6 +888,14 @@ class TestExecutor:
 
         monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
         monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "GTC")
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_entry_collateral_snapshot_for_submit",
+            lambda conn: {"component": "collateral_snapshot_refresh", "allowed": True, "reason": "test"},
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_buy",
+            lambda *args, **kwargs: {"component": "collateral_ledger", "allowed": True, "reason": "test"},
+        )
         monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
         monkeypatch.setattr("src.state.venue_command_repo.append_order_fact", fail_order_fact)
@@ -903,6 +917,95 @@ class TestExecutor:
                 (command["command_id"],),
             ).fetchone()[0]
             == 0
+        )
+
+    def test_entry_ack_persistence_retry_is_idempotent_after_ack_committed(self, monkeypatch):
+        final_intent = _final_execution_intent(
+            final_limit_price=Decimal("0.33"),
+            snapshot_top_ask=Decimal("0.34"),
+            order_policy="post_only_passive_limit",
+            order_type="GTC",
+            post_only=True,
+        )
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def v2_preflight(self):
+                return None
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                return _final_submit_result(self.bound_envelope, order_id="ack-committed-buy-1")
+
+        import src.state.venue_command_repo as command_repo
+
+        real_append_order_fact = command_repo.append_order_fact
+        calls = {"count": 0}
+
+        def lock_after_ack_committed(conn, *args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                conn.commit()
+                raise sqlite3.OperationalError("database is locked")
+            return real_append_order_fact(conn, *args, **kwargs)
+
+        monkeypatch.setattr("src.execution.executor._assert_risk_allocator_allows_submit", lambda intent: None)
+        monkeypatch.setattr("src.execution.executor._select_risk_allocator_order_type", lambda conn, snapshot_id: "GTC")
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_entry_collateral_snapshot_for_submit",
+            lambda conn: {"component": "collateral_snapshot_refresh", "allowed": True, "reason": "test"},
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_buy",
+            lambda *args, **kwargs: {"component": "collateral_ledger", "allowed": True, "reason": "test"},
+        )
+        monkeypatch.setattr("src.control.ws_gap_guard.assert_ws_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(command_repo, "append_order_fact", lock_after_ack_committed)
+
+        result = execute_final_intent(final_intent, conn=_TEST_CONN, decision_id="decision-ack-idempotent")
+
+        assert result.status == "pending"
+        assert result.command_state == "ACKED"
+        command = _TEST_CONN.execute(
+            "SELECT command_id, state, venue_order_id FROM venue_commands WHERE decision_id = ?",
+            ("decision-ack-idempotent",),
+        ).fetchone()
+        assert command["state"] == "ACKED"
+        assert command["venue_order_id"] == "ack-committed-buy-1"
+        assert (
+            _TEST_CONN.execute(
+                """
+                SELECT COUNT(*) FROM venue_command_events
+                 WHERE command_id = ? AND event_type = 'SUBMIT_ACKED'
+                """,
+                (command["command_id"],),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            _TEST_CONN.execute(
+                """
+                SELECT COUNT(*) FROM venue_command_events
+                 WHERE command_id = ? AND event_type = 'REVIEW_REQUIRED'
+                """,
+                (command["command_id"],),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            _TEST_CONN.execute(
+                """
+                SELECT COUNT(*) FROM venue_order_facts
+                 WHERE command_id = ? AND venue_order_id = ?
+                """,
+                (command["command_id"], "ack-committed-buy-1"),
+            ).fetchone()[0]
+            == 1
         )
 
     def test_execute_final_intent_rejects_resting_intent_when_a2_requires_taker(self, monkeypatch):
