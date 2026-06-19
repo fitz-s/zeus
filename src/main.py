@@ -6747,6 +6747,17 @@ def _edli_refresh_continuous_money_path_families(
             "lock_timeout_seconds": lock_timeout_s,
             "lock": "edli_redecision_confirm_refresh",
         }
+    if not _market_substrate_refresh_lock.acquire(timeout=lock_timeout_s):
+        try:
+            _edli_redecision_confirm_refresh_lock.release()
+        except RuntimeError:
+            pass
+        return {
+            "status": "skipped_lock_busy",
+            "families_requested": len(clean_families),
+            "lock_timeout_seconds": lock_timeout_s,
+            "lock": "market_substrate_refresh",
+        }
     from src.state.db import (
         ZEUS_FORECASTS_DB_PATH,
         get_forecasts_connection_read_only,
@@ -6799,6 +6810,10 @@ def _edli_refresh_continuous_money_path_families(
             time.sleep(delay_s)
         return summary
     finally:
+        try:
+            _market_substrate_refresh_lock.release()
+        except RuntimeError:
+            pass
         try:
             _edli_redecision_confirm_refresh_lock.release()
         except RuntimeError:
@@ -7778,6 +7793,17 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             1.0,
             float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
         )
+        lock_timeout_s = max(
+            0.0,
+            float(os.environ.get("ZEUS_DECISION_REFRESH_LOCK_TIMEOUT_SECONDS", "2.0")),
+        )
+        acquired = _market_substrate_refresh_lock.acquire(timeout=lock_timeout_s)
+        if not acquired:
+            logger.warning(
+                "decision family refresh: substrate refresh lock busy for %s/%s/%s",
+                city, target_date, metric,
+            )
+            return False
         write_conn = get_trade_connection(write_class="live")
         try:
             market = reconstruct_weather_market_from_static_topology(
@@ -7813,6 +7839,10 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             return False
         finally:
             write_conn.close()
+            try:
+                _market_substrate_refresh_lock.release()
+            except RuntimeError:
+                pass
 
     return _refresh
 
