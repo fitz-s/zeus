@@ -16,6 +16,7 @@ from typing import Optional
 from src.state.collateral_ledger import CollateralInsufficient, assert_sell_preflight
 
 logger = logging.getLogger(__name__)
+SUBMIT_COLLATERAL_REFRESH_TIMEOUT_SECONDS = 20.0
 
 
 def _capability_component(
@@ -33,6 +34,29 @@ def _capability_component(
     if details:
         payload["details"] = dict(details)
     return payload
+
+
+class _DeadlineCollateralAdapter:
+    def __init__(self, adapter, *, timeout_seconds: float):
+        self._adapter = adapter
+        self._timeout_seconds = timeout_seconds
+        self.last_error: str | None = None
+
+    def get_collateral_payload(self) -> dict:
+        from src.runtime.timeout_guard import run_with_timeout
+
+        fn = getattr(self._adapter, "get_collateral_payload", None)
+        if not callable(fn):
+            raise AttributeError("adapter exposes no get_collateral_payload")
+        try:
+            return run_with_timeout(
+                fn,
+                seconds=self._timeout_seconds,
+                label="submit_collateral_refresh",
+            )
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise
 
 
 def refresh_collateral_snapshot_for_submit(
@@ -79,7 +103,12 @@ def refresh_collateral_snapshot_for_submit(
     _LOCK_RETRIES = 5
     _LOCK_BACKOFF_SECONDS = 0.4
     client = PolymarketClient()
-    adapter = client._ensure_v2_adapter()
+    ensure_adapter = getattr(client, "_ensure_v2_adapter", None)
+    raw_adapter = ensure_adapter() if callable(ensure_adapter) else client
+    adapter = _DeadlineCollateralAdapter(
+        raw_adapter,
+        timeout_seconds=SUBMIT_COLLATERAL_REFRESH_TIMEOUT_SECONDS,
+    )
     snapshot = None
     for attempt in range(_LOCK_RETRIES):
         try:
@@ -96,7 +125,10 @@ def refresh_collateral_snapshot_for_submit(
     if snapshot is None:
         raise CollateralInsufficient("collateral_refresh_failed: lock_retries_exhausted")
     if snapshot.authority_tier == "DEGRADED":
-        raise CollateralInsufficient(f"collateral_snapshot_degraded: refreshed_before_{action}")
+        error = f": {adapter.last_error}" if adapter.last_error else ""
+        raise CollateralInsufficient(
+            f"collateral_snapshot_degraded: refreshed_before_{action}{error}"
+        )
     return _capability_component(
         "collateral_snapshot_refresh",
         authority_tier=snapshot.authority_tier,
