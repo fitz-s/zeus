@@ -935,3 +935,53 @@ def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes():
     assert center_yes
     assert center_yes[0].economics.edge_lcb > 0.0
     assert center_yes[0].economics.optimal_delta_u > 0.0
+
+
+def test_qkernel_scope_does_not_resurrect_direction_law_rejections():
+    """The spine may rescore legacy economics vetoes, not structural direction law.
+
+    Regression: passing ``honor_admission_rejections=False`` wholesale let the qkernel
+    revive a proof that the reactor had already marked as a forecast-bin/direction
+    mismatch. That recreates the live all-NO failure mode: an adjacent high-probability
+    NO can be selected even though the settlement-aware direction law has proven it is
+    betting against the forecast landing set.
+    """
+    from dataclasses import replace
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=[0.10, 0.80, 0.10, 0.00],
+        q_lcb_by_bin=[0.08, 0.65, 0.08, 0.00],
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+    marked = tuple(
+        replace(
+            proof,
+            missing_reason=(
+                "DIRECTION_LAW_BIN_FORECAST_MISMATCH:"
+                "direction=buy_no:forecast_boundary_zone"
+            ),
+            passed_prefilter=False,
+            trade_score=0.0,
+        )
+        if proof.direction == "buy_no" and proof.candidate.bin.label == "21C"
+        else proof
+        for proof in proofs
+    )
+
+    qkernel_scoped = era._selection_scoped_proofs(
+        proofs=marked,
+        honor_admission_rejections=False,
+    )
+
+    assert all(
+        not (proof.direction == "buy_no" and proof.candidate.bin.label == "21C")
+        for proof in qkernel_scoped
+    )
+    assert any(
+        proof.direction == "buy_yes" and proof.candidate.bin.label == "20C"
+        for proof in qkernel_scoped
+    )

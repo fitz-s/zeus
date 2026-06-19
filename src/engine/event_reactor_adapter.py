@@ -238,6 +238,7 @@ from src.strategy.live_inference.live_admission import (
     coverage_unlicensed_tail_rejection_reason,
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
+    live_near_settled_entry_price_rejection_reason,
 )
 
 _SELECTION_DIAGNOSTIC_PI_MIN = 0.90
@@ -8456,11 +8457,41 @@ def _selection_scoped_proofs(
     # TRADE_SCORE_NON_POSITIVE submit gate — never a bad order, but it STARVED
     # the legitimate admitted sibling of its selection. Gate-rejected proofs are
     # unrankable, not merely unsubmittable.
+    def _qkernel_may_rescore_rejected_proof(missing_reason: str | None) -> bool:
+        """Whether the qkernel may re-evaluate a legacy admission rejection.
+
+        The qkernel replaces scalar economics, not structural truth. It may restore a
+        proof removed by the old capital-efficiency prefilter so the vector payoff
+        engine can compare the leg honestly. It must not resurrect direction-law
+        failures, missing native structure, near-settled-price blocks, or buy-NO
+        conservative-evidence failures; those are executable/semantic defects, not a
+        legacy scalar objective.
+        """
+        text = str(missing_reason or "").strip()
+        if not text:
+            return True
+        return text.startswith(
+            (
+                "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+                "ADMISSION_CAPITAL_EFFICIENCY",
+            )
+        )
+
     if honor_admission_rejections:
         executable = [
             proof
             for proof in executable
             if proof.missing_reason is None
+            or (
+                allow_same_family_monitor_owned
+                and _is_entry_held_family_reason(proof.missing_reason)
+            )
+        ]
+    else:
+        executable = [
+            proof
+            for proof in executable
+            if _qkernel_may_rescore_rejected_proof(proof.missing_reason)
             or (
                 allow_same_family_monitor_owned
                 and _is_entry_held_family_reason(proof.missing_reason)
@@ -9180,6 +9211,13 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = capital_efficiency_reason
+            near_settled_reason = live_near_settled_entry_price_rejection_reason(
+                execution_price=execution_price.value if execution_price is not None else None,
+            )
+            if near_settled_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = near_settled_reason
             def _lcb_source(value: object) -> str | None:
                 source = getattr(value, "calibration_source", None)
                 return str(source) if source else None
@@ -9237,6 +9275,7 @@ def _generate_candidate_proofs(
             # concern is telemetry-only now and is deliberately NOT a prefilter trigger.)
             if (
                 capital_efficiency_reason is not None
+                or near_settled_reason is not None
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
             ):

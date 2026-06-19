@@ -2,13 +2,14 @@
 # Last reused or audited: 2026-06-18
 # Authority basis: docs/evidence/coarse_global_removal/FINAL_no_shadow_execution_flow_2026-06-18.md
 #   §"THE q_lcb RELIABILITY GUARD — exact form" + step 6. The guard serves
-#   q_safe = min(band.q_lcb, L_g) and abstains (q_safe=0) on a thin / below-floor OOF cell.
+#   q_safe = min(band.q_lcb, L_g) on known deep OOF cells and abstains (q_safe=0)
+#   only on thin / missing cells.
 """RED-on-revert tests for the q_lcb empirical reliability guard (FINAL no-shadow §6).
 
   * a WELL-CALIBRATED cell (n >= N_MIN, realized hit-rate well above the bucket floor) ⇒ the
     guard SERVES q_safe = min(band_q_lcb, L_g), trade=True, NOT abstained.
-  * a MISCALIBRATED cell (realized hit-rate below the bucket floor) ⇒ q_safe deflated to 0,
-    abstained=True.
+  * a MISCALIBRATED deep cell (realized hit-rate below the bucket floor) ⇒ q_safe is
+    continuously deflated to min(band_q_lcb, L_g), not zeroed by a second binary veto.
   * a THIN cell (n < N_MIN) ⇒ abstained even if the point hit-rate looks high (Wilson lower
     bound on a thin sample is conservative AND the N_MIN gate fires).
   * an UNKNOWN cell with no artifact ⇒ INERT pass-through (q_safe == band_q_lcb, trade=True,
@@ -59,9 +60,10 @@ def test_well_calibrated_cell_serves_min_band_and_Lg():
     assert math.isclose(v.q_safe, min(band_q_lcb, v.L_g), rel_tol=1e-9)
 
 
-def test_miscalibrated_cell_abstains_q_safe_zero():
+def test_miscalibrated_deep_cell_deflates_to_wilson_not_zero():
     # A deep cell whose realized hit-rate (0.55) is FAR below the bucket floor (0.7) for a
-    # band_q_lcb of 0.72 -> L_g << floor -> NOT licensed -> abstain, q_safe = 0.
+    # band_q_lcb of 0.72 -> L_g << floor. The guard corrects the lower bound to L_g; it
+    # does not add a binary veto. Route cost decides whether that deflated q still trades.
     band_q_lcb = 0.72
     bucket_idx, _floor = qlcb_bucket(band_q_lcb)
     key = f"high|L1|YES|modal|qb{bucket_idx}"
@@ -70,9 +72,10 @@ def test_miscalibrated_cell_abstains_q_safe_zero():
         band_q_lcb=band_q_lcb, metric="high", lead_days=1.0,
         side="YES", bin_position="modal", reliability_table=table,
     )
-    assert v.abstained is True
-    assert v.trade is False
-    assert v.q_safe == 0.0
+    assert v.abstained is False
+    assert v.trade is True
+    assert 0.0 < v.q_safe < band_q_lcb
+    assert math.isclose(v.q_safe, min(band_q_lcb, v.L_g), rel_tol=1e-9)
 
 
 def test_thin_cell_abstains_even_with_high_point_rate():

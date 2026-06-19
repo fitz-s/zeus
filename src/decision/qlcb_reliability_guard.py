@@ -327,10 +327,12 @@ def apply_guard(
          ``basis="INERT"`` (pass-through, no abstain; the conservative edge_lcb>0 gate
          downstream is still the trade authority).
       4. ACTIVE path — cell known: ``L_g = wilson_lower_bound_95(hits, N_g)`` where
-         ``hits = round(hit_rate_g * N_g)``. Trade is licensed iff ``N_g >= N_MIN`` AND
-         ``L_g >= bucket_floor − EPS``. ``q_safe = min(band_q_lcb, L_g)`` when licensed, else
-         ``0.0`` (abstain). The after-cost ``q_safe − price − cost > EDGE_FLOOR`` check is the
-         caller's (it has the route price + cost).
+         ``hits = round(hit_rate_g * N_g)``. If ``N_g >= N_MIN``, serve the continuous
+         calibrated lower bound ``q_safe = min(band_q_lcb, L_g)``. The after-cost
+         ``q_safe − price − cost > EDGE_FLOOR`` check is the caller's (it has the route
+         price + cost). The bucket floor is diagnostic provenance, not a second binary
+         veto: a known cell may prove the served band overclaimed while still proving a
+         positive, tradeable lower bound.
       5. ACTIVE missing-cell path — artifact exists but the side-aware cell is absent:
          abstain. Unknown active cells are not authority for live money.
 
@@ -382,8 +384,7 @@ def apply_guard(
     hits = int(round(float(hit_rate_g) * int(n_g)))
     L_g = wilson_lower_bound_95(hits, int(n_g))
 
-    licensed = (int(n_g) >= N_MIN) and (L_g >= bucket_floor - EPS)
-    if licensed:
+    if int(n_g) >= N_MIN:
         q_safe = min(float(band_q_lcb), float(L_g))
         return GuardVerdict(
             q_safe=q_safe,
@@ -395,8 +396,10 @@ def apply_guard(
             bucket_floor=bucket_floor,
             basis="OOF_WILSON_95",
         )
-    # Thin cell or realized frequency below the bucket floor -> abstain. q_safe = 0 deflates the
-    # edge so the candidate cannot trade (publish the point prob, do not trade this bin).
+    # Thin cell -> abstain. q_safe = 0 deflates the edge so the candidate cannot trade
+    # (publish the point prob, do not trade this bin). A deep known cell never abstains
+    # merely because L_g is below the bucket floor; it continuously deflates to L_g and
+    # lets the route price decide whether any edge remains.
     return GuardVerdict(
         q_safe=0.0,
         trade=False,

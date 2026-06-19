@@ -166,6 +166,7 @@ DRIFT RESOLVED (recorded per operator law; see docs/rebuild/impl_w4_family_decis
 """
 from __future__ import annotations
 
+import math
 import hashlib
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -420,6 +421,42 @@ def forecast_bin_id(joint_q: JointQ) -> str:
     return joint_q.omega.bins[i].bin_id
 
 
+def forecast_settlement_bin_id(
+    predictive: PredictiveDistribution, omega: OutcomeSpace
+) -> str:
+    """The bin where the served center settles under this family's rounding rule.
+
+    Direction law is a contract/settlement statement, not a largest-mass statement.
+    Open shoulders can carry more probability than a one-degree center bin simply
+    because they aggregate many integer outcomes. That must not make the shoulder
+    the "forecast bin" for live direction law. The forecast bin is the bin containing
+    the settlement value of ``predictive.mu_native`` under ``omega.resolution``.
+    """
+    mu = float(predictive.mu_native)
+    if not math.isfinite(mu):
+        raise FamilyDecisionError(
+            f"FORECAST_CENTER_NONFINITE: mu_native={predictive.mu_native!r}"
+        )
+    rule = str(omega.resolution.rounding_rule)
+    if rule == "wmo_half_up":
+        settled = math.floor(mu + 0.5)
+    elif rule in ("floor", "oracle_truncate"):
+        settled = math.floor(mu)
+    elif rule == "ceil":
+        settled = math.ceil(mu)
+    else:  # pragma: no cover - EventResolution validates the closed rule set
+        raise FamilyDecisionError(f"UNKNOWN_ROUNDING_RULE: {rule!r}")
+    settled_value = float(settled)
+    for b in omega.bins:
+        lower_ok = b.lower_native is None or settled_value >= float(b.lower_native)
+        upper_ok = b.upper_native is None or settled_value <= float(b.upper_native)
+        if lower_ok and upper_ok:
+            return b.bin_id
+    raise FamilyDecisionError(
+        f"FORECAST_SETTLEMENT_BIN_NOT_FOUND: mu={mu!r} settled={settled_value!r}"
+    )
+
+
 # Settlement-validated lower edge of the calibrated non-modal q domain.
 #
 # This is NOT an arbitrary cap / throttle / q-haircut (operator law: no caps). It is the
@@ -656,8 +693,10 @@ class FamilyDecisionEngine:
             enable_negrisk_routes=self._enable_negrisk_routes,
         )
 
-        # The forecast (modal) bin — the direction-law reference.
-        forecast_bin = forecast_bin_id(joint_q)
+        # The forecast settlement bin — the direction-law reference. This is the bin
+        # containing the rounded served center, not necessarily the max-mass bin (open
+        # shoulders can accumulate more mass than a one-degree center bin).
+        forecast_bin = forecast_settlement_bin_id(predictive, omega)
 
         # --- (6) enumerate + score every candidate route -------------------------
         enumerated = self._enumerate_candidates(

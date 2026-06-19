@@ -48,6 +48,7 @@ import pytest
 
 import src.forecast.center as center_mod
 import src.forecast.sigma_authority as sa
+from src.decision import qlcb_reliability_guard as guard_mod
 import src.decision.family_decision_engine as fde_mod
 from src.config import City
 from src.contracts.executable_cost_curve import (
@@ -124,6 +125,19 @@ REALIZED_FLOOR_C = 0.6
 # settlement integration is the runtime cost — 200 keeps each decide() fast.
 _TEST_BAND_DRAWS = 200
 _CAPTURED = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_qlcb_reliability_artifact(monkeypatch, tmp_path):
+    """Keep core decision-engine contract tests independent from live artifacts."""
+    monkeypatch.setattr(
+        guard_mod,
+        "_QLCB_OOF_RELIABILITY_PATH",
+        str(tmp_path / "absent_qlcb_oof_reliability.json"),
+    )
+    guard_mod.reset_reliability_cache()
+    yield
+    guard_mod.reset_reliability_cache()
 
 
 def _resolution(metric: str = "high") -> EventResolution:
