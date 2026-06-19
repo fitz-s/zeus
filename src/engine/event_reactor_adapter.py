@@ -2760,6 +2760,7 @@ def _build_event_bound_no_submit_receipt_core(
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=trade_conn,
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+            honor_admission_rejections=False,
         )
         if not _spine_entry_proofs:
             proof = None
@@ -8444,6 +8445,7 @@ def _selection_scoped_proofs(
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
     allow_same_family_monitor_owned: bool = False,
+    honor_admission_rejections: bool = True,
 ) -> tuple[_CandidateProof, ...]:
     executable = [proof for proof in proofs if proof.execution_price is not None]
     # FIX A/B hardening (2026-06-10 Milan-24C incident): a priced proof that an
@@ -8454,15 +8456,16 @@ def _selection_scoped_proofs(
     # TRADE_SCORE_NON_POSITIVE submit gate — never a bad order, but it STARVED
     # the legitimate admitted sibling of its selection. Gate-rejected proofs are
     # unrankable, not merely unsubmittable.
-    executable = [
-        proof
-        for proof in executable
-        if proof.missing_reason is None
-        or (
-            allow_same_family_monitor_owned
-            and _is_entry_held_family_reason(proof.missing_reason)
-        )
-    ]
+    if honor_admission_rejections:
+        executable = [
+            proof
+            for proof in executable
+            if proof.missing_reason is None
+            or (
+                allow_same_family_monitor_owned
+                and _is_entry_held_family_reason(proof.missing_reason)
+            )
+        ]
     tradeable_limit = [
         proof
         for proof in executable

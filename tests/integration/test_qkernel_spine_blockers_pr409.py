@@ -811,3 +811,76 @@ def test_overlay_does_not_create_milan_buy_yes_probability_contradiction():
     assert new_proof.q_posterior == pytest.approx(0.199009684818666)
     assert new_proof.q_lcb_5pct == pytest.approx(0.04625961651748593)
     assert new_proof.q_lcb_5pct <= new_proof.q_posterior
+
+
+def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes():
+    """The spine must rank executable family legs itself, not inherit legacy vetoes.
+
+    Regression: qkernel was called after `_selection_scoped_proofs`, which filtered
+    every proof with a legacy `missing_reason`. That meant an old capital/FDR veto
+    could remove the center YES before the payoff-vector selector ever saw it,
+    preserving the all-NO behavior the spine was introduced to replace.
+    """
+    from dataclasses import replace
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.05, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=[0.10, 0.80, 0.10, 0.00],
+        q_lcb_by_bin=[0.08, 0.65, 0.08, 0.00],
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+    marked = tuple(
+        replace(
+            proof,
+            missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:legacy-pre-spine",
+            passed_prefilter=False,
+            trade_score=0.0,
+        )
+        if proof.direction == "buy_yes" and proof.candidate.bin.label == "20C"
+        else proof
+        for proof in proofs
+    )
+
+    legacy_scoped = era._selection_scoped_proofs(
+        proofs=marked,
+        honor_admission_rejections=True,
+    )
+    qkernel_scoped = era._selection_scoped_proofs(
+        proofs=marked,
+        honor_admission_rejections=False,
+    )
+
+    assert all(
+        not (proof.direction == "buy_yes" and proof.candidate.bin.label == "20C")
+        for proof in legacy_scoped
+    )
+    assert any(
+        proof.direction == "buy_yes" and proof.candidate.bin.label == "20C"
+        for proof in qkernel_scoped
+    )
+
+    res = _drive(
+        family,
+        qkernel_scoped,
+        _payload(mu=20.0, sigma=0.1, members=[20, 20, 20, 20, 20]),
+    )
+
+    center_yes = [
+        decision
+        for decision in res.decision.candidate_decisions
+        if decision.route.side == "YES"
+        and decision.route.bin_id == era._candidate_bin_id(
+            next(
+                proof
+                for proof in qkernel_scoped
+                if proof.direction == "buy_yes" and proof.candidate.bin.label == "20C"
+            )
+        )
+    ]
+
+    assert center_yes
+    assert center_yes[0].economics.edge_lcb > 0.0
+    assert center_yes[0].economics.optimal_delta_u > 0.0
