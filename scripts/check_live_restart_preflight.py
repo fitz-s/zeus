@@ -83,6 +83,7 @@ FORECAST_LIVE_HEARTBEAT_PATH = STATE_DIR / "forecast-live-heartbeat.json"
 DUST_SHARE_LIMIT = 0.01
 SIDECAR_HEARTBEAT_MAX_AGE_SECONDS = 180.0
 EXECUTION_FEASIBILITY_MAX_AGE_SECONDS = 180.0
+EXECUTION_FEASIBILITY_CLOCK_SKEW_TOLERANCE_SECONDS = 5.0
 EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS = 600.0
 FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS = 120.0
 REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS = 1800.0
@@ -377,6 +378,14 @@ def _latest_iso_from_covered(rows: list[dict[str, Any]], key: str) -> str | None
     return latest.isoformat() if latest is not None else None
 
 
+def _execution_feasibility_age_is_fresh(age_seconds: float) -> bool:
+    return (
+        -EXECUTION_FEASIBILITY_CLOCK_SKEW_TOLERANCE_SECONDS
+        <= age_seconds
+        <= EXECUTION_FEASIBILITY_MAX_AGE_SECONDS
+    )
+
+
 def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResult:
     now = datetime.now(timezone.utc)
     evidence: dict[str, Any] = {
@@ -414,6 +423,9 @@ def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResul
     evidence["latest_quote_seen_at"] = _latest_iso_from_covered(
         exposure_results["covered"], "latest_quote_seen_at"
     )
+    evidence["clock_skew_tolerance_seconds"] = (
+        EXECUTION_FEASIBILITY_CLOCK_SKEW_TOLERANCE_SECONDS
+    )
     evidence.update(exposure_results)
     if latest_dt is None:
         return CheckResult(
@@ -424,7 +436,11 @@ def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResul
         )
     age = (now - latest_dt).total_seconds()
     evidence["age_seconds"] = age
-    ok = 0.0 <= age <= EXECUTION_FEASIBILITY_MAX_AGE_SECONDS and not exposure_results["risky"]
+    if age < 0:
+        evidence["clock_skew_tolerated_seconds"] = min(
+            abs(age), EXECUTION_FEASIBILITY_CLOCK_SKEW_TOLERANCE_SECONDS
+        )
+    ok = _execution_feasibility_age_is_fresh(age) and not exposure_results["risky"]
     return CheckResult(
         "execution_feasibility_evidence_freshness",
         ok,
@@ -484,9 +500,18 @@ def _execution_feasibility_exposure_freshness(
             continue
         age = (now - latest_dt).total_seconds()
         evidence["age_seconds"] = age
+        if age < 0:
+            evidence["clock_skew_tolerated_seconds"] = min(
+                abs(age), EXECUTION_FEASIBILITY_CLOCK_SKEW_TOLERANCE_SECONDS
+            )
         covered.append(evidence)
-        if not (0.0 <= age <= EXECUTION_FEASIBILITY_MAX_AGE_SECONDS):
-            risky.append({**evidence, "risk": "stale_execution_feasibility_evidence"})
+        if not _execution_feasibility_age_is_fresh(age):
+            risk = (
+                "future_execution_feasibility_evidence"
+                if age < 0
+                else "stale_execution_feasibility_evidence"
+            )
+            risky.append({**evidence, "risk": risk})
     return {"scoped_exposure_count": len(exposures), "risky": risky, "covered": covered}
 
 

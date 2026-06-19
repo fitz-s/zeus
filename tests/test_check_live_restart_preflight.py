@@ -1205,6 +1205,100 @@ def test_execution_feasibility_freshness_uses_observation_time_not_venue_book_ti
     assert covered["latest_quote_seen_at"] == stale_book_time.isoformat()
 
 
+def test_execution_feasibility_freshness_tolerates_small_writer_clock_skew():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc)
+    observed_after_check_started = now + timedelta(seconds=1)
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES (?, ?, ?, ?)",
+        (
+            "cond-target",
+            "tok-no-target",
+            now.isoformat(),
+            observed_after_check_started.isoformat(),
+        ),
+    )
+
+    result = preflight._execution_feasibility_exposure_freshness(
+        conn,
+        columns={"condition_id", "token_id", "quote_seen_at", "created_at"},
+        exposures=[
+            {
+                "position_id": "active-pos",
+                "phase": "active",
+                "city": "Tokyo",
+                "target_date": "2026-06-21",
+                "temperature_metric": "low",
+                "bin_label": "Will the lowest temperature in Tokyo be 22°C on June 21?",
+                "direction": "buy_no",
+                "condition_id": "cond-target",
+                "tokens": ["tok-no-target"],
+            }
+        ],
+        now=now,
+    )
+
+    assert result["risky"] == []
+    covered = result["covered"][0]
+    assert covered["age_seconds"] == -1.0
+    assert covered["clock_skew_tolerated_seconds"] == 1.0
+
+
+def test_execution_feasibility_freshness_blocks_large_future_timestamp():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(
+        seconds=preflight.EXECUTION_FEASIBILITY_CLOCK_SKEW_TOLERANCE_SECONDS + 1
+    )
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES (?, ?, ?, ?)",
+        ("cond-target", "tok-no-target", now.isoformat(), future.isoformat()),
+    )
+
+    result = preflight._execution_feasibility_exposure_freshness(
+        conn,
+        columns={"condition_id", "token_id", "quote_seen_at", "created_at"},
+        exposures=[
+            {
+                "position_id": "active-pos",
+                "phase": "active",
+                "city": "Tokyo",
+                "target_date": "2026-06-21",
+                "temperature_metric": "low",
+                "bin_label": "Will the lowest temperature in Tokyo be 22°C on June 21?",
+                "direction": "buy_no",
+                "condition_id": "cond-target",
+                "tokens": ["tok-no-target"],
+            }
+        ],
+        now=now,
+    )
+
+    assert result["risky"][0]["risk"] == "future_execution_feasibility_evidence"
+
+
 def test_executable_quote_not_required_after_venue_close(monkeypatch):
     from src.strategy import market_phase
 
