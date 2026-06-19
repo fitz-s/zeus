@@ -24,6 +24,7 @@ from src.events.idempotency import stable_event_id
 
 UTC = timezone.utc
 MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+REST_SEED_COMMIT_CHUNK_SIZE = 16
 _logger = logging.getLogger(__name__)
 
 
@@ -713,6 +714,69 @@ class MarketChannelOnlineService:
             pre_cached=pre_captured_books,
         )
 
+    def seed_rest_books_in_chunks(
+        self,
+        *,
+        token_ids: Iterable[str],
+        received_at: str,
+        world_mutex: Any,
+        commit: Callable[[], None] | None,
+        logger: Any | None = None,
+        chunk_size: int = REST_SEED_COMMIT_CHUNK_SIZE,
+    ) -> int:
+        """Fetch REST books off-lock and commit evidence in bounded chunks.
+
+        The old connect path pre-captured the entire active universe before one
+        DB commit. With 100+ weather tokens that let held-position quote evidence
+        age past the live preflight/redecision SLA while the thread was still
+        fetching. This method keeps the no-I/O-under-world-mutex invariant but
+        commits every small batch, so fresh held/candidate evidence reaches the
+        live monitor continuously.
+        """
+
+        if self.fetch_orderbook is None:
+            return 0
+        size = max(1, int(chunk_size or REST_SEED_COMMIT_CHUNK_SIZE))
+        ordered = [
+            str(token_id)
+            for token_id in sorted({str(token_id) for token_id in token_ids})
+            if str(token_id) in self.ingestor._active_token_ids
+        ]
+        written = 0
+        for offset in range(0, len(ordered), size):
+            chunk = ordered[offset: offset + size]
+            pre_captured_books: dict[str, dict] = {}
+            for token_id in chunk:
+                try:
+                    pre_captured_books[token_id] = self.fetch_orderbook(token_id)
+                except Exception as exc:
+                    _logger.warning(
+                        "market_channel: REST seed pre-fetch failed for token %s"
+                        " (will skip seed for this token): %s: %s",
+                        token_id,
+                        type(exc).__name__,
+                        exc,
+                    )
+            if not pre_captured_books:
+                continue
+            with world_mutex:
+                results = self.ingestor.seed_from_rest(
+                    self.fetch_orderbook,
+                    received_at=received_at,
+                    pre_cached=pre_captured_books,
+                    token_ids=pre_captured_books.keys(),
+                )
+                if commit is not None:
+                    commit()
+            written += len(results)
+            if logger is not None:
+                logger.debug(
+                    "EDLI market-channel REST seed committed chunk: tokens=%d events=%d",
+                    len(pre_captured_books),
+                    len(results),
+                )
+        return written
+
     def on_disconnect(self, *, gap_start: str) -> None:
         self.connected = False
         self.gap_start = gap_start
@@ -722,6 +786,8 @@ class MarketChannelOnlineService:
         *,
         received_at: str,
         pre_captured_books: "dict[str, dict] | None" = None,
+        token_ids: Iterable[str] | None = None,
+        gap_start: str | None = None,
     ) -> list[EventWriteResult]:
         """Seed gap-close books on reconnect.
 
@@ -740,8 +806,15 @@ class MarketChannelOnlineService:
         results = []
         from src.state.db import assert_no_world_mutex_held_for_io
 
-        gap_start_captured = self.gap_start or received_at
-        for token_id in sorted(self.ingestor._active_token_ids):
+        gap_start_captured = gap_start or self.gap_start or received_at
+        active_token_ids = self.ingestor._active_token_ids
+        if token_ids is not None:
+            active_token_ids = {
+                str(token_id)
+                for token_id in token_ids
+                if str(token_id) in self.ingestor._active_token_ids
+            }
+        for token_id in sorted(active_token_ids):
             try:
                 if pre_captured_books is not None and token_id in pre_captured_books:
                     message = dict(pre_captured_books[token_id])
@@ -772,6 +845,63 @@ class MarketChannelOnlineService:
                 results.append(result)
         self.gap_start = None
         return results
+
+    def reconnect_rest_books_in_chunks(
+        self,
+        *,
+        token_ids: Iterable[str],
+        received_at: str,
+        world_mutex: Any,
+        commit: Callable[[], None] | None,
+        logger: Any | None = None,
+        chunk_size: int = REST_SEED_COMMIT_CHUNK_SIZE,
+    ) -> int:
+        """Fetch reconnect gap books off-lock and commit in bounded chunks."""
+
+        if self.fetch_orderbook is None:
+            return 0
+        gap_start_captured = self.gap_start or received_at
+        size = max(1, int(chunk_size or REST_SEED_COMMIT_CHUNK_SIZE))
+        ordered = [
+            str(token_id)
+            for token_id in sorted({str(token_id) for token_id in token_ids})
+            if str(token_id) in self.ingestor._active_token_ids
+        ]
+        written = 0
+        for offset in range(0, len(ordered), size):
+            chunk = ordered[offset: offset + size]
+            pre_captured_books: dict[str, dict] = {}
+            for token_id in chunk:
+                try:
+                    pre_captured_books[token_id] = self.fetch_orderbook(token_id)
+                except Exception as exc:
+                    _logger.warning(
+                        "market_channel: reconnect REST pre-fetch failed for token %s"
+                        " (will skip seed for this token): %s: %s",
+                        token_id,
+                        type(exc).__name__,
+                        exc,
+                    )
+            if not pre_captured_books:
+                continue
+            with world_mutex:
+                results = self.on_reconnect(
+                    received_at=received_at,
+                    pre_captured_books=pre_captured_books,
+                    token_ids=pre_captured_books.keys(),
+                    gap_start=gap_start_captured,
+                )
+                if commit is not None:
+                    commit()
+            written += len(results)
+            if logger is not None:
+                logger.debug(
+                    "EDLI market-channel reconnect REST seed committed chunk: tokens=%d events=%d",
+                    len(pre_captured_books),
+                    len(results),
+                )
+        self.gap_start = None
+        return written
 
     async def run_websocket_forever(
         self,
@@ -808,63 +938,26 @@ class MarketChannelOnlineService:
                         if str(token_id) in self.ingestor._active_token_ids
                     }
                 )
-                if seed_first and self.fetch_orderbook is not None:
-                    seed_first_books: dict[str, dict] = {}
-                    for _token_id in seed_first:
-                        try:
-                            seed_first_books[_token_id] = self.fetch_orderbook(_token_id)
-                        except Exception as _exc:
-                            _logger.warning(
-                                "market_channel: priority pre-fetch failed for token %s"
-                                " (will skip seed for this token): %s: %s",
-                                _token_id,
-                                type(_exc).__name__,
-                                _exc,
-                            )
-                    if seed_first_books:
-                        with _world_mutex:
-                            self.ingestor.seed_from_rest(
-                                self.fetch_orderbook,
-                                received_at=received_at,
-                                pre_cached=seed_first_books,
-                                token_ids=seed_first_books.keys(),
-                            )
-                            if commit is not None:
-                                commit()
-
-                # Pre-capture REST orderbook snapshots BEFORE acquiring the world
-                # mutex (STEP-7 / pre-capture pattern — 5th-instance fix 2026-06-04).
-                # Holding the world mutex across a blocking REST fetch was the direct
-                # cause of zeus-world.db WAL bloat (488→601 MB, STAT=U wedge).
-                # The fetch now runs off the lock; only the fast DB-only seed commit
-                # happens inside the critical section.
-                pre_captured_books: dict[str, dict] | None = None
                 if self.fetch_orderbook is not None:
-                    pre_captured_books = {}
-                    for _token_id in sorted(self.ingestor._active_token_ids):
-                        try:
-                            pre_captured_books[_token_id] = self.fetch_orderbook(_token_id)
-                        except Exception as _exc:
-                            _logger.warning(
-                                "market_channel: pre-fetch failed for token %s"
-                                " (will skip seed for this token): %s: %s",
-                                _token_id,
-                                type(_exc).__name__,
-                                _exc,
-                            )
-                            # Token absent from pre_captured_books → seed_from_rest
-                            # skips it gracefully (fail-closed per token, not per
-                            # connect — the WS connection proceeds normally).
-
-                # Seed-on-connect write unit (REST book seed → event/feasibility rows).
-                # I/O is done; only fast DB writes + commit happen under the mutex.
-                with _world_mutex:
-                    self.on_connect(
+                    if seed_first:
+                        self.seed_rest_books_in_chunks(
+                            token_ids=seed_first,
+                            received_at=received_at,
+                            world_mutex=_world_mutex,
+                            commit=commit,
+                            logger=logger,
+                            chunk_size=max(1, len(seed_first)),
+                        )
+                    remaining = sorted(set(self.ingestor._active_token_ids) - set(seed_first))
+                    self.seed_rest_books_in_chunks(
+                        token_ids=remaining,
                         received_at=received_at,
-                        pre_captured_books=pre_captured_books,
+                        world_mutex=_world_mutex,
+                        commit=commit,
+                        logger=logger,
                     )
-                    if commit is not None:
-                        commit()
+                self.connected = True
+                self.gap_start = None
                 async with websockets.connect(endpoint, ping_interval=20, ping_timeout=20) as ws:
                     await ws.send(
                         json.dumps(
@@ -927,31 +1020,17 @@ class MarketChannelOnlineService:
                         pass
                 await asyncio.sleep(reconnect_delay_seconds)
                 try:
-                    # Pre-capture reconnect books OFF the mutex (same STEP-7
-                    # pre-capture pattern as the initial connect path above).
                     _reconnect_at = datetime.now(UTC).isoformat()
-                    _pre_reconnect_books: dict[str, dict] | None = None
                     if self.fetch_orderbook is not None:
-                        _pre_reconnect_books = {}
-                        for _tid in sorted(self.ingestor._active_token_ids):
-                            try:
-                                _pre_reconnect_books[_tid] = self.fetch_orderbook(_tid)
-                            except Exception as _exc:
-                                _logger.warning(
-                                    "market_channel: reconnect pre-fetch failed for"
-                                    " token %s (will skip seed): %s: %s",
-                                    _tid,
-                                    type(_exc).__name__,
-                                    _exc,
-                                )
-                    # Reconnect seed write unit — only fast DB writes under the mutex.
-                    with _world_mutex:
-                        self.on_reconnect(
+                        self.reconnect_rest_books_in_chunks(
+                            token_ids=self.ingestor._active_token_ids,
                             received_at=_reconnect_at,
-                            pre_captured_books=_pre_reconnect_books,
+                            world_mutex=_world_mutex,
+                            commit=commit,
+                            logger=logger,
                         )
-                        if commit is not None:
-                            commit()
+                    self.connected = True
+                    self.gap_start = None
                 except Exception as seed_exc:  # noqa: BLE001
                     # Reconnect seed failed (e.g. REST 404). Rollback any partial
                     # transaction from the seed attempt for the same reason above.

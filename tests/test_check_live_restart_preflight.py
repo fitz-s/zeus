@@ -1123,6 +1123,39 @@ def test_execution_feasibility_freshness_uses_observation_time_not_venue_book_ti
     assert covered["latest_quote_seen_at"] == stale_book_time.isoformat()
 
 
+def test_executable_quote_not_required_after_venue_close(monkeypatch):
+    from src.strategy import market_phase
+
+    monkeypatch.setattr(market_phase, "family_venue_closed", lambda **_: True)
+    now = datetime.now(timezone.utc)
+
+    for phase in ("active", "day0_window", "pending_exit"):
+        assert preflight._requires_executable_quote(
+            {
+                "phase": phase,
+                "city": "Singapore",
+                "target_date": "2026-06-19",
+            },
+            now_utc=now,
+        ) is False
+
+
+def test_executable_quote_required_before_venue_close(monkeypatch):
+    from src.strategy import market_phase
+
+    monkeypatch.setattr(market_phase, "family_venue_closed", lambda **_: False)
+    now = datetime.now(timezone.utc)
+
+    assert preflight._requires_executable_quote(
+        {
+            "phase": "day0_window",
+            "city": "Paris",
+            "target_date": "2026-06-20",
+        },
+        now_utc=now,
+    ) is True
+
+
 def test_preflight_blocks_missing_sidecar_heartbeat(monkeypatch, tmp_path):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)

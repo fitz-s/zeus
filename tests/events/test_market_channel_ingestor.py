@@ -283,6 +283,106 @@ def test_seed_from_rest_can_seed_priority_subset_before_full_universe():
     assert rows == [("token-2",), ("token-2",)]
 
 
+def test_rest_seed_chunks_commit_progressively_before_full_universe_finishes():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    metadata = {
+        f"token-{idx}": _metadata(f"token-{idx}")[
+            f"token-{idx}"
+        ]
+        for idx in range(5)
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        quote_cache=cache,
+    )
+    fetch_calls: list[str] = []
+    commit_counts: list[int] = []
+
+    def fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=fetch)
+
+    written = service.seed_rest_books_in_chunks(
+        token_ids=set(metadata),
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=nullcontext(),
+        commit=lambda: commit_counts.append(
+            conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        ),
+        chunk_size=2,
+    )
+
+    assert written == 5
+    assert fetch_calls == [f"token-{idx}" for idx in range(5)]
+    # Two evidence rows per token (buy/sell for the canonical side), committed
+    # after each bounded batch rather than only after the full universe.
+    assert commit_counts == [4, 8, 10]
+
+
+def test_reconnect_rest_seed_chunks_preserve_gap_snapshot_and_commit_progressively():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    metadata = {
+        f"token-{idx}": _metadata(f"token-{idx}")[
+            f"token-{idx}"
+        ]
+        for idx in range(5)
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        quote_cache=QuoteCache(),
+    )
+    fetch_calls: list[str] = []
+    commit_counts: list[int] = []
+
+    def fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "event_type": "book",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=fetch)
+    service.connected = False
+    service.gap_start = "2026-05-24T09:58:00+00:00"
+
+    written = service.reconnect_rest_books_in_chunks(
+        token_ids=set(metadata),
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=nullcontext(),
+        commit=lambda: commit_counts.append(
+            conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'").fetchone()[0]
+        ),
+        chunk_size=2,
+    )
+
+    assert written == 5
+    assert fetch_calls == [f"token-{idx}" for idx in range(5)]
+    assert commit_counts == [2, 4, 5]
+    assert service.connected is True
+    assert service.gap_start is None
+
+
 def test_market_channel_quote_writes_feasibility_evidence_only():
     conn, writer = _conn_writer()
     ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())

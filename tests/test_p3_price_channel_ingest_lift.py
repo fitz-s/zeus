@@ -279,6 +279,116 @@ def test_open_position_tokens_are_market_channel_seed_priority():
     }
 
 
+def test_market_channel_seed_first_prefers_held_positions_over_candidate_universe():
+    from src.ingest.price_channel_ingest import _edli_market_channel_seed_first_token_ids
+
+    assert _edli_market_channel_seed_first_token_ids(
+        held_priority_token_ids={"held-yes", "held-no"},
+        candidate_priority_token_ids={"candidate-yes", "candidate-no"},
+    ) == {"held-yes", "held-no"}
+
+
+def test_market_channel_seed_first_falls_back_to_candidates_without_open_positions():
+    from src.ingest.price_channel_ingest import _edli_market_channel_seed_first_token_ids
+
+    assert _edli_market_channel_seed_first_token_ids(
+        held_priority_token_ids=set(),
+        candidate_priority_token_ids={"candidate-yes", "candidate-no"},
+    ) == {"candidate-yes", "candidate-no"}
+
+
+def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
+    from src.data import polymarket_client
+    from src.ingest.price_channel_ingest import _edli_refresh_held_position_quote_evidence
+    from src.state import db as state_db
+    from src.state.db import init_schema
+
+    world_path = tmp_path / "world.db"
+    trade_path = tmp_path / "trade.db"
+    for path in (world_path, trade_path):
+        conn = sqlite3.connect(path)
+        init_schema(conn)
+        conn.commit()
+        conn.close()
+
+    trade = sqlite3.connect(trade_path)
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, direction, strategy_key,
+            updated_at, temperature_metric, token_id, no_token_id, condition_id
+        ) VALUES (
+            'pos-1', 'active', 'Paris', '2026-06-20', 'buy_no',
+            'opening_inertia', '2026-06-19T10:00:00+00:00', 'low',
+            'yes-token', 'no-token', '0xcondition'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+            question_id, yes_token_id, no_token_id, enable_orderbook, active,
+            closed, market_end_at, min_tick_size, min_order_size,
+            fee_details_json, token_map_json, neg_risk, orderbook_top_bid,
+            orderbook_top_ask, orderbook_depth_json, raw_gamma_payload_hash,
+            raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+            captured_at, freshness_deadline
+        ) VALUES (
+            'snap-1', 'gamma-1', 'event-1', 'weather-test', '0xcondition',
+            'question-1', 'yes-token', 'no-token', 1, 1, 0,
+            '2026-06-21T00:00:00+00:00', '0.01', '5', '{}',
+            '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
+            'CLOB', '2026-06-19T10:00:00+00:00',
+            '2026-06-19T10:05:00+00:00'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    def _trade_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(trade_path)
+
+    def _world_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(world_path)
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            return {
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "timestamp": "1781863200000",
+                "hash": f"hash-{token_id}",
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.75", "size": "10"}],
+            }
+
+    monkeypatch.setattr(state_db, "get_trade_connection", _trade_conn)
+    monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = _edli_refresh_held_position_quote_evidence()
+
+    assert result["held_priority_token_ids"] == 2
+    assert result["held_token_metadata"] == 2
+    assert result["held_quote_refresh_events"] == 2
+    check = sqlite3.connect(trade_path)
+    try:
+        assert (
+            check.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+            == 4
+        )
+    finally:
+        check.close()
+
+
 # ===========================================================================
 # SUPERIORITY INVARIANTS (the lift makes the reduce_only-forever latch
 # unconstructable in the order daemon process)

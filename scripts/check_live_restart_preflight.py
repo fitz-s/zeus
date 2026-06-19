@@ -799,23 +799,24 @@ def _open_positions() -> list[Any]:
 def _requires_executable_quote(row: sqlite3.Row, *, now_utc: datetime) -> bool:
     """Whether restart preflight should require fresh executable book evidence.
 
-    A venue-closed ``pending_exit`` cannot be acted through CLOB anymore; it must
-    be handled by settlement/harvester recovery and the pending-exit check, not by
-    waiting forever for fresh executable substrate or quote evidence.
+    A venue-closed position cannot be acted through CLOB anymore regardless of
+    its local lifecycle phase. It must be handled by settlement/harvester
+    recovery and the pending-exit/held-belief checks, not by waiting forever for
+    fresh executable substrate or quote evidence.
     """
 
-    if row["phase"] != "pending_exit":
-        return True
     try:
         from src.strategy.market_phase import family_venue_closed
 
-        return not family_venue_closed(
+        if family_venue_closed(
             city=str(row["city"] or ""),
             target_date=str(row["target_date"] or ""),
             now_utc=now_utc,
-        )
+        ):
+            return False
     except Exception:
         return True
+    return True
 
 
 def _open_positions_requiring_executable_quote(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
