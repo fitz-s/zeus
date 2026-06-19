@@ -15,8 +15,10 @@ pre-Wave-4 but was not the live default. Wave 4 wires the
 
 These tests pin the activation contract:
 
-  - default behaviour (no env, no cap) activates the live payoff-vector optimizer.
-  - live tier env var can still force emergency single-leg rollback.
+  - default behaviour (no env, no cap) activates the live payoff-vector optimizer
+    in constrained single-leg mode.
+  - live tier env var can still expand optimizer search for non-restart research,
+    but restart preflight blocks live max_legs > 1 until portfolio execution exists.
   - loss cap rejection falls back to the deterministic single-leg safety selector.
   - R4 regression: optimizer ELG(2-leg) >= ELG(1-leg) on a favourable
     partition (codifies Wave 1's R4 contract under the new helpers).
@@ -65,12 +67,13 @@ def _edge(label: str, *, posterior: float, entry: float, direction: str = "buy_y
 # ---------------------------------------------------------------------------
 
 class TestMaxLegsHelper:
-    def test_default_max_legs_uses_live_optimizer_when_env_unset(self, monkeypatch):
+    def test_default_max_legs_constrains_live_restart_to_single_leg(self, monkeypatch):
         monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, raising=False)
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
             assert _family_portfolio_max_legs() == DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE
+            assert _family_portfolio_max_legs() == 1
 
-    def test_live_env_can_force_single_leg_or_expand(self, monkeypatch):
+    def test_live_env_can_explicitly_expand_non_restart_search(self, monkeypatch):
         monkeypatch.setenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "1")
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
             assert _family_portfolio_max_legs() == 1
@@ -127,7 +130,7 @@ class TestPreselectMaxLegsConsistency:
             assert len(kept) == 1
             assert len(drops) == 1
 
-    def test_default_live_optimizer_evaluates_family_portfolio(self, monkeypatch):
+    def test_default_live_optimizer_evaluates_single_leg_family_intent(self, monkeypatch):
         monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, raising=False)
         monkeypatch.delenv(ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD, raising=False)
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
@@ -142,7 +145,7 @@ class TestPreselectMaxLegsConsistency:
                 temperature_metric="high",
                 enabled=True,
             )
-            assert len(kept) >= 1
+            assert len(kept) == 1
             assert len(kept) + len(drops) == len(edges)
 
 

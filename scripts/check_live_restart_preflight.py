@@ -37,13 +37,17 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from check_data_pipeline_live_e2e import _connect_live_readonly
 
-TRADE_DB = ROOT / "state" / "zeus_trades.db"
-WORLD_DB = ROOT / "state" / "zeus-world.db"
-FORECAST_DB = ROOT / "state" / "zeus-forecasts.db"
 SETTINGS_PATH = ROOT / "config" / "settings.json"
-STATE_DIR = ROOT / "state"
-SCHEDULER_HEALTH_PATH = ROOT / "state" / "scheduler_jobs_health.json"
-FORECAST_LIVE_HEARTBEAT_PATH = ROOT / "state" / "forecast-live-heartbeat.json"
+STATE_DIR = Path(
+    os.environ.get("ZEUS_LIVE_PREFLIGHT_STATE_DIR")
+    or os.environ.get("ZEUS_STATE_DIR")
+    or ROOT / "state"
+).expanduser().resolve()
+TRADE_DB = Path(os.environ.get("ZEUS_TRADE_DB") or STATE_DIR / "zeus_trades.db")
+WORLD_DB = Path(os.environ.get("ZEUS_WORLD_DB") or STATE_DIR / "zeus-world.db")
+FORECAST_DB = Path(os.environ.get("ZEUS_FORECAST_DB") or STATE_DIR / "zeus-forecasts.db")
+SCHEDULER_HEALTH_PATH = STATE_DIR / "scheduler_jobs_health.json"
+FORECAST_LIVE_HEARTBEAT_PATH = STATE_DIR / "forecast-live-heartbeat.json"
 LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
 DUST_SHARE_LIMIT = 0.01
 SIDECAR_HEARTBEAT_MAX_AGE_SECONDS = 180.0
@@ -130,15 +134,46 @@ def _qkernel_spine_cutover_check(cfg: dict[str, Any]) -> CheckResult:
     )
 
 
-def _qlcb_reliability_artifact_check() -> CheckResult:
+def _family_portfolio_single_leg_check() -> CheckResult:
     try:
-        from src.decision.qlcb_reliability_guard import (
-            reliability_artifact_status,
-            reset_reliability_cache,
+        from src.strategy.family_exclusive_dedup import (
+            ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE,
+            _family_portfolio_max_legs,
         )
 
-        reset_reliability_cache()
-        evidence = reliability_artifact_status()
+        max_legs = _family_portfolio_max_legs()
+        raw = os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE)
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            "family_portfolio_single_leg_cutover",
+            False,
+            "family portfolio max-legs check failed",
+            {"error": str(exc)},
+        )
+    ok = max_legs == 1
+    return CheckResult(
+        "family_portfolio_single_leg_cutover",
+        ok,
+        (
+            "live family portfolio execution is constrained to one leg"
+            if ok
+            else "live family portfolio max_legs exceeds 1 without portfolio execution state machine"
+        ),
+        {
+            "env": ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE,
+            "raw_value": raw,
+            "effective_max_legs": max_legs,
+        },
+    )
+
+
+def _qlcb_reliability_artifact_check() -> CheckResult:
+    try:
+        from src.decision import qlcb_reliability_guard as qlcb_guard
+
+        qlcb_guard._QLCB_OOF_RELIABILITY_PATH = str(STATE_DIR / "qlcb_oof_reliability.json")
+        qlcb_guard.reset_reliability_cache()
+        evidence = qlcb_guard.reliability_artifact_status()
     except Exception as exc:  # noqa: BLE001
         return CheckResult(
             "qlcb_reliability_artifact",
@@ -147,14 +182,14 @@ def _qlcb_reliability_artifact_check() -> CheckResult:
             {"error": str(exc)},
         )
     status = str(evidence.get("status") or "")
-    ok = status in {"ABSENT_ALLOWED", "ACTIVE_VALID"}
+    ok = status == "ACTIVE_VALID"
     return CheckResult(
         "qlcb_reliability_artifact",
         ok,
         (
-            "qLCB reliability artifact is absent/inert or active-valid"
+            "qLCB reliability artifact is active-valid"
             if ok
-            else "qLCB reliability artifact exists but is invalid; live guard would abstain"
+            else "qLCB reliability artifact is not active-valid for live restart"
         ),
         evidence,
     )
@@ -1002,6 +1037,7 @@ def evaluate() -> dict[str, Any]:
             {"edli.real_order_submit_enabled": real_submit},
         ),
         _qkernel_spine_cutover_check(cfg),
+        _family_portfolio_single_leg_check(),
         _qlcb_reliability_artifact_check(),
         _forecast_sidecar_health(),
         _posterior_summary(),

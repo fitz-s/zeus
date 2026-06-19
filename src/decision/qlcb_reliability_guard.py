@@ -6,7 +6,9 @@
 #   guard that does NOT move μ (not a de-bias → law-compliant) and is the LIVE SERVING RULE
 #   (not a parallel product → no shadow). Artifact-gated like the settlement σ-floor
 #   (src/data/replacement_forecast_materializer._replacement_sigma_scale_lookup precedent):
-#   INERT (pass-through, no abstain) only when the OOF reliability table is absent.
+#   Runtime compatibility remains INERT (pass-through, no abstain) only when the OOF
+#   reliability table is absent. Live restart preflight is stricter: it requires an
+#   ACTIVE_VALID artifact so "absent" is not confused with "ready".
 #   Once the artifact exists, a missing side-aware cell is an evidence gap and abstains.
 """q_lcb empirical reliability guard — the RAW-honest serving rule (no shadow, no de-bias).
 
@@ -34,13 +36,14 @@ serving rule applied where the decision layer consumes q_lcb (family_decision_en
 abstains globally, the correct DIRECT decision is "do not trade those bins" — never "quietly
 use EB".
 
-ARTIFACT-GATED (no shadow, absent-artifact inert only): the OOF reliability table is read from
+ARTIFACT-GATED (no shadow, absent-artifact runtime-inert only): the OOF reliability table is read from
 ``state/qlcb_oof_reliability.json`` (gitignored generated artifact, same posture as the σ-floor
-and the anchor-debias artifacts). When the artifact is ABSENT (the current live state) the
-guard is INERT — it serves ``band.q_lcb`` unchanged and abstains on NOTHING — so the live q is
-byte-identical to pre-guard behavior. Once the artifact exists, an unseen or incompatible cell
-ABSTAINS instead of passing through; an active artifact cannot silently authorize a side/bin it
-did not grade. The table itself is built OFFLINE from settled OOF predictions (the same
+and the anchor-debias artifacts). When the artifact is ABSENT the runtime guard remains INERT
+for compatibility — it serves ``band.q_lcb`` unchanged and abstains on NOTHING. That is not a
+live-restart readiness signal: restart preflight requires ``ACTIVE_VALID`` so absent/inert cannot
+be mistaken for a production-ready guard. Once the artifact exists, an unseen or incompatible
+cell ABSTAINS instead of passing through; an active artifact cannot silently authorize a side/bin
+it did not grade. The table itself is built OFFLINE from settled OOF predictions (the same
 settlement truth everything else grades on); this module only READS it and applies the Wilson
 lower bound + the trade/abstain rule. It NEVER fits per-city offsets, NEVER moves μ, and NEVER
 constructs a parallel q.

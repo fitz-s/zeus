@@ -88,6 +88,7 @@ def _patch_paths(monkeypatch, tmp_path):
     scheduler_health = tmp_path / "scheduler_jobs_health.json"
     forecast_live_heartbeat = tmp_path / "forecast-live-heartbeat.json"
     live_plist = tmp_path / "com.zeus.live-trading.plist"
+    qlcb_artifact = state_dir / "qlcb_oof_reliability.json"
     now = datetime.now(timezone.utc).isoformat()
     settings.write_text(
         json.dumps(
@@ -145,6 +146,16 @@ def _patch_paths(monkeypatch, tmp_path):
             }
         )
     )
+    qlcb_artifact.write_text(
+        json.dumps(
+            {
+                "cells": {
+                    "high|L1|YES|modal|qb1": {"n": 100, "hit_rate": 0.80},
+                    "high|L1|NO|nonmodal|qb1": {"n": 100, "hit_rate": 0.80},
+                }
+            }
+        )
+    )
     sqlite3.connect(world_db).close()
     monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
     monkeypatch.setattr(preflight, "WORLD_DB", world_db)
@@ -161,6 +172,7 @@ def _patch_paths(monkeypatch, tmp_path):
     )
     guard_mod.reset_reliability_cache()
     monkeypatch.delenv("ZEUS_HARVESTER_LIVE_ENABLED", raising=False)
+    monkeypatch.delenv("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", raising=False)
     monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
     monkeypatch.setattr(preflight, "_git_head", lambda: "testsha")
     return trade_db, forecast_db, state_dir
@@ -200,6 +212,78 @@ def test_preflight_blocks_qkernel_cutover_flag_off(monkeypatch, tmp_path):
     assert result["ok"] is False
     qkernel = next(c for c in result["checks"] if c["name"] == "qkernel_spine_cutover")
     assert qkernel["ok"] is False
+
+
+def test_preflight_qlcb_check_uses_preflight_state_dir(monkeypatch, tmp_path):
+    _trade_db, _forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(guard_mod, "_QLCB_OOF_RELIABILITY_PATH", str(tmp_path / "wrong.json"))
+    guard_mod.reset_reliability_cache()
+
+    result = preflight._qlcb_reliability_artifact_check()
+
+    assert result.ok is True
+    assert result.evidence["status"] == "ACTIVE_VALID"
+    assert result.evidence["path"] == str(state_dir / "qlcb_oof_reliability.json")
+
+
+def test_preflight_blocks_live_family_portfolio_max_legs_gt_one(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    monkeypatch.setenv("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", "2")
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    max_legs = next(c for c in result["checks"] if c["name"] == "family_portfolio_single_leg_cutover")
+    assert max_legs["ok"] is False
+    assert max_legs["evidence"]["effective_max_legs"] == 2
+
+
+def test_preflight_blocks_absent_qlcb_artifact(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    (state_dir / "qlcb_oof_reliability.json").unlink()
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    qlcb = next(c for c in result["checks"] if c["name"] == "qlcb_reliability_artifact")
+    assert qlcb["ok"] is False
+    assert qlcb["evidence"]["status"] == "ABSENT_ALLOWED"
 
 
 def test_preflight_blocks_present_invalid_qlcb_artifact(monkeypatch, tmp_path):

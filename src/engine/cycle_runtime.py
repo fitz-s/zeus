@@ -5727,11 +5727,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         or getattr(candidate, "slug", "")
                     ),
                     existing_exposures=_family_exposures,
-                    family_portfolio_intent=any(
-                        str(getattr(_d, "family_portfolio_leg_role", "") or "")
-                        == "portfolio_selected"
-                        for _d in decisions
-                    ),
                 )
                 _frontier_increment("family_frontier", "families_seen")
                 _frontier_increment(

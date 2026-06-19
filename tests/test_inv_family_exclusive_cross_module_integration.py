@@ -374,16 +374,15 @@ def test_gate_disabled_all_three_decisions_reach_execution_layer(
     ), "gate-disabled path must not stamp any dedup rejection reason"
 
 
-def test_live_family_fallback_tries_second_leg_when_primary_reprice_fails(
+def test_live_scalar_family_fallbacks_are_not_parallel_submit_candidates(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    """RELATIONSHIP: ranked family candidates fallback before live submit.
+    """RELATIONSHIP: scalar ranked family fallbacks collapse before live submit.
 
-    The primary family leg can fail executable reprice after preselection. That
-    must not turn the whole family into no-trade while a ranked sibling has
-    valid executable authority. Once one sibling submits, later siblings must be
-    skipped by the same family gate.
+    Ranked scalar siblings are not an execution queue. The family gate admits
+    one best scalar decision before reprice/submit, so a failed first sibling
+    cannot race a second same-family order.
     """
     from src.state.db import get_connection, init_schema
 
@@ -472,18 +471,24 @@ def test_live_family_fallback_tries_second_leg_when_primary_reprice_fails(
     )
 
     assert len(captured) == 1
-    assert reprice_attempts == [decisions[0].decision_id, decisions[1].decision_id]
+    assert reprice_attempts == [decisions[1].decision_id]
     assert submitted == [decisions[1].decision_id]
     assert len(artifact.trade_cases) == 1
     assert artifact.trade_cases[0]["decision_id"] == decisions[1].decision_id
-    assert summary["family_fallback_selected_rank"] == 2
     skipped = [
         ntc for ntc in artifact.no_trade_cases
         if "mutually_exclusive_family_fallback_not_attempted_after_submit"
         in ntc.rejection_reasons
     ]
-    assert len(skipped) == 1
-    assert skipped[0].decision_id == decisions[2].decision_id
+    assert skipped == []
+    family_dedup = [
+        ntc for ntc in artifact.no_trade_cases
+        if "mutually_exclusive_family_dedup" in ntc.rejection_reasons
+    ]
+    assert {ntc.decision_id for ntc in family_dedup} == {
+        decisions[0].decision_id,
+        decisions[2].decision_id,
+    }
 
 
 def test_live_family_portfolio_selected_legs_do_not_stop_after_first_submit(
@@ -597,15 +602,19 @@ def test_live_family_portfolio_selected_legs_do_not_stop_after_first_submit(
         if "mutually_exclusive_family_fallback_not_attempted_after_submit"
         in ntc.rejection_reasons
     ]
-    assert len(skipped) == 1
-    assert skipped[0].decision_id == decisions[2].decision_id
+    assert skipped == []
+    family_dedup = [
+        ntc for ntc in artifact.no_trade_cases
+        if "mutually_exclusive_family_dedup" in ntc.rejection_reasons
+    ]
+    assert [ntc.decision_id for ntc in family_dedup] == [decisions[2].decision_id]
 
 
-def test_paper_family_fallback_executes_at_most_one_ranked_leg(
+def test_paper_scalar_family_fallbacks_are_not_parallel_submit_candidates(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    """RELATIONSHIP: family fallback is an execution invariant in every env."""
+    """RELATIONSHIP: scalar family fallback collapse is invariant in every env."""
 
     from src.state.db import get_connection, init_schema
 
@@ -662,18 +671,23 @@ def test_paper_family_fallback_executes_at_most_one_ranked_leg(
     )
 
     assert len(captured) == 1
-    assert created == ["token-1"]
-    assert executed == [decisions[0].decision_id]
+    assert created == ["token-2"]
+    assert executed == [decisions[1].decision_id]
     assert len(artifact.trade_cases) == 1
     skipped = [
         ntc for ntc in artifact.no_trade_cases
         if "mutually_exclusive_family_fallback_not_attempted_after_submit"
         in ntc.rejection_reasons
     ]
-    assert [ntc.decision_id for ntc in skipped] == [
-        decisions[1].decision_id,
-        decisions[2].decision_id,
+    assert skipped == []
+    family_dedup = [
+        ntc for ntc in artifact.no_trade_cases
+        if "mutually_exclusive_family_dedup" in ntc.rejection_reasons
     ]
+    assert {ntc.decision_id for ntc in family_dedup} == {
+        decisions[0].decision_id,
+        decisions[2].decision_id,
+    }
 
 
 def test_structural_sentinel_dedup_called_from_cycle_runtime() -> None:

@@ -62,12 +62,11 @@ def test_r4_optimizer_exists_and_is_callable() -> None:
     assert callable(optimize_exclusive_outcome_portfolio)
 
 
-def test_r4_live_default_uses_multi_leg_optimizer() -> None:
-    """Documents that shipped live defaults evaluate multi-leg family portfolios.
+def test_r4_live_default_constrains_restart_to_single_leg_optimizer() -> None:
+    """Unset live defaults use full-omega selection but no multi-leg execution.
 
-    `ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS=1` remains available as an explicit
-    emergency rollback, but the unset default must allow the optimizer to
-    compare dominated baskets against capital-efficient center YES legs.
+    Multi-leg search remains an explicit env override for non-restart research
+    until the execution layer has portfolio legging/partial-fill semantics.
     """
     import os
 
@@ -79,8 +78,8 @@ def test_r4_live_default_uses_multi_leg_optimizer() -> None:
             str(DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE),
         )
     )
-    assert live_legs >= 2, (
-        f"ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS={live_legs}; expected live default >=2."
+    assert live_legs == 1, (
+        f"ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS={live_legs}; expected live default 1."
     )
     legacy = os.environ.get("ZEUS_FAMILY_OPTIMIZER_MAX_LEGS")
     assert legacy is None, (

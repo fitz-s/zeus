@@ -15,11 +15,11 @@ event.
 
 The live path uses ``optimize_exclusive_outcome_portfolio`` through
 ``preselect_single_family_edge_before_kelly`` / ``build_weather_family_decision``.
-That optimizer compares buy-YES, native buy-NO, and multi-leg portfolios by the
-same payoff-vector objective, so dominated sibling-NO baskets lose to a
-capital-efficient center YES when the payoff is equivalent. Explicit
-``ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS=1`` remains an emergency rollback only,
-not the live default.
+That optimizer compares buy-YES and native buy-NO by the same payoff-vector
+objective, so dominated sibling-NO exposure loses to a capital-efficient center
+YES when the payoff is equivalent. Multi-leg portfolio search remains available
+only by explicit operator override; the live default is single-leg until the
+execution layer has a tested stake-vector/partial-fill portfolio state machine.
 
 ``dedup_mutually_exclusive_families`` remains a second-line runtime safety net
 for legacy/mixed callers and existing-exposure conflicts. It prevents scalar
@@ -50,13 +50,13 @@ _DEFAULT = "1"  # ON by default (live-money fail-safe).
 BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_ENABLED"
 BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_ENABLED"
 
-# Wave 4 (2026-05-27), live repair 2026-06-19: family-portfolio optimizer
-# activation. Default 3 lets the live optimizer compare common
-# dominated baskets (for example two sibling NO legs) against a capital-efficient
-# center YES. Set the env var to 1 only for an explicit emergency single-leg
-# rollback.
+# Wave 4 (2026-05-27), live repair 2026-06-19: the full-omega family optimizer
+# is live, but live execution is constrained to single-leg selection by default.
+# Multi-leg portfolios require a separate execution state machine for legging,
+# partial fills, UNKNOWN recovery, and stake-vector optimization; until then an
+# explicit env override is test/research only and blocked by restart preflight.
 ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = "ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS"
-DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = 3
+DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = 1
 # Hard cap on a family portfolio's worst-case loss (USD). When set, the
 # optimizer rejects portfolios with ``max_loss_usd > cap`` (returns None) so
 # the caller falls back to the single-leg safety selector. Default None = no cap (relies
@@ -204,7 +204,6 @@ class WeatherFamilyDecision:
 
     portfolio: ExclusiveOutcomePortfolio
     dropped: tuple[FamilyPreselectionDrop, ...]
-    family_portfolio_intent: bool = True
 
 
 _BLOCKING_EXPOSURE_PHASES = frozenset(
@@ -1009,6 +1008,7 @@ def _outcome_support_from_probabilities(
     """
 
     support_probability: dict[int, float] = {}
+    explicit = outcome_probabilities is not None
     if outcome_probabilities is not None:
         if isinstance(outcome_probabilities, Mapping):
             iterator = outcome_probabilities.items()
@@ -1023,6 +1023,14 @@ def _outcome_support_from_probabilities(
             if support_index < 0 or not math.isfinite(probability):
                 continue
             support_probability[support_index] = max(0.0, probability)
+
+    if explicit:
+        leg_support = {leg.support_index for leg in legs}
+        if not leg_support.issubset(set(support_probability)):
+            return ()
+        total = sum(support_probability.values())
+        if not math.isfinite(total) or abs(total - 1.0) > 1e-6:
+            return ()
 
     if not support_probability:
         for leg in legs:
@@ -1667,7 +1675,6 @@ def dedup_mutually_exclusive_families(
     market_family_id: str = "",
     enabled: bool | None = None,
     existing_exposures: Iterable[Any] | None = None,
-    family_portfolio_intent: bool = False,
     family_portfolio_allowed_exposure_ids: Iterable[str] | None = None,
 ) -> list["EdgeDecision"]:
     """Second-line safety gate for scalar entries in an exclusive family.
@@ -1695,10 +1702,6 @@ def dedup_mutually_exclusive_families(
             different bin already has exposure, new independent entries for the
             same family are blocked unless a typed rebalance intent explicitly
             names the existing exposure id.
-        family_portfolio_intent: true only when a first-class family portfolio
-            optimizer emitted the executable portfolio intent. FDR-selected
-            hypotheses alone are not a portfolio intent. This boolean is NOT
-            authority to ignore existing live exposure.
         family_portfolio_allowed_exposure_ids: position/command ids that a
             typed monitor/rebalance intent is explicitly allowed to touch. New
             entry intents pass none, so existing same-family exposure blocks.
@@ -1769,20 +1772,36 @@ def dedup_mutually_exclusive_families(
             # Single-bin (or single-entry) family: untouched — byte-identical
             # to the legacy per-edge path. No regression.
             continue
-        if all(
-            int(getattr(decisions[i], "family_fallback_candidate_count", 0) or 0) > 1
+        portfolio_selected = [
+            i
+            for i in idxs
+            if int(getattr(decisions[i], "family_fallback_candidate_count", 0) or 0) > 1
             and str(getattr(decisions[i], "family_portfolio_leg_role", "") or "")
             == "portfolio_selected"
-            for i in idxs
-        ):
-            for i in idxs:
+        ]
+        if portfolio_selected:
+            selected_set = set(portfolio_selected)
+            for i in portfolio_selected:
                 validations = getattr(decisions[i], "applied_validations", None)
                 if isinstance(validations, list) and "family_ranked_executable_fallback" not in validations:
                     validations.append("family_ranked_executable_fallback")
+            for i in idxs:
+                if i in selected_set:
+                    continue
+                d = decisions[i]
+                d.should_trade = False
+                d.rejection_stage = FAMILY_REJECTION_STAGE
+                d.rejection_reasons = [MUTUALLY_EXCLUSIVE_FAMILY_DEDUP]
+                d.rejection_reason_enum = NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
+                d.rejection_reason_detail = (
+                    f"family={city}|{target_date}|{temperature_metric} "
+                    f"dropped_bin={_decision_bin_label(d)!r} "
+                    "(portfolio selected legs only; scalar fallback alternative not live)"
+                )
             logger.info(
                 "[MUTUALLY_EXCLUSIVE_FAMILY_FALLBACK_CANDIDATES] family=%s candidate_count=%d",
                 "|".join(key),
-                len(idxs),
+                len(portfolio_selected),
             )
             continue
         best_i = _pick_best_index(decisions, idxs)

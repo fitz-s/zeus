@@ -423,10 +423,10 @@ def test_unknown_market_family_exposure_blocks_conservatively() -> None:
 
 
 @pytest.mark.parametrize("blocking_phase", ["open", "pending", "active"])
-def test_family_portfolio_optimizer_intent_without_scope_does_not_bypass_existing_exposure(
+def test_existing_exposure_blocks_without_scoped_rebalance(
     blocking_phase: str,
 ) -> None:
-    """The old broad bool is not enough to bypass an existing live exposure."""
+    """A same-family exposure blocks unless a typed rebalance names it."""
     bins = {s[2]: s for s in _BIN_SPECS}
     new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
     new_bin.fdr_family_size = len(_BIN_SPECS)
@@ -444,7 +444,6 @@ def test_family_portfolio_optimizer_intent_without_scope_does_not_bypass_existin
         target_date=TARGET_DATE,
         temperature_metric=METRIC,
         existing_exposures=[exposure],
-        family_portfolio_intent=True,
         enabled=True,
     )
 
@@ -833,8 +832,8 @@ def test_trade_db_family_exposure_does_not_let_stale_envelope_mask_snapshot_iden
     ]
 
 
-def test_family_portfolio_intent_does_not_bypass_existing_exposure_without_scope() -> None:
-    """A broad portfolio-intent bool is not permission to add conflicting exposure."""
+def test_same_family_exposure_requires_scoped_rebalance_id() -> None:
+    """A same-family entry without scoped rebalance id cannot add conflicting exposure."""
     bins = {s[2]: s for s in _BIN_SPECS}
     new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
     exposure = WeatherFamilyExposure(
@@ -850,7 +849,6 @@ def test_family_portfolio_intent_does_not_bypass_existing_exposure_without_scope
         target_date=TARGET_DATE,
         temperature_metric=METRIC,
         existing_exposures=[exposure],
-        family_portfolio_intent=True,
         enabled=True,
     )
 
@@ -878,7 +876,6 @@ def test_scoped_rebalance_intent_may_touch_named_existing_exposure() -> None:
         target_date=TARGET_DATE,
         temperature_metric=METRIC,
         existing_exposures=[exposure],
-        family_portfolio_intent=True,
         family_portfolio_allowed_exposure_ids=["pos-existing-1"],
         enabled=True,
     )
@@ -922,7 +919,6 @@ def test_weather_family_decision_is_first_class_single_leg_intent() -> None:
     )
 
     assert family_decision is not None
-    assert family_decision.family_portfolio_intent is True
     assert family_decision.portfolio.family_key == WeatherFamilyKey(CITY, TARGET_DATE, METRIC)
     assert family_decision.portfolio.selected_leg is low_price_tail
     assert family_decision.portfolio.selected_legs == (low_price_tail,)
@@ -1209,6 +1205,72 @@ def test_family_optimizer_scores_full_omega_with_non_candidate_residual_outcome(
     assert len(portfolio.payoff_matrix) == 4
 
 
+def test_family_optimizer_fails_closed_on_explicit_probability_missing_candidate_support() -> None:
+    """Explicit live probability vectors must cover every executable candidate support."""
+
+    yes_29 = _celsius_edge(
+        label="29°C",
+        support_index=0,
+        direction="buy_yes",
+        entry_price=0.35,
+        p_posterior=0.50,
+        forward_edge=0.15,
+    )
+    no_30 = _celsius_edge(
+        label="30°C",
+        support_index=1,
+        direction="buy_no",
+        entry_price=0.40,
+        p_posterior=0.70,
+        forward_edge=0.30,
+    )
+
+    portfolio = optimize_exclusive_outcome_portfolio(
+        [yes_29, no_30],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        outcome_probabilities={0: 1.0},
+        min_legs=1,
+        max_legs=1,
+    )
+
+    assert portfolio is None
+
+
+def test_family_optimizer_fails_closed_on_explicit_probability_mass_drift() -> None:
+    """Explicit live probability vectors are source-of-truth q, not normalizable hints."""
+
+    yes_29 = _celsius_edge(
+        label="29°C",
+        support_index=0,
+        direction="buy_yes",
+        entry_price=0.35,
+        p_posterior=0.50,
+        forward_edge=0.15,
+    )
+    no_30 = _celsius_edge(
+        label="30°C",
+        support_index=1,
+        direction="buy_no",
+        entry_price=0.40,
+        p_posterior=0.70,
+        forward_edge=0.30,
+    )
+
+    portfolio = optimize_exclusive_outcome_portfolio(
+        [yes_29, no_30],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        outcome_probabilities=[0.45, 0.15],
+        min_legs=1,
+        max_legs=1,
+    )
+
+    assert portfolio is None
+
+
 def test_family_optimizer_full_omega_flips_truncated_candidate_renormalization() -> None:
     """Residual settlement mass can make the optimal leg different from candidate-subset math."""
 
@@ -1297,9 +1359,12 @@ def test_preselection_rejects_shanghai_no_basket_for_center_yes_by_default(monke
     assert {drop.dropped_bin for drop in dropped} == {"29°C", "31°C"}
 
 
-def test_multi_leg_family_decision_executes_selected_portfolio_not_scalar_fallbacks() -> None:
+def test_multi_leg_family_decision_executes_selected_portfolio_not_scalar_fallbacks(
+    monkeypatch,
+) -> None:
     """A multi-leg optimized portfolio must not be collapsed into a one-leg fallback queue."""
 
+    monkeypatch.setenv("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", "2")
     bins = {s[2]: s for s in _BIN_SPECS}
     edge_a = _bin_edge(bins["20-21°F"], entry_price=0.20, forward_edge=0.20)
     edge_b = _bin_edge(bins["22-23°F"], entry_price=0.20, forward_edge=0.20)
