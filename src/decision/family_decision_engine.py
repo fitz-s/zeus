@@ -671,26 +671,10 @@ class FamilyDecisionEngine:
             max_stake_usd=max_stake_usd,
         )
 
-        # --- the market-coherence report over the candidate bins (spec 891) ------
-        candidate_bin_ids = sorted({d.route.bin_id for d in enumerated})
-        coherence = assess_market_coherence(
-            joint_q=joint_q,
-            family_book=family_book,
-            candidate_bin_ids=candidate_bin_ids,
-            case_key=case.family_id,
-            licensed_model_superiority=(
-                licensed_model_superiority
-                if licensed_model_superiority is not None
-                else _license_nothing
-            ),
-            min_depth=self._min_depth,
-            max_spread=self._max_spread,
-            depth_reference_size=self._depth_reference_size,
-        )
-
-        # Re-stamp each candidate's direction-law + coherence flags (coherence needs the
-        # report, which needs the candidate bins — so it is computed after enumeration).
-        scored = tuple(
+        # Stamp the direction-law first. The q_lcb reliability guard is empirical
+        # model-superiority evidence; it must run before market coherence so a guarded,
+        # positive-edge candidate can carry the license promised by the coherence contract.
+        pre_coherence_scored = tuple(
             CandidateDecision(
                 route=d.route,
                 economics=d.economics,
@@ -699,7 +683,7 @@ class FamilyDecisionEngine:
                     forecast_bin=forecast_bin,
                     point_q=float(joint_q.q_by_bin_id.get(d.route.bin_id, 0.0)),
                 ),
-                coherence_allows=coherence_allows(d.route, coherence),
+                coherence_allows=True,
                 robust_trade_score=d.robust_trade_score,
             )
             for d in enumerated
@@ -712,9 +696,9 @@ class FamilyDecisionEngine:
         # is thin (N_g < N_MIN) or its OOF realized frequency does not support the bucket
         # (L_g < bucket_floor − EPS). Applied here, where the decision layer consumes the
         # q_lcb (between scoring and selection). INERT when the OOF reliability artifact is
-        # absent (current live state) -> scored is byte-identical (no abstain). Moves no μ.
-        scored = self._apply_qlcb_reliability_guard(
-            scored=scored,
+        # absent -> scored is byte-identical (no abstain). Moves no μ.
+        guarded = self._apply_qlcb_reliability_guard(
+            scored=pre_coherence_scored,
             case=case,
             joint_q=joint_q,
             band=band,
@@ -723,6 +707,49 @@ class FamilyDecisionEngine:
             exposure=portfolio,
             sizing_candidates=sizing_candidates,
             max_stake_usd=max_stake_usd,
+        )
+
+        # --- the market-coherence report over the candidate bins (spec 891) ------
+        # A large model/market logit gap is not automatically a live-money incident.
+        # When the same qkernel candidate has a side-aware OOF reliability cell
+        # (OOF_WILSON_95), did not abstain, and still has positive guarded edge and
+        # positive guarded ΔU, that cell is the receipt-carrying model-superiority
+        # license the coherence module was designed to consume. INERT/missing/error guard
+        # states license nothing, preserving the Tokyo tick-floor block.
+        empirical_license_bins = frozenset(
+            d.route.bin_id
+            for d in guarded
+            if d.direction_law_ok
+            and d.q_lcb_guard_basis == "OOF_WILSON_95"
+            and not d.q_lcb_guard_abstained
+            and d.economics.edge_lcb > 0.0
+            and d.economics.optimal_delta_u > 0.0
+        )
+
+        def _empirical_or_injected_license(case_key: str, bin_id: str) -> bool:
+            if licensed_model_superiority is not None and licensed_model_superiority(
+                case_key, bin_id
+            ):
+                return True
+            return bin_id in empirical_license_bins
+
+        candidate_bin_ids = sorted({d.route.bin_id for d in guarded})
+        coherence = assess_market_coherence(
+            joint_q=joint_q,
+            family_book=family_book,
+            candidate_bin_ids=candidate_bin_ids,
+            case_key=case.family_id,
+            licensed_model_superiority=_empirical_or_injected_license,
+            min_depth=self._min_depth,
+            max_spread=self._max_spread,
+            depth_reference_size=self._depth_reference_size,
+        )
+
+        # Re-stamp each candidate's coherence flag from the report. Direction and q_lcb
+        # guard fields are already authoritative on ``guarded``.
+        scored = tuple(
+            replace(d, coherence_allows=coherence_allows(d.route, coherence))
+            for d in guarded
         )
 
         # --- (7) the filter chain (spec lines 896-898) — ORDER IS THE CONTRACT ----
