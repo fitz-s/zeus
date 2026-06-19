@@ -320,6 +320,50 @@ def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_
     )
 
 
+def test_day0_emit_scanner_retries_sqlite_lock(monkeypatch):
+    class Trigger:
+        def __init__(self):
+            self.authority_calls = 0
+            self.observation_calls = 0
+
+        def scan_authority_rows(self, **_kwargs):
+            self.authority_calls += 1
+            if self.authority_calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return ["authority"]
+
+        def scan_observation_instants_rows(self, **_kwargs):
+            self.observation_calls += 1
+            return ["observation"]
+
+    trigger = Trigger()
+    sleeps = []
+    monkeypatch.setenv("ZEUS_DAY0_EMIT_LOCK_RETRY_SECONDS", "0.01")
+    monkeypatch.setattr(main_module.time, "sleep", lambda delay: sleeps.append(delay))
+
+    authority, observation = main_module._edli_scan_day0_with_lock_retry(
+        trigger=trigger,
+        trade_conn=object(),
+        decision_time=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+        received_at="2026-06-19T12:00:00+00:00",
+        limit=10,
+    )
+
+    assert authority == ["authority"]
+    assert observation == ["observation"]
+    assert trigger.authority_calls == 2
+    assert trigger.observation_calls == 1
+    assert sleeps == [0.01]
+
+
+def test_day0_emit_lock_exhaustion_is_caught_at_reactor_boundary():
+    source = inspect.getsource(main_module._edli_event_reactor_cycle)
+
+    assert "_edli_emit_day0_extreme_events" in source
+    assert "_edli_is_sqlite_lock_error(_day0_emit_lock_exc)" in source
+    assert "skipping Day0 emit this cycle" in source
+
+
 def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatch):
     """Late topology selection must leave both /books prefetch and capture time."""
 

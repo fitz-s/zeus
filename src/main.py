@@ -5179,22 +5179,32 @@ def _edli_event_reactor_cycle() -> None:
             ):
                 _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
                 try:
-                    _edli_emit_day0_extreme_events(
-                        conn,
-                        _day0_trade_conn,
-                        decision_time=now,
-                        received_at=received_at,
-                        limit=day0_emit_limit,
-                        # PR#404 P0-2: HTTP was prefetched OUTSIDE the mutex
-                        # (_day0_fast_prefetch above, before acquire); this call
-                        # is the pure write phase.
-                        fast_prefetch=_day0_fast_prefetch,
-                        # Stamp scope-aware emission priority. Production live
-                        # scope makes Day0 tradeable.
-                        day0_is_tradeable=day0_is_tradeable_for_scope(
-                            str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
-                        ),
-                    )
+                    try:
+                        _edli_emit_day0_extreme_events(
+                            conn,
+                            _day0_trade_conn,
+                            decision_time=now,
+                            received_at=received_at,
+                            limit=day0_emit_limit,
+                            # PR#404 P0-2: HTTP was prefetched OUTSIDE the mutex
+                            # (_day0_fast_prefetch above, before acquire); this call
+                            # is the pure write phase.
+                            fast_prefetch=_day0_fast_prefetch,
+                            # Stamp scope-aware emission priority. Production live
+                            # scope makes Day0 tradeable.
+                            day0_is_tradeable=day0_is_tradeable_for_scope(
+                                str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
+                            ),
+                        )
+                    except sqlite3.OperationalError as _day0_emit_lock_exc:
+                        if _edli_is_sqlite_lock_error(_day0_emit_lock_exc):
+                            logger.warning(
+                                "EDLI reactor: day0 emit still locked after bounded retry "
+                                "(%r) — skipping Day0 emit this cycle and draining already-queued candidates.",
+                                _day0_emit_lock_exc,
+                            )
+                        else:
+                            raise
                 finally:
                     _day0_trade_conn.close()
             # Commit the emit WRITE UNIT (FSR + redecision + day0 → opportunity_events)
@@ -7389,16 +7399,9 @@ def _edli_emit_day0_extreme_events(
         day0_is_tradeable=day0_is_tradeable,
         suppress_recent_no_value_refutations=True,
     )
-    authority_results = trigger.scan_authority_rows(
-        observation_conn=trade_conn,
-        settlement_semantics=_edli_day0_settlement_semantics,
-        decision_time=decision_time,
-        received_at=received_at,
-        limit=limit,
-    )
-    observation_results = trigger.scan_observation_instants_rows(
-        observation_conn=trade_conn,
-        settlement_semantics=_edli_day0_settlement_semantics,
+    authority_results, observation_results = _edli_scan_day0_with_lock_retry(
+        trigger=trigger,
+        trade_conn=trade_conn,
         decision_time=decision_time,
         received_at=received_at,
         limit=limit,
@@ -7410,6 +7413,84 @@ def _edli_emit_day0_extreme_events(
         fast_emitted, len(authority_results), len(observation_results),
     )
     return fast_emitted + len(authority_results) + len(observation_results)
+
+
+def _edli_scan_day0_with_lock_retry(
+    *,
+    trigger,
+    trade_conn,
+    decision_time: datetime,
+    received_at: str,
+    limit: int,
+) -> tuple[list, list]:
+    import sqlite3
+
+    retry_delays = _edli_day0_emit_lock_retry_delays()
+    for attempt in range(1, len(retry_delays) + 2):
+        try:
+            authority_results = trigger.scan_authority_rows(
+                observation_conn=trade_conn,
+                settlement_semantics=_edli_day0_settlement_semantics,
+                decision_time=decision_time,
+                received_at=received_at,
+                limit=limit,
+            )
+            observation_results = trigger.scan_observation_instants_rows(
+                observation_conn=trade_conn,
+                settlement_semantics=_edli_day0_settlement_semantics,
+                decision_time=decision_time,
+                received_at=received_at,
+                limit=limit,
+            )
+            return authority_results, observation_results
+        except sqlite3.OperationalError as exc:
+            if not _edli_is_sqlite_lock_error(exc) or attempt > len(retry_delays):
+                raise
+            logger.warning(
+                "EDLI day0 emit hit transient world-DB lock; retrying in %.1fs "
+                "(attempt %d/%d): %r",
+                retry_delays[attempt - 1],
+                attempt,
+                len(retry_delays) + 1,
+                exc,
+            )
+            time.sleep(retry_delays[attempt - 1])
+    raise RuntimeError("unreachable day0 emit retry state")
+
+
+def _edli_day0_emit_lock_retry_delays() -> tuple[float, ...]:
+    raw = os.environ.get("ZEUS_DAY0_EMIT_LOCK_RETRY_SECONDS", "1.0,2.0")
+    delays: list[float] = []
+    for piece in raw.split(","):
+        text = piece.strip()
+        if not text:
+            continue
+        try:
+            delay_s = float(text)
+        except ValueError:
+            continue
+        if delay_s > 0:
+            delays.append(min(delay_s, 10.0))
+    return tuple(delays)
+
+
+def _edli_is_sqlite_lock_error(exc: Exception) -> bool:
+    import sqlite3
+
+    if isinstance(exc, sqlite3.OperationalError):
+        lock_codes = {
+            getattr(sqlite3, "SQLITE_BUSY", 5),
+            getattr(sqlite3, "SQLITE_LOCKED", 6),
+        }
+        code = getattr(exc, "sqlite_errorcode", None)
+        if code is not None and code in lock_codes:
+            return True
+    message = str(exc).lower()
+    return (
+        "database is locked" in message
+        or "database table is locked" in message
+        or "database is busy" in message
+    )
 
 
 def _edli_day0_settlement_semantics(observation: dict):

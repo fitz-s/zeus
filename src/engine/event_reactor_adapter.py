@@ -147,8 +147,11 @@ side-effect boundary.
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import sqlite3
+import time as _time
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -2084,15 +2087,70 @@ def _run_live_order_build_savepoint(
     conn: sqlite3.Connection,
     build: Callable[[], tuple[DecisionCertificate, ...]],
 ) -> tuple[DecisionCertificate, ...]:
-    conn.execute("SAVEPOINT edli_live_order_build")
-    try:
-        result = build()
-    except Exception:
-        conn.execute("ROLLBACK TO SAVEPOINT edli_live_order_build")
+    retry_delays = _live_order_build_lock_retry_delays()
+    for attempt in range(1, len(retry_delays) + 2):
+        conn.execute("SAVEPOINT edli_live_order_build")
+        try:
+            result = build()
+        except sqlite3.OperationalError as exc:
+            _rollback_release_live_order_build_savepoint(conn)
+            if not _is_sqlite_lock_error(exc) or attempt > len(retry_delays):
+                raise
+            logging.getLogger(__name__).warning(
+                "live order certificate build hit sqlite lock; rolled back savepoint "
+                "and retrying in %.1fs (attempt %d/%d): %s",
+                retry_delays[attempt - 1],
+                attempt,
+                len(retry_delays) + 1,
+                exc,
+            )
+            _time.sleep(retry_delays[attempt - 1])
+            continue
+        except Exception:
+            _rollback_release_live_order_build_savepoint(conn)
+            raise
         conn.execute("RELEASE SAVEPOINT edli_live_order_build")
-        raise
-    conn.execute("RELEASE SAVEPOINT edli_live_order_build")
-    return result
+        return result
+    raise RuntimeError("unreachable live order build retry state")
+
+
+def _rollback_release_live_order_build_savepoint(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("ROLLBACK TO SAVEPOINT edli_live_order_build")
+    finally:
+        conn.execute("RELEASE SAVEPOINT edli_live_order_build")
+
+
+def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
+    lock_codes = {
+        getattr(sqlite3, "SQLITE_BUSY", 5),
+        getattr(sqlite3, "SQLITE_LOCKED", 6),
+    }
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None and code in lock_codes:
+        return True
+    message = str(exc).lower()
+    return (
+        "database is locked" in message
+        or "database table is locked" in message
+        or "database is busy" in message
+    )
+
+
+def _live_order_build_lock_retry_delays() -> tuple[float, ...]:
+    raw = os.environ.get("ZEUS_LIVE_ORDER_BUILD_LOCK_RETRY_SECONDS", "0.5,1.5")
+    delays: list[float] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            delay = float(item)
+        except ValueError:
+            continue
+        if delay > 0:
+            delays.append(min(delay, 10.0))
+    return tuple(delays)
 
 
 # --------------------------------------------------------------------------- #

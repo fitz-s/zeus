@@ -253,6 +253,52 @@ def test_live_adapter_rejects_if_actionable_certificate_fails(monkeypatch):
     assert "ACTIONABLE_CERTIFICATE_REJECTED" in receipt.reason
 
 
+def test_live_order_build_savepoint_retries_sqlite_lock_after_rollback(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE writes (value TEXT)")
+    attempts = {"count": 0}
+    sleeps = []
+    monkeypatch.setenv("ZEUS_LIVE_ORDER_BUILD_LOCK_RETRY_SECONDS", "0.01")
+    monkeypatch.setattr(adapter._time, "sleep", lambda delay: sleeps.append(delay))
+
+    def _build():
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            conn.execute("INSERT INTO writes(value) VALUES ('rolled-back')")
+            raise sqlite3.OperationalError("database is locked")
+        rows = conn.execute("SELECT value FROM writes").fetchall()
+        assert rows == []
+        conn.execute("INSERT INTO writes(value) VALUES ('committed')")
+        return ("command-cert",)
+
+    result = adapter._run_live_order_build_savepoint(conn, _build)
+
+    assert result == ("command-cert",)
+    assert attempts["count"] == 2
+    assert sleeps == [0.01]
+    assert [row[0] for row in conn.execute("SELECT value FROM writes")] == ["committed"]
+
+
+def test_live_order_build_savepoint_does_not_retry_non_lock_operational_error(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    attempts = {"count": 0}
+    monkeypatch.setenv("ZEUS_LIVE_ORDER_BUILD_LOCK_RETRY_SECONDS", "0.01")
+    monkeypatch.setattr(adapter._time, "sleep", lambda _delay: pytest.fail("unexpected sleep"))
+
+    def _build():
+        attempts["count"] += 1
+        raise sqlite3.OperationalError("no such table: live_cap")
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        adapter._run_live_order_build_savepoint(conn, _build)
+
+    assert attempts["count"] == 1
+
+
 def test_live_cap_certificate_is_backed_by_usage_row():
     from src.engine import event_reactor_adapter as adapter
     from src.events.reactor import EventSubmissionReceipt
