@@ -3657,6 +3657,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
                shares = 60.0,
                cost_basis_usd = 44.4,
                entry_price = 0.74,
+               chain_state = 'synced',
                chain_shares = 60.0,
                chain_avg_price = 0.74,
                chain_cost_basis_usd = 44.4,
@@ -3682,7 +3683,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
 
     current = conn.execute(
         """
-        SELECT size_usd, shares, cost_basis_usd, chain_shares,
+        SELECT size_usd, shares, cost_basis_usd, chain_state, chain_shares,
                chain_cost_basis_usd, last_monitor_prob, last_monitor_edge,
                last_monitor_market_price, updated_at
           FROM position_current
@@ -3693,6 +3694,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     assert current["size_usd"] == pytest.approx(44.4)
     assert current["shares"] == pytest.approx(60.0)
     assert current["cost_basis_usd"] == pytest.approx(44.4)
+    assert current["chain_state"] == "synced"
     assert current["chain_shares"] == pytest.approx(60.0)
     assert current["chain_cost_basis_usd"] == pytest.approx(44.4)
     assert current["last_monitor_prob"] == pytest.approx(0.869)

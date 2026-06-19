@@ -225,6 +225,7 @@ _MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
         "entry_method",
         "fill_authority",
         "recovery_authority",
+        "chain_state",
         "chain_shares",
         "chain_avg_price",
         "chain_cost_basis_usd",

@@ -3101,6 +3101,80 @@ def test_reconciliation_size_correction_uses_canonical_current_to_avoid_repeated
     conn.close()
 
 
+def test_reconciliation_restores_synced_state_when_chain_economics_already_match():
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+    from src.state.portfolio import PortfolioState
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+
+    pos = _runtime_position(state="entered", chain_state="local_only")
+    pos.token_id = "tok-1"
+    pos.shares = 5.48
+    pos.cost_basis_usd = 4.0552
+    pos.size_usd = 4.0552
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="dec-1",
+        source_module="src.engine.cycle_runtime",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET chain_shares = 5.48,
+               chain_avg_price = 0.74,
+               chain_cost_basis_usd = 4.0552,
+               chain_seen_at = '2026-06-19T11:04:24+00:00',
+               chain_state = 'local_only'
+         WHERE position_id = 'rt-pos-1'
+        """
+    )
+
+    portfolio = PortfolioState(positions=[pos])
+    chain_positions = [
+        ChainPosition(
+            token_id="tok-1",
+            size=5.48,
+            avg_price=0.74,
+            cost=4.0552,
+            condition_id="cond-1",
+        )
+    ]
+
+    stats = reconcile(portfolio, chain_positions, conn=conn)
+
+    row = conn.execute(
+        """
+        SELECT chain_state, chain_shares, chain_avg_price, chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'rt-pos-1'
+        """
+    ).fetchone()
+    event = conn.execute(
+        """
+        SELECT event_type, payload_json
+          FROM position_events
+         WHERE position_id = 'rt-pos-1'
+         ORDER BY sequence_no DESC LIMIT 1
+        """
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert stats.get("chain_observation_persisted") == 1
+    assert row["chain_state"] == "synced"
+    assert row["chain_shares"] == pytest.approx(5.48)
+    assert row["chain_avg_price"] == pytest.approx(0.74)
+    assert row["chain_cost_basis_usd"] == pytest.approx(4.0552)
+    assert event["event_type"] == "CHAIN_SIZE_CORRECTED"
+    assert payload["reason"] == "chain_economics_observed"
+    conn.close()
+
+
 @pytest.mark.skip(reason="P9: legacy position_events vocabulary eliminated")
 def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy_db():
     from src.state.chain_reconciliation import ChainPosition, reconcile
