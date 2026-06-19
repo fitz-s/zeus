@@ -11,6 +11,7 @@ decision owns it (TAKER_ESCALATED_AFTER_REST lane).
 
 import json
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
 from src.execution.maker_rest_escalation import (
     find_expired_resting_entries,
@@ -414,6 +415,91 @@ class TestPersistedRestCancel:
         ]
         assert events.count("CANCEL_REQUESTED") == 1
         assert events[-2:] == ["CANCEL_REQUESTED", "CANCEL_ACKED"]
+
+    def test_persisted_cancel_immediately_voids_zero_fill_pending_entry_projection(self):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.state.db import init_schema
+        from tests.test_command_recovery import (
+            _advance_to_acked,
+            _append_order_fact,
+            _insert,
+            _insert_decision_log_trade_case_for_recovery,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_schema(conn)
+        _insert(conn, size=13.45, price=0.68)
+        _advance_to_acked(conn, venue_order_id="ord-live")
+        _append_order_fact(
+            conn,
+            order_id="ord-live",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        mock_client = MagicMock(
+            spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info", "v2_preflight"]
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        live_summary = reconcile_unresolved_commands(conn, mock_client)
+        assert live_summary["live_entry_projection_repair"]["advanced"] == 1
+        assert conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()[0] == "pending_entry"
+
+        clob = _FakeClob()
+        stats = run_persisted_cancels_for_expired_rests(
+            [
+                {
+                    "command_id": "cmd-001",
+                    "venue_order_id": "ord-live",
+                    "token_id": "tok-001",
+                    "market_id": "mkt-001",
+                    "created_at": "2026-04-26T00:00:00Z",
+                    "fact_state": "LIVE",
+                    "matched_size": "0",
+                    "cancel_reason": "CONFIRMED_VALUE_REFRESH",
+                    "cancel_action": "CANCEL_REPLACE",
+                }
+            ],
+            clob,
+            conn_factory=lambda: conn,
+            close_connections=False,
+        )
+
+        assert stats == {
+            "scanned": 1,
+            "cancelled": 1,
+            "cancel_failed": 0,
+            "cancel_journal_failed": 0,
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "voided",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "order_status": "canceled",
+        }
+        events = conn.execute(
+            """
+            SELECT event_type
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+        assert [row["event_type"] for row in events] == [
+            "POSITION_OPEN_INTENT",
+            "ENTRY_ORDER_POSTED",
+            "ENTRY_ORDER_VOIDED",
+        ]
 
 
 class TestDeadlineSource:

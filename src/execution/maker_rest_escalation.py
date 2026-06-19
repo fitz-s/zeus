@@ -404,6 +404,12 @@ def run_persisted_cancels_for_expired_rests(
 
         if event_type == "CANCEL_ACKED":
             stats["cancelled"] += 1
+            _reconcile_terminal_no_fill_after_cancel_ack(
+                conn_factory,
+                command_id=command_id,
+                order_id=order_id,
+                close_connections=close_connections,
+            )
             if collect_cancelled is not None:
                 collect_cancelled.append(entry)
         else:
@@ -436,6 +442,71 @@ def run_persisted_cancels_for_expired_rests(
                 float(deadline_minutes if deadline_minutes is not None else _deadline_minutes()),
             )
     return stats
+
+
+def _reconcile_terminal_no_fill_after_cancel_ack(
+    conn_factory: Callable[[], sqlite3.Connection],
+    *,
+    command_id: str,
+    order_id: str,
+    close_connections: bool,
+) -> None:
+    """Immediately consume zero-fill cancel truth after a maker-rest pull.
+
+    The full INV-31 command-recovery sweep can be delayed by authenticated venue
+    reads. A confirmed cancel already has enough durable local evidence for the
+    DB-only terminal-no-fill reducers to clear a zero-exposure ``pending_entry``
+    projection, so run those narrow reducers in the cancel path.
+    """
+
+    conn = conn_factory()
+    try:
+        required_tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if not {
+            "position_current",
+            "venue_commands",
+            "venue_command_events",
+            "venue_order_facts",
+        }.issubset(required_tables):
+            return
+        from src.execution.command_recovery import (
+            reconcile_cancel_ack_terminal_no_fill_facts,
+            reconcile_terminal_order_facts,
+        )
+
+        cancel_summary = reconcile_cancel_ack_terminal_no_fill_facts(conn)
+        terminal_summary = reconcile_terminal_order_facts(conn)
+        try:
+            conn.commit()
+        except Exception:
+            pass
+        advanced = int(cancel_summary.get("advanced", 0) or 0) + int(
+            terminal_summary.get("advanced", 0) or 0
+        )
+        if advanced:
+            logger.info(
+                "maker_rest_escalation: terminal no-fill reducers advanced command=%s "
+                "order=%s cancel_ack=%s terminal=%s",
+                command_id,
+                order_id,
+                cancel_summary,
+                terminal_summary,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "maker_rest_escalation: terminal no-fill reducer deferred command=%s "
+            "order=%s: %r",
+            command_id,
+            order_id,
+            exc,
+        )
+    finally:
+        _close_conn_if_needed(conn, close=close_connections)
 
 
 def run_maker_rest_escalation_cycle(
