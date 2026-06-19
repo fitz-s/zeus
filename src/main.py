@@ -1595,13 +1595,47 @@ def _refresh_global_collateral_snapshot_if_due(
         ):
             return False
         _last_collateral_heartbeat_refresh_attempt_at = current
-        ledger.refresh(adapter)
+        refreshed = ledger.refresh(adapter)
+        logger.info(
+            "CollateralLedger heartbeat refresh: authority=%s captured_at=%s "
+            "reserved_pusd_micro=%s reserved_token_count=%s",
+            refreshed.authority_tier,
+            refreshed.captured_at.isoformat(),
+            refreshed.reserved_pusd_for_buys_micro,
+            len(refreshed.reserved_tokens_for_sells),
+        )
         return True
     except Exception as exc:
         logger.warning("CollateralLedger heartbeat refresh failed closed: %s", exc)
         return False
     finally:
         _collateral_background_refresh_lock.release()
+
+
+def _global_collateral_snapshot_needs_refresh(
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether collateral is too stale/degraded to defer behind backlog."""
+
+    try:
+        from src.state.collateral_ledger import get_global_ledger
+
+        ledger = get_global_ledger()
+        if ledger is None:
+            return False
+        snapshot = ledger.snapshot()
+        if snapshot.authority_tier == "DEGRADED":
+            return True
+        current = now or datetime.now(timezone.utc)
+        captured_at = snapshot.captured_at
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+        age_seconds = (current - captured_at.astimezone(timezone.utc)).total_seconds()
+        return age_seconds >= COLLATERAL_HEARTBEAT_REFRESH_SECONDS
+    except Exception as exc:
+        logger.warning("CollateralLedger refresh-need check failed closed: %s", exc)
+        return True
 
 
 def _run_ws_gap_reconcile_if_required(
@@ -2001,7 +2035,10 @@ def _start_collateral_background_refresh_async(adapter=None) -> str:
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
         return "adapter_unavailable"
-    if _edli_reactor_pending_backlog_exists():
+    if (
+        _edli_reactor_pending_backlog_exists()
+        and not _global_collateral_snapshot_needs_refresh()
+    ):
         return "deferred_edli_pending_backlog"
     if _collateral_background_refresh_lock.locked():
         return "already_running"

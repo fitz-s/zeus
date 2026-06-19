@@ -1078,6 +1078,54 @@ def test_collateral_background_refresh_defers_when_edli_pending_backlog_exists(m
     assert calls == []
 
 
+def test_collateral_background_refresh_runs_for_degraded_snapshot_despite_edli_backlog(monkeypatch):
+    from src import main
+    from src.state.collateral_ledger import (
+        CollateralLedger,
+        CollateralSnapshot,
+        configure_global_ledger,
+    )
+
+    adapter = object()
+    calls = []
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=0,
+            pusd_allowance_micro=0,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime.now(timezone.utc),
+            authority_tier="DEGRADED",
+        )
+    )
+    configure_global_ledger(ledger)
+
+    class InlineThread:
+        def __init__(self, *, target, name, daemon):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(main, "_edli_reactor_pending_backlog_exists", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_refresh_global_collateral_snapshot_if_due",
+        lambda active_adapter: calls.append(active_adapter),
+    )
+    monkeypatch.setattr(main.threading, "Thread", InlineThread)
+    main._last_collateral_heartbeat_refresh_attempt_at = None
+
+    assert main._start_collateral_background_refresh_async(adapter) == "started"
+    assert calls == [adapter]
+
+
 def test_collateral_background_refresh_is_not_blocked_by_slow_venue_maintenance(monkeypatch):
     from src import main
 
