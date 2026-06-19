@@ -2023,36 +2023,14 @@ def _run_venue_background_maintenance_once(adapter=None) -> dict:
         "status": "ok",
         "ws_gap_reconcile": _run_ws_gap_reconcile_if_required(active_adapter),
         "reconcile_findings_refresh": reconcile_findings_refresh,
-        "collateral_refreshed": _refresh_global_collateral_snapshot_if_due(active_adapter),
+        "collateral_refreshed": "owned_by_post_trade_capital",
     }
 
 
 def _start_collateral_background_refresh_async(adapter=None) -> str:
-    """Refresh collateral on an independent lane from slower venue maintenance."""
+    """Compatibility no-op: collateral refresh is owned by post-trade-capital."""
 
-    if _cycle_lock.locked() or _edli_reactor_active():
-        return "deferred_cycle_running"
-    active_adapter = adapter or _venue_heartbeat_adapter
-    if active_adapter is None:
-        return "adapter_unavailable"
-    if (
-        _edli_reactor_pending_backlog_exists()
-        and not _global_collateral_snapshot_needs_refresh()
-    ):
-        return "deferred_edli_pending_backlog"
-    if _collateral_background_refresh_lock.locked():
-        return "already_running"
-
-    def _runner() -> None:
-        _refresh_global_collateral_snapshot_if_due(active_adapter)
-
-    thread = threading.Thread(
-        target=_runner,
-        name="collateral-background-refresh",
-        daemon=True,
-    )
-    thread.start()
-    return "started"
+    return "owned_by_post_trade_capital"
 
 
 def _start_venue_background_maintenance_async(adapter=None) -> str:

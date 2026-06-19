@@ -87,6 +87,7 @@ EXECUTION_FEASIBILITY_CLOCK_SKEW_TOLERANCE_SECONDS = 5.0
 EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS = 600.0
 FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS = 120.0
 REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS = 1800.0
+COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = 180.0
 SIDECAR_HEARTBEATS = (
     ("substrate_observer_daemon", "daemon-heartbeat-substrate-observer.json"),
     ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
@@ -365,6 +366,71 @@ def _sidecar_heartbeat_check(name: str, filename: str) -> CheckResult:
 
 def _sidecar_heartbeat_checks() -> list[CheckResult]:
     return [_sidecar_heartbeat_check(name, filename) for name, filename in SIDECAR_HEARTBEATS]
+
+
+def _collateral_snapshot_freshness_check() -> CheckResult:
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "max_age_seconds": COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS,
+    }
+    try:
+        with _connect_live_ro() as conn:
+            if not _table_exists(conn, "main", "collateral_ledger_snapshots"):
+                return CheckResult(
+                    "collateral_snapshot_freshness",
+                    False,
+                    "collateral ledger snapshot table is missing",
+                    evidence,
+                )
+            row = conn.execute(
+                """
+                SELECT id, captured_at, authority_tier, pusd_balance_micro, pusd_allowance_micro
+                  FROM collateral_ledger_snapshots
+                 ORDER BY id DESC
+                 LIMIT 1
+                """
+            ).fetchone()
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "collateral_snapshot_freshness",
+            False,
+            "collateral ledger snapshot could not be read",
+            evidence,
+        )
+    if row is None:
+        return CheckResult(
+            "collateral_snapshot_freshness",
+            False,
+            "collateral ledger has no snapshot rows",
+            evidence,
+        )
+    payload = dict(row)
+    captured_at = _parse_dt(payload.get("captured_at"))
+    evidence["latest_snapshot"] = payload
+    evidence["captured_at"] = captured_at.isoformat() if captured_at else None
+    if captured_at is None:
+        return CheckResult(
+            "collateral_snapshot_freshness",
+            False,
+            "latest collateral snapshot timestamp is invalid",
+            evidence,
+        )
+    age = (datetime.now(timezone.utc) - captured_at).total_seconds()
+    evidence["age_seconds"] = age
+    authority_tier = str(payload.get("authority_tier") or "")
+    ok = (
+        authority_tier != "DEGRADED"
+        and 0.0 <= age <= COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
+    )
+    return CheckResult(
+        "collateral_snapshot_freshness",
+        ok,
+        "collateral ledger snapshot is fresh"
+        if ok
+        else "collateral ledger snapshot is stale, degraded, or future-dated",
+        evidence,
+    )
 
 
 def _latest_iso_from_covered(rows: list[dict[str, Any]], key: str) -> str | None:
@@ -1161,6 +1227,7 @@ def evaluate() -> dict[str, Any]:
         _forecast_sidecar_health(),
         _posterior_summary(),
         *_sidecar_heartbeat_checks(),
+        _collateral_snapshot_freshness_check(),
         _executable_substrate_freshness_check(quote_rows),
         _execution_feasibility_evidence_check(quote_rows),
         _pending_exit_check(rows),
