@@ -766,6 +766,11 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     assert new_proof.q_lcb_5pct == pytest.approx(0.990)
     assert new_proof.trade_score == pytest.approx(0.050)
     assert new_proof.q_source == "qkernel_spine"
+    assert new_proof.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(
+        0.052
+    )
+    assert new_proof.qkernel_execution_economics["edge_lcb"] == pytest.approx(0.05)
+    assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
 
 
 def test_overlay_does_not_create_milan_buy_yes_probability_contradiction():

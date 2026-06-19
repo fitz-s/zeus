@@ -1234,13 +1234,48 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
     selected = decision.selected
     if selected is None:
         return proof
+    selected_decision = None
+    for candidate_decision in getattr(decision, "candidate_decisions", ()) or ():
+        try:
+            if candidate_decision.economics.candidate_id == selected.candidate_id:
+                selected_decision = candidate_decision
+                break
+        except Exception:  # noqa: BLE001
+            continue
     try:
         new_trade_score = float(selected.point_ev)
     except Exception:  # noqa: BLE001
         new_trade_score = float(getattr(proof, "trade_score", 0.0))
+    cost_value = float(getattr(selected.cost, "value", 0.0) or 0.0)
+    qkernel_execution_economics: dict[str, Any] = {
+        "source": "qkernel_spine",
+        "decision_id": getattr(decision, "decision_id", None),
+        "receipt_hash": getattr(decision, "receipt_hash", None),
+        "candidate_id": selected.candidate_id,
+        "route_id": selected.route_id,
+        "payoff_q_lcb": float(selected.edge_lcb) + cost_value,
+        "edge_lcb": float(selected.edge_lcb),
+        "point_ev": float(selected.point_ev),
+        "delta_u_at_min": float(selected.delta_u_at_min),
+        "optimal_stake_usd": str(selected.optimal_stake_usd),
+        "optimal_delta_u": float(selected.optimal_delta_u),
+        "q_dot_payoff": float(selected.q_dot_payoff),
+        "cost": cost_value,
+    }
+    if selected_decision is not None:
+        qkernel_execution_economics.update(
+            {
+                "side": selected_decision.route.side,
+                "bin_id": selected_decision.route.bin_id,
+                "q_lcb_guard_basis": selected_decision.q_lcb_guard_basis,
+                "q_lcb_guard_abstained": bool(selected_decision.q_lcb_guard_abstained),
+                "q_lcb_guard_cell_key": selected_decision.q_lcb_guard_cell_key,
+            }
+        )
     overlay: dict[str, Any] = {
         "trade_score": new_trade_score,
         "q_source": "qkernel_spine",
+        "qkernel_execution_economics": qkernel_execution_economics,
     }
     try:
         return replace(proof, **overlay)

@@ -394,6 +394,11 @@ class _CandidateProof:
     # +edge cheap trades was removed from the live path; this records the signal for
     # settlement-graded study without touching the live decision.
     unlicensed_tail_coverage_telemetry: bool = False
+    # qkernel spine execution economics certificate. This is deliberately separate from
+    # q_posterior / q_lcb_5pct, which remain receipt-facing selected-side probability
+    # fields. When q_source == "qkernel_spine", submit sizing consumes this guarded
+    # payoff-space economics payload instead of rebuilding stake from proof q_lcb.
+    qkernel_execution_economics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -7666,6 +7671,43 @@ def _proof_probability_uncertainty(
     )
 
 
+def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] | None:
+    """Return the qkernel guarded execution-economics certificate, if authoritative."""
+    if str(getattr(proof, "q_source", "") or "") != "qkernel_spine":
+        return None
+    cert = getattr(proof, "qkernel_execution_economics", None)
+    if not isinstance(cert, Mapping):
+        return None
+    return cert
+
+
+def _qkernel_execution_float(
+    proof: "_CandidateProof",
+    key: str,
+) -> float | None:
+    cert = _qkernel_execution_economics(proof)
+    if cert is None:
+        return None
+    value = cert.get(key)
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out):
+        return None
+    return out
+
+
+def _qkernel_execution_q_lcb(proof: "_CandidateProof") -> float | None:
+    """The guarded payoff-space lower bound the qkernel selected and sized on."""
+    q_lcb = _qkernel_execution_float(proof, "payoff_q_lcb")
+    if q_lcb is None:
+        return None
+    if not (0.0 <= q_lcb <= 1.0):
+        return None
+    return q_lcb
+
+
 def _native_side_cost_curve_from_execution_price(
     *,
     proof: _CandidateProof,
@@ -7857,6 +7899,9 @@ def _native_side_candidate_from_proof(
 
     q_point = float(proof.q_posterior)
     q_lcb = float(proof.q_lcb_5pct)
+    qkernel_q_lcb = _qkernel_execution_q_lcb(proof)
+    if qkernel_q_lcb is not None:
+        q_lcb = qkernel_q_lcb
 
     # §13 / Hidden #2 live no-trade gate: q_lcb is INVALID when it is out of
     # [0, 1] or EXCEEDS q_point (a lower-confidence bound above the point estimate
@@ -9672,6 +9717,125 @@ def _robust_marginal_utility_stake_and_price(
     # Wave-1 2026-06-12: the DAY0 EXPOSURE CAP kernel bound is DELETED (operator no-caps
     # law). max_stake is governed by the fractional-Kelly budget + concentration ceiling +
     # free-cash bound ONLY — no day0-specific notional clamp.
+    qkernel_cert = _qkernel_execution_economics(selected_proof)
+    if qkernel_cert is not None:
+        qkernel_q_lcb = _qkernel_execution_q_lcb(selected_proof)
+        qkernel_cost = _qkernel_execution_float(selected_proof, "cost")
+        qkernel_edge = _qkernel_execution_float(selected_proof, "edge_lcb")
+        qkernel_optimal_delta_u = _qkernel_execution_float(
+            selected_proof, "optimal_delta_u"
+        )
+        qkernel_delta_u_at_min = _qkernel_execution_float(
+            selected_proof, "delta_u_at_min"
+        )
+        try:
+            qkernel_optimal_stake = Decimal(
+                str(qkernel_cert.get("optimal_stake_usd"))
+            )
+        except (ArithmeticError, TypeError, ValueError):
+            qkernel_optimal_stake = Decimal("0")
+        if (
+            qkernel_q_lcb is None
+            or qkernel_cost is None
+            or qkernel_edge is None
+            or qkernel_optimal_delta_u is None
+            or qkernel_delta_u_at_min is None
+            or qkernel_edge <= 0.0
+            or qkernel_optimal_delta_u <= 0.0
+            or qkernel_optimal_stake <= Decimal("0")
+        ):
+            return 0.0, None
+
+        selected_candidate = _native_side_candidate_from_proof(
+            family_key=family_key, proof=selected_proof
+        )
+        if (
+            not selected_candidate.is_tradeable
+            or selected_candidate.executable_cost_curve is None
+        ):
+            return 0.0, None
+
+        chosen = min(qkernel_optimal_stake, max_stake)
+        if chosen <= Decimal("0"):
+            return 0.0, None
+
+        if free_cash_usd is not None and float(free_cash_usd) >= 0.0:
+            _free_cash = Decimal(str(free_cash_usd))
+            if chosen > _free_cash:
+                chosen = _free_cash
+                if stake_floor_out is not None:
+                    stake_floor_out["stake_floor"] = "FREE_CASH_BOUND"
+                    stake_floor_out["stake_floor_free_cash_usd"] = float(_free_cash)
+                if chosen <= Decimal("0"):
+                    return 0.0, None
+
+        try:
+            min_order_price = selected_candidate.executable_cost_curve.avg_cost_for_shares(
+                selected_candidate.executable_cost_curve.min_order_size
+            )
+            min_order_usd = (
+                Decimal(str(min_order_price.value))
+                * selected_candidate.executable_cost_curve.min_order_size
+            )
+        except (ArithmeticError, TypeError, ValueError, ExecutionPriceContractError):
+            return 0.0, None
+        if min_order_usd > Decimal("0") and chosen < min_order_usd:
+            _ev_positive_at_min = float(qkernel_delta_u_at_min) > 0.0
+            _fits_free_cash = (
+                free_cash_usd is None
+                or min_order_usd <= Decimal(str(free_cash_usd))
+            )
+            if _ev_positive_at_min and _fits_free_cash:
+                chosen = min_order_usd
+                if stake_floor_out is not None:
+                    stake_floor_out["stake_floor"] = "VENUE_MIN_ORDER"
+                    stake_floor_out["stake_floor_min_order_usd"] = float(min_order_usd)
+                    stake_floor_out["stake_floor_delta_u_at_min_order"] = float(
+                        qkernel_delta_u_at_min
+                    )
+            else:
+                _why = (
+                    "ev_non_positive_at_venue_minimum"
+                    if not _ev_positive_at_min
+                    else "venue_minimum_exceeds_free_cash_bound"
+                )
+                _free_cash_str = (
+                    f"{float(free_cash_usd):.6f}" if free_cash_usd is not None else "None"
+                )
+                raise _StakeBelowMinOrder(
+                    f"chosen stake {float(chosen):.6f} USD below venue min order "
+                    f"{float(min_order_usd):.6f} USD; reason={_why}; "
+                    f"delta_u_at_min_order={float(qkernel_delta_u_at_min):.6g}, "
+                    f"free_cash_usd={_free_cash_str} "
+                    "(qkernel guarded execution economics; NOT an edge reversal)"
+                )
+
+        try:
+            price = _chosen_stake_execution_price(
+                selected_candidate.executable_cost_curve,
+                chosen,
+            )
+        except ValueError as exc:
+            if "min_order_size" in str(exc) or "below" in str(exc):
+                raise _StakeBelowMinOrder(
+                    f"qkernel chosen-stake pricing rejected below min order: {exc}"
+                ) from exc
+            return 0.0, None
+        except (ArithmeticError, ExecutionPriceContractError):
+            return 0.0, None
+        if stake_floor_out is not None:
+            stake_floor_out["qkernel_execution_economics"] = {
+                "payoff_q_lcb": float(qkernel_q_lcb),
+                "edge_lcb": float(qkernel_edge),
+                "optimal_stake_usd": float(qkernel_optimal_stake),
+                "optimal_delta_u": float(qkernel_optimal_delta_u),
+                "route_id": qkernel_cert.get("route_id"),
+                "candidate_id": qkernel_cert.get("candidate_id"),
+                "guard_basis": qkernel_cert.get("q_lcb_guard_basis"),
+                "guard_cell_key": qkernel_cert.get("q_lcb_guard_cell_key"),
+            }
+        return float(chosen), price
+
     scored, proof_by_hypothesis = _score_family_candidates_by_robust_marginal_utility(
         executable=list(all_proofs),
         family_key=family_key,

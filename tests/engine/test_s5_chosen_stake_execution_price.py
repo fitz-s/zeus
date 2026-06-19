@@ -27,6 +27,7 @@ live decision body of ``evaluate_event_bound_submission`` at the sizing seam.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -364,3 +365,64 @@ def test_kernel_no_trade_returns_no_price():
     )
     assert stake == 0.0
     assert price is None
+
+
+def test_qkernel_execution_certificate_bounds_submit_sizing():
+    """A qkernel-selected proof sizes from guarded execution economics, not proof q_lcb.
+
+    The qkernel bridge preserves q_posterior/q_lcb_5pct as receipt probability fields.
+    Submit must therefore consume the separate qkernel execution certificate; otherwise a
+    guarded selection can be resized from the stale unguarded proof q_lcb.
+    """
+    from src.types.market import Bin
+
+    bin_x = Bin(low=60.0, high=61.0, unit="F", label="60-61F")
+    row = _snapshot_row(yes_asks=(("0.20", "1000000"),))
+    unguarded = _proof_from_row(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-1",
+        q_posterior=0.90,
+        q_lcb_5pct=0.90,
+        bin_obj=bin_x,
+    )
+    guarded = replace(
+        unguarded,
+        q_source="qkernel_spine",
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "candidate_id": "YES:bin-1:DIRECT_YES",
+            "route_id": "DIRECT_YES:bin-1@proof",
+            "payoff_q_lcb": 0.30,
+            "edge_lcb": 0.10,
+            "point_ev": 0.70,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "6.25",
+            "optimal_delta_u": 0.02,
+            "q_dot_payoff": 0.90,
+            "cost": 0.20,
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+        },
+    )
+
+    unguarded_stake, _ = era._robust_marginal_utility_stake_and_price(
+        family_key="fam",
+        selected_proof=unguarded,
+        all_proofs=(unguarded,),
+        extra_exposure_by_bin_id={},
+        bankroll_usd=10000.0,
+        kelly_multiplier=1.0,
+    )
+    guarded_stake, guarded_price = era._robust_marginal_utility_stake_and_price(
+        family_key="fam",
+        selected_proof=guarded,
+        all_proofs=(guarded,),
+        extra_exposure_by_bin_id={},
+        bankroll_usd=10000.0,
+        kelly_multiplier=1.0,
+    )
+
+    assert unguarded_stake > 100.0
+    assert guarded_stake == pytest.approx(6.25)
+    assert guarded_price is not None
+    assert guarded_price.value == pytest.approx(0.20)
