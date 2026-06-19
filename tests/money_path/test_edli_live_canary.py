@@ -2315,7 +2315,8 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     assert witness.user_ws_authority_id == "ws_gap_guard"
     assert witness.balance_allowance_authority_id == "polymarket_wallet_readonly"
     assert witness.balance_allowance_status == "OK"
-    assert clob_timeouts == [2.5, 2.5]
+    assert len(clob_timeouts) == 2
+    assert all(0 < timeout < 1.25 for timeout in clob_timeouts)
 
 
 def test_main_pre_submit_buy_uses_pusd_payload_without_ctf_enumeration(monkeypatch):
@@ -2514,7 +2515,19 @@ def test_main_pre_submit_jit_book_provider_uses_short_http_timeout(monkeypatch):
     provider = main._edli_pre_submit_jit_book_quote_provider()
 
     assert provider("yes-1")["hash"] == "book-hash"
-    assert captured["public_http_timeout"] == 2.5
+    assert 0 < captured["public_http_timeout"] < 1.25
+    assert captured["public_http_timeout"] * 2.0 < 2.5
+
+
+def test_main_pre_submit_inner_io_timeout_stays_inside_outer_guard(monkeypatch):
+    import src.main as main
+
+    monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "3.0")
+    monkeypatch.delenv("ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS", raising=False)
+    timeout = main._edli_pre_submit_inner_io_timeout_seconds()
+
+    assert 0 < timeout <= 1.0
+    assert timeout * 2.0 < main._edli_pre_submit_clob_timeout_seconds()
 
 
 def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(monkeypatch):

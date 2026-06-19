@@ -7833,6 +7833,36 @@ def _edli_pre_submit_clob_timeout_seconds() -> float:
     return value
 
 
+def _edli_pre_submit_inner_io_timeout_seconds() -> float:
+    """Network timeout used inside the outer pre-submit timeout guard.
+
+    The outer guard is a daemon-protection circuit breaker.  Inner venue/RPC
+    calls must time out first; otherwise the guard returns while the worker
+    thread keeps blocking in TLS/SDK I/O and the live reactor eventually skips
+    cycles with leaked pre-submit workers.
+    """
+
+    outer = _edli_pre_submit_clob_timeout_seconds()
+    raw = os.environ.get("ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS")
+    if raw not in (None, ""):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS=%r; deriving from outer timeout",
+                raw,
+            )
+        else:
+            if value > 0 and (value * 2.0) < outer:
+                return value
+            logger.warning(
+                "Invalid ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS=%r; must be positive and < half outer timeout %.3fs",
+                raw,
+                outer,
+            )
+    return max(0.01, min(1.0, outer * 0.35))
+
+
 def _edli_run_pre_submit_clob_call(label: str, fn):
     from src.runtime.timeout_guard import run_with_timeout
 
@@ -7857,7 +7887,7 @@ def _edli_pre_submit_jit_book_quote_provider():
     def _fetch(token_id: str) -> dict:
         from src.data.polymarket_client import PolymarketClient
 
-        with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
+        with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
             return _edli_run_pre_submit_clob_call(
                 "jit_book",
                 lambda: clob.get_orderbook_snapshot(token_id),
@@ -8212,7 +8242,7 @@ def _edli_pre_submit_authority_provider_from_world_conn(
         if normalized_side == "BUY" and pusd_collateral_payload_cache is None:
             from src.data.polymarket_client import PolymarketClient
 
-            with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
+            with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
                 adapter = clob._ensure_v2_adapter()
                 pusd_payload_fn = getattr(adapter, "get_pusd_collateral_payload", None)
                 if not callable(pusd_payload_fn):
@@ -8228,7 +8258,7 @@ def _edli_pre_submit_authority_provider_from_world_conn(
         if full_collateral_payload_cache is None:
             from src.data.polymarket_client import PolymarketClient
 
-            with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
+            with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
                 adapter = clob._ensure_v2_adapter()
                 full_collateral_payload_cache = dict(
                     _edli_run_pre_submit_clob_call(
@@ -8360,7 +8390,7 @@ def _edli_user_ws_authority_summary(checked_at: datetime) -> dict[str, object]:
 def _edli_venue_connectivity_authority_summary(checked_at: datetime) -> dict[str, object]:
     from src.data.polymarket_client import PolymarketClient
 
-    with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
+    with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
         _edli_run_pre_submit_clob_call("venue_preflight", clob.v2_preflight)
     return {
         "authority_id": "polymarket_v2_preflight",
@@ -8386,7 +8416,7 @@ def _edli_balance_allowance_status(
     size = float(intent.get("size") or 0.0)
     notional = float(intent.get("notional_usd") or 0.0)
     if collateral_payload is None:
-        with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
+        with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
             adapter = clob._ensure_v2_adapter()
             collateral = _edli_run_pre_submit_clob_call(
                 "collateral_payload",

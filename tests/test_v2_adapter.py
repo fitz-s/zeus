@@ -523,6 +523,30 @@ def test_collateral_payload_syncs_and_reads_with_configured_signature_type(tmp_p
         assert getattr(params, "signature_type") == 3
 
 
+def test_v2_adapter_passes_configured_network_timeout_to_sdk_factory(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    captured = {}
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return FakeBalanceAllowanceClient()
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=factory,
+        network_timeout_seconds=0.75,
+    )
+
+    assert adapter._sdk_client() is not None
+    assert captured["network_timeout_seconds"] == 0.75
+
+
 def test_pusd_collateral_payload_does_not_enumerate_ctf_positions(tmp_path):
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 
@@ -609,6 +633,38 @@ def test_collateral_payload_missing_allowance_remains_fail_closed_zero(tmp_path)
     assert payload["pusd_allowance_micro"] == 0
     assert payload["authority_tier"] == "CHAIN"
     assert payload["pusd_allowance_source"] == "missing"
+
+
+def test_default_chain_rpc_uses_configured_network_timeout(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient(response={"balance": "100000000"})
+    rpc_timeouts: list[float] = []
+
+    def fake_json_rpc_call(_url, method, params, *, timeout_seconds=20.0):
+        rpc_timeouts.append(timeout_seconds)
+        assert method == "eth_call"
+        assert params
+        return hex(25_000_000)
+
+    monkeypatch.setattr(adapter_mod, "_json_rpc_call", fake_json_rpc_call)
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        polygon_rpc_url="https://rpc.test",
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+        network_timeout_seconds=0.75,
+    )
+
+    payload = adapter.get_collateral_payload()
+
+    assert payload["pusd_allowance_micro"] == 25_000_000
+    assert rpc_timeouts == [0.75, 0.75]
 
 
 def test_collateral_payload_uses_chain_allowance_when_clob_omits_allowance(tmp_path):

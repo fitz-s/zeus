@@ -271,6 +271,7 @@ class PolymarketV2Adapter:
         q1_egress_evidence_path: Path | None = DEFAULT_Q1_EGRESS_EVIDENCE,
         client_factory: Optional[Callable[..., Any]] = None,
         sdk_version: Optional[str] = None,
+        network_timeout_seconds: float | None = None,
     ) -> None:
         self.host = host.rstrip("/")
         self.funder_address = funder_address
@@ -279,12 +280,30 @@ class PolymarketV2Adapter:
         self.chain_id = chain_id
         self.signature_type = _normalize_signature_type(signature_type)
         self.polygon_rpc_url = polygon_rpc_url
-        self._rpc_call = rpc_call or _json_rpc_call
+        self.network_timeout_seconds = (
+            float(network_timeout_seconds)
+            if network_timeout_seconds is not None and float(network_timeout_seconds) > 0
+            else None
+        )
+        if rpc_call is None:
+            self._rpc_call = lambda rpc_url, method, params: _json_rpc_call(
+                rpc_url,
+                method,
+                params,
+                timeout_seconds=self._network_timeout(20.0),
+            )
+        else:
+            self._rpc_call = rpc_call
         self.builder_code = builder_code
         self.q1_egress_evidence_path = q1_egress_evidence_path
         self._client_factory = client_factory or self._default_client_factory
         self._client = None
         self.sdk_version = sdk_version or _sdk_version()
+
+    def _network_timeout(self, default: float) -> float:
+        if self.network_timeout_seconds is None:
+            return default
+        return max(0.01, float(self.network_timeout_seconds))
 
     def _default_client_factory(self, **kwargs: Any) -> Any:
         from py_clob_client_v2.client import ClobClient
@@ -303,9 +322,13 @@ class PolymarketV2Adapter:
             import httpx as _httpx
             from py_clob_client_v2.http_helpers import helpers as _pcc_helpers
 
-            _pcc_helpers._http_client = _httpx.Client(
-                http2=False, timeout=_httpx.Timeout(15.0, connect=8.0)
-            )
+            sdk_timeout = kwargs.get("network_timeout_seconds")
+            if sdk_timeout is not None:
+                sdk_timeout = max(0.01, float(sdk_timeout))
+                timeout = _httpx.Timeout(sdk_timeout, connect=sdk_timeout)
+            else:
+                timeout = _httpx.Timeout(15.0, connect=8.0)
+            _pcc_helpers._http_client = _httpx.Client(http2=False, timeout=timeout)
         except Exception:  # noqa: BLE001 - non-fatal; library default retained
             pass
 
@@ -381,6 +404,7 @@ class PolymarketV2Adapter:
                 signature_type=self.signature_type,
                 funder_address=self.funder_address,
                 builder_code=self.builder_code,
+                network_timeout_seconds=self.network_timeout_seconds,
             )
         return self._client
 
@@ -639,7 +663,7 @@ class PolymarketV2Adapter:
             headers={"user-agent": "zeus-readonly/1.0"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:
+            with urllib.request.urlopen(request, timeout=self._network_timeout(15.0)) as response:
                 decoded = json.loads(response.read())
         except Exception as exc:
             raise V2ReadUnavailable(f"data-api position enumeration failed: {exc}") from exc
@@ -2603,7 +2627,13 @@ def _eth_call_uint(
     return int(str(raw or "0x0"), 16)
 
 
-def _json_rpc_call(rpc_url: str, method: str, params: list[Any]) -> Any:
+def _json_rpc_call(
+    rpc_url: str,
+    method: str,
+    params: list[Any],
+    *,
+    timeout_seconds: float = 20.0,
+) -> Any:
     # CATEGORY ANTIBODY (2026-06-04): the single on-chain RPC entrypoint. A
     # blocking eth_call here while the world write mutex is held is the M5 /
     # STEP-7 / #95 starvation disease — fail loud and located, never wedge.
@@ -2620,7 +2650,7 @@ def _json_rpc_call(rpc_url: str, method: str, params: list[Any]) -> Any:
             "user-agent": "zeus-readonly/1.0",
         },
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=max(0.01, float(timeout_seconds))) as response:
         decoded = json.loads(response.read())
     if "error" in decoded:
         raise V2AdapterError(f"polygon rpc error: {decoded['error']}")
