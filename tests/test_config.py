@@ -5,6 +5,7 @@
 
 import json
 import inspect
+import os
 import tempfile
 from pathlib import Path
 
@@ -27,7 +28,6 @@ from src.config import (
     ensemble_unimodal_range_epsilon,
     get_mode,
     load_cities,
-    runtime_state_path,
     sizing_defaults,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -42,8 +42,37 @@ def test_get_mode_is_live_constant_not_env_authority(monkeypatch):
     assert get_mode() == "live"
 
 
-def test_runtime_state_path_is_code_authoritative():
-    assert runtime_state_path("status_summary.json") == PROJECT_ROOT / "state" / "status_summary.json"
+def test_runtime_state_path_is_code_authoritative(monkeypatch):
+    import importlib
+    import src.config as config_mod
+
+    monkeypatch.delenv("ZEUS_PRIMARY_ROOT", raising=False)
+    reloaded = importlib.reload(config_mod)
+
+    assert reloaded.runtime_state_path("status_summary.json") == PROJECT_ROOT / "state" / "status_summary.json"
+    assert reloaded.PROJECT_ROOT == PROJECT_ROOT
+    assert reloaded.RUNTIME_ROOT == PROJECT_ROOT
+    assert reloaded.STATE_DIR == PROJECT_ROOT / "state"
+
+
+def test_runtime_state_path_honors_primary_root_at_import(tmp_path):
+    import importlib
+    import src.config as config_mod
+
+    old_primary = os.environ.get("ZEUS_PRIMARY_ROOT")
+    os.environ["ZEUS_PRIMARY_ROOT"] = str(tmp_path)
+    try:
+        reloaded = importlib.reload(config_mod)
+        assert reloaded.PROJECT_ROOT == PROJECT_ROOT
+        assert reloaded.RUNTIME_ROOT == tmp_path.resolve()
+        assert reloaded.STATE_DIR == tmp_path.resolve() / "state"
+        assert reloaded.runtime_state_path("status_summary.json") == tmp_path.resolve() / "state" / "status_summary.json"
+    finally:
+        if old_primary is None:
+            os.environ.pop("ZEUS_PRIMARY_ROOT", None)
+        else:
+            os.environ["ZEUS_PRIMARY_ROOT"] = old_primary
+        importlib.reload(config_mod)
 
 
 def test_settings_mode_key_is_legacy_optional(tmp_path):
@@ -74,7 +103,7 @@ def test_settings_no_fallback_pattern():
 
 def test_cities_load():
     cities = load_cities()
-    assert len(cities) == 52  # 52 cities after Qingdao addition 2026-05-07
+    assert len(cities) == 54
     names = {c.name for c in cities}
     assert "NYC" in names
     assert "London" in names
@@ -121,6 +150,8 @@ def test_city_weighted_low_calibration_eligibility_is_explicit():
         "Chicago",
         "Guangzhou",
         "Beijing",
+        "Jinan",
+        "Zhengzhou",
     }
 
     false_cities = {
@@ -280,9 +311,9 @@ def test_city_airport_coordinates():
     assert abs(nyc.lat - 40.7772) < 0.01
     assert abs(nyc.lon - (-73.8726)) < 0.01
 
-    # Chicago: O'Hare (~41.97), NOT downtown (~41.88)
+    # Chicago: operational NOAA grid point for O'Hare, NOT downtown (~41.88).
     chi = by_name["Chicago"]
-    assert abs(chi.lat - 41.9742) < 0.01
+    assert abs(chi.lat - 41.96017) < 0.01
 
     # London: City Airport (~51.505), NOT city center (~51.51) or Heathrow.
     lon = by_name["London"]

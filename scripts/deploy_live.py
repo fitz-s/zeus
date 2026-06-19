@@ -63,6 +63,9 @@ GUI_DOMAIN = os.environ.get("ZEUS_GUI_DOMAIN") or f"gui/{os.getuid()}"
 DAEMONS = {
     "data-ingest": "com.zeus.data-ingest",
     "forecast-live": "com.zeus.forecast-live",
+    "substrate-observer": "com.zeus.substrate-observer",
+    "price-channel-ingest": "com.zeus.price-channel-ingest",
+    "post-trade-capital": "com.zeus.post-trade-capital",
     "riskguard-live": "com.zeus.riskguard-live",
     "live-trading": "com.zeus.live-trading",
     "venue-heartbeat": "com.zeus.venue-heartbeat",
@@ -71,9 +74,11 @@ DAEMONS = {
 
 # Runtime surface whose dirtiness must block a restart (per the incident).
 # scripts/ is included because daemon plists and operator flows execute
-# scripts/*.py from the live checkout (external review 2026-06-12). docs/ and
+# scripts/*.py from the live checkout (external review 2026-06-12). deploy/launchd
+# is included because the sidecar split is launchd-topology-sensitive; a clean
+# code tree with stale plist artifacts is not a deploy-clean runtime. docs/ and
 # tests/ are deliberately outside the gate.
-RUNTIME_PATHSPECS = ["src/", "config/", "scripts/"]
+RUNTIME_PATHSPECS = ["src/", "config/", "scripts/", "deploy/launchd/"]
 
 
 def _git(*args: str, repo: str | None = None) -> subprocess.CompletedProcess:
@@ -98,6 +103,10 @@ def current_branch() -> str:
 def dirty_runtime_files() -> list[str]:
     """Lines from `git status --porcelain -- src/ config/` on the live repo."""
     res = _git("status", "--porcelain", "--", *RUNTIME_PATHSPECS)
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout).strip().splitlines()
+        msg = detail[-1] if detail else "unknown git status failure"
+        return [f"GIT_STATUS_FAILED: {msg}"]
     return [ln for ln in res.stdout.splitlines() if ln.strip()]
 
 
@@ -173,7 +182,10 @@ def _gate(allow_dirty: bool) -> tuple[bool, list[str]]:
     blockers: list[str] = []
     dirty = dirty_runtime_files()
     if dirty:
-        blockers.append(f"{len(dirty)} uncommitted runtime file(s) in src/ config/:")
+        if any(line.startswith("GIT_STATUS_FAILED:") for line in dirty):
+            blockers.append("git status failed for runtime surface (fail-closed):")
+        else:
+            blockers.append(f"{len(dirty)} uncommitted runtime file(s) in src/ config/ scripts/ deploy/launchd/:")
         blockers.extend(f"   {ln}" for ln in dirty)
     unpushed, push_detail = unpushed_state(branch)
     if unpushed:

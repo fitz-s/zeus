@@ -36,12 +36,13 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from check_data_pipeline_live_e2e import _connect_live_readonly
+from src.config import STATE_DIR as DEFAULT_RUNTIME_STATE_DIR
 
 SETTINGS_PATH = ROOT / "config" / "settings.json"
 STATE_DIR = Path(
     os.environ.get("ZEUS_LIVE_PREFLIGHT_STATE_DIR")
     or os.environ.get("ZEUS_STATE_DIR")
-    or ROOT / "state"
+    or DEFAULT_RUNTIME_STATE_DIR
 ).expanduser().resolve()
 TRADE_DB = Path(os.environ.get("ZEUS_TRADE_DB") or STATE_DIR / "zeus_trades.db")
 WORLD_DB = Path(os.environ.get("ZEUS_WORLD_DB") or STATE_DIR / "zeus-world.db")

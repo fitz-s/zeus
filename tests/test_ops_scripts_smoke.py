@@ -313,6 +313,17 @@ def test_deploy_live_status_runs(capsys):
     out = capsys.readouterr().out
     assert "deploy_live status" in out
     assert "branch" in out and "HEAD" in out and "daemons" in out
+    assert "substrate-observer" in out
+    assert "price-channel-ingest" in out
+    assert "post-trade-capital" in out
+
+
+def test_deploy_live_knows_sidecar_labels():
+    dl = _load("deploy_live_sidecars", "deploy_live.py")
+    assert dl.DAEMONS["substrate-observer"] == "com.zeus.substrate-observer"
+    assert dl.DAEMONS["price-channel-ingest"] == "com.zeus.price-channel-ingest"
+    assert dl.DAEMONS["post-trade-capital"] == "com.zeus.post-trade-capital"
+    assert "deploy/launchd/" in dl.RUNTIME_PATHSPECS
 
 
 def test_deploy_live_gate_refuses_dirty(tmp_path, capsys):
@@ -340,6 +351,26 @@ def test_deploy_live_gate_refuses_dirty(tmp_path, capsys):
     # --allow-dirty overrides the refusal.
     ok2, _ = dl._gate(allow_dirty=True)
     assert ok2 is True
+
+
+def test_deploy_live_gate_fails_closed_when_git_status_fails(monkeypatch):
+    dl = _load("deploy_live_smoke_git_status_fail", "deploy_live.py")
+
+    def _fake_git(*args, repo=None):
+        import subprocess
+
+        if args and args[0] == "status":
+            return subprocess.CompletedProcess(args, 128, "", "fatal: bad pathspec")
+        return subprocess.CompletedProcess(args, 0, "main\n", "")
+
+    monkeypatch.setattr(dl, "_git", _fake_git)
+
+    ok, blockers = dl._gate(allow_dirty=False)
+
+    assert ok is False
+    blob = " ".join(blockers)
+    assert "git status failed" in blob
+    assert "fatal: bad pathspec" in blob
 
 
 def test_deploy_live_unknown_daemon_rejected(capsys):
