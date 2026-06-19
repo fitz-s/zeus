@@ -254,6 +254,8 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # persist it so the serving calibrator is recoverable from the blob forever.
     if payload.get("q_source") is None:
         payload.pop("q_source", None)
+    if payload.get("qkernel_execution_economics") is None:
+        payload.pop("qkernel_execution_economics", None)
     if payload.get("opportunity_book") is None:
         payload.pop("opportunity_book", None)
     if payload.get("replacement_forecast") is None:

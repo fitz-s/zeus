@@ -3476,6 +3476,7 @@ def _build_event_bound_no_submit_receipt_core(
             # SAME settled-record evidence — lockstep, never starved.
             "settlement_coverage_status": proof.settlement_coverage_status,
             "q_source": proof.q_source,  # #120 calibrator provenance
+            "qkernel_execution_economics": proof.qkernel_execution_economics,
             # H2_E2E: typed posterior link carried to the receipt (None on canonical).
             "posterior_id": proof.posterior_id,
             "probability_authority": proof.probability_authority,
@@ -3995,6 +3996,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_source=raw_receipt.get("mainstream_source"),
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
         q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
+        qkernel_execution_economics=raw_receipt.get("qkernel_execution_economics"),
         q_lcb_calibration_source=raw_receipt.get("q_lcb_calibration_source"),
         same_bin_yes_posterior=_optional_float(raw_receipt.get("same_bin_yes_posterior")),
         settlement_coverage_status=(
@@ -5066,6 +5068,7 @@ def _actionable_payload_from_receipt(
         "direction": receipt.direction,
         "executable_snapshot_id": receipt.executable_snapshot_id,
         "q_source": receipt.q_source,
+        "qkernel_execution_economics": receipt.qkernel_execution_economics,
         "opportunity_book": receipt.opportunity_book,
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
@@ -5141,6 +5144,7 @@ def _live_decision_audit_payload(
         "unit": receipt.unit,
         "strategy_key": receipt.strategy_key,
         "q_source": receipt.q_source,
+        "qkernel_execution_economics": receipt.qkernel_execution_economics,
         # H2_E2E: make the live-order aggregate self-contained — the fill->posterior
         # link is reconstructable from the aggregate payload without JSON_EXTRACT on
         # the receipt blob. None on canonical orders.
@@ -8439,16 +8443,32 @@ def _opportunity_book_from_proofs(
         and getattr(selected_proof, "execution_price", None) is not None
         else None
     )
+    selection_authority = None
+    selected_qkernel_execution_economics = None
+    if selected_proof is not None and decided_candidate_id is not None:
+        selection_authority = (
+            str(selected_proof.q_source)
+            if selected_proof.q_source is not None
+            else "robust_marginal_utility"
+        )
+        selected_qkernel_execution_economics = selected_proof.qkernel_execution_economics
+    cache_summary: dict[str, Any] = {
+        "belief_cache": "source_run_bound",
+        "price_cache": "snapshot_rows_refreshed_for_family",
+        "actual_receipt_selected_candidate_id": decided_candidate_id,
+    }
+    if selection_authority is not None:
+        cache_summary["selection_authority"] = selection_authority
+    if selected_qkernel_execution_economics is not None:
+        cache_summary["selected_qkernel_execution_economics"] = (
+            selected_qkernel_execution_economics
+        )
     return build_family_opportunity_book(
         family_id=family_id,
         evaluations=evaluations,
         event_id=event_id,
         decided_candidate_id=decided_candidate_id,
-        cache_summary={
-            "belief_cache": "source_run_bound",
-            "price_cache": "snapshot_rows_refreshed_for_family",
-            "actual_receipt_selected_candidate_id": decided_candidate_id,
-        },
+        cache_summary=cache_summary,
     )
 
 

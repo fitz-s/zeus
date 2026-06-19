@@ -1355,6 +1355,40 @@ def test_actionable_payload_persists_live_authority_provenance():
     assert payload["strategy_key"] == "center_buy"
 
 
+def test_actionable_payload_persists_qkernel_execution_economics():
+    from src.engine import event_reactor_adapter as adapter
+
+    event = _forecast_event()
+    qkernel_cert = {
+        "source": "qkernel_spine",
+        "candidate_id": "DIRECT_NO:bin-1",
+        "route_id": "DIRECT_NO:bin-1@proof",
+        "payoff_q_lcb": 0.72,
+        "edge_lcb": 0.17,
+        "delta_u_at_min": 0.01,
+        "optimal_stake_usd": "15.39",
+        "optimal_delta_u": 0.03,
+        "cost": 0.55,
+    }
+    receipt = replace(
+        _accepted_receipt(event),
+        q_source="qkernel_spine",
+        qkernel_execution_economics=qkernel_cert,
+    )
+    live_cap = SimpleNamespace(
+        payload={
+            "usage_id": "usage-1",
+            "reserved_notional_usd": 15.39,
+            "notional_cap_enabled": False,
+        }
+    )
+
+    payload = adapter._actionable_payload_from_receipt(receipt, live_cap, event=event)
+
+    assert payload["q_source"] == "qkernel_spine"
+    assert payload["qkernel_execution_economics"] == qkernel_cert
+
+
 def test_live_execution_command_requires_opportunity_book_selection_match():
     from dataclasses import replace
 

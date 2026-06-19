@@ -308,6 +308,11 @@ class EventSubmissionReceipt:
     # ONLY when set (omit-when-None for hash stability) so 06-05+ settlement can
     # attribute EMOS-cells vs maze-cells per city — the PROMOTE evidence.
     q_source: str | None = None
+    # qkernel spine execution economics certificate. This is distinct from q_live /
+    # q_lcb_5pct, which are receipt-facing probability provenance. When present,
+    # execution sizing is accountable to this guarded payoff-space certificate.
+    # Omitted when None so non-qkernel receipts keep stable JSON.
+    qkernel_execution_economics: dict[str, Any] | None = None
     strategy_key: str | None = None
     # Telemetry-only Opportunity Book selector evidence. Omitted from receipt_json
     # when None so pre-book receipts keep byte-identical hashes.

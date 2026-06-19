@@ -44,12 +44,36 @@ class OpportunityBook:
             None,
         )
         actual_selected_candidate_id = self.cache_summary.get("actual_receipt_selected_candidate_id")
-        return {
+        selection_authority = self.cache_summary.get("selection_authority")
+        selected_qkernel_execution_economics = self.cache_summary.get(
+            "selected_qkernel_execution_economics"
+        )
+        candidate_receipts = [
+            evaluation.to_receipt_dict() for evaluation in self.evaluations
+        ]
+        if actual_selected_candidate_id:
+            for candidate in candidate_receipts:
+                if str(candidate.get("candidate_id") or "") != str(actual_selected_candidate_id):
+                    continue
+                legacy_admitted = bool(candidate.get("admitted"))
+                candidate["legacy_admitted"] = legacy_admitted
+                candidate["admitted"] = True
+                candidate["live_decision_selected"] = True
+                if selection_authority is not None:
+                    candidate["live_selection_authority"] = selection_authority
+                if selected_qkernel_execution_economics is not None:
+                    candidate["qkernel_execution_economics"] = selected_qkernel_execution_economics
+                break
+        receipt = {
             "book_id": self.book_id,
             "book_version": self.book_version,
             "family_id": self.family_id,
             "evaluated_count": len(self.evaluations),
-            "admitted_count": sum(1 for evaluation in self.evaluations if evaluation.admitted),
+            "admitted_count": sum(
+                1
+                for candidate in candidate_receipts
+                if bool(candidate.get("admitted"))
+            ),
             # SINGLE DECISION SURFACE (operator directive 2026-06-08; "bin
             # selection.md" §14 item 8). The recorded selection is the ΔU decision
             # (``self.selected_candidate_id`` == ``decided_candidate_id``)
@@ -78,8 +102,13 @@ class OpportunityBook:
             "global_rank": self.global_rank,
             "loser_reasons": self.loser_reasons,
             "cache_summary": self.cache_summary,
-            "candidates": [evaluation.to_receipt_dict() for evaluation in self.evaluations],
+            "candidates": candidate_receipts,
         }
+        if selection_authority is not None:
+            receipt["selection_authority"] = selection_authority
+        if selected_qkernel_execution_economics is not None:
+            receipt["selected_qkernel_execution_economics"] = selected_qkernel_execution_economics
+        return receipt
 
 
 def build_family_opportunity_book(
