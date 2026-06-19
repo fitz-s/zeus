@@ -2568,11 +2568,11 @@ def test_main_pre_submit_jit_book_provider_uses_short_http_timeout(monkeypatch):
 def test_main_pre_submit_inner_io_timeout_stays_inside_outer_guard(monkeypatch):
     import src.main as main
 
-    monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "3.0")
+    monkeypatch.delenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS", raising=False)
     timeout = main._edli_pre_submit_inner_io_timeout_seconds()
 
-    assert 0 < timeout <= 1.0
+    assert 0 < timeout <= 2.0
     assert timeout * 2.0 < main._edli_pre_submit_clob_timeout_seconds()
 
 

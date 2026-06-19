@@ -7894,15 +7894,15 @@ def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | 
 def _edli_pre_submit_clob_timeout_seconds() -> float:
     raw = os.environ.get("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS")
     if raw in (None, ""):
-        return 3.0
+        return 6.0
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
-        return 3.0
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 6.0", raw)
+        return 6.0
     if value <= 0:
-        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
-        return 3.0
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 6.0", raw)
+        return 6.0
     return value
 
 
@@ -7933,7 +7933,7 @@ def _edli_pre_submit_inner_io_timeout_seconds() -> float:
                 raw,
                 outer,
             )
-    return max(0.01, min(1.0, outer * 0.35))
+    return max(0.01, min(2.0, outer * 0.35))
 
 
 def _edli_run_pre_submit_clob_call(label: str, fn):
