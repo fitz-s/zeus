@@ -5355,8 +5355,6 @@ def _append_cancel_unknown_confirmed_trade_fill(
     matched_size = _point_order_matched_size(point_order, fallback=filled_size)
     remaining_size = _matched_remaining_size(command, matched_size, venue_status=venue_status)
     event_type = _matched_event_type(command, matched_size, venue_status=venue_status)
-    if event_type != CommandEventType.FILL_CONFIRMED.value:
-        raise ValueError("cancel-unknown confirmed trade did not prove full fill")
     payload = {
         "schema_version": 1,
         "reason": "review_cleared_confirmed_fill",
@@ -5434,15 +5432,25 @@ def _append_cancel_unknown_confirmed_trade_fill(
         occurred_at=observed_at,
         payload=payload,
     )
-    _append_exit_order_fill_projection(
-        conn,
-        command=command,
-        venue_order_id=venue_order_id,
-        matched_size=filled_size,
-        fill_price=fill_price,
-        observed_at=observed_at,
-        event_type=event_type,
-    )
+    if str(command.get("intent_kind") or "").upper() == "ENTRY":
+        _append_matched_order_fill_projection(
+            conn,
+            command=command,
+            venue_order_id=venue_order_id,
+            matched_size=filled_size,
+            fill_price=fill_price,
+            observed_at=observed_at,
+        )
+    else:
+        _append_exit_order_fill_projection(
+            conn,
+            command=command,
+            venue_order_id=venue_order_id,
+            matched_size=filled_size,
+            fill_price=fill_price,
+            observed_at=observed_at,
+            event_type=event_type,
+        )
 
 
 def _review_required_cancel_unknown_live_order_recovery(
@@ -5507,13 +5515,51 @@ def _review_required_cancel_unknown_live_order_recovery(
             return "stayed"
         matching_open_orders = _matching_open_orders_for_command(client, command)
         matching_trades = _matching_trades_for_command(client, command)
-        if matching_open_orders or matching_trades:
+        if matching_open_orders:
             logger.info(
                 "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
-                "(point order %s but account exposure still matches: open_orders=%s trades=%s)",
+                "(point order %s but account open order still matches: open_orders=%s)",
                 cmd.command_id,
                 "has no live record" if point_order_no_live_record else "absent",
                 len(matching_open_orders),
+            )
+            return "stayed"
+        if matching_trades:
+            trade = _confirmed_trade_for_order_id(client, venue_order_id)
+            if trade is not None:
+                now = _now_iso()
+                safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
+                sp_name = f"sp_cancel_unknown_confirmed_trade_{safe_command_id}"
+                conn.execute(f"SAVEPOINT {sp_name}")
+                try:
+                    _append_cancel_unknown_confirmed_trade_fill(
+                        conn,
+                        command=command,
+                        point_order=order or {
+                            "orderID": venue_order_id,
+                            "status": point_order_status,
+                        },
+                        trade=trade,
+                        observed_at=now,
+                    )
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                except Exception:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                    raise
+                logger.info(
+                    "recovery: command %s REVIEW_REQUIRED cancel-unknown -> trade fill "
+                    "(venue_order_id=%s point_order_status=%s)",
+                    cmd.command_id,
+                    venue_order_id,
+                    point_order_status,
+                )
+                return "advanced"
+            logger.info(
+                "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
+                "(point order %s but only exposure-level trades matched: trades=%s)",
+                cmd.command_id,
+                "has no live record" if point_order_no_live_record else "absent",
                 len(matching_trades),
             )
             return "stayed"

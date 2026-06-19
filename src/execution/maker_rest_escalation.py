@@ -89,6 +89,7 @@ def find_expired_resting_entries(
         WHERE vc.intent_kind = 'ENTRY'
           AND vc.venue_order_id IS NOT NULL
           AND vc.venue_order_id != ''
+          AND vc.state IN ('ACKED', 'POST_ACKED', 'PARTIAL')
           AND lf.state IN ({placeholders})
           AND vc.created_at <= ?
         """,

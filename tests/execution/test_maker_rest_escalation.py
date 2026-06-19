@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-19
 # Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K4.0
 """Relationship tests for the K4.0 maker-rest escalation job.
 
@@ -77,6 +77,7 @@ def _add_order(
     *,
     command_id: str,
     intent_kind: str = "ENTRY",
+    command_state: str = "ACKED",
     venue_order_id: str | None = None,
     created_at: datetime = NOW - timedelta(minutes=180),
     fact_states: tuple[str, ...] = ("LIVE",),
@@ -93,7 +94,7 @@ def _add_order(
             10.0,
             0.5,
             venue_order_id,
-            "ACKED",
+            command_state,
             None,
             created_at.isoformat(),
             created_at.isoformat(),
@@ -186,6 +187,20 @@ class TestScopeGuards:
         clob = _FakeClob()
         run_maker_rest_escalation_cycle(conn, clob, now=NOW)
         assert clob.cancelled == []
+
+    def test_review_required_open_fact_is_recovery_owned_not_cancelled(self):
+        conn = _db()
+        _add_order(
+            conn,
+            command_id="c1",
+            venue_order_id="o1",
+            command_state="REVIEW_REQUIRED",
+            fact_states=("LIVE",),
+        )
+        clob = _FakeClob()
+        stats = run_maker_rest_escalation_cycle(conn, clob, now=NOW)
+        assert clob.cancelled == []
+        assert stats["scanned"] == 0
 
     def test_stuck_submitting_without_order_id_is_skipped(self):
         """No venue_order_id (lost ack) -> command recovery owns it, not this job."""

@@ -1519,6 +1519,62 @@ class TestRecoveryResolutionTable:
             "tx_hash": "0xabc",
         }
 
+    def test_cancel_unknown_unknown_point_order_with_exact_trade_fills_entry_projection(
+        self, conn, mock_client
+    ):
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=5, price=0.55)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, order_id="ord-entry")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-entry",
+            "status": "UNKNOWN",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-entry-001",
+                "taker_order_id": "ord-entry",
+                "status": "CONFIRMED",
+                "side": "BUY",
+                "asset_id": "tok-001",
+                "size": "5",
+                "price": "0.55",
+                "transaction_hash": "0xdef",
+            }
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["venue_order_proof"]["venue_status"] == "UNKNOWN"
+        assert payload["trade_fact_proof"]["trade"]["id"] == "trade-entry-001"
+        fact = conn.execute(
+            """
+            SELECT state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+            """
+        ).fetchone()
+        assert dict(fact) == {
+            "state": "CONFIRMED",
+            "filled_size": "5",
+            "fill_price": "0.55",
+            "tx_hash": "0xdef",
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()
+        assert current["phase"] in {"active", "day0_window"}
+        assert Decimal(str(current["shares"])) == Decimal("5")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("2.75")
+        assert current["order_status"] == "filled"
+
     def test_cancel_unknown_review_required_terminal_no_fill_expires_entry(self, conn, mock_client):
         from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
 
