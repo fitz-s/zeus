@@ -425,9 +425,10 @@ def _k2_obs_tick():
         if str(_REPO_ROOT) not in _sys.path:
             _sys.path.insert(0, str(_REPO_ROOT))
         from scripts.obs_live_tick import run_live_tick
+        from src.config import STATE_DIR
         # run_live_tick opens its own db_writer_lock connection to world.db.
         # Do NOT create a second get_world_connection here.
-        results = run_live_tick(days_back=7, db_path=_REPO_ROOT / "state" / "zeus-world.db")
+        results = run_live_tick(days_back=7, db_path=STATE_DIR / "zeus-world.db")
         written = sum(r.rows_written for r in results if not r.skipped_hko)
         failed = [r.city for r in results if r.failure_reason]
         logger.info("K2 obs_tick: written=%d failed=%s", written, failed or "none")
@@ -454,11 +455,11 @@ def _active_window_cities(now_utc: "datetime | None" = None) -> list[str]:
         if not city.timezone:
             continue
         try:
-            local_now = ref.astimezone(_ZI(city.timezone))
-            local_hour = local_now.hour + local_now.minute / 60.0
+            city_clock = ref.astimezone(_ZI(city.timezone))
+            clock_hour = city_clock.hour + city_clock.minute / 60.0
             # Active window: [0, peak_hour + 6] local time.
             window_end = float(getattr(city, "historical_peak_hour", 14.0) or 14.0) + 6.0
-            if 0.0 <= local_hour <= window_end:
+            if 0.0 <= clock_hour <= window_end:
                 active.append(city.name)
         except Exception:
             continue
@@ -502,6 +503,7 @@ def _k2_obs_fast_tick():
         if str(_REPO_ROOT) not in _sys.path:
             _sys.path.insert(0, str(_REPO_ROOT))
         from scripts.obs_live_tick import run_live_tick
+        from src.config import STATE_DIR
 
         now_utc = _dt.now(_tz.utc)
         city_filter = _active_window_cities(now_utc)
@@ -521,7 +523,7 @@ def _k2_obs_fast_tick():
         results = run_live_tick(
             days_back=1,
             city_filter=city_filter,
-            db_path=_REPO_ROOT / "state" / "zeus-world.db",
+            db_path=STATE_DIR / "zeus-world.db",
         )
         written = sum(r.rows_written for r in results if not r.skipped_hko)
         failed = [r.city for r in results if r.failure_reason]
@@ -557,7 +559,8 @@ def _k2_hko_tick():
             logger.info("ingest k2_hko_tick skipped_lock_held")
             return
         _REPO_ROOT = Path(__file__).resolve().parent.parent
-        db_path = _REPO_ROOT / "state" / "zeus-world.db"
+        from src.config import STATE_DIR
+        db_path = STATE_DIR / "zeus-world.db"
         # Import the standalone script's two entry-point functions directly.
         # hko_ingest_tick.py is already in SQLITE_CONNECT_ALLOWLIST.
         import sys as _sys

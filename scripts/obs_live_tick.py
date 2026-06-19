@@ -63,7 +63,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from src.config import cities_by_name  # noqa: E402
+from src.config import STATE_DIR, cities_by_name  # noqa: E402
 from src.data.observation_instants_writer import (  # noqa: E402
     InvalidObsV2RowError,
     ObsV2Row,
@@ -81,8 +81,8 @@ from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = _REPO_ROOT / "state" / "zeus-world.db"
-DEFAULT_LOG_PATH = _REPO_ROOT / "state" / "obs_v2_live_tick_log.jsonl"
+DEFAULT_DB_PATH = STATE_DIR / "zeus-world.db"
+DEFAULT_LOG_PATH = STATE_DIR / "obs_v2_live_tick_log.jsonl"
 DEFAULT_DAYS_BACK = 7
 DATA_VERSION = "v1.wu-native"
 LIVE_TICK_PARSER_VERSION = "obs_v2_live_tick_v1"

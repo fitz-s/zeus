@@ -208,6 +208,32 @@ def test_obs_v2_live_tick_imports_cleanly() -> None:
     assert DATA_VERSION.startswith("v1."), f"DATA_VERSION must match v1.* pattern, got {DATA_VERSION!r}"
 
 
+def test_obs_v2_and_hko_live_ticks_use_runtime_state_dir(monkeypatch, tmp_path: Path) -> None:
+    """Live tick defaults must follow ZEUS_PRIMARY_ROOT, not the deploy worktree."""
+    import importlib
+    import sys
+
+    import src.config as config_mod
+
+    monkeypatch.setenv("ZEUS_PRIMARY_ROOT", str(tmp_path))
+    reloaded_config = importlib.reload(config_mod)
+    for module_name in ("scripts.obs_live_tick", "scripts.hko_ingest_tick"):
+        sys.modules.pop(module_name, None)
+
+    obs_tick = importlib.import_module("scripts.obs_live_tick")
+    hko_tick = importlib.import_module("scripts.hko_ingest_tick")
+
+    assert obs_tick.DEFAULT_DB_PATH == reloaded_config.STATE_DIR / "zeus-world.db"
+    assert obs_tick.DEFAULT_LOG_PATH == reloaded_config.STATE_DIR / "obs_v2_live_tick_log.jsonl"
+    assert hko_tick.DEFAULT_DB_PATH == reloaded_config.STATE_DIR / "zeus-world.db"
+    assert hko_tick.DEFAULT_LOG_PATH == reloaded_config.STATE_DIR / "hko_ingest_log.jsonl"
+
+    monkeypatch.delenv("ZEUS_PRIMARY_ROOT", raising=False)
+    importlib.reload(config_mod)
+    for module_name in ("scripts.obs_live_tick", "scripts.hko_ingest_tick"):
+        sys.modules.pop(module_name, None)
+
+
 def test_obs_v2_live_tick_uses_city_local_fetch_window_for_day0() -> None:
     """East-of-UTC cities must fetch the already-started local day."""
     from datetime import datetime, timezone
@@ -263,3 +289,5 @@ def test_ingest_main_registers_obs_v2_job() -> None:
         "ingest_main.py must define _k2_obs_tick function. "
         "This is the F44 fix entry point."
     )
+    assert '_REPO_ROOT / "state" / "zeus-world.db"' not in source_text
+    assert 'STATE_DIR / "zeus-world.db"' in source_text
