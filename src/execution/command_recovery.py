@@ -534,6 +534,10 @@ def _attached_table_exists(conn: sqlite3.Connection, schema: str, table: str) ->
     return row is not None
 
 
+def _table_has_columns(conn: sqlite3.Connection, table_ref: str, required: set[str]) -> bool:
+    return required.issubset(_table_columns(conn, table_ref))
+
+
 def _maybe_attach_world_for_recovery(conn: sqlite3.Connection) -> None:
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" in attached:
@@ -552,6 +556,26 @@ def _maybe_attach_world_for_recovery(conn: sqlite3.Connection) -> None:
             conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
     except sqlite3.OperationalError:
         logger.debug("command recovery could not attach world DB", exc_info=True)
+
+
+def _maybe_attach_forecasts_for_recovery(conn: sqlite3.Connection) -> None:
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "forecasts" in attached:
+        return
+    main_path = ""
+    for row in conn.execute("PRAGMA database_list").fetchall():
+        if str(row[1]) == "main":
+            main_path = str(row[2] or "")
+            break
+    if not main_path or Path(main_path).name != "zeus_trades.db":
+        return
+    try:
+        from src.state.db import ZEUS_FORECASTS_DB_PATH
+
+        if ZEUS_FORECASTS_DB_PATH.exists():
+            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+    except sqlite3.OperationalError:
+        logger.debug("command recovery could not attach forecasts DB", exc_info=True)
 
 
 def _edli_live_order_events_ref(conn: sqlite3.Connection) -> str | None:
@@ -595,12 +619,30 @@ def _decision_certificates_ref(conn: sqlite3.Connection) -> str | None:
 
 
 def _market_events_ref(conn: sqlite3.Connection) -> str | None:
+    _maybe_attach_forecasts_for_recovery(conn)
+    _maybe_attach_world_for_recovery(conn)
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
-    if "forecasts" in attached and _attached_table_exists(conn, "forecasts", "market_events"):
+    required = {
+        "city",
+        "target_date",
+        "range_label",
+        "outcome",
+        "temperature_metric",
+        "condition_id",
+    }
+    if (
+        "forecasts" in attached
+        and _attached_table_exists(conn, "forecasts", "market_events")
+        and _table_has_columns(conn, "forecasts.market_events", required)
+    ):
         return "forecasts.market_events"
-    if "world" in attached and _attached_table_exists(conn, "world", "market_events"):
+    if (
+        "world" in attached
+        and _attached_table_exists(conn, "world", "market_events")
+        and _table_has_columns(conn, "world.market_events", required)
+    ):
         return "world.market_events"
-    if _table_exists(conn, "market_events"):
+    if _table_exists(conn, "market_events") and _table_has_columns(conn, "market_events", required):
         return "market_events"
     return None
 
@@ -686,9 +728,19 @@ def _count_facts(conn: sqlite3.Connection, table: str, command_id: str) -> int:
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    if not _table_exists(conn, table):
+    try:
+        if "." in table:
+            schema, table_name = table.split(".", 1)
+            if not _attached_table_exists(conn, schema, table_name):
+                return set()
+            rows = conn.execute(f"PRAGMA {schema}.table_info({table_name})").fetchall()
+        else:
+            if not _table_exists(conn, table):
+                return set()
+            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(row[1]) for row in rows}
+    except sqlite3.OperationalError:
         return set()
-    return {str(row[1]) for row in conn.execute("PRAGMA table_info(" + table + ")")}
 
 
 def _count_position_rows_for_command(conn: sqlite3.Connection, command: dict) -> dict[str, int]:
@@ -6348,19 +6400,6 @@ def _review_required_post_ack_terminal_no_fill_recovery(
     sp_name = f"sp_post_ack_no_fill_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
-        if not _ensure_entry_projection_is_pending_zero_exposure(
-            conn,
-            command=command,
-            order_id=venue_order_id,
-        ):
-            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
-            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-            logger.info(
-                "recovery: command %s REVIEW_REQUIRED post-ACK stayed "
-                "(terminal no-fill proof but entry projection is not zero-exposure pending)",
-                cmd.command_id,
-            )
-            return "stayed"
         append_event(
             conn,
             command_id=cmd.command_id,
@@ -6368,21 +6407,35 @@ def _review_required_post_ack_terminal_no_fill_recovery(
             occurred_at=now,
             payload=payload,
         )
-        _append_entry_order_voided_projection(
-            conn,
-            command=command,
-            order_fact={
-                **command,
-                "order_fact_id": terminal_fact_id,
-                "order_fact_state": latest_fact.get("state"),
-                "order_fact_observed_at": latest_fact.get("observed_at") or now,
-                "order_fact_venue_order_id": venue_order_id,
-                "order_fact_remaining_size": latest_fact.get("remaining_size") or "0",
-                "order_fact_matched_size": latest_fact.get("matched_size") or "0",
-                "order_fact_source": latest_fact.get("source") or "REST",
-            },
-            occurred_at=now,
-        )
+        try:
+            current = _position_current_for_terminal_order(
+                conn,
+                command=command,
+                order_id=venue_order_id,
+            )
+        except (MissingPositionCurrentForTerminalOrder, ValueError):
+            current = None
+        if (
+            current is not None
+            and str(current.get("phase") or "") == "pending_entry"
+            and _decimal_is_zero(current.get("shares"))
+            and _decimal_is_zero(current.get("cost_basis_usd"))
+        ):
+            _append_entry_order_voided_projection(
+                conn,
+                command=command,
+                order_fact={
+                    **command,
+                    "order_fact_id": terminal_fact_id,
+                    "order_fact_state": latest_fact.get("state"),
+                    "order_fact_observed_at": latest_fact.get("observed_at") or now,
+                    "order_fact_venue_order_id": venue_order_id,
+                    "order_fact_remaining_size": latest_fact.get("remaining_size") or "0",
+                    "order_fact_matched_size": latest_fact.get("matched_size") or "0",
+                    "order_fact_source": latest_fact.get("source") or "REST",
+                },
+                occurred_at=now,
+            )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
