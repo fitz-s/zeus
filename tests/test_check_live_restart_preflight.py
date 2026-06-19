@@ -1077,6 +1077,52 @@ def test_preflight_blocks_open_position_when_only_irrelevant_sidecar_rows_are_fr
     assert feasibility["evidence"]["risky"][0]["tokens"] == ["tok-no-target", "tok-yes-target"]
 
 
+def test_execution_feasibility_freshness_uses_observation_time_not_venue_book_timestamp():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc)
+    stale_book_time = now - timedelta(minutes=5)
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES (?, ?, ?, ?)",
+        ("cond-target", "tok-no-target", stale_book_time.isoformat(), now.isoformat()),
+    )
+
+    result = preflight._execution_feasibility_exposure_freshness(
+        conn,
+        columns={"condition_id", "token_id", "quote_seen_at", "created_at"},
+        exposures=[
+            {
+                "position_id": "active-pos",
+                "phase": "active",
+                "city": "London",
+                "target_date": "2026-06-19",
+                "temperature_metric": "low",
+                "bin_label": "Will the lowest temperature in London be 17°C on June 19?",
+                "direction": "buy_no",
+                "condition_id": "cond-target",
+                "tokens": ["tok-no-target"],
+            }
+        ],
+        now=now,
+    )
+
+    assert result["risky"] == []
+    covered = result["covered"][0]
+    assert covered["freshness_basis"] == "created_at"
+    assert covered["latest_observed_at"] == now.isoformat()
+    assert covered["latest_quote_seen_at"] == stale_book_time.isoformat()
+
+
 def test_preflight_blocks_missing_sidecar_heartbeat(monkeypatch, tmp_path):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)

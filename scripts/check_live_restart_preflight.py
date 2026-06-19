@@ -377,10 +377,13 @@ def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResul
             exposures=[_open_exposure_identity(row) for row in rows],
             now=now,
         )
-    latest = _latest_iso_from_covered(exposure_results["covered"], "latest_quote_seen_at")
+    latest = _latest_iso_from_covered(exposure_results["covered"], "latest_observed_at")
     latest_dt = _parse_dt(latest)
     evidence["row_count"] = "not_scanned_append_only_hot_path"
-    evidence["latest_quote_seen_at"] = latest
+    evidence["latest_observed_at"] = latest
+    evidence["latest_quote_seen_at"] = _latest_iso_from_covered(
+        exposure_results["covered"], "latest_quote_seen_at"
+    )
     evidence.update(exposure_results)
     if latest_dt is None:
         return CheckResult(
@@ -425,19 +428,27 @@ def _execution_feasibility_exposure_freshness(
             risky.append({**item, "risk": "missing_execution_identity_for_feasibility"})
             continue
         where_sql, params = predicate
+        observed_expr = "created_at" if "created_at" in columns else "quote_seen_at"
         row = conn.execute(
             f"""
-            SELECT quote_seen_at AS latest_quote_seen_at
+            SELECT {observed_expr} AS latest_observed_at,
+                   quote_seen_at AS latest_quote_seen_at
               FROM execution_feasibility_evidence
              WHERE {where_sql}
-             ORDER BY quote_seen_at DESC
+             ORDER BY {observed_expr} DESC
              LIMIT 1
             """,
             params,
         ).fetchone()
-        latest = row["latest_quote_seen_at"] if row else None
-        latest_dt = _parse_dt(latest)
-        evidence = {**item, "latest_quote_seen_at": latest}
+        latest_observed = row["latest_observed_at"] if row else None
+        latest_quote = row["latest_quote_seen_at"] if row else None
+        latest_dt = _parse_dt(latest_observed)
+        evidence = {
+            **item,
+            "latest_observed_at": latest_observed,
+            "latest_quote_seen_at": latest_quote,
+            "freshness_basis": observed_expr,
+        }
         if latest_dt is None:
             risky.append({**evidence, "risk": "missing_execution_feasibility_evidence"})
             continue

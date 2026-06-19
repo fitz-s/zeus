@@ -107,7 +107,7 @@ test_trust_policy:
     tests/test_edli_stage_status_summary_freshness.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_edli_stage_source_health_freshness.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_edli_stage_loaded_sha.py: {created: "2026-05-31", last_used: "2026-05-31"}
-    tests/test_edli_shadow_boot_stale_surfaces.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/test_edli_live_boot_stage_surfaces.py: {created: "2026-05-31", last_used: "2026-06-19"}
     tests/test_multiclass_skill_scoring.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_settlement_resolution_contract.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_selection_coverage_settlement_truth.py: {created: "2026-05-29", last_used: "2026-05-29"}

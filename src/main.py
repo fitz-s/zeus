@@ -769,10 +769,10 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
         world_db_path=str(_settings_section("state", {}).get("world_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
         trade_db_path=str(_settings_section("state", {}).get("trade_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
         forecasts_db_path=str(_settings_section("state", {}).get("forecasts_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
-        loaded_sha_file=str(edli_cfg.get("edli_stage_loaded_sha_file") or ""),
+        loaded_sha_file=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_loaded_sha_file")),
         promotion_artifact_path=str(edli_cfg.get("edli_live_promotion_artifact_path") or ""),
-        source_health_json=str(edli_cfg.get("edli_stage_source_health_json") or ""),
-        status_json=str(edli_cfg.get("edli_stage_status_json") or ""),
+        source_health_json=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_source_health_json")),
+        status_json=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_status_json")),
         max_age_seconds=int(edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)),
     )
     if stage == "edli_live":
@@ -842,6 +842,20 @@ def _require_stage_file_paths(edli_cfg: dict, stage: str) -> None:
     ]
     if missing:
         raise RuntimeError(f"{stage.upper()}_REQUIRES_STAGE_EVIDENCE_FILES:{','.join(missing)}")
+
+
+def _resolve_edli_stage_runtime_path(raw_path: object) -> str:
+    path_text = str(raw_path or "").strip()
+    if not path_text:
+        return ""
+    path = Path(path_text).expanduser()
+    if path.is_absolute():
+        return str(path)
+    from src.config import RUNTIME_ROOT, STATE_DIR
+
+    if path.parts and path.parts[0] == "state":
+        return str(STATE_DIR.joinpath(*path.parts[1:]))
+    return str(RUNTIME_ROOT / path)
 
 
 def _edli_stage_pending_reconcile_count(conn) -> int:
