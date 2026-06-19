@@ -4271,8 +4271,9 @@ def _startup_freshness_check() -> None:
     §3.7 gate split:
     - Data freshness gate: degrade-or-warn on STALE. Operator may override
       individual sources via state/control_plane.json::force_ignore_freshness.
-    - Wallet gate (_startup_wallet_check): NEVER overridable; hard exit on
-      failure.
+    - Wallet reachability warm-up (_startup_wallet_check): NEVER synthesizes
+      bankroll truth; missing wallet truth leaves new submit/sizing fail-closed
+      while monitor/redecision continues.
 
     Boot behavior (driven by evaluate_freshness_at_boot):
     - FRESH: log at INFO, proceed.
@@ -4588,7 +4589,7 @@ _WALLET_RECORD_UNSET = object()
 
 
 def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
-    """P7: Fail-closed wallet gate. Live daemon refuses to start if wallet query fails.
+    """P7: Startup wallet reachability warm-up.
 
     Accepts an optional clob for testing. In production, creates a live
     PolymarketClient.
@@ -4600,7 +4601,13 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
     immediately poisoned the singleton, blocking every downstream
     `assert_buy_preflight` / `assert_sell_preflight` with
     `collateral_ledger_unconfigured` or `sqlite3.ProgrammingError`.
+
+    Wallet unreachability is fail-closed for new live submit, not fatal for the
+    whole daemon. Held-position monitoring, redecision, settlement, and later
+    bankroll warm retries must continue; submit/sizing paths consume
+    bankroll_provider.cached() and already fail closed when it is unavailable.
     """
+    balance = None
     if clob is not None:
         # TEST-INJECTION PATH: an explicit clob was supplied. Use it directly
         # and keep the same fail-closed semantics. Production never reaches here.
@@ -4608,8 +4615,11 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
             balance = float(clob.get_balance())
             logger.info("Startup wallet check: $%.2f pUSD available", balance)
         except Exception as exc:
-            logger.critical("FAIL-CLOSED: wallet query failed at daemon start: %s", exc)
-            sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
+            logger.critical(
+                "STARTUP_WALLET_UNAVAILABLE: wallet query failed at daemon start; "
+                "continuing monitor/redecision while new submit remains fail-closed: %s",
+                exc,
+            )
     else:
         # PRODUCTION PATH: route the fail-closed wallet-reachability gate through
         # bankroll_provider.current() instead of constructing a SECOND
@@ -4625,24 +4635,35 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
         # tests / a boot path without the warm thread) the gate self-fetches via
         # current(). Efficiency #1 still holds: Site A warmed the 30s cache, so
         # current() here is a fresh CACHE HIT with no additional on-chain RPC; on
-        # a cold cache it does a real fetch and still fail-closes on None.
-        if bankroll_record is _WALLET_RECORD_UNSET:
-            from src.runtime.bankroll_provider import current as _bankroll_current
+        # a cold cache it does a real fetch. None keeps the submit lane
+        # fail-closed via bankroll_provider.cached() consumers, but no longer
+        # kills monitoring/redecision.
+        try:
+            if bankroll_record is _WALLET_RECORD_UNSET:
+                from src.runtime.bankroll_provider import current as _bankroll_current
 
-            rec = _bankroll_current()
-        else:
-            rec = bankroll_record
+                rec = _bankroll_current()
+            else:
+                rec = bankroll_record
+        except Exception as exc:
+            rec = None
+            logger.critical(
+                "STARTUP_WALLET_UNAVAILABLE: bankroll_provider.current() raised; "
+                "continuing monitor/redecision while new submit remains fail-closed: %s",
+                exc,
+            )
         if rec is None:
             logger.critical(
-                "FAIL-CLOSED: wallet query failed at daemon start "
-                "(bankroll_provider returned None)"
+                "STARTUP_WALLET_UNAVAILABLE: bankroll_provider returned None at daemon "
+                "start; continuing monitor/redecision while new submit remains "
+                "fail-closed until a later bankroll warm succeeds."
             )
-            sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
-        balance = rec.value_usd
-        logger.info(
-            "Startup wallet check: $%.2f pUSD available (source=%s cached=%s)",
-            balance, rec.source, rec.cached,
-        )
+        else:
+            balance = rec.value_usd
+            logger.info(
+                "Startup wallet check: $%.2f pUSD available (source=%s cached=%s)",
+                balance, rec.source, rec.cached,
+            )
 
     # Install the process-wide collateral ledger singleton with a ledger-owned
     # persistent conn so downstream executor / riskguard preflight callers do
@@ -9031,7 +9052,8 @@ def main():
     # Runs BEFORE strategy gate so operator sees freshness diagnostics even when
     # strategy gate refuses. GATE SPLIT (§3.7): data gate is operator-overridable
     # via state/control_plane.json::force_ignore_freshness: ["source_name"].
-    # Wallet gate (_startup_wallet_check below) is NEVER overridable.
+    # Wallet reachability (_startup_wallet_check below) is never overridden into
+    # fake bankroll truth.
     # Absent source_health.json → 5-min retry then FATAL (see freshness_gate.py).
     # Stale source_health.json → degrade per source family; trading continues.
     # Phase 3 will promote ABSENT result here to a hard FATAL (currently warn).
@@ -9079,10 +9101,11 @@ def main():
                 _capital_str,
                 settings["sizing"]["kelly_multiplier"] * 100)
 
-    # P7: Fail-closed wallet gate — must run before first cycle.
-    # GATE SPLIT (§3.7): wallet failure is ALWAYS fatal, no operator override.
+    # P7: Wallet reachability warm-up — must run before first cycle.
+    # GATE SPLIT (§3.7): wallet failure is NEVER converted into fake bankroll
+    # truth; new submit/sizing fail closed while monitor/redecision continues.
     # Consume the warm record (efficiency #3): warm + gate = exactly ONE
-    # current() acquisition. A None warm record → the gate fail-closes.
+    # current() acquisition.
     _startup_wallet_check(bankroll_record=_warm_rec)
 
     # MF-1: durable self-healing capital spine — AT BOOT, before any new trading,

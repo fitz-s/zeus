@@ -39,17 +39,47 @@ from check_data_pipeline_live_e2e import _connect_live_readonly
 from src.config import STATE_DIR as DEFAULT_RUNTIME_STATE_DIR
 
 SETTINGS_PATH = ROOT / "config" / "settings.json"
-STATE_DIR = Path(
-    os.environ.get("ZEUS_LIVE_PREFLIGHT_STATE_DIR")
-    or os.environ.get("ZEUS_STATE_DIR")
-    or DEFAULT_RUNTIME_STATE_DIR
-).expanduser().resolve()
+LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
+
+
+def _runtime_state_dir(plist_path: Path = LIVE_TRADING_PLIST_PATH) -> Path:
+    """Resolve the canonical runtime state root used by the loaded live daemon.
+
+    The preflight is often run from the deploy worktree.  In that shell,
+    ``src.config.STATE_DIR`` points at the worktree's local ``state/`` unless
+    ZEUS_PRIMARY_ROOT is exported.  The launchd job carries the runtime root, so
+    use that same source before falling back to checkout-local state.
+    """
+
+    explicit = os.environ.get("ZEUS_LIVE_PREFLIGHT_STATE_DIR") or os.environ.get(
+        "ZEUS_STATE_DIR"
+    )
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+
+    primary_root = os.environ.get("ZEUS_PRIMARY_ROOT")
+    if primary_root:
+        return (Path(primary_root).expanduser().resolve() / "state")
+
+    try:
+        payload = plistlib.loads(plist_path.read_bytes())
+        env = payload.get("EnvironmentVariables")
+        if isinstance(env, dict):
+            plist_root = env.get("ZEUS_PRIMARY_ROOT")
+            if plist_root:
+                return (Path(str(plist_root)).expanduser().resolve() / "state")
+    except Exception:
+        pass
+
+    return Path(DEFAULT_RUNTIME_STATE_DIR).expanduser().resolve()
+
+
+STATE_DIR = _runtime_state_dir()
 TRADE_DB = Path(os.environ.get("ZEUS_TRADE_DB") or STATE_DIR / "zeus_trades.db")
 WORLD_DB = Path(os.environ.get("ZEUS_WORLD_DB") or STATE_DIR / "zeus-world.db")
 FORECAST_DB = Path(os.environ.get("ZEUS_FORECAST_DB") or STATE_DIR / "zeus-forecasts.db")
 SCHEDULER_HEALTH_PATH = STATE_DIR / "scheduler_jobs_health.json"
 FORECAST_LIVE_HEARTBEAT_PATH = STATE_DIR / "forecast-live-heartbeat.json"
-LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
 DUST_SHARE_LIMIT = 0.01
 SIDECAR_HEARTBEAT_MAX_AGE_SECONDS = 180.0
 EXECUTION_FEASIBILITY_MAX_AGE_SECONDS = 180.0

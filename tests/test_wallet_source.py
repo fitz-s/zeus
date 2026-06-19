@@ -1,13 +1,17 @@
+# Created: 2026-05-04
+# Last reused/audited: 2026-06-19
+# Authority basis: P7 wallet bankroll source of truth + live monitor continuity on wallet RPC faults
+# Lifecycle: created=2026-05-04; last_reviewed=2026-06-19; last_reused=2026-06-19
 """P7 — Wallet as bankroll source of truth.
 
 Tests that wallet_balance is the SOLE bankroll in live mode (no config cap).
 2026-05-04 update (bankroll truth-chain cleanup): the prior config-cap
 truncation has been removed; effective bankroll now equals the on-chain wallet
-balance unconditionally. The daemon still fails closed when the wallet query
-fails at startup.
+balance unconditionally. A wallet query failure must never synthesize bankroll;
+new submit/sizing fail closed while monitor/redecision continues.
 
 Criteria covered:
-  #1 — startup fails closed when wallet raises
+  #1 — startup wallet failure blocks submit without killing monitor
   #2 — wallet balance flows through unchanged (no upper-bound clip)
   #3 — wallet error returns (None, entry_block_reason)
 """
@@ -15,6 +19,8 @@ Criteria covered:
 import logging
 import pytest
 import src.engine.cycle_runtime as _runtime
+from src.runtime import bankroll_provider
+from src.state import collateral_ledger
 from src.state.portfolio import PortfolioState
 
 
@@ -93,8 +99,20 @@ class TestWalletBankrollSource:
         assert cap["wallet_balance_usd"] == balance
         assert cap["entry_block_reason"] == "entry_bankroll_non_positive"
 
-    def test_startup_fails_closed_on_wallet_error(self):
-        """Criterion #1: wallet raises at startup u2192 daemon refuses to start via sys.exit."""
+    def test_startup_wallet_error_blocks_submit_without_crashing_monitor(self, caplog):
+        """Criterion #1: wallet raises at startup -> no fake bankroll, but daemon startup continues.
+
+        Submit/sizing consumers still fail closed through the unavailable bankroll cache;
+        monitoring/redecision must not be killed by a transient wallet RPC fault.
+        """
         import src.main as main_mod
-        with pytest.raises(SystemExit):
+
+        bankroll_provider.reset_cache_for_tests()
+        collateral_ledger.configure_global_ledger(None)
+
+        with caplog.at_level(logging.CRITICAL, logger="src.main"):
             main_mod._startup_wallet_check(clob=_FailLiveClob())
+
+        assert "STARTUP_WALLET_UNAVAILABLE" in caplog.text
+        assert bankroll_provider.cached() is None
+        assert collateral_ledger.get_global_ledger() is not None

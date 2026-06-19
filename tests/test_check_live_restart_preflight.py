@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 from scripts import check_live_restart_preflight as preflight
@@ -176,6 +179,83 @@ def _patch_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
     monkeypatch.setattr(preflight, "_git_head", lambda: "testsha")
     return trade_db, forecast_db, state_dir
+
+
+def test_runtime_state_dir_reads_primary_root_from_live_plist(monkeypatch, tmp_path):
+    monkeypatch.delenv("ZEUS_LIVE_PREFLIGHT_STATE_DIR", raising=False)
+    monkeypatch.delenv("ZEUS_STATE_DIR", raising=False)
+    monkeypatch.delenv("ZEUS_PRIMARY_ROOT", raising=False)
+    runtime_root = tmp_path / "runtime-root"
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_bytes(
+        (
+            b"""<?xml version="1.0" encoding="UTF-8"?>\n"""
+            b"""<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" """
+            b""""http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n"""
+            b"""<plist version="1.0"><dict><key>EnvironmentVariables</key><dict>"""
+            + f"<key>ZEUS_PRIMARY_ROOT</key><string>{runtime_root}</string>".encode()
+            + b"""</dict></dict></plist>\n"""
+        )
+    )
+
+    assert preflight._runtime_state_dir(plist) == runtime_root / "state"
+
+
+def test_import_time_db_paths_follow_live_plist_primary_root(tmp_path):
+    home = tmp_path / "home"
+    launch_agents = home / "Library" / "LaunchAgents"
+    launch_agents.mkdir(parents=True)
+    runtime_root = tmp_path / "runtime-root"
+    plist = launch_agents / "com.zeus.live-trading.plist"
+    plist.write_bytes(
+        (
+            b"""<?xml version="1.0" encoding="UTF-8"?>\n"""
+            b"""<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" """
+            b""""http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n"""
+            b"""<plist version="1.0"><dict><key>EnvironmentVariables</key><dict>"""
+            + f"<key>ZEUS_PRIMARY_ROOT</key><string>{runtime_root}</string>".encode()
+            + b"""</dict></dict></plist>\n"""
+        )
+    )
+    env = os.environ.copy()
+    for key in (
+        "ZEUS_LIVE_PREFLIGHT_STATE_DIR",
+        "ZEUS_STATE_DIR",
+        "ZEUS_PRIMARY_ROOT",
+        "ZEUS_TRADE_DB",
+        "ZEUS_WORLD_DB",
+        "ZEUS_FORECAST_DB",
+    ):
+        env.pop(key, None)
+    env["HOME"] = str(home)
+    env["PYTHONPATH"] = str(preflight.ROOT)
+    code = """
+import json
+from scripts import check_live_restart_preflight as p
+print(json.dumps({
+    "state": str(p.STATE_DIR),
+    "trade": str(p.TRADE_DB),
+    "world": str(p.WORLD_DB),
+    "forecast": str(p.FORECAST_DB),
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=preflight.ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    state_dir = runtime_root.resolve() / "state"
+
+    assert payload == {
+        "state": str(state_dir),
+        "trade": str(state_dir / "zeus_trades.db"),
+        "world": str(state_dir / "zeus-world.db"),
+        "forecast": str(state_dir / "zeus-forecasts.db"),
+    }
 
 
 def test_preflight_blocks_qkernel_cutover_flag_off(monkeypatch, tmp_path):
@@ -993,9 +1073,10 @@ def test_preflight_blocks_open_position_when_only_irrelevant_sidecar_rows_are_fr
     trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
     now = datetime.now(timezone.utc)
+    target_date = (now + timedelta(days=3)).date().isoformat()
     _write_fresh_sidecar_heartbeats(state_dir, now=now)
     _add_identity_columns(trade)
-    label = "Will the highest temperature in Seattle be between 82-83°F on June 19?"
+    label = f"Will the highest temperature in Seattle be between 82-83F on {target_date}?"
     trade.execute(
         """
         INSERT INTO position_current (
@@ -1006,12 +1087,12 @@ def test_preflight_blocks_open_position_when_only_irrelevant_sidecar_rows_are_fr
             last_monitor_market_price_is_fresh, updated_at,
             condition_id, token_id, no_token_id
         ) VALUES (
-            'active-pos', 'active', 'Seattle', '2026-06-19', 'high',
+            'active-pos', 'active', 'Seattle', ?, 'high',
             ?, 'buy_no', 9.0, 9.0, 'filled', NULL, 0, NULL,
             0.84, 1, 0.72, 1, ?, 'cond-target', 'tok-yes-target', 'tok-no-target'
         )
         """,
-        (label, now.isoformat()),
+        (target_date, label, now.isoformat()),
     )
     trade.execute(
         """
@@ -1051,9 +1132,10 @@ def test_preflight_blocks_open_position_when_only_irrelevant_sidecar_rows_are_fr
         INSERT INTO forecast_posteriors (
             posterior_id, city, target_date, temperature_metric,
             source_cycle_time, computed_at, q_json, runtime_layer
-        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, ?, 'live')
+        ) VALUES (1, 'Seattle', ?, 'high', ?, ?, ?, 'live')
         """,
         (
+            target_date,
             now.isoformat(),
             now.isoformat(),
             json.dumps({label: 0.15}),

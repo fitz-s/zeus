@@ -1,7 +1,7 @@
 # Created: 2026-06-05
-# Last reused/audited: 2026-06-05
-# Authority basis: efficiency #1 boot wallet-fetch dedupe
-# Lifecycle: created=2026-06-05; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Last reused/audited: 2026-06-19
+# Authority basis: efficiency #1 boot wallet-fetch dedupe + live monitor continuity on wallet RPC faults
+# Lifecycle: created=2026-06-05; last_reviewed=2026-06-19; last_reused=2026-06-19
 # Purpose: Relationship antibody — the production (clob=None) wallet gate routes through bankroll_provider.current() and reuses Site A's warm 30s cache instead of issuing a SECOND on-chain RPC.
 # Reuse: Re-run when _startup_wallet_check's production path, the Site A "Capital (on-chain)" warm call, or bankroll_provider's cache TTL changes.
 """Relationship test — boot wallet-fetch dedupe (Site A warm → Site B free).
@@ -29,7 +29,9 @@ fresh PolymarketClient instead of calling current(), the counter would stay 0
 AND the live path would fire — exactly the RED state on pre-dedupe code.
 
 The two other jobs of the gate are independently asserted:
-  (2) fail-closed sys.exit when current() returns None (wallet unreachable);
+  (2) fail-closed submit semantics when current() returns None (wallet unreachable):
+      no synthetic bankroll is installed, and later submit/sizing consumers still
+      fail closed via bankroll_provider.cached();
   (3) CollateralLedger global singleton install on every success path; and
   (4) the clob= test-injection path stays entirely independent of current().
 """
@@ -113,15 +115,17 @@ def test_site_b_routes_through_current_no_second_fetch(monkeypatch):
     )
 
 
-def test_fail_closed_when_current_returns_none(monkeypatch):
+def test_submit_fail_closed_but_daemon_continues_when_current_returns_none(monkeypatch):
     """FAIL-CLOSED PRESERVED: current() returns None (wallet unreachable / never
-    warmed) → _startup_wallet_check(clob=None) must sys.exit."""
+    warmed) → _startup_wallet_check(clob=None) must not synthesize bankroll or
+    crash monitoring. Submit/sizing remains blocked downstream by the empty
+    bankroll_provider cache."""
     counter = _CurrentCounter(returns_none=True)
     monkeypatch.setattr(bankroll_provider, "current", counter)
 
-    with pytest.raises(SystemExit):
-        main_mod._startup_wallet_check(clob=None)
+    main_mod._startup_wallet_check(clob=None)
     assert counter.calls == 1, "fail-closed path must still consult current()"
+    assert bankroll_provider.cached() is None
 
 
 def test_injected_clob_does_not_touch_bankroll_provider(monkeypatch):
