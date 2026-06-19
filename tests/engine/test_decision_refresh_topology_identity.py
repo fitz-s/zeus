@@ -279,40 +279,24 @@ def test_decision_refresher_reinjects_family_identity() -> None:
     )
 
 
-def test_reactor_refresher_uses_gamma_capable_pending_family_refresh(monkeypatch) -> None:
-    """Gate-level snapshot blocks may have no topology yet.
+def test_reactor_refresher_delegates_to_sidecar_pending_family_refresh(monkeypatch) -> None:
+    """Gate-level snapshot blocks must not run producer I/O in the reactor.
 
-    The reactor drain must use ``_refresh_pending_family_snapshots`` because that
-    path can do targeted Gamma slug discovery. The decision-time fast refresher is
-    intentionally topology-only and would return False forever for no-topology
-    Day0/FSR events.
+    A blocked event is already requeued into the pending event table; that table is
+    the substrate-observer sidecar's work surface. The reactor drain therefore
+    records the nudge and returns without calling the Gamma/CLOB refresh helper.
     """
 
     import src.main as main
-    import src.state.db as db
 
-    calls: list[dict[str, object]] = []
+    def fail_refresh(*_args, **_kwargs):
+        raise AssertionError("reactor must not call substrate producer refresh")
 
-    def fake_refresh(world_conn, forecasts_conn, **kwargs):
-        calls.append(dict(kwargs))
-        assert world_conn is not forecasts_conn
-        return {"status": "refreshed", "inserted": 1, "fresh_skipped": 0}
-
-    monkeypatch.setattr(main, "_refresh_pending_family_snapshots", fake_refresh)
-    monkeypatch.setattr(db, "get_world_connection", lambda: sqlite3.connect(":memory:"))
-    monkeypatch.setattr(
-        db,
-        "get_forecasts_connection_read_only",
-        lambda: sqlite3.connect(":memory:"),
-    )
+    monkeypatch.setattr(main, "_refresh_pending_family_snapshots", fail_refresh)
 
     refresher = main._edli_reactor_family_snapshot_refresher()
 
-    assert refresher(city="Auckland", target_date="2026-06-20", metric="low") is True
-    assert len(calls) == 1
-    assert calls[0]["consumer_name"] == "edli_reactor_drain"
-    assert calls[0]["extra_priority_families"] == [("Auckland", "2026-06-20", "low")]
-    assert calls[0]["include_pending_families"] is False
+    assert refresher(city="Auckland", target_date="2026-06-20", metric="low") is False
 
 
 def test_reactor_market_absence_provider_reads_gamma_empty_backoff(monkeypatch) -> None:

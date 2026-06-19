@@ -5596,12 +5596,11 @@ def _edli_event_reactor_cycle() -> None:
         _decision_family_snapshot_refresher = _edli_decision_family_snapshot_refresher(
             forecasts_conn
         )
-        # ALWAYS-DECIDABLE invariant (operator law 2026-06-12): the reactor itself must make a
-        # blocked event's substrate fresh, so a transient SUBSTRATE block can never requeue
-        # forever without a refresh attempt. The reactor drain uses the Gamma-capable pending-
-        # family warmer (not the decision-time fast path) because a gate-level snapshot block may
-        # mean the family has no topology yet. The adapter still uses the fast path after a
-        # selected row exists but is price-stale.
+        # ALWAYS-DECIDABLE invariant (operator law 2026-06-12): a blocked event must
+        # create visible refresh work, but the live reactor is a consumer, not the
+        # executable-substrate producer. Requeueing the event keeps its family on the
+        # substrate-observer sidecar's pending-family work surface; the reactor drain
+        # records the nudge and stays out of Gamma/CLOB producer I/O.
         _reactor_family_snapshot_refresher = _edli_reactor_family_snapshot_refresher()
         _reactor_cycle_advance_enqueuer = _edli_reactor_cycle_advance_enqueuer()
         _reactor_family_market_absence_provider = (
@@ -7988,16 +7987,13 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
 
 
 def _edli_reactor_family_snapshot_refresher():
-    """Build the reactor-drain family snapshot refresher.
+    """Build the reactor-drain substrate nudge.
 
-    This is deliberately broader than ``_edli_decision_family_snapshot_refresher``.
-    The decision-time fast path is used after a family already has topology and
-    an elected snapshot row goes price-stale. Reactor gate blocks can happen one
-    step earlier: the event's family may have no executable snapshot because the
-    Gamma/topology substrate has not been discovered yet. In that case the
-    fast path returns False forever. The reactor drain must call the same
-    Gamma-capable pending-family warmer used by the normal substrate lane,
-    scoped to exactly the blocked family.
+    The reactor is a live decision consumer, not the executable-substrate producer.
+    A transient snapshot block is already requeued in ``opportunity_event_processing``;
+    the substrate-observer sidecar reads that pending-family surface and performs
+    Gamma/CLOB capture out-of-process. Returning False here preserves honest retry
+    accounting without blocking the reactor on producer I/O.
     """
 
     def _refresh(*, city, target_date, metric, **_ignored):
@@ -8008,59 +8004,11 @@ def _edli_reactor_family_snapshot_refresher():
         )
         if not family[0] or not family[1] or family[2] not in {"high", "low"}:
             return False
-        lock_timeout_s = max(
-            0.0,
-            float(os.environ.get("ZEUS_REACTOR_DRAIN_REFRESH_LOCK_TIMEOUT_SECONDS", "2.0")),
+        logger.info(
+            "reactor family refresh delegated to substrate-observer sidecar via pending event: %s/%s/%s",
+            family[0], family[1], family[2],
         )
-        acquired = _market_substrate_refresh_lock.acquire(timeout=lock_timeout_s)
-        if not acquired:
-            logger.warning(
-                "reactor family refresh: substrate refresh lock busy for %s/%s/%s",
-                family[0], family[1], family[2],
-            )
-            return False
-
-        from src.state.db import get_forecasts_connection_read_only, get_world_connection
-
-        world = None
-        forecasts_ro = None
-        try:
-            world = get_world_connection()
-            forecasts_ro = get_forecasts_connection_read_only()
-            summary = _refresh_pending_family_snapshots(
-                world,
-                forecasts_ro,
-                consumer_name="edli_reactor_drain",
-                now_utc=datetime.now(timezone.utc),
-                extra_priority_families=[family],
-                include_pending_families=False,
-            )
-            if str(summary.get("status") or "") == "error":
-                return False
-            return int(summary.get("inserted", 0) or 0) > 0 or int(
-                summary.get("fresh_skipped", 0) or 0
-            ) > 0
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "reactor family refresh: Gamma-capable refresh failed for %s/%s/%s: %s",
-                family[0], family[1], family[2], exc,
-            )
-            return False
-        finally:
-            try:
-                if forecasts_ro is not None:
-                    forecasts_ro.close()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                if world is not None:
-                    world.close()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                _market_substrate_refresh_lock.release()
-            except RuntimeError:
-                pass
+        return False
 
     return _refresh
 
