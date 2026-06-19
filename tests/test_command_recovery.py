@@ -4146,6 +4146,137 @@ class TestRecoveryResolutionTable:
             "temperature_metric": "high",
         }
 
+    def test_cancel_unknown_terminal_no_fill_hydrates_bare_command_identity(
+        self,
+        conn,
+        mock_client,
+        tmp_path,
+    ):
+        """Cancel-unknown repair must not depend on caller-side join aliases."""
+        from src.risk_allocator.governor import count_unknown_side_effects
+
+        conn.execute("DROP TABLE IF EXISTS market_events")
+        conn.execute(
+            """
+            CREATE TABLE market_events (
+                id INTEGER,
+                market_slug TEXT,
+                city TEXT,
+                target_date TEXT,
+                condition_id TEXT,
+                token_id TEXT,
+                range_label TEXT,
+                range_low REAL,
+                range_high REAL,
+                outcome TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        forecasts_db = tmp_path / "forecasts.db"
+        conn.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_db),))
+        conn.execute(
+            """
+            CREATE TABLE forecasts.market_events (
+                event_id TEXT,
+                market_slug TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                condition_id TEXT,
+                token_id TEXT,
+                range_label TEXT,
+                range_low REAL,
+                range_high REAL,
+                outcome TEXT,
+                created_at TEXT,
+                recorded_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO forecasts.market_events (
+                event_id, market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label, outcome, created_at, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "event-london-28c",
+                "highest-temperature-in-london-on-june-21-2026",
+                "London",
+                "2026-04-27",
+                "high",
+                "condition-test",
+                "tok-001-no",
+                "Will the highest temperature in London be 28°C on April 27?",
+                "Will the highest temperature in London be 28°C on April 27?",
+                "2026-04-26T00:00:00Z",
+                "2026-04-26T00:00:00Z",
+            ),
+        )
+        _insert(
+            conn,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+            outcome_label="NO",
+            decision_id="edli_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
+            size=13.45,
+            price=0.01,
+        )
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-terminal")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-terminal",
+            "status": "UNKNOWN",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import (
+            _decision_log_trade_case_for_command,
+            reconcile_unresolved_commands,
+        )
+
+        bare_command = dict(
+            conn.execute(
+                "SELECT * FROM venue_commands WHERE command_id = 'cmd-001'"
+            ).fetchone()
+        )
+        recovered, _source_id = _decision_log_trade_case_for_command(conn, bare_command)
+        assert recovered["city"] == "London"
+        assert recovered["target_date"] == "2026-04-27"
+        assert recovered["direction"] == "buy_no"
+
+        before_count, _ = count_unknown_side_effects(conn)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert before_count == 1
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        current = conn.execute(
+            """
+            SELECT phase, city, target_date, direction, token_id, no_token_id,
+                   order_id, strategy_key, temperature_metric
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "voided",
+            "city": "London",
+            "target_date": "2026-04-27",
+            "direction": "buy_no",
+            "token_id": "tok-001",
+            "no_token_id": "tok-001-no",
+            "order_id": "ord-terminal",
+            "strategy_key": "opening_inertia",
+            "temperature_metric": "high",
+        }
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 0
+        assert after_markets == ()
+
     def test_live_entry_repair_does_not_duplicate_existing_order_token_projection(
         self,
         conn,

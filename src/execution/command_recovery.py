@@ -706,6 +706,37 @@ def _command_envelope(conn: sqlite3.Connection, envelope_id: str | None) -> dict
     return _dict_row(row)
 
 
+def _command_snapshot(conn: sqlite3.Connection, snapshot_id: str | None) -> dict:
+    if not snapshot_id:
+        return {}
+    row = conn.execute(
+        "SELECT * FROM executable_market_snapshots WHERE snapshot_id = ?",
+        (snapshot_id,),
+    ).fetchone()
+    return _dict_row(row)
+
+
+def _hydrate_command_execution_identity(conn: sqlite3.Connection, command: dict) -> dict:
+    """Add immutable envelope/snapshot identity aliases to a bare command row."""
+
+    hydrated = dict(command)
+    envelope = _command_envelope(conn, str(command.get("envelope_id") or "").strip())
+    snapshot = _command_snapshot(conn, str(command.get("snapshot_id") or "").strip())
+    for prefix, source in (("env", envelope), ("snapshot", snapshot)):
+        if not source:
+            continue
+        for column, alias in (
+            ("condition_id", f"{prefix}_condition_id"),
+            ("yes_token_id", f"{prefix}_yes_token_id"),
+            ("no_token_id", f"{prefix}_no_token_id"),
+            ("selected_outcome_token_id", f"{prefix}_selected_outcome_token_id"),
+            ("outcome_label", f"{prefix}_outcome_label"),
+        ):
+            if hydrated.get(alias) in (None, "") and source.get(column) not in (None, ""):
+                hydrated[alias] = source.get(column)
+    return hydrated
+
+
 def _count_facts(conn: sqlite3.Connection, table: str, command_id: str) -> int:
     if not _table_exists(conn, table):
         return 0
@@ -2083,6 +2114,7 @@ def _snapshot_trade_case_for_command(conn: sqlite3.Connection, command: dict, *,
     not misclassified as opening_inertia.
     """
 
+    command = _hydrate_command_execution_identity(conn, command)
     condition_id = str(
         command.get("env_condition_id")
         or command.get("snapshot_condition_id")
@@ -2639,6 +2671,7 @@ def _append_filled_entry_projection_repair(
     from src.state.ledger import append_many_and_project
     from src.state.projection import upsert_position_current
 
+    candidate = _hydrate_command_execution_identity(conn, candidate)
     trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate, client=client)
     if not trade_case:
         logger.info(
@@ -2729,6 +2762,7 @@ def _append_live_entry_projection_repair(
     from src.state.ledger import append_many_and_project
     from src.state.projection import upsert_position_current
 
+    candidate = _hydrate_command_execution_identity(conn, candidate)
     trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate, client=client)
     if not trade_case:
         raise ValueError("live entry projection repair requires matching decision_log trade_case")
