@@ -50,6 +50,7 @@ _TERMINAL_NO_VALUE_REFUTATION_SQL = """
         )
     )
 """
+_FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL = "COALESCE(executable_snapshot_id, '') = ''"
 
 
 def _no_value_refutation_event_types_compatible(
@@ -1142,6 +1143,7 @@ class EventStore:
              WHERE n.created_at >= ?
                AND n.created_at <= ?
                AND ({_TERMINAL_NO_VALUE_REFUTATION_SQL})
+               AND ({_FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL})
              ORDER BY n.created_at DESC
             """,
             (evidence_floor, parsed_decision_time.isoformat()),

@@ -142,6 +142,7 @@ def _insert_no_value_regret(
     *,
     created_at: str = "2026-05-24T04:18:00+00:00",
     rejection_reason: str = "TRADE_SCORE_NON_POSITIVE",
+    executable_snapshot_id: str | None = None,
 ) -> None:
     payload = json.loads(event.payload_json)
     conn.execute(
@@ -149,9 +150,9 @@ def _insert_no_value_regret(
         INSERT INTO no_trade_regret_events (
             regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
             decision_time, city, target_date, metric, family_id, causal_snapshot_id,
-            created_at, schema_version
+            executable_snapshot_id, created_at, schema_version
         ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
-                  ?, ?, ?, ?, ?, ?, ?, 1)
+                  ?, ?, ?, ?, ?, ?, ?, ?, 1)
         """,
         (
             "regret-" + event.event_id,
@@ -169,6 +170,7 @@ def _insert_no_value_regret(
                 )
             ),
             event.causal_snapshot_id,
+            executable_snapshot_id,
             created_at,
         ),
     )
@@ -585,6 +587,60 @@ def test_archive_recent_no_value_refuted_events_expires_queued_fsr_from_redecisi
     assert rows[queued_fsr.event_id][0] == "expired"
     assert rows[queued_fsr.event_id][1].startswith(
         "RECENT_NO_VALUE_REFUTATION:payload_hash:"
+    )
+
+
+def test_archive_recent_no_value_refuted_events_keeps_price_conditioned_regret_live():
+    conn = _world_conn()
+    store = EventStore(conn)
+    prior_redecision = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Chicago|2026-05-24|high|snap-priced",
+        source="edli_redecision:screen",
+        observed_at="2026-05-24T04:10:00+00:00",
+        available_at="2026-05-24T04:10:00+00:00",
+        received_at="2026-05-24T04:11:00+00:00",
+        causal_snapshot_id="snap-priced",
+        payload=_payload("snap-priced"),
+        priority=50,
+    )
+    queued_fsr = _fsr_entity_event(
+        "Chicago|2026-05-24|high|snap-priced",
+        "snap-priced",
+        "2026-05-24T04:12:00+00:00",
+        "2026-05-24T04:12:30+00:00",
+    )
+    for event in (prior_redecision, queued_fsr):
+        store.insert_or_ignore(event)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processed'
+         WHERE event_id = ?
+        """,
+        (prior_redecision.event_id,),
+    )
+    _insert_no_value_regret(
+        conn,
+        prior_redecision,
+        executable_snapshot_id="ems2-old-price",
+    )
+
+    archived = store.archive_recent_no_value_refuted_events(
+        decision_time="2026-05-24T05:20:00+00:00"
+    )
+
+    assert archived == 0
+    assert (
+        conn.execute(
+            """
+            SELECT processing_status
+              FROM opportunity_event_processing
+             WHERE event_id = ?
+            """,
+            (queued_fsr.event_id,),
+        ).fetchone()[0]
+        == "pending"
     )
 
 
