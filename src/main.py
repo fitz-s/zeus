@@ -5799,6 +5799,26 @@ def _edli_bankroll_warm_cycle() -> None:
         )
 
 
+def _command_recovery_summary_mutated_allocator_inputs(summary: object) -> bool:
+    """Return True when command recovery changed facts used by submit gating."""
+
+    if not isinstance(summary, dict):
+        return False
+    mutation_keys = {"advanced", "corrected", "projected", "exit_projected"}
+    for key, value in summary.items():
+        if isinstance(value, dict):
+            if _command_recovery_summary_mutated_allocator_inputs(value):
+                return True
+            continue
+        if key in mutation_keys:
+            try:
+                if int(value or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
 @_scheduler_job("edli_command_recovery")
 def _edli_command_recovery_cycle() -> None:
     """Unresolved venue-command reconcile sweep for the EDLI lane (#28c).
@@ -5824,6 +5844,16 @@ def _edli_command_recovery_cycle() -> None:
     summary = reconcile_unresolved_commands()
     if summary.get("scanned"):
         logger.info("edli_command_recovery: %s", summary)
+    if _command_recovery_summary_mutated_allocator_inputs(summary):
+        trade_conn = get_trade_connection_with_world_required(write_class=None)
+        try:
+            allocator_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)
+        finally:
+            trade_conn.close()
+        logger.info(
+            "edli_command_recovery: refreshed allocator after recovery mutation: %s",
+            allocator_refresh,
+        )
 
 
 def _escalation_families_from_cancelled(

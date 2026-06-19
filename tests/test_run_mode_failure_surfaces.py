@@ -660,3 +660,18 @@ def test_venue_heartbeat_lost_yields_degraded_even_when_daemon_heartbeat_is_fres
     assert result["surfaces"]["heartbeat"]["ok"] is True
     assert "venue_heartbeat" in result["failing_surfaces"]
     assert result["surfaces"]["venue_heartbeat"]["issue"] == "VENUE_HEARTBEAT_LOST"
+
+
+def test_command_recovery_mutation_summary_requires_allocator_refresh() -> None:
+    """Command recovery mutations must refresh live submit gating in-process."""
+    from src.main import _command_recovery_summary_mutated_allocator_inputs
+
+    assert not _command_recovery_summary_mutated_allocator_inputs(
+        {"scanned": 1, "advanced": 0, "partial_remainders": {"advanced": 0}}
+    )
+    assert _command_recovery_summary_mutated_allocator_inputs(
+        {"scanned": 1, "advanced": 1, "partial_remainders": {"advanced": 0}}
+    )
+    assert _command_recovery_summary_mutated_allocator_inputs(
+        {"scanned": 1, "advanced": 0, "recorded_maker_fill_economics": {"projected": 17}}
+    )
