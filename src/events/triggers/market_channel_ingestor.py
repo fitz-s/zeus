@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
@@ -723,6 +724,7 @@ class MarketChannelOnlineService:
         commit: Callable[[], None] | None,
         logger: Any | None = None,
         chunk_size: int = REST_SEED_COMMIT_CHUNK_SIZE,
+        deadline_monotonic: float | None = None,
     ) -> int:
         """Fetch REST books off-lock and commit evidence in bounded chunks.
 
@@ -744,9 +746,27 @@ class MarketChannelOnlineService:
         ]
         written = 0
         for offset in range(0, len(ordered), size):
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                if logger is not None:
+                    logger.warning(
+                        "EDLI market-channel REST seed budget exhausted before chunk: "
+                        "written=%d remaining=%d",
+                        written,
+                        max(0, len(ordered) - offset),
+                    )
+                break
             chunk = ordered[offset: offset + size]
             pre_captured_books: dict[str, dict] = {}
             for token_id in chunk:
+                if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                    if logger is not None:
+                        logger.warning(
+                            "EDLI market-channel REST seed budget exhausted inside chunk: "
+                            "written=%d remaining=%d",
+                            written,
+                            max(0, len(ordered) - offset),
+                        )
+                    break
                 try:
                     pre_captured_books[token_id] = self.fetch_orderbook(token_id)
                 except Exception as exc:

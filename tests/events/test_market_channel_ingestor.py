@@ -337,6 +337,50 @@ def test_rest_seed_chunks_commit_progressively_before_full_universe_finishes():
     assert commit_counts == [4, 8, 10]
 
 
+def test_rest_seed_deadline_stops_before_fetching_more_tokens():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    metadata = {
+        "token-1": _metadata("token-1")["token-1"],
+        "token-2": _metadata("token-2")["token-2"],
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+    )
+    fetch_calls: list[str] = []
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda token_id: fetch_calls.append(token_id) or {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        },
+    )
+
+    written = service.seed_rest_books_in_chunks(
+        token_ids=set(metadata),
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=nullcontext(),
+        commit=conn.commit,
+        chunk_size=1,
+        deadline_monotonic=0.0,
+    )
+
+    assert written == 0
+    assert fetch_calls == []
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'"
+        ).fetchone()[0]
+        == 0
+    )
+
+
 def test_reconnect_rest_seed_chunks_preserve_gap_snapshot_and_commit_progressively():
     from contextlib import nullcontext
 

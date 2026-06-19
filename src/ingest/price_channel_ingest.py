@@ -60,6 +60,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -98,6 +99,8 @@ EDLI_EVENT_DRIVEN_MODES = {
     "edli_live_canary",
     "edli_live",
 }
+
+MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 15.0
 
 # Required env for the user-channel WS (moved verbatim from src/main.py:1867).
 USER_CHANNEL_REQUIRED_ENV_VARS = (
@@ -151,6 +154,22 @@ def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum:
     if value <= 0:
         value = default
     return max(1, min(value, maximum))
+
+
+def _edli_bounded_positive_float(
+    config: dict,
+    key: str,
+    *,
+    default: float,
+    maximum: float,
+) -> float:
+    try:
+        value = float(config.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    if value <= 0:
+        value = default
+    return max(0.001, min(value, maximum))
 
 
 def _row_get(row, key: str):
@@ -1398,7 +1417,11 @@ def _edli_refresh_held_position_quote_evidence() -> dict:
             world_conn.close()
 
 
-def _edli_refresh_candidate_priority_quote_evidence(*, limit: int = 128) -> dict:
+def _edli_refresh_candidate_priority_quote_evidence(
+    *,
+    limit: int = 128,
+    budget_seconds: float = MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT,
+) -> dict:
     """Refresh executable quote evidence for recently selected candidate tokens.
 
     The long-lived market-channel thread captures its token universe at thread
@@ -1426,6 +1449,9 @@ def _edli_refresh_candidate_priority_quote_evidence(*, limit: int = 128) -> dict
         )
     finally:
         world_read.close()
+    started_monotonic = time.monotonic()
+    budget = max(0.001, float(budget_seconds))
+    deadline = started_monotonic + budget
     if not candidate_token_ids:
         return {"candidate_priority_token_ids": 0, "candidate_quote_refresh_events": 0}
 
@@ -1470,11 +1496,16 @@ def _edli_refresh_candidate_priority_quote_evidence(*, limit: int = 128) -> dict
                 world_mutex=_world_write_mutex(),
                 commit=_commit_event_and_feasibility,
                 logger=logger,
+                deadline_monotonic=deadline,
             )
+        elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
         return {
             "candidate_priority_token_ids": len(candidate_token_ids),
             "candidate_token_metadata": len(token_metadata),
             "candidate_quote_refresh_events": int(written),
+            "budget_seconds": budget,
+            "elapsed_seconds": elapsed_seconds,
+            "budget_exhausted": elapsed_seconds >= budget,
         }
     finally:
         try:
@@ -1531,7 +1562,13 @@ def _edli_market_channel_ingestor_cycle() -> None:
                 "market_channel_candidate_priority_max_tokens",
                 default=128,
                 maximum=1000,
-            )
+            ),
+            budget_seconds=_edli_bounded_positive_float(
+                edli_cfg,
+                "market_channel_candidate_quote_refresh_budget_seconds",
+                default=MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT,
+                maximum=120.0,
+            ),
         )
         _write_scheduler_health(
             "edli_market_channel_ingestor",
