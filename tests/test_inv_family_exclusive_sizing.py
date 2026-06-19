@@ -1056,6 +1056,7 @@ def test_runtime_dedup_preserves_multi_leg_portfolio_selected_legs() -> None:
         target_date=TARGET_DATE,
         temperature_metric=METRIC,
         enabled=True,
+        family_portfolio_intent=True,
     )
 
     assert _count_trades(out) == 2
