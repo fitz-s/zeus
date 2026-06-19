@@ -1590,6 +1590,44 @@ def test_position_current_views_use_fill_authority_current_open_economics(tmp_pa
     conn.close()
 
 
+def test_portfolio_loader_view_projects_runtime_monitor_columns(tmp_path):
+    from src.state.db import query_portfolio_loader_view
+
+    conn = get_connection(tmp_path / "loader-runtime-columns.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="loader-runtime-columns-pos",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET entry_ci_width = 0.12,
+               exit_retry_count = 3,
+               next_exit_retry_at = '2026-04-01T00:10:00+00:00',
+               last_monitor_prob = 0.64,
+               last_monitor_prob_is_fresh = 1,
+               last_monitor_market_price = 0.43,
+               last_monitor_market_price_is_fresh = 1
+         WHERE position_id = ?
+        """,
+        ("loader-runtime-columns-pos",),
+    )
+    conn.commit()
+
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    loader_position = loader_view["positions"][0]
+    assert loader_position["entry_ci_width"] == pytest.approx(0.12)
+    assert loader_position["exit_retry_count"] == 3
+    assert loader_position["next_exit_retry_at"] == "2026-04-01T00:10:00+00:00"
+    assert loader_position["last_monitor_prob"] == pytest.approx(0.64)
+    assert loader_position["last_monitor_prob_is_fresh"] is True
+    assert loader_position["last_monitor_market_price"] == pytest.approx(0.43)
+    assert loader_position["last_monitor_market_price_is_fresh"] is True
+
+
 def test_position_current_status_view_ignores_non_exit_status_payload(tmp_path):
     from src.state.db import query_position_current_status_view
 
@@ -3453,9 +3491,14 @@ def test_append_many_and_project_rejects_missing_env_for_non_settlement_events(t
         "cost_basis_usd": 10.0,
         "entry_price": 0.5,
         "p_posterior": 0.6,
+        "entry_ci_width": 0.0,
+        "exit_retry_count": 0,
+        "next_exit_retry_at": None,
         "last_monitor_prob": 0.6,
+        "last_monitor_prob_is_fresh": 0,
         "last_monitor_edge": 0.1,
         "last_monitor_market_price": 0.5,
+        "last_monitor_market_price_is_fresh": 0,
         "decision_snapshot_id": "snap-missing-entry-env",
         "entry_method": "test",
         "strategy_key": "center_buy",

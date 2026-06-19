@@ -7230,8 +7230,7 @@ def _decision_vector_value(decision, attr_name: str) -> float | None:
     vector = getattr(decision, attr_name, None)
     if edge is None or vector is None:
         return None
-    if getattr(edge, "direction", "") == "buy_no":
-        return None
+    direction = str(getattr(edge, "direction", "") or "")
     try:
         values = vector.tolist() if hasattr(vector, "tolist") else list(vector)
     except TypeError:
@@ -7254,6 +7253,10 @@ def _decision_vector_value(decision, attr_name: str) -> float | None:
         probability = float(values[idx])
     except (TypeError, ValueError):
         return None
+    if probability != probability or probability in (float("inf"), float("-inf")):
+        return None
+    if direction == "buy_no":
+        probability = 1.0 - probability
     return probability
 
 
@@ -9780,6 +9783,21 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
     authority_select_expr = ", ".join(
         c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
     )
+    # These runtime columns are additive on live DBs. Keep the loader read
+    # boundary compatible with older/partially migrated DBs, but always project
+    # the keys it later maps into Position so load_portfolio cannot fail after
+    # restart.
+    _runtime_cols_defaults = {
+        "entry_ci_width": "0.0",
+        "exit_retry_count": "0",
+        "next_exit_retry_at": "NULL",
+        "last_monitor_prob_is_fresh": "0",
+        "last_monitor_market_price_is_fresh": "0",
+    }
+    runtime_select_expr = ", ".join(
+        c if c in actual_cols else f"{default} AS {c}"
+        for c, default in _runtime_cols_defaults.items()
+    )
 
     rows = conn.execute(
         f"""
@@ -9788,7 +9806,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                last_monitor_prob, last_monitor_edge, last_monitor_market_price,
                decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
                chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
-               temperature_metric, {position_current_env_expr}, {authority_select_expr}
+               temperature_metric, {position_current_env_expr}, {authority_select_expr},
+               {runtime_select_expr}
         FROM position_current {where_clause}
         ORDER BY updated_at DESC, position_id
         """,

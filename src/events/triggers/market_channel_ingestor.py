@@ -1051,7 +1051,7 @@ def insert_execution_feasibility_evidence(conn: sqlite3.Connection, row: dict[st
     )
     conn.execute(
         """
-        INSERT OR IGNORE INTO execution_feasibility_evidence (
+        INSERT INTO execution_feasibility_evidence (
             evidence_id, event_id, condition_id, token_id, outcome_label, direction,
             quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
             depth_before_json, order_intent_time, submit_time, accepted_or_rejected,
@@ -1066,6 +1066,15 @@ def insert_execution_feasibility_evidence(conn: sqlite3.Connection, row: dict[st
             :fill_price, :cancel_remainder_status, :book_hash_after, :latency_ms,
             :maker_cancel_before_submit, :would_have_edge_after_fee, :created_at, :schema_version
         )
+        ON CONFLICT(evidence_id) DO UPDATE SET
+            book_hash_before = excluded.book_hash_before,
+            best_bid_before = excluded.best_bid_before,
+            best_ask_before = excluded.best_ask_before,
+            depth_before_json = excluded.depth_before_json,
+            maker_cancel_before_submit = excluded.maker_cancel_before_submit,
+            would_have_edge_after_fee = excluded.would_have_edge_after_fee,
+            created_at = excluded.created_at,
+            schema_version = excluded.schema_version
         """,
         values,
     )

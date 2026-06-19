@@ -161,6 +161,60 @@ def test_insert_execution_feasibility_evidence():
     assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 1
 
 
+def test_execution_feasibility_duplicate_quote_refreshes_observation_time():
+    conn, _writer = _conn_writer()
+    row = {
+        "event_id": "event-static-book",
+        "condition_id": "0xcondition",
+        "token_id": "token-1",
+        "outcome_label": "NO",
+        "direction": "buy_no",
+        "quote_seen_at": "2026-05-24T10:00:00+00:00",
+        "book_hash_before": "hash-1",
+        "best_bid_before": 0.74,
+        "best_ask_before": 0.75,
+        "depth_before_json": '{"bids":[],"asks":[]}',
+        "order_intent_time": None,
+        "submit_time": None,
+        "accepted_or_rejected": None,
+        "venue_order_id": None,
+        "fok_full_fill": None,
+        "fak_partial_fill": None,
+        "filled_shares": None,
+        "fill_price": None,
+        "cancel_remainder_status": None,
+        "book_hash_after": None,
+        "latency_ms": None,
+        "maker_cancel_before_submit": None,
+        "would_have_edge_after_fee": 1,
+        "fill_truth_source": "evidence_only",
+        "created_at": "2026-05-24T10:00:01+00:00",
+    }
+    insert_execution_feasibility_evidence(conn, row)
+    refreshed = {
+        **row,
+        "book_hash_before": "hash-2",
+        "best_bid_before": 0.73,
+        "best_ask_before": 0.76,
+        "created_at": "2026-05-24T10:02:01+00:00",
+    }
+    insert_execution_feasibility_evidence(conn, refreshed)
+
+    rows = conn.execute(
+        """
+        SELECT quote_seen_at, created_at, book_hash_before, best_bid_before, best_ask_before
+          FROM execution_feasibility_evidence
+        """
+    ).fetchall()
+
+    assert len(rows) == 1
+    assert rows[0][0] == "2026-05-24T10:00:00+00:00"
+    assert rows[0][1] == "2026-05-24T10:02:01+00:00"
+    assert rows[0][2] == "hash-2"
+    assert rows[0][3] == pytest.approx(0.73)
+    assert rows[0][4] == pytest.approx(0.76)
+
+
 def test_quote_cache_seeded_from_rest_on_connect():
     conn, writer = _conn_writer()
     cache = QuoteCache()
