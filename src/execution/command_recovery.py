@@ -37,6 +37,7 @@ import logging
 import json
 import re
 import sqlite3
+import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -8612,6 +8613,24 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
     )
 
     conn_factory = default_trade_conn_factory
+    lock_retry_delays = (2.0, 5.0, 10.0)
+
+    def _run_pass_with_lock_retry(label: str, fn):
+        for attempt in range(len(lock_retry_delays) + 1):
+            try:
+                return fn()
+            except sqlite3.OperationalError as exc:
+                if not str(exc).startswith("database is locked") or attempt >= len(lock_retry_delays):
+                    raise
+                delay = lock_retry_delays[attempt]
+                logger.warning(
+                    "recovery: pass %s hit database lock; retrying in %.1fs (attempt %d/%d)",
+                    label,
+                    delay,
+                    attempt + 1,
+                    len(lock_retry_delays) + 1,
+                )
+                time.sleep(delay)
 
     def _client_pass(
         label, pass_fn, summary_key, *,
@@ -8640,9 +8659,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
             _accumulate(summary, summary_key, ps, advanced_key=advanced_key, fold_stayed=fold_stayed)
             return ps
 
-        run_three_phase(
-            _snapshot, _network, _apply,
-            conn_factory=conn_factory, label=f"recovery.{label}",
+        return _run_pass_with_lock_retry(
+            label,
+            lambda: run_three_phase(
+                _snapshot, _network, _apply,
+                conn_factory=conn_factory, label=f"recovery.{label}",
+            ),
         )
 
     def _db_pass(label, pass_fn, summary_key, *, advanced_key="advanced", fold_stayed=True, **pass_kwargs):
@@ -8651,7 +8673,10 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
             _accumulate(summary, summary_key, ps, advanced_key=advanced_key, fold_stayed=fold_stayed)
             return ps
 
-        run_db_only_pass(_apply, conn_factory=conn_factory, label=f"recovery.{label}")
+        return _run_pass_with_lock_retry(
+            label,
+            lambda: run_db_only_pass(_apply, conn_factory=conn_factory, label=f"recovery.{label}"),
+        )
 
     # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
     with open_tracked(conn_factory, label="recovery.priming:snapshot") as conn:
@@ -8704,11 +8729,14 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
         summary["errors"] += ps["errors"]
         return ps
 
-    run_three_phase(
-        lambda conn: None,
-        lambda _snap: venue_snapshot,
-        _apply_inflight,
-        conn_factory=conn_factory, label="recovery.inflight_scan",
+    _run_pass_with_lock_retry(
+        "inflight_scan",
+        lambda: run_three_phase(
+            lambda conn: None,
+            lambda _snap: venue_snapshot,
+            _apply_inflight,
+            conn_factory=conn_factory, label="recovery.inflight_scan",
+        ),
     )
 
     _client_pass("local_orphan_no_fill_findings",
