@@ -92,6 +92,13 @@ class RejectionReason(str, Enum):
         "NATIVE_ASK_MISSING / bare SELECTED_CANDIDATE_MISSING label lie (2026-06-11) "
         "when the books were actually live two-sided.",
     )
+    QKERNEL_SPINE_NO_TRADE = (
+        "QKERNEL_SPINE_NO_TRADE",
+        RejectionCategory.HONEST_MARKET,
+        "The q-kernel spine evaluated the full family and returned a typed no-trade "
+        "reason (for example no positive edge, no direction-law candidate, or no "
+        "direct executable route). Detail after ':' carries the inner spine reason.",
+    )
     EVENT_BOUND_MARKET_TOPOLOGY_INVALID = (
         "EVENT_BOUND_MARKET_TOPOLOGY_INVALID",
         RejectionCategory.HONEST_MARKET,
@@ -211,6 +218,18 @@ class RejectionReason(str, Enum):
         "day0-lane event under edli_live_scope=day0_shadow: full pipeline runs, "
         "enriched no-submit receipt, NEVER submits. The shadow comparator's source "
         "of truth.",
+    )
+    UNSUPPORTED_EDLI_LIVE_SCOPE = (
+        "UNSUPPORTED_EDLI_LIVE_SCOPE",
+        RejectionCategory.DESIGNED_GATE,
+        "Live adapter boundary rejected an unsupported EDLI live scope. The only "
+        "production scope is forecast_plus_day0.",
+    )
+    EVENT_TYPE_OUT_OF_LIVE_SCOPE = (
+        "EVENT_TYPE_OUT_OF_LIVE_SCOPE",
+        RejectionCategory.DESIGNED_GATE,
+        "Live adapter boundary rejected an event type outside the forecast/day0 "
+        "money path.",
     )
     DAY0_OUT_OF_SCOPE_AT_BOUNDARY = (
         "DAY0_OUT_OF_SCOPE_AT_BOUNDARY",
