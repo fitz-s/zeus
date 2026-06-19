@@ -1512,17 +1512,36 @@ def _is_position_day0_quote_eligible(pos: Position) -> bool:
     return _is_position_target_local_day(pos, city, target_d)
 
 
-def _day0_bid_only_monitor_quote(conn, clob: PolymarketClient, pos: Position, token_id: str) -> HeldTokenMonitorQuote | None:
+def _day0_one_sided_monitor_quote(conn, clob: PolymarketClient, pos: Position, token_id: str) -> HeldTokenMonitorQuote | None:
     if not _is_position_day0_quote_eligible(pos) or not hasattr(clob, "get_orderbook"):
         return None
     try:
         from src.data.market_scanner import _top_book_level_decimal
 
         book = clob.get_orderbook(token_id)
-        best_bid, bid_size = _top_book_level_decimal(book, "bids")
-        bid_f = float(best_bid)
-        bid_sz_f = float(bid_size)
-        if not np.isfinite(bid_f) or bid_f <= 0.0 or not np.isfinite(bid_sz_f) or bid_sz_f <= 0.0:
+        best_bid = bid_size = None
+        best_ask = ask_size = None
+        try:
+            best_bid, bid_size = _top_book_level_decimal(book, "bids")
+        except Exception:  # noqa: BLE001 - one-sided books are valid day0 evidence
+            pass
+        try:
+            best_ask, ask_size = _top_book_level_decimal(book, "asks")
+        except Exception:  # noqa: BLE001 - bid-only books are valid day0 evidence
+            pass
+
+        if best_bid is None and best_ask is None:
+            return None
+        bid_f = float(best_bid) if best_bid is not None else 0.0
+        bid_sz_f = float(bid_size) if bid_size is not None else 0.0
+        ask_f = float(best_ask) if best_ask is not None else None
+        ask_sz_f = float(ask_size) if ask_size is not None else 0.0
+        if ask_f is not None and (not np.isfinite(ask_f) or ask_f <= 0.0):
+            ask_f = None
+            ask_sz_f = 0.0
+        if not np.isfinite(bid_f) or bid_f < 0.0 or not np.isfinite(bid_sz_f) or bid_sz_f < 0.0:
+            return None
+        if bid_f <= 0.0 and ask_f is None:
             return None
         source_timestamp = datetime.now(timezone.utc).isoformat()
         try:
@@ -1535,25 +1554,25 @@ def _day0_bid_only_monitor_quote(conn, clob: PolymarketClient, pos: Position, to
                 target_date=pos.target_date,
                 range_label=pos.bin_label,
                 price=bid_f,
-                volume=bid_sz_f,
+                volume=bid_sz_f + ask_sz_f,
                 bid=bid_f,
-                ask=None,
-                spread=None,
+                ask=ask_f,
+                spread=(round(float(ask_f - bid_f), 4) if ask_f is not None and ask_f >= bid_f else None),
                 source_timestamp=source_timestamp,
             )
         except Exception as exc:
-            logger.debug("Bid-only microstructure log failed for %s: %s", pos.trade_id, exc)
+            logger.debug("Day0 one-sided microstructure log failed for %s: %s", pos.trade_id, exc)
         return HeldTokenMonitorQuote(
             token_id=token_id,
             best_bid=bid_f,
-            best_ask=None,
+            best_ask=ask_f,
             bid_size=bid_sz_f,
-            ask_size=0.0,
+            ask_size=ask_sz_f,
             diagnostic_market_price=bid_f,
             source_timestamp=source_timestamp,
         )
     except Exception as exc:
-        logger.debug("Day0 bid-only quote refresh failed for %s: %s", pos.trade_id, exc)
+        logger.debug("Day0 one-sided quote refresh failed for %s: %s", pos.trade_id, exc)
         return None
 
 
@@ -1606,9 +1625,9 @@ def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTo
             source_timestamp=source_timestamp,
         )
     except Exception as e:
-        bid_only_quote = _day0_bid_only_monitor_quote(conn, clob, pos, tid)
-        if bid_only_quote is not None:
-            return bid_only_quote
+        one_sided_quote = _day0_one_sided_monitor_quote(conn, clob, pos, tid)
+        if one_sided_quote is not None:
+            return one_sided_quote
         logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)
         return None
 

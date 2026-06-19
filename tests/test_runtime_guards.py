@@ -631,6 +631,18 @@ class _BidOnlyDay0Clob:
         return {"bids": [{"price": 0.998, "size": 12.5}], "asks": []}
 
 
+class _AskOnlyDay0Clob:
+    def get_best_bid_ask(self, token_id):
+        from src.contracts.exceptions import EmptyOrderbookError
+
+        assert token_id == "yes123"
+        raise EmptyOrderbookError("No executable top book for yes123: missing bids")
+
+    def get_orderbook(self, token_id):
+        assert token_id == "yes123"
+        return {"bids": [], "asks": [{"price": 0.001, "size": 100.0}]}
+
+
 def test_day0_monitor_quote_refresh_uses_executable_bid_when_asks_absent(monkeypatch):
     from src.engine import monitor_refresh
 
@@ -645,6 +657,23 @@ def test_day0_monitor_quote_refresh_uses_executable_bid_when_asks_absent(monkeyp
     assert quote.best_ask is None
     assert quote.ask_size == pytest.approx(0.0)
     assert quote.diagnostic_market_price == pytest.approx(0.998)
+
+
+def test_day0_monitor_quote_refresh_uses_zero_sell_value_when_bids_absent(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+
+    pos = _position(state="day0_window")
+
+    quote = monitor_refresh.monitor_quote_refresh(None, _AskOnlyDay0Clob(), pos)
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.0)
+    assert quote.best_ask == pytest.approx(0.001)
+    assert quote.bid_size == pytest.approx(0.0)
+    assert quote.ask_size == pytest.approx(100.0)
+    assert quote.diagnostic_market_price == pytest.approx(0.0)
 
 
 def test_target_local_day_active_position_uses_bid_only_quote_when_asks_absent(monkeypatch):
@@ -697,6 +726,37 @@ def test_day0_refresh_keeps_current_market_fresh_with_bid_only_book(monkeypatch)
     assert pos.last_monitor_prob_is_fresh is False
     assert edge_ctx.p_market[0] == pytest.approx(0.998)
     assert not np.isfinite(edge_ctx.p_posterior)
+
+
+def test_day0_refresh_keeps_current_market_fresh_with_ask_only_no_bid_book(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
+
+    def _fresh_structural_hold(pos, *, conn, city, target_d):
+        pos.applied_validations = ["day0_hard_fact_structural_win_hold"]
+        return 1.0, pos, True
+
+    monkeypatch.setattr(monitor_refresh, "monitor_probability_refresh", _fresh_structural_hold)
+
+    pos = _position(
+        state="day0_window",
+        entry_price=0.64,
+        p_posterior=0.88,
+        last_monitor_market_price=None,
+        last_monitor_prob=0.0,
+    )
+
+    edge_ctx = monitor_refresh.refresh_position(None, _AskOnlyDay0Clob(), pos)
+
+    assert pos.last_monitor_market_price == pytest.approx(0.0)
+    assert pos.last_monitor_market_price_is_fresh is True
+    assert pos.last_monitor_best_bid == pytest.approx(0.0)
+    assert pos.last_monitor_best_ask == pytest.approx(0.001)
+    assert pos.last_monitor_prob_is_fresh is True
+    assert edge_ctx.p_market[0] == pytest.approx(0.0)
+    assert edge_ctx.p_posterior == pytest.approx(1.0)
 
 
 def test_refresh_position_advances_monitor_time_when_quote_and_probability_are_stale(monkeypatch):
