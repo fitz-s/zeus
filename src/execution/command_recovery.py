@@ -766,6 +766,7 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
         sorted(
             {
                 *_ACKED_ORDER_STATES,
+                CommandState.CANCEL_PENDING.value,
                 CommandState.CANCELLED.value,
                 CommandState.EXPIRED.value,
             }
@@ -803,9 +804,9 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
           LEFT JOIN executable_market_snapshots snap
             ON snap.snapshot_id = cmd.snapshot_id
          WHERE cmd.intent_kind = 'ENTRY'
-           AND cmd.state IN (?, ?, ?, ?)
+           AND cmd.state IN (?, ?, ?, ?, ?)
            AND (
-                cmd.state IN ('ACKED', 'POST_ACKED')
+                cmd.state IN ('ACKED', 'POST_ACKED', 'CANCEL_PENDING')
                 OR pc.position_id IS NULL
                 OR (
                     cmd.state IN ('CANCELLED', 'EXPIRED')
@@ -3883,6 +3884,23 @@ def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
                         conn,
                         command_id=command_id,
                         event_type=CommandEventType.EXPIRED.value,
+                        occurred_at=occurred_at,
+                        payload={
+                            "reason": "venue_terminal_no_fill",
+                            "venue_order_id": order_id,
+                            "venue_order_fact_id": row.get("order_fact_id"),
+                            "venue_order_fact_state": row.get("order_fact_state"),
+                            "matched_size": row.get("order_fact_matched_size"),
+                            "remaining_size": row.get("order_fact_remaining_size"),
+                            "source": row.get("order_fact_source"),
+                            "resolved_m5_local_orphan_findings": resolved_findings,
+                        },
+                    )
+                elif command_state == CommandState.CANCEL_PENDING.value:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type=CommandEventType.CANCEL_ACKED.value,
                         occurred_at=occurred_at,
                         payload={
                             "reason": "venue_terminal_no_fill",

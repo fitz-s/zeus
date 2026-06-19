@@ -2284,6 +2284,49 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
         assert current["order_status"] == "canceled"
 
+    def test_cancel_pending_terminal_no_fill_order_fact_cancels_command_and_voids_pending_entry(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="12.44")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_order_facts"]["advanced"] == 1
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        event_types = [e["event_type"] for e in _get_events(conn, "cmd-001")]
+        assert event_types[-1] == "CANCEL_ACKED"
+        position_event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, command_id, order_id
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(position_event) == {
+            "event_type": "ENTRY_ORDER_VOIDED",
+            "phase_before": "pending_entry",
+            "phase_after": "voided",
+            "command_id": "cmd-001",
+            "order_id": "ord-001",
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "voided"
+        assert Decimal(str(current["shares"])) == Decimal("0")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
+        assert current["order_status"] == "canceled"
+
     def test_acked_point_order_terminal_no_fill_fact_expires_command_and_voids_pending_entry(
         self,
         conn,
