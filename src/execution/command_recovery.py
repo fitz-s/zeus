@@ -5337,6 +5337,45 @@ def _confirmed_trade_for_order_id(client, venue_order_id: str) -> dict | None:
     return None
 
 
+def _selected_maker_order_for_trade(trade: dict, venue_order_id: str) -> dict | None:
+    for maker in trade.get("maker_orders") or ():
+        if not isinstance(maker, dict):
+            continue
+        maker_order_id = str(
+            maker.get("order_id")
+            or maker.get("orderID")
+            or maker.get("orderId")
+            or maker.get("id")
+            or ""
+        )
+        if maker_order_id == venue_order_id:
+            return maker
+    return None
+
+
+def _confirmed_trade_command_leg(trade: dict, venue_order_id: str) -> tuple[str, str]:
+    maker = _selected_maker_order_for_trade(trade, venue_order_id)
+    if maker is not None:
+        size = (
+            maker.get("matched_amount")
+            or maker.get("matchedAmount")
+            or maker.get("filled_size")
+            or maker.get("size")
+            or maker.get("amount")
+            or ""
+        )
+        price = (
+            maker.get("avgPrice")
+            or maker.get("avg_price")
+            or maker.get("fillPrice")
+            or maker.get("fill_price")
+            or maker.get("price")
+            or ""
+        )
+        return str(size), str(price)
+    return str(trade.get("size") or trade.get("matched_amount") or ""), str(trade.get("price") or "")
+
+
 def _append_cancel_unknown_confirmed_trade_fill(
     conn: sqlite3.Connection,
     *,
@@ -5348,8 +5387,7 @@ def _append_cancel_unknown_confirmed_trade_fill(
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
     trade_id = str(trade.get("id") or trade.get("trade_id") or "")
-    filled_size = str(trade.get("size") or trade.get("matched_amount") or "")
-    fill_price = str(trade.get("price") or "")
+    filled_size, fill_price = _confirmed_trade_command_leg(trade, venue_order_id)
     tx_hash = str(trade.get("transaction_hash") or trade.get("tx_hash") or "") or None
     venue_status = _order_status(point_order)
     matched_size = _point_order_matched_size(point_order, fallback=filled_size)

@@ -1813,7 +1813,8 @@ def reconcile_recorded_maker_fill_economics(
         fact = dict(row)
         try:
             command = _command_from_prefixed_trade_fact_row(fact)
-            raw = _json_mapping(fact.get("raw_payload_json"))
+            raw_payload = _json_mapping(fact.get("raw_payload_json"))
+            raw = _trade_payload_for_maker_economics(raw_payload)
             order_id = str(command.get("venue_order_id") or fact.get("venue_order_id") or "")
             if _selected_maker_order(raw, order_id) is None:
                 summary["stayed"] += 1
@@ -1868,6 +1869,18 @@ def reconcile_recorded_maker_fill_economics(
     summary["stayed"] += exit_summary["stayed"]
     summary["errors"] += exit_summary["errors"]
     return summary
+
+
+def _trade_payload_for_maker_economics(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+    trade_proof = raw.get("trade_fact_proof")
+    if isinstance(trade_proof, Mapping):
+        trade = trade_proof.get("trade")
+        if isinstance(trade, Mapping):
+            return trade
+    trade = raw.get("trade")
+    if isinstance(trade, Mapping):
+        return trade
+    return raw
 
 
 def _reconcile_recorded_exit_fill_projections(

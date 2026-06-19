@@ -1533,12 +1533,28 @@ class TestRecoveryResolutionTable:
         mock_client.get_trades.return_value = [
             {
                 "id": "trade-entry-001",
-                "taker_order_id": "ord-entry",
+                "taker_order_id": "ord-other-side",
                 "status": "CONFIRMED",
                 "side": "BUY",
-                "asset_id": "tok-001",
-                "size": "5",
-                "price": "0.55",
+                "asset_id": "tok-yes",
+                "size": "14",
+                "price": "0.45",
+                "maker_orders": [
+                    {
+                        "order_id": "ord-entry",
+                        "side": "BUY",
+                        "asset_id": "tok-001",
+                        "matched_amount": "5",
+                        "price": "0.55",
+                    },
+                    {
+                        "order_id": "ord-other-maker",
+                        "side": "SELL",
+                        "asset_id": "tok-yes",
+                        "matched_amount": "9",
+                        "price": "0.45",
+                    },
+                ],
                 "transaction_hash": "0xdef",
             }
         ]
