@@ -1579,6 +1579,65 @@ class TestRecoveryResolutionTable:
             "order_status": "canceled",
         }
 
+    def test_cancel_unknown_review_required_absent_point_order_no_exposure_expires_entry(
+        self, conn, mock_client
+    ):
+        from src.risk_allocator.governor import count_unknown_side_effects
+
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-absent")
+        _seed_pending_entry_projection(conn, order_id="ord-absent")
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        before_count, _ = count_unknown_side_effects(conn)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert before_count == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "cancel_unknown_terminal_no_fill"
+        assert payload["required_predicates"]["point_order_absent"] is True
+        assert payload["required_predicates"]["no_matching_open_orders"] is True
+        assert payload["required_predicates"]["no_matching_trades"] is True
+        assert payload["venue_absence_proof"]["point_order_status"] == "NOT_FOUND"
+        assert payload["venue_absence_proof"]["matching_open_order_count"] == 0
+        assert payload["venue_absence_proof"]["matching_trade_count"] == 0
+
+        terminal_fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert terminal_fact["state"] == "VENUE_WIPED"
+        assert Decimal(str(terminal_fact["matched_size"])) == Decimal("0")
+        assert Decimal(str(terminal_fact["remaining_size"])) == Decimal("0")
+        fact_payload = json.loads(terminal_fact["raw_payload_json"])
+        assert fact_payload["source_reason"] == "cancel_unknown_point_order_absent_terminal_no_fill"
+
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "voided",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "order_status": "canceled",
+        }
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 0
+        assert after_markets == ()
+
     def test_expired_terminal_no_fill_entry_resolves_late_m5_local_orphan_finding(self, conn, mock_client):
         from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
 

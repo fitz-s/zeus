@@ -1518,7 +1518,6 @@ def _validate_review_cancel_unknown_no_fill_payload(
         "semantic_cancel_status_cancel_unknown",
         "requires_m5_reconcile",
         "venue_order_id_present",
-        "venue_order_id_matches_point_read",
         "point_order_terminal_no_fill",
         "point_order_matched_size_zero",
         "no_trade_facts",
@@ -1528,6 +1527,12 @@ def _validate_review_cancel_unknown_no_fill_payload(
     missing = [name for name in required_true if required_predicates.get(name) is not True]
     if missing:
         raise ValueError(f"cancel-unknown no-fill predicates are not proven true: {missing}")
+    point_order_matches = required_predicates.get("venue_order_id_matches_point_read") is True
+    point_order_absent = required_predicates.get("point_order_absent") is True
+    if not point_order_matches and not point_order_absent:
+        raise ValueError(
+            "cancel-unknown no-fill clearance requires point order match or authenticated absence"
+        )
     if payload.get("side_effect_boundary_crossed") != "unknown":
         raise ValueError("cancel-unknown no-fill clearance requires side_effect_boundary_crossed=unknown")
     if payload.get("sdk_submit_attempted") != "unknown":
@@ -1622,6 +1627,11 @@ def _validate_review_cancel_unknown_no_fill_payload(
     venue_proof = payload.get("venue_absence_proof")
     if not isinstance(venue_proof, dict):
         raise ValueError("cancel-unknown no-fill clearance requires venue_absence_proof")
+    if point_order_absent and (
+        str(venue_proof.get("point_order_status") or "").upper() != "NOT_FOUND"
+        or venue_proof.get("point_order") is not None
+    ):
+        raise ValueError("cancel-unknown no-fill point_order_absent proof is invalid")
     if venue_proof.get("owner_scope") != "authenticated_funder":
         raise ValueError("cancel-unknown no-fill clearance requires authenticated_funder owner_scope")
     for key in ("open_orders_checked", "trades_checked", "open_orders_query_complete", "trades_query_complete"):
@@ -1668,7 +1678,10 @@ def _validate_review_cancel_unknown_no_fill_payload(
     for key in ("source_commit", "source_function", "source_reason"):
         if not str(source.get(key) or "").strip():
             raise ValueError(f"cancel-unknown no-fill source_proof missing {key}")
-    if source.get("source_reason") != "cancel_unknown_point_order_terminal_no_fill":
+    if source.get("source_reason") not in {
+        "cancel_unknown_point_order_terminal_no_fill",
+        "cancel_unknown_point_order_absent_terminal_no_fill",
+    }:
         raise ValueError("cancel-unknown no-fill source_reason is unsupported")
 
 

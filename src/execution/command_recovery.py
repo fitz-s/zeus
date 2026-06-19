@@ -5419,7 +5419,155 @@ def _review_required_cancel_unknown_live_order_recovery(
         return "error"
     order = _venue_order_payload(raw_order) or {}
     if not order:
-        return "stayed"
+        command = _dict_row(
+            conn.execute(
+                "SELECT * FROM venue_commands WHERE command_id = ?",
+                (cmd.command_id,),
+            ).fetchone()
+        )
+        if not _entry_projection_is_pending_zero_exposure(
+            conn,
+            command=command,
+            order_id=venue_order_id,
+        ):
+            logger.info(
+                "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
+                "(point order absent but entry projection is not zero-exposure pending)",
+                cmd.command_id,
+            )
+            return "stayed"
+        matching_open_orders = _matching_open_orders_for_command(client, command)
+        matching_trades = _matching_trades_for_command(client, command)
+        if matching_open_orders or matching_trades:
+            logger.info(
+                "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
+                "(point order absent but account exposure still matches: open_orders=%s trades=%s)",
+                cmd.command_id,
+                len(matching_open_orders),
+                len(matching_trades),
+            )
+            return "stayed"
+        if _trade_fact_count(conn, cmd.command_id) != 0:
+            logger.info(
+                "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
+                "(point order absent but local trade facts exist)",
+                cmd.command_id,
+            )
+            return "stayed"
+        now = _now_iso()
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
+        sp_name = f"sp_cancel_unknown_absent_no_fill_{safe_command_id}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            fact_id, fact_payload = _append_point_order_terminal_no_fill_fact(
+                conn,
+                command=command,
+                observed_at=now,
+                venue_status="NOT_FOUND",
+                point_order=None,
+                matching_open_orders=matching_open_orders,
+                matching_trades=matching_trades,
+                source_reason="cancel_unknown_point_order_absent_terminal_no_fill",
+            )
+            resolved_findings = _resolve_m5_local_orphan_findings(
+                conn,
+                venue_order_id=venue_order_id,
+                resolved_at=now,
+                resolution="command_recovery_point_order_absent_no_fill",
+            )
+            payload = {
+                "schema_version": 1,
+                "reason": "review_cleared_no_venue_exposure",
+                "command_id": cmd.command_id,
+                "venue_order_id": venue_order_id,
+                "proof_class": "cancel_unknown_terminal_no_fill",
+                "side_effect_boundary_crossed": "unknown",
+                "sdk_submit_attempted": "unknown",
+                "required_predicates": {
+                    "latest_event_is_cancel_replace_blocked": True,
+                    "semantic_cancel_status_cancel_unknown": True,
+                    "requires_m5_reconcile": True,
+                    "venue_order_id_present": True,
+                    "point_order_absent": True,
+                    "point_order_terminal_no_fill": True,
+                    "point_order_matched_size_zero": True,
+                    "no_trade_facts": True,
+                    "no_matching_open_orders": True,
+                    "no_matching_trades": True,
+                },
+                "terminal_order_fact_id": fact_id,
+                "terminal_order_fact": fact_payload,
+                "resolved_m5_local_orphan_findings": resolved_findings,
+                "venue_absence_proof": {
+                    "source": "authenticated_clob_user_read",
+                    "owner_scope": "authenticated_funder",
+                    "observed_at": now,
+                    "command_id": cmd.command_id,
+                    "decision_id": str(command.get("decision_id") or ""),
+                    "market_id": str(command.get("market_id") or ""),
+                    "token_id": str(command.get("token_id") or ""),
+                    "side": str(command.get("side") or ""),
+                    "price": str(Decimal(str(command.get("price")))),
+                    "size": str(Decimal(str(command.get("size")))),
+                    "time_window_start": command.get("created_at"),
+                    "time_window_end": now,
+                    "open_orders_checked": True,
+                    "trades_checked": True,
+                    "open_orders_query_complete": True,
+                    "trades_query_complete": True,
+                    "pagination_scope": "sdk_get_trades_returned_all_visible_user_trades",
+                    "matching_open_order_count": 0,
+                    "matching_trade_count": 0,
+                    "matching_open_orders": [],
+                    "matching_trades": [],
+                    "point_order_status": "NOT_FOUND",
+                    "point_order": None,
+                },
+                "source_proof": {
+                    "source_commit": "runtime",
+                    "source_function": "command_recovery._review_required_cancel_unknown_live_order_recovery",
+                    "source_reason": "cancel_unknown_point_order_absent_terminal_no_fill",
+                },
+                "review_required_proof": {
+                    "reason": "cancel_unknown_requires_m5",
+                },
+                "reviewed_by": "command_recovery",
+                "cleared_at": now,
+            }
+            append_event(
+                conn,
+                command_id=cmd.command_id,
+                event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_EXPOSURE.value,
+                occurred_at=now,
+                payload=payload,
+            )
+            _append_entry_order_voided_projection(
+                conn,
+                command=command,
+                order_fact={
+                    **command,
+                    "order_fact_id": fact_id,
+                    "order_fact_state": "VENUE_WIPED",
+                    "order_fact_observed_at": now,
+                    "order_fact_venue_order_id": venue_order_id,
+                    "order_fact_remaining_size": "0",
+                    "order_fact_matched_size": "0",
+                    "order_fact_source": "REST",
+                },
+                occurred_at=now,
+            )
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        except Exception:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            raise
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED cancel-unknown -> EXPIRED "
+            "(venue_order_id=%s point_order=NOT_FOUND)",
+            cmd.command_id,
+            venue_order_id,
+        )
+        return "advanced"
     order_id = _extract_order_id(order)
     status = _order_status(order)
     matched_size = _order_matched_size(order)

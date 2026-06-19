@@ -21,6 +21,7 @@ Cross-module invariant (polymarket_user_channel -> ws_gap_guard -> exchange_reco
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -212,6 +213,95 @@ def test_empty_surface_pong_still_full_clears(conn) -> None:
     assert status.subscription_state == "AUTHED"
     assert status.m5_reconcile_required is False
     assert status.to_summary(now=NOW)["entry"]["allow_submit"] is True
+
+
+def test_order_daemon_clean_boot_latch_uses_fresh_price_channel_sidecar_evidence(
+    conn, tmp_path, monkeypatch
+) -> None:
+    import src.config as config
+
+    live_now = datetime.now(timezone.utc)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps({"daemon": "price-channel-ingest", "alive_at": live_now.isoformat(), "pid": 123})
+    )
+    (tmp_path / "scheduler_jobs_health.json").write_text(
+        json.dumps(
+            {
+                "edli_market_channel_ingestor": {
+                    "status": "OK",
+                    "last_success_at": live_now.isoformat(),
+                },
+                "edli_user_channel_reconcile": {
+                    "status": "OK",
+                    "last_success_at": live_now.isoformat(),
+                },
+            }
+        )
+    )
+
+    summary = ws_gap_guard.summary(now=live_now + timedelta(seconds=5))
+    assert summary["entry"]["allow_submit"] is True
+    assert summary["gap_reason"] == "sidecar_durable_evidence"
+    ws_gap_guard.assert_ws_allows_submit("condition-ws")
+
+
+def test_order_daemon_clean_boot_latch_stays_closed_when_sidecar_evidence_stale(
+    conn, tmp_path, monkeypatch
+) -> None:
+    import src.config as config
+
+    live_now = datetime.now(timezone.utc)
+    old = live_now - timedelta(seconds=ws_gap_guard.DURABLE_SIDECAR_STALE_AFTER_SECONDS + 1)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps({"daemon": "price-channel-ingest", "alive_at": old.isoformat(), "pid": 123})
+    )
+    (tmp_path / "scheduler_jobs_health.json").write_text(
+        json.dumps(
+            {
+                "edli_market_channel_ingestor": {"status": "OK", "last_success_at": old.isoformat()},
+                "edli_user_channel_reconcile": {"status": "OK", "last_success_at": old.isoformat()},
+            }
+        )
+    )
+
+    assert ws_gap_guard.summary(now=live_now)["entry"]["allow_submit"] is False
+    with pytest.raises(ws_gap_guard.WSGapSubmitBlocked):
+        ws_gap_guard.assert_ws_allows_submit("condition-ws")
+
+
+def test_real_midrun_ws_gap_is_not_cleared_by_sidecar_evidence(conn, tmp_path, monkeypatch) -> None:
+    import src.config as config
+
+    live_now = datetime.now(timezone.utc)
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps({"daemon": "price-channel-ingest", "alive_at": live_now.isoformat(), "pid": 123})
+    )
+    (tmp_path / "scheduler_jobs_health.json").write_text(
+        json.dumps(
+            {
+                "edli_market_channel_ingestor": {"status": "OK", "last_success_at": live_now.isoformat()},
+                "edli_user_channel_reconcile": {"status": "OK", "last_success_at": live_now.isoformat()},
+            }
+        )
+    )
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=live_now - timedelta(seconds=10),
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionResetError",
+            m5_reconcile_required=True,
+            updated_at=live_now,
+            stale_after_seconds=30,
+        )
+    )
+
+    assert ws_gap_guard.summary(now=live_now)["entry"]["allow_submit"] is False
+    with pytest.raises(ws_gap_guard.WSGapSubmitBlocked):
+        ws_gap_guard.assert_ws_allows_submit("condition-ws")
 
 
 def test_unresolved_finding_keeps_sweep_from_clearing(conn) -> None:
