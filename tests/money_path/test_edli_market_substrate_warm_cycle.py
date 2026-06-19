@@ -778,7 +778,11 @@ def test_pending_family_refresh_does_not_truncate_to_fixed_family_cap(monkeypatc
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = substrate_observer._refresh_pending_family_snapshots(
+        conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["families_checked"] == 12
@@ -923,7 +927,11 @@ def test_pending_family_refresh_timeboxes_topology_before_capture_reserve(monkey
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = substrate_observer._refresh_pending_family_snapshots(
+        conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["topology_budget_exhausted"] == 1
@@ -1052,7 +1060,11 @@ def test_pending_family_refresh_reserves_time_for_direct_gamma_lookup(monkeypatc
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = substrate_observer._refresh_pending_family_snapshots(
+        conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["topology_budget_exhausted"] == 1
@@ -1183,7 +1195,11 @@ def test_pending_family_refresh_direct_gamma_lookup_drains_multiple_families(mon
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = substrate_observer._refresh_pending_family_snapshots(
+        conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == len(families)
@@ -1358,7 +1374,11 @@ def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeyp
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(world_conn, forecasts_conn)
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 0
@@ -1433,7 +1453,11 @@ def test_pending_family_refresh_falls_back_to_gamma_when_static_topology_incompl
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(world_conn, forecasts_conn)
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 1
@@ -1499,7 +1523,11 @@ def test_pending_family_refresh_matches_gamma_with_canonical_city_alias(monkeypa
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(world_conn, forecasts_conn)
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 1
@@ -1785,8 +1813,7 @@ def test_warm_lane_skips_venue_closed_family_keeps_venue_open_family(monkeypatch
     # The closed family produced NO refresh work: no topology family, no submit.
     assert closed_result.get("cached_topology_families", 0) == 0
     assert closed_submitted == []
-    # all-fresh / no-work status (never "refreshed") because the only family was skipped.
-    assert closed_result["status"] != "refreshed"
+    assert closed_result["status"] in {"venue_closed", "no_refreshable_families"}
 
 
 def test_lifted_substrate_warm_lane_skips_venue_closed_family(monkeypatch):
@@ -1803,7 +1830,7 @@ def test_lifted_substrate_warm_lane_skips_venue_closed_family(monkeypatch):
     assert closed_result["venue_closed_skipped"] == 1
     assert closed_result.get("cached_topology_families", 0) == 0
     assert closed_submitted == []
-    assert closed_result["status"] != "refreshed"
+    assert closed_result["status"] == "venue_closed"
 
 
 def test_lifted_substrate_warm_lane_backs_off_gamma_empty_family(monkeypatch):

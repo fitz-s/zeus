@@ -684,6 +684,37 @@ def _refresh_pending_family_snapshots(
             ) % n_priority_families
 
         if not gamma_refresh_families and not cached_topology_markets:
+            if venue_closed_skipped:
+                no_work_status = (
+                    "venue_closed"
+                    if venue_closed_skipped == len(families)
+                    else "no_refreshable_families"
+                )
+                logger.info(
+                    "refresh_pending_family_snapshots: no refreshable families, skipped. "
+                    "status=%s families=%d fresh_skipped=%d venue_closed_skipped=%d "
+                    "no_topology=%d no_topology_backed_off=%d cached_topology_incomplete=%d",
+                    no_work_status,
+                    len(families),
+                    fresh_skipped,
+                    venue_closed_skipped,
+                    no_topology,
+                    no_topology_backed_off,
+                    cached_topology_incomplete,
+                )
+                return {
+                    "status": no_work_status,
+                    "families_checked": len(families),
+                    "explicit_priority_families": len(explicit_priority_families),
+                    "include_pending_families": bool(include_pending_families),
+                    "open_rest_priority_families": len(open_rest_priority_families),
+                    "held_position_priority_families": len(held_position_priority_families),
+                    "fresh_skipped": fresh_skipped,
+                    "no_topology": no_topology,
+                    "venue_closed_skipped": venue_closed_skipped,
+                    "no_topology_backed_off": no_topology_backed_off,
+                    "cached_topology_incomplete": cached_topology_incomplete,
+                }
             logger.info(
                 "refresh_pending_family_snapshots: all families fresh, skipped. "
                 "families=%d fresh_skipped=%d no_topology=%d venue_closed_skipped=%d "

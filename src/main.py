@@ -3265,6 +3265,37 @@ def _refresh_pending_family_snapshots(
         ) % max(1, n_ordinary_families)
 
         if not gamma_refresh_families and not cached_topology_markets:
+            if venue_closed_skipped:
+                no_work_status = (
+                    "venue_closed"
+                    if venue_closed_skipped == len(families)
+                    else "no_refreshable_families"
+                )
+                logger.info(
+                    "refresh_pending_family_snapshots: no refreshable families, skipped. "
+                    "status=%s families=%d fresh_skipped=%d venue_closed_skipped=%d "
+                    "no_topology=%d no_topology_backed_off=%d cached_topology_incomplete=%d",
+                    no_work_status,
+                    len(families),
+                    fresh_skipped,
+                    venue_closed_skipped,
+                    no_topology,
+                    no_topology_backed_off,
+                    cached_topology_incomplete,
+                )
+                return {
+                    "status": no_work_status,
+                    "families_checked": len(families),
+                    "explicit_priority_families": len(explicit_priority_families),
+                    "include_pending_families": bool(include_pending_families),
+                    "open_rest_priority_families": len(open_rest_priority_families),
+                    "held_position_priority_families": len(held_position_priority_families),
+                    "fresh_skipped": fresh_skipped,
+                    "no_topology": no_topology,
+                    "venue_closed_skipped": venue_closed_skipped,
+                    "no_topology_backed_off": no_topology_backed_off,
+                    "cached_topology_incomplete": cached_topology_incomplete,
+                }
             logger.info(
                 "refresh_pending_family_snapshots: all families fresh, skipped. "
                 "families=%d fresh_skipped=%d no_topology=%d venue_closed_skipped=%d "
@@ -6847,7 +6878,7 @@ def _edli_refresh_continuous_money_path_families(
     This is not the broad pending-event warmer. It exists so continuous
     redecision confirms fresh executable prices for families that already have
     cheap-screen value, a live rest needing reprice, or chain-confirmed exposure.
-    If the shared substrate lock is busy, the caller must skip emit this tick
+    If its confirmation lock is busy, the caller must skip emit this tick
     rather than queueing decisions from stale prices.
     """
 
@@ -6870,17 +6901,6 @@ def _edli_refresh_continuous_money_path_families(
             "families_requested": len(clean_families),
             "lock_timeout_seconds": lock_timeout_s,
             "lock": "edli_redecision_confirm_refresh",
-        }
-    if not _market_substrate_refresh_lock.acquire(timeout=lock_timeout_s):
-        try:
-            _edli_redecision_confirm_refresh_lock.release()
-        except RuntimeError:
-            pass
-        return {
-            "status": "skipped_lock_busy",
-            "families_requested": len(clean_families),
-            "lock_timeout_seconds": lock_timeout_s,
-            "lock": "market_substrate_refresh",
         }
     from src.state.db import (
         ZEUS_FORECASTS_DB_PATH,
@@ -6934,10 +6954,6 @@ def _edli_refresh_continuous_money_path_families(
             time.sleep(delay_s)
         return summary
     finally:
-        try:
-            _market_substrate_refresh_lock.release()
-        except RuntimeError:
-            pass
         try:
             _edli_redecision_confirm_refresh_lock.release()
         except RuntimeError:
