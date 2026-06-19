@@ -94,6 +94,7 @@ from src.probability.event_resolution import (
 )
 from src.probability.instruments import Instrument
 from src.probability.joint_q import build_joint_q
+from src.probability.joint_q_band import build_joint_q_band
 from src.probability.outcome_space import (
     OutcomeBin,
     OutcomeSpace,
@@ -796,6 +797,60 @@ def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monk
     assert selected is low_cost
 
 
+def test_select_total_delta_u_objective_is_explicit_non_default(monkeypatch):
+    """The terminal total-utility objective only applies when explicitly requested."""
+    case = _case()
+    space = _outcome_space(case)
+    high_total_route = _hand_route(space, side="NO", bin_id="b24", cost=0.80)
+    high_density_route = _hand_route(space, side="YES", bin_id="b25", cost=0.27)
+    high_total = _hand_decision(
+        high_total_route,
+        edge_lcb=0.08,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.90,
+        optimal_stake_usd=Decimal("100"),
+    )
+    high_density = _hand_decision(
+        high_density_route,
+        edge_lcb=0.08,
+        optimal_delta_u=0.05,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("5"),
+    )
+
+    default_engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    terminal_engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+        selection_objective="total_delta_u",
+    )
+
+    default_selected, default_reason = default_engine._select([high_total, high_density])
+    terminal_selected, terminal_reason = terminal_engine._select([high_total, high_density])
+
+    assert default_reason is None
+    assert terminal_reason is None
+    assert default_selected is high_density
+    assert terminal_selected is high_total
+
+
+def test_select_rejects_unknown_selection_objective():
+    with pytest.raises(ValueError, match="unknown selection_objective"):
+        FamilyDecisionEngine(
+            fresh_model_reader=_FreshModelReader(_model_set([25.0], _case())),
+            day0_reader=_Day0Reader(_no_obs()),
+            predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+            selection_objective="scalar_score",  # type: ignore[arg-type]
+        )
+
+
 # ===========================================================================
 # SPEC RED-on-revert #2: no_trade_reason present when no candidate passes.
 # ===========================================================================
@@ -1153,17 +1208,25 @@ def test_qlcb_guard_exception_abstains_candidate(monkeypatch):
         day0_reader=_Day0Reader(_no_obs()),
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
     )
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
 
     guarded = engine._apply_qlcb_reliability_guard(
         scored=(candidate,),
         case=case,
-        joint_q=build_joint_q(
-            PredictiveDistributionBuilder(DebiasAuthority(())).build(
-                case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
-            ),
-            space,
-        ),
+        joint_q=jq,
+        band=build_joint_q_band(pd, space, n_draws=_TEST_BAND_DRAWS, alpha=0.05),
         forecast_bin="b25",
+        matrix=_matrix(space),
+        exposure=PortfolioExposureVector.flat(_matrix(space), baseline=Decimal("1000")),
+        sizing_candidates={
+            ("b25", "YES"): _yes_sizing(
+                space, "b25", q_point=0.50, q_lcb=0.45, price="0.30"
+            )
+        },
+        max_stake_usd=Decimal("100"),
     )
 
     assert guarded[0].q_lcb_guard_basis == "QLCB_RELIABILITY_GUARD_ERROR"
@@ -1174,8 +1237,8 @@ def test_qlcb_guard_exception_abstains_candidate(monkeypatch):
     assert reason == NO_TRADE_NO_POSITIVE_EDGE
 
 
-def test_licensed_qlcb_deflation_blocks_stale_delta_u_and_stake(monkeypatch):
-    """A licensed qLCB deflation cannot leave pre-guard ΔU/stake executable."""
+def test_licensed_qlcb_deflation_recomputes_delta_u_and_stake(monkeypatch):
+    """A licensed qLCB deflation recomputes ΔU/stake from q_safe instead of abstaining."""
 
     from src.decision.qlcb_reliability_guard import GuardVerdict
 
@@ -1220,27 +1283,37 @@ def test_licensed_qlcb_deflation_blocks_stale_delta_u_and_stake(monkeypatch):
         day0_reader=_Day0Reader(_no_obs()),
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
     )
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    matrix = _matrix(space)
 
     guarded = engine._apply_qlcb_reliability_guard(
         scored=(candidate,),
         case=case,
-        joint_q=build_joint_q(
-            PredictiveDistributionBuilder(DebiasAuthority(())).build(
-                case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
-            ),
-            space,
-        ),
+        joint_q=jq,
+        band=build_joint_q_band(pd, space, n_draws=_TEST_BAND_DRAWS, alpha=0.05),
         forecast_bin="b25",
+        matrix=matrix,
+        exposure=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        sizing_candidates={
+            ("b25", "YES"): _yes_sizing(
+                space, "b25", q_point=0.50, q_lcb=0.45, price="0.30"
+            )
+        },
+        max_stake_usd=Decimal("100"),
     )
 
     guarded_economics = guarded[0].economics
-    assert guarded[0].q_lcb_guard_basis == "OOF_WILSON_95_DEFLECTED_UNSIZED"
-    assert guarded[0].q_lcb_guard_abstained is True
+    assert guarded[0].q_lcb_guard_basis == "OOF_WILSON_95"
+    assert guarded[0].q_lcb_guard_abstained is False
     assert guarded_economics.edge_lcb == pytest.approx(0.19)
-    assert guarded_economics.delta_u_at_min <= 0.0
-    assert guarded_economics.optimal_delta_u <= 0.0
-    assert guarded_economics.optimal_stake_usd == Decimal("0")
+    assert guarded_economics.delta_u_at_min > 0.0
+    assert guarded_economics.optimal_delta_u > 0.0
+    assert guarded_economics.optimal_stake_usd > Decimal("0")
 
     selected, reason = engine._select(guarded)
-    assert selected is None
-    assert reason == NO_TRADE_NO_POSITIVE_EDGE
+    assert reason is None
+    assert selected is not None
+    assert selected.economics.edge_lcb == pytest.approx(0.19)

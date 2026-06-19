@@ -34,7 +34,7 @@ scalar behavior the spec replaces:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Mapping
 
@@ -42,11 +42,14 @@ import numpy as np
 import pytest
 
 from src.config import City
+from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.contracts.execution_price import ExecutionPrice
+from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.payoff_vector import (
     CandidateEconomics,
     CandidateRoute,
     build_candidate_route,
+    compute_candidate_economics,
     edge_lower_bound,
     live_candidate_passes,
     optimize_vector_stake,
@@ -208,6 +211,45 @@ def _no_instrument(bin_id: str) -> Instrument:
                       direct_token_id=f"no-{bin_id}")
 
 
+def _curve(bin_id: str, *, side: str, price: str, depth: str = "5000") -> ExecutableCostCurve:
+    return ExecutableCostCurve(
+        token_id=f"{side.lower()}-{bin_id}",
+        side=side,  # type: ignore[arg-type]
+        snapshot_id="snap-1",
+        book_hash=f"hash-{side}-{bin_id}",
+        levels=(BookLevel(price=Decimal(price), size=Decimal(depth)),),
+        fee_model=FeeModel(fee_rate=Decimal("0.0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=2),
+    )
+
+
+def _sizing(
+    space: OutcomeSpace,
+    *,
+    side: str,
+    bin_id: str,
+    q_point: float,
+    q_lcb: float,
+    price: str,
+) -> NativeSideCandidate:
+    return NativeSideCandidate.tradeable(
+        family_key=space.family_id,
+        bin_id=bin_id,
+        side=side,  # type: ignore[arg-type]
+        token_id=f"{side.lower()}-{bin_id}",
+        condition_id=f"cond-{bin_id}",
+        q_point=q_point,
+        q_lcb=q_lcb,
+        probability_uncertainty=None,
+        executable_cost_curve=_curve(bin_id, side=side, price=price),
+        forecast_snapshot_id="fc-1",
+        market_snapshot_id="mk-1",
+        hypothesis_id=f"hyp-{bin_id}-{side}",
+    )
+
+
 # ===========================================================================
 # Supporting primitive checks.
 # ===========================================================================
@@ -309,6 +351,98 @@ def test_edge_lcb_subtracts_cost_inside_the_quantile():
     lcb = edge_lower_bound(band, payoff, cost)
     fair_quantile = float(np.quantile(band.samples @ payoff, band.alpha))
     assert lcb == pytest.approx(fair_quantile - cost, abs=1e-12)
+
+
+def test_guarded_payoff_q_lcb_recomputes_yes_delta_u_and_stake():
+    """A guarded YES qLCB is consumed by edge and robust ΔU, not just edge_lcb."""
+
+    space = _outcome_space()
+    jq = _joint_q(space, {"b25": 0.65, "b24": 0.10})
+    band = _band_from_point(jq, jitter=0.01)
+    matrix = FamilyPayoffMatrix.over_bins([b.bin_id for b in space.bins if b.executable])
+    exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
+
+    yes = _yes_instrument("b25")
+    route = build_candidate_route(
+        candidate_id="cand-yes-25",
+        instrument=yes,
+        route_cost=_route_cost(yes, cost=0.30),
+        omega=space,
+    )
+    sizing = _sizing(space, side="YES", bin_id="b25", q_point=0.65, q_lcb=0.60, price="0.30")
+
+    low = compute_candidate_economics(
+        route,
+        joint_q=jq,
+        band=band,
+        sizing_candidate=sizing,
+        matrix=matrix,
+        exposure=exposure,
+        max_stake_usd=Decimal("100"),
+        guarded_payoff_q_lcb=0.32,
+    )
+    high = compute_candidate_economics(
+        route,
+        joint_q=jq,
+        band=band,
+        sizing_candidate=sizing,
+        matrix=matrix,
+        exposure=exposure,
+        max_stake_usd=Decimal("100"),
+        guarded_payoff_q_lcb=0.55,
+    )
+
+    assert low.q_dot_payoff == pytest.approx(jq.q_by_bin_id["b25"])
+    assert low.edge_lcb == pytest.approx(0.02)
+    assert high.edge_lcb == pytest.approx(0.25)
+    assert high.optimal_delta_u > low.optimal_delta_u
+    assert high.optimal_stake_usd >= low.optimal_stake_usd
+
+
+def test_guarded_payoff_q_lcb_recomputes_no_delta_u_and_stake():
+    """A guarded NO qLCB is the NO payoff win mass consumed by robust ΔU."""
+
+    space = _outcome_space()
+    jq = _joint_q(space, {"b25": 0.30, "b24": 0.20})
+    band = _band_from_point(jq, jitter=0.01)
+    matrix = FamilyPayoffMatrix.over_bins([b.bin_id for b in space.bins if b.executable])
+    exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
+
+    no = _no_instrument("b25")
+    route = build_candidate_route(
+        candidate_id="cand-no-25",
+        instrument=no,
+        route_cost=_route_cost(no, cost=0.30),
+        omega=space,
+    )
+    sizing = _sizing(space, side="NO", bin_id="b25", q_point=0.70, q_lcb=0.65, price="0.30")
+
+    low = compute_candidate_economics(
+        route,
+        joint_q=jq,
+        band=band,
+        sizing_candidate=sizing,
+        matrix=matrix,
+        exposure=exposure,
+        max_stake_usd=Decimal("100"),
+        guarded_payoff_q_lcb=0.32,
+    )
+    high = compute_candidate_economics(
+        route,
+        joint_q=jq,
+        band=band,
+        sizing_candidate=sizing,
+        matrix=matrix,
+        exposure=exposure,
+        max_stake_usd=Decimal("100"),
+        guarded_payoff_q_lcb=0.60,
+    )
+
+    assert low.q_dot_payoff == pytest.approx(1.0 - jq.q_by_bin_id["b25"])
+    assert low.edge_lcb == pytest.approx(0.02)
+    assert high.edge_lcb == pytest.approx(0.30)
+    assert high.optimal_delta_u > low.optimal_delta_u
+    assert high.optimal_stake_usd >= low.optimal_stake_usd
 
 
 # ===========================================================================

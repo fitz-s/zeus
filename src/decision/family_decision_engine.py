@@ -170,6 +170,7 @@ import hashlib
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import (
+    Literal,
     Mapping,
     Optional,
     Protocol,
@@ -523,7 +524,12 @@ class FamilyDecisionEngine:
         depth_reference_size: float = 100.0,
         min_depth: float = 1.0,
         max_spread: float = 0.10,
+        selection_objective: Literal[
+            "utility_density", "total_delta_u"
+        ] = "utility_density",
     ) -> None:
+        if selection_objective not in {"utility_density", "total_delta_u"}:
+            raise ValueError(f"unknown selection_objective: {selection_objective!r}")
         self._fresh_model_reader = fresh_model_reader
         self._day0_reader = day0_reader
         self._predictive_builder = predictive_builder
@@ -546,6 +552,7 @@ class FamilyDecisionEngine:
         self._depth_reference_size = float(depth_reference_size)
         self._min_depth = float(min_depth)
         self._max_spread = float(max_spread)
+        self._selection_objective = selection_objective
 
     # ------------------------------------------------------------------ decide
     def decide(
@@ -705,9 +712,17 @@ class FamilyDecisionEngine:
         # is thin (N_g < N_MIN) or its OOF realized frequency does not support the bucket
         # (L_g < bucket_floor − EPS). Applied here, where the decision layer consumes the
         # q_lcb (between scoring and selection). INERT when the OOF reliability artifact is
-        # absent (current live state) -> scored is byte-identical (no abstain). Moves NO μ.
+        # absent (current live state) -> scored is byte-identical (no abstain). Moves no μ.
         scored = self._apply_qlcb_reliability_guard(
-            scored=scored, case=case, joint_q=joint_q, forecast_bin=forecast_bin
+            scored=scored,
+            case=case,
+            joint_q=joint_q,
+            band=band,
+            forecast_bin=forecast_bin,
+            matrix=matrix,
+            exposure=portfolio,
+            sizing_candidates=sizing_candidates,
+            max_stake_usd=max_stake_usd,
         )
 
         # --- (7) the filter chain (spec lines 896-898) — ORDER IS THE CONTRACT ----
@@ -914,7 +929,12 @@ class FamilyDecisionEngine:
         scored: tuple[CandidateDecision, ...],
         case: ForecastCase,
         joint_q: JointQ,
+        band: JointQBand,
         forecast_bin: str,
+        matrix: FamilyPayoffMatrix,
+        exposure: PortfolioExposureVector,
+        sizing_candidates: Mapping[tuple[str, str], NativeSideCandidate],
+        max_stake_usd: Optional[Decimal],
     ) -> tuple[CandidateDecision, ...]:
         """Deflate each candidate's served q_lcb by the empirical OOF reliability guard.
 
@@ -929,11 +949,11 @@ class FamilyDecisionEngine:
         On ABSTAIN (thin cell or below floor) the candidate's economics are re-stamped with a
         non-positive ``edge_lcb`` / ΔU / stake so the existing ``edge_lcb > 0`` and ΔU filters
         reject it — the candidate publishes its point prob but never trades. On a licensed
-        deflation (``q_safe < q_lcb_route``), the edge is lowered to ``q_safe − cost``. Because
-        this post-scoring hook cannot recompute robust ΔU against the guarded probability object,
-        any licensed deflation also conservatively zeroes stake/ΔU and abstains; otherwise the
-        selector could read a guarded edge paired with stale pre-guard sizing. INERT (artifact
-        absent) -> every verdict is pass-through and ``scored`` is returned unchanged.
+        deflation (``q_safe < q_lcb_route``), the engine recomputes ``edge_lcb``, robust ΔU,
+        and stake with ``q_safe`` as the candidate-local guarded payoff lower bound. Point q
+        / μ stay unchanged; only the downside economics consumed by selection are guarded.
+        INERT (artifact absent) -> every verdict is pass-through and ``scored`` is returned
+        unchanged.
 
         Read-only on μ. Guard faults are fail-closed: a broken active guard is not authority
         to trade, so the candidate is re-stamped as abstained and the existing edge_lcb>0
@@ -949,6 +969,28 @@ class FamilyDecisionEngine:
                 delta_u_at_min=min(float(getattr(econ, "delta_u_at_min", 0.0) or 0.0), 0.0),
                 optimal_stake_usd=Decimal("0"),
                 optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
+            )
+
+        def _recomputed_guarded_economics(
+            d: CandidateDecision,
+            *,
+            q_safe: float,
+        ) -> CandidateEconomics:
+            sizing = sizing_candidates.get((d.route.bin_id, d.route.side))
+            if sizing is None or not sizing.is_tradeable:
+                return _blocked_economics(
+                    d.economics,
+                    edge_lcb=float(q_safe) - float(d.economics.cost.value),
+                )
+            return compute_candidate_economics(
+                d.route,
+                joint_q=joint_q,
+                band=band,
+                sizing_candidate=sizing,
+                matrix=matrix,
+                exposure=exposure,
+                max_stake_usd=max_stake_usd,
+                guarded_payoff_q_lcb=float(q_safe),
             )
 
         out: list[CandidateDecision] = []
@@ -984,24 +1026,15 @@ class FamilyDecisionEngine:
                     new_econ = _blocked_economics(econ, edge_lcb=float(new_edge))
                     out.append(replace(d, economics=new_econ, **guard_fields))
                     continue
-                # Licensed deflation: lower the edge to q_safe − cost (>= the abstain edge,
-                # <= the original). q_safe = min(q_lcb_route, L_g), so when L_g >= q_lcb_route
-                # this is the original edge (no-op). When L_g < q_lcb_route this hook can
-                # tighten edge but cannot recompute robust ΔU/stake from a guarded band. Treat
-                # that intermediate state as an abstain until guarded-economics recomputation
-                # exists; mixing guarded edge with stale pre-guard sizing is not live-safe.
+                # Licensed deflation: lower the candidate payoff's q_lcb to q_safe and
+                # recompute edge + robust ΔU + stake on a candidate-local guarded view.
+                # The point q remains unchanged (the guard moves no μ), but the downside
+                # samples consumed by edge_lcb and optimize_vector_stake now share the same
+                # conservative reliability evidence.
                 guarded_edge = verdict.q_safe - cost
                 if guarded_edge < edge_lcb:
-                    new_econ = _blocked_economics(econ, edge_lcb=float(guarded_edge))
-                    out.append(
-                        replace(
-                            d,
-                            economics=new_econ,
-                            q_lcb_guard_basis=f"{verdict.basis}_DEFLECTED_UNSIZED",
-                            q_lcb_guard_abstained=True,
-                            q_lcb_guard_cell_key=verdict.cell_key,
-                        )
-                    )
+                    new_econ = _recomputed_guarded_economics(d, q_safe=float(verdict.q_safe))
+                    out.append(replace(d, economics=new_econ, **guard_fields))
                 else:
                     out.append(replace(d, **guard_fields))
             except Exception:  # noqa: BLE001 — guard failures are live-money abstains.
@@ -1026,7 +1059,7 @@ class FamilyDecisionEngine:
     def _select(
         self, scored: Sequence[CandidateDecision]
     ) -> tuple[Optional[CandidateDecision], Optional[str]]:
-        """Apply the filter chain and select maximum robust utility density.
+        """Apply the filter chain and select by the configured robust objective.
 
         The filter ORDER is the contract:
 
@@ -1036,8 +1069,10 @@ class FamilyDecisionEngine:
                (the executable-route + direction-law + coherence preconditions of the live
                 pass are already true here, so live_candidate_passes is a re-proof)
 
-        The survivor with the MAX ``optimal_delta_u / optimal_stake_usd`` is selected. The
-        scalar ``robust_trade_score`` is NEVER consulted. When the survivor set is empty, the
+        The default live objective selects the survivor with the MAX
+        ``optimal_delta_u / optimal_stake_usd``. Terminal/research callers may explicitly
+        request ``total_delta_u`` to rank first by absolute robust utility. The scalar
+        ``robust_trade_score`` is NEVER consulted. When the survivor set is empty, the
         returned ``no_trade_reason`` names the FIRST filter that emptied it (so the no-trade
         is auditable to its cause).
         """
@@ -1142,19 +1177,31 @@ class FamilyDecisionEngine:
             stake = max(stake, 1e-9)
             return float(d.economics.optimal_delta_u) / stake
 
-        # SELECT: choose the best robust utility density over the survivors. Total ΔU remains
-        # a secondary ordering signal, but a high-capital low-density NO cannot dominate a
-        # lower-capital higher-density YES just because it ties up more dollars. The scalar
-        # trade score is NOT a key.
-        selected = max(
-            survivors,
-            key=lambda d: (
-                _utility_density(d),
-                d.economics.optimal_delta_u,
-                d.economics.edge_lcb,
-                -float(d.economics.cost.value),
-            ),
-        )
+        # SELECT: live defaults to the best robust utility density over the survivors.
+        # Total ΔU remains a secondary ordering signal, so a high-capital low-density NO
+        # cannot dominate a lower-capital higher-density YES just because it ties up more
+        # dollars. Terminal/research callers can explicitly request total ΔU first. The
+        # scalar trade score is NOT a key in either objective.
+        if self._selection_objective == "total_delta_u":
+            selected = max(
+                survivors,
+                key=lambda d: (
+                    d.economics.optimal_delta_u,
+                    _utility_density(d),
+                    d.economics.edge_lcb,
+                    -float(d.economics.cost.value),
+                ),
+            )
+        else:
+            selected = max(
+                survivors,
+                key=lambda d: (
+                    _utility_density(d),
+                    d.economics.optimal_delta_u,
+                    d.economics.edge_lcb,
+                    -float(d.economics.cost.value),
+                ),
+            )
         return selected, None
 
     # ------------------------------------------------------- no-trade-before-q
