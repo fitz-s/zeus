@@ -927,11 +927,13 @@ class FamilyDecisionEngine:
         ``q_safe = min(q_lcb_route, L_g)`` plus a trade/abstain verdict.
 
         On ABSTAIN (thin cell or below floor) the candidate's economics are re-stamped with a
-        non-positive ``edge_lcb`` (and ``optimal_delta_u``) so the existing ``edge_lcb > 0``
-        filter rejects it — the candidate publishes its point prob but never trades. On a
-        licensed deflation (``q_safe < q_lcb_route``) the edge is lowered to
-        ``q_safe − cost`` so the after-cost edge the selector reads is the GUARDED edge. INERT
-        (artifact absent) -> every verdict is pass-through and ``scored`` is returned unchanged.
+        non-positive ``edge_lcb`` / ΔU / stake so the existing ``edge_lcb > 0`` and ΔU filters
+        reject it — the candidate publishes its point prob but never trades. On a licensed
+        deflation (``q_safe < q_lcb_route``), the edge is lowered to ``q_safe − cost``. Because
+        this post-scoring hook cannot recompute robust ΔU against the guarded probability object,
+        any licensed deflation also conservatively zeroes stake/ΔU and abstains; otherwise the
+        selector could read a guarded edge paired with stale pre-guard sizing. INERT (artifact
+        absent) -> every verdict is pass-through and ``scored`` is returned unchanged.
 
         Read-only on μ. Guard faults are fail-closed: a broken active guard is not authority
         to trade, so the candidate is re-stamped as abstained and the existing edge_lcb>0
@@ -939,6 +941,16 @@ class FamilyDecisionEngine:
         """
         lead_days = float(getattr(case, "lead_hours", 0.0) or 0.0) / 24.0
         metric = str(getattr(case, "metric", "")).lower()
+
+        def _blocked_economics(econ: CandidateEconomics, *, edge_lcb: float) -> CandidateEconomics:
+            return replace(
+                econ,
+                edge_lcb=float(edge_lcb),
+                delta_u_at_min=min(float(getattr(econ, "delta_u_at_min", 0.0) or 0.0), 0.0),
+                optimal_stake_usd=Decimal("0"),
+                optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
+            )
+
         out: list[CandidateDecision] = []
         for d in scored:
             try:
@@ -966,21 +978,30 @@ class FamilyDecisionEngine:
                 if verdict.abstained:
                     # ABSTAIN: deflate the edge to a non-positive value so edge_lcb>0 rejects
                     # it. q_safe = 0 -> guarded edge = 0 − cost = −cost (< 0 for any real cost).
+                    # Stake and both ΔU fields are blocked with the edge so no stale pre-guard
+                    # sizing can survive into the selector or receipt.
                     new_edge = verdict.q_safe - cost
-                    new_econ = replace(
-                        econ,
-                        edge_lcb=float(new_edge),
-                        optimal_delta_u=min(float(econ.optimal_delta_u), 0.0),
-                    )
+                    new_econ = _blocked_economics(econ, edge_lcb=float(new_edge))
                     out.append(replace(d, economics=new_econ, **guard_fields))
                     continue
                 # Licensed deflation: lower the edge to q_safe − cost (>= the abstain edge,
                 # <= the original). q_safe = min(q_lcb_route, L_g), so when L_g >= q_lcb_route
-                # this is the original edge (no-op); when L_g < q_lcb_route it tightens it.
+                # this is the original edge (no-op). When L_g < q_lcb_route this hook can
+                # tighten edge but cannot recompute robust ΔU/stake from a guarded band. Treat
+                # that intermediate state as an abstain until guarded-economics recomputation
+                # exists; mixing guarded edge with stale pre-guard sizing is not live-safe.
                 guarded_edge = verdict.q_safe - cost
                 if guarded_edge < edge_lcb:
-                    new_econ = replace(econ, edge_lcb=float(guarded_edge))
-                    out.append(replace(d, economics=new_econ, **guard_fields))
+                    new_econ = _blocked_economics(econ, edge_lcb=float(guarded_edge))
+                    out.append(
+                        replace(
+                            d,
+                            economics=new_econ,
+                            q_lcb_guard_basis=f"{verdict.basis}_DEFLECTED_UNSIZED",
+                            q_lcb_guard_abstained=True,
+                            q_lcb_guard_cell_key=verdict.cell_key,
+                        )
+                    )
                 else:
                     out.append(replace(d, **guard_fields))
             except Exception:  # noqa: BLE001 — guard failures are live-money abstains.
@@ -989,11 +1010,7 @@ class FamilyDecisionEngine:
                     cost = float(econ.cost.value)
                 except Exception:  # noqa: BLE001
                     cost = 1.0
-                new_econ = replace(
-                    econ,
-                    edge_lcb=-max(cost, 1e-9),
-                    optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
-                )
+                new_econ = _blocked_economics(econ, edge_lcb=-max(cost, 1e-9))
                 out.append(
                     replace(
                         d,

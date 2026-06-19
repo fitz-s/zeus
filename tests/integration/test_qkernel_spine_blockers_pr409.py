@@ -765,6 +765,7 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     assert new_proof.q_posterior == pytest.approx(0.80)
     assert new_proof.q_lcb_5pct == pytest.approx(0.990)
     assert new_proof.trade_score == pytest.approx(0.050)
+    assert new_proof.q_source == "qkernel_spine"
 
 
 def test_overlay_does_not_create_milan_buy_yes_probability_contradiction():

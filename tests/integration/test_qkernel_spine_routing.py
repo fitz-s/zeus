@@ -437,9 +437,9 @@ def test_selected_proof_shape_is_submission_pipeline_ready():
     assert proof.candidate is not None and str(proof.candidate.condition_id or "")
     assert isinstance(proof.q_posterior, float)
     assert isinstance(proof.q_lcb_5pct, float)
-    # q_source remains the proof's probability authority; the spine decision is
-    # represented by result.decision, not by relabeling receipt-facing q fields.
-    assert getattr(proof, "q_source", None) != "qkernel_spine"
+    # q_source marks the qkernel spine as the live selection authority while q_posterior /
+    # q_lcb_5pct remain the selected-side probability fields consumed by submit receipts.
+    assert getattr(proof, "q_source", None) == "qkernel_spine"
     # The spine's selected candidate_id maps to this proof's (bin, side).
     parsed = bridge._parse_candidate_id(result.decision.selected.candidate_id)
     assert parsed is not None

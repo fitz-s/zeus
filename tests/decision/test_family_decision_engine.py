@@ -1172,3 +1172,75 @@ def test_qlcb_guard_exception_abstains_candidate(monkeypatch):
     selected, reason = engine._select(guarded)
     assert selected is None
     assert reason == NO_TRADE_NO_POSITIVE_EDGE
+
+
+def test_licensed_qlcb_deflation_blocks_stale_delta_u_and_stake(monkeypatch):
+    """A licensed qLCB deflation cannot leave pre-guard ΔU/stake executable."""
+
+    from src.decision.qlcb_reliability_guard import GuardVerdict
+
+    case = _case()
+    space = _outcome_space(case)
+    route = _hand_route(space, side="YES", bin_id="b25", cost=0.30)
+    economics = CandidateEconomics(
+        candidate_id=route.candidate_id,
+        point_ev=0.30,
+        edge_lcb=0.20,  # q_lcb_route = edge + cost = 0.50 before reliability deflation.
+        delta_u_at_min=0.001,
+        optimal_stake_usd=Decimal("5"),
+        optimal_delta_u=0.05,
+        q_dot_payoff=0.50,
+        cost=route.route_cost.avg_cost,
+        route_id=route.route_cost.route_id,
+    )
+    candidate = CandidateDecision(
+        route=route,
+        economics=economics,
+        direction_law_ok=True,
+        coherence_allows=True,
+        robust_trade_score=0.20,
+    )
+
+    def _licensed_deflation(**kwargs):
+        assert kwargs["band_q_lcb"] == pytest.approx(0.50)
+        return GuardVerdict(
+            q_safe=0.49,  # Guarded edge remains positive: 0.49 - 0.30 = 0.19.
+            trade=True,
+            abstained=False,
+            cell_key="high|L1|YES|modal|qb10",
+            L_g=0.49,
+            n_g=500,
+            bucket_floor=0.50,
+            basis="OOF_WILSON_95",
+        )
+
+    monkeypatch.setattr(fde_mod, "_apply_qlcb_guard", _licensed_deflation)
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    guarded = engine._apply_qlcb_reliability_guard(
+        scored=(candidate,),
+        case=case,
+        joint_q=build_joint_q(
+            PredictiveDistributionBuilder(DebiasAuthority(())).build(
+                case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
+            ),
+            space,
+        ),
+        forecast_bin="b25",
+    )
+
+    guarded_economics = guarded[0].economics
+    assert guarded[0].q_lcb_guard_basis == "OOF_WILSON_95_DEFLECTED_UNSIZED"
+    assert guarded[0].q_lcb_guard_abstained is True
+    assert guarded_economics.edge_lcb == pytest.approx(0.19)
+    assert guarded_economics.delta_u_at_min <= 0.0
+    assert guarded_economics.optimal_delta_u <= 0.0
+    assert guarded_economics.optimal_stake_usd == Decimal("0")
+
+    selected, reason = engine._select(guarded)
+    assert selected is None
+    assert reason == NO_TRADE_NO_POSITIVE_EDGE
