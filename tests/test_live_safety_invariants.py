@@ -4116,8 +4116,8 @@ def test_day0_window_refresh_uses_day0_observation_semantics(monkeypatch):
     assert pos.last_monitor_market_price == pytest.approx(0.41)
 
 
-def test_day0_wu_observation_unavailable_falls_back_to_forecast_origin_monitor(monkeypatch):
-    """Forecast-origin day0 positions stay monitorable when WU has no current observation."""
+def test_day0_wu_observation_unavailable_reseeds_without_forecast_fallback(monkeypatch):
+    """A missing Day0 observation must not borrow legacy forecast freshness."""
     from src.contracts import EntryMethod
     from src.contracts.exceptions import ObservationUnavailableError
     from src.engine import monitor_refresh
@@ -4145,12 +4145,15 @@ def test_day0_wu_observation_unavailable_falls_back_to_forecast_origin_monitor(m
         observed_methods.append(position.entry_method)
         if position.entry_method == EntryMethod.DAY0_OBSERVATION.value:
             raise ObservationUnavailableError("wu observation unavailable")
-        position.selected_method = position.entry_method
-        position.applied_validations = [position.entry_method, "q_source:emos"]
-        monitor_refresh._set_monitor_probability_fresh(position, True)
-        return 0.66
+        raise AssertionError("legacy forecast monitor fallback must not run")
 
     monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
+    reseeds = []
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_enqueue_single_family_belief_reseed_failsoft",
+        lambda **kw: reseeds.append(kw),
+    )
 
     p, refresh_pos, fresh = monitor_refresh.monitor_probability_refresh(
         pos,
@@ -4161,14 +4164,17 @@ def test_day0_wu_observation_unavailable_falls_back_to_forecast_origin_monitor(m
 
     assert observed_methods == [
         EntryMethod.DAY0_OBSERVATION.value,
-        EntryMethod.ENS_MEMBER_COUNTING.value,
     ]
-    assert p == pytest.approx(0.66)
-    assert refresh_pos is pos
-    assert fresh is True
-    assert pos.selected_method == EntryMethod.ENS_MEMBER_COUNTING.value
-    assert "day0_observation_unavailable:forecast_monitor_fallback" in pos.applied_validations
-    assert "q_source:emos" in pos.applied_validations
+    assert p == pytest.approx(pos.p_posterior)
+    assert refresh_pos is not pos
+    assert refresh_pos.entry_method == EntryMethod.DAY0_OBSERVATION.value
+    assert fresh is False
+    assert "day0_observation_unavailable:replacement_belief_reseed" in refresh_pos.applied_validations
+    assert all("forecast_monitor_fallback" not in v for v in refresh_pos.applied_validations)
+    assert "q_source:emos" not in refresh_pos.applied_validations
+    assert reseeds == [
+        {"city": "Chicago", "target_date": "2026-04-01", "metric": "high"}
+    ]
 
 
 def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):

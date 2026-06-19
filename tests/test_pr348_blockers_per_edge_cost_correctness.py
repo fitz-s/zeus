@@ -250,7 +250,7 @@ class TestK2_ReliabilityHardVeto:
 
 
 # ---------------------------------------------------------------------------
-# K4 — Stage B refuses live max_legs > 1 (P0-5)
+# K4 — live optimizer honors max_legs > 1 after full payoff-vector repair
 # ---------------------------------------------------------------------------
 
 
@@ -297,27 +297,14 @@ class TestK3_DepthCap:
         assert a == pytest.approx(b)
 
 
-class TestK4_StageBLiveRefusal:
-    def test_live_max_legs_gt_1_is_capped_to_1_until_full_optimizer(self, monkeypatch):
-        """Stage B optimizer's ELG is not yet full-family. LIVE max_legs > 1 must
-        be refused (capped to 1 with WARNING) until full-outcome ELG ships.
+class TestK4_StageBLiveActivation:
+    def test_live_max_legs_gt_1_is_honoured_by_full_optimizer(self, monkeypatch):
+        """LIVE max_legs > 1 must be honored now that the full payoff-vector
+        optimizer is the live family selector.
         """
         from src.strategy.family_exclusive_dedup import _family_portfolio_max_legs
 
         monkeypatch.setenv("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", "3")
         with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="live"):
-            legs = _family_portfolio_max_legs()
-        # Per K4 the live tier must NOT allow > 1 until full-outcome ELG is correct.
-        assert legs == 1, (
-            f"_family_portfolio_max_legs returned {legs} in live mode with env=3; "
-            "expected cap to 1 until Stage B optimizer ships full-family ELG"
-        )
-
-    def test_shadow_max_legs_gt_1_still_honoured(self, monkeypatch):
-        """Shadow tier may activate Stage B for observation — only LIVE is refused."""
-        from src.strategy.family_exclusive_dedup import _family_portfolio_max_legs
-
-        monkeypatch.setenv("ZEUS_SHADOW_FAMILY_PORTFOLIO_MAX_LEGS", "3")
-        with mock.patch("src.strategy.family_exclusive_dedup.get_mode", return_value="shadow"):
             legs = _family_portfolio_max_legs()
         assert legs == 3

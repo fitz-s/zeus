@@ -5,7 +5,8 @@
 #   far bin the MC almost never lands in it. A mean-only bias correction cannot make a
 #   far bin a "certain not-settle" when the irreducible residual sigma is ~2C. This pins the
 #   structural antibody (iron rule 5): on the CORRECTED domain a buy_no q_lcb of 1.0 must be
-#   UNCONSTRUCTABLE. Without a native NO lower bound, NO confidence fails closed.
+#   UNCONSTRUCTABLE. With native NO quote evidence, NO confidence is live, but it is
+#   capped by the same representativeness floor and cannot exceed the held-side point.
 #
 #   ANTI-P-HACKING: the floor is the GENUINE Gaussian tail mass, not an invented constant. At
 #   3-4C distance (where deep-NO candidates actually live) the floor is material (~0.07 -> cap
@@ -20,9 +21,9 @@
 """No certain NO ceiling on the bias-corrected domain.
 
 Contract:
-  1. sigma_repr=0 -> the disabled NO bootstrap is byte-identical to the explicit-zero path.
-  2. sigma_repr>0 -> buy_no q_lcb remains unavailable without native NO-side evidence.
-  3. No representativeness sigma value may manufacture NO confidence.
+  1. sigma_repr=0 -> NO bootstrap remains bounded by held-side point probability.
+  2. sigma_repr>0 -> buy_no q_lcb is live only with native NO quote evidence.
+  3. Representativeness sigma may only reduce/widen NO confidence, not inflate it.
   4. The POINT q (p_posterior) is unchanged.
 """
 from __future__ import annotations
@@ -77,31 +78,34 @@ FAR_BIN = 1
 
 class TestNoCertainNoCeiling:
     def test_q_no_lcb_can_never_reach_one_with_repr_sigma(self):
-        # The structural "no certain NO" guarantee: absent native NO evidence,
-        # corrected-domain buy_no q_lcb is unavailable instead of near-certain.
+        # The structural "no certain NO" guarantee: corrected-domain buy_no
+        # q_lcb is live but never reaches certainty or exceeds the point NO prob.
         a = _city(edge=34.0, sigma=2.0, members=_TIGHT_MEMBERS)
-        assert _q_no_lcb(a, FAR_BIN) == 0.0
+        q = _q_no_lcb(a, FAR_BIN)
+        assert 0.0 < q < 1.0
+        assert q <= 1.0 - float(a.p_posterior[FAR_BIN]) + 1e-9
 
-    def test_deep_tail_no_confidence_fails_closed_without_native_no_evidence(self):
+    def test_deep_tail_no_confidence_is_capped_by_representativeness_floor(self):
         a = _city(edge=31.0, sigma=2.0, members=_TIGHT_MEMBERS)
         q = _q_no_lcb(a, FAR_BIN)
-        assert q == 0.0
+        assert q <= 1.0 - a._no_certain_yes_floor(FAR_BIN) + 1e-9
+        assert q <= 1.0 - float(a.p_posterior[FAR_BIN]) + 1e-9
 
     def test_material_haircut_at_realistic_deep_no_distance(self):
         # ~3C distance, σ_repr=2C: the q≈0.93 regime the operator cited.
-        # Without native NO-side evidence the over-confident claim is impossible.
+        # Native NO is usable, but the complement-sample lower tail materially haircuts it.
         a = _city(edge=28.0, sigma=2.0, members=_TIGHT_MEMBERS)
         q = _q_no_lcb(a, FAR_BIN)
-        assert q == 0.0
+        assert 0.0 < q < 0.95
+        assert q <= 1.0 - a._no_certain_yes_floor(FAR_BIN) + 1e-9
 
-    def test_larger_repr_sigma_cannot_create_no_confidence(self):
+    def test_larger_repr_sigma_reduces_no_confidence(self):
         q_small = _q_no_lcb(_city(edge=31.0, sigma=2.0, members=_TIGHT_MEMBERS), FAR_BIN)
         q_large = _q_no_lcb(_city(edge=31.0, sigma=3.0, members=_TIGHT_MEMBERS), FAR_BIN)
-        assert q_small == 0.0
-        assert q_large == 0.0
+        assert 0.0 < q_large <= q_small
 
     def test_zero_repr_sigma_ceiling_is_legacy_identical(self):
-        # sigma_repr=0 must reproduce the disabled NO bootstrap exactly.
+        # sigma_repr=0 keeps the NO bootstrap deterministic across construction paths.
         bins = [
             Bin(low=None, high=28.0, unit="C", label="28C or below"),
             Bin(low=28.0, high=None, unit="C", label="29C or above"),
@@ -130,8 +134,8 @@ class TestNoCertainNoCeiling:
         assert np.allclose(a_legacy.p_posterior, a_repr.p_posterior)
 
     def test_near_bin_ceiling_does_not_raise_lcb(self):
-        # When the member mean sits near the bin edge, disabled NO inference must still fail
-        # closed instead of creating confidence from the YES-side model.
+        # When the member mean sits near the bin edge, NO confidence is live but
+        # strongly haircut by complement samples and representativeness.
         a = _city(edge=25.0, sigma=2.0, members=_TIGHT_MEMBERS, p_near=0.55, p_far=0.45)
         q = _q_no_lcb(a, FAR_BIN)
-        assert q == 0.0
+        assert 0.0 <= q < 1.0 - float(a.p_posterior[FAR_BIN])

@@ -1,9 +1,9 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-21
+# Last reused or audited: 2026-06-18
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive weather
-#                  family sizing), STAGE A; Fitz §1 (structural decision > patch).
+#                  family sizing), Fitz §1 (structural decision > patch).
 
-"""P0-1 STAGE A — emergency mutually-exclusive family entry gate.
+"""Mutually-exclusive weather-family portfolio selection.
 
 A weather market for one ``(city, target_date, temperature_metric)`` is a
 PARTITION: exactly one temperature bin resolves YES. The bins are NOT
@@ -13,35 +13,18 @@ BH cutoff as ``should_trade=True``, and the cycle runtime submitted each as an
 INDEPENDENT scalar-Kelly live order → ~Nx over-allocation on one underlying
 event.
 
-This module is the STAGE A emergency gate (Stage B replaces it with the full
-``ExclusiveOutcomePortfolio`` / ``WeatherFamilyDecision`` object). When the env
-flag ``ZEUS_LIVE_MAX_ONE_ENTRY_PER_WEATHER_FAMILY`` is ON (default "1"), for
-each family with >=2 ``should_trade=True`` bins, exactly ONE bin survives —
-the single best by **executable net EV after fees + spread + depth + family
-cap** — and the rest are flipped to ``should_trade=False`` carrying the
-auditable ``MUTUALLY_EXCLUSIVE_FAMILY_DEDUP`` reason string.
+The live path uses ``optimize_exclusive_outcome_portfolio`` through
+``preselect_single_family_edge_before_kelly`` / ``build_weather_family_decision``.
+That optimizer compares buy-YES, native buy-NO, and multi-leg portfolios by the
+same payoff-vector objective, so dominated sibling-NO baskets lose to a
+capital-efficient center YES when the payoff is equivalent. Explicit
+``ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS=1`` remains an emergency rollback only,
+not the live default.
 
-STAGE A is PURE RUNTIME GATING — no schema change (per the operator spec). The
-dropped-bin audit trail is the reason STRING in ``rejection_reasons`` +
-``rejection_stage`` + ``rejection_reason_detail`` + a structured log line; it
-does NOT set ``rejection_reason_enum``. Rationale: the ``no_trade_events`` DB
-CHECK clause is built dynamically from the ``NoTradeReason`` enum at table
-creation, so adding an enum member changes the schema hash (SCHEMA_VERSION
-bump + re-pin) and would be rejected by the baked-in CHECK on already-created
-SV15 DBs. Persisting the enum is therefore deferred to Stage B (the
-architectural-object PR that already carries a DB migration). The spec wording
-("record NoTradeReason ... so it's auditable, e.g. MUTUALLY_EXCLUSIVE_FAMILY_DEDUP")
-is satisfied by the string-level audit. SEE the SCAFFOLD report — this is the
-flagged brief-premise conflict (brief said "no schema change" AND "add to enum";
-both cannot hold, runtime-gating wins for Stage A).
-
-Selection-metric provenance: Stage A now has two hooks. The primary
-``preselect_single_family_edge_before_kelly`` hook runs in the evaluator before
-scalar Kelly/risk sizing and ranks by ``BinEdge.forward_edge`` so dropped
-siblings cannot mutate projected exposure. The cycle-runtime
-``dedup_mutually_exclusive_families`` hook remains a second-line safety net for
-legacy/mixed callers and still ranks already-sized ``EdgeDecision`` objects by
-``size_usd``. Stage B replaces both with a first-class family payoff optimizer.
+``dedup_mutually_exclusive_families`` remains a second-line runtime safety net
+for legacy/mixed callers and existing-exposure conflicts. It prevents scalar
+independent orders from leaking to the executor when no first-class family
+portfolio intent exists.
 
 Fail-safe: this gate can only REMOVE entries (set should_trade False). It never
 adds, resizes, or re-enables a decision, so it can never increase exposure.
@@ -66,12 +49,16 @@ _DEFAULT = "1"  # ON by default (live-money fail-safe).
 BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_ENABLED"
 BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_ENABLED"
 
-# Wave 4 (2026-05-27): Stage B family-portfolio optimizer activation.
-# Default 1 keeps the Stage A single-leg gate behaviour as the fail-safe.
+# Wave 4 (2026-05-27), live repair 2026-06-19: family-portfolio optimizer
+# activation. Default 3 lets the live optimizer compare common
+# dominated baskets (for example two sibling NO legs) against a capital-efficient
+# center YES. Set the env var to 1 only for an explicit emergency single-leg
+# rollback.
 ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = "ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS"
-# Hard cap on a Stage B portfolio's worst-case loss (USD). When set, the
+DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = 3
+# Hard cap on a family portfolio's worst-case loss (USD). When set, the
 # optimizer rejects portfolios with ``max_loss_usd > cap`` (returns None) so
-# the caller falls back to Stage A single-leg. Default None = no cap (relies
+# the caller falls back to the single-leg safety selector. Default None = no cap (relies
 # on per-leg Kelly + portfolio_heat to bound exposure).
 ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD = "ZEUS_FAMILY_PORTFOLIO_MAX_LOSS_USD"
 
@@ -79,12 +66,16 @@ ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD = "ZEUS_FAMILY_PORTFOLIO_MAX_LOSS_USD"
 def _family_portfolio_max_legs() -> int:
     """Live max_legs for the Stage B family portfolio optimizer.
 
-    Unknown or invalid values fall back to 1 (fail-safe).
+    Unknown or invalid values fall back to the live default.
     """
     try:
-        return max(1, int(os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE, "1")))
+        raw = os.environ.get(
+            ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE,
+            str(DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE),
+        )
+        return max(1, int(raw))
     except (TypeError, ValueError):
-        return 1
+        return DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE
 
 
 def _family_portfolio_max_loss_usd() -> float | None:
@@ -104,15 +95,15 @@ def _family_portfolio_max_loss_usd() -> float | None:
 from src.contracts.no_trade_reason import NoTradeReason
 from src.config import get_mode, settings
 
-# Audit reason string for dropped bins. Stage B promotes this into the
-# NoTradeReason enum while keeping the string stable for older artifacts.
+# Audit reason string for dropped bins.
 MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = "mutually_exclusive_family_dedup"
-# X2 fix (Copilot review of PR #348): audit-trail string for the Wave 4 loss-cap
-# rejection path. NoTradeReason enum bump is deferred until the next DB-migration
-# PR (SV15 CHECK constraint requires schema_version bump + re-pin) — the string
-# constant matches the MUTUALLY_EXCLUSIVE_FAMILY_DEDUP pattern so operators can
-# grep / aggregate Stage B → Stage A fall-backs from logs without waiting for
-# the enum to land. See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave 4.
+# X2 fix (Copilot review of PR #348): audit-trail string for the Wave 4
+# loss-cap rejection path. NoTradeReason enum bump is deferred until the next
+# DB-migration PR (SV15 CHECK constraint requires schema_version bump + re-pin).
+# The string constant matches the MUTUALLY_EXCLUSIVE_FAMILY_DEDUP pattern so
+# operators can grep / aggregate optimizer loss-cap fallbacks from logs.
+# See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md
+# section Wave 4.
 FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED = "family_portfolio_loss_cap_exceeded"
 FAMILY_REJECTION_STAGE = "ANTI_CHURN"
 _SAME_FAMILY_MONITOR_OWNED_REASON_BASE = "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED"
@@ -854,7 +845,7 @@ def _has_conflicting_existing_exposure(
 
 
 def family_gate_enabled() -> bool:
-    """True when the STAGE A one-entry-per-family gate is ON.
+    """True when the scalar family safety gate is ON.
 
     Default ON ("1"). Disabled only by an explicit ``"0"`` / ``"false"`` /
     ``"no"`` / ``"off"`` (case-insensitive). Any other value (including the
@@ -1349,48 +1340,47 @@ def preselect_single_family_edge_before_kelly(
     if not enabled or len(edges) < 2:
         return edges, []
 
-    # Wave 4 (2026-05-27): when Stage B is activated via env (max_legs > 1),
-    # honour the multi-leg optimum here too so the pre-Kelly preselection
-    # path stays consistent with build_weather_family_decision. Stage A
-    # single-leg fallback is preserved when max_legs == 1 (default).
+    # The family portfolio optimizer is the live selector, including when max_legs is explicitly set
+    # to 1 for emergency single-leg rollback. This keeps pre-Kelly selection
+    # and build_weather_family_decision on the same payoff-vector objective.
     max_legs = _family_portfolio_max_legs()
-    if max_legs > 1:
-        portfolio = optimize_exclusive_outcome_portfolio(
-            edges,
-            city=city,
-            target_date=target_date,
-            temperature_metric=temperature_metric,
-            max_legs=max_legs,
-        )
-        loss_cap = _family_portfolio_max_loss_usd()
-        if portfolio is not None and (
-            loss_cap is None or float(portfolio.max_loss_usd) <= loss_cap
-        ):
-            selected_ids = {id(edge) for edge in portfolio.selected_legs}
-            kept: list[Any] = [edge for edge in edges if id(edge) in selected_ids]
-            kept_labels = ",".join(_edge_bin_label(edge) for edge in kept)
-            kept_score = float(portfolio.selection_score)
-            drops_b: list[FamilyPreselectionDrop] = []
-            for edge in edges:
-                if id(edge) in selected_ids:
-                    continue
-                drops_b.append(
-                    FamilyPreselectionDrop(
-                        edge=edge,
-                        dropped_bin=_edge_bin_label(edge),
-                        kept_bin=kept_labels,
-                        family_selection_score=_edge_family_selection_score(edge),
-                        kept_family_selection_score=kept_score,
-                    )
+    portfolio = optimize_exclusive_outcome_portfolio(
+        edges,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+        max_legs=max_legs,
+    )
+    loss_cap = _family_portfolio_max_loss_usd()
+    if portfolio is not None and (
+        loss_cap is None or float(portfolio.max_loss_usd) <= loss_cap
+    ):
+        selected_ids = {id(edge) for edge in portfolio.selected_legs}
+        kept: list[Any] = [edge for edge in edges if id(edge) in selected_ids]
+        kept_labels = ",".join(_edge_bin_label(edge) for edge in kept)
+        kept_score = float(portfolio.selection_score)
+        drops_b: list[FamilyPreselectionDrop] = []
+        for edge in edges:
+            if id(edge) in selected_ids:
+                continue
+            drops_b.append(
+                FamilyPreselectionDrop(
+                    edge=edge,
+                    dropped_bin=_edge_bin_label(edge),
+                    kept_bin=kept_labels,
+                    family_selection_score=_edge_family_selection_score(edge),
+                    kept_family_selection_score=kept_score,
                 )
-                logger.info(
-                    "[FAMILY_PORTFOLIO_STAGE_B_PRE_KELLY] family=%s|%s|%s "
-                    "max_legs=%d kept=%s dropped_bin=%r",
-                    city, target_date, temperature_metric, max_legs,
-                    kept_labels, _edge_bin_label(edge),
-                )
-            return kept, drops_b
-        # Optimizer returned None OR loss cap exceeded → fall through to Stage A
+            )
+            logger.info(
+                "[FAMILY_PORTFOLIO_STAGE_B_PRE_KELLY] family=%s|%s|%s "
+                "max_legs=%d kept=%s dropped_bin=%r",
+                city, target_date, temperature_metric, max_legs,
+                kept_labels, _edge_bin_label(edge),
+            )
+        return kept, drops_b
+    # Optimizer returned None OR loss cap exceeded -> fall through to the
+    # deterministic single-leg safety selector.
 
     best = max(edges, key=_edge_preselection_key)
     best_bin = ""
@@ -1440,7 +1430,7 @@ def build_weather_family_decision(
     market_family_id: str = "",
     enabled: bool | None = None,
 ) -> WeatherFamilyDecision | None:
-    """Build the single-leg family decision consumed before scalar Kelly."""
+    """Build the family portfolio decision consumed before scalar Kelly."""
 
     gate_enabled = family_gate_enabled() if enabled is None else enabled
     if not gate_enabled:
@@ -1459,7 +1449,7 @@ def build_weather_family_decision(
         candidate_edges = executable_candidate_edges
         excluded_blocked_edges = blocked_edges
 
-    # Wave 4 (2026-05-27): max_legs controls the live Stage B multi-leg optimizer.
+    # Wave 4 (2026-05-27): max_legs controls the live family portfolio optimizer.
     max_legs = _family_portfolio_max_legs()
     try:
         fallback_candidate_count = int(
@@ -1478,13 +1468,13 @@ def build_weather_family_decision(
     if portfolio is None:
         return None
     # Wave 4: hard-cap on worst-case family loss. When the cap is set and the
-    # optimizer's portfolio exceeds it, return None so the caller falls back
-    # to the Stage A single-leg path. Fail-open (no cap) when env unset.
+    # optimizer's portfolio exceeds it, return None so the caller can use the
+    # deterministic single-leg safety selector. Fail-open (no cap) when env unset.
     loss_cap = _family_portfolio_max_loss_usd()
     if loss_cap is not None and float(portfolio.max_loss_usd) > loss_cap:
         logger.warning(
             "[%s] city=%s target=%s metric=%s "
-            "max_loss_usd=%.4f > cap=%.4f — falling back to Stage A",
+            "max_loss_usd=%.4f > cap=%.4f - falling back to single-leg safety selector",
             FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED.upper(),
             city, target_date, temperature_metric,
             float(portfolio.max_loss_usd), loss_cap,
@@ -1546,7 +1536,7 @@ def build_weather_family_decision(
 
 
 def _pick_best_index(decisions: list["EdgeDecision"], idxs: list[int]) -> int:
-    """Return the index (into ``decisions``) of the single best family member.
+    """Return the index of the best emergency single-leg family member.
 
     Best = highest ``(size_usd, forward_edge)``; on a full economic tie the
     lexicographically smallest ``decision_id`` wins (stable, deterministic).
@@ -1578,12 +1568,11 @@ def dedup_mutually_exclusive_families(
     existing_exposures: Iterable[Any] | None = None,
     family_portfolio_intent: bool = False,
 ) -> list["EdgeDecision"]:
-    """STAGE A gate: keep only the single best entry per exclusive family.
+    """Second-line safety gate for scalar entries in an exclusive family.
 
     Mutates the passed ``EdgeDecision`` objects in place (sets
     ``should_trade=False`` + ``rejection_stage`` + ``rejection_reasons`` string
-    + ``rejection_reason_detail`` on dropped bins; the ``rejection_reason_enum``
-    is left untouched — STAGE A is pure runtime gating, no schema-derived CHECK)
+    + ``rejection_reason_detail`` on dropped bins)
     and returns the same list for caller convenience.
 
     Args:
@@ -1706,7 +1695,7 @@ def dedup_mutually_exclusive_families(
                 f"dropped_bin={dropped_label!r} kept_bin={best_label!r} "
                 f"kept_size_usd={kept_size:.2f} "
                 f"kept_expected_net_profit_usd={_decision_family_selection_score(best):.6f} "
-                f"({ENV_FLAG}=1; Stage-B single-leg family decision)"
+                f"({ENV_FLAG}=1; scalar family safety gate; no portfolio intent)"
             )
             logger.info(
                 "[MUTUALLY_EXCLUSIVE_FAMILY_DEDUP] family=%s|%s|%s dropped_bin=%r "

@@ -150,17 +150,18 @@ class TestCIOverlapHold:
         )
 
     def test_ci_separated_adverse_exits(self):
-        """When CI is fully separated AND price drops below entry, exit is expected.
+        """When CI is fully separated AND sell value beats hold EV, exit is expected.
 
         entry_ci = (0.74, 0.76) tight, current_ci = (0.28, 0.32) fully below.
-        _ci_intervals_separated = True; fresh_prob=0.30 < entry_posterior=0.75 → EXIT.
+        _ci_intervals_separated = True; fresh_prob=0.30 < entry_posterior=0.75.
+        A current bid above the held EV proves liquidation is economically better.
         MINOR-5: assert should_exit is True (not merely trigger != CI_OVERLAP_HOLD).
         """
         pos = _make_position(direction="buy_yes", entry_price=0.75, entry_ci_width=0.02)
         ctx = _make_exit_context(
             fresh_prob=0.30,
-            current_market_price=0.30,
-            best_bid=0.29,
+            current_market_price=0.45,
+            best_bid=0.45,
             entry_posterior=0.75,
             entry_ci=(0.74, 0.76),   # tight around entry
             current_ci=(0.28, 0.32), # fully disjoint below entry CI

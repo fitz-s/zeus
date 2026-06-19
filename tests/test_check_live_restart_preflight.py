@@ -482,6 +482,7 @@ def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tm
     forecasts.commit()
     trade.close()
     forecasts.close()
+    monkeypatch.setattr(preflight, "_single_family_reseed_repair_evidence", lambda item: None)
 
     result = preflight.evaluate()
 
@@ -489,6 +490,75 @@ def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tm
     belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
     assert belief["ok"] is False
     assert belief["evidence"]["risky"][0]["risk"] == "stale_live_belief"
+
+
+def test_preflight_accepts_stale_belief_when_single_family_reseed_is_materializable(
+    monkeypatch, tmp_path
+):
+    trade_db, forecast_db = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    label = "Will the highest temperature in Karachi be 35°C on June 19?"
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'karachi-pos', 'day0_window', 'Karachi', '2026-06-19', 'high',
+            ?, 'buy_no', 5.0, 5.0, 'filled', NULL, 0, NULL,
+            0.84, 1, 0.72, 1, '2026-06-18T23:00:00+00:00'
+        )
+        """,
+        (label,),
+    )
+    stale = datetime.now(timezone.utc) - timedelta(hours=72)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Karachi', '2026-06-19', 'high', ?, ?, ?, 'live')
+        """,
+        (
+            stale.isoformat(),
+            stale.isoformat(),
+            json.dumps({label: 0.20}),
+        ),
+    )
+    fresh = datetime.now(timezone.utc)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (2, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    monkeypatch.setattr(
+        preflight,
+        "_single_family_reseed_repair_evidence",
+        lambda item: {
+            **item,
+            "risk": "missing_live_belief_repairable_by_single_family_reseed",
+            "family_materializable_cycle": "2026-06-18T18:00:00+00:00",
+            "write_performed": False,
+        },
+    )
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is True
+    belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
+    assert belief["ok"] is True
+    assert belief["evidence"]["risky"] == []
+    repair = belief["evidence"]["repairable"][0]
+    assert repair["position_id"] == "karachi-pos"
+    assert repair["risk"] == "stale_live_belief_repairable_by_single_family_reseed"
+    assert repair["posterior_id"] == "1"
 
 
 def test_preflight_accepts_missing_belief_when_single_family_reseed_is_materializable(

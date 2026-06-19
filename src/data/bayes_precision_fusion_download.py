@@ -995,6 +995,11 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     except Exception:
         persisted_keys = set()
         prev_runs_done = set()
+    single_success_models: set[str] = {
+        str(model)
+        for model, _city, _target_date, _metric, endpoint in persisted_keys
+        if endpoint == "single_runs"
+    }
 
     # De-duplicate targets by (city, target_date, lead_days) for the batched fetch path.
     # The metric dimension is NOT a fetch axis — both high and low come from one payload.
@@ -1043,6 +1048,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         if sv is None:
                             dropped.append(f"{model}:single_runs")
                     if sv is not None:
+                        single_success_models.add(model)
                         rows.append({
                             "model": model, "city": t.city, "target_date": t.target_date,
                             "metric": t.metric, "source_cycle_time": cycle_iso,
@@ -1132,7 +1138,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             dropped.append(f"{model}:single_runs")
                             continue
                         if (model, t.city, t.target_date, t.metric, "single_runs") in persisted_keys:
+                            single_success_models.add(model)
                             continue
+                        single_success_models.add(model)
                         rows.append({
                             "model": model, "city": t.city, "target_date": t.target_date,
                             "metric": t.metric, "source_cycle_time": cycle_iso,
@@ -1215,14 +1223,22 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         m for m in BAYES_PRECISION_FUSION_EXTRA_MODELS
         if m not in frozenset(REGIONAL_MODELS) | frozenset({ICON_EU_MODEL})
     )
-    global_single_dropped = {
+    global_single_dropped_scoped = {
         d.split(":")[0] for d in dropped if d.endswith(":single_runs")
     } & global_models_expected
-    if global_single_dropped:
+    global_single_unavailable = global_models_expected - single_success_models
+    if global_single_dropped_scoped:
         _LOG.warning(
-            "BAYES_PRECISION_FUSION download: GLOBAL model(s) single_runs UNAVAILABLE (not domain-excluded — "
-            "real upstream failure): %s",
-            sorted(global_single_dropped),
+            "BAYES_PRECISION_FUSION download: GLOBAL model(s) had scoped single_runs drops "
+            "(not domain-excluded; coverage/fixpoint handles residual target gaps): %s",
+            sorted(global_single_dropped_scoped),
+        )
+    if global_single_unavailable:
+        _LOG.error(
+            "BAYES_PRECISION_FUSION download: GLOBAL model(s) have zero successful single_runs "
+            "rows for cycle %s: %s",
+            cycle_iso,
+            sorted(global_single_unavailable),
         )
 
     return {
@@ -1237,5 +1253,6 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "domain_excluded": tuple(sorted(set(domain_excluded))),
         # Ensemble-completeness markers: how many global (always-in-domain) models succeeded.
         "global_models_expected": len(global_models_expected),
-        "global_models_unavailable": sorted(global_single_dropped),
+        "global_models_dropped_scoped": sorted(global_single_dropped_scoped),
+        "global_models_unavailable": sorted(global_single_unavailable),
     }

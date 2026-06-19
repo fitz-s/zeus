@@ -906,6 +906,20 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
         }
         covered.append(evidence)
         if not belief.fresh:
+            repair = _single_family_reseed_repair_evidence({**item, **evidence})
+            if repair is not None:
+                repairable.append(
+                    {
+                        **repair,
+                        "risk": "stale_live_belief_repairable_by_single_family_reseed",
+                        "posterior_id": belief.posterior_id,
+                        "computed_at": belief.computed_at,
+                        "age_hours": belief.age_hours,
+                        "source_cycle_age_hours": belief.source_cycle_age_hours,
+                        "freshness_basis": belief.freshness_basis,
+                    }
+                )
+                continue
             risky.append({**evidence, "risk": "stale_live_belief"})
     return CheckResult(
         "held_position_belief_coverage",

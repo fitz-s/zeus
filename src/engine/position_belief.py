@@ -81,6 +81,8 @@ class ReplacementBelief:
     runtime_layer: str = LIVE_RUNTIME_LAYER
     source_id: str | None = None
     posterior_method: str | None = None
+    latest_raw_cycle_time: str | None = None
+    raw_cycle_lag_hours: float | None = None
 
     def freshness_validation(self) -> str:
         state = "fresh" if self.fresh else "stale"
@@ -90,13 +92,18 @@ class ReplacementBelief:
                 f";source_id={self.source_id or ''};"
                 f"posterior_method={self.posterior_method or ''}"
             )
+        raw_lag = ""
+        if self.latest_raw_cycle_time:
+            raw_lag = f";latest_raw_cycle_time={self.latest_raw_cycle_time}"
+            if self.raw_cycle_lag_hours is not None:
+                raw_lag += f";raw_cycle_lag_h={self.raw_cycle_lag_hours:.2f}"
         if self.source_cycle_age_hours is not None:
             return (
                 f"belief_source={self.source_table};age_h={self.age_hours:.2f};"
                 f"source_cycle_age_h={self.source_cycle_age_hours:.2f};"
-                f"basis={self.freshness_basis}{authority};{state}"
+                f"basis={self.freshness_basis}{authority}{raw_lag};{state}"
             )
-        return f"belief_source={self.source_table};age_h={self.age_hours:.2f}{authority};{state}"
+        return f"belief_source={self.source_table};age_h={self.age_hours:.2f}{authority}{raw_lag};{state}"
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -114,6 +121,58 @@ def _parse_computed_at(raw: object) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _latest_raw_single_runs_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    now: datetime,
+) -> datetime | None:
+    """Latest captured raw live-input cycle for the same family, if present."""
+
+    columns = _table_columns(conn, "raw_model_forecasts")
+    required = {"city", "target_date", "metric", "source_cycle_time"}
+    if not required.issubset(columns):
+        return None
+    predicates = ["city = ?", "target_date = ?", "metric = ?"]
+    params: list[object] = [city, target_date, temperature_metric]
+    if "endpoint" in columns:
+        predicates.append("endpoint = 'single_runs'")
+    if "coverage_status" in columns:
+        predicates.append("(coverage_status IS NULL OR coverage_status = 'COVERED')")
+    if "captured_at" in columns:
+        predicates.append("(captured_at IS NULL OR datetime(captured_at) <= datetime(?))")
+        params.append(now.isoformat())
+    if "source_available_at" in columns:
+        predicates.append(
+            "(source_available_at IS NULL OR datetime(source_available_at) <= datetime(?))"
+        )
+        params.append(now.isoformat())
+    try:
+        row = conn.execute(
+            f"""
+            SELECT source_cycle_time
+            FROM raw_model_forecasts
+            WHERE {' AND '.join(predicates)}
+              AND datetime(source_cycle_time) <= datetime(?)
+            GROUP BY source_cycle_time
+            ORDER BY datetime(source_cycle_time) DESC
+            LIMIT 1
+            """,
+            tuple([*params, now.isoformat()]),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        raw_value = row["source_cycle_time"]
+    except (TypeError, IndexError):
+        raw_value = row[0]
+    return _parse_computed_at(raw_value)
 
 
 def _match_bin(q: Mapping[str, object], bin_label: str) -> tuple[str, float] | None:
@@ -165,6 +224,8 @@ def load_replacement_belief(
         from src.state.db import ZEUS_FORECASTS_DB_PATH
 
         db_path = str(ZEUS_FORECASTS_DB_PATH)
+    now_dt = now or datetime.now(timezone.utc)
+    latest_raw_cycle_time: datetime | None = None
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
     except sqlite3.Error as exc:
@@ -213,6 +274,14 @@ def load_replacement_belief(
             """,
             tuple([*authority_params[:3], LIVE_RUNTIME_LAYER, *authority_params[3:]]),
         ).fetchone()
+        if row is not None:
+            latest_raw_cycle_time = _latest_raw_single_runs_cycle(
+                conn,
+                city=city,
+                target_date=target_date,
+                temperature_metric=temperature_metric,
+                now=now_dt,
+            )
     except sqlite3.Error as exc:
         logger.warning("position_belief: posterior read failed: %s", exc)
         return None
@@ -237,7 +306,6 @@ def load_replacement_belief(
         # Unparseable timestamp must not be branded fresh (fail-closed; the
         # 2026-06-11 serving-freshness incident class).
         return None
-    now_dt = now or datetime.now(timezone.utc)
     age_hours = (now_dt - computed_at).total_seconds() / 3600.0
     source_cycle_time = _parse_computed_at(row["source_cycle_time"])
     source_cycle_age_hours: float | None = None
@@ -260,6 +328,17 @@ def load_replacement_belief(
         except Exception:  # noqa: BLE001 - keep the old explicit age gate as fallback
             source_cycle_age_hours = (now_dt - source_cycle_time).total_seconds() / 3600.0
             fresh = 0.0 <= age_hours <= float(max_age_hours)
+    raw_cycle_lag_hours: float | None = None
+    if (
+        latest_raw_cycle_time is not None
+        and source_cycle_time is not None
+        and latest_raw_cycle_time > source_cycle_time
+    ):
+        raw_cycle_lag_hours = (
+            latest_raw_cycle_time - source_cycle_time
+        ).total_seconds() / 3600.0
+        fresh = False
+        freshness_basis = "source_cycle_time_raw_model_forecasts_lag"
     held = q_yes if direction == "buy_yes" else 1.0 - q_yes
     return ReplacementBelief(
         held_side_prob=held,
@@ -280,6 +359,10 @@ def load_replacement_belief(
         posterior_method=(
             str(row["posterior_method"]) if row["posterior_method"] is not None else None
         ),
+        latest_raw_cycle_time=(
+            latest_raw_cycle_time.isoformat() if latest_raw_cycle_time is not None else None
+        ),
+        raw_cycle_lag_hours=raw_cycle_lag_hours,
     )
 
 

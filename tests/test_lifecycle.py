@@ -749,6 +749,35 @@ class TestExitTriggers:
         assert not decision.should_exit
         assert decision.trigger == "CI_SEPARATED_POSITIVE_EDGE_HOLD"
 
+    def test_ci_separated_shenzhen_light_negative_edge_holds(self):
+        """Shenzhen 2026-06-19 regression: a lightly negative buy-NO edge is
+        not enough to liquidate a still-high-probability held bin."""
+        pos = _make_position(
+            direction="buy_no",
+            p_posterior=0.871650896043244,
+            entry_price=0.74,
+            entry_ci_width=0.02,
+            shares=60.0,
+            shares_filled=60.0,
+            filled_cost_basis_usd=44.4,
+            cost_basis_usd=44.4,
+            size_usd=44.4,
+        )
+
+        decision = _call_exit(
+            pos,
+            fresh_prob=0.846733041380824,
+            current_market_price=0.85,
+            best_bid=0.85,
+            entry_ci=(0.86, 0.88),
+            current_ci=(0.84, 0.85),
+            entry_posterior=0.871650896043244,
+        )
+
+        assert not decision.should_exit
+        assert decision.trigger == "CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD"
+        assert "ci_separated_edge_within_threshold_hold" in decision.applied_validations
+
     def test_buy_yes_ev_gate_hold_when_bid_below_posterior(self):
         """When best_bid < p_posterior (hold EV > sell EV), exit is blocked.
 

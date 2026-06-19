@@ -22,7 +22,7 @@ lower-confidence-bound (q_lcb) widens honestly. Contract:
 
   1. σ_repr=0 -> q_lcb bit-identical to the legacy path (backward compatible).
   2. σ_repr>0 -> q_lcb strictly LOWER (more conservative) for the same members.
-  3. buy_no q_lcb remains unavailable unless native NO-side evidence exists (#106/#129).
+  3. buy_no q_lcb uses the native NO quote plus complement probability samples (#106/#129).
   4. a high-σ city (Seoul 2.5) gets a materially wider CI than a low-σ city (Tokyo 1.7)
      at the same point.
 
@@ -33,6 +33,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.strategy.market_analysis import MarketAnalysis
+from src.strategy.probability_uncertainty import lower_quantile, no_side_samples
 from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 from src.types.market import Bin
 
@@ -120,27 +121,36 @@ class TestReprSigmaWidensYesLcb:
 # (c) buy_no q_lcb is INDEPENDENT and also widens
 # ---------------------------------------------------------------------------
 
-class TestReprSigmaDoesNotMintNoLcb:
-    def test_no_ci_lower_remains_unavailable_with_repr_sigma(self):
+class TestReprSigmaWidensNoLcb:
+    def test_no_ci_lower_widens_with_repr_sigma(self):
         a_legacy = _make_analysis(representativeness_sigma=0.0, rng_seed=42)
         a_repr = _make_analysis(representativeness_sigma=2.5, rng_seed=42)
         no_legacy = a_legacy._bootstrap_bin_no(0, 4000)
         no_repr = a_repr._bootstrap_bin_no(0, 4000)
-        assert no_legacy[0] + float(a_legacy.buy_no_market_price(0)) == 0.0
-        assert no_repr[0] + float(a_repr.buy_no_market_price(0)) == 0.0
+        q_legacy = no_legacy[0] + float(a_legacy.buy_no_market_price(0))
+        q_repr = no_repr[0] + float(a_repr.buy_no_market_price(0))
+        assert 0.0 < q_repr <= q_legacy
+        assert q_repr <= 1.0 - float(a_repr.p_posterior[0]) + 1e-9
 
-    def test_no_lcb_does_not_follow_yes_lcb(self):
-        # Independence (#106/#129): absent a native NO lower bound, the NO lower
-        # bound fails closed instead of being derived from the YES lower bound.
+    def test_no_lcb_uses_complement_lower_tail_not_yes_lcb(self):
+        # Independence (#106/#129): native NO lower bound is the lower tail of
+        # complement samples, not the point complement of the YES lower bound.
         a = _make_analysis(representativeness_sigma=2.5, rng_seed=42)
+        yes_samples = a.forecast_yes_probability_samples(0, 4000)
         yes_ci = a._bootstrap_bin(0, 4000)
         no_ci = a._bootstrap_bin_no(0, 4000)
         c_yes = 0.30
         c_no = 0.30
         yes_q_lcb = yes_ci[0] + c_yes
         no_q_lcb = no_ci[0] + c_no
+        expected_no = min(
+            lower_quantile(no_side_samples(yes_samples)),
+            1.0 - float(a.p_posterior[0]),
+            1.0 - a._no_certain_yes_floor(0),
+        )
         assert yes_q_lcb > 0.0
-        assert no_q_lcb == 0.0
+        assert abs(no_q_lcb - expected_no) < 1e-9
+        assert abs(no_q_lcb - (1.0 - yes_q_lcb)) > 1e-3
 
 
 # ---------------------------------------------------------------------------

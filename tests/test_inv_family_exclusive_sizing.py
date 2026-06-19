@@ -1,31 +1,32 @@
-# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-06-18
+# Lifecycle: created=2026-05-20; last_reviewed=2026-06-18; last_reused=2026-06-18
 # Purpose: Relationship antibody (Fitz §3) — mutually-exclusive weather bins
 #          (one city/date/metric partition) must NOT emit independent live
-#          orders. P0-1 STAGE A single-best entry gate.
+#          scalar orders; live selection must use family payoff efficiency.
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive weather
-#                  family sizing), STAGE A.
+#                  family sizing), family portfolio optimizer.
 
 """Relationship test: INV-family-exclusive-sizing.
 
 Cross-module relationship under test:
     evaluator emits N EdgeDecision(should_trade=True) for one
-    (city, target_date, metric) weather market (a PARTITION — exactly one bin
-    resolves YES)  →  cycle_runtime's family gate  →  the executor.
+    (city, target_date, metric) weather market (a PARTITION - exactly one bin
+    resolves YES) -> family portfolio selection -> the executor.
 
-Invariant (the cross-boundary property): when several mutually-exclusive bins
-of the SAME family pass family-wise FDR, AT MOST ONE may flow to the executor
-as should_trade=True. The dropped bins must carry an auditable
-``mutually_exclusive_family_dedup`` reason string. Single-bin families are
-unchanged (byte-identical to legacy per-edge path).
+Invariant (the cross-boundary property): mutually-exclusive bins may not cross
+into execution as unrelated scalar orders. The live selector must choose the
+best payoff/capital-efficient family portfolio. When no first-class portfolio
+intent exists, the second-line safety gate may collapse scalar siblings and the
+dropped bins must carry an auditable ``mutually_exclusive_family_dedup`` reason
+string. Single-bin families are unchanged.
 
 Why a relationship test, not a function test: the over-allocation bug lives at
 the MOMENT a per-bin decision list crosses from the evaluator into the
-execution loop — neither module is individually wrong, the relationship across
+execution loop - neither module is individually wrong, the relationship across
 the boundary is. Per Fitz §3 this is authored RED before implementation.
 
-RED→GREEN protocol (recorded for the opus critic):
+RED->GREEN protocol (recorded for the opus critic):
   * ``test_legacy_baseline_emits_three_independent_orders`` pins the CURRENT
-    (pre-gate / gate-disabled) behavior: family-wise FDR selects 3 bins →
+    (pre-gate / gate-disabled) behavior: family-wise FDR selects 3 bins ->
     3 should_trade=True. This is the RED state the gate must fix.
   * ``test_same_city_date_metric_...`` asserts the REQUIRED post-gate behavior:
     exactly 1 should_trade for the family + 2 dropped bins carrying the dedup
@@ -162,7 +163,7 @@ def _trade_decision(
 def _family_after_fdr() -> list[EdgeDecision]:
     """The 3 bins family-wise FDR selects (20-21, 22-23, 26+) all as trades.
 
-    Differentiated executable economics so single-best selection is unambiguous:
+    Differentiated executable economics so emergency single-leg ranking is unambiguous:
     22-23°F has the largest expected-net-profit proxy.
     """
     bins = {s[2]: s for s in _BIN_SPECS}
@@ -178,9 +179,9 @@ def _count_trades(decisions: list[EdgeDecision]) -> int:
 
 
 def test_legacy_baseline_emits_three_independent_orders() -> None:
-    """RED baseline: gate OFF == current production == 3 independent orders.
+    """RED baseline: gate OFF == legacy bug == 3 independent scalar orders.
 
-    Pins the over-allocation bug so the GREEN test's delta (3 → 1) is provably
+    Pins the over-allocation bug so the GREEN test's delta (3 -> 1) is provably
     the gate's effect, not a fixture artifact.
     """
     decisions = _family_after_fdr()
@@ -193,7 +194,7 @@ def test_legacy_baseline_emits_three_independent_orders() -> None:
     )
     assert _count_trades(out) == 3, (
         "legacy/gate-disabled path must preserve all 3 FDR-selected bins "
-        "(this is the bug the STAGE A gate fixes)"
+        "(this is the bug the family safety gate fixes)"
     )
     assert all(
         MUTUALLY_EXCLUSIVE_FAMILY_DEDUP not in (d.rejection_reasons or [])
@@ -204,7 +205,7 @@ def test_legacy_baseline_emits_three_independent_orders() -> None:
 def test_same_city_date_metric_mutually_exclusive_bins_do_not_emit_independent_live_orders(
     caplog,
 ) -> None:
-    """REQUIRED live-mode behavior: exactly 1 entry per exclusive family.
+    """Safety-gate behavior when scalar entries arrive without portfolio intent.
 
     With the gate ON, the 3 FDR-selected mutually-exclusive bins collapse to
     exactly 1 should_trade=True (the single family utility winner) and
@@ -230,7 +231,7 @@ def test_same_city_date_metric_mutually_exclusive_bins_do_not_emit_independent_l
         f"mutually-exclusive family must emit exactly 1 live entry, got {len(trades)}"
     )
 
-    # The survivor is the single best by family expected-net-profit proxy.
+    # The survivor is the emergency single-leg safety winner.
     kept = trades[0]
     assert kept.edge is not None and kept.edge.bin.label == "22-23°F", (
         f"single_best must be the highest-size_usd bin; kept {kept.edge.bin.label!r}"
@@ -832,7 +833,7 @@ def test_trade_db_family_exposure_does_not_let_stale_envelope_mask_snapshot_iden
 
 
 def test_family_portfolio_intent_allows_optimizer_owned_multi_bin_execution() -> None:
-    """Stage A only blocks independent bins, not an explicit family portfolio."""
+    """Safety gate blocks independent bins, not an explicit family portfolio."""
     bins = {s[2]: s for s in _BIN_SPECS}
     new_bin = _trade_decision(bins["22-23°F"], size_usd=20.0, forward_edge=0.07)
     exposure = WeatherFamilyExposure(
@@ -859,7 +860,7 @@ def test_family_portfolio_intent_allows_optimizer_owned_multi_bin_execution() ->
 
 
 def test_family_preselection_happens_before_projected_exposure_mutation() -> None:
-    """Pre-Kelly relationship: only one FDR sibling enters scalar sizing."""
+    """Pre-Kelly relationship: family optimizer runs before scalar sizing."""
 
     bins = {s[2]: s for s in _BIN_SPECS}
     low_price_tail = _bin_edge(bins["26°F or above"], entry_price=0.02, forward_edge=0.02)
@@ -874,9 +875,9 @@ def test_family_preselection_happens_before_projected_exposure_mutation() -> Non
         enabled=True,
     )
 
-    assert selected == [mid_bin]
-    assert {d.dropped_bin for d in dropped} == {"26°F or above", "20-21°F"}
-    assert all(d.kept_bin == "22-23°F" for d in dropped)
+    assert selected == [low_price_tail]
+    assert {d.dropped_bin for d in dropped} == {"22-23°F", "20-21°F"}
+    assert all(d.kept_bin == "26°F or above" for d in dropped)
 
 
 def test_weather_family_decision_is_first_class_single_leg_intent() -> None:
@@ -1103,6 +1104,48 @@ def test_family_optimizer_rejects_capital_dominated_no_basket_for_center_yes() -
 
     assert portfolio is not None
     assert portfolio.selected_legs == (yes_30,)
+
+
+def test_preselection_rejects_shanghai_no_basket_for_center_yes_by_default(monkeypatch) -> None:
+    """Default live preselection must choose the capital-efficient center YES,
+    not collapse two dominated NO legs into one arbitrary NO."""
+
+    monkeypatch.delenv("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", raising=False)
+    no_29 = _celsius_edge(
+        label="29°C",
+        support_index=0,
+        direction="buy_no",
+        entry_price=0.79,
+        p_posterior=0.10,
+        forward_edge=0.05,
+    )
+    yes_30 = _celsius_edge(
+        label="30°C",
+        support_index=1,
+        direction="buy_yes",
+        entry_price=0.27,
+        p_posterior=0.80,
+        forward_edge=0.10,
+    )
+    no_31 = _celsius_edge(
+        label="31°C",
+        support_index=2,
+        direction="buy_no",
+        entry_price=0.80,
+        p_posterior=0.10,
+        forward_edge=0.05,
+    )
+
+    selected, dropped = preselect_single_family_edge_before_kelly(
+        [no_29, yes_30, no_31],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        enabled=True,
+    )
+
+    assert selected == [yes_30]
+    assert {drop.dropped_bin for drop in dropped} == {"29°C", "31°C"}
 
 
 def test_family_optimizer_honors_live_admission_and_qlcb_before_payoff_selection() -> None:

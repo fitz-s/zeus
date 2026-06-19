@@ -65,6 +65,20 @@ def forecasts_db(tmp_path):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            endpoint TEXT,
+            coverage_status TEXT,
+            captured_at TEXT,
+            source_available_at TEXT
+        )
+        """
+    )
     conn.commit()
     conn.close()
     return str(path)
@@ -88,6 +102,28 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             runtime_layer,
             source_id,
             posterior_method,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_raw(db_path, *, source_cycle_time, city="Karachi",
+                target_date="2026-06-12", metric="high",
+                endpoint="single_runs", coverage_status="COVERED",
+                captured_at=None, source_available_at=None):
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO raw_model_forecasts VALUES (?,?,?,?,?,?,?,?)",
+        (
+            city,
+            target_date,
+            metric,
+            source_cycle_time,
+            endpoint,
+            coverage_status,
+            captured_at,
+            source_available_at,
         ),
     )
     conn.commit()
@@ -230,6 +266,35 @@ class TestLoadReplacementBelief:
         assert belief.fresh is True
         assert belief.freshness_basis == "source_cycle_time"
         assert belief.source_cycle_age_hours == pytest.approx(24.0)
+
+    def test_newer_raw_cycle_marks_posterior_stale_until_materialized(self, forecasts_db):
+        """Monitor authority must not treat an older posterior as fresh when
+        newer live-input raw cycles already exist for the same family."""
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+            q={BIN: 0.242},
+        )
+        _insert_raw(
+            forecasts_db,
+            source_cycle_time=(NOW - timedelta(hours=6)).isoformat(),
+            captured_at=(NOW - timedelta(hours=5, minutes=30)).isoformat(),
+            source_available_at=(NOW - timedelta(hours=5, minutes=45)).isoformat(),
+        )
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.fresh is False
+        assert belief.freshness_basis == "source_cycle_time_raw_model_forecasts_lag"
+        assert belief.latest_raw_cycle_time == (NOW - timedelta(hours=6)).isoformat()
+        assert belief.raw_cycle_lag_hours == pytest.approx(6.0)
+        validation = belief.freshness_validation()
+        assert "latest_raw_cycle_time=" in validation
+        assert "raw_cycle_lag_h=6.00" in validation
+        assert validation.endswith(";stale")
 
     def test_source_cycle_clock_still_fails_closed_after_bound(self, forecasts_db):
         _insert(

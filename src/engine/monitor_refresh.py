@@ -749,15 +749,15 @@ def _resolve_unified_exit_bias_native(
     NOT do). The caller MUST also apply identity-Platt on the corrected domain (skip
     ``calibrate_and_normalize``), because the Platt models were fit on the UNCORRECTED p_raw
     domain (same reasoning as ``event_reactor_adapter._snapshot_p_cal``). The legacy
-    full_transport (FT) error-model path — removed 2026-06-14 (dead 0-row shadow) —
+    full_transport (FT) error-model path - removed 2026-06-14 (retired 0-row experiment) -
     residual-widened AND ran real Platt, which on a bias-shifted domain would be a
     DIFFERENT, NEW asymmetry; this helper is deliberately a separate bias-shift-only path.
 
     UNIT: ``effective_bias_c`` is degC; F-settled cities (members carry the city's settlement
     unit) need ×1.8 before subtraction — same conversion the reactor entry applies.
 
-    FAIL-CLOSED: missing flag/config/row/field or any error → None (no correction; the caller
-    falls back to today's plain-p_raw + real-Platt path). Never breaks the exit decision.
+    FAIL-CLOSED: missing flag/config/row/field or any error -> None (no correction; the caller
+    uses today's plain-p_raw + real-Platt path). Never breaks the exit decision.
     Authority: D2 bias-family unify / wiring verdict 2026-06-03.
     """
     try:
@@ -1035,9 +1035,8 @@ def _refresh_ens_member_counting(
                 f"settlement_sigma_floor_applied:{_monitor_q.settlement_sigma_floor_applied}",
             ]
         else:
-            # _monitor_q absent: full_transport (FT) error-model path removed 2026-06-14
-            # (dead shadow, 0 rows). p_raw falls through to the unified-bias or plain
-            # branch below.
+            # _monitor_q absent: full_transport (FT) error-model path was retired
+            # as a 0-row experiment. p_raw uses the unified-bias or plain branch below.
             pass
         if _monitor_q_source is not None:
             pass
@@ -1145,9 +1144,8 @@ def _refresh_ens_member_counting(
                 f"settlement_sigma_floor_applied:{_monitor_q.settlement_sigma_floor_applied}",
             ]
         else:
-            # _monitor_q absent: full_transport (FT) error-model path removed 2026-06-14
-            # (dead shadow, 0 rows). p_raw falls through to the unified-bias or plain
-            # branch below.
+            # _monitor_q absent: full_transport (FT) error-model path was retired
+            # as a 0-row experiment. p_raw uses the unified-bias or plain branch below.
             pass
         if _monitor_q_source is not None:
             pass
@@ -2467,14 +2465,10 @@ def monitor_probability_refresh(
         EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
     }
     refresh_pos = pos
-    day0_unsupported_forecast_fallback = False
-    day0_observation_unavailable_forecast_fallback = False
     if _would_use_day0_lane and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
         if _city_supports_executable_day0_observation(city):
             refresh_pos = copy.copy(pos)
             refresh_pos.entry_method = EntryMethod.DAY0_OBSERVATION.value
-        else:
-            day0_unsupported_forecast_fallback = True
     setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
 
     # recompute_native_probability still carries a legacy current_p_market
@@ -2491,32 +2485,19 @@ def monitor_probability_refresh(
             target_d=target_d,
         )
     except ObservationUnavailableError:
-        if refresh_pos is pos or pos.entry_method == EntryMethod.DAY0_OBSERVATION.value:
-            raise
-        day0_observation_unavailable_forecast_fallback = True
-        refresh_pos = pos
-        setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
-        current_p_posterior = recompute_native_probability(
-            refresh_pos,
-            current_p_market=probability_reference_price,
-            registry=registry,
-            conn=conn,
-            city=city,
-            target_d=target_d,
-        )
-    if day0_observation_unavailable_forecast_fallback:
+        _set_monitor_probability_fresh(refresh_pos, False)
         _append_monitor_validation(
             refresh_pos,
-            "day0_observation_unavailable:forecast_monitor_fallback",
+            "day0_observation_unavailable:replacement_belief_reseed",
         )
-    if day0_unsupported_forecast_fallback:
-        _append_monitor_validation(
-            refresh_pos,
-            "day0_observation_unsupported:forecast_monitor_fallback",
+        _enqueue_single_family_belief_reseed_failsoft(
+            city=str(pos.city),
+            target_date=str(pos.target_date),
+            metric=resolve_position_metric(pos)[0],
         )
+        return pos.p_posterior, refresh_pos, False
     if (
         _would_use_day0_lane
-        and not day0_observation_unavailable_forecast_fallback
         and getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None) is True
     ):
         try:

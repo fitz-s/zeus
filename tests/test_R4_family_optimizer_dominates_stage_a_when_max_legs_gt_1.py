@@ -2,16 +2,17 @@
 # Last reused or audited: 2026-05-27
 # Authority basis: architecture/market_cost_seam_executable_uncertainty_2026_05_27.md §Wave1 + D4
 # Lifecycle: created=2026-05-27; last_reviewed=2026-05-27; last_reused=never
-# Purpose: R4 — relationship test antibody for Stage B family optimizer activation
-# Reuse: optimize_exclusive_outcome_portfolio ELG(2-leg) >= ELG(1-leg) on favourable partition; Stage A pin preserved when max_legs=1 (default).
-"""R4: Stage B optimizer ELG(2-leg) >= ELG(1-leg) on a synthetic YES/NO partition.
+# Purpose: R4 — relationship test antibody for live family optimizer activation
+# Reuse: optimize_exclusive_outcome_portfolio ELG(2-leg) >= ELG(1-leg) on favourable partition; explicit max_legs=1 remains emergency rollback only.
+"""R4: family optimizer ELG(2-leg) >= ELG(1-leg) on a synthetic YES/NO partition.
 
-Smoke test for D4 — the Stage B optimizer exists and works but is pinned to
-max_legs=1 by config, making it behaviorally identical to Stage A. Wave 4 bumps
-the config. This test verifies the optimizer's math is correct on a synthetic
-two-bin partition: YES + NO = 1 (exclusive outcome).
+Smoke test for D4 — the live family optimizer must be callable and the live
+default must not silently collapse back to emergency single-leg selection. This test verifies
+the optimizer's math is correct on a synthetic two-bin partition: YES + NO = 1
+(exclusive outcome).
 
-Passes today (optimizer logic is correct), but documents the D4 structural gap.
+This also documents that single-leg selection is only an explicit emergency
+rollback, not the live default.
 """
 from __future__ import annotations
 
@@ -56,30 +57,31 @@ def test_r4_two_leg_elg_dominates_single_leg_on_favorable_partition() -> None:
 
 
 def test_r4_optimizer_exists_and_is_callable() -> None:
-    """optimize_exclusive_outcome_portfolio is importable (D4: it exists, just pinned)."""
+    """optimize_exclusive_outcome_portfolio is importable and callable."""
     from src.strategy.family_exclusive_dedup import optimize_exclusive_outcome_portfolio  # noqa: F401
     assert callable(optimize_exclusive_outcome_portfolio)
 
 
-def test_r4_stage_b_default_pinned_to_max_legs_1() -> None:
-    """Documents that the SHIPPED env-var defaults make Stage B identical to Stage A.
+def test_r4_live_default_uses_multi_leg_optimizer() -> None:
+    """Documents that shipped live defaults evaluate multi-leg family portfolios.
 
-    Wave 4 renamed/split the activation env var into a mode-aware pair:
-        ZEUS_SHADOW_FAMILY_PORTFOLIO_MAX_LEGS (default 1) — used in shadow mode
-        ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS   (default 1) — used in live mode
-    Both default 1 so the Stage A single-leg gate stays the operational
-    behaviour until the operator explicitly promotes either tier.
+    `ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS=1` remains available as an explicit
+    emergency rollback, but the unset default must allow the optimizer to
+    compare dominated baskets against capital-efficient center YES legs.
     """
     import os
-    shadow_legs = int(os.environ.get("ZEUS_SHADOW_FAMILY_PORTFOLIO_MAX_LEGS", "1"))
-    live_legs = int(os.environ.get("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", "1"))
-    assert shadow_legs == 1, (
-        f"ZEUS_SHADOW_FAMILY_PORTFOLIO_MAX_LEGS={shadow_legs}; expected 1 by default."
+
+    from src.strategy.family_exclusive_dedup import DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE
+
+    live_legs = int(
+        os.environ.get(
+            "ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS",
+            str(DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE),
+        )
     )
-    assert live_legs == 1, (
-        f"ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS={live_legs}; expected 1 by default."
+    assert live_legs >= 2, (
+        f"ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS={live_legs}; expected live default >=2."
     )
-    # Confirm the LEGACY name is not silently expected anywhere by the test suite.
     legacy = os.environ.get("ZEUS_FAMILY_OPTIMIZER_MAX_LEGS")
     assert legacy is None, (
         f"Legacy env var ZEUS_FAMILY_OPTIMIZER_MAX_LEGS={legacy!r} found — Wave 4 "

@@ -525,7 +525,7 @@ class TestMarketAnalysis:
         with pytest.raises(ValueError, match="buy_yes bootstrap requires executable YES-side"):
             ma._bootstrap_bin(0, 1)
 
-    def test_binary_buy_no_complement_is_diagnostic_not_executable(self):
+    def test_binary_buy_no_complement_diagnostic_is_forbidden(self):
         bins = [
             Bin(low=None, high=32, label="32 or below", unit="F"),
             Bin(low=33, high=None, label="33 or higher", unit="F"),
@@ -543,7 +543,8 @@ class TestMarketAnalysis:
         )
 
         assert ma.supports_buy_no_edges(0) is False
-        assert ma.buy_no_complement_diagnostic_price(0) == pytest.approx(0.60)
+        with pytest.raises(ValueError, match="buy_no complement diagnostic is forbidden"):
+            ma.buy_no_complement_diagnostic_price(0)
         with pytest.raises(ValueError, match="buy_no is not executable"):
             ma.buy_no_market_price(0)
         with pytest.raises(ValueError, match="buy_no bootstrap requires executable NO-side"):

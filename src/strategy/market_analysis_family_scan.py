@@ -102,5 +102,26 @@ def scan_full_hypothesis_family(
 
         if not _supports_buy_no_for_bin(analysis, idx):
             continue
-        continue
+        p_market_no = _buy_no_market_price_for_bin(analysis, idx)
+        p_posterior_no = 1.0 - float(analysis.p_posterior[idx])
+        p_model_no = 1.0 - float(analysis.p_cal[idx])
+        edge_no = p_posterior_no - p_market_no
+        ci_lo_no, ci_hi_no, p_value_no = analysis._bootstrap_bin_no(idx, n_bootstrap)
+        hypotheses.append(
+            FullFamilyHypothesis(
+                index=idx,
+                range_label=label,
+                direction="buy_no",
+                edge=float(edge_no),
+                ci_lower=float(ci_lo_no),
+                ci_upper=float(ci_hi_no),
+                p_value=float(p_value_no),
+                p_model=float(p_model_no),
+                p_market=float(p_market_no),
+                p_posterior=float(p_posterior_no),
+                entry_price=float(p_market_no),
+                is_shoulder=bool(getattr(bin_obj, "is_shoulder", False)),
+                passed_prefilter=edge_no > 0 and float(ci_lo_no) > 0,
+            )
+        )
     return hypotheses

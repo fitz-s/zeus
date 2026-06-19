@@ -400,6 +400,59 @@ def test_domain_gate_unavailable_global_is_loud_not_silent(tmp_path) -> None:
     )
 
 
+def test_scoped_global_drop_does_not_fail_cycle_when_model_succeeds_elsewhere(tmp_path) -> None:
+    """A global model with at least one successful row for the cycle is degraded by scope,
+    not unavailable for the whole BPF capture job.
+
+    This guards the live preflight deadlock where one residual target gap marked
+    bayes_precision_fusion_capture FAILED even though the same global model had already
+    landed rows for other targets in that cycle.
+    """
+    from src.data.bayes_precision_fusion_download import (
+        BayesPrecisionFusionDownloadTarget,
+        download_bayes_precision_fusion_extra_raw_inputs,
+    )
+
+    db = _forecast_db(tmp_path)
+    targets = [
+        BayesPrecisionFusionDownloadTarget(
+            city="Paris",
+            metric="high",
+            target_date="2026-06-09",
+            lead_days=1,
+            latitude=48.967,
+            longitude=2.428,
+            timezone_name="Europe/Paris",
+        ),
+        BayesPrecisionFusionDownloadTarget(
+            city="Berlin",
+            metric="high",
+            target_date="2026-06-09",
+            lead_days=1,
+            latitude=52.520,
+            longitude=13.405,
+            timezone_name="Europe/Berlin",
+        ),
+    ]
+
+    def _single(*, model, latitude, **_k):
+        if model == "icon_global" and float(latitude) < 50.0:
+            return None
+        return 20.0
+
+    report = download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 9, 0, tzinfo=UTC),
+        targets=targets,
+        single_runs_fetch=_single,
+        previous_runs_fetch=lambda **_k: 19.0,
+    )
+
+    assert "icon_global:single_runs" in report["dropped"]
+    assert "icon_global" in report["global_models_dropped_scoped"]
+    assert "icon_global" not in report["global_models_unavailable"]
+
+
 def test_default_previous_runs_fetch_uses_om_ecmwf_id_for_anchor(monkeypatch) -> None:
     """FIX 1 mapping: the DEFAULT previous-runs fetch for the anchor must send the OM
     ECMWF previous-runs model id (ecmwf_ifs025) to the OM API, even though the stored
