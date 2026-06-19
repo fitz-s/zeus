@@ -361,6 +361,60 @@ class TestPersistedRestCancel:
         ]
         assert events[-2:] == ["CANCEL_REQUESTED", "CANCEL_ACKED"]
 
+    def test_pre_cancel_journal_lock_retry_is_idempotent_after_request_committed(self, monkeypatch):
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+        expired = find_expired_resting_entries(conn, now=NOW)
+        collected: list[dict] = []
+        clob = _FakeClob()
+
+        import src.state.venue_command_repo as command_repo
+
+        real_append_event = command_repo.append_event
+        calls = {"count": 0}
+
+        def lock_after_cancel_requested_committed(conn, *, command_id, event_type, occurred_at, payload):
+            calls["count"] += 1
+            event_id = real_append_event(
+                conn,
+                command_id=command_id,
+                event_type=event_type,
+                occurred_at=occurred_at,
+                payload=payload,
+            )
+            if event_type == "CANCEL_REQUESTED" and calls["count"] == 1:
+                conn.commit()
+                raise sqlite3.OperationalError("database is locked")
+            return event_id
+
+        monkeypatch.setattr(command_repo, "append_event", lock_after_cancel_requested_committed)
+
+        stats = run_persisted_cancels_for_expired_rests(
+            expired,
+            clob,
+            conn_factory=lambda: conn,
+            close_connections=False,
+            collect_cancelled=collected,
+        )
+
+        assert stats == {
+            "scanned": 1,
+            "cancelled": 1,
+            "cancel_failed": 0,
+            "cancel_journal_failed": 0,
+        }
+        assert clob.cancelled == ["o1"]
+        assert [entry["command_id"] for entry in collected] == ["c1"]
+        events = [
+            row[0]
+            for row in conn.execute(
+                "SELECT event_type FROM venue_command_events "
+                "WHERE command_id = 'c1' ORDER BY sequence_no"
+            ).fetchall()
+        ]
+        assert events.count("CANCEL_REQUESTED") == 1
+        assert events[-2:] == ["CANCEL_REQUESTED", "CANCEL_ACKED"]
+
 
 class TestDeadlineSource:
     def test_default_deadline_is_the_registry_constant(self):

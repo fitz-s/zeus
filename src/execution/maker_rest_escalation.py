@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -197,6 +198,49 @@ def _close_conn_if_needed(conn: sqlite3.Connection, *, close: bool) -> None:
         pass
 
 
+def _is_sqlite_lock_error(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return "database is locked" in text or "database table is locked" in text or "busy" in text
+
+
+def _cancel_journal_event_already_persisted(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    event_type: str,
+    venue_order_id: str,
+) -> bool:
+    try:
+        rows = conn.execute(
+            """
+            SELECT payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = ?
+             ORDER BY sequence_no DESC
+            """,
+            (command_id, event_type),
+        ).fetchall()
+    except Exception:
+        return False
+    import json
+
+    for row in rows:
+        try:
+            raw = row["payload_json"]
+        except Exception:
+            raw = row[0]
+        try:
+            payload = json.loads(str(raw or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict) and str(payload.get("venue_order_id") or "") == venue_order_id:
+            return True
+    return False
+
+
 def _append_cancel_journal_event(
     conn_factory: Callable[[], sqlite3.Connection],
     *,
@@ -208,18 +252,45 @@ def _append_cancel_journal_event(
 ) -> None:
     from src.state.venue_command_repo import append_event
 
-    conn = conn_factory()
-    try:
-        append_event(
-            conn,
-            command_id=command_id,
-            event_type=event_type,
-            occurred_at=occurred_at,
-            payload=payload,
-        )
-        conn.commit()
-    finally:
-        _close_conn_if_needed(conn, close=close_connections)
+    venue_order_id = str(payload.get("venue_order_id") or "")
+    for attempt in range(1, 4):
+        conn = conn_factory()
+        try:
+            if venue_order_id and _cancel_journal_event_already_persisted(
+                conn,
+                command_id=command_id,
+                event_type=event_type,
+                venue_order_id=venue_order_id,
+            ):
+                return
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type=event_type,
+                occurred_at=occurred_at,
+                payload=payload,
+            )
+            conn.commit()
+            return
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if not _is_sqlite_lock_error(exc) or attempt == 3:
+                raise
+            logger.warning(
+                "maker_rest_escalation: retrying %s journal command=%s order=%s "
+                "after sqlite lock (attempt %d/3): %s",
+                event_type,
+                command_id,
+                venue_order_id,
+                attempt,
+                exc,
+            )
+            time.sleep(0.25 * attempt)
+        finally:
+            _close_conn_if_needed(conn, close=close_connections)
 
 
 def run_persisted_cancels_for_expired_rests(
