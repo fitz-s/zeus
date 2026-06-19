@@ -1245,6 +1245,52 @@ def test_live_build_failure_rolls_back_partial_live_order_aggregate(monkeypatch)
     assert _table_count(conn, "edli_live_cap_usage") == 0
 
 
+def test_live_certificate_build_failure_preserves_selected_leg_on_receipt(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
+    )
+    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: accepted)
+
+    def _raise_build_failure(**_kwargs):
+        raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_MISSING")
+
+    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _raise_build_failure)
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=True,
+        durable_submit_outbox_enabled=True,
+        executor_submit=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("executor must not be called after certificate build failure")
+        ),
+        operator_arm=_operator_arm(),
+        pre_submit_authority_provider=_pre_submit_authority_provider,
+    )
+
+    receipt = submit(event, decision_time)
+
+    assert receipt.proof_accepted is False
+    assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.reason == "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_MISSING"
+    assert receipt.token_id == accepted.token_id
+    assert receipt.condition_id == accepted.condition_id
+    assert receipt.bin_label == accepted.bin_label
+    assert receipt.direction == accepted.direction
+    assert receipt.q_live == accepted.q_live
+    assert receipt.c_fee_adjusted == accepted.c_fee_adjusted
+
+
 def test_live_execution_command_build_fails_without_pre_submit_authority_witness():
     from src.engine import event_reactor_adapter as adapter
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
@@ -2227,7 +2273,7 @@ def test_main_live_mode_wires_production_executor_boundary_source():
     assert "submit_event_bound_final_intent_via_existing_executor" in source
     assert "executor_submit=lambda final_intent_cert, execution_command_cert" in source
     assert "live_bridge_mode" in source
-    assert "pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn" in source
+    assert "pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_book_evidence_conn" in source
 
 
 def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatch):
@@ -2287,7 +2333,7 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
             }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -2381,7 +2427,7 @@ def test_main_pre_submit_buy_uses_pusd_payload_without_ctf_enumeration(monkeypat
             raise AssertionError("BUY pre-submit proof must not enumerate CTF positions")
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -2461,7 +2507,7 @@ def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
             }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -2585,7 +2631,7 @@ def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(mo
             }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -2662,7 +2708,7 @@ def test_main_pre_submit_authority_provider_blocks_venue_connectivity_failure(mo
             }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -3264,7 +3310,7 @@ def test_gate84_jit_book_quote_makes_quote_age_satisfiable_for_stale_db_row(monk
             "timestamp": str(int((decision_time - timedelta(seconds=71)).timestamp() * 1000)),
         }
 
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
         book_quote_provider=_jit_book,
@@ -3300,7 +3346,7 @@ def test_gate84_jit_unavailable_and_db_row_stale_fails_closed(monkeypatch):
     def _jit_book_fails(token_id: str) -> dict:
         raise RuntimeError("CLOB /book 503")
 
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
         book_quote_provider=_jit_book_fails,
@@ -3322,7 +3368,7 @@ def test_gate84_jit_unavailable_but_db_row_fresh_uses_db_row(monkeypatch):
     )
     _gate84_patch_authority_guards(monkeypatch)
 
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
     )

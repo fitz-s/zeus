@@ -301,15 +301,18 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
     from src.data import polymarket_client
     from src.ingest.price_channel_ingest import _edli_refresh_held_position_quote_evidence
     from src.state import db as state_db
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     world_path = tmp_path / "world.db"
     trade_path = tmp_path / "trade.db"
-    for path in (world_path, trade_path):
-        conn = sqlite3.connect(path)
-        init_schema(conn)
-        conn.commit()
-        conn.close()
+    world_conn = sqlite3.connect(world_path)
+    init_schema(world_conn)
+    world_conn.commit()
+    world_conn.close()
+    trade_conn = sqlite3.connect(trade_path)
+    init_schema_trade_only(trade_conn)
+    trade_conn.commit()
+    trade_conn.close()
 
     trade = sqlite3.connect(trade_path)
     trade.execute(

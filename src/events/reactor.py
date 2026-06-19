@@ -1744,6 +1744,18 @@ class OpportunityEventReactor:
                 receipt=receipt,
                 decision_time=decision_time,
             )
+        if (
+            receipt.proof_accepted is False
+            and str(receipt.reason or "").startswith("EDLI_LIVE_CERTIFICATE_BUILD_FAILED:")
+        ):
+            return self._reject_or_retry_post_submit(
+                event,
+                "EXECUTOR_EXPRESSIBILITY",
+                receipt.reason,
+                result,
+                receipt=receipt,
+                decision_time=decision_time,
+            )
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt, self._config)
         if proof_stage is not None:
             return self._reject_or_retry_post_submit(

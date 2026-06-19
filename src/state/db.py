@@ -302,8 +302,9 @@ def get_forecasts_connection_read_only() -> sqlite3.Connection:
 # --------------------------------------------------------------------------
 # Root (EDLI live canary): zeus-world.db is a WAL database with multiple
 # in-process writers running as apscheduler jobs / daemon threads inside the
-# SAME daemon process — the EDLI reactor (EventStore emit/claim/mark) and the
-# market-channel ingestor (execution_feasibility_evidence + event rows). With
+# SAME daemon process — especially the EDLI reactor (EventStore emit/claim/mark)
+# and other world-class event writers. Market-channel executable feasibility rows
+# are trade-class evidence and are not written through this world lock. With
 # sqlite3's default ``isolation_level=""`` (implicit DEFERRED BEGIN), the first
 # DML opens a transaction that upgrades to the single WAL *write* lock and holds
 # it until COMMIT. The reactor's long cycle (~330 s, incl. HTTP/MC re-pricing)
@@ -3006,10 +3007,6 @@ def init_schema(
     _ensure_opportunity_event_processing_table(conn)
     _ensure_event_dead_letters_table(conn)
 
-    # EDLI v1 (2026-05-24): executable quote/book feasibility evidence.
-    from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
-    _ensure_execution_feasibility_evidence_table(conn)
-
     # EDLI v1 (2026-05-24): event-triggered no-trade regret ledger.
     from src.state.schema.no_trade_regret_events_schema import ensure_table as _ensure_no_trade_regret_events_table
     _ensure_no_trade_regret_events_table(conn)
@@ -4281,6 +4278,7 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "book_hash_transitions",
     "decision_integrity_quarantine",
     "execution_fact",
+    "execution_feasibility_evidence",
     "executable_market_snapshots",
     # Repoint 2 (fix/prearm-fill-exit-readiness 2026-06-03): outcome_fact
     # corrected to trade_class. The live writer (harvester.py log_settlement_event)
@@ -4890,6 +4888,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     init_snapshot_schema(conn)
     from src.state.schema.book_hash_transitions_schema import ensure_table as _ensure_book_hash_transitions_table
     _ensure_book_hash_transitions_table(conn)
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
+    _ensure_execution_feasibility_evidence_table(conn)
     # PR-E (2026-05-22): decision_integrity_quarantine lives on the trade DB.
     from src.state.schema.decision_integrity_quarantine_schema import ensure_table as _ensure_decision_integrity_quarantine_table
     _ensure_decision_integrity_quarantine_table(conn)

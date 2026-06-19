@@ -5600,8 +5600,8 @@ def _edli_event_reactor_cycle() -> None:
                 replacement_forecast_refit_decision=replacement_forecast_refit_decision,
                 replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
                 replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
-                pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(
-                    conn,
+                pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_book_evidence_conn(
+                    trade_conn,
                     edli_cfg,
                     # GATE #84: in live-submit mode the pre-submit authority pulls a
                     # just-in-time live book for the selected candidate so quote_age
@@ -8173,8 +8173,8 @@ def _edli_book_best_price(levels, *, best: str):
     return max(parsed) if best == "bid" else min(parsed)
 
 
-def _edli_pre_submit_authority_provider_from_world_conn(
-    world_conn, edli_cfg, *, book_quote_provider=None
+def _edli_pre_submit_authority_provider_from_book_evidence_conn(
+    book_evidence_conn, edli_cfg, *, book_quote_provider=None
 ):
     """Build EDLI's production pre-submit authority provider.
 
@@ -8256,7 +8256,7 @@ def _edli_pre_submit_authority_provider_from_world_conn(
             # row ONLY if it is itself within the freshness bound; a venue-stale row
             # (the GATE #84 pathology) must NOT be emitted as a fresh quote.
             row = _edli_latest_pre_submit_book_row(
-                world_conn,
+                book_evidence_conn,
                 token_id=token_id,
                 decision_time=checked_at,
             )
@@ -8320,8 +8320,8 @@ def _edli_pre_submit_authority_provider_from_world_conn(
     return _provider
 
 
-def _edli_latest_pre_submit_book_row(world_conn, *, token_id: str, decision_time: datetime):
-    return world_conn.execute(
+def _edli_latest_pre_submit_book_row(book_evidence_conn, *, token_id: str, decision_time: datetime):
+    return book_evidence_conn.execute(
         """
         SELECT quote_seen_at, book_hash_before, best_bid_before, best_ask_before
         FROM execution_feasibility_evidence

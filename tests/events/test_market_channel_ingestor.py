@@ -24,13 +24,18 @@ from src.events.triggers.market_channel_ingestor import (
     invalidate_executable_snapshots_for_market_channel_action,
     insert_execution_feasibility_evidence,
 )
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 from src.strategy.live_inference.executable_cost import ExecutableCostError, quote_book_from_depth_json, executable_cost
 
 
 def _conn_writer():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
+    # Most ingestor unit tests use a single in-memory connection to exercise
+    # parsing/coalescing behavior. Live wiring is covered separately by
+    # test_market_channel_can_write_feasibility_to_trade_connection.
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+    ensure_table(conn)
     return conn, EventWriter(conn)
 
 
@@ -408,9 +413,11 @@ def test_market_channel_quote_writes_feasibility_evidence_only():
 
 
 def test_market_channel_can_write_feasibility_to_trade_connection():
-    world_conn, writer = _conn_writer()
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    writer = EventWriter(world_conn)
     trade_conn = sqlite3.connect(":memory:")
-    init_schema(trade_conn)
+    init_schema_trade_only(trade_conn)
     ingestor = MarketChannelIngestor(
         writer,
         active_token_ids={"token-1"},
@@ -433,7 +440,9 @@ def test_market_channel_can_write_feasibility_to_trade_connection():
     )
 
     assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
-    assert world_conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 0
+    assert world_conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='execution_feasibility_evidence'"
+    ).fetchone()[0] == 0
     rows = trade_conn.execute(
         "SELECT direction, accepted_or_rejected, filled_shares FROM execution_feasibility_evidence ORDER BY direction"
     ).fetchall()
@@ -858,13 +867,17 @@ def test_universe_to_witness_relationship_candidate_gets_fresh_evidence_row():
     )
     assert "yes-cand" in token_metadata
 
-    # World DB with the REAL execution_feasibility_evidence schema + witness reads.
+    # World DB owns opportunity events; trade DB owns execution_feasibility_evidence
+    # and is the same book-evidence connection the pre-submit witness reads in live.
     world_conn = sqlite3.connect(":memory:")
     init_schema(world_conn)
+    trade_conn = sqlite3.connect(":memory:")
+    init_schema_trade_only(trade_conn)
     ingestor = MarketChannelIngestor(
         EventWriter(world_conn),
         active_token_ids=set(token_metadata),
         token_metadata=token_metadata,
+        feasibility_conn=trade_conn,
     )
 
     seed_time = "2026-05-31T12:00:00+00:00"
@@ -893,11 +906,12 @@ def test_universe_to_witness_relationship_candidate_gets_fresh_evidence_row():
 
     ingestor.seed_from_rest(_fetch_orderbook, received_at=seed_time)
     world_conn.commit()
+    trade_conn.commit()
 
     # Decision time strictly AFTER the seed quote — causal witness must accept it.
     decision_time = datetime(2026, 5, 31, 12, 0, 30, tzinfo=timezone.utc)
     row = _edli_latest_pre_submit_book_row(
-        world_conn, token_id="yes-cand", decision_time=decision_time
+        trade_conn, token_id="yes-cand", decision_time=decision_time
     )
     assert row is not None, "witness must find a fresh evidence row for the candidate token"
     quote_seen_at, book_hash_before, best_bid_before, best_ask_before = row
@@ -910,7 +924,7 @@ def test_universe_to_witness_relationship_candidate_gets_fresh_evidence_row():
     past_decision = datetime(2026, 5, 31, 11, 59, 0, tzinfo=timezone.utc)
     assert (
         _edli_latest_pre_submit_book_row(
-            world_conn, token_id="yes-cand", decision_time=past_decision
+            trade_conn, token_id="yes-cand", decision_time=past_decision
         )
         is None
     ), "causal guard must still reject quotes seen after the decision time"

@@ -2051,10 +2051,10 @@ def event_bound_live_adapter_from_trade_conn(
                 proof_accepted=True,
             )
         except Exception as exc:
-            return EventSubmissionReceipt(
-                False,
-                event.event_id,
-                event.causal_snapshot_id,
+            return dataclass_replace(
+                no_submit_receipt,
+                submitted=False,
+                side_effect_status="NO_SUBMIT",
                 reason=f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{exc}",
                 proof_accepted=False,
             )
