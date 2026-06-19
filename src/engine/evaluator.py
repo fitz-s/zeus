@@ -5645,6 +5645,7 @@ def evaluate_candidate(
         target_date=target_date,
         temperature_metric=temperature_metric.temperature_metric,
         market_family_id=_entry_forecast_market_family(candidate, temperature_metric),
+        outcome_probabilities=p_cal,
     )
     family_preselection_drops = list(family_decision.dropped) if family_decision else []
     family_fallback_rank_by_edge_id: dict[int, int] = {}

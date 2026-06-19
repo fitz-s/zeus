@@ -48,6 +48,7 @@ import pytest
 
 import src.forecast.center as center_mod
 import src.forecast.sigma_authority as sa
+import src.decision.family_decision_engine as fde_mod
 from src.config import City
 from src.contracts.executable_cost_curve import (
     BookLevel,
@@ -1116,3 +1117,58 @@ def test_no_on_modal_requires_side_aware_oof_license():
     assert reason2 == NO_TRADE_NO_DIRECTION_LAW, (
         f"expected NO_TRADE_NO_DIRECTION_LAW for YES-on-non-modal; got {reason2!r}"
     )
+
+
+def test_qlcb_guard_exception_abstains_candidate(monkeypatch):
+    """A broken qLCB guard cannot leave a positive-edge live candidate untouched."""
+
+    case = _case()
+    space = _outcome_space(case)
+    route = _hand_route(space, side="YES", bin_id="b25", cost=0.30)
+    economics = CandidateEconomics(
+        candidate_id=route.candidate_id,
+        point_ev=0.20,
+        edge_lcb=0.15,
+        delta_u_at_min=0.001,
+        optimal_stake_usd=Decimal("5"),
+        optimal_delta_u=0.05,
+        q_dot_payoff=0.45,
+        cost=route.route_cost.avg_cost,
+        route_id=route.route_cost.route_id,
+    )
+    candidate = CandidateDecision(
+        route=route,
+        economics=economics,
+        direction_law_ok=True,
+        coherence_allows=True,
+        robust_trade_score=0.15,
+    )
+
+    def _boom(**_kwargs):
+        raise RuntimeError("artifact parser exploded")
+
+    monkeypatch.setattr(fde_mod, "_apply_qlcb_guard", _boom)
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    guarded = engine._apply_qlcb_reliability_guard(
+        scored=(candidate,),
+        case=case,
+        joint_q=build_joint_q(
+            PredictiveDistributionBuilder(DebiasAuthority(())).build(
+                case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
+            ),
+            space,
+        ),
+        forecast_bin="b25",
+    )
+
+    assert guarded[0].q_lcb_guard_basis == "QLCB_RELIABILITY_GUARD_ERROR"
+    assert guarded[0].q_lcb_guard_abstained is True
+    assert guarded[0].economics.edge_lcb < 0.0
+    selected, reason = engine._select(guarded)
+    assert selected is None
+    assert reason == NO_TRADE_NO_POSITIVE_EDGE

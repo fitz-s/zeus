@@ -115,6 +115,51 @@ def _settings() -> dict[str, Any]:
         return {}
 
 
+def _qkernel_spine_cutover_check(cfg: dict[str, Any]) -> CheckResult:
+    flags = cfg.get("feature_flags") if isinstance(cfg.get("feature_flags"), dict) else {}
+    enabled = flags.get("qkernel_spine_enabled")
+    ok = enabled is True
+    return CheckResult(
+        "qkernel_spine_cutover",
+        ok,
+        "qkernel spine is enabled" if ok else "qkernel spine is not enabled for live restart",
+        {
+            "settings_path": str(SETTINGS_PATH),
+            "feature_flags.qkernel_spine_enabled": enabled,
+        },
+    )
+
+
+def _qlcb_reliability_artifact_check() -> CheckResult:
+    try:
+        from src.decision.qlcb_reliability_guard import (
+            reliability_artifact_status,
+            reset_reliability_cache,
+        )
+
+        reset_reliability_cache()
+        evidence = reliability_artifact_status()
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            "qlcb_reliability_artifact",
+            False,
+            "qLCB reliability artifact health check failed",
+            {"error": str(exc)},
+        )
+    status = str(evidence.get("status") or "")
+    ok = status in {"ABSENT_ALLOWED", "ACTIVE_VALID"}
+    return CheckResult(
+        "qlcb_reliability_artifact",
+        ok,
+        (
+            "qLCB reliability artifact is absent/inert or active-valid"
+            if ok
+            else "qLCB reliability artifact exists but is invalid; live guard would abstain"
+        ),
+        evidence,
+    )
+
+
 def _parse_dt(raw: object) -> datetime | None:
     try:
         dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
@@ -956,6 +1001,8 @@ def evaluate() -> dict[str, Any]:
             "real order submit config read",
             {"edli.real_order_submit_enabled": real_submit},
         ),
+        _qkernel_spine_cutover_check(cfg),
+        _qlcb_reliability_artifact_check(),
         _forecast_sidecar_health(),
         _posterior_summary(),
         *_sidecar_heartbeat_checks(),

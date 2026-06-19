@@ -98,6 +98,7 @@ _QLCB_OOF_RELIABILITY_PATH: str = "state/qlcb_oof_reliability.json"
 _RELIABILITY_CACHE: Optional[dict[str, tuple[int, float]]] = None
 _RELIABILITY_LOADED: bool = False
 _RELIABILITY_ARTIFACT_ACTIVE: bool = False
+_RELIABILITY_ARTIFACT_STATUS: str = "ABSENT_ALLOWED"
 
 
 # ---------------------------------------------------------------------------
@@ -186,24 +187,26 @@ def _load_reliability_table() -> dict[str, tuple[int, float]]:
     """Load the OOF reliability table ``{cell_key: (n, hit_rate)}`` (one-shot, cached).
 
     The artifact maps each cell key to ``{"n": int, "hit_rate": float}`` (the OOF realized
-    frequency the offline fitter wrote from settled predictions). Absent / malformed / empty ->
-    the EMPTY map (the guard is then INERT: every cell is "unknown" -> pass-through, see
-    ``apply_guard``). FAIL-SOFT absent/malformed -> inactive empty map (never raises into
-    the decision). An existing but incompatible artifact is active with zero usable cells so
-    live candidates abstain rather than consuming stale side-less cells.
+    frequency the offline fitter wrote from settled predictions). The only inert state is
+    physical absence. A present but malformed, unreadable, empty, or incompatible artifact is
+    active with zero usable cells so live candidates abstain rather than consuming stale or
+    broken reliability evidence.
     """
-    global _RELIABILITY_CACHE, _RELIABILITY_LOADED, _RELIABILITY_ARTIFACT_ACTIVE
+    global _RELIABILITY_CACHE, _RELIABILITY_LOADED
+    global _RELIABILITY_ARTIFACT_ACTIVE, _RELIABILITY_ARTIFACT_STATUS
     if _RELIABILITY_LOADED and _RELIABILITY_CACHE is not None:
         return _RELIABILITY_CACHE
     out: dict[str, tuple[int, float]] = {}
     artifact_active = False
+    artifact_status = "ABSENT_ALLOWED"
+    path = _QLCB_OOF_RELIABILITY_PATH
+    if not os.path.isabs(path):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(repo, _QLCB_OOF_RELIABILITY_PATH)
     try:
-        path = _QLCB_OOF_RELIABILITY_PATH
-        if not os.path.isabs(path):
-            repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            path = os.path.join(repo, _QLCB_OOF_RELIABILITY_PATH)
         if os.path.exists(path):
             artifact_active = True
+            artifact_status = "ACTIVE_INVALID"
             with open(path, "r", encoding="utf-8") as fh:
                 artifact = json.load(fh)
             cells = artifact.get("cells") if isinstance(artifact, dict) else None
@@ -222,21 +225,42 @@ def _load_reliability_table() -> dict[str, tuple[int, float]]:
                         continue
                     if n > 0 and math.isfinite(hr) and 0.0 <= hr <= 1.0:
                         out[str(key)] = (n, hr)
-    except Exception:  # noqa: BLE001 — fail-soft to inert; never break the decision.
+                artifact_status = "ACTIVE_VALID" if out else "ACTIVE_INVALID"
+    except Exception:  # noqa: BLE001 — present-but-bad is active fail-closed.
         out = {}
-        artifact_active = False
+        artifact_active = os.path.exists(path)
+        artifact_status = "ACTIVE_INVALID" if artifact_active else "ABSENT_ALLOWED"
     _RELIABILITY_CACHE = out
     _RELIABILITY_LOADED = True
     _RELIABILITY_ARTIFACT_ACTIVE = artifact_active
+    _RELIABILITY_ARTIFACT_STATUS = artifact_status
     return out
 
 
 def reset_reliability_cache() -> None:
     """Reset the one-shot artifact cache (tests inject a table then reset between cases)."""
-    global _RELIABILITY_CACHE, _RELIABILITY_LOADED, _RELIABILITY_ARTIFACT_ACTIVE
+    global _RELIABILITY_CACHE, _RELIABILITY_LOADED
+    global _RELIABILITY_ARTIFACT_ACTIVE, _RELIABILITY_ARTIFACT_STATUS
     _RELIABILITY_CACHE = None
     _RELIABILITY_LOADED = False
     _RELIABILITY_ARTIFACT_ACTIVE = False
+    _RELIABILITY_ARTIFACT_STATUS = "ABSENT_ALLOWED"
+
+
+def reliability_artifact_status() -> dict[str, object]:
+    """Return read-only health for restart/preflight gates."""
+
+    _load_reliability_table()
+    path = _QLCB_OOF_RELIABILITY_PATH
+    if not os.path.isabs(path):
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(repo, _QLCB_OOF_RELIABILITY_PATH)
+    return {
+        "path": path,
+        "status": _RELIABILITY_ARTIFACT_STATUS,
+        "active": _RELIABILITY_ARTIFACT_ACTIVE,
+        "cell_count": len(_RELIABILITY_CACHE or {}),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +301,7 @@ def apply_guard(
     side: str = "YES",
     bin_position: str,
     reliability_table: Optional[Mapping[str, tuple[int, float]]] = None,
+    reliability_artifact_active: Optional[bool] = None,
 ) -> GuardVerdict:
     """Apply the q_lcb empirical reliability guard to ONE candidate's served q_lcb.
 
@@ -297,12 +322,16 @@ def apply_guard(
          abstain. Unknown active cells are not authority for live money.
 
     The guard NEVER moves μ and NEVER fits a per-city offset; it only serves a lower bound the
-    realized frequency supports (or abstains). FAIL-SOFT inside the table read (inert on error).
+    realized frequency supports (or abstains). Artifact read failures are active fail-closed when
+    the artifact is present; only physical absence is inert.
     """
     table = reliability_table if reliability_table is not None else _load_reliability_table()
-    artifact_active = (
-        bool(reliability_table) if reliability_table is not None else _RELIABILITY_ARTIFACT_ACTIVE
-    )
+    if reliability_artifact_active is not None:
+        artifact_active = bool(reliability_artifact_active)
+    elif reliability_table is not None:
+        artifact_active = bool(reliability_table)
+    else:
+        artifact_active = _RELIABILITY_ARTIFACT_ACTIVE
     bucket_idx, bucket_floor = qlcb_bucket(band_q_lcb)
     key = (
         f"{str(metric).lower()}|{lead_bucket(lead_days)}|"

@@ -10,6 +10,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from scripts import check_live_restart_preflight as preflight
+from src.decision import qlcb_reliability_guard as guard_mod
 
 
 def _init_trade_db(path):
@@ -88,7 +89,14 @@ def _patch_paths(monkeypatch, tmp_path):
     forecast_live_heartbeat = tmp_path / "forecast-live-heartbeat.json"
     live_plist = tmp_path / "com.zeus.live-trading.plist"
     now = datetime.now(timezone.utc).isoformat()
-    settings.write_text(json.dumps({"edli": {"real_order_submit_enabled": True}}))
+    settings.write_text(
+        json.dumps(
+            {
+                "edli": {"real_order_submit_enabled": True},
+                "feature_flags": {"qkernel_spine_enabled": True},
+            }
+        )
+    )
     live_plist.write_bytes(
         (
             b"""<?xml version="1.0" encoding="UTF-8"?>\n"""
@@ -146,10 +154,82 @@ def _patch_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(preflight, "SCHEDULER_HEALTH_PATH", scheduler_health)
     monkeypatch.setattr(preflight, "FORECAST_LIVE_HEARTBEAT_PATH", forecast_live_heartbeat)
     monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", live_plist)
+    monkeypatch.setattr(
+        guard_mod,
+        "_QLCB_OOF_RELIABILITY_PATH",
+        str(state_dir / "qlcb_oof_reliability.json"),
+    )
+    guard_mod.reset_reliability_cache()
     monkeypatch.delenv("ZEUS_HARVESTER_LIVE_ENABLED", raising=False)
     monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
     monkeypatch.setattr(preflight, "_git_head", lambda: "testsha")
     return trade_db, forecast_db, state_dir
+
+
+def test_preflight_blocks_qkernel_cutover_flag_off(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+    preflight.SETTINGS_PATH.write_text(
+        json.dumps(
+            {
+                "edli": {"real_order_submit_enabled": True},
+                "feature_flags": {"qkernel_spine_enabled": False},
+            }
+        )
+    )
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    qkernel = next(c for c in result["checks"] if c["name"] == "qkernel_spine_cutover")
+    assert qkernel["ok"] is False
+
+
+def test_preflight_blocks_present_invalid_qlcb_artifact(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    (state_dir / "qlcb_oof_reliability.json").write_text("{not-json")
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    qlcb = next(c for c in result["checks"] if c["name"] == "qlcb_reliability_artifact")
+    assert qlcb["ok"] is False
+    assert qlcb["evidence"]["status"] == "ACTIVE_INVALID"
 
 
 def _init_sidecar_surfaces(conn, *, now: datetime):

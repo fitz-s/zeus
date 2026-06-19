@@ -101,6 +101,25 @@ def test_unknown_cell_is_inert_passthrough():
     assert v.q_safe == 0.61
 
 
+def test_injected_active_empty_table_abstains():
+    """An active artifact with zero usable cells is not the same as artifact absence."""
+
+    v = apply_guard(
+        band_q_lcb=0.61,
+        metric="high",
+        lead_days=1.0,
+        side="YES",
+        bin_position="nonmodal",
+        reliability_table={},
+        reliability_artifact_active=True,
+    )
+
+    assert v.basis == "OOF_WILSON_95_MISSING_CELL"
+    assert v.abstained is True
+    assert v.trade is False
+    assert v.q_safe == 0.0
+
+
 def test_missing_cell_inside_active_table_abstains():
     # Once an artifact is active, an unseen side-aware cell is not authority.
     active_table = {"high|L1|YES|modal|qb1": (500, 0.5)}
@@ -155,4 +174,21 @@ def test_guard_is_inert_when_artifact_absent_default_load(tmp_path, monkeypatch)
     v = apply_guard(band_q_lcb=0.88, metric="low", lead_days=2.0, bin_position="modal")
     assert v.basis == "INERT"
     assert v.q_safe == 0.88
+    guard_mod.reset_reliability_cache()
+
+
+def test_present_malformed_artifact_is_active_fail_closed(tmp_path, monkeypatch):
+    artifact = tmp_path / "qlcb_oof_reliability.json"
+    artifact.write_text("{not-json")
+    monkeypatch.setattr(guard_mod, "_QLCB_OOF_RELIABILITY_PATH", str(artifact))
+    guard_mod.reset_reliability_cache()
+
+    v = apply_guard(band_q_lcb=0.88, metric="low", lead_days=2.0, bin_position="modal")
+
+    assert v.basis == "OOF_WILSON_95_MISSING_CELL"
+    assert v.abstained is True
+    assert v.q_safe == 0.0
+    status = guard_mod.reliability_artifact_status()
+    assert status["active"] is True
+    assert status["status"] == "ACTIVE_INVALID"
     guard_mod.reset_reliability_cache()

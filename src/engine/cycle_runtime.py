@@ -5684,10 +5684,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             # should_trade=True, and the execution loop below submits each as
             # an INDEPENDENT scalar-Kelly live order → ~Nx over-allocation on
             # one underlying event. This single structural hook (NOT a
-            # per-callsite cap) collapses each family to its single best
-            # executable entry before the persistence + execution loops see
-            # the decisions. Gate default ON in live; fail-safe (only ever
-            # removes entries). Authority: operator P0-1 live-money spec
+            # per-callsite cap) admits one coherent optimized family intent:
+            # either one scalar best leg or all selected legs of a typed
+            # multi-leg portfolio. Ranked fallback siblings are not parallel
+            # live submit intents. Gate default ON in live; fail-safe (only
+            # ever removes entries). Authority: operator P0-1 live-money spec
             # 2026-05-20/21 (mutually-exclusive weather family sizing).
             if decisions:
                 from src.strategy.family_exclusive_dedup import (

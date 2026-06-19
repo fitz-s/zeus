@@ -933,8 +933,9 @@ class FamilyDecisionEngine:
         ``q_safe − cost`` so the after-cost edge the selector reads is the GUARDED edge. INERT
         (artifact absent) -> every verdict is pass-through and ``scored`` is returned unchanged.
 
-        Read-only on μ. FAIL-SOFT: any guard error leaves the candidate untouched (the
-        conservative edge_lcb>0 gate is still the trade authority).
+        Read-only on μ. Guard faults are fail-closed: a broken active guard is not authority
+        to trade, so the candidate is re-stamped as abstained and the existing edge_lcb>0
+        filter rejects it.
         """
         lead_days = float(getattr(case, "lead_hours", 0.0) or 0.0) / 24.0
         metric = str(getattr(case, "metric", "")).lower()
@@ -982,8 +983,26 @@ class FamilyDecisionEngine:
                     out.append(replace(d, economics=new_econ, **guard_fields))
                 else:
                     out.append(replace(d, **guard_fields))
-            except Exception:  # noqa: BLE001 — fail-soft: leave the candidate untouched.
-                out.append(d)
+            except Exception:  # noqa: BLE001 — guard failures are live-money abstains.
+                econ = d.economics
+                try:
+                    cost = float(econ.cost.value)
+                except Exception:  # noqa: BLE001
+                    cost = 1.0
+                new_econ = replace(
+                    econ,
+                    edge_lcb=-max(cost, 1e-9),
+                    optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
+                )
+                out.append(
+                    replace(
+                        d,
+                        economics=new_econ,
+                        q_lcb_guard_basis="QLCB_RELIABILITY_GUARD_ERROR",
+                        q_lcb_guard_abstained=True,
+                        q_lcb_guard_cell_key="ERROR",
+                    )
+                )
         return tuple(out)
 
     # --------------------------------------------------------------- selection
