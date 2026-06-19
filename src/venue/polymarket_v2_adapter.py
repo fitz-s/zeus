@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -432,18 +433,34 @@ class PolymarketV2Adapter:
             evidence_result = _validate_q1_egress_evidence(self.q1_egress_evidence_path)
             if not evidence_result.ok:
                 return evidence_result
-        try:
-            client = self._sdk_client()
-            get_ok = getattr(client, "get_ok", None)
-            if callable(get_ok):
-                get_ok()
-            return PreflightResult(ok=True)
-        except Exception as exc:
-            return PreflightResult(
-                ok=False,
-                error_code="V2_PREFLIGHT_FAILED",
-                message=str(exc),
-            )
+        max_attempts = max(
+            1,
+            int(float(os.environ.get("ZEUS_V2_PREFLIGHT_MAX_ATTEMPTS", "2") or "2")),
+        )
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                client = self._sdk_client()
+                get_ok = getattr(client, "get_ok", None)
+                if callable(get_ok):
+                    get_ok()
+                if attempt > 1:
+                    logger.warning(
+                        "VENUE_PREFLIGHT_RECOVERED_AFTER_RETRY: attempt=%s max_attempts=%s",
+                        attempt,
+                        max_attempts,
+                    )
+                return PreflightResult(ok=True)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= max_attempts:
+                    break
+                time.sleep(min(0.25 * attempt, 1.0))
+        return PreflightResult(
+            ok=False,
+            error_code="V2_PREFLIGHT_FAILED",
+            message=str(last_exc) if last_exc is not None else "unknown preflight failure",
+        )
 
 
     def get_clob_market_info(self, condition_id: str) -> ClobMarketInfo:

@@ -7339,6 +7339,16 @@ def _forecast_authority_payload_and_clock(
     )
     if coverage is None:
         raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:coverage")
+    if event.event_type == "DAY0_EXTREME_UPDATED":
+        return _day0_forecast_authority_payload_and_clock(
+            snapshot=snapshot,
+            source_run=source_run,
+            coverage=coverage,
+            event=event,
+            family=family,
+            payload=payload,
+            decision_time=decision_time,
+        )
     result = _read_executable_forecast_bundle_result(
         conn,
         snapshot=snapshot,
@@ -7458,6 +7468,164 @@ def _forecast_authority_payload_and_clock(
         _parse_utc(source_run.get("imported_at"))
         or _parse_utc(coverage.get("computed_at"))
         or _parse_utc(evidence.captured_at)
+    )
+    if source_time is None or agent_time is None or persisted_time is None:
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:clock")
+    return payload_out, EvidenceClock(source_time, agent_time, persisted_time)
+
+
+def _day0_forecast_authority_payload_and_clock(
+    *,
+    snapshot: dict[str, Any],
+    source_run: dict[str, Any],
+    coverage: dict[str, Any],
+    event: OpportunityEvent,
+    family,
+    payload: dict[str, object],
+    decision_time: datetime,
+) -> tuple[dict[str, Any], EvidenceClock]:
+    """Build the forecast-base authority for DAY0 hard-fact decisions.
+
+    Day0 consumes realized observation facts, then uses the latest causality-safe
+    forecast snapshot only as a base distribution to mask. The entry forecast reader's
+    runtime readiness TTL licenses new forecast-entry decisions; it must not veto a
+    live-authorized Day0 observation after the target day is already realizing.
+    """
+
+    from src.calibration.forecast_calibration_domain import derive_phase2_keys_from_ens_result
+
+    unit = _snapshot_unit(snapshot, payload)
+    city_config = runtime_cities_by_name().get(family.city)
+    if city_config is None:
+        raise ValueError(f"FORECAST_AUTHORITY_EVIDENCE_MISSING:city:{family.city}")
+    coverage_readiness = _nonnull(coverage.get("readiness_status"))
+    coverage_completeness = _nonnull(coverage.get("completeness_status"))
+    source_run_completeness = _nonnull(source_run.get("completeness_status"))
+    if coverage_readiness != "LIVE_ELIGIBLE":
+        raise ValueError(f"FORECAST_AUTHORITY_EVIDENCE_MISSING:coverage_readiness:{coverage_readiness or 'missing'}")
+    if coverage_completeness != "COMPLETE":
+        raise ValueError(f"FORECAST_AUTHORITY_EVIDENCE_MISSING:coverage_completeness:{coverage_completeness or 'missing'}")
+    if source_run_completeness not in {"COMPLETE", "PARTIAL"}:
+        raise ValueError(f"FORECAST_AUTHORITY_EVIDENCE_MISSING:source_run_completeness:{source_run_completeness or 'missing'}")
+    required_steps = tuple(str(item) for item in _json_list(coverage.get("expected_steps_json") or source_run.get("expected_steps_json")))
+    observed_steps = tuple(str(item) for item in _json_list(coverage.get("observed_steps_json") or source_run.get("observed_steps_json")))
+    expected_members = int(coverage.get("expected_members") or source_run.get("expected_members") or 0)
+    observed_members = int(coverage.get("observed_members") or source_run.get("observed_members") or 0)
+    if not required_steps or not set(required_steps).issubset(set(observed_steps)):
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:steps")
+    if expected_members <= 0 or observed_members < expected_members:
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:members")
+    if _nonnull(snapshot.get("authority") or "VERIFIED") != "VERIFIED":
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:authority")
+    if _nonnull(snapshot.get("causality_status") or "OK") != "OK":
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:causality")
+    if int(snapshot.get("boundary_ambiguous") or 0) != 0:
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:boundary_ambiguous")
+    available_at = _parse_utc(snapshot.get("available_at"))
+    if available_at is None or available_at > decision_time.astimezone(UTC):
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:available_at")
+    _, _, derived_horizon_profile = derive_phase2_keys_from_ens_result(
+        {
+            "issue_time": _nonnull(
+                source_run.get("source_issue_time")
+                or snapshot.get("source_issue_time")
+                or snapshot.get("issue_time")
+                or payload.get("issue_time")
+                or payload.get("source_cycle_time")
+            ),
+            "source_id": _nonnull(coverage.get("source_id") or source_run.get("source_id") or snapshot.get("source_id")),
+            "horizon_profile": snapshot.get("horizon_profile"),
+        }
+    )
+    payload_out = {
+        "identity": str(snapshot.get("snapshot_id")),
+        "snapshot_id": str(snapshot.get("snapshot_id")),
+        "reader_authority": "day0_latest_forecast_snapshot_seed",
+        "reader_status": "VERIFIED",
+        "reader_reason_code": None,
+        "city": family.city,
+        "target_date": family.target_date,
+        "metric": family.metric,
+        "temperature_metric": family.metric,
+        "members_extrema_metric_identity": snapshot.get("temperature_metric"),
+        "members_extrema_transform": _members_extrema_transform(family.metric),
+        "members_json_source": "ensemble_snapshots.daily_extrema",
+        "members_json_hash": _snapshot_members_json_hash(snapshot),
+        "target_local_date": family.target_date,
+        "city_timezone": _nonnull(coverage.get("city_timezone") or source_run.get("city_timezone") or snapshot.get("city_timezone") or city_config.timezone),
+        "settlement_unit": snapshot.get("settlement_unit"),
+        "members_unit": snapshot.get("members_unit"),
+        "unit": unit,
+        "unit_authority_source": _snapshot_unit_authority_source(snapshot),
+        "local_date_window_hash": stable_hash(
+            {
+                "city": snapshot.get("city"),
+                "target_date": snapshot.get("target_date"),
+                "temperature_metric": snapshot.get("temperature_metric"),
+                "members_json_hash": _snapshot_members_json_hash(snapshot),
+                "local_day_start_utc": snapshot.get("local_day_start_utc"),
+                "forecast_window_start_utc": snapshot.get("forecast_window_start_utc"),
+                "forecast_window_end_utc": snapshot.get("forecast_window_end_utc"),
+            }
+        ),
+        "forecast_source_id": coverage.get("source_id") or source_run.get("source_id") or snapshot.get("source_id"),
+        "model": snapshot.get("model_version"),
+        "model_family": snapshot.get("model_version"),
+        "forecast_issue_time": snapshot.get("issue_time") or source_run.get("source_issue_time"),
+        "forecast_valid_time": snapshot.get("valid_time"),
+        "forecast_fetch_time": snapshot.get("fetch_time") or source_run.get("fetch_finished_at"),
+        "forecast_available_at": snapshot.get("available_at") or source_run.get("source_available_at"),
+        "degradation_level": None,
+        "forecast_source_role": "day0_base_distribution",
+        "authority_tier": snapshot.get("authority") or "VERIFIED",
+        "decision_time": decision_time.astimezone(UTC).isoformat(),
+        "decision_time_status": "OK",
+        "first_member_observed_time": snapshot.get("first_member_observed_time"),
+        "run_complete_time": snapshot.get("run_complete_time"),
+        "forecast_data_version": coverage.get("data_version") or snapshot.get("dataset_id"),
+        "source_transport": coverage.get("source_transport") or snapshot.get("source_transport"),
+        "source_cycle_time": source_run.get("source_cycle_time") or snapshot.get("source_cycle_time"),
+        "source_issue_time": source_run.get("source_issue_time") or snapshot.get("source_issue_time") or snapshot.get("issue_time"),
+        "horizon_profile": _nonnull(snapshot.get("horizon_profile")) or derived_horizon_profile,
+        "source_run_id": source_run.get("source_run_id") or snapshot.get("source_run_id"),
+        "coverage_id": coverage.get("coverage_id"),
+        "producer_readiness_id": None,
+        "entry_readiness_id": None,
+        "input_snapshot_ids": tuple(str(item) for item in _json_list(coverage.get("snapshot_ids_json"))),
+        "raw_payload_hash": source_run.get("raw_payload_hash"),
+        "manifest_hash": source_run.get("manifest_hash") or snapshot.get("manifest_hash"),
+        "required_steps": required_steps,
+        "observed_steps": observed_steps,
+        "expected_members": expected_members,
+        "observed_members": observed_members,
+        "source_run_status": source_run.get("status"),
+        "source_run_completeness_status": source_run_completeness,
+        "coverage_completeness_status": coverage_completeness,
+        "coverage_readiness_status": coverage_readiness,
+        "applied_validations": (
+            "source_run_completeness_status",
+            "coverage_completeness_status",
+            "coverage_readiness_status",
+            "required_steps_observed",
+            "expected_members_observed",
+            "causality_status_ok",
+            "authority_verified",
+            "available_at_not_future",
+        ),
+        "source_available_at": snapshot.get("source_available_at") or source_run.get("source_available_at") or snapshot.get("available_at"),
+        "fetch_started_at": source_run.get("fetch_started_at"),
+        "fetch_finished_at": source_run.get("fetch_finished_at") or snapshot.get("fetch_time"),
+        "captured_at": source_run.get("captured_at") or snapshot.get("fetch_time") or snapshot.get("available_at"),
+        "day0_entry_readiness_expiry_not_applied": True,
+        "day0_base_forecast_scope": "base_distribution_only",
+    }
+    source_time = _parse_utc(payload_out.get("source_available_at"))
+    agent_time = _parse_utc(payload_out.get("fetch_finished_at")) or _parse_utc(payload_out.get("captured_at"))
+    persisted_time = (
+        _parse_utc(source_run.get("imported_at"))
+        or _parse_utc(coverage.get("computed_at"))
+        or _parse_utc(snapshot.get("recorded_at"))
+        or _parse_utc(payload_out.get("captured_at"))
     )
     if source_time is None or agent_time is None or persisted_time is None:
         raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:clock")
@@ -12676,6 +12844,8 @@ def _forecast_snapshot_row_for_event(
         return None
     names = [description[0] for description in cur.description]
     snapshot = {name: row[name] for name in names} if isinstance(row, sqlite3.Row) else dict(zip(names, row))
+    if event.event_type == "DAY0_EXTREME_UPDATED":
+        return snapshot
     reason, elected_snapshot_id = _forecast_snapshot_reader_block_reason(
         conn,
         snapshot=snapshot,

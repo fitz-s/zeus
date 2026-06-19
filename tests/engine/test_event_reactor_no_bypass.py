@@ -2370,6 +2370,63 @@ def test_adapter_surfaces_reader_block_after_event_emit(monkeypatch):
     assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:READINESS_BLOCKED" in receipt.reason
 
 
+def test_day0_latest_snapshot_seed_does_not_consume_entry_reader_readiness(monkeypatch):
+    """Day0 hard facts use the latest safe snapshot as a seed, not entry-reader TTL.
+
+    A realized DAY0_EXTREME_UPDATED payload has already passed live source/station/date
+    authority. The executable forecast reader's runtime readiness expiry licenses the
+    forecast-entry lane, not this observation-aware Day0 mask.
+    """
+    from types import SimpleNamespace
+
+    from src.data import executable_forecast_reader
+    from src.engine.event_reactor_adapter import (
+        _forecast_authority_payload_and_clock,
+        _forecast_snapshot_row_for_event,
+    )
+
+    conn = _trade_conn_with_snapshot()
+    day0 = _day0_event()
+    family = SimpleNamespace(
+        city="Chicago",
+        target_date="2026-05-25",
+        metric="high",
+        family_id="run-1",
+        condition_ids=["condition-1"],
+        candidates=[],
+    )
+    calls = []
+
+    def _expired_reader(*_args, **_kwargs):
+        calls.append("reader")
+        return SimpleNamespace(ok=False, bundle=None, reason_code="READINESS_EXPIRED")
+
+    monkeypatch.setattr(executable_forecast_reader, "read_executable_forecast", _expired_reader)
+    decision_time = datetime(2026, 5, 24, 14, 12, tzinfo=timezone.utc)
+
+    row = _forecast_snapshot_row_for_event(
+        conn,
+        event=day0,
+        family=family,
+        allow_latest=True,
+        decision_time=decision_time,
+    )
+    payload, _clock = _forecast_authority_payload_and_clock(
+        conn,
+        event=day0,
+        family=family,
+        payload=json.loads(day0.payload_json),
+        decision_time=decision_time,
+    )
+
+    assert row is not None
+    assert calls == []
+    assert payload["reader_authority"] == "day0_latest_forecast_snapshot_seed"
+    assert payload["reader_status"] == "VERIFIED"
+    assert payload["coverage_readiness_status"] == "LIVE_ELIGIBLE"
+    assert payload["day0_entry_readiness_expiry_not_applied"] is True
+
+
 def test_adapter_computes_on_reader_elected_snapshot_not_causal_pin(monkeypatch):
     """RELATIONSHIP: the reactor computes inference on the executable-forecast reader's
     ELECTED snapshot, never on the causal-pinned seed with an equality assertion.

@@ -112,6 +112,17 @@ class FakePreflightOnlyClient:
         return {"ok": True}
 
 
+class FakeFlakyPreflightClient:
+    def __init__(self):
+        self.calls = []
+
+    def get_ok(self):
+        self.calls.append(("get_ok",))
+        if len(self.calls) == 1:
+            raise RuntimeError("transient preflight transport")
+        return {"ok": True}
+
+
 class FakeCreateOrderFailureClient(FakeTwoStepClient):
     def create_order(self, order_args, options=None):
         self.calls.append(("create_order", order_args, options))
@@ -996,6 +1007,16 @@ def test_preflight_rejects_archived_april_q1_egress_path_without_sdk_contact(tmp
     assert result.ok is False
     assert result.error_code == "Q1_EGRESS_EVIDENCE_INVALID"
     assert fake.calls == []
+
+
+def test_preflight_retries_transient_get_ok_without_submit_side_effect(tmp_path, monkeypatch):
+    adapter, fake = _adapter(tmp_path, FakeFlakyPreflightClient())
+    monkeypatch.setenv("ZEUS_V2_PREFLIGHT_MAX_ATTEMPTS", "2")
+
+    result = adapter.preflight()
+
+    assert result.ok is True
+    assert fake.calls == [("get_ok",), ("get_ok",)]
 
 
 def test_submit_fails_closed_when_q1_egress_evidence_absent(tmp_path):
