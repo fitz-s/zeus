@@ -252,6 +252,7 @@ def _already_enqueued(
     target_date: str,
     metric: str,
     target_cycle_iso: str,
+    allow_missing_seed_file_reenqueue: bool = False,
 ) -> bool:
     """True iff a real re-materialization seed already exists for this exact target cycle.
 
@@ -276,6 +277,8 @@ def _already_enqueued(
     reason = str((row["reason"] if hasattr(row, "keys") else row[1]) or "")
     if not seed_file and reason.startswith("CYCLE_LEG_ARTIFACT_MISSING:"):
         return False
+    if allow_missing_seed_file_reenqueue and seed_file and not Path(seed_file).exists():
+        return False
     return True
 
 
@@ -290,6 +293,7 @@ def _record_enqueue(
     held_position: bool,
     seed_file: str | None,
     reason: str | None = None,
+    replace_existing_seed_file: bool = False,
 ) -> bool:
     """Write the idempotency marker. Returns True iff this call inserted the row (False = a
     concurrent/prior enqueue already recorded it, via the UNIQUE index INSERT OR IGNORE).
@@ -324,6 +328,33 @@ def _record_enqueue(
         return True
     if seed_file:
         update_before = conn.total_changes
+        if replace_existing_seed_file:
+            conn.execute(
+                """
+                UPDATE cycle_advance_enqueues
+                   SET enqueued_at = ?,
+                       consumed_cycle_time = ?,
+                       held_position = ?,
+                       seed_file = ?,
+                       reason = ?
+                 WHERE city = ?
+                   AND target_date = ?
+                   AND metric = ?
+                   AND target_cycle_time = ?
+                """,
+                (
+                    datetime.now(tz=UTC).isoformat(),
+                    consumed_cycle_iso,
+                    1 if held_position else 0,
+                    seed_file,
+                    reason,
+                    city,
+                    target_date,
+                    metric,
+                    target_cycle_iso,
+                ),
+            )
+            return conn.total_changes > update_before
         conn.execute(
             """
             UPDATE cycle_advance_enqueues
@@ -614,6 +645,11 @@ def enqueue_single_family_cycle_advance_reseed(
     target_date: str,
     metric: str,
     computed_at: datetime | None = None,
+    day0_observed_extreme_c: float | None = None,
+    day0_observed_extreme_source: str | None = None,
+    day0_observed_extreme_observation_time: str | None = None,
+    day0_observed_extreme_sample_count: int | None = None,
+    day0_observed_extreme_unit: str | None = None,
 ) -> dict[str, object]:
     """ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12). Single-family variant of
     ``enqueue_cycle_advance_reseeds``: when the reactor/monitor finds ONE family blocked on a
@@ -654,6 +690,7 @@ def enqueue_single_family_cycle_advance_reseed(
     city = str(city)
     target_date = str(target_date)
     metric = str(metric)
+    has_day0_observed_extreme = day0_observed_extreme_c is not None
     report: dict[str, object] = {
         "status": "SINGLE_FAMILY_CYCLE_ADVANCE",
         "city": city,
@@ -732,7 +769,12 @@ def enqueue_single_family_cycle_advance_reseed(
                 return report
             target_cycle_iso = family_cycle.isoformat()
             if _already_enqueued(
-                conn, city=city, target_date=target_date, metric=metric, target_cycle_iso=target_cycle_iso
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                target_cycle_iso=target_cycle_iso,
+                allow_missing_seed_file_reenqueue=has_day0_observed_extreme,
             ):
                 report["status"] = "CYCLE_ADVANCE_ALREADY_ENQUEUED"
                 return report
@@ -756,6 +798,11 @@ def enqueue_single_family_cycle_advance_reseed(
                 seed_name=_seed_name,
                 expected_identity=expected_replacement_dependency_identity_by_role,
                 upgrade_trigger="missing_live_posterior_reseed",
+                day0_observed_extreme_c=day0_observed_extreme_c,
+                day0_observed_extreme_source=day0_observed_extreme_source,
+                day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
+                day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
+                day0_observed_extreme_unit=day0_observed_extreme_unit,
             )
             if seed_file is None:
                 report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
@@ -770,6 +817,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 held_position=False,
                 seed_file=str(seed_file),
                 reason="MISSING_LIVE_POSTERIOR",
+                replace_existing_seed_file=has_day0_observed_extreme,
             )
             conn.commit()
             report["enqueued"] = bool(inserted)
@@ -790,7 +838,12 @@ def enqueue_single_family_cycle_advance_reseed(
             return report
         target_cycle_iso = family_cycle.isoformat()
         if _already_enqueued(
-            conn, city=city, target_date=target_date, metric=metric, target_cycle_iso=target_cycle_iso
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            target_cycle_iso=target_cycle_iso,
+            allow_missing_seed_file_reenqueue=has_day0_observed_extreme,
         ):
             report["status"] = "CYCLE_ADVANCE_ALREADY_ENQUEUED"
             return report
@@ -814,6 +867,11 @@ def enqueue_single_family_cycle_advance_reseed(
             seed_name=_seed_name,
             expected_identity=expected_replacement_dependency_identity_by_role,
             upgrade_trigger="newer_cycle_ingested",
+            day0_observed_extreme_c=day0_observed_extreme_c,
+            day0_observed_extreme_source=day0_observed_extreme_source,
+            day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
+            day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
+            day0_observed_extreme_unit=day0_observed_extreme_unit,
         )
         if seed_file is None:
             report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
@@ -827,6 +885,7 @@ def enqueue_single_family_cycle_advance_reseed(
             target_cycle_iso=target_cycle_iso,
             held_position=False,
             seed_file=str(seed_file),
+            replace_existing_seed_file=has_day0_observed_extreme,
         )
         conn.commit()
         report["enqueued"] = bool(inserted)
@@ -866,6 +925,11 @@ def _build_and_write_advance_seed(
     seed_name,
     expected_identity,
     upgrade_trigger: str = "newer_cycle_ingested",
+    day0_observed_extreme_c: float | None = None,
+    day0_observed_extreme_source: str | None = None,
+    day0_observed_extreme_observation_time: str | None = None,
+    day0_observed_extreme_sample_count: int | None = None,
+    day0_observed_extreme_unit: str | None = None,
 ) -> Path | None:
     """Build one re-materialization seed for a scope using the existing seed-builder pieces and
     write it into seed_dir. Returns the seed Path, or None when the required manifests/context are
@@ -904,6 +968,11 @@ def _build_and_write_advance_seed(
         precision_metadata_json=resolve_path(precision_metadata, base_dir=openmeteo_base_dir),
         computed_at=computed_at,
         base_dir=seed_path,
+        day0_observed_extreme_c=day0_observed_extreme_c,
+        day0_observed_extreme_source=day0_observed_extreme_source,
+        day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
+        day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
+        day0_observed_extreme_unit=day0_observed_extreme_unit,
     )
     if not seed_result.ok or seed_result.seed is None:
         return None

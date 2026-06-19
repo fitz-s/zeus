@@ -470,6 +470,11 @@ def _enqueue_single_family_belief_reseed_failsoft(
                 city, target_date, metric,
             )
             return None
+        day0_payload = _day0_observed_extreme_reseed_payload(
+            city=city,
+            target_date=target_date,
+            metric=metric,
+        )
         report = enqueue_single_family_cycle_advance_reseed(
             forecast_db=Path(str(forecast_db)),
             seed_dir=Path(str(seed_dir)),
@@ -477,12 +482,15 @@ def _enqueue_single_family_belief_reseed_failsoft(
             city=city,
             target_date=target_date,
             metric=metric,
+            **day0_payload,
         )
         logger.info(
-            "monitor belief reseed enqueued city=%s target_date=%s metric=%s status=%s enqueued=%s",
+            "monitor belief reseed enqueued city=%s target_date=%s metric=%s status=%s "
+            "enqueued=%s day0_observed_extreme=%s",
             city, target_date, metric,
             report.get("status") if isinstance(report, dict) else None,
             report.get("enqueued") if isinstance(report, dict) else None,
+            day0_payload.get("day0_observed_extreme_c") if day0_payload else None,
         )
         return report
     except Exception as exc:  # noqa: BLE001 — reseed MUST NOT crash the monitor
@@ -1383,6 +1391,83 @@ def _fetch_day0_observation(city: Position | object, target_d: date):
         return get_current_observation(city, target_date=target_d, reference_time=reference_time)
     except TypeError:
         return get_current_observation(city)
+
+
+def _temperature_native_value_to_c(value: float, *, unit: str) -> float:
+    normalized = str(unit or "").strip().upper()
+    number = float(value)
+    if normalized == "C":
+        return number
+    if normalized == "F":
+        return (number - 32.0) * 5.0 / 9.0
+    raise ValueError(f"unsupported Day0 observed-extreme unit: {unit!r}")
+
+
+def _day0_observed_extreme_reseed_payload(
+    *, city: str, target_date: str, metric: str
+) -> dict[str, object]:
+    city_obj = cities_by_name.get(str(city))
+    if city_obj is None or not _city_supports_executable_day0_observation(city_obj):
+        return {}
+    try:
+        target_d = date.fromisoformat(str(target_date))
+    except Exception:
+        return {}
+    if not _is_position_target_local_day(None, city_obj, target_d):
+        return {}
+    try:
+        metric_id = MetricIdentity.from_raw(metric)
+    except Exception:
+        return {}
+    try:
+        obs = _fetch_day0_observation(city_obj, target_d)
+    except Exception as exc:
+        logger.info(
+            "monitor belief reseed Day0 observation unavailable city=%s target_date=%s metric=%s exc=%s",
+            city, target_date, metric, exc,
+        )
+        return {}
+    if obs is None:
+        return {}
+    if not _day0_observation_field(obs, "observation_time"):
+        return {}
+    source_rejection = _day0_observation_source_rejection_reason(
+        city_obj,
+        obs,
+        consumer_label="replacement belief reseed",
+    )
+    if source_rejection is not None:
+        logger.info(
+            "monitor belief reseed Day0 observation rejected city=%s target_date=%s metric=%s reason=%s",
+            city, target_date, metric, source_rejection,
+        )
+        return {}
+    observed_native = _finite_day0_observation_float(
+        obs, "low_so_far" if metric_id.is_low() else "high_so_far"
+    )
+    if observed_native is None:
+        return {}
+    unit = str(getattr(city_obj, "settlement_unit", "") or "").strip().upper()
+    try:
+        observed_c = _temperature_native_value_to_c(observed_native, unit=unit)
+    except Exception as exc:
+        logger.info(
+            "monitor belief reseed Day0 observed-extreme unit conversion failed "
+            "city=%s target_date=%s metric=%s unit=%s exc=%s",
+            city, target_date, metric, unit, exc,
+        )
+        return {}
+    try:
+        sample_count = int(_day0_observation_field(obs, "sample_count", 0) or 0)
+    except Exception:
+        sample_count = 0
+    return {
+        "day0_observed_extreme_c": float(observed_c),
+        "day0_observed_extreme_source": str(_day0_observation_field(obs, "source", "") or ""),
+        "day0_observed_extreme_observation_time": str(_day0_observation_field(obs, "observation_time", "") or ""),
+        "day0_observed_extreme_sample_count": sample_count,
+        "day0_observed_extreme_unit": unit,
+    }
 
 
 def _is_stale_day0_observation_quality_rejection(reason: str | None) -> bool:

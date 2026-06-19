@@ -172,6 +172,10 @@ def _request(
     expires_at: datetime | None = None,
     anchor_artifact_id: int | None = None,
     openmeteo_precision_guard=_DEFAULT_PRECISION_GUARD,
+    day0_observed_extreme_c: float | None = None,
+    day0_observed_extreme_source: str | None = None,
+    day0_observed_extreme_observation_time: str | None = None,
+    day0_observed_extreme_sample_count: int | None = None,
 ) -> ReplacementForecastMaterializeRequest:
     guard = _precision_guard() if openmeteo_precision_guard is _DEFAULT_PRECISION_GUARD else openmeteo_precision_guard
     return ReplacementForecastMaterializeRequest(
@@ -192,6 +196,11 @@ def _request(
         expires_at=expires_at or _dt(6),
         anchor_artifact_id=anchor_artifact_id,
         openmeteo_precision_guard=guard,
+        day0_observed_extreme_c=day0_observed_extreme_c,
+        day0_observed_extreme_source=day0_observed_extreme_source,
+        day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
+        day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
+        day0_observed_extreme_unit="C" if day0_observed_extreme_c is not None else None,
     )
 
 
@@ -493,6 +502,53 @@ def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.Monk
         assert q_lcb[key] <= point <= q_ucb[key]
     assert not any(str(key).startswith(("buy_no:", "no:")) for key in q_lcb)
     assert provenance["q_lcb_json_role"] == "fused_center_bootstrap_lcb"
+
+
+def test_materializer_blocks_day0_without_observed_extreme() -> None:
+    conn = _conn()
+
+    result = materialize_replacement_forecast_live(
+        conn,
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        ),
+    )
+
+    assert result.ok is False
+    assert result.reason_codes == ("REPLACEMENT_MATERIALIZATION_DAY0_OBSERVED_EXTREME_REQUIRED",)
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+
+
+def test_materializer_day0_observed_extreme_conditions_q_and_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+
+    result = materialize_replacement_forecast_live(
+        conn,
+        _request(
+            computed_at=_dt(18),
+            expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+            day0_observed_extreme_c=26.0,
+            day0_observed_extreme_source="wu_api",
+            day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+            day0_observed_extreme_sample_count=12,
+        ),
+    )
+
+    assert result.ok is True
+    row = conn.execute(
+        "SELECT q_json, q_lcb_json, provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (result.posterior_id,),
+    ).fetchone()
+    q = json.loads(row["q_json"])
+    q_lcb = json.loads(row["q_lcb_json"])
+    provenance = json.loads(row["provenance_json"])
+    assert q["cool"] == pytest.approx(0.0)
+    assert q_lcb["cool"] == pytest.approx(0.0)
+    assert q["warm"] > q["hot"]
+    assert provenance["q_shape"] == "fused_day0_conditioned_normal"
+    assert provenance["day0_conditioning"]["observed_extreme_c"] == 26.0
 
 
 def test_materializer_blocks_readiness_when_baseline_identity_is_wrong() -> None:

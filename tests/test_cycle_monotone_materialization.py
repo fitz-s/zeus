@@ -418,6 +418,65 @@ def test_cycle_advance_gap_marker_heals_to_seed_when_artifact_arrives() -> None:
     assert row["reason"] is None
 
 
+def test_day0_observed_extreme_reseed_can_replace_moved_seed_file(tmp_path) -> None:
+    """A prior seed moved out of the live queue is not terminal for Day0 repair.
+
+    This is the automatic recovery path for a seed that reached the queue but
+    later failed materialization with DAY0_OBSERVED_EXTREME_REQUIRED. Once the
+    monitor has a real observed extreme, the same family/cycle may rewrite the
+    idempotency row with a fresh seed instead of staying stuck at
+    CYCLE_ADVANCE_ALREADY_ENQUEUED.
+    """
+    conn = _conn()
+    target_cycle = "2026-06-12T12:00:00+00:00"
+    moved_seed = tmp_path / "seed_failed" / "CityB.old.json"
+    conn.execute(
+        """
+        INSERT INTO cycle_advance_enqueues
+            (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+             held_position, seed_file, reason)
+        VALUES ('t', 'CityB', '2026-06-13', 'high', 'NO_LIVE_POSTERIOR',
+                ?, 0, ?, 'MISSING_LIVE_POSTERIOR')
+        """,
+        (target_cycle, str(moved_seed)),
+    )
+    conn.commit()
+
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="CityB",
+        target_date="2026-06-13",
+        metric="high",
+        target_cycle_iso=target_cycle,
+        allow_missing_seed_file_reenqueue=True,
+    ) is False
+
+    new_seed = tmp_path / "seeds" / "CityB.new.json"
+    new_seed.parent.mkdir()
+    new_seed.write_text("{}", encoding="utf-8")
+    replaced = cycle_advance._record_enqueue(
+        conn,
+        city="CityB",
+        target_date="2026-06-13",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=target_cycle,
+        held_position=True,
+        seed_file=str(new_seed),
+        reason="MISSING_LIVE_POSTERIOR",
+        replace_existing_seed_file=True,
+    )
+    conn.commit()
+
+    assert replaced is True
+    row = conn.execute(
+        "SELECT held_position, seed_file, reason FROM cycle_advance_enqueues WHERE city = 'CityB'"
+    ).fetchone()
+    assert row["held_position"] == 1
+    assert row["seed_file"] == str(new_seed)
+    assert row["reason"] == "MISSING_LIVE_POSTERIOR"
+
+
 def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypatch) -> None:
     """Always-decidable repair: a held family with no BPF posterior is a first materialization,
     not CYCLE_ADVANCE_NOT_NEEDED."""
