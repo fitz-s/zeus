@@ -4501,6 +4501,49 @@ def _resolve_m5_local_orphan_findings(
     return resolved
 
 
+def _resolve_m5_exchange_ghost_findings(
+    conn: sqlite3.Connection,
+    *,
+    venue_order_id: str,
+    resolved_at: str,
+    resolution: str,
+) -> int:
+    if not _table_exists(conn, "exchange_reconcile_findings"):
+        return 0
+    rows = conn.execute(
+        """
+        SELECT finding_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
+           AND subject_id = ?
+           AND resolved_at IS NULL
+         ORDER BY recorded_at, finding_id
+        """,
+        (venue_order_id,),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    resolved = 0
+    for row in rows:
+        conn.execute(
+            """
+            UPDATE exchange_reconcile_findings
+               SET resolved_at = ?, resolution = ?, resolved_by = ?
+             WHERE finding_id = ?
+               AND resolved_at IS NULL
+            """,
+            (
+                resolved_at,
+                resolution,
+                "src.execution.command_recovery",
+                str(_dict_row(row)["finding_id"]),
+            ),
+        )
+        resolved += 1
+    return resolved
+
+
 def _payload_hash(payload: dict) -> str:
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -6869,6 +6912,22 @@ def _raw_matches_command_exposure(raw: dict, command: dict) -> bool:
     return _decimal_matches(raw_size, command.get("size"))
 
 
+def _raw_matches_command_submit_identity(raw: dict, command: dict) -> bool:
+    token_id = str(command.get("token_id") or "")
+    if not token_id or not _raw_mentions_token(raw, token_id):
+        return False
+    raw_side = str(raw.get("side") or "").upper()
+    if raw_side != str(command.get("side") or "").upper():
+        return False
+    if not _decimal_matches(raw.get("price"), command.get("price")):
+        return False
+    raw_size = raw.get("original_size") or raw.get("size") or raw.get("matched_amount")
+    if not _decimal_matches(raw_size, command.get("size")):
+        return False
+    status = _order_status(raw)
+    return not status or status in _LIVE_ORDER_STATUSES
+
+
 def _summarize_venue_match(raw: dict) -> dict:
     return {
         "id": raw.get("id") or raw.get("order_id") or raw.get("taker_order_id"),
@@ -7095,6 +7154,176 @@ def clear_review_required_no_venue_exposure(
         payload=payload,
     )
     return payload
+
+
+def _review_required_no_venue_live_order_recovery(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+    client,
+) -> str:
+    events = _command_events(conn, cmd.command_id)
+    latest_reason = _latest_review_required_payload(events).get("reason")
+    if latest_reason != "recovery_no_venue_order_id":
+        return "stayed"
+    if str(cmd.venue_order_id or "").strip():
+        return "stayed"
+    command = _dict_row(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (cmd.command_id,),
+        ).fetchone()
+    )
+    try:
+        open_orders = [_raw_payload(order) for order in _client_open_orders(client)]
+        trades = [_raw_payload(trade) for trade in _client_trades(client)]
+    except Exception as exc:  # noqa: BLE001 - recovery should retry on venue read failure.
+        logger.warning(
+            "recovery: command %s REVIEW_REQUIRED no-venue live-order proof read failed: %s",
+            cmd.command_id,
+            exc,
+        )
+        return "error"
+
+    matching_open_orders = [
+        raw
+        for raw in open_orders
+        if _raw_matches_command_submit_identity(raw, command)
+    ]
+    if len(matching_open_orders) != 1:
+        if len(matching_open_orders) > 1:
+            logger.warning(
+                "recovery: command %s REVIEW_REQUIRED no-venue stayed; "
+                "ambiguous matching open orders=%d",
+                cmd.command_id,
+                len(matching_open_orders),
+            )
+        return "stayed"
+
+    matching_trades = _matching_trades_for_command(
+        client,
+        command,
+        trades=trades,
+    )
+    if matching_trades:
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED no-venue stayed; "
+            "matching trades=%d require fill authority",
+            cmd.command_id,
+            len(matching_trades),
+        )
+        return "stayed"
+
+    order = dict(matching_open_orders[0])
+    venue_order_id = str(_extract_order_id(order) or "").strip()
+    status = _order_status(order) or "LIVE"
+    matched_size = _point_order_matched_size(order)
+    if not venue_order_id or status not in _LIVE_ORDER_STATUSES or not _decimal_is_zero(matched_size):
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED no-venue stayed; "
+            "order_id=%s status=%s matched_size=%s",
+            cmd.command_id,
+            venue_order_id or "<missing>",
+            status or "UNKNOWN",
+            matched_size,
+        )
+        return "stayed"
+
+    now = _now_iso()
+    order_summary = _summarize_venue_match(order)
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_venue_order_live",
+        "command_id": cmd.command_id,
+        "venue_order_id": venue_order_id,
+        "proof_class": "recovery_no_venue_order_id_live_order",
+        "side_effect_boundary_crossed": True,
+        "sdk_submit_attempted": True,
+        "required_predicates": {
+            "latest_event_is_review_required": True,
+            "review_reason_recovery_no_venue_order_id": True,
+            "venue_order_id_absent_before_recovery": True,
+            "proof_venue_order_id_present": True,
+            "unique_matching_open_order": True,
+            "matching_open_order_matches_command": True,
+            "authenticated_live_order_seen": True,
+            "point_order_matched_size_not_positive": True,
+            "no_matching_trades": True,
+            "no_trade_facts": _count_facts(conn, "venue_trade_facts", cmd.command_id) == 0,
+        },
+        "venue_order_live_proof": {
+            "source": "authenticated_clob_user_open_orders_read",
+            "owner_scope": "authenticated_funder",
+            "observed_at": now,
+            "venue_order_id": venue_order_id,
+            "point_order_status": status,
+            "matched_size": matched_size,
+            "matching_open_order_count": 1,
+            "matching_trade_count": 0,
+            "matching_open_orders": [order_summary],
+            "point_order": order,
+        },
+        "source_proof": {
+            "source_function": "command_recovery._reconcile_row",
+            "source_reason": "recovery_no_venue_order_id_live_order",
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": now,
+    }
+    safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
+    sp_name = f"sp_no_venue_live_order_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        append_event(
+            conn,
+            command_id=cmd.command_id,
+            event_type=CommandEventType.REVIEW_CLEARED_VENUE_ORDER_LIVE.value,
+            occurred_at=now,
+            payload=payload,
+        )
+        append_order_fact(
+            conn,
+            venue_order_id=venue_order_id,
+            command_id=cmd.command_id,
+            state="RESTING" if status == "RESTING" else "LIVE",
+            remaining_size=str(order.get("size") or order.get("remaining_size") or command.get("size") or ""),
+            matched_size=matched_size,
+            source="REST",
+            observed_at=now,
+            venue_timestamp=now,
+            raw_payload_hash=_canonical_payload_hash(
+                {
+                    "source": "command_recovery_no_venue_live_order",
+                    "command_id": cmd.command_id,
+                    "venue_order_id": venue_order_id,
+                    "exchange_order": order,
+                }
+            ),
+            raw_payload_json={
+                "source": "command_recovery_no_venue_live_order",
+                "command_id": cmd.command_id,
+                "venue_order_id": venue_order_id,
+                "exchange_order": order,
+            },
+        )
+        _resolve_m5_exchange_ghost_findings(
+            conn,
+            venue_order_id=venue_order_id,
+            resolved_at=now,
+            resolution="command_recovery_no_venue_live_order_adopted",
+        )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    logger.info(
+        "recovery: command %s REVIEW_REQUIRED no-venue -> ACKED "
+        "(venue_order_id=%s status=%s)",
+        cmd.command_id,
+        venue_order_id,
+        status,
+    )
+    return "advanced"
 
 
 def clear_review_required_confirmed_fill(
@@ -7498,6 +7727,9 @@ def _reconcile_row(
             if outcome != "stayed":
                 return outcome
             outcome = _review_required_confirmed_trade_recovery(conn, cmd, client)
+            if outcome != "stayed":
+                return outcome
+            outcome = _review_required_no_venue_live_order_recovery(conn, cmd, client)
             if outcome != "stayed":
                 return outcome
             return _review_required_no_venue_exposure_recovery(conn, cmd, client)

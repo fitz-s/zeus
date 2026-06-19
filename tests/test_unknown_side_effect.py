@@ -36,6 +36,22 @@ def conn(monkeypatch):
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.execution.executor._assert_collateral_allows_sell",
+        lambda *args, **kwargs: {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+            "reason": "allowed",
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._entry_taker_quality_component",
+        lambda *args, **kwargs: {
+            "component": "entry_taker_quality",
+            "allowed": True,
+            "reason": "allowed",
+        },
+    )
 
     def _seed_submit_collateral(conn: sqlite3.Connection) -> dict:
         CollateralLedger(conn).set_snapshot(
@@ -1139,6 +1155,160 @@ def test_review_required_recovery_no_venue_exposure_can_be_cleared(conn):
     unknown_count, unknown_markets = count_unknown_side_effects(conn)
     assert unknown_count == 0
     assert unknown_markets == ()
+
+
+def test_review_required_recovery_no_venue_live_order_is_adopted(conn):
+    from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.execution.exchange_reconcile import init_exchange_reconcile_schema
+    from src.risk_allocator.governor import count_unknown_side_effects
+
+    token_id = "tok-m2-adopt-live"
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-adopt-live",
+        token_id=token_id,
+        idem="6" * 32,
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+    init_exchange_reconcile_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO exchange_reconcile_findings (
+          finding_id, kind, subject_id, context, evidence_json, recorded_at
+        ) VALUES ('finding-adopt-live', 'exchange_ghost_order', 'ord-adopt-live',
+                  'ws_gap', ?, ?)
+        """,
+        (
+            json.dumps({"reason": "exchange_open_order_absent_from_venue_commands"}),
+            NOW.isoformat(),
+        ),
+    )
+    conn.commit()
+
+    class FakeAdapter:
+        def get_open_orders(self):
+            return [
+                {
+                    "id": "ord-adopt-live",
+                    "asset_id": token_id,
+                    "side": "BUY",
+                    "price": "0.55",
+                    "original_size": "18.19",
+                    "size": "18.19",
+                    "size_matched": "0",
+                    "status": "LIVE",
+                }
+            ]
+
+        def get_trades(self):
+            return []
+
+    summary = reconcile_unresolved_commands(conn, FakeAdapter())
+
+    assert summary["advanced"] >= 1
+    cmd = conn.execute(
+        "SELECT state, venue_order_id FROM venue_commands WHERE command_id = ?",
+        ("cmd-m2-adopt-live",),
+    ).fetchone()
+    assert dict(cmd) == {"state": "ACKED", "venue_order_id": "ord-adopt-live"}
+    event = conn.execute(
+        """
+        SELECT event_type, payload_json
+          FROM venue_command_events
+         WHERE command_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        ("cmd-m2-adopt-live",),
+    ).fetchone()
+    assert event["event_type"] == "REVIEW_CLEARED_VENUE_ORDER_LIVE"
+    payload = json.loads(event["payload_json"])
+    assert payload["proof_class"] == "recovery_no_venue_order_id_live_order"
+    assert payload["required_predicates"]["unique_matching_open_order"] is True
+
+    fact = conn.execute(
+        """
+        SELECT venue_order_id, command_id, state, matched_size
+          FROM venue_order_facts
+         WHERE command_id = ?
+        """,
+        ("cmd-m2-adopt-live",),
+    ).fetchone()
+    assert dict(fact) == {
+        "venue_order_id": "ord-adopt-live",
+        "command_id": "cmd-m2-adopt-live",
+        "state": "LIVE",
+        "matched_size": "0",
+    }
+    finding = conn.execute(
+        """
+        SELECT resolved_at, resolution, resolved_by
+          FROM exchange_reconcile_findings
+         WHERE finding_id = 'finding-adopt-live'
+        """
+    ).fetchone()
+    assert finding["resolved_at"] is not None
+    assert finding["resolution"] == "command_recovery_no_venue_live_order_adopted"
+    assert finding["resolved_by"] == "src.execution.command_recovery"
+
+    unknown_count, unknown_markets = count_unknown_side_effects(conn)
+    assert unknown_count == 0
+    assert unknown_markets == ()
+
+
+def test_review_required_recovery_no_venue_live_order_ambiguous_stays_review_required(conn):
+    from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.state.venue_command_repo import find_unknown_command_by_economic_intent
+
+    token_id = "tok-m2-adopt-ambiguous"
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-adopt-ambiguous",
+        token_id=token_id,
+        idem="0" * 32,
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+
+    class FakeAdapter:
+        def get_open_orders(self):
+            return [
+                {
+                    "id": order_id,
+                    "asset_id": token_id,
+                    "side": "BUY",
+                    "price": "0.55",
+                    "original_size": "18.19",
+                    "size": "18.19",
+                    "size_matched": "0",
+                    "status": "LIVE",
+                }
+                for order_id in ("ord-amb-1", "ord-amb-2")
+            ]
+
+        def get_trades(self):
+            return []
+
+    summary = reconcile_unresolved_commands(conn, FakeAdapter())
+
+    assert summary["advanced"] == 0
+    cmd = conn.execute(
+        "SELECT state, venue_order_id FROM venue_commands WHERE command_id = ?",
+        ("cmd-m2-adopt-ambiguous",),
+    ).fetchone()
+    assert cmd["state"] == "REVIEW_REQUIRED"
+    assert cmd["venue_order_id"] is None
+    unresolved = find_unknown_command_by_economic_intent(
+        conn,
+        intent_kind="ENTRY",
+        token_id=token_id,
+        side="BUY",
+        price=0.55,
+        size=18.19,
+    )
+    assert unresolved is not None
+    assert unresolved["command_id"] == "cmd-m2-adopt-ambiguous"
 
 
 def test_review_required_recovery_no_venue_exposure_rejects_matching_trade(conn):

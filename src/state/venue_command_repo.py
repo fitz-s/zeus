@@ -1265,6 +1265,7 @@ def _validate_review_venue_order_live_payload(
     if proof_class not in {
         "cancel_unknown_venue_order_live",
         "acked_submit_venue_order_live",
+        "recovery_no_venue_order_id_live_order",
     }:
         raise ValueError("review live-order clearance proof_class is not supported")
     if proof_class == "cancel_unknown_venue_order_live":
@@ -1272,11 +1273,16 @@ def _validate_review_venue_order_live_payload(
             raise ValueError("review live-order clearance requires side_effect_boundary_crossed=unknown")
         if payload.get("sdk_cancel_attempted") != "unknown":
             raise ValueError("review live-order clearance requires sdk_cancel_attempted=unknown")
-    else:
+    elif proof_class == "acked_submit_venue_order_live":
         if payload.get("side_effect_boundary_crossed") is not True:
             raise ValueError("post-ACK live-order clearance requires side_effect_boundary_crossed=true")
         if payload.get("sdk_submit_attempted") is not True:
             raise ValueError("post-ACK live-order clearance requires sdk_submit_attempted=true")
+    else:
+        if payload.get("side_effect_boundary_crossed") is not True:
+            raise ValueError("no-venue live-order clearance requires side_effect_boundary_crossed=true")
+        if payload.get("sdk_submit_attempted") is not True:
+            raise ValueError("no-venue live-order clearance requires sdk_submit_attempted=true")
     required_predicates = payload.get("required_predicates")
     if not isinstance(required_predicates, dict):
         raise ValueError("review live-order clearance requires required_predicates")
@@ -1292,16 +1298,30 @@ def _validate_review_venue_order_live_payload(
             "no_trade_facts",
         )
     else:
-        required_true = (
-            "latest_event_is_review_required",
-            "review_reason_post_ack_persistence_failure",
-            "venue_order_id_present",
-            "venue_order_id_matches_live_proof",
-            "authenticated_live_order_seen",
-            "latest_order_fact_live",
-            "point_order_matched_size_not_positive",
-            "no_trade_facts",
-        )
+        if proof_class == "acked_submit_venue_order_live":
+            required_true = (
+                "latest_event_is_review_required",
+                "review_reason_post_ack_persistence_failure",
+                "venue_order_id_present",
+                "venue_order_id_matches_live_proof",
+                "authenticated_live_order_seen",
+                "latest_order_fact_live",
+                "point_order_matched_size_not_positive",
+                "no_trade_facts",
+            )
+        else:
+            required_true = (
+                "latest_event_is_review_required",
+                "review_reason_recovery_no_venue_order_id",
+                "venue_order_id_absent_before_recovery",
+                "proof_venue_order_id_present",
+                "unique_matching_open_order",
+                "matching_open_order_matches_command",
+                "authenticated_live_order_seen",
+                "point_order_matched_size_not_positive",
+                "no_matching_trades",
+                "no_trade_facts",
+            )
     missing = [name for name in required_true if required_predicates.get(name) is not True]
     if missing:
         raise ValueError(f"review live-order clearance predicates are not proven true: {missing}")
@@ -1320,7 +1340,11 @@ def _validate_review_venue_order_live_payload(
     allowed_sources = (
         {"authenticated_clob_point_order_read"}
         if proof_class == "cancel_unknown_venue_order_live"
-        else {"authenticated_clob_user_or_point_order_read"}
+        else (
+            {"authenticated_clob_user_or_point_order_read"}
+            if proof_class == "acked_submit_venue_order_live"
+            else {"authenticated_clob_user_open_orders_read"}
+        )
     )
     if proof.get("source") not in allowed_sources:
         raise ValueError("review live-order clearance requires authenticated point order proof")
@@ -1332,7 +1356,11 @@ def _validate_review_venue_order_live_payload(
     expected_source_reason = (
         "cancel_unknown_venue_order_live"
         if proof_class == "cancel_unknown_venue_order_live"
-        else "acked_submit_venue_order_live"
+        else (
+            "acked_submit_venue_order_live"
+            if proof_class == "acked_submit_venue_order_live"
+            else "recovery_no_venue_order_id_live_order"
+        )
     )
     if source.get("source_reason") != expected_source_reason:
         raise ValueError("review live-order clearance source_reason is not supported")
@@ -2359,7 +2387,7 @@ def _actual_review_venue_order_live_predicates(
     with _row_factory_as(conn, sqlite3.Row):
         command = conn.execute(
             """
-            SELECT venue_order_id
+            SELECT venue_order_id, token_id, side, price, size
             FROM venue_commands
             WHERE command_id = ?
             """,
@@ -2392,6 +2420,10 @@ def _actual_review_venue_order_live_predicates(
     matching_open_orders = proof.get("matching_open_orders")
     matching_open_orders = matching_open_orders if isinstance(matching_open_orders, list) else []
     command_venue_order_id = str(command["venue_order_id"] or "").strip() if command is not None else ""
+    command_token_id = str(command["token_id"] or "").strip() if command is not None else ""
+    command_side = str(command["side"] or "").upper().strip() if command is not None else ""
+    command_price = command["price"] if command is not None else None
+    command_size = command["size"] if command is not None else None
     matching_open_order_id_matches = any(
         _venue_order_id_from_payload(order if isinstance(order, dict) else {}) == command_venue_order_id
         for order in matching_open_orders
@@ -2424,6 +2456,27 @@ def _actual_review_venue_order_live_predicates(
         )
     )
     latest_reason = str(latest_payload.get("reason") or "")
+    proof_order_token = str(
+        point_order.get("asset_id")
+        or point_order.get("token_id")
+        or point_order.get("tokenID")
+        or point_order.get("assetId")
+        or ""
+    ).strip()
+    proof_order_side = str(point_order.get("side") or "").upper().strip()
+    proof_order_size = (
+        point_order.get("original_size")
+        or point_order.get("size")
+        or point_order.get("matched_amount")
+    )
+    proof_order_identity_matches_command = (
+        bool(proof_venue_order_id)
+        and bool(command_token_id)
+        and proof_order_token == command_token_id
+        and proof_order_side == command_side
+        and _decimal_text_equal(point_order.get("price"), command_price)
+        and _decimal_text_equal(proof_order_size, command_size)
+    )
     return {
         "latest_event_is_cancel_replace_blocked": (
             latest is not None
@@ -2437,11 +2490,14 @@ def _actual_review_venue_order_live_predicates(
             "entry_ack_persistence_failed_after_side_effect",
             "exit_ack_persistence_failed_after_side_effect",
         },
+        "review_reason_recovery_no_venue_order_id": latest_reason == "recovery_no_venue_order_id",
         "semantic_cancel_status_cancel_unknown": (
             str(latest_payload.get("semantic_cancel_status") or "").upper() == "CANCEL_UNKNOWN"
         ),
         "requires_m5_reconcile": latest_payload.get("requires_m5_reconcile") is True,
         "venue_order_id_present": bool(command_venue_order_id),
+        "venue_order_id_absent_before_recovery": not command_venue_order_id,
+        "proof_venue_order_id_present": bool(proof_venue_order_id),
         "venue_order_id_matches_point_read": (
             bool(command_venue_order_id)
             and command_venue_order_id == proof_venue_order_id
@@ -2470,6 +2526,9 @@ def _actual_review_venue_order_live_predicates(
             )
             or point_status in {"LIVE", "OPEN", "RESTING"}
         ),
+        "unique_matching_open_order": proof.get("matching_open_order_count") == 1,
+        "matching_open_order_matches_command": proof_order_identity_matches_command,
+        "no_matching_trades": proof.get("matching_trade_count") == 0,
         "point_order_matched_size_not_positive": not _optional_decimal_positive(matched_size),
         "no_trade_facts": _review_clearance_fact_count(conn, "venue_trade_facts", command_id) == 0,
     }
