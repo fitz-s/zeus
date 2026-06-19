@@ -97,11 +97,14 @@ def _reset_substrate_refresh_cursor():
     main_module._SUBSTRATE_REFRESH_CURSOR = 0
     saved_lifted = substrate_observer._SUBSTRATE_REFRESH_CURSOR
     substrate_observer._SUBSTRATE_REFRESH_CURSOR = 0
+    saved_lifted_priority = substrate_observer._SUBSTRATE_PRIORITY_REFRESH_CURSOR
+    substrate_observer._SUBSTRATE_PRIORITY_REFRESH_CURSOR = 0
     try:
         yield
     finally:
         main_module._SUBSTRATE_REFRESH_CURSOR = saved
         substrate_observer._SUBSTRATE_REFRESH_CURSOR = saved_lifted
+        substrate_observer._SUBSTRATE_PRIORITY_REFRESH_CURSOR = saved_lifted_priority
 
 
 def _enable_edli_cfg(monkeypatch, *, enabled: bool = True) -> None:
@@ -116,6 +119,13 @@ def _enable_edli_cfg(monkeypatch, *, enabled: bool = True) -> None:
             {"enabled": enabled} if name in {"edli", "edli_v1"} else (default if default is not None else {})
         ),
     )
+
+
+def test_substrate_settings_section_accepts_live_edli_alias(monkeypatch):
+    """Live settings use `edli`; the lifted warm job must not silently no-op on old `edli_v1`."""
+    monkeypatch.setattr(substrate_observer, "settings", {"edli": {"enabled": True}})
+
+    assert substrate_observer._settings_section("edli_v1") == {"enabled": True}
 
 
 def test_reactor_cycle_does_not_refresh_inline():
@@ -1523,7 +1533,7 @@ def _pending_family_conn(event_id: str, city: str, target_date: str, metric: str
     return conn
 
 
-def _venue_close_relationship_harness(monkeypatch):
+def _venue_close_relationship_harness(monkeypatch, *, refresh_module=main_module):
     """Wire a single Hong Kong / 2026-06-07 pending family through the warm
     refresh with all venue-I/O mocked. Returns a callable
     ``run(now_utc) -> (result, submitted)`` so a single fixture can be driven at
@@ -1558,6 +1568,7 @@ def _venue_close_relationship_harness(monkeypatch):
     }
 
     import src.data.market_scanner as scanner
+    import src.data.market_topology_rows as market_topology_rows
     import src.data.polymarket_client as polymarket_client
     import src.engine.event_reactor_adapter as adapter
     import src.state.db as state_db
@@ -1565,7 +1576,13 @@ def _venue_close_relationship_harness(monkeypatch):
     monkeypatch.setattr(
         adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows
     )
+    monkeypatch.setattr(
+        market_topology_rows,
+        "_event_family_market_topology_rows",
+        lambda *a, **k: topology_rows,
+    )
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **k: _FakeConn())
     monkeypatch.setattr(
         scanner,
         "reconstruct_weather_market_from_static_topology",
@@ -1591,7 +1608,7 @@ def _venue_close_relationship_harness(monkeypatch):
         )
         # Fresh pending family per run so a prior run's cursor / state does not leak.
         world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
-        result = main_module._refresh_pending_family_snapshots(
+        result = refresh_module._refresh_pending_family_snapshots(
             world_conn, forecasts_conn, now_utc=now_utc
         )
         return result, submitted
@@ -1638,6 +1655,77 @@ def test_warm_lane_skips_venue_closed_family_keeps_venue_open_family(monkeypatch
     assert closed_submitted == []
     # all-fresh / no-work status (never "refreshed") because the only family was skipped.
     assert closed_result["status"] != "refreshed"
+
+
+def test_lifted_substrate_warm_lane_skips_venue_closed_family(monkeypatch):
+    """The sidecar-owned lifted warmer must carry the same venue-close eviction as
+    ``src.main``; otherwise a closed held family can pin the refresh queue head and
+    starve live executable substrate updates."""
+    run = _venue_close_relationship_harness(
+        monkeypatch, refresh_module=substrate_observer
+    )
+
+    closed_now = datetime(2026, 6, 7, 18, 0, tzinfo=timezone.utc)
+    closed_result, closed_submitted = run(closed_now)
+
+    assert closed_result["venue_closed_skipped"] == 1
+    assert closed_result.get("cached_topology_families", 0) == 0
+    assert closed_submitted == []
+    assert closed_result["status"] != "refreshed"
+
+
+def test_lifted_substrate_warm_lane_backs_off_gamma_empty_family(monkeypatch):
+    """A family whose direct Gamma slug lookup returned empty must cool down in the
+    lifted sidecar path too; otherwise the 20s warm tick hammers the same
+    not-listed/no-topology family and starves refreshable live families."""
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+    substrate_observer._GAMMA_EMPTY_BACKOFF_UNTIL.clear()
+    monkeypatch.setenv("ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS", "300")
+
+    import src.data.market_scanner as scanner
+    import src.data.market_topology_rows as market_topology_rows
+    import src.state.db as state_db
+
+    class _EmptyGammaResponse:
+        status_code = 200
+
+        def json(self):
+            return []
+
+    gamma_calls = {"count": 0}
+
+    def _empty_gamma(*_args, **_kwargs):
+        gamma_calls["count"] += 1
+        return _EmptyGammaResponse()
+
+    monkeypatch.setattr(
+        market_topology_rows,
+        "_event_family_market_topology_rows",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **k: _FakeConn())
+    monkeypatch.setattr(scanner, "_gamma_get", _empty_gamma)
+    monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [])
+
+    open_now = datetime(2026, 6, 7, 6, 0, tzinfo=timezone.utc)
+    first_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
+    first = substrate_observer._refresh_pending_family_snapshots(
+        first_conn, forecasts_conn, now_utc=open_now
+    )
+
+    second_conn = _pending_family_conn("event-2", "Hong Kong", "2026-06-07", "high")
+    second = substrate_observer._refresh_pending_family_snapshots(
+        second_conn, forecasts_conn, now_utc=open_now
+    )
+
+    assert first["gamma_slug_attempted"] == 1
+    assert first["gamma_slug_empty"] == 1
+    assert gamma_calls["count"] == 1
+    assert second.get("gamma_refresh_families", 0) == 0
+    assert second["no_topology_backed_off"] == 1
+    assert gamma_calls["count"] == 1
 
 
 def test_warm_lane_venue_close_skip_is_failsoft_on_unresolvable_family(monkeypatch):

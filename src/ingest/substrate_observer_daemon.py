@@ -219,7 +219,12 @@ def main() -> None:
     # in-process _market_substrate_refresh_lock; max_workers=1 + per-job max_instances=1
     # serializes them so neither overlaps itself nor the other (system_decomposition_plan §4.1).
     _scheduler = BlockingScheduler(
-        executors={"default": _APSchedulerThreadPoolExecutor(max_workers=1)},
+        executors={
+            # Snapshot writers stay serialized on the default worker. The heartbeat is
+            # file-only liveness evidence and must not be starved by CLOB/Gamma work.
+            "default": _APSchedulerThreadPoolExecutor(max_workers=1),
+            "heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1),
+        },
     )
 
     # Budget<interval invariant (carried over from src/main.py:7691, Fitz #5): the warm
@@ -260,14 +265,17 @@ def main() -> None:
         coalesce=True,
     )
 
-    # 60s liveness heartbeat (file-only; safe to run on the single-writer pool — it does not
-    # write any DB). The heartbeat-sensor watches this file's mtime.
+    # 60s liveness heartbeat (file-only; it does not write any DB). Run it on a dedicated
+    # executor so the preflight heartbeat cannot go stale while the single writer handles
+    # warm CLOB/Gamma work.
     _scheduler.add_job(
         _write_substrate_observer_heartbeat,
         "interval",
         seconds=60,
         id="substrate_observer_heartbeat",
+        executor="heartbeat",
         max_instances=1,
+        misfire_grace_time=30,
         coalesce=True,
         next_run_time=datetime.now(timezone.utc),
     )

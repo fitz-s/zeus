@@ -188,6 +188,47 @@ def test_quote_cache_seeded_from_rest_on_connect():
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'").fetchone()[0] == 1
 
 
+def test_seed_from_rest_can_seed_priority_subset_before_full_universe():
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    metadata = {
+        "token-1": _metadata("token-1")["token-1"],
+        "token-2": _metadata("token-2")["token-2"],
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1", "token-2"},
+        token_metadata=metadata,
+        quote_cache=cache,
+    )
+    fetch_calls: list[str] = []
+
+    def fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    results = ingestor.seed_from_rest(
+        fetch,
+        received_at="2026-05-24T10:00:00+00:00",
+        token_ids={"token-2"},
+    )
+
+    assert len(results) == 1
+    assert fetch_calls == ["token-2"]
+    assert cache.get("token-2") is not None
+    assert cache.get("token-1") is None
+    rows = conn.execute(
+        "SELECT token_id FROM execution_feasibility_evidence ORDER BY token_id"
+    ).fetchall()
+    assert rows == [("token-2",), ("token-2",)]
+
+
 def test_market_channel_quote_writes_feasibility_evidence_only():
     conn, writer = _conn_writer()
     ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
@@ -207,6 +248,39 @@ def test_market_channel_quote_writes_feasibility_evidence_only():
     )
 
     rows = conn.execute(
+        "SELECT direction, accepted_or_rejected, filled_shares FROM execution_feasibility_evidence ORDER BY direction"
+    ).fetchall()
+    assert rows == [("buy_yes", None, None), ("sell_yes", None, None)]
+
+
+def test_market_channel_can_write_feasibility_to_trade_connection():
+    world_conn, writer = _conn_writer()
+    trade_conn = sqlite3.connect(":memory:")
+    init_schema(trade_conn)
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        feasibility_conn=trade_conn,
+    )
+
+    ingestor.handle_message(
+        {
+            "event_type": "book",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "outcome_label": "YES",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "hash-1",
+            "timestamp": "1766789469958",
+        },
+        received_at="2026-05-24T10:00:00+00:00",
+    )
+
+    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+    assert world_conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 0
+    rows = trade_conn.execute(
         "SELECT direction, accepted_or_rejected, filled_shares FROM execution_feasibility_evidence ORDER BY direction"
     ).fetchall()
     assert rows == [("buy_yes", None, None), ("sell_yes", None, None)]

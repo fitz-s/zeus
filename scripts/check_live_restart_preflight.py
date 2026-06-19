@@ -254,11 +254,12 @@ def _freshness_predicate_for_exposure(
     columns: set[str],
     exposure: dict[str, Any],
     token_columns: tuple[str, ...],
+    include_condition_id: bool = True,
 ) -> tuple[str, tuple[Any, ...]] | None:
     clauses: list[str] = []
     params: list[Any] = []
     condition_id = str(exposure.get("condition_id") or "").strip()
-    if condition_id and "condition_id" in columns:
+    if include_condition_id and condition_id and "condition_id" in columns:
         clauses.append("condition_id = ?")
         params.append(condition_id)
     tokens = [token for token in exposure.get("tokens", []) if token]
@@ -335,12 +336,32 @@ def _sidecar_heartbeat_checks() -> list[CheckResult]:
     return [_sidecar_heartbeat_check(name, filename) for name, filename in SIDECAR_HEARTBEATS]
 
 
+def _latest_iso_from_covered(rows: list[dict[str, Any]], key: str) -> str | None:
+    latest: datetime | None = None
+    for row in rows:
+        dt = _parse_dt(row.get(key))
+        if dt is None:
+            continue
+        if latest is None or dt > latest:
+            latest = dt
+    return latest.isoformat() if latest is not None else None
+
+
 def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResult:
     now = datetime.now(timezone.utc)
     evidence: dict[str, Any] = {
         "table": "execution_feasibility_evidence",
         "max_age_seconds": EXECUTION_FEASIBILITY_MAX_AGE_SECONDS,
     }
+    if not rows:
+        evidence["scoped_exposure_count"] = 0
+        evidence["row_count"] = "not_scanned_no_open_exposures"
+        return CheckResult(
+            "execution_feasibility_evidence_freshness",
+            True,
+            "no open exposures require execution feasibility evidence",
+            evidence,
+        )
     with _connect_live_ro() as conn:
         if not _table_exists(conn, "main", "execution_feasibility_evidence"):
             return CheckResult(
@@ -350,18 +371,15 @@ def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResul
                 evidence,
             )
         columns = _table_columns(conn, "main", "execution_feasibility_evidence")
-        row = conn.execute(
-            "SELECT MAX(quote_seen_at) AS latest_quote_seen_at, COUNT(*) AS rows FROM execution_feasibility_evidence"
-        ).fetchone()
         exposure_results = _execution_feasibility_exposure_freshness(
             conn,
             columns=columns,
             exposures=[_open_exposure_identity(row) for row in rows],
             now=now,
         )
-    latest = row["latest_quote_seen_at"] if row else None
+    latest = _latest_iso_from_covered(exposure_results["covered"], "latest_quote_seen_at")
     latest_dt = _parse_dt(latest)
-    evidence["rows"] = int(row["rows"] or 0) if row else 0
+    evidence["row_count"] = "not_scanned_append_only_hot_path"
     evidence["latest_quote_seen_at"] = latest
     evidence.update(exposure_results)
     if latest_dt is None:
@@ -400,6 +418,7 @@ def _execution_feasibility_exposure_freshness(
             columns=columns,
             exposure=exposure,
             token_columns=("token_id",),
+            include_condition_id=False,
         )
         item = _exposure_stub(exposure)
         if predicate is None:
@@ -408,16 +427,17 @@ def _execution_feasibility_exposure_freshness(
         where_sql, params = predicate
         row = conn.execute(
             f"""
-            SELECT MAX(quote_seen_at) AS latest_quote_seen_at,
-                   COUNT(*) AS rows
+            SELECT quote_seen_at AS latest_quote_seen_at
               FROM execution_feasibility_evidence
              WHERE {where_sql}
+             ORDER BY quote_seen_at DESC
+             LIMIT 1
             """,
             params,
         ).fetchone()
         latest = row["latest_quote_seen_at"] if row else None
         latest_dt = _parse_dt(latest)
-        evidence = {**item, "rows": int(row["rows"] or 0) if row else 0, "latest_quote_seen_at": latest}
+        evidence = {**item, "latest_quote_seen_at": latest}
         if latest_dt is None:
             risky.append({**evidence, "risk": "missing_execution_feasibility_evidence"})
             continue
@@ -435,6 +455,15 @@ def _executable_substrate_freshness_check(rows: list[sqlite3.Row]) -> CheckResul
         "table": "executable_market_snapshots",
         "max_age_seconds": EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS,
     }
+    if not rows:
+        evidence["scoped_exposure_count"] = 0
+        evidence["row_count"] = "not_scanned_no_open_exposures"
+        return CheckResult(
+            "executable_substrate_freshness",
+            True,
+            "no open exposures require executable market substrate",
+            evidence,
+        )
     with _connect_live_ro() as conn:
         if not _table_exists(conn, "main", "executable_market_snapshots"):
             return CheckResult(
@@ -444,25 +473,19 @@ def _executable_substrate_freshness_check(rows: list[sqlite3.Row]) -> CheckResul
                 evidence,
             )
         columns = _table_columns(conn, "main", "executable_market_snapshots")
-        row = conn.execute(
-            """
-            SELECT MAX(captured_at) AS latest_captured_at,
-                   MAX(freshness_deadline) AS latest_freshness_deadline,
-                   COUNT(*) AS rows
-              FROM executable_market_snapshots
-            """
-        ).fetchone()
         exposure_results = _executable_substrate_exposure_freshness(
             conn,
             columns=columns,
             exposures=[_open_exposure_identity(row) for row in rows],
             now=now,
         )
-    captured_dt = _parse_dt(row["latest_captured_at"] if row else None)
-    deadline_dt = _parse_dt(row["latest_freshness_deadline"] if row else None)
-    evidence["rows"] = int(row["rows"] or 0) if row else 0
-    evidence["latest_captured_at"] = row["latest_captured_at"] if row else None
-    evidence["latest_freshness_deadline"] = row["latest_freshness_deadline"] if row else None
+    latest_captured = _latest_iso_from_covered(exposure_results["covered"], "latest_captured_at")
+    latest_deadline = _latest_iso_from_covered(exposure_results["covered"], "latest_freshness_deadline")
+    captured_dt = _parse_dt(latest_captured)
+    deadline_dt = _parse_dt(latest_deadline)
+    evidence["row_count"] = "not_scanned_append_only_hot_path"
+    evidence["latest_captured_at"] = latest_captured
+    evidence["latest_freshness_deadline"] = latest_deadline
     evidence.update(exposure_results)
     if captured_dt is None:
         return CheckResult(
@@ -511,11 +534,12 @@ def _executable_substrate_exposure_freshness(
         where_sql, params = predicate
         row = conn.execute(
             f"""
-            SELECT MAX(captured_at) AS latest_captured_at,
-                   MAX(freshness_deadline) AS latest_freshness_deadline,
-                   COUNT(*) AS rows
+            SELECT captured_at AS latest_captured_at,
+                   freshness_deadline AS latest_freshness_deadline
               FROM executable_market_snapshots
              WHERE {where_sql}
+             ORDER BY captured_at DESC
+             LIMIT 1
             """,
             params,
         ).fetchone()
@@ -523,7 +547,6 @@ def _executable_substrate_exposure_freshness(
         deadline_dt = _parse_dt(row["latest_freshness_deadline"] if row else None)
         evidence = {
             **item,
-            "rows": int(row["rows"] or 0) if row else 0,
             "latest_captured_at": row["latest_captured_at"] if row else None,
             "latest_freshness_deadline": row["latest_freshness_deadline"] if row else None,
         }
@@ -760,6 +783,33 @@ def _open_positions() -> list[Any]:
                 """
             )
         )
+
+
+def _requires_executable_quote(row: sqlite3.Row, *, now_utc: datetime) -> bool:
+    """Whether restart preflight should require fresh executable book evidence.
+
+    A venue-closed ``pending_exit`` cannot be acted through CLOB anymore; it must
+    be handled by settlement/harvester recovery and the pending-exit check, not by
+    waiting forever for fresh executable substrate or quote evidence.
+    """
+
+    if row["phase"] != "pending_exit":
+        return True
+    try:
+        from src.strategy.market_phase import family_venue_closed
+
+        return not family_venue_closed(
+            city=str(row["city"] or ""),
+            target_date=str(row["target_date"] or ""),
+            now_utc=now_utc,
+        )
+    except Exception:
+        return True
+
+
+def _open_positions_requiring_executable_quote(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+    now = datetime.now(timezone.utc)
+    return [row for row in rows if _requires_executable_quote(row, now_utc=now)]
 
 
 def _verified_settlement_truth_for(rows: list[sqlite3.Row]) -> dict[tuple[str, str, str], dict[str, Any]]:
@@ -1024,6 +1074,7 @@ def evaluate() -> dict[str, Any]:
     cfg = _settings()
     real_submit = bool((cfg.get("edli") or {}).get("real_order_submit_enabled", False))
     rows = _open_positions()
+    quote_rows = _open_positions_requiring_executable_quote(rows)
     checks = [
         CheckResult(
             "live_trading_process_absent",
@@ -1043,8 +1094,8 @@ def evaluate() -> dict[str, Any]:
         _forecast_sidecar_health(),
         _posterior_summary(),
         *_sidecar_heartbeat_checks(),
-        _executable_substrate_freshness_check(rows),
-        _execution_feasibility_evidence_check(rows),
+        _executable_substrate_freshness_check(quote_rows),
+        _execution_feasibility_evidence_check(quote_rows),
         _pending_exit_check(rows),
         _belief_check(rows),
     ]
@@ -1056,6 +1107,7 @@ def evaluate() -> dict[str, Any]:
         "trade_db": str(TRADE_DB),
         "forecast_db": str(FORECAST_DB),
         "open_position_count": len(rows),
+        "open_positions_requiring_executable_quote_count": len(quote_rows),
         "real_order_submit_enabled": real_submit,
         "checks": [asdict(check) for check in checks],
         "blockers": blockers,

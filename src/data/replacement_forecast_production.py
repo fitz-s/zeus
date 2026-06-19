@@ -84,10 +84,10 @@ def _replacement_forecast_runtime_flags_from_settings() -> dict[str, bool]:
 
 
 def _replacement_forecast_live_materialization_queue_config() -> dict[str, object]:
-    from src.config import PROJECT_ROOT
+    from src.config import PROJECT_ROOT, RUNTIME_ROOT, STATE_DIR
 
     cfg = _settings_section("replacement_forecast_live", {}) or {}
-    base_dir = PROJECT_ROOT / "state" / "replacement_forecast_live"
+    base_dir = STATE_DIR / "replacement_forecast_live"
     raw_manifest_dir = cfg.get("raw_manifest_dir")
     forecast_db = cfg.get("forecast_db")
 
@@ -96,7 +96,11 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
         if raw in (None, ""):
             return None
         path = Path(str(raw))
-        return path if path.is_absolute() else PROJECT_ROOT / path
+        if path.is_absolute():
+            return path
+        if path.parts and path.parts[0] == "state":
+            return RUNTIME_ROOT / path
+        return PROJECT_ROOT / path
 
     return {
         "seed_dir": _rooted_path(cfg.get("seed_dir"), base_dir / "seeds"),

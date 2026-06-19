@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -244,6 +245,38 @@ def test_no_regression_new_process_uses_sanctioned_db_path_no_independent_cross_
         "the producer must not open a raw independent connection; cross-DB writes use the "
         "sanctioned ATTACH+SAVEPOINT path (INV-37)."
     )
+
+
+def test_open_position_tokens_are_market_channel_seed_priority():
+    from src.ingest.price_channel_ingest import _edli_held_position_priority_token_ids
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?,?,?,?)",
+        [
+            ("active-1", "active", "yes-active", "no-active"),
+            ("day0-1", "day0_window", None, "no-day0"),
+            ("exit-1", "pending_exit", "yes-exit", None),
+            ("closed-1", "economically_closed", "yes-closed", "no-closed"),
+        ],
+    )
+
+    assert _edli_held_position_priority_token_ids(conn) == {
+        "yes-active",
+        "no-active",
+        "no-day0",
+        "yes-exit",
+    }
 
 
 # ===========================================================================
@@ -542,6 +575,15 @@ def test_no_regression_lifted_reconcile_cycle_invokable_in_new_host():
     # cycle consults through _settings_section.
     assert hasattr(lane, "settings")
     assert hasattr(lane, "_settings_section")
+
+
+def test_price_channel_settings_section_accepts_live_edli_alias(monkeypatch):
+    """Live settings use `edli`; the lifted lane must not silently no-op on old `edli_v1`."""
+    from src.ingest import price_channel_ingest as lane
+
+    monkeypatch.setattr(lane, "settings", {"edli": {"enabled": True}})
+
+    assert lane._settings_section("edli_v1") == {"enabled": True}
 
 
 def test_no_regression_market_channel_online_service_wiring_lives_in_lane_module():

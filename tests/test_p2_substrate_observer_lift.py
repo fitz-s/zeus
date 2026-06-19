@@ -141,6 +141,15 @@ def test_no_regression_two_lifted_jobs_share_one_in_process_snapshot_lock():
     )
 
 
+def test_substrate_observer_heartbeat_has_dedicated_executor():
+    """The file heartbeat must not be starved by the single snapshot-writer worker."""
+    src = _OBSERVER_DAEMON.read_text(encoding="utf-8")
+    assert '"heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1)' in src
+    assert 'id="substrate_observer_heartbeat"' in src
+    assert 'executor="heartbeat"' in src
+    assert "misfire_grace_time=30" in src
+
+
 def test_no_regression_reactor_reader_in_order_runtime_is_untouched():
     """P1's reactor MUST keep its SELECT-side snapshot reader (the consumer side of I1)."""
     reader_path = _REPO_ROOT / "src" / "engine" / "event_reactor_adapter.py"
