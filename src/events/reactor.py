@@ -1833,10 +1833,11 @@ class OpportunityEventReactor:
             # TIMEOUT_UNKNOWN / POST_SUBMIT_UNKNOWN stay proof_accepted — a
             # venue order may exist and the reconcile sweep owns those.
             if receipt.side_effect_status in {"REJECTED", "PRE_SUBMIT_ERROR"}:
-                self._reject_event(
+                reason = receipt.reason or receipt.side_effect_status
+                return self._reject_or_retry_post_submit(
                     event,
                     "EXECUTION_RECEIPT",
-                    receipt.reason or receipt.side_effect_status,
+                    reason,
                     result,
                     receipt=receipt,
                     decision_time=decision_time,
@@ -2402,6 +2403,10 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # coverage-table/DB read that threw re-runs clean next cycle) — requeue, never size
     # on the unlicensed bound.
     "QLCB_COVERAGE_AUTHORITY_FAULT",
+    # Pre-venue SQLite writer contention in executor persistence. The venue POST
+    # boundary has not been crossed, so no order can exist; re-run the full event
+    # decision on the next cycle instead of terminally burning a valuable intent.
+    "pre_submit_db_locked_transient",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
