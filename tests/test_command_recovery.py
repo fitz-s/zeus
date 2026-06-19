@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-05-21
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-06-18
+# Last reused/audited: 2026-06-19
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -1684,6 +1684,107 @@ class TestRecoveryResolutionTable:
         after_count, after_markets = count_unknown_side_effects(conn)
         assert after_count == 0
         assert after_markets == ()
+
+    def test_maker_rest_cancel_unknown_legacy_payload_unknown_no_live_record_expires_entry(
+        self, conn, mock_client
+    ):
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-maker-rest-unknown")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REPLACE_BLOCKED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={
+                "venue_order_id": "ord-maker-rest-unknown",
+                "reason": "post_cancel_unknown_possible_side_effect",
+                "cancel_outcome": {
+                    "orderID": "ord-maker-rest-unknown",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": (
+                        "ord-maker-rest-unknown: order can't be found - already canceled or matched"
+                    ),
+                },
+            },
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-maker-rest-unknown")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-maker-rest-unknown",
+            "status": "UNKNOWN",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        before_count, _ = count_unknown_side_effects(conn)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert before_count == 1
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["required_predicates"]["point_order_no_live_record"] is True
+        assert "point_order_absent" not in payload["required_predicates"]
+        assert payload["venue_absence_proof"]["point_order_status"] == "UNKNOWN"
+        assert payload["venue_absence_proof"]["point_order"] == {
+            "orderID": "ord-maker-rest-unknown",
+            "status": "UNKNOWN",
+        }
+        assert payload["source_proof"]["source_reason"] == (
+            "cancel_unknown_point_order_no_live_record_terminal_no_fill"
+        )
+        terminal_fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert terminal_fact["state"] == "VENUE_WIPED"
+        fact_payload = json.loads(terminal_fact["raw_payload_json"])
+        assert fact_payload["required_predicates"]["point_order_no_live_record"] is True
+        assert Decimal(str(terminal_fact["matched_size"])) == Decimal("0")
+        assert Decimal(str(terminal_fact["remaining_size"])) == Decimal("0")
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 0
+        assert after_markets == ()
+
+    def test_cancel_unknown_unknown_point_order_with_live_data_stays_review_required(
+        self, conn, mock_client
+    ):
+        from src.risk_allocator.governor import count_unknown_side_effects
+
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-unknown-live-data")
+        _seed_pending_entry_projection(conn, order_id="ord-unknown-live-data")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-unknown-live-data",
+            "status": "UNKNOWN",
+            "size": "11.62",
+            "price": "0.02",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        event_count_before = len(_get_events(conn, "cmd-001"))
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["stayed"] >= 1
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert len(_get_events(conn, "cmd-001")) == event_count_before
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 1
+        assert after_markets == ("mkt-001",)
 
     def test_expired_terminal_no_fill_entry_resolves_late_m5_local_orphan_finding(self, conn, mock_client):
         from src.execution.exchange_reconcile import list_unresolved_findings, record_finding

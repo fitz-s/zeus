@@ -1510,6 +1510,30 @@ def _latest_payload_is_cancel_unknown(payload: dict) -> bool:
     return str(payload.get("reason") or "") == "post_cancel_unknown_possible_side_effect"
 
 
+_POINT_ORDER_LIVE_DATA_KEYS = (
+    "size",
+    "original_size",
+    "originalSize",
+    "size_matched",
+    "sizeMatched",
+    "matched",
+    "matched_size",
+    "matchedSize",
+    "matched_amount",
+    "price",
+    "side",
+    "remaining",
+    "remaining_size",
+    "remainingSize",
+)
+
+
+def _point_order_has_live_data(point_order: object) -> bool:
+    if not isinstance(point_order, dict):
+        return False
+    return any(point_order.get(key) not in (None, "") for key in _POINT_ORDER_LIVE_DATA_KEYS)
+
+
 def _validate_review_cancel_unknown_no_fill_payload(
     *,
     conn: sqlite3.Connection,
@@ -1538,9 +1562,11 @@ def _validate_review_cancel_unknown_no_fill_payload(
         raise ValueError(f"cancel-unknown no-fill predicates are not proven true: {missing}")
     point_order_matches = required_predicates.get("venue_order_id_matches_point_read") is True
     point_order_absent = required_predicates.get("point_order_absent") is True
-    if not point_order_matches and not point_order_absent:
+    point_order_no_live_record = required_predicates.get("point_order_no_live_record") is True
+    if not point_order_matches and not point_order_absent and not point_order_no_live_record:
         raise ValueError(
-            "cancel-unknown no-fill clearance requires point order match or authenticated absence"
+            "cancel-unknown no-fill clearance requires point order match, authenticated absence, "
+            "or authenticated no-live-record proof"
         )
     if payload.get("side_effect_boundary_crossed") != "unknown":
         raise ValueError("cancel-unknown no-fill clearance requires side_effect_boundary_crossed=unknown")
@@ -1639,6 +1665,24 @@ def _validate_review_cancel_unknown_no_fill_payload(
         or venue_proof.get("point_order") is not None
     ):
         raise ValueError("cancel-unknown no-fill point_order_absent proof is invalid")
+    if point_order_no_live_record:
+        point_order = venue_proof.get("point_order")
+        status = str(venue_proof.get("point_order_status") or "").upper()
+        if status not in {"UNKNOWN", "NOT_FOUND", ""}:
+            raise ValueError("cancel-unknown no-fill point_order_no_live_record status is invalid")
+        if not isinstance(point_order, dict):
+            raise ValueError("cancel-unknown no-fill point_order_no_live_record requires point_order payload")
+        point_order_id = str(
+            point_order.get("orderID")
+            or point_order.get("orderId")
+            or point_order.get("order_id")
+            or point_order.get("id")
+            or ""
+        )
+        if point_order_id and point_order_id != str(command["venue_order_id"] or ""):
+            raise ValueError("cancel-unknown no-fill point_order_no_live_record order id mismatch")
+        if _point_order_has_live_data(point_order):
+            raise ValueError("cancel-unknown no-fill point_order_no_live_record contains live order data")
     if venue_proof.get("owner_scope") != "authenticated_funder":
         raise ValueError("cancel-unknown no-fill clearance requires authenticated_funder owner_scope")
     for key in ("open_orders_checked", "trades_checked", "open_orders_query_complete", "trades_query_complete"):
@@ -1688,6 +1732,7 @@ def _validate_review_cancel_unknown_no_fill_payload(
     if source.get("source_reason") not in {
         "cancel_unknown_point_order_terminal_no_fill",
         "cancel_unknown_point_order_absent_terminal_no_fill",
+        "cancel_unknown_point_order_no_live_record_terminal_no_fill",
     }:
         raise ValueError("cancel-unknown no-fill source_reason is unsupported")
 

@@ -72,6 +72,22 @@ _CANCEL_TERMINAL_STATUSES = frozenset({
     "CANCELLED", "CANCELED", "EXPIRED", "REJECTED",
 })
 _LIVE_ORDER_STATUSES = frozenset({"LIVE", "OPEN", "RESTING"})
+_POINT_ORDER_LIVE_DATA_KEYS = (
+    "size",
+    "original_size",
+    "originalSize",
+    "size_matched",
+    "sizeMatched",
+    "matched",
+    "matched_size",
+    "matchedSize",
+    "matched_amount",
+    "price",
+    "side",
+    "remaining",
+    "remaining_size",
+    "remainingSize",
+)
 _TERMINAL_NO_FILL_ORDER_FACT_STATES = frozenset({
     "CANCEL_CONFIRMED",
     "EXPIRED",
@@ -1150,6 +1166,27 @@ def _first_present(raw: dict | None, *keys: str):
         if value not in (None, ""):
             return value
     return None
+
+
+def _point_order_has_live_order_data(point_order: dict | None) -> bool:
+    if not isinstance(point_order, dict):
+        return False
+    return any(
+        _first_present(point_order, key) not in (None, "")
+        for key in _POINT_ORDER_LIVE_DATA_KEYS
+    )
+
+
+def _point_order_no_live_record(point_order: dict | None, *, expected_order_id: str) -> bool:
+    if not isinstance(point_order, dict):
+        return False
+    status = str(point_order.get("status") or point_order.get("state") or "").upper()
+    order_id = str(_extract_order_id(point_order) or "")
+    return (
+        status in {"UNKNOWN", "NOT_FOUND", ""}
+        and not _point_order_has_live_order_data(point_order)
+        and (not order_id or order_id == expected_order_id)
+    )
 
 
 def _string_sequence_from_value(value: object) -> tuple[str, ...]:
@@ -4604,15 +4641,30 @@ def _append_point_order_terminal_no_fill_fact(
     matching_open_orders: list[dict],
     matching_trades: list[dict],
     source_reason: str,
+    venue_resp_present_for_terminal_state: bool | None = None,
 ) -> tuple[int, dict]:
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
+    venue_resp_present = (
+        point_order is not None
+        if venue_resp_present_for_terminal_state is None
+        else venue_resp_present_for_terminal_state
+    )
     fact_state = _terminal_fact_state_for_venue_status(
         venue_status,
-        venue_resp_present=point_order is not None,
+        venue_resp_present=venue_resp_present,
     )
     if fact_state is None:
         raise ValueError(f"venue status is not terminal no-fill: {venue_status!r}")
+    required_predicates = {
+        "point_order_terminal_no_fill": True,
+        "point_order_matched_size_zero": True,
+        "no_local_trade_facts": _trade_fact_count(conn, command_id) == 0,
+        "no_matching_open_orders": len(matching_open_orders) == 0,
+        "no_matching_trades": len(matching_trades) == 0,
+    }
+    if source_reason == "cancel_unknown_point_order_no_live_record_terminal_no_fill":
+        required_predicates["point_order_no_live_record"] = True
     payload = {
         "reason": "point_order_terminal_no_fill",
         "proof_class": "point_order_terminal_no_fill_plus_open_trade_absence",
@@ -4623,13 +4675,7 @@ def _append_point_order_terminal_no_fill_fact(
         "point_order": point_order,
         "remaining_size": "0",
         "matched_size": "0",
-        "required_predicates": {
-            "point_order_terminal_no_fill": True,
-            "point_order_matched_size_zero": True,
-            "no_local_trade_facts": _trade_fact_count(conn, command_id) == 0,
-            "no_matching_open_orders": len(matching_open_orders) == 0,
-            "no_matching_trades": len(matching_trades) == 0,
-        },
+        "required_predicates": required_predicates,
         "matching_open_orders": matching_open_orders[:10],
         "matching_trades": matching_trades[:10],
     }
@@ -5004,11 +5050,7 @@ def _point_order_terminal_for_partial_remainder(client, venue_order_id: str) -> 
     # zero new ENTRY orders despite a healthy +edge decision lane (live 2026-06-16). A
     # LIVE/RESTING/PARTIALLY_MATCHED/MATCHED/FILLED status (a real live/fill record) is
     # NOT terminalized here — only the no-live-record UNKNOWN/absent case.
-    _has_live_order_data = any(
-        raw.get(k) not in (None, "")
-        for k in ("size", "original_size", "size_matched", "matched", "price", "side", "remaining")
-    )
-    if status in {"UNKNOWN", "NOT_FOUND", ""} and not _has_live_order_data:
+    if _point_order_no_live_record(raw, expected_order_id=venue_order_id):
         return True, status or "NOT_FOUND", raw
     return False, status or "UNKNOWN", raw
 
@@ -5425,8 +5467,26 @@ def _review_required_cancel_unknown_live_order_recovery(
             exc,
         )
         return "error"
-    order = _venue_order_payload(raw_order) or {}
-    if not order:
+    order = _venue_order_payload(raw_order)
+    point_order_no_live_record = _point_order_no_live_record(
+        order,
+        expected_order_id=venue_order_id,
+    )
+    if order is None or point_order_no_live_record:
+        point_order_status = (
+            str((order or {}).get("status") or (order or {}).get("state") or "NOT_FOUND")
+            .upper()
+        )
+        source_reason = (
+            "cancel_unknown_point_order_no_live_record_terminal_no_fill"
+            if point_order_no_live_record
+            else "cancel_unknown_point_order_absent_terminal_no_fill"
+        )
+        resolution = (
+            "command_recovery_point_order_no_live_record_no_fill"
+            if point_order_no_live_record
+            else "command_recovery_point_order_absent_no_fill"
+        )
         command = _dict_row(
             conn.execute(
                 "SELECT * FROM venue_commands WHERE command_id = ?",
@@ -5440,8 +5500,9 @@ def _review_required_cancel_unknown_live_order_recovery(
         ):
             logger.info(
                 "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
-                "(point order absent but entry projection is not zero-exposure pending)",
+                "(point order %s but entry projection is not zero-exposure pending)",
                 cmd.command_id,
+                "has no live record" if point_order_no_live_record else "absent",
             )
             return "stayed"
         matching_open_orders = _matching_open_orders_for_command(client, command)
@@ -5449,8 +5510,9 @@ def _review_required_cancel_unknown_live_order_recovery(
         if matching_open_orders or matching_trades:
             logger.info(
                 "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
-                "(point order absent but account exposure still matches: open_orders=%s trades=%s)",
+                "(point order %s but account exposure still matches: open_orders=%s trades=%s)",
                 cmd.command_id,
+                "has no live record" if point_order_no_live_record else "absent",
                 len(matching_open_orders),
                 len(matching_trades),
             )
@@ -5458,31 +5520,38 @@ def _review_required_cancel_unknown_live_order_recovery(
         if _trade_fact_count(conn, cmd.command_id) != 0:
             logger.info(
                 "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
-                "(point order absent but local trade facts exist)",
+                "(point order %s but local trade facts exist)",
                 cmd.command_id,
+                "has no live record" if point_order_no_live_record else "absent",
             )
             return "stayed"
         now = _now_iso()
         safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
-        sp_name = f"sp_cancel_unknown_absent_no_fill_{safe_command_id}"
+        sp_name = f"sp_cancel_unknown_no_live_exposure_{safe_command_id}"
         conn.execute(f"SAVEPOINT {sp_name}")
         try:
             fact_id, fact_payload = _append_point_order_terminal_no_fill_fact(
                 conn,
                 command=command,
                 observed_at=now,
-                venue_status="NOT_FOUND",
-                point_order=None,
+                venue_status=point_order_status,
+                point_order=order,
                 matching_open_orders=matching_open_orders,
                 matching_trades=matching_trades,
-                source_reason="cancel_unknown_point_order_absent_terminal_no_fill",
+                source_reason=source_reason,
+                venue_resp_present_for_terminal_state=False,
             )
             resolved_findings = _resolve_m5_local_orphan_findings(
                 conn,
                 venue_order_id=venue_order_id,
                 resolved_at=now,
-                resolution="command_recovery_point_order_absent_no_fill",
+                resolution=resolution,
             )
+            point_order_presence_predicate = {
+                "point_order_no_live_record": True,
+            } if point_order_no_live_record else {
+                "point_order_absent": True,
+            }
             payload = {
                 "schema_version": 1,
                 "reason": "review_cleared_no_venue_exposure",
@@ -5496,7 +5565,7 @@ def _review_required_cancel_unknown_live_order_recovery(
                     "semantic_cancel_status_cancel_unknown": True,
                     "requires_m5_reconcile": True,
                     "venue_order_id_present": True,
-                    "point_order_absent": True,
+                    **point_order_presence_predicate,
                     "point_order_terminal_no_fill": True,
                     "point_order_matched_size_zero": True,
                     "no_trade_facts": True,
@@ -5528,13 +5597,13 @@ def _review_required_cancel_unknown_live_order_recovery(
                     "matching_trade_count": 0,
                     "matching_open_orders": [],
                     "matching_trades": [],
-                    "point_order_status": "NOT_FOUND",
-                    "point_order": None,
+                    "point_order_status": point_order_status,
+                    "point_order": order,
                 },
                 "source_proof": {
                     "source_commit": "runtime",
                     "source_function": "command_recovery._review_required_cancel_unknown_live_order_recovery",
-                    "source_reason": "cancel_unknown_point_order_absent_terminal_no_fill",
+                    "source_reason": source_reason,
                 },
                 "review_required_proof": {
                     "reason": "cancel_unknown_requires_m5",
@@ -5571,11 +5640,14 @@ def _review_required_cancel_unknown_live_order_recovery(
             raise
         logger.info(
             "recovery: command %s REVIEW_REQUIRED cancel-unknown -> EXPIRED "
-            "(venue_order_id=%s point_order=NOT_FOUND)",
+            "(venue_order_id=%s point_order_status=%s no_live_record=%s)",
             cmd.command_id,
             venue_order_id,
+            point_order_status,
+            point_order_no_live_record,
         )
         return "advanced"
+    order = order or {}
     order_id = _extract_order_id(order)
     status = _order_status(order)
     matched_size = _order_matched_size(order)
