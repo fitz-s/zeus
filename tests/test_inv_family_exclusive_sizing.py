@@ -1384,6 +1384,48 @@ def test_multi_leg_family_decision_executes_selected_portfolio_not_scalar_fallba
     assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
 
 
+def test_preselection_rejects_shanghai_no_basket_for_center_yes_by_default(monkeypatch) -> None:
+    """Default live preselection must choose the capital-efficient center YES,
+    not collapse two dominated NO legs into one arbitrary NO."""
+
+    monkeypatch.delenv("ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS", raising=False)
+    no_29 = _celsius_edge(
+        label="29°C",
+        support_index=0,
+        direction="buy_no",
+        entry_price=0.79,
+        p_posterior=0.10,
+        forward_edge=0.05,
+    )
+    yes_30 = _celsius_edge(
+        label="30°C",
+        support_index=1,
+        direction="buy_yes",
+        entry_price=0.27,
+        p_posterior=0.80,
+        forward_edge=0.10,
+    )
+    no_31 = _celsius_edge(
+        label="31°C",
+        support_index=2,
+        direction="buy_no",
+        entry_price=0.80,
+        p_posterior=0.10,
+        forward_edge=0.05,
+    )
+
+    selected, dropped = preselect_single_family_edge_before_kelly(
+        [no_29, yes_30, no_31],
+        city="Shanghai",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        enabled=True,
+    )
+
+    assert selected == [yes_30]
+    assert {drop.dropped_bin for drop in dropped} == {"29°C", "31°C"}
+
+
 def test_family_optimizer_honors_live_admission_and_qlcb_before_payoff_selection() -> None:
     """Rejected tail lottery legs must not re-enter through family optimization."""
 

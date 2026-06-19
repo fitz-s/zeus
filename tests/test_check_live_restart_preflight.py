@@ -724,7 +724,7 @@ def test_preflight_accepts_stale_belief_when_single_family_reseed_is_materializa
         "_single_family_reseed_repair_evidence",
         lambda item: {
             **item,
-            "risk": "missing_live_belief_repairable_by_single_family_reseed",
+            "risk": "stale_live_belief_repairable_by_single_family_reseed",
             "family_materializable_cycle": "2026-06-18T18:00:00+00:00",
             "write_performed": False,
         },
