@@ -9,6 +9,7 @@ The cross decision itself never happens here — the next certified reactor
 decision owns it (TAKER_ESCALATED_AFTER_REST lane).
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from src.execution.maker_rest_escalation import (
@@ -234,6 +235,34 @@ class TestFailSoft:
         stats = run_maker_rest_escalation_cycle(conn, clob, now=NOW)
         assert clob.cancelled == ["o2"]
         assert stats == {"scanned": 2, "cancelled": 1, "cancel_failed": 1}
+
+    def test_cancel_unknown_event_carries_recovery_semantics(self):
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+        clob = _FakeClob(fail_on={"o1"})
+        expired = find_expired_resting_entries(conn, now=NOW)
+
+        run_persisted_cancels_for_expired_rests(
+            expired,
+            clob,
+            conn_factory=lambda: conn,
+            close_connections=False,
+        )
+
+        event = conn.execute(
+            """
+            SELECT event_type, payload_json
+              FROM venue_command_events
+             WHERE command_id = 'c1'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert event["event_type"] == "CANCEL_REPLACE_BLOCKED"
+        payload = json.loads(event["payload_json"])
+        assert payload["reason"] == "post_cancel_unknown_possible_side_effect"
+        assert payload["semantic_cancel_status"] == "CANCEL_UNKNOWN"
+        assert payload["requires_m5_reconcile"] is True
 
 
 class TestEscalationRedecisionHarvest:

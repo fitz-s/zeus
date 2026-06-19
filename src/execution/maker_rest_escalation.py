@@ -304,6 +304,8 @@ def run_persisted_cancels_for_expired_rests(
             payload = {
                 "venue_order_id": order_id,
                 "reason": "post_cancel_unknown_possible_side_effect",
+                "requires_m5_reconcile": True,
+                "semantic_cancel_status": "CANCEL_UNKNOWN",
                 "cancel_outcome": raw,
             }
 

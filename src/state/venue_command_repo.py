@@ -1501,6 +1501,15 @@ def _validate_review_no_exposure_payload(
         raise ValueError("review no-exposure review_required_proof reason does not match DB")
 
 
+def _latest_payload_is_cancel_unknown(payload: dict) -> bool:
+    if (
+        str(payload.get("semantic_cancel_status") or "").upper() == "CANCEL_UNKNOWN"
+        and payload.get("requires_m5_reconcile") is True
+    ):
+        return True
+    return str(payload.get("reason") or "") == "post_cancel_unknown_possible_side_effect"
+
+
 def _validate_review_cancel_unknown_no_fill_payload(
     *,
     conn: sqlite3.Connection,
@@ -1605,9 +1614,7 @@ def _validate_review_cancel_unknown_no_fill_payload(
         raise ValueError("cancel-unknown no-fill latest payload is invalid") from exc
     if not isinstance(latest_payload, dict):
         raise ValueError("cancel-unknown no-fill latest payload is invalid")
-    if latest_payload.get("requires_m5_reconcile") is not True:
-        raise ValueError("cancel-unknown no-fill latest payload must require M5 reconcile")
-    if str(latest_payload.get("semantic_cancel_status") or "").upper() != "CANCEL_UNKNOWN":
+    if not _latest_payload_is_cancel_unknown(latest_payload):
         raise ValueError("cancel-unknown no-fill latest payload must be CANCEL_UNKNOWN")
     if fact is None:
         raise ValueError("cancel-unknown no-fill clearance requires terminal order fact")
@@ -2360,10 +2367,8 @@ def _actual_review_confirmed_fill_predicates(
     return {
         "latest_event_is_review_required": latest_event_type == "REVIEW_REQUIRED",
         "latest_event_is_cancel_replace_blocked": latest_event_type == "CANCEL_REPLACE_BLOCKED",
-        "semantic_cancel_status_cancel_unknown": (
-            str(latest_payload.get("semantic_cancel_status") or "").upper() == "CANCEL_UNKNOWN"
-        ),
-        "requires_m5_reconcile": latest_payload.get("requires_m5_reconcile") is True,
+        "semantic_cancel_status_cancel_unknown": _latest_payload_is_cancel_unknown(latest_payload),
+        "requires_m5_reconcile": _latest_payload_is_cancel_unknown(latest_payload),
         "review_reason_supported": review_reason == "ws_trade_lifecycle_regression_or_economic_drift",
         "review_reason_recovery_no_venue_order_id": review_reason == "recovery_no_venue_order_id",
         "prior_fill_confirmed_event": prior_fill_confirmed,
@@ -2504,10 +2509,8 @@ def _actual_review_venue_order_live_predicates(
             "exit_ack_persistence_failed_after_side_effect",
         },
         "review_reason_recovery_no_venue_order_id": latest_reason == "recovery_no_venue_order_id",
-        "semantic_cancel_status_cancel_unknown": (
-            str(latest_payload.get("semantic_cancel_status") or "").upper() == "CANCEL_UNKNOWN"
-        ),
-        "requires_m5_reconcile": latest_payload.get("requires_m5_reconcile") is True,
+        "semantic_cancel_status_cancel_unknown": _latest_payload_is_cancel_unknown(latest_payload),
+        "requires_m5_reconcile": _latest_payload_is_cancel_unknown(latest_payload),
         "venue_order_id_present": bool(command_venue_order_id),
         "venue_order_id_absent_before_recovery": not command_venue_order_id,
         "proof_venue_order_id_present": bool(proof_venue_order_id),

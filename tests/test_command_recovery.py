@@ -1638,6 +1638,53 @@ class TestRecoveryResolutionTable:
         assert after_count == 0
         assert after_markets == ()
 
+    def test_maker_rest_cancel_unknown_legacy_payload_absent_point_order_expires_entry(
+        self, conn, mock_client
+    ):
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=11.62, price=0.02)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-maker-rest-absent")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REPLACE_BLOCKED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={
+                "venue_order_id": "ord-maker-rest-absent",
+                "reason": "post_cancel_unknown_possible_side_effect",
+                "cancel_outcome": {
+                    "orderID": "ord-maker-rest-absent",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": (
+                        "ord-maker-rest-absent: order can't be found - already canceled or matched"
+                    ),
+                },
+            },
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-maker-rest-absent")
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        before_count, _ = count_unknown_side_effects(conn)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert before_count == 1
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        events = _get_events(conn, "cmd-001")
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["source_proof"]["source_reason"] == (
+            "cancel_unknown_point_order_absent_terminal_no_fill"
+        )
+        after_count, after_markets = count_unknown_side_effects(conn)
+        assert after_count == 0
+        assert after_markets == ()
+
     def test_expired_terminal_no_fill_entry_resolves_late_m5_local_orphan_finding(self, conn, mock_client):
         from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
 

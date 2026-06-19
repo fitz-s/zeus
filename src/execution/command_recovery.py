@@ -5238,13 +5238,20 @@ def _latest_event_payload(events: list[dict]) -> tuple[str, dict]:
     return str(latest.get("event_type") or ""), _json_dict(latest.get("payload_json"))
 
 
+def _payload_is_cancel_unknown(latest_payload: dict) -> bool:
+    if (
+        str(latest_payload.get("semantic_cancel_status") or "").upper() == "CANCEL_UNKNOWN"
+        and latest_payload.get("requires_m5_reconcile") is True
+    ):
+        return True
+    return str(latest_payload.get("reason") or "") == "post_cancel_unknown_possible_side_effect"
+
+
 def _latest_cancel_unknown_payload(events: list[dict]) -> dict | None:
     latest_event_type, latest_payload = _latest_event_payload(events)
     if latest_event_type != CommandEventType.CANCEL_REPLACE_BLOCKED.value:
         return None
-    if str(latest_payload.get("semantic_cancel_status") or "").upper() != "CANCEL_UNKNOWN":
-        return None
-    if latest_payload.get("requires_m5_reconcile") is not True:
+    if not _payload_is_cancel_unknown(latest_payload):
         return None
     return latest_payload
 
