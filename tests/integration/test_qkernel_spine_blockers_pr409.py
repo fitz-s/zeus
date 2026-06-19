@@ -765,7 +765,8 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     assert new_proof.q_posterior == pytest.approx(0.80)
     assert new_proof.q_lcb_5pct == pytest.approx(0.990)
     assert new_proof.trade_score == pytest.approx(0.050)
-    assert new_proof.q_source == "qkernel_spine"
+    assert new_proof.q_source != "qkernel_spine"
+    assert new_proof.selection_authority_applied == "qkernel_spine"
     assert new_proof.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(
         0.052
     )

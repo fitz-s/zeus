@@ -399,9 +399,11 @@ class _CandidateProof:
     unlicensed_tail_coverage_telemetry: bool = False
     # qkernel spine execution economics certificate. This is deliberately separate from
     # q_posterior / q_lcb_5pct, which remain receipt-facing selected-side probability
-    # fields. When q_source == "qkernel_spine", submit sizing consumes this guarded
-    # payoff-space economics payload instead of rebuilding stake from proof q_lcb.
+    # fields. When selection_authority_applied == "qkernel_spine", submit sizing
+    # consumes this guarded payoff-space economics payload instead of rebuilding
+    # stake from proof q_lcb.
     qkernel_execution_economics: dict[str, Any] | None = None
+    selection_authority_applied: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1238,7 +1240,7 @@ def _assert_receipt_qkernel_execution_economics(
     book: Mapping[str, object],
     selected_candidate_id: str,
 ) -> Mapping[str, Any] | None:
-    if str(receipt.q_source or "").strip() != "qkernel_spine":
+    if receipt.qkernel_execution_economics is None:
         return None
     receipt_cert = _valid_qkernel_execution_economics_payload(
         receipt.qkernel_execution_economics,
@@ -4346,7 +4348,7 @@ def _build_event_bound_taker_quality_proof(
     direction = str(actionable_payload.get("direction") or "")
     touch = fresh_best_ask if direction.startswith("buy_") else fresh_best_bid
     q_lcb_source = "q_lcb_5pct"
-    if str(actionable_payload.get("q_source") or "").strip() == "qkernel_spine":
+    if actionable_payload.get("qkernel_execution_economics") is not None:
         qkernel_cert = _valid_qkernel_execution_economics_payload(
             actionable_payload.get("qkernel_execution_economics"),
             direction=direction,
@@ -7870,16 +7872,22 @@ _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
 
 
 def _proof_uses_qkernel_spine(proof: "_CandidateProof") -> bool:
-    return str(getattr(proof, "q_source", "") or "") == "qkernel_spine"
+    if str(getattr(proof, "selection_authority_applied", "") or "") == "qkernel_spine":
+        return True
+    cert = getattr(proof, "qkernel_execution_economics", None)
+    return _valid_qkernel_execution_economics_payload(
+        cert,
+        direction=str(getattr(proof, "direction", "") or ""),
+    ) is not None
 
 
 def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] | None:
     """Return the qkernel guarded execution-economics certificate, if valid.
 
-    ``q_source == "qkernel_spine"`` is an execution authority switch: the submit path
-    may size only from the guarded qkernel certificate. Missing or malformed
-    certificates therefore return ``None`` and the caller must fail closed rather than
-    fall back to legacy proof-qLCB sizing.
+    ``selection_authority_applied == "qkernel_spine"`` is an execution authority
+    switch: the submit path may size only from the guarded qkernel certificate.
+    Missing or malformed certificates therefore return ``None`` and the caller
+    must fail closed rather than fall back to legacy proof-qLCB sizing.
     """
     if not _proof_uses_qkernel_spine(proof):
         return None
@@ -8558,8 +8566,8 @@ def _opportunity_book_from_proofs(
     selected_qkernel_execution_economics = None
     if selected_proof is not None and decided_candidate_id is not None:
         selection_authority = (
-            str(selected_proof.q_source)
-            if selected_proof.q_source is not None
+            str(selected_proof.selection_authority_applied)
+            if selected_proof.selection_authority_applied is not None
             else "robust_marginal_utility"
         )
         selected_qkernel_execution_economics = selected_proof.qkernel_execution_economics
@@ -10815,7 +10823,9 @@ def _replacement_live_authority_proof_for_direction(
 
 
 def _replacement_primary_authority_already_applied(proof: _CandidateProof) -> bool:
-    return str(getattr(proof, "q_source", "") or "") == "replacement_0_1"
+    if str(getattr(proof, "q_source", "") or "") == "replacement_0_1":
+        return True
+    return str(getattr(proof, "selection_authority_applied", "") or "") == "qkernel_spine"
 
 
 def _locked_candidate_no_price_improvement_reason(
@@ -13487,14 +13497,13 @@ def _maybe_bias_decay_kelly_haircut(
     WARN (never crash or zero a live size). Flag-gated: edli.bias_decay_kelly_haircut_enabled.
     """
     try:
-        # ZERO-LEGACY (2026-06-16): qkernel_spine is a one-calibrator regime whose
+        # ZERO-LEGACY (2026-06-16): replacement_0_1 is a one-calibrator regime whose
         # center is ALREADY bias-corrected at source (multi-model raw_model_forecasts
         # fusion + settlement-residual de-bias). The legacy per-city ENSEMBLE-bias
         # haircut (model_bias_ens / edli_per_city_v1) must NOT also halve the spine's
-        # Kelly — that double-penalizes an already-corrected size. With emos/raw_honest
-        # already exempt, exempting qkernel_spine removes this legacy haircut from the
-        # entire LIVE decision path.
-        if str(q_source or "").strip().lower() in {"emos", "raw_honest", "qkernel_spine"}:
+        # Kelly — that double-penalizes an already-corrected size. qkernel is selection
+        # authority, not q_source; the probability provenance remains replacement_0_1.
+        if str(q_source or "").strip().lower() in {"emos", "raw_honest", "replacement_0_1"}:
             return kelly_multiplier, False, None, "one_calibrator_regime"
         ev = settings["edli"]
         if not bool(ev.get("bias_decay_kelly_haircut_enabled", False)):

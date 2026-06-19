@@ -1230,9 +1230,9 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
     The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` / ``trade_score`` /
     ``execution_price`` etc. off the proof. The spine is the selection authority, but
     its payoff-space fair value is not a replacement for the receipt-facing
-    selected-side probability fields. Preserve ``q_posterior`` and ``q_lcb_5pct``;
-    mark ``q_source`` as ``qkernel_spine`` and overlay only the spine's selected
-    edge/score provenance. The executable identity
+    selected-side probability fields. Preserve ``q_source``, ``q_posterior``, and
+    ``q_lcb_5pct``; record qkernel selection authority separately and overlay only
+    the spine's selected edge/score provenance. The executable identity
     (row / token / execution_price / native_quote_available) is LEFT UNCHANGED — the
     spine selected this exact executable leg, and the submit pipeline re-authorizes it
     at submit time. Returns a NEW proof (frozen dataclass replace) so the original
@@ -1283,8 +1283,8 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         )
     overlay: dict[str, Any] = {
         "trade_score": new_trade_score,
-        "q_source": "qkernel_spine",
         "qkernel_execution_economics": qkernel_execution_economics,
+        "selection_authority_applied": "qkernel_spine",
     }
     try:
         return replace(proof, **overlay)
