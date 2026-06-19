@@ -1490,9 +1490,6 @@ def _latest_posterior_source_cycle_for_family(
     if "source_id" in columns:
         predicates.append("source_id = ?")
         params.append(LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID)
-    if "posterior_method" in columns:
-        predicates.append("posterior_method = ?")
-        params.append(LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID)
     if "source_available_at" in columns:
         predicates.append("source_available_at <= ?")
         params.append(decision_time)

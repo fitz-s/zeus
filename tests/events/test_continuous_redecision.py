@@ -383,7 +383,7 @@ def test_entry_redecision_latest_cycle_ignores_deprecated_aifs_residue():
                 "2026-05-31T13:00:00+00:00",
                 "2026-05-31T13:05:00+00:00",
                 "openmeteo_ecmwf_ifs9_bayes_fusion",
-                "openmeteo_ecmwf_ifs9_bayes_fusion",
+                "the_path_bayes_precision_fusion",
             ),
             (
                 2,
@@ -403,6 +403,49 @@ def test_entry_redecision_latest_cycle_ignores_deprecated_aifs_residue():
         metric="high",
         decision_time="2026-05-31T20:00:00+00:00",
     ) == "2026-05-31T12:00:00+00:00"
+
+
+def test_entry_redecision_latest_cycle_accepts_live_bpf_with_non_source_method():
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            computed_at TEXT,
+            runtime_layer TEXT,
+            source_id TEXT,
+            posterior_method TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, source_available_at, computed_at, runtime_layer,
+            source_id, posterior_method
+        ) VALUES (1, 'Wuhan', '2026-06-01', 'high',
+                  '2026-05-31T18:00:00+00:00',
+                  '2026-05-31T19:00:00+00:00',
+                  '2026-05-31T19:05:00+00:00',
+                  'live',
+                  'openmeteo_ecmwf_ifs9_bayes_fusion',
+                  'the_path_bayes_precision_fusion')
+        """
+    )
+
+    assert cr._latest_posterior_source_cycle_for_family(
+        forecasts,
+        city="Wuhan",
+        target_date="2026-06-01",
+        metric="high",
+        decision_time="2026-05-31T20:00:00+00:00",
+    ) == "2026-05-31T18:00:00+00:00"
 
 
 def test_entry_redecision_ignores_non_live_posterior_cycle():

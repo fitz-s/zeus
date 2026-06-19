@@ -18,7 +18,8 @@ exit organ was structurally blind while three positions settled at a loss.
 
 THE CONTRACT:
 - Held-position belief comes from the SAME table the entry decision used:
-  ``forecast_posteriors``, freshest row per (city, target_date, metric).
+  ``forecast_posteriors``, freshest live replacement-source row per
+  (city, target_date, metric).
   The bin is indexed by the position's ``bin_label`` — q_json keys are the
   venue range-label strings, the exact strings entry certified against.
 - Held-side conversion happens here, exactly once:
@@ -53,7 +54,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_AGE_HOURS = 9.0
 BELIEF_SOURCE_TABLE = "forecast_posteriors"
 SELECTED_METHOD_REPLACEMENT_POSTERIOR = "replacement_posterior"
-LIVE_REPLACEMENT_POSTERIOR_METHOD = LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID
 
 _WS_RE = re.compile(r"\s+")
 
@@ -255,9 +255,6 @@ def load_replacement_belief(
         if "source_id" in columns:
             authority_predicates.append("source_id = ?")
             authority_params.append(LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID)
-        if "posterior_method" in columns:
-            authority_predicates.append("posterior_method = ?")
-            authority_params.append(LIVE_REPLACEMENT_POSTERIOR_METHOD)
         authority_sql = ""
         if authority_predicates:
             authority_sql = " AND " + " AND ".join(authority_predicates)

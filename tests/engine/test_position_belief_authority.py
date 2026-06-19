@@ -37,7 +37,6 @@ import pytest
 from src.contracts import EntryMethod
 from src.engine.position_belief import (
     DEFAULT_MAX_AGE_HOURS,
-    LIVE_REPLACEMENT_POSTERIOR_METHOD,
     LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
     SELECTED_METHOD_REPLACEMENT_POSTERIOR,
     ReplacementBelief,
@@ -87,7 +86,7 @@ def forecasts_db(tmp_path):
 def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             target_date="2026-06-12", metric="high", source_cycle_time=None,
             runtime_layer="live", source_id=LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
-            posterior_method=LIVE_REPLACEMENT_POSTERIOR_METHOD):
+            posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"):
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -216,7 +215,26 @@ class TestLoadReplacementBelief:
         assert belief.posterior_id == "bpf"
         assert belief.q_yes_bin == pytest.approx(0.20)
         assert belief.source_id == LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID
-        assert belief.posterior_method == LIVE_REPLACEMENT_POSTERIOR_METHOD
+        assert belief.posterior_method == "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
+
+    def test_live_bpf_source_accepts_non_source_posterior_method(self, forecasts_db):
+        """posterior_method is provenance, not live-authority identity."""
+        _insert(
+            forecasts_db,
+            posterior_id="bpf-method",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            q={BIN: 0.34},
+            source_id=LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+            posterior_method="the_path_bayes_precision_fusion",
+        )
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.posterior_id == "bpf-method"
+        assert belief.q_yes_bin == pytest.approx(0.34)
+        assert belief.source_id == LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID
+        assert belief.posterior_method == "the_path_bayes_precision_fusion"
 
     def test_only_deprecated_aifs_rows_fail_closed(self, forecasts_db):
         _insert(
