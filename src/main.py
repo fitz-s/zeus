@@ -5840,6 +5840,7 @@ def _edli_command_recovery_cycle() -> None:
     if _defer_for_held_position_monitor("edli_command_recovery"):
         return
     from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.state.db import get_trade_connection_with_world_required
 
     summary = reconcile_unresolved_commands()
     if summary.get("scanned"):

@@ -675,3 +675,52 @@ def test_command_recovery_mutation_summary_requires_allocator_refresh() -> None:
     assert _command_recovery_summary_mutated_allocator_inputs(
         {"scanned": 1, "advanced": 0, "recorded_maker_fill_economics": {"projected": 17}}
     )
+
+
+def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypatch) -> None:
+    """The scheduled recovery job must refresh allocator state after DB mutations."""
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_conn = FakeConn()
+    health_calls: list[tuple[str, bool, str | None]] = []
+    refresh_calls: list[FakeConn] = []
+
+    monkeypatch.setattr(main_module, "_settings_section", lambda name, default=None: {"enabled": True})
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda: {"scanned": 1, "advanced": 1},
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_with_world_required",
+        lambda write_class=None: fake_conn,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_refresh_global_allocator_for_live_bridge",
+        lambda conn: refresh_calls.append(conn) or {"configured": True},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_write_scheduler_health",
+        lambda job_name, failed=False, reason=None, **kwargs: health_calls.append(
+            (job_name, failed, reason)
+        ),
+    )
+
+    main_module._edli_command_recovery_cycle()
+
+    assert refresh_calls == [fake_conn]
+    assert fake_conn.closed is True
+    assert ("edli_command_recovery", False, None) in health_calls
