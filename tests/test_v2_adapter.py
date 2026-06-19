@@ -523,6 +523,36 @@ def test_collateral_payload_syncs_and_reads_with_configured_signature_type(tmp_p
         assert getattr(params, "signature_type") == 3
 
 
+def test_pusd_collateral_payload_does_not_enumerate_ctf_positions(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    class FakeClientWithForbiddenPositions(FakeBalanceAllowanceClient):
+        def get_positions(self):
+            raise AssertionError("BUY pUSD proof must not enumerate CTF positions")
+
+    fake = FakeClientWithForbiddenPositions()
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_pusd_collateral_payload()
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    assert payload["pusd_allowance_micro"] == "50000000"
+    assert payload["ctf_token_balances_units"] == {}
+    assert payload["ctf_token_allowances_units"] == {}
+    assert [call[0] for call in fake.calls[:2]] == [
+        "update_balance_allowance",
+        "get_balance_allowance",
+    ]
+
+
 def test_collateral_payload_rederives_once_when_runtime_l2_creds_are_stale(tmp_path):
     import src.venue.polymarket_v2_adapter as adapter_mod
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter

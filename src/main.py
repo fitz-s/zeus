@@ -8197,7 +8197,8 @@ def _edli_pre_submit_authority_provider_from_world_conn(
     max_quote_age_ms = int(edli_cfg.get("pre_submit_max_quote_age_ms", 1000) or 1000)
     balance_check_enabled = bool(edli_cfg.get("pre_submit_balance_allowance_check_enabled", True))
     venue_summary_cache: dict[str, object] | None = None
-    collateral_payload_cache: dict[str, object] | None = None
+    pusd_collateral_payload_cache: dict[str, object] | None = None
+    full_collateral_payload_cache: dict[str, object] | None = None
 
     def _cached_venue_summary(checked_at: datetime) -> dict[str, object]:
         nonlocal venue_summary_cache
@@ -8205,20 +8206,37 @@ def _edli_pre_submit_authority_provider_from_world_conn(
             venue_summary_cache = _edli_venue_connectivity_authority_summary(checked_at)
         return venue_summary_cache
 
-    def _cached_collateral_payload() -> dict[str, object]:
-        nonlocal collateral_payload_cache
-        if collateral_payload_cache is None:
+    def _cached_collateral_payload(side: str) -> dict[str, object]:
+        nonlocal full_collateral_payload_cache, pusd_collateral_payload_cache
+        normalized_side = str(side or "").upper()
+        if normalized_side == "BUY" and pusd_collateral_payload_cache is None:
             from src.data.polymarket_client import PolymarketClient
 
             with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
                 adapter = clob._ensure_v2_adapter()
-                collateral_payload_cache = dict(
+                pusd_payload_fn = getattr(adapter, "get_pusd_collateral_payload", None)
+                if not callable(pusd_payload_fn):
+                    pusd_payload_fn = adapter.get_collateral_payload
+                pusd_collateral_payload_cache = dict(
+                    _edli_run_pre_submit_clob_call(
+                        "collateral_payload",
+                        pusd_payload_fn,
+                    )
+                )
+        if normalized_side == "BUY":
+            return pusd_collateral_payload_cache
+        if full_collateral_payload_cache is None:
+            from src.data.polymarket_client import PolymarketClient
+
+            with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
+                adapter = clob._ensure_v2_adapter()
+                full_collateral_payload_cache = dict(
                     _edli_run_pre_submit_clob_call(
                         "collateral_payload",
                         adapter.get_collateral_payload,
                     )
                 )
-        return collateral_payload_cache
+        return full_collateral_payload_cache
 
     def _provider(final_intent, _executable_snapshot, decision_time):
         checked_at = decision_time.astimezone(timezone.utc)
@@ -8270,7 +8288,7 @@ def _edli_pre_submit_authority_provider_from_world_conn(
             final_intent,
             checked_at,
             enabled=balance_check_enabled,
-            collateral_payload=_cached_collateral_payload(),
+            collateral_payload=_cached_collateral_payload(str(intent.get("side") or "")),
         )
 
         return PreSubmitAuthorityWitness(

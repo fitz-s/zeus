@@ -53,6 +53,19 @@ UTC = timezone.utc
 
 # Latest-fact states that mean "this order is resting open at the venue".
 OPEN_REST_FACT_STATES = ("LIVE", "RESTING", "PARTIALLY_MATCHED")
+TERMINAL_COMMAND_STATES = frozenset(
+    {"CANCELLED", "CANCELED", "EXPIRED", "FILLED", "REJECTED", "SUBMIT_REJECTED"}
+)
+
+
+class _TerminalCommandNoop(RuntimeError):
+    def __init__(self, command_id: str, state: str, event_type: str) -> None:
+        super().__init__(
+            f"terminal command {command_id} already {state}; skipping {event_type}"
+        )
+        self.command_id = command_id
+        self.state = state
+        self.event_type = event_type
 
 
 def _deadline_minutes() -> float:
@@ -256,6 +269,14 @@ def _append_cancel_journal_event(
     for attempt in range(1, 4):
         conn = conn_factory()
         try:
+            row = conn.execute(
+                "SELECT state FROM venue_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            if row is not None:
+                current_state = str(row["state"] if isinstance(row, sqlite3.Row) else row[0]).upper()
+                if current_state in TERMINAL_COMMAND_STATES:
+                    raise _TerminalCommandNoop(command_id, current_state, event_type)
             if venue_order_id and _cancel_journal_event_already_persisted(
                 conn,
                 command_id=command_id,
@@ -277,6 +298,8 @@ def _append_cancel_journal_event(
                 conn.rollback()
             except Exception:
                 pass
+            if isinstance(exc, _TerminalCommandNoop):
+                raise
             if not _is_sqlite_lock_error(exc) or attempt == 3:
                 raise
             logger.warning(
@@ -344,6 +367,15 @@ def run_persisted_cancels_for_expired_rests(
                 },
                 close_connections=close_connections,
             )
+        except _TerminalCommandNoop as exc:
+            logger.info(
+                "maker_rest_escalation: skipped terminal command before cancel "
+                "command=%s order=%s state=%s",
+                command_id,
+                order_id,
+                exc.state,
+            )
+            continue
         except Exception as exc:  # noqa: BLE001
             stats["cancel_failed"] += 1
             logger.error(
@@ -390,6 +422,16 @@ def run_persisted_cancels_for_expired_rests(
                 payload=payload,
                 close_connections=close_connections,
             )
+        except _TerminalCommandNoop as exc:
+            logger.info(
+                "maker_rest_escalation: skipped post-cancel journal for terminal command "
+                "command=%s order=%s event=%s state=%s",
+                command_id,
+                order_id,
+                event_type,
+                exc.state,
+            )
+            continue
         except Exception as exc:  # noqa: BLE001
             stats["cancel_journal_failed"] += 1
             logger.error(

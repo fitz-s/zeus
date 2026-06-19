@@ -280,6 +280,42 @@ class TestFailSoft:
         assert payload["semantic_cancel_status"] == "CANCEL_UNKNOWN"
         assert payload["requires_m5_reconcile"] is True
 
+    def test_terminal_command_race_does_not_append_cancel_replace_blocked(self):
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+        expired = find_expired_resting_entries(conn, now=NOW)
+
+        class RaceClob:
+            def cancel_order(self, _order_id: str):
+                conn.execute(
+                    "UPDATE venue_commands SET state = 'CANCELLED' WHERE command_id = 'c1'"
+                )
+                conn.commit()
+                raise RuntimeError("matched orders can't be canceled")
+
+        stats = run_persisted_cancels_for_expired_rests(
+            expired,
+            RaceClob(),
+            conn_factory=lambda: conn,
+            close_connections=False,
+        )
+
+        event_types = [
+            row[0]
+            for row in conn.execute(
+                "SELECT event_type FROM venue_command_events "
+                "WHERE command_id = 'c1' ORDER BY sequence_no"
+            )
+        ]
+        assert stats == {
+            "scanned": 1,
+            "cancelled": 0,
+            "cancel_failed": 0,
+            "cancel_journal_failed": 0,
+        }
+        assert event_types[-1] == "CANCEL_REQUESTED"
+        assert "CANCEL_REPLACE_BLOCKED" not in event_types
+
 
 class TestEscalationRedecisionHarvest:
     """collect_cancelled out-parameter (redecide-block fix 2026-06-16): the cancel

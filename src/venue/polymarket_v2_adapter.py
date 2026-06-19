@@ -658,14 +658,7 @@ class PolymarketV2Adapter:
             raise V2AdapterError("balance allowance response missing balance")
         return balance
 
-    def get_collateral_payload(self) -> dict[str, Any]:
-        """Return SDK-derived collateral facts for CollateralLedger.refresh().
-
-        All py_clob_client_v2 imports stay confined to this adapter. The state
-        ledger receives plain dictionaries and never depends on SDK types.
-        """
-
-        raw = self._collateral_balance_allowance_raw()
+    def _pusd_collateral_payload_from_raw(self, raw: dict[str, Any]) -> dict[str, Any]:
         pusd_allowance_raw = raw.get("allowance")
         allowance_int = _micro_int_or_none(pusd_allowance_raw)
         authority_tier = "CHAIN"
@@ -683,6 +676,32 @@ class PolymarketV2Adapter:
                 authority_tier = "DEGRADED"
                 allowance_source = "chain_erc20_unavailable_clob_zero"
 
+        return {
+            "pusd_balance_micro": raw.get("balance", 0),
+            "pusd_allowance_micro": pusd_allowance_raw if pusd_allowance_raw is not None else 0,
+            "usdc_e_legacy_balance_micro": 0,
+            "ctf_token_balances_units": {},
+            "ctf_token_allowances_units": {},
+            "authority_tier": authority_tier,
+            "signature_type": self.signature_type,
+            "pusd_allowance_source": allowance_source,
+        }
+
+    def get_pusd_collateral_payload(self) -> dict[str, Any]:
+        """Return pUSD balance/allowance facts without CTF position enumeration."""
+
+        raw = self._collateral_balance_allowance_raw()
+        return self._pusd_collateral_payload_from_raw(raw)
+
+    def get_collateral_payload(self) -> dict[str, Any]:
+        """Return SDK-derived collateral facts for CollateralLedger.refresh().
+
+        All py_clob_client_v2 imports stay confined to this adapter. The state
+        ledger receives plain dictionaries and never depends on SDK types.
+        """
+
+        raw = self._collateral_balance_allowance_raw()
+        payload = self._pusd_collateral_payload_from_raw(raw)
         balances: dict[str, int] = {}
         allowances: dict[str, int] = {}
         # CTF position enumeration goes through a separate read surface (the
@@ -736,16 +755,9 @@ class PolymarketV2Adapter:
                 allowance_units = 0
             allowances[token_key] = allowances.get(token_key, 0) + allowance_units
 
-        return {
-            "pusd_balance_micro": raw.get("balance", 0),
-            "pusd_allowance_micro": pusd_allowance_raw if pusd_allowance_raw is not None else 0,
-            "usdc_e_legacy_balance_micro": 0,
-            "ctf_token_balances_units": balances,
-            "ctf_token_allowances_units": allowances,
-            "authority_tier": authority_tier,
-            "signature_type": self.signature_type,
-            "pusd_allowance_source": allowance_source,
-        }
+        payload["ctf_token_balances_units"] = balances
+        payload["ctf_token_allowances_units"] = allowances
+        return payload
 
     def _collateral_balance_allowance_raw(self) -> dict[str, Any]:
         """Read the CLOB collateral balance/allowance surface once."""
