@@ -6368,7 +6368,32 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 now_utc=now,
             )
             confirm_status = str(confirm_refresh_summary.get("status") or "")
-            if _edli_confirmation_refresh_unavailable(confirm_refresh_summary):
+            if _edli_confirmation_refresh_needs_family_freshness_filter(confirm_refresh_summary):
+                fresh_confirmed_families = _edli_families_with_fresh_executable_substrate(
+                    confirm_families,
+                    now_utc=now,
+                )
+                confirmed_entry_scope &= fresh_confirmed_families
+                confirmed_rest_scope &= fresh_confirmed_families
+                confirm_families &= fresh_confirmed_families
+                logger.info(
+                    "edli_redecision_screen: partial confirmation refresh admitted "
+                    "fresh families=%d/%d entry_scope=%d rest_scope=%d summary=%r",
+                    len(fresh_confirmed_families),
+                    len(set(all_families) | set(held_families)),
+                    len(confirmed_entry_scope),
+                    len(confirmed_rest_scope),
+                    confirm_refresh_summary,
+                )
+                if not confirmed_entry_scope and not confirmed_rest_scope:
+                    logger.info(
+                        "edli_redecision_screen: confirmation refresh partial but no "
+                        "screened family has complete fresh substrate; skipping emit "
+                        "this tick rather than queueing stale redecision families=%d",
+                        len(set(all_families) | set(held_families)),
+                    )
+                    return
+            elif _edli_confirmation_refresh_unavailable(confirm_refresh_summary):
                 logger.info(
                     "edli_redecision_screen: confirmation refresh not available; "
                     "skipping emit this tick rather than queueing stale redecision "
@@ -6969,6 +6994,84 @@ def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:
     if coverage in {"NONE", "PARTIAL"}:
         return True
     return False
+
+
+def _edli_confirmation_refresh_needs_family_freshness_filter(summary: dict | None) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    return (
+        str(summary.get("status") or "") == "refreshed"
+        and str(summary.get("executable_substrate_coverage_status") or "") == "PARTIAL"
+        and not _edli_refresh_summary_has_sqlite_lock_failures(summary)
+    )
+
+
+def _edli_families_with_fresh_executable_substrate(
+    families: set[tuple[str, str, str]],
+    *,
+    now_utc: datetime,
+) -> set[tuple[str, str, str]]:
+    """Families whose complete market topology has fresh executable snapshots.
+
+    This is the family-level confirmation proof for continuous redecision. A
+    partial capture must not freeze every current money-path family, but it also
+    must not queue decisions from stale prices. Each family is admitted only when
+    every known condition has fresh YES and NO buy-side executable substrate.
+    """
+
+    clean_families = {
+        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        for city, target_date, metric in families or set()
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
+    if not clean_families:
+        return set()
+    from src.data.market_topology_rows import _event_family_market_topology_rows
+    from src.state.db import get_forecasts_connection_read_only, get_trade_connection_read_only
+
+    fresh_at_iso = now_utc.isoformat()
+    out: set[tuple[str, str, str]] = set()
+    forecasts_ro = get_forecasts_connection_read_only()
+    trade_ro = get_trade_connection_read_only()
+    try:
+        for family in sorted(clean_families):
+            city, target_date, metric = family
+            try:
+                topology_rows = _event_family_market_topology_rows(
+                    forecasts_ro,
+                    {"city": city, "target_date": target_date, "metric": metric},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "edli_redecision_screen: family freshness topology read failed; "
+                    "family not admitted this tick city=%r target_date=%r metric=%r error=%r",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
+            condition_ids = {
+                str(row.get("condition_id") or "").strip()
+                for row in topology_rows
+                if str(row.get("condition_id") or "").strip()
+            }
+            if not condition_ids:
+                continue
+            if all(_condition_buy_sides_fresh(trade_ro, cid, fresh_at_iso) for cid in condition_ids):
+                out.add(family)
+    finally:
+        try:
+            forecasts_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            trade_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 def _edli_reemittable_forecast_family_keys(

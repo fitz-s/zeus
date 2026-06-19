@@ -330,12 +330,16 @@ def _topology_lookup_deadline_for_snapshot_refresh(
     """Stop topology reconstruction early enough to attempt direct Gamma lookup."""
 
     pre_capture_deadline = refresh_deadline - snapshot_reserve_s
+    available_pre_capture_s = max(0.0, refresh_budget_s - snapshot_reserve_s)
     gamma_min_slice_s = max(
         0.0,
-        float(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_MIN_SECONDS", "15.0")),
+        float(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_MIN_SECONDS", "2.0")),
     )
-    available_pre_capture_s = max(0.0, refresh_budget_s - snapshot_reserve_s)
-    gamma_min_slice_s = min(gamma_min_slice_s, available_pre_capture_s)
+    # Gamma is only needed for families whose topology is missing. In steady-state
+    # live operation the money-path families already have cached topology, so the
+    # Gamma reserve must not consume the whole pre-capture window and collapse the
+    # topology scan to one family per tick.
+    gamma_min_slice_s = min(gamma_min_slice_s, available_pre_capture_s * 0.5)
     return max(refresh_deadline - refresh_budget_s, pre_capture_deadline - gamma_min_slice_s)
 def _snapshot_capture_budget_for_refresh(
     *,

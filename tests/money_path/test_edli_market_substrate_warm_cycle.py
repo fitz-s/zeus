@@ -232,6 +232,10 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "_market_substrate_refresh_lock" not in confirm_src
     assert "include_pending_families=False" in confirm_src
     assert "extra_priority_families=clean_families" in confirm_src
+    assert "_edli_confirmation_refresh_needs_family_freshness_filter(confirm_refresh_summary)" in screen_src
+    assert "_edli_families_with_fresh_executable_substrate(" in screen_src
+    assert "confirmed_entry_scope &= fresh_confirmed_families" in screen_src
+    assert "confirmed_rest_scope &= fresh_confirmed_families" in screen_src
     assert "_edli_confirmation_refresh_unavailable(confirm_refresh_summary)" in screen_src
 
 
@@ -303,7 +307,9 @@ def test_continuous_redecision_confirm_refresh_retries_locked_summary(monkeypatc
 
 def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_summary():
     """The emit gate must fail closed when confirmation refresh did not prove
-    full executable-price coverage for the current money-path families."""
+    any executable-price coverage for the current money-path families. A PARTIAL
+    capture is not globally sufficient; it must be resolved by family freshness
+    proof before any family can be emitted."""
 
     assert main_module._edli_confirmation_refresh_unavailable(
         {
@@ -315,9 +321,71 @@ def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_
     assert main_module._edli_confirmation_refresh_unavailable(
         {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
     )
+    assert main_module._edli_confirmation_refresh_needs_family_freshness_filter(
+        {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
+    )
+    assert not main_module._edli_confirmation_refresh_needs_family_freshness_filter(
+        {
+            "status": "refreshed",
+            "executable_substrate_coverage_status": "PARTIAL",
+            "failure_samples": [{"error": "database is locked"}],
+        }
+    )
     assert not main_module._edli_confirmation_refresh_unavailable(
         {"status": "refreshed", "executable_substrate_coverage_status": "FULL"}
     )
+
+
+def test_continuous_redecision_partial_refresh_filters_to_fresh_families(monkeypatch):
+    """A PARTIAL confirmation refresh must not freeze every family. Only families
+    whose full topology has fresh YES and NO executable substrate are admitted."""
+
+    import src.data.market_topology_rows as topology_rows
+    import src.state.db as state_db
+
+    class _Conn:
+        def __init__(self, name: str):
+            self.name = name
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    forecasts = _Conn("forecasts")
+    trade = _Conn("trade")
+    topology = {
+        ("Paris", "2026-06-20", "low"): [{"condition_id": "fresh-a"}, {"condition_id": "fresh-b"}],
+        ("Tokyo", "2026-06-20", "high"): [{"condition_id": "fresh-c"}, {"condition_id": "stale-d"}],
+        ("Berlin", "2026-06-20", "high"): [],
+    }
+    fresh_conditions: list[str] = []
+
+    def _topology(_conn, payload):
+        return topology.get((payload["city"], payload["target_date"], payload["metric"]), [])
+
+    def _fresh(_conn, condition_id, fresh_at_iso):
+        assert fresh_at_iso == "2026-06-19T12:00:00+00:00"
+        fresh_conditions.append(condition_id)
+        return condition_id.startswith("fresh")
+
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: forecasts)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: trade)
+    monkeypatch.setattr(topology_rows, "_event_family_market_topology_rows", _topology)
+    monkeypatch.setattr(main_module, "_condition_buy_sides_fresh", _fresh)
+
+    admitted = main_module._edli_families_with_fresh_executable_substrate(
+        {
+            ("Paris", "2026-06-20", "low"),
+            ("Tokyo", "2026-06-20", "high"),
+            ("Berlin", "2026-06-20", "high"),
+        },
+        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert admitted == {("Paris", "2026-06-20", "low")}
+    assert {"fresh-a", "fresh-b", "stale-d"}.issubset(set(fresh_conditions))
+    assert forecasts.closed
+    assert trade.closed
 
 
 def test_day0_emit_scanner_retries_sqlite_lock(monkeypatch):
