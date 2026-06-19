@@ -523,7 +523,7 @@ def _spine_inputs_missing_reason(payload: Mapping[str, Any]) -> str:
     """Sub-type WHY ``_served_predictive_inputs`` failed, so a live SPINE_INPUTS_UNAVAILABLE
     names the exact gap (the Stage-0 producer threads these onto the payload; a missing key
     means the producer did not run for this family, mutated a different payload object, or
-    that branch computed no value). Diagnostic only — never alters a decision."""
+    that branch computed no value). Non-gating telemetry — never alters a decision."""
     mu = payload.get("_edli_spine_mu_native")
     sigma = payload.get("_edli_spine_sigma_native")
     if mu is None or sigma is None:
@@ -952,11 +952,10 @@ def decide_family_via_spine(
 
     # --- map the spine's selection back onto the reactor proof -----------------
     if decision.selected is None:
-        # DIAGNOSTIC (2026-06-15): on no-trade, log the top candidates by edge_lcb so we can
-        # tell HONEST no-edge (edge_lcb clearly < 0) from a near-miss (edge_lcb ~ 0 but
-        # optimal_delta_u <= 0). Read-only; fail-safe — never raise into the hot path.
+        # Non-gating telemetry: on no-trade, log the top candidates by edge_lcb so the
+        # operator can distinguish no positive edge from a near-miss. Read-only; fail-safe.
         try:
-            import logging as _spine_diag_logging
+            import logging as _spine_telemetry_logging
 
             _cands = sorted(
                 getattr(decision, "candidates", ()) or (),
@@ -970,8 +969,8 @@ def decide_family_via_spine(
                     f"cost={float(c.cost.value):.4f} stake={c.optimal_stake_usd}"
                     for c in _cands
                 )
-                _spine_diag_logging.getLogger("zeus.spine_edge").info(
-                    "SPINE_NOTRADE_EDGE_DIAG family=%s reason=%s top=[%s]",
+                _spine_telemetry_logging.getLogger("zeus.spine_edge").info(
+                    "SPINE_NOTRADE_EDGE_TELEMETRY family=%s reason=%s top=[%s]",
                     getattr(case, "family_id", "?"),
                     decision.no_trade_reason,
                     _top,

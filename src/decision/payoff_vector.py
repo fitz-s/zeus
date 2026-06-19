@@ -100,7 +100,7 @@ scalar transform in place):
 
 THE SCALAR IS TELEMETRY (spec lines 793-802, 1184). ``CandidateEconomics.q_dot_payoff``
 records ``q @ payoff`` (the point fair value) and a derived scalar ``q - price`` edge
-is available ONLY as a logged diagnostic via :func:`scalar_trade_score`. The live
+is available ONLY as logged telemetry via :func:`scalar_trade_score`. The live
 candidate pass (:func:`live_candidate_passes`) selects on the VECTOR quantities
 (``edge_lcb > 0`` AND ``delta_u_at_min > 0`` AND ``optimal_delta_u > 0`` AND executable
 route AND direction-law proof present AND market coherence accepted). The scalar score
@@ -737,8 +737,8 @@ def live_candidate_passes(
         market coherence accepted
 
     EVERY condition is a vector / structural quantity. The scalar ``q - price`` trade
-    score is NOT one of them — :func:`scalar_trade_score` exists ONLY as a logged
-    telemetry diagnostic and is never read here. So the bad selection (promoting on a
+    score is NOT one of them — :func:`scalar_trade_score` exists ONLY as logged
+    telemetry and is never read here. So the bad selection (promoting on a
     scalar ``q_i - price`` that ignores the rest of the payoff vector and the family
     exposure) is unconstructable: the only inputs to the pass are the vector edge_lcb,
     the vector ΔU at min and at s*, the route's executability, the direction-law proof,

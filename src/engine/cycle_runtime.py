@@ -5726,6 +5726,11 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         or getattr(candidate, "slug", "")
                     ),
                     existing_exposures=_family_exposures,
+                    family_portfolio_intent=any(
+                        str(getattr(_d, "family_portfolio_leg_role", "") or "")
+                        == "portfolio_selected"
+                        for _d in decisions
+                    ),
                 )
                 _frontier_increment("family_frontier", "families_seen")
                 _frontier_increment(
@@ -5881,9 +5886,13 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     family_fallback_candidate_count = int(
                         getattr(d, "family_fallback_candidate_count", 0) or 0
                     )
+                    family_portfolio_leg_role = str(
+                        getattr(d, "family_portfolio_leg_role", "") or ""
+                    )
                     if (
                         family_fallback_candidate_count > 1
                         and family_fallback_submit_satisfied
+                        and family_portfolio_leg_role != "portfolio_selected"
                     ):
                         summary["no_trades"] += 1
                         rejection_stage = "ANTI_CHURN"
@@ -6740,10 +6749,23 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         and family_fallback_attempt_accepted
                     ):
                         family_fallback_submit_satisfied = True
+                    if (
+                        family_fallback_candidate_count > 1
+                        and family_fallback_attempt_accepted
+                        and family_portfolio_leg_role != "portfolio_selected"
+                    ):
                         summary["family_fallback_selected_rank"] = int(
                             getattr(d, "family_fallback_rank", 0) or 0
                         )
                         summary["family_fallback_candidate_count"] = family_fallback_candidate_count
+                    elif (
+                        family_fallback_candidate_count > 1
+                        and family_fallback_attempt_accepted
+                        and family_portfolio_leg_role == "portfolio_selected"
+                    ):
+                        summary["family_portfolio_selected_submits"] = (
+                            int(summary.get("family_portfolio_selected_submits", 0) or 0) + 1
+                        )
                     # P1.S5 INV-32: materialize_position advances position
                     # authority ONLY after the venue command reached a durable
                     # ack state (ACKED, PARTIAL, FILLED). Commands in

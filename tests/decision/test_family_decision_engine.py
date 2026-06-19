@@ -4,7 +4,7 @@
 #   ("Create src/decision/family_decision_engine.py" block lines 854-904: the
 #   FamilyDecision dataclass 858-871; the decide() algorithm 876-901 — the candidate
 #   filter chain direction_law_ok -> coherence_allows -> (edge_lcb>0 & optimal_delta_u>0)
-#   -> selected = argmax optimal_delta_u; the no_trade_reason + receipt_hash on every
+#   -> selected = max robust utility density; the no_trade_reason + receipt_hash on every
 #   exit) and the Stage 8 block lines 1166-1184 (the scalar robust_trade_score is
 #   telemetry only — it CANNOT select). Reconciled against
 #   docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md (GREENFIELD — the engine
@@ -12,17 +12,14 @@
 #   scalar q-price is logged, never selected on).
 """RED-on-revert contract tests for the family_decision_engine (Stage 8b).
 
-Three spec-named tests fail if the corrected transformation is reverted to the broken
+Spec-named tests fail if the corrected transformation is reverted to the broken
 behavior the spec replaces:
 
-  * ``test_decide_filters_direction_then_coherence_then_edge_then_argmax_delta_u`` — the
+  * ``test_decide_filters_direction_then_coherence_then_edge_then_utility_density`` — the
     full candidate filter chain runs in the spec ORDER (direction_law_ok ->
     coherence_allows -> edge_lcb>0 & optimal_delta_u>0) and the survivor is selected by
-    ``argmax optimal_delta_u``, NOT by the scalar ``q - price`` trade score. RED-on-revert:
-    we build a family in which a SCALAR-positive candidate has a LOWER optimal_delta_u than
-    the genuine vector winner; selecting on the scalar would pick the wrong candidate. The
-    test asserts the selected candidate is the ΔU-argmax, and that a scalar-higher candidate
-    was NOT selected — so a reversion to ``argmax robust_trade_score`` fails.
+    robust utility density, NOT by the scalar ``q - price`` trade score or capital-heavy
+    total ΔU alone.
 
   * ``test_no_trade_reason_present_when_no_candidate_passes`` — when nothing survives the
     filter chain, ``decide`` returns a ``FamilyDecision`` with ``selected=None``, a non-None
@@ -566,6 +563,7 @@ def _hand_decision(
     optimal_delta_u: float,
     delta_u_at_min: float,
     robust_trade_score: float,
+    optimal_stake_usd: Decimal = Decimal("5"),
 ) -> CandidateDecision:
     """A hand-built CandidateDecision (direction-law-legal + coherent) for the _select test."""
     economics = CandidateEconomics(
@@ -573,7 +571,7 @@ def _hand_decision(
         point_ev=edge_lcb + 0.01,
         edge_lcb=edge_lcb,
         delta_u_at_min=delta_u_at_min,
-        optimal_stake_usd=Decimal("5"),
+        optimal_stake_usd=optimal_stake_usd,
         optimal_delta_u=optimal_delta_u,
         q_dot_payoff=0.5,
         cost=route.route_cost.avg_cost,
@@ -589,25 +587,22 @@ def _hand_decision(
 
 
 # ===========================================================================
-# SPEC RED-on-revert #1: filter chain order + argmax optimal_delta_u (not the scalar).
+# SPEC RED-on-revert #1: filter chain order + utility-density selection (not the scalar).
 # ===========================================================================
 
-def test_decide_filters_direction_then_coherence_then_edge_then_argmax_delta_u(monkeypatch):
-    """The survivor is selected by argmax optimal_delta_u over the filter chain — NOT the scalar.
+def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(monkeypatch):
+    """The survivor is selected by robust utility density over the filter chain, NOT scalar score.
 
     Build a family centered on b25 (the forecast/modal bin) with a DEEP, tight market whose
     YES midpoints AGREE with the model q (coherence does NOT block anything). The candidate
     set is the direction-law-legal YES_25 plus the direction-law-legal NO candidates on every
     OTHER bin (a NO_i is legal iff i is not the forecast bin). Each candidate is priced so its
-    vector edge is positive but its robust ΔU differs.
+    vector edge is positive but its robust utility density differs.
 
-    The load-bearing RED-on-revert fact: the candidate with the highest SCALAR
-    ``robust_trade_score`` is NOT the candidate with the highest ``optimal_delta_u`` — because
-    the scalar is a single-number ``q - price`` while ΔU is the family-vector log-growth that
-    accounts for the WHOLE payoff vector and the existing exposure. The engine selects by
-    ``argmax optimal_delta_u``; a reversion to ``argmax robust_trade_score`` would pick the
-    scalar-max candidate. The test asserts the selected candidate IS the ΔU-argmax AND that a
-    genuinely scalar-higher candidate exists that was NOT selected (so the revert path differs).
+    The load-bearing RED-on-revert fact: scalar ``robust_trade_score`` is not a selection key,
+    and total ΔU alone is not enough either when it only wins by tying up more capital. The
+    engine selects by ``optimal_delta_u / optimal_stake_usd`` over candidates that already pass
+    direction/coherence/edge/ΔU gates.
     """
     case = _case()
     space = _outcome_space(case)
@@ -687,9 +682,9 @@ def test_decide_filters_direction_then_coherence_then_edge_then_argmax_delta_u(m
     assert selected_decision.economics.edge_lcb > 0.0
     assert selected_decision.economics.optimal_delta_u > 0.0
 
-    # PIN THE SELECTION KEY: the selected candidate has the MAXIMUM optimal_delta_u among the
+    # PIN THE SELECTION KEY: the selected candidate has the MAXIMUM utility density among the
     # candidates that passed the full filter chain (direction-law-legal, coherent, executable,
-    # positive edge, positive ΔU). This is the argmax-ΔU contract.
+    # positive edge, positive ΔU). This is the utility-density contract.
     passing = [
         d
         for d in decision.candidate_decisions
@@ -700,8 +695,14 @@ def test_decide_filters_direction_then_coherence_then_edge_then_argmax_delta_u(m
         and d.economics.optimal_delta_u > 0.0
     ]
     assert passing
-    assert decision.selected.optimal_delta_u == pytest.approx(
-        max(d.economics.optimal_delta_u for d in passing)
+    selected_density = float(decision.selected.optimal_delta_u) / max(
+        float(decision.selected.optimal_stake_usd), 1e-9
+    )
+    assert selected_density == pytest.approx(
+        max(
+            float(d.economics.optimal_delta_u) / max(float(d.economics.optimal_stake_usd), 1e-9)
+            for d in passing
+        )
     )
 
     # Post-2026-06-15 relax: a non-modal YES whose point-q is INSIDE the settlement-validated
@@ -716,15 +717,13 @@ def test_decide_filters_direction_then_coherence_then_edge_then_argmax_delta_u(m
     )
 
 
-def test_select_uses_argmax_delta_u_not_scalar_trade_score(monkeypatch):
-    """The engine's selection key is optimal_delta_u, NOT the scalar robust_trade_score.
+def test_select_uses_utility_density_not_scalar_trade_score(monkeypatch):
+    """The engine's selection key is utility density, NOT scalar score.
 
     This is the isolated RED-on-revert for the selection KEY. We hand-build two passing
     candidate decisions (both direction-law-legal, coherent, executable, positive edge,
-    positive ΔU) where one has a STRICTLY HIGHER scalar ``robust_trade_score`` but a STRICTLY
-    LOWER ``optimal_delta_u`` than the other. The engine's ``_select`` must choose the
-    ΔU-argmax candidate. A reversion to ``argmax robust_trade_score`` (the demoted scalar the
-    spec forbids from selecting — lines 900-903, 1184) would choose the other and fail.
+    positive ΔU) where one has a STRICTLY HIGHER scalar ``robust_trade_score`` but lower
+    robust utility density. The engine's ``_select`` must choose the density winner.
     """
     case = _case()
     space = _outcome_space(case)
@@ -732,13 +731,15 @@ def test_select_uses_argmax_delta_u_not_scalar_trade_score(monkeypatch):
     route_lo_scalar_hi_du = _hand_route(space, side="NO", bin_id="b24", cost=0.20)
     route_hi_scalar_lo_du = _hand_route(space, side="NO", bin_id="b22", cost=0.05)
 
-    # The ΔU winner: lower scalar trade score, HIGHER optimal_delta_u.
+    # The density winner: lower scalar trade score, higher utility per staked dollar.
     win = _hand_decision(route_lo_scalar_hi_du, edge_lcb=0.10, optimal_delta_u=0.50,
-                         delta_u_at_min=0.01, robust_trade_score=0.30)
-    # The scalar winner: HIGHER scalar trade score, LOWER optimal_delta_u (a scalar-argmax
+                         delta_u_at_min=0.01, robust_trade_score=0.30,
+                         optimal_stake_usd=Decimal("10"))
+    # The scalar winner: HIGHER scalar trade score, lower density (a scalar-argmax
     # reversion would pick this one).
     lose = _hand_decision(route_hi_scalar_lo_du, edge_lcb=0.20, optimal_delta_u=0.20,
-                          delta_u_at_min=0.01, robust_trade_score=0.90)
+                          delta_u_at_min=0.01, robust_trade_score=0.90,
+                          optimal_stake_usd=Decimal("100"))
 
     engine = FamilyDecisionEngine(
         fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
@@ -749,16 +750,19 @@ def test_select_uses_argmax_delta_u_not_scalar_trade_score(monkeypatch):
 
     assert reason is None
     assert selected is not None
-    # The selection is the ΔU-argmax (win), NOT the scalar-argmax (lose).
+    # The selection is the density winner, NOT the scalar-argmax loser.
     assert selected.route.bin_id == "b24"
     assert selected.economics.optimal_delta_u == pytest.approx(0.50)
     # Prove the trap: the LOSER had the strictly higher scalar but was NOT selected.
     assert lose.robust_trade_score > win.robust_trade_score
-    assert selected.economics.optimal_delta_u > lose.economics.optimal_delta_u
+    assert (
+        float(selected.economics.optimal_delta_u) / float(selected.economics.optimal_stake_usd)
+        > float(lose.economics.optimal_delta_u) / float(lose.economics.optimal_stake_usd)
+    )
 
 
-def test_select_prefers_capital_efficiency_when_utility_and_edge_tie(monkeypatch):
-    """Equal growth candidates should not tie-break toward higher capital lockup."""
+def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monkeypatch):
+    """A high-capital low-density route must not beat a lower-capital high-density route."""
     case = _case()
     space = _outcome_space(case)
     high_cost_route = _hand_route(space, side="NO", bin_id="b24", cost=0.80)
@@ -766,16 +770,18 @@ def test_select_prefers_capital_efficiency_when_utility_and_edge_tie(monkeypatch
     high_cost = _hand_decision(
         high_cost_route,
         edge_lcb=0.08,
-        optimal_delta_u=0.12,
+        optimal_delta_u=0.20,
         delta_u_at_min=0.01,
         robust_trade_score=0.90,
+        optimal_stake_usd=Decimal("100"),
     )
     low_cost = _hand_decision(
         low_cost_route,
         edge_lcb=0.08,
-        optimal_delta_u=0.12,
+        optimal_delta_u=0.05,
         delta_u_at_min=0.01,
         robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("5"),
     )
 
     engine = FamilyDecisionEngine(
@@ -999,29 +1005,16 @@ def test_tokyo_impossible_bin_blocked_by_coherence_before_scoring(monkeypatch):
 
 
 # ===========================================================================
-# SPEC RED-on-revert #4: NO-on-modal survives _select via favorite-longshot relaxation.
+# SPEC RED-on-revert #4: NO-on-modal requires side-aware OOF evidence.
 # ===========================================================================
 
-def test_no_on_modal_survives_select_via_edge_gated_relaxation():
-    """A NO-on-modal candidate (direction_law_ok=False) is admitted by _select when edge_lcb>0.
+def test_no_on_modal_requires_side_aware_oof_license():
+    """A NO-on-modal candidate cannot bypass direction law on edge alone.
 
-    The fix: ``_select`` defines ``_direction_admitted(d)`` as::
-
-        d.direction_law_ok or (d.route.side == "NO" and d.economics.edge_lcb > 0.0)
-
-    and passes that SAME predicate to both the ``after_direction`` filter AND to
-    ``live_candidate_passes(direction_law_proof_present=_direction_admitted(d))``.
-
-    RED-on-revert: if the re-proof is reverted to
-    ``direction_law_proof_present=d.direction_law_ok`` (which is ``False`` for a
-    NO-on-modal candidate), ``live_candidate_passes`` returns ``False`` and ``_select``
-    returns ``(None, NO_TRADE_NO_POSITIVE_EDGE)``, silently re-zeroing the entire
-    favorite-longshot harvest class.
-
-    This test also confirms that a YES-on-non-modal candidate (direction_law_ok=False,
-    side="YES", edge_lcb>0) is NOT admitted: the relaxation is strictly NO-side-only.
-    Competing a YES-on-non-modal against a NO-on-modal would expose both cases to the
-    after_direction filter simultaneously; we use a separate _select call for clarity.
+    The prior relaxation admitted any NO candidate with edge_lcb>0. That was unsafe once the
+    q_lcb reliability guard became active, because a missing NO-complement cell could pass
+    through as INERT while the center YES cell was abstained. The override now requires an
+    active, non-abstaining side-aware OOF verdict for the exact NO claim.
     """
     case = _case()
     space = _outcome_space(case)
@@ -1050,14 +1043,22 @@ def test_no_on_modal_survives_select_via_edge_gated_relaxation():
         route_id=no_on_modal_route.route_cost.route_id,
     )
     # direction_law_ok=False — this is the key: NO-on-modal is direction-law-ILLEGAL.
-    # The relaxation in _direction_admitted admits it anyway because side=="NO" and
-    # edge_lcb>0. coherence_allows=True (coherence does not block it).
     no_on_modal_cand = CandidateDecision(
         route=no_on_modal_route,
         economics=no_on_modal_economics,
         direction_law_ok=False,
         coherence_allows=True,
         robust_trade_score=0.08,
+    )
+    licensed_no_on_modal_cand = CandidateDecision(
+        route=no_on_modal_route,
+        economics=no_on_modal_economics,
+        direction_law_ok=False,
+        coherence_allows=True,
+        robust_trade_score=0.08,
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="high|L1|NO|modal|qb7",
     )
 
     engine = FamilyDecisionEngine(
@@ -1067,25 +1068,19 @@ def test_no_on_modal_survives_select_via_edge_gated_relaxation():
     )
 
     selected, reason = engine._select([no_on_modal_cand])
+    assert selected is None
+    assert reason == NO_TRADE_NO_DIRECTION_LAW
 
-    # The candidate MUST be selected: direction-law-illegal but admitted via the
-    # edge-gated NO-on-modal relaxation.
-    assert reason is None, (
-        f"expected no no-trade reason; got {reason!r} — "
-        "reverting the re-proof to direction_law_proof_present=d.direction_law_ok "
-        "makes live_candidate_passes return False here (direction_law_ok is False)"
-    )
-    assert selected is not None, (
-        "NO-on-modal with edge_lcb>0 must be selected via the favorite-longshot "
-        "relaxation; got None — check that _direction_admitted is used in BOTH the "
-        "after_direction filter AND in the live_candidate_passes re-proof"
-    )
+    selected, reason = engine._select([licensed_no_on_modal_cand])
+    assert reason is None
+    assert selected is not None
     assert selected.route.side == "NO"
     assert selected.route.bin_id == modal_bin_id
-    # The critical invariant: admitted DESPITE direction_law_ok being False.
+    # The critical invariant: admitted DESPITE direction_law_ok being False only because an
+    # active side-aware OOF verdict licensed the NO complement claim.
     assert selected.direction_law_ok is False, (
-        "expected direction_law_ok=False on the selected candidate — the test proves "
-        "admission is via edge_lcb>0 relaxation, not direction-law legality"
+        "expected direction_law_ok=False on the selected candidate — the test proves the "
+        "admission is via the side-aware OOF license, not bare direction-law legality"
     )
 
     # ---- Confirm the relaxation is NO-side-only --------------------------------

@@ -9,7 +9,7 @@
 #   no_trade PREDICTIVE_DISTRIBUTION_NOT_LIVE_ELIGIBLE) -> joint_q -> joint_q_band ->
 #   family_book -> market_implied_q -> coherence -> routes -> payoff candidates ->
 #   filter [direction_law_ok, coherence_allows, edge_lcb>0 & optimal_delta_u>0] ->
-#   selected = argmax optimal_delta_u) and the Stage 8 block lines 1166-1184.
+#   selected = max robust utility density) and the Stage 8 block lines 1166-1184.
 #   Reconciled against docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md
 #   (GREENFIELD — no live edits; reactor wiring is Wave 5. The scalar robust_trade_score
 #   is telemetry only — it CANNOT select. This is the ONLY decision authority; it
@@ -67,24 +67,25 @@ THE PIPELINE (spec decide() lines 876-901; the order is the contract):
     candidates = [c for c in candidates if coherence_allows(c)]
     candidates = [c for c in candidates if c.edge_lcb > 0 and c.optimal_delta_u > 0]
 
-    selected   = argmax(candidates, key=lambda c: c.optimal_delta_u)
+    selected   = max(candidates, key=lambda c: c.optimal_delta_u / c.optimal_stake_usd)
     return FamilyDecision(...)
 
 THE THREE CORRECTED TRANSFORMATIONS THIS ORCHESTRATOR PRESERVES (operator law — make the
 bad output mathematically impossible; NO gate/cap/clamp/haircut that catches a bad value
 and leaves a broken transform in place):
 
-  1. SELECTION IS ``argmax optimal_delta_u`` OVER THE SURVIVORS, NEVER A SCALAR TRADE
-     SCORE (spec lines 900-903, 1184). The candidate filter chain is
+  1. SELECTION IS ROBUST UTILITY DENSITY OVER THE SURVIVORS, NEVER A SCALAR TRADE
+     SCORE (operator Shanghai correction over spec lines 900-903, 1184). The candidate filter chain is
      ``direction_law_ok -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)``,
-     and the survivor with the maximum ``optimal_delta_u`` is selected. The scalar
+     and the survivor with the maximum ``optimal_delta_u / optimal_stake_usd`` is selected.
+     Total ``optimal_delta_u`` remains a secondary ordering signal. The scalar
      ``robust_trade_score`` (``scalar_trade_score`` from payoff_vector) is computed for
      EVERY candidate as TELEMETRY on the receipt, but it is never one of the filter
      conditions and never the argmax key. There is no code path where the scalar reaches
-     the selection — the only inputs to the selection are the vector quantities
-     (``edge_lcb``, ``optimal_delta_u``) and the structural proofs (direction law,
-     coherence). A reversion that selected ``argmax robust_trade_score`` would pick a
-     different candidate; here the scalar cannot select.
+     the selection — the inputs are the vector quantities (``edge_lcb``, ``optimal_delta_u``,
+     ``optimal_stake_usd``) and the structural proofs (direction law, coherence). A reversion
+     that selected ``argmax robust_trade_score`` would pick a different candidate; here the
+     scalar cannot select.
 
   2. COHERENCE BLOCKS BEFORE SCORING (spec lines 891, 897, 953; market_coherence Stage 9).
      ``coherence_allows(c)`` consults the typed ``MarketCoherenceReport``: when the report
@@ -331,6 +332,9 @@ class CandidateDecision:
     * ``robust_trade_score`` — the SCALAR ``q - price`` telemetry (point fair value minus
       cost). RECORDED for the receipt; NEVER read by the selection. This is the demoted
       scalar that cannot select a trade.
+    * ``q_lcb_guard_basis`` / ``q_lcb_guard_abstained`` — the side-aware OOF reliability
+      verdict applied to this candidate. A NO-on-modal direction relaxation can only use
+      an active OOF verdict, never an inert/missing evidence path.
     """
 
     route: CandidateRoute
@@ -338,6 +342,9 @@ class CandidateDecision:
     direction_law_ok: bool
     coherence_allows: bool
     robust_trade_score: float
+    q_lcb_guard_basis: str = ""
+    q_lcb_guard_abstained: bool = False
+    q_lcb_guard_cell_key: str = ""
 
 
 # ===========================================================================
@@ -365,8 +372,8 @@ class FamilyDecision:
       path). Its ``status`` is the calibration-incident contract.
     * ``candidates`` — the ``CandidateEconomics`` for EVERY enumerated candidate (passing or
       not), so the decision is fully auditable. Empty on the ineligible path.
-    * ``selected`` — the ``CandidateEconomics`` of the chosen trade (``argmax
-      optimal_delta_u`` over the survivors), or ``None`` for a no-trade.
+    * ``selected`` — the ``CandidateEconomics`` of the chosen trade (maximum robust utility
+      density over the survivors), or ``None`` for a no-trade.
     * ``no_trade_reason`` — the reason the survivor set was empty (``None`` when a trade was
       selected). Names the first gate that emptied it.
     * ``receipt_hash`` — a deterministic hash over the whole decision tuple (the receipt
@@ -914,9 +921,10 @@ class FamilyDecisionEngine:
         FINAL no-shadow execution flow §6. The candidate's served q_lcb (the route's robust
         lower bound) is ``q_lcb_route = economics.edge_lcb + cost`` (because
         ``edge_lcb = quantile(samples @ payoff) − cost``). The guard resolves the cell
-        ``(metric, lead_bucket, bin_position, q_lcb_bucket)`` — ``bin_position`` is "modal"
-        for the forecast (modal) bin, "nonmodal" otherwise (a stable, NON-per-city position
-        label) — and returns ``q_safe = min(q_lcb_route, L_g)`` plus a trade/abstain verdict.
+        ``(metric, lead_bucket, side, bin_position, q_lcb_bucket)`` — ``side`` is the actual
+        executable YES/NO claim, and ``bin_position`` is "modal" for the forecast (modal) bin,
+        "nonmodal" otherwise (a stable, NON-per-city position label) — and returns
+        ``q_safe = min(q_lcb_route, L_g)`` plus a trade/abstain verdict.
 
         On ABSTAIN (thin cell or below floor) the candidate's economics are re-stamped with a
         non-positive ``edge_lcb`` (and ``optimal_delta_u``) so the existing ``edge_lcb > 0``
@@ -943,10 +951,16 @@ class FamilyDecisionEngine:
                     band_q_lcb=q_lcb_route,
                     metric=metric,
                     lead_days=lead_days,
+                    side=d.route.side,
                     bin_position=bin_position,
                 )
+                guard_fields = {
+                    "q_lcb_guard_basis": verdict.basis,
+                    "q_lcb_guard_abstained": bool(verdict.abstained),
+                    "q_lcb_guard_cell_key": verdict.cell_key,
+                }
                 if verdict.basis == "INERT" and not verdict.abstained:
-                    out.append(d)  # pass-through (no OOF evidence for this cell)
+                    out.append(replace(d, **guard_fields))  # no artifact; pass-through
                     continue
                 if verdict.abstained:
                     # ABSTAIN: deflate the edge to a non-positive value so edge_lcb>0 rejects
@@ -957,7 +971,7 @@ class FamilyDecisionEngine:
                         edge_lcb=float(new_edge),
                         optimal_delta_u=min(float(econ.optimal_delta_u), 0.0),
                     )
-                    out.append(replace(d, economics=new_econ))
+                    out.append(replace(d, economics=new_econ, **guard_fields))
                     continue
                 # Licensed deflation: lower the edge to q_safe − cost (>= the abstain edge,
                 # <= the original). q_safe = min(q_lcb_route, L_g), so when L_g >= q_lcb_route
@@ -965,9 +979,9 @@ class FamilyDecisionEngine:
                 guarded_edge = verdict.q_safe - cost
                 if guarded_edge < edge_lcb:
                     new_econ = replace(econ, edge_lcb=float(guarded_edge))
-                    out.append(replace(d, economics=new_econ))
+                    out.append(replace(d, economics=new_econ, **guard_fields))
                 else:
-                    out.append(d)
+                    out.append(replace(d, **guard_fields))
             except Exception:  # noqa: BLE001 — fail-soft: leave the candidate untouched.
                 out.append(d)
         return tuple(out)
@@ -976,7 +990,7 @@ class FamilyDecisionEngine:
     def _select(
         self, scored: Sequence[CandidateDecision]
     ) -> tuple[Optional[CandidateDecision], Optional[str]]:
-        """Apply the filter chain and select ``argmax optimal_delta_u`` (spec 896-901).
+        """Apply the filter chain and select maximum robust utility density.
 
         The filter ORDER is the contract:
 
@@ -986,10 +1000,10 @@ class FamilyDecisionEngine:
                (the executable-route + direction-law + coherence preconditions of the live
                 pass are already true here, so live_candidate_passes is a re-proof)
 
-        The survivor with the MAX ``optimal_delta_u`` is selected. The scalar
-        ``robust_trade_score`` is NEVER consulted — the selection key is the vector ΔU. When
-        the survivor set is empty, the returned ``no_trade_reason`` names the FIRST filter
-        that emptied it (so the no-trade is auditable to its cause).
+        The survivor with the MAX ``optimal_delta_u / optimal_stake_usd`` is selected. The
+        scalar ``robust_trade_score`` is NEVER consulted. When the survivor set is empty, the
+        returned ``no_trade_reason`` names the FIRST filter that emptied it (so the no-trade
+        is auditable to its cause).
         """
         if not scored:
             return None, NO_TRADE_NO_EXECUTABLE_ROUTE
@@ -1001,38 +1015,17 @@ class FamilyDecisionEngine:
         if not after_executable:
             return None, NO_TRADE_NO_EXECUTABLE_ROUTE
 
-        # FAVORITE-LONGSHOT HARVEST (2026-06-15, settlement-validated by TWO independent
-        # methods: spine settlement grade docs/evidence/qkernel_rebuild/
-        # spine_q_settlement_grade_2026-06-15.md + ChatGPT edge consult
-        # chatgpt_edge_consult_2026-06-15.md rank 1). The market systematically
-        # OVER-PRICES the point-forecast (modal) bin: it realizes ~22% but is priced
-        # ~35%. The direction law's blanket buy_no-on-the-forecast-bin ban structurally
-        # zeroed this harvest. We relax ONLY that one case, and ONLY when the candidate's
-        # CONSERVATIVE edge clears: for a NO route edge_lcb = q_no_lcb - cost, so
-        # edge_lcb > 0 == q_no_lcb > the NO ask == the market over-prices the favorite
-        # beyond our conservative lower bound (the agent grade's recommended condition).
-        # This swaps the blanket geometry ban for a conservative-belief gate; the
-        # downstream edge_lcb>0 & ΔU>0, coherence, and live-pass gates still apply.
-        # Settlement evidence: gate-fired NO win 0.778 (CI [0.750,0.804]) vs breakeven
-        # 0.65; after-cost +0.125 (WU) / +0.056 (OM); the gate structurally EXCLUDES the
-        # historical loss class (deep-far-NO cost>=0.79, where q_no_lcb caps ~0.781 so
-        # q_no_lcb>cost is unreachable) AND the operator's hated cost-0.78 favorite-NO
-        # (edge_lcb~0 there). buy_yes on a NON-modal bin (the OTHER direction_law_ok=False
-        # case) STAYS banned — it graded after-cost NEGATIVE. NOTE: the 1.22x modal
-        # over-confidence is load-bearing for this gate; RE-GRADE before any sigma/center
-        # change (current sigma artifact k_default=1.30).
-        # Favorite-longshot relaxation, defined ONCE so the after_direction admission and
-        # the final live_candidate_passes re-proof CANNOT diverge. They diverged once
-        # (commit 3c4aeecc75 relaxed this list but the re-proof below still passed the bare
-        # `d.direction_law_ok`, which is False for a NO-on-modal candidate, so
-        # live_candidate_passes silently re-zeroed the exact harvest class this relaxation
-        # admits). Admit a candidate's direction iff it is direction-law-legal OR it is an
-        # edge-gated NO (edge_lcb = q_no_lcb - cost > 0 == the market over-prices the favorite
-        # beyond our CONSERVATIVE lower bound). Every OTHER gate (edge_lcb>0, ΔU at min/at s*,
-        # coherence, executable) still applies independently and unchanged.
+        # NO-on-modal is direction-law illegal by geometry. It may only be admitted when the
+        # side-aware OOF reliability guard actively licensed that exact NO-complement claim.
+        # A positive edge from an INERT/missing-cell guard is not enough evidence for a live
+        # direction override; otherwise a missing NO cell can pass while a center YES cell is
+        # abstained, recreating the all-NO admission bias.
         def _direction_admitted(d):
             return d.direction_law_ok or (
-                d.route.side == "NO" and d.economics.edge_lcb > 0.0
+                d.route.side == "NO"
+                and d.economics.edge_lcb > 0.0
+                and d.q_lcb_guard_basis == "OOF_WILSON_95"
+                and not d.q_lcb_guard_abstained
             )
 
         after_direction = [d for d in after_executable if _direction_admitted(d)]
@@ -1105,19 +1098,24 @@ class FamilyDecisionEngine:
                 pass
             return None, NO_TRADE_NO_POSITIVE_EDGE
 
-        def _capital_efficiency(d: CandidateDecision) -> float:
-            cost = max(float(d.economics.cost.value), 1e-9)
-            return float(d.economics.optimal_delta_u) / cost
+        def _utility_density(d: CandidateDecision) -> float:
+            try:
+                stake = float(d.economics.optimal_stake_usd)
+            except Exception:  # noqa: BLE001
+                stake = 0.0
+            stake = max(stake, 1e-9)
+            return float(d.economics.optimal_delta_u) / stake
 
-        # SELECT: argmax optimal_delta_u over the survivors. The scalar trade score is NOT
-        # the key. Capital efficiency is a deterministic tie-break before lower raw cost, so
-        # equal-utility routes prefer the same expected growth with less capital tied up.
+        # SELECT: choose the best robust utility density over the survivors. Total ΔU remains
+        # a secondary ordering signal, but a high-capital low-density NO cannot dominate a
+        # lower-capital higher-density YES just because it ties up more dollars. The scalar
+        # trade score is NOT a key.
         selected = max(
             survivors,
             key=lambda d: (
+                _utility_density(d),
                 d.economics.optimal_delta_u,
                 d.economics.edge_lcb,
-                _capital_efficiency(d),
                 -float(d.economics.cost.value),
             ),
         )

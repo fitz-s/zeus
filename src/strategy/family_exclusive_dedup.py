@@ -149,7 +149,7 @@ class FamilyPortfolioLeg:
     bin_label: str
     support_index: int
     cost: float
-    posterior: float
+    outcome_probability: float
     direction: str
 
 
@@ -925,6 +925,22 @@ def _edge_posterior(edge: Any) -> float:
     return max(0.0, min(1.0, posterior))
 
 
+def _edge_outcome_probability(edge: Any) -> float:
+    """Return settlement probability for this leg's own support outcome.
+
+    ``BinEdge.p_posterior`` is held-side probability. For ``buy_yes`` that is
+    already P(this bin settles YES); for ``buy_no`` it is P(this bin does NOT
+    settle YES). The family payoff matrix is indexed by settlement outcomes, so
+    NO legs must be inverted before building the outcome probability vector.
+    """
+
+    held_side_probability = _edge_posterior(edge)
+    direction = str(getattr(edge, "direction", "") or "").lower()
+    if direction == "buy_no":
+        return max(0.0, min(1.0, 1.0 - held_side_probability))
+    return held_side_probability
+
+
 def _edge_bin_label(edge: Any) -> str:
     bin_obj = getattr(edge, "bin", None)
     if bin_obj is None:
@@ -962,7 +978,7 @@ def _portfolio_payoff_for_leg(
 
 
 def _normalize_posterior_vector(legs: list[FamilyPortfolioLeg]) -> tuple[float, ...]:
-    raw = [max(0.0, leg.posterior) for leg in legs]
+    raw = [max(0.0, leg.outcome_probability) for leg in legs]
     total = sum(raw)
     if total <= 0.0:
         return tuple(1.0 / len(legs) for _ in legs) if legs else ()
@@ -1078,7 +1094,7 @@ def optimize_exclusive_outcome_portfolio(
                 bin_label=_edge_bin_label(edge),
                 support_index=_edge_support_index(edge, idx),
                 cost=_edge_cost(edge),
-                posterior=_edge_posterior(edge),
+                outcome_probability=_edge_outcome_probability(edge),
                 direction=str(getattr(edge, "direction", "") or ""),
             )
             for idx, edge in enumerate(executable_edges)
@@ -1481,10 +1497,20 @@ def build_weather_family_decision(
         )
         return None
     ranked_edges = sorted(candidate_edges, key=_edge_preselection_key, reverse=True)
-    primary = portfolio.selected_leg
-    fallback_candidates = [primary]
-    fallback_candidates.extend(edge for edge in ranked_edges if edge is not primary)
-    fallback_candidates = fallback_candidates[: max(1, min(fallback_candidate_count, len(fallback_candidates)))]
+    selected_legs = list(portfolio.selected_legs)
+    if len(selected_legs) > 1:
+        # A multi-leg family portfolio is a coherent payoff vector. Ranked
+        # scalar siblings are not interchangeable fallback legs for it; replacing
+        # one selected leg requires re-optimizing the portfolio, not appending the
+        # old scalar fallback queue.
+        fallback_candidates = selected_legs
+    else:
+        primary = portfolio.selected_leg
+        fallback_candidates = [primary]
+        fallback_candidates.extend(edge for edge in ranked_edges if edge is not primary)
+        fallback_candidates = fallback_candidates[
+            : max(1, min(fallback_candidate_count, len(fallback_candidates)))
+        ]
     portfolio = ExclusiveOutcomePortfolio(
         family_key=portfolio.family_key,
         selected_leg=portfolio.selected_leg,

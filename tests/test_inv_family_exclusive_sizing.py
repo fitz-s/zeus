@@ -2,6 +2,8 @@
 # Purpose: Relationship antibody (Fitz §3) — mutually-exclusive weather bins
 #          (one city/date/metric partition) must NOT emit independent live
 #          scalar orders; live selection must use family payoff efficiency.
+# Reuse: Run when family-exclusive optimization, weather bin portfolio selection, or live
+#        family fallback semantics change.
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive weather
 #                  family sizing), family portfolio optimizer.
 
@@ -1073,7 +1075,7 @@ def test_family_optimizer_rejects_capital_dominated_no_basket_for_center_yes() -
         support_index=0,
         direction="buy_no",
         entry_price=0.79,
-        p_posterior=0.10,
+        p_posterior=0.90,
         forward_edge=0.05,
     )
     yes_30 = _celsius_edge(
@@ -1089,7 +1091,7 @@ def test_family_optimizer_rejects_capital_dominated_no_basket_for_center_yes() -
         support_index=2,
         direction="buy_no",
         entry_price=0.80,
-        p_posterior=0.10,
+        p_posterior=0.90,
         forward_edge=0.05,
     )
 
@@ -1104,6 +1106,11 @@ def test_family_optimizer_rejects_capital_dominated_no_basket_for_center_yes() -
 
     assert portfolio is not None
     assert portfolio.selected_legs == (yes_30,)
+    assert portfolio.posterior_vector == (
+        pytest.approx(0.10),
+        pytest.approx(0.80),
+        pytest.approx(0.10),
+    )
 
 
 def test_preselection_rejects_shanghai_no_basket_for_center_yes_by_default(monkeypatch) -> None:
@@ -1116,7 +1123,7 @@ def test_preselection_rejects_shanghai_no_basket_for_center_yes_by_default(monke
         support_index=0,
         direction="buy_no",
         entry_price=0.79,
-        p_posterior=0.10,
+        p_posterior=0.90,
         forward_edge=0.05,
     )
     yes_30 = _celsius_edge(
@@ -1132,7 +1139,7 @@ def test_preselection_rejects_shanghai_no_basket_for_center_yes_by_default(monke
         support_index=2,
         direction="buy_no",
         entry_price=0.80,
-        p_posterior=0.10,
+        p_posterior=0.90,
         forward_edge=0.05,
     )
 
@@ -1146,6 +1153,28 @@ def test_preselection_rejects_shanghai_no_basket_for_center_yes_by_default(monke
 
     assert selected == [yes_30]
     assert {drop.dropped_bin for drop in dropped} == {"29°C", "31°C"}
+
+
+def test_multi_leg_family_decision_executes_selected_portfolio_not_scalar_fallbacks() -> None:
+    """A multi-leg optimized portfolio must not be collapsed into a one-leg fallback queue."""
+
+    bins = {s[2]: s for s in _BIN_SPECS}
+    edge_a = _bin_edge(bins["20-21°F"], entry_price=0.20, forward_edge=0.20)
+    edge_b = _bin_edge(bins["22-23°F"], entry_price=0.20, forward_edge=0.20)
+    scalar_fallback = _bin_edge(bins["26°F or above"], entry_price=0.70, forward_edge=0.01)
+
+    family_decision = build_weather_family_decision(
+        [edge_a, edge_b, scalar_fallback],
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        enabled=True,
+    )
+
+    assert family_decision is not None
+    assert family_decision.portfolio.selected_legs == (edge_a, edge_b)
+    assert family_decision.portfolio.fallback_candidate_legs == (edge_a, edge_b)
+    assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
 
 
 def test_family_optimizer_honors_live_admission_and_qlcb_before_payoff_selection() -> None:

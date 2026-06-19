@@ -109,16 +109,18 @@ def test_guard_inert_keeps_the_trade(monkeypatch, tmp_path):
 
 
 def test_miscalibrated_cell_abstains_and_kills_the_trade(monkeypatch):
-    # Inject a MISCALIBRATED reliability table: every high|L1 cell (modal + nonmodal, every q_lcb
-    # bucket) has a deep but very LOW realized hit-rate (0.05). For a candidate whose band q_lcb
+    # Inject a MISCALIBRATED reliability table: every high|L1 side-aware cell (YES/NO,
+    # modal/nonmodal, every q_lcb bucket) has a deep but very LOW realized hit-rate (0.05).
+    # For a candidate whose band q_lcb
     # is ~0.27, the Wilson lower bound L_g ≈ 0.035 deflates q_safe = min(band_q_lcb, L_g) ≈ 0.035,
     # so the guarded after-cost edge q_safe − cost < 0 and the candidate cannot trade. (A cell
     # whose realized frequency is far below the served q_lcb is the miscalibration the guard
     # exists to catch.) -> no positive-edge survivor -> no trade.
     bad_table: dict[str, tuple[int, float]] = {}
-    for pos in ("modal", "nonmodal"):
-        for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
-            bad_table[f"high|L1|{pos}|qb{qb}"] = (500, 0.05)
+    for side in ("YES", "NO"):
+        for pos in ("modal", "nonmodal"):
+            for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
+                bad_table[f"high|L1|{side}|{pos}|qb{qb}"] = (500, 0.05)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", bad_table)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
 
