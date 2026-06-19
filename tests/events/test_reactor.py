@@ -502,12 +502,13 @@ def test_sqlite_lock_during_live_certificate_build_is_retryable_not_consumed():
     assert _processing_status(conn, event.event_id) == "pending"
 
 
-def test_live_certificate_build_failure_rejects_with_selected_leg_identity():
-    """A non-transient live certificate build failure is an execution-expression reject.
+def test_live_book_authority_gap_requeues_with_selected_leg_identity():
+    """A pre-submit book authority gap is a retryable execution-expression deferral.
 
     The adapter may have already selected a qkernel/Kelly leg before the final
-    command certificate fails.  The reactor must reject on the execution surface
-    while preserving that leg identity for continuous diagnosis/redecision.
+    command certificate fails. The reactor must keep the event pending, while
+    writing a token-bearing regret/deferral row so the price sidecar can pin and
+    seed exactly that token before the next attempt.
     """
     payload = json.loads(_forecast_event(target_date="2026-05-25").payload_json)
 
@@ -564,9 +565,9 @@ def test_live_certificate_build_failure_rejects_with_selected_leg_identity():
     )
     result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
 
-    assert result.processed == 1
-    assert result.rejected == 1
-    assert result.retried == 0
+    assert result.processed == 0
+    assert result.rejected == 0
+    assert result.retried == 1
     row = conn.execute(
         """
         SELECT rejection_stage, rejection_reason, token_id, bin_label, direction
@@ -582,7 +583,7 @@ def test_live_certificate_build_failure_rejects_with_selected_leg_identity():
         "80F",
         "buy_yes",
     )
-    assert _processing_status(conn, event.event_id) == "processed"
+    assert _processing_status(conn, event.event_id) == "pending"
 
 
 def test_sqlite_lock_during_post_submit_begin_is_retryable_not_dead_lettered(tmp_path):

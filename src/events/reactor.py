@@ -1748,6 +1748,17 @@ class OpportunityEventReactor:
             receipt.proof_accepted is False
             and str(receipt.reason or "").startswith("EDLI_LIVE_CERTIFICATE_BUILD_FAILED:")
         ):
+            if _is_transient_money_path_reason(receipt.reason):
+                if _certificate_build_failed_is_book_authority_gap(str(receipt.reason)):
+                    self._write_regret(
+                        event,
+                        "EXECUTOR_EXPRESSIBILITY",
+                        receipt.reason,
+                        receipt=receipt,
+                        decision_time=decision_time,
+                    )
+                self._transient_requeue_reasons[event.event_id] = str(receipt.reason)
+                return _EXECUTABLE_SNAPSHOT_RETRY
             return self._reject_or_retry_post_submit(
                 event,
                 "EXECUTOR_EXPRESSIBILITY",
@@ -2593,9 +2604,18 @@ def _certificate_build_failed_is_transient(reason: str) -> bool:
     suffix_lower = reason.lower()
     return (
         "would_cross_book" in suffix_lower
+        or _certificate_build_failed_is_book_authority_gap(reason)
         or "database is locked" in suffix_lower
         or "database table is locked" in suffix_lower
         or "database is busy" in suffix_lower
+    )
+
+
+def _certificate_build_failed_is_book_authority_gap(reason: str) -> bool:
+    suffix_lower = reason.lower()
+    return (
+        "pre_submit_book_authority_missing" in suffix_lower
+        or "pre_submit_book_authority_stale" in suffix_lower
     )
 
 

@@ -72,6 +72,18 @@ def test_db_lock_certificate_failure_still_transient():
     )
 
 
+def test_pre_submit_book_authority_gap_is_transient():
+    assert _is_transient_money_path_reason(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_MISSING"
+    )
+    assert _is_transient_money_path_reason(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_STALE"
+    )
+    assert not _is_transient_money_path_reason(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE"
+    )
+
+
 def test_executable_snapshot_stale_still_transient():
     assert _is_transient_money_path_reason("EXECUTABLE_SNAPSHOT_STALE")
 
