@@ -1676,6 +1676,7 @@ def dedup_mutually_exclusive_families(
     enabled: bool | None = None,
     existing_exposures: Iterable[Any] | None = None,
     family_portfolio_allowed_exposure_ids: Iterable[str] | None = None,
+    family_portfolio_intent: bool = False,
 ) -> list["EdgeDecision"]:
     """Second-line safety gate for scalar entries in an exclusive family.
 
@@ -1705,6 +1706,9 @@ def dedup_mutually_exclusive_families(
         family_portfolio_allowed_exposure_ids: position/command ids that a
             typed monitor/rebalance intent is explicitly allowed to touch. New
             entry intents pass none, so existing same-family exposure blocks.
+        family_portfolio_intent: explicit caller proof that the surviving
+            ``portfolio_selected`` decisions are additive legs of one optimized
+            family payoff vector, not independent scalar sibling entries.
 
     Returns:
         The same ``decisions`` list (mutated in place when the gate fires).
@@ -1779,7 +1783,7 @@ def dedup_mutually_exclusive_families(
             and str(getattr(decisions[i], "family_portfolio_leg_role", "") or "")
             == "portfolio_selected"
         ]
-        if portfolio_selected:
+        if family_portfolio_intent and portfolio_selected:
             selected_set = set(portfolio_selected)
             for i in portfolio_selected:
                 validations = getattr(decisions[i], "applied_validations", None)
