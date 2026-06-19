@@ -779,17 +779,17 @@ class TestExitTriggers:
         assert "ci_separated_edge_within_threshold_hold" in decision.applied_validations
 
     def test_buy_yes_ev_gate_hold_when_bid_below_posterior(self):
-        """When best_bid < p_posterior (hold EV > sell EV), exit is blocked.
+        """When best_bid is below current posterior after exit costs, exit is blocked.
 
         Wave 3: direct observable-behavior test. No monkeypatching needed.
         Position has neg_edge_count=1 (pre-set); next negative cycle would
-        normally exit but EV gate blocks it (sell at 0.10 < hold value 0.60).
+        normally exit but EV gate blocks it.
         """
         pos = _make_position(p_posterior=0.60, entry_price=0.50)
         pos.neg_edge_count = 1
-        # fresh_prob=0.10, market=0.55 → edge=-0.45 (deeply negative, would exit)
-        # best_bid=0.10 << p_posterior=0.60 → hold EV > sell EV → HOLD
-        decision = _call_exit(pos, 0.10, 0.55, best_bid=0.10)
+        # fresh_prob=0.10, market=0.55 -> edge=-0.45 (deeply negative, would exit).
+        # best_bid is still too low versus current held-side value after exit costs.
+        decision = _call_exit(pos, 0.10, 0.55, best_bid=0.01)
         assert not decision.should_exit  # EV gate blocks
 
     def test_buy_yes_ev_gate_exits_when_bid_above_posterior(self):
@@ -827,17 +827,15 @@ class TestExitTriggers:
         assert not decision.should_exit
 
     def test_flash_crash_panic_fires_with_adverse_velocity(self):
-        """Adverse velocity (-0.20/h) triggers FLASH_CRASH_PANIC.
+        """Sustained deep adverse velocity triggers FLASH_CRASH_PANIC.
 
         Wave 3: live path requires probability authority (fresh_prob_is_fresh=True).
-        Flash crash fires AFTER the authority check: it needs consecutive cycles of
-        velocity <= flash_crash_velocity(). Set flash_crash_count=2 via two calls.
+        Flash crash fires on persistent catastrophe velocity even when model divergence
+        has not already taken the earlier MODEL_DIVERGENCE_PANIC branch.
         """
         pos = _make_position()
-        # Two cycles of adverse velocity accumulate flash_crash_count
-        _call_exit(pos, 0.60, 0.40, market_velocity_1h=-0.20)
-        decision = _call_exit(pos, 0.60, 0.40, market_velocity_1h=-0.20)
-        # After 2 consecutive flash-crash-velocity cycles, FLASH_CRASH_PANIC fires
+        _call_exit(pos, 0.60, 0.40, market_velocity_1h=-0.45)
+        decision = _call_exit(pos, 0.60, 0.40, market_velocity_1h=-0.45)
         assert decision.should_exit
         assert decision.trigger == "FLASH_CRASH_PANIC"
 

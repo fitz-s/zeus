@@ -67,10 +67,11 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_harvester_scheduler_fails_closed_without_legacy_integrated_fallback():
     """Trading daemon must not fall back to integrated truth-writing harvester."""
     source = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
+    sidecar_source = (ROOT / "src" / "execution" / "post_trade_capital.py").read_text(encoding="utf-8")
 
     assert "from src.execution.harvester import run_harvester" not in source
     assert "result = run_harvester()" not in source
-    assert "resolver_unavailable_fail_closed" in source
+    assert "resolver_unavailable_fail_closed" in sidecar_source
 
 
 def test_settlement_readers_filter_verified_authority_before_downstream_use():

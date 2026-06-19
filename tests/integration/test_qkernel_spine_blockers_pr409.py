@@ -1,5 +1,5 @@
 # Created: 2026-06-15
-# Last reused or audited: 2026-06-19
+# Lifecycle: created=2026-06-15; last_reviewed=2026-06-19; last_reused=2026-06-19
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
 #   corrections docs/rebuild/consult_review_pr409_round2.md §1/§3/§5. RED-on-revert
 #   tests for the FOUR live-path blockers in the q-kernel integration bridge, folding
@@ -45,6 +45,32 @@ DECISION_TIME = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
 def _fast_band_draws(monkeypatch):
     """Lower the band draw count for a fast, deterministic smoke (logic unchanged)."""
     monkeypatch.setattr(bridge, "SPINE_BAND_DRAWS", 400, raising=False)
+
+
+def _install_sigma_floor_artifact(monkeypatch, tmp_path, *, sigma_floor_c: float = 1.0):
+    """Install a minimal settlement sigma-floor artifact for tests that need a real floor."""
+
+    from src.calibration import emos as emos_mod
+
+    path = tmp_path / "settlement_sigma_floor.json"
+    path.write_text(
+        json.dumps(
+            {
+                "_meta": {"k_default": 1.0},
+                "cells": {
+                    f"{CITY}|JJA|{METRIC}": {
+                        "sigma_floor_c": sigma_floor_c,
+                        "n": 100,
+                        "window": "test-fixture",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(emos_mod, "_SIGMA_FLOOR_PATH", path)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", None)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +293,7 @@ def _drive(family, proofs, payload, *, decision_time=DECISION_TIME, extra_exposu
 # ===========================================================================
 # BLOCKER 1 — live==replay forecast-case (source-cycle, emos_season, 24h bucket).
 # ===========================================================================
-def test_live_bridge_forecast_case_matches_arm_replay():
+def test_live_bridge_forecast_case_matches_arm_replay(monkeypatch, tmp_path):
     """The live bridge ForecastCase season / metric / lead-bucket / regime match the
     ARM-replay case construction, built from the FORECAST SOURCE CYCLE (not
     decision_time), and the served sigma floor is a non-None REALIZED floor.
@@ -282,6 +308,8 @@ def test_live_bridge_forecast_case_matches_arm_replay():
     from src.forecast.forecast_case_factory import DEFAULT_REGIME_KEY, REPLAY_LEAD_HOURS
     from src.forecast.sigma_authority import lead_bucket_for, realized_sigma_floor
     from src.forecast.types import ForecastCase
+
+    _install_sigma_floor_artifact(monkeypatch, tmp_path)
 
     family, _bins = _three_bin_family()
     cycle = _dt.datetime.fromisoformat(SOURCE_CYCLE_TIME_UTC.replace("Z", "+00:00"))
@@ -455,7 +483,7 @@ def test_direct_route_edge_uses_proof_execution_price_not_ask():
         assert float(route.avg_cost.value) == pytest.approx(float(proof.execution_price.value))
 
 
-def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkeypatch):
+def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkeypatch, tmp_path):
     """Shanghai-style direct selection: licensed cheap modal YES beats adjacent NO substitutes.
 
     The live qkernel v1 route surface is direct-only. It still must choose the best executable
@@ -463,6 +491,8 @@ def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkey
     adjacent NO" because old family/guard wiring made YES disappear.
     """
     from src.decision import qlcb_reliability_guard as guard_mod
+
+    _install_sigma_floor_artifact(monkeypatch, tmp_path)
 
     reliability_cells: dict[str, tuple[int, float]] = {}
     for lead in ("L1", "L2_3", "L4P"):

@@ -285,7 +285,7 @@ class TestDurableFillBridgeScan:
         leaving command/PnL/redecision joins split.
         """
         from src.events.edli_position_bridge import edli_bridge_position_id
-        from src.main import _edli_durable_fill_bridge_scan
+        from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
 
         conn = _make_conn()
         aggregate_id = "evtMF1d:fiMF1d"

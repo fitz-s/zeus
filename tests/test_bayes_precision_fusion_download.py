@@ -1,5 +1,7 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Purpose: Regression tests for BPF raw forecast download and persistence semantics.
+# Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
 #   raw_model_forecasts), §5 (~6mo retention); CONTINUITY_AND_WIRING.md §4 steps 2-3 + 9
 #   (forward+history daily download/persist + 180d prune). IRON RULE #4 (one-builder: reuse

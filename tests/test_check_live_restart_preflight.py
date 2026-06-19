@@ -495,16 +495,34 @@ def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tm
 def test_preflight_accepts_stale_belief_when_single_family_reseed_is_materializable(
     monkeypatch, tmp_path
 ):
-    trade_db, forecast_db = _patch_paths(monkeypatch, tmp_path)
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    _add_identity_columns(trade)
+    _init_sidecar_surfaces_for_identity(
+        trade,
+        now=fresh,
+        condition_id="cond-karachi",
+        yes_token_id="tok-karachi-yes",
+        no_token_id="tok-karachi-no",
+    )
     label = "Will the highest temperature in Karachi be 35°C on June 19?"
     trade.execute(
         """
-        INSERT INTO position_current VALUES (
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric, bin_label,
+            direction, shares, chain_shares, order_status, exit_reason,
+            exit_retry_count, next_exit_retry_at, last_monitor_prob,
+            last_monitor_prob_is_fresh, last_monitor_market_price,
+            last_monitor_market_price_is_fresh, updated_at,
+            condition_id, token_id, no_token_id
+        ) VALUES (
             'karachi-pos', 'day0_window', 'Karachi', '2026-06-19', 'high',
             ?, 'buy_no', 5.0, 5.0, 'filled', NULL, 0, NULL,
-            0.84, 1, 0.72, 1, '2026-06-18T23:00:00+00:00'
+            0.84, 1, 0.72, 1, '2026-06-18T23:00:00+00:00',
+            'cond-karachi', 'tok-karachi-yes', 'tok-karachi-no'
         )
         """,
         (label,),
@@ -523,7 +541,6 @@ def test_preflight_accepts_stale_belief_when_single_family_reseed_is_materializa
             json.dumps({label: 0.20}),
         ),
     )
-    fresh = datetime.now(timezone.utc)
     forecasts.execute(
         """
         INSERT INTO forecast_posteriors (
