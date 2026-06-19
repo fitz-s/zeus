@@ -22,6 +22,7 @@ import sqlite3
 import tempfile
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -291,3 +292,31 @@ def test_ingest_main_registers_obs_v2_job() -> None:
     )
     assert '_REPO_ROOT / "state" / "zeus-world.db"' not in source_text
     assert 'STATE_DIR / "zeus-world.db"' in source_text
+
+
+def test_obs_tick_all_city_failures_mark_scheduler_failed() -> None:
+    """A total obs ingest outage must not be reported as scheduler success."""
+    from src.ingest_main import _raise_if_all_obs_tick_attempts_failed
+
+    with pytest.raises(RuntimeError, match="all attempted observation cities failed"):
+        _raise_if_all_obs_tick_attempts_failed(
+            "ingest_k2_obs",
+            [
+                SimpleNamespace(city="Paris", skipped_hko=False, failure_reason="no such table: observation_instants"),
+                SimpleNamespace(city="Tokyo", skipped_hko=False, failure_reason="no such table: observation_instants"),
+                SimpleNamespace(city="Hong Kong", skipped_hko=True, failure_reason=None),
+            ],
+        )
+
+
+def test_obs_tick_partial_city_failures_do_not_fail_whole_job() -> None:
+    """Partial provider failures are logged by city, not escalated to total outage."""
+    from src.ingest_main import _raise_if_all_obs_tick_attempts_failed
+
+    _raise_if_all_obs_tick_attempts_failed(
+        "ingest_k2_obs_fast_tick",
+        [
+            SimpleNamespace(city="Paris", skipped_hko=False, failure_reason=None),
+            SimpleNamespace(city="Tokyo", skipped_hko=False, failure_reason="provider timeout"),
+        ],
+    )

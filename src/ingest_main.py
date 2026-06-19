@@ -432,6 +432,7 @@ def _k2_obs_tick():
         written = sum(r.rows_written for r in results if not r.skipped_hko)
         failed = [r.city for r in results if r.failure_reason]
         logger.info("K2 obs_tick: written=%d failed=%s", written, failed or "none")
+        _raise_if_all_obs_tick_attempts_failed("ingest_k2_obs", results)
 
 
 def _active_window_cities(now_utc: "datetime | None" = None) -> list[str]:
@@ -534,6 +535,26 @@ def _k2_obs_fast_tick():
             "K2 obs_fast_tick: cities=%d written=%d failed=%s reasons=%s",
             len(city_filter), written, failed or "none", reasons or "none",
         )
+        _raise_if_all_obs_tick_attempts_failed("ingest_k2_obs_fast_tick", results)
+
+
+def _raise_if_all_obs_tick_attempts_failed(job_id: str, results: list[object]) -> None:
+    """Fail scheduler health when an obs tick made no successful city attempt."""
+
+    attempted = [r for r in results if not bool(getattr(r, "skipped_hko", False))]
+    if not attempted:
+        return
+    failed = [r for r in attempted if getattr(r, "failure_reason", None)]
+    if len(failed) != len(attempted):
+        return
+    reasons = {
+        str(getattr(r, "city", "<unknown>")): str(getattr(r, "failure_reason", ""))[:160]
+        for r in failed[:10]
+    }
+    raise RuntimeError(
+        f"{job_id} all attempted observation cities failed "
+        f"(failed={len(failed)} sample_reasons={reasons})"
+    )
 
 
 @_scheduler_job("ingest_k2_hko_tick")
