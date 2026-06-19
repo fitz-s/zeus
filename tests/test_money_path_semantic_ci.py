@@ -69,6 +69,36 @@ def test_classifier_cli_fails_on_unregistered_intent_state(tmp_path: Path) -> No
     assert "state:INTENT_CREATED_V2" in payload["unregistered_objects"]
 
 
+def test_classifier_accepts_registered_reactor_runtime_config(tmp_path: Path) -> None:
+    diff = tmp_path / "diff.patch"
+    diff.write_text(
+        "diff --git a/src/main.py b/src/main.py\n"
+        "+++ b/src/main.py\n"
+        "+float(os.environ.get('ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS', '300.0'))\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "scripts/ci/semantic_diff_classifier.py",
+            "--diff-file",
+            str(diff),
+            "--fail-on-unregistered",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    payload = json.loads(proc.stdout)
+    assert "ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS" in payload["new_states"]
+    assert "state:ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS" not in payload[
+        "unregistered_objects"
+    ]
+
+
 def test_semantic_ci_registry_changes_select_self_defense_tests(tmp_path: Path) -> None:
     diff = tmp_path / "diff.patch"
     diff.write_text(

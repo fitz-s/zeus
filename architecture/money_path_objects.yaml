@@ -88,6 +88,19 @@ economic_objects:
         meaning: "Settlement source finality time."
 
 state_machines:
+  reactor_runtime_config:
+    owner: src/engine/event_reactor_adapter.py
+    description: >
+      Live reactor runtime configuration knobs whose ALL-CAPS names can be
+      detected by semantic CI's state-candidate scan. These are not lifecycle,
+      command, order, or venue states; registering them prevents the classifier
+      from treating known live config as an unreviewed money-path state machine.
+      ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS controls how long the reactor
+      suppresses repeated empty Gamma probes after a no-market response.
+    states:
+      - ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS
+    invariant_tests:
+      - tests/test_money_path_semantic_ci.py
   venue_command:
     owner: src/state/venue_command_repo.py
     states:
