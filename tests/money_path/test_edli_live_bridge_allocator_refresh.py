@@ -327,19 +327,22 @@ def test_held_position_monitor_refreshes_allocator_before_exit_monitor():
     )
 
 
-def test_pre_chain_monitor_cannot_submit_exits_before_chain_sync():
-    """Restart safety: armed exits are only allowed after chain sync."""
+def test_chain_sync_read_lane_cannot_submit_exits():
+    """Restart safety: the chain-sync read lane cannot submit exits."""
     import inspect
 
     import src.main as main
+    from src.execution import post_trade_capital
 
-    source = inspect.getsource(main._chain_sync_and_exit_monitor_cycle)
-    pre_chain_idx = source.index('mode="held_position_monitor_pre_chain"')
-    chain_sync_idx = source.index("_run_chain_sync(portfolio, clob, conn)")
-    post_chain_idx = source.index('mode="chain_sync_monitor"')
-    assert pre_chain_idx < chain_sync_idx < post_chain_idx
+    chain_source = inspect.getsource(post_trade_capital.chain_sync_read_cycle)
+    exit_source = inspect.getsource(main._exit_monitor_cycle)
 
-    pre_chain_block = source[pre_chain_idx:chain_sync_idx]
-    post_chain_block = source[post_chain_idx:]
-    assert "exit_order_submit_enabled=False" in pre_chain_block
-    assert "exit_order_submit_enabled=real_order_submit_enabled" in post_chain_block
+    assert "_run_chain_sync(portfolio, clob, conn)" in chain_source
+    assert "conn.commit()" in chain_source
+    assert "_execute_monitoring_phase(" not in chain_source
+    assert "exit_order_submit_enabled" not in chain_source
+
+    assert 'mode="exit_monitor"' in exit_source
+    assert "_execute_monitoring_phase(" in exit_source
+    assert "exit_order_submit_enabled=real_order_submit_enabled" in exit_source
+    assert "_run_chain_sync(" not in exit_source
