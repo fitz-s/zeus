@@ -6482,6 +6482,95 @@ def _terminalize_submit_unknown_invalid_amount_400_if_proven(
     return payload
 
 
+def reconcile_stale_intent_created_no_submit(
+    conn: sqlite3.Connection,
+    *,
+    updated_before: str | None = None,
+) -> dict[str, int]:
+    """Terminalize pre-submit command shells that never crossed the venue boundary.
+
+    A crash/SQLite lock can occur after ``insert_command`` appends INTENT_CREATED
+    but before SUBMIT_REQUESTED is appended or any venue call is made.  Such a
+    row is not an unresolved venue side effect, but leaving it active misleads
+    operators and downstream projections.  The predicates here are intentionally
+    local and strict: no submit event, no venue order id, no order/trade facts,
+    and no position projection.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    cutoff = str(updated_before or _now_iso())
+    rows = conn.execute(
+        """
+        SELECT cmd.*
+          FROM venue_commands cmd
+         WHERE cmd.state = 'INTENT_CREATED'
+           AND COALESCE(cmd.venue_order_id, '') = ''
+           AND cmd.updated_at < ?
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM venue_command_events ev
+                 WHERE ev.command_id = cmd.command_id
+                   AND ev.event_type != 'INTENT_CREATED'
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM venue_order_facts fact
+                 WHERE fact.command_id = cmd.command_id
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM venue_trade_facts fact
+                 WHERE fact.command_id = cmd.command_id
+           )
+           AND NOT EXISTS (
+                SELECT 1 FROM position_current pc
+                 WHERE pc.position_id = cmd.position_id
+           )
+         ORDER BY cmd.updated_at, cmd.command_id
+        """,
+        (cutoff,),
+    ).fetchall()
+    summary["scanned"] = len(rows)
+    for row in rows:
+        command = _dict_row(row)
+        command_id = str(command.get("command_id") or "")
+        try:
+            payload = {
+                "schema_version": 1,
+                "reason": "pre_venue_intent_abandoned_before_submit",
+                "command_id": command_id,
+                "decision_id": str(command.get("decision_id") or ""),
+                "proof_class": "local_command_journal_no_submit_boundary",
+                "side_effect_boundary_crossed": False,
+                "venue_order_created": False,
+                "safe_replay_permitted": True,
+                "required_predicates": {
+                    "state_is_intent_created": True,
+                    "no_submit_requested_event": True,
+                    "no_venue_order_id": True,
+                    "no_order_facts": True,
+                    "no_trade_facts": True,
+                    "no_position_current": True,
+                    "updated_before_recovery_started_at": cutoff,
+                },
+                "reviewed_by": "command_recovery",
+                "cleared_at": cutoff,
+            }
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type=CommandEventType.SUBMIT_REJECTED.value,
+                occurred_at=cutoff,
+                payload=payload,
+            )
+            summary["advanced"] += 1
+        except Exception:
+            summary["errors"] += 1
+            logger.exception(
+                "recovery: stale INTENT_CREATED terminalization failed for command %s",
+                command_id,
+            )
+    return summary
+
+
 def _latest_edli_event(conn: sqlite3.Connection, events_ref: str, aggregate_id: str, event_type: str | None = None) -> dict:
     if event_type is None:
         row = conn.execute(
@@ -8517,6 +8606,15 @@ def _reconcile_passes_inline(
         summary["stayed"] += edli_confirmed_command_summary["stayed"]
         summary["errors"] += edli_confirmed_command_summary["errors"]
 
+        stale_intent_summary = reconcile_stale_intent_created_no_submit(
+            conn,
+            updated_before=started_at,
+        )
+        summary["stale_intent_created_no_submit"] = stale_intent_summary
+        summary["advanced"] += stale_intent_summary["advanced"]
+        summary["stayed"] += stale_intent_summary["stayed"]
+        summary["errors"] += stale_intent_summary["errors"]
+
         rows = find_unresolved_commands(conn)
         summary["scanned"] = len(rows)
 
@@ -8852,6 +8950,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
     _db_pass("edli_confirmed_legacy_command_repair",
              reconcile_edli_confirmed_legacy_command_repairs,
              "edli_confirmed_legacy_command_repair")
+
+    _db_pass("stale_intent_created_no_submit",
+             reconcile_stale_intent_created_no_submit,
+             "stale_intent_created_no_submit",
+             updated_before=started_at)
 
     # In-flight per-row scan (find_unresolved_commands + _reconcile_row).
     def _scan_inflight(conn, snap_client):

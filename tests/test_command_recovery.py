@@ -831,6 +831,33 @@ class TestRecoveryResolutionTable:
         payload = json.loads(rejected["payload_json"])
         assert payload["venue_status"] == "REJECTED"
 
+    def test_stale_intent_created_without_submit_terminalizes_no_side_effect(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["stale_intent_created_no_submit"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "SUBMIT_REJECTED"
+        mock_client.get_order.assert_not_called()
+        events = _get_events(conn, "cmd-001")
+        rejected = [e for e in events if e["event_type"] == "SUBMIT_REJECTED"][-1]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["reason"] == "pre_venue_intent_abandoned_before_submit"
+        assert payload["side_effect_boundary_crossed"] is False
+        assert payload["venue_order_created"] is False
+        assert payload["safe_replay_permitted"] is True
+
     # Case 2: SUBMITTING + no venue_order_id -> REVIEW_REQUIRED
     # Grammar note: SUBMITTING->EXPIRED is not a legal transition (_TRANSITIONS
     # has no such edge). Recovery uses REVIEW_REQUIRED (legal from SUBMITTING)
