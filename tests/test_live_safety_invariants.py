@@ -3616,7 +3616,7 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
 
 
 def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
-    """Monitor refresh must not roll a chain-corrected position back to stale fill size."""
+    """Monitor refresh must not roll a chain-corrected position back to stale fill size/state."""
     from src.engine.lifecycle_events import (
         build_entry_canonical_write,
         build_monitor_refreshed_canonical_write,
@@ -3657,7 +3657,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
                shares = 60.0,
                cost_basis_usd = 44.4,
                entry_price = 0.74,
-               chain_state = 'synced',
+               chain_state = 'local_only',
                chain_shares = 60.0,
                chain_avg_price = 0.74,
                chain_cost_basis_usd = 44.4,

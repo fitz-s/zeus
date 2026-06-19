@@ -260,7 +260,25 @@ def _preserve_existing_monitor_refresh_authority(
     merged = dict(projection)
     for index, column in enumerate(preserved):
         merged[column] = row[index]
+    if _has_positive_chain_observation(merged) and str(
+        merged.get("chain_state") or ""
+    ) in {"", "unknown", "local_only"}:
+        merged["chain_state"] = "synced"
     return merged
+
+
+def _has_positive_chain_observation(projection: dict) -> bool:
+    try:
+        chain_shares = float(projection.get("chain_shares") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if chain_shares <= 0.0:
+        return False
+    if not str(projection.get("chain_seen_at") or ""):
+        return False
+    if str(projection.get("chain_absence_at") or ""):
+        return False
+    return True
 
 
 @capability("canonical_position_write", lease=True)
