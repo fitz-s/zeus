@@ -104,6 +104,22 @@ _RELIABILITY_ARTIFACT_ACTIVE: bool = False
 _RELIABILITY_ARTIFACT_STATUS: str = "ABSENT_ALLOWED"
 
 
+def _reliability_artifact_path() -> str:
+    path = _QLCB_OOF_RELIABILITY_PATH
+    if os.path.isabs(path):
+        return path
+    filename = path
+    if filename.startswith("state/"):
+        filename = filename[len("state/"):]
+    try:
+        from src.config import state_path
+
+        return str(state_path(filename))
+    except Exception:  # noqa: BLE001
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        return os.path.join(repo, path)
+
+
 # ---------------------------------------------------------------------------
 # Cells + buckets.
 # ---------------------------------------------------------------------------
@@ -202,10 +218,7 @@ def _load_reliability_table() -> dict[str, tuple[int, float]]:
     out: dict[str, tuple[int, float]] = {}
     artifact_active = False
     artifact_status = "ABSENT_ALLOWED"
-    path = _QLCB_OOF_RELIABILITY_PATH
-    if not os.path.isabs(path):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        path = os.path.join(repo, _QLCB_OOF_RELIABILITY_PATH)
+    path = _reliability_artifact_path()
     try:
         if os.path.exists(path):
             artifact_active = True
@@ -254,10 +267,7 @@ def reliability_artifact_status() -> dict[str, object]:
     """Return read-only health for restart/preflight gates."""
 
     _load_reliability_table()
-    path = _QLCB_OOF_RELIABILITY_PATH
-    if not os.path.isabs(path):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        path = os.path.join(repo, _QLCB_OOF_RELIABILITY_PATH)
+    path = _reliability_artifact_path()
     return {
         "path": path,
         "status": _RELIABILITY_ARTIFACT_STATUS,

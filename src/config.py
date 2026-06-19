@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
-STATE_DIR = PROJECT_ROOT / "state"
+RUNTIME_ROOT = Path(os.environ.get("ZEUS_PRIMARY_ROOT") or PROJECT_ROOT).expanduser().resolve()
+STATE_DIR = RUNTIME_ROOT / "state"
 
 
 def legacy_state_path(filename: str) -> Path:
