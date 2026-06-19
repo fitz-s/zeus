@@ -5294,24 +5294,21 @@ def _edli_event_reactor_cycle() -> None:
         conn.close()
         _edli_reactor_active_lock.release()
         raise
-    # Warm the in-process bankroll-of-record cache once per cycle so the per-event no-submit
-    # Kelly proof can read bankroll_provider.cached() (it must NOT live-fetch per decision).
-    # The on-chain wallet is the only bankroll truth; this is a cycle-level refresh, not a
-    # per-event side effect. Non-fatal — Kelly fails closed (KELLY_PROOF_MISSING) if unwarm.
+    # Warm the in-process bankroll-of-record cache from the durable collateral
+    # ledger snapshot so the per-event no-submit Kelly proof can read
+    # bankroll_provider.cached() without performing venue/RPC I/O inside the
+    # reactor. The post-trade-capital sidecar owns wallet refreshes; this live
+    # scheduler consumes only local fresh truth. Non-fatal — Kelly fails closed
+    # (KELLY_PROOF_MISSING) if the ledger is absent/stale/degraded.
     try:
         from src.runtime import bankroll_provider as _bankroll_provider
 
-        # 2026-05-31: FORCE a fresh on-chain fetch each cycle (max_age_seconds=0.0) so the
-        # per-event no-submit Kelly read (bankroll_provider.cached(), 300s window) always sees
-        # a fresh value. The prior plain current() used the default 30s freshness and could
-        # return a stale cache-hit without re-fetching, letting _last_fetched_at age past 300s
-        # → cached() None → KELLY_PROOF_MISSING:bankroll_provider_unavailable on every event.
-        # Cycle-level (not per-decision) — preserves #45's "no per-decision wallet fetch".
-        _bk_warm = _bankroll_provider.current(max_age_seconds=0.0)
+        _bk_warm = _bankroll_provider.warm_from_collateral_snapshot()
         if _bk_warm is None:
             logger.error(
-                "EDLI reactor: bankroll warm current() returned None — cache cold, Kelly will "
-                "fail closed (KELLY_PROOF_MISSING). On-chain wallet fetch is failing."
+                "EDLI reactor: bankroll ledger warm returned None — cache cold, Kelly will "
+                "fail closed (KELLY_PROOF_MISSING). Collateral snapshot is missing, stale, "
+                "or degraded."
             )
     except Exception as _bk_exc:  # noqa: BLE001
         logger.warning("EDLI reactor: bankroll cache warm failed (non-fatal): %r", _bk_exc)
@@ -5781,7 +5778,7 @@ def _edli_event_reactor_cycle() -> None:
 
 @_scheduler_job("edli_bankroll_warm")
 def _edli_bankroll_warm_cycle() -> None:
-    """Dedicated frequent (~60s) on-chain bankroll-of-record cache warmer.
+    """Dedicated frequent (~60s) bankroll-of-record cache warmer.
 
     STRUCTURAL FIX (2026-05-31, follow-up to #45): the per-event no-submit Kelly
     proof and the live-bridge allocator refresh both read
@@ -5794,18 +5791,12 @@ def _edli_bankroll_warm_cycle() -> None:
     ``KELLY_PROOF_MISSING:bankroll_provider_unavailable``. Bankroll freshness was
     structurally COUPLED to the slow reactor cycle.
 
-    This job DECOUPLES freshness from the reactor cycle: it runs on its own ~60s
-    cadence and forces a fresh on-chain fetch (``current(max_age_seconds=0.0)``),
-    advancing ``_last_fetched_at`` so ``cached()`` (300s window) always resolves
-    regardless of how long the reactor cycle takes. It does NOT widen the
-    ``cached()`` window or weaken any fail-closed semantics — the consumers still
-    fail-closed correctly when bankroll is genuinely unavailable.
-
-    Not a DB writer (no table owned) — the @_scheduler_job decorator is the only
-    wiring needed (B047 observability). Fail-soft: a transient wallet-RPC failure
-    logs an ERROR but never crashes this job; a failed warm simply means this tick's
-    freshness did not advance (the next tick retries in ~60s, and consumers stay
-    fail-closed in the interim).
+    This job DECOUPLES freshness from the reactor cycle without doing live venue
+    I/O in the trading daemon. It consumes the durable CollateralLedger snapshot
+    maintained by the post-trade-capital sidecar and advances the in-process
+    cache from that local truth. It does NOT widen the ``cached()`` window or
+    weaken fail-closed semantics — stale/degraded/missing collateral snapshots
+    leave consumers fail-closed.
     """
 
     edli_cfg = _settings_section("edli", {})
@@ -5814,18 +5805,19 @@ def _edli_bankroll_warm_cycle() -> None:
     from src.runtime import bankroll_provider as _bankroll_provider
 
     try:
-        warm = _bankroll_provider.current(max_age_seconds=0.0)
+        warm = _bankroll_provider.warm_from_collateral_snapshot()
     except Exception as exc:  # noqa: BLE001 — fail-soft; consumers fail-closed on None
         logger.error(
-            "EDLI bankroll warm: on-chain wallet fetch raised (non-fatal, freshness "
+            "EDLI bankroll warm: collateral snapshot warm raised (non-fatal, freshness "
             "did not advance this tick): %r",
             exc,
         )
         return
     if warm is None:
         logger.error(
-            "EDLI bankroll warm: current() returned None — on-chain wallet fetch is "
-            "failing; cached() will fail closed (KELLY_PROOF_MISSING) until it recovers."
+            "EDLI bankroll warm: collateral snapshot warm returned None — cached() will "
+            "fail closed (KELLY_PROOF_MISSING) until post-trade-capital publishes a fresh "
+            "non-degraded collateral snapshot."
         )
 
 

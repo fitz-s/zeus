@@ -122,6 +122,8 @@ _last_spendable_cash_usd: Optional[float] = None
 # cash + only corroborated position value (excludes the blip_held phantom).
 _last_sizing_equity_usd: Optional[float] = None
 _last_fetched_at: Optional[datetime] = None
+_last_source: str = "polymarket_wallet"
+_last_authority: str = "canonical"
 # Positions-blip guard state (2026-06-09): anchor of the last VERIFIED nonzero
 # position value, used to detect an empty /positions read that contradicts
 # recent reality. Updated only under _lock (all writers run inside current()).
@@ -534,6 +536,7 @@ def current(
         no usable cache exists. Callers MUST treat None as fail-closed.
     """
     global _last_value_usd, _last_spendable_cash_usd, _last_sizing_equity_usd, _last_fetched_at
+    global _last_source, _last_authority
 
     with _lock:
         now = _now_utc()
@@ -547,6 +550,8 @@ def current(
                 value_usd=cached_value,
                 spendable_cash_usd=_last_spendable_cash_usd,
                 fetched_at=cached_fetched_at.isoformat(),
+                source=_last_source,
+                authority=_last_authority,
                 staleness_seconds=cached_age,
                 cached=True,
                 positions_read_verdict=_last_positions_read_verdict,
@@ -562,10 +567,14 @@ def current(
             _last_spendable_cash_usd = fresh_spendable_cash
             _last_sizing_equity_usd = fresh_sizing_equity
             _last_fetched_at = now
+            _last_source = "polymarket_wallet"
+            _last_authority = "canonical"
             return BankrollOfRecord(
                 value_usd=fresh_value,
                 spendable_cash_usd=fresh_spendable_cash,
                 fetched_at=now.isoformat(),
+                source=_last_source,
+                authority=_last_authority,
                 staleness_seconds=0.0,
                 cached=False,
                 positions_read_verdict=_last_positions_read_verdict,
@@ -587,6 +596,8 @@ def current(
                 value_usd=cached_value,
                 spendable_cash_usd=_last_spendable_cash_usd,
                 fetched_at=cached_fetched_at.isoformat(),
+                source=_last_source,
+                authority=_last_authority,
                 staleness_seconds=cached_age,
                 cached=True,
                 positions_read_verdict=_last_positions_read_verdict,
@@ -635,6 +646,8 @@ def cached(*, max_age_seconds: Optional[float] = None) -> Optional[BankrollOfRec
             value_usd=_last_value_usd,
             spendable_cash_usd=_last_spendable_cash_usd,
             fetched_at=_last_fetched_at.isoformat(),
+            source=_last_source,
+            authority=_last_authority,
             staleness_seconds=age,
             cached=True,
             positions_read_verdict=_last_positions_read_verdict,
@@ -642,10 +655,82 @@ def cached(*, max_age_seconds: Optional[float] = None) -> Optional[BankrollOfRec
         )
 
 
+def warm_from_collateral_snapshot(
+    *,
+    max_age_seconds: float | None = None,
+) -> Optional[BankrollOfRecord]:
+    """Populate the bankroll cache from the durable collateral ledger snapshot.
+
+    This path performs no venue/RPC I/O.  It lets the live event reactor and the
+    in-process warm scheduler consume the post-trade-capital sidecar's wallet
+    truth without blocking their scheduler thread on py-clob-client or Gamma
+    network calls.  Freshness remains fail-closed: no ledger, degraded snapshot,
+    malformed timestamp, or stale snapshot returns ``None``.
+    """
+
+    from src.state.collateral_ledger import (
+        COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS,
+        get_global_ledger,
+    )
+
+    ledger = get_global_ledger()
+    if ledger is None:
+        logger.error("bankroll ledger warm -> None: collateral_ledger_unconfigured")
+        return None
+    snapshot = ledger.snapshot()
+    if snapshot.authority_tier == "DEGRADED":
+        logger.error("bankroll ledger warm -> None: collateral snapshot degraded")
+        return None
+    captured_at = snapshot.captured_at
+    if captured_at.tzinfo is None:
+        captured_at = captured_at.replace(tzinfo=timezone.utc)
+    now = _now_utc()
+    age = (now - captured_at.astimezone(timezone.utc)).total_seconds()
+    bound = (
+        COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
+        if max_age_seconds is None
+        else float(max_age_seconds)
+    )
+    if age < 0:
+        logger.error("bankroll ledger warm -> None: collateral snapshot from the future age=%.3fs", age)
+        return None
+    if age > bound:
+        logger.error(
+            "bankroll ledger warm -> None: collateral snapshot stale age=%.1fs > bound=%.1fs",
+            age,
+            bound,
+        )
+        return None
+
+    value_usd = float(snapshot.available_pusd_micro) / 1_000_000.0
+    with _lock:
+        global _last_value_usd, _last_spendable_cash_usd, _last_sizing_equity_usd, _last_fetched_at
+        global _last_positions_read_verdict, _last_source, _last_authority
+        _last_value_usd = value_usd
+        _last_spendable_cash_usd = value_usd
+        _last_sizing_equity_usd = value_usd
+        _last_fetched_at = captured_at.astimezone(timezone.utc)
+        _last_positions_read_verdict = "collateral_snapshot"
+        _last_source = "collateral_ledger_snapshot"
+        _last_authority = "canonical"
+    return BankrollOfRecord(
+        value_usd=value_usd,
+        spendable_cash_usd=value_usd,
+        fetched_at=captured_at.astimezone(timezone.utc).isoformat(),
+        source="collateral_ledger_snapshot",
+        authority="canonical",
+        staleness_seconds=age,
+        cached=True,
+        positions_read_verdict="collateral_snapshot",
+        equity_for_new_entry_sizing_usd=value_usd,
+    )
+
+
 def reset_cache_for_tests() -> None:
     """Clear the module-level cache. Tests only — not part of the public contract."""
     global _last_value_usd, _last_spendable_cash_usd, _last_sizing_equity_usd, _last_fetched_at
     global _last_position_value_usd, _last_nonzero_positions_at, _last_positions_read_verdict
+    global _last_source, _last_authority
     with _lock:
         _last_value_usd = None
         _last_spendable_cash_usd = None
@@ -654,3 +739,5 @@ def reset_cache_for_tests() -> None:
         _last_position_value_usd = None
         _last_nonzero_positions_at = None
         _last_positions_read_verdict = "verified"
+        _last_source = "polymarket_wallet"
+        _last_authority = "canonical"

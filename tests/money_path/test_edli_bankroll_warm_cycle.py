@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-05-31
+# Last reused/audited: 2026-06-19
 # Authority basis: src/runtime/bankroll_provider.py (cached() RESILIENT bound, KILLER 1
 #   2026-05-31: default 1800s, supersedes the prior 300s fail-closed window that blanked
 #   last-good across transient wallet-RPC blip clusters) + src/main.py:_edli_event_reactor_cycle
@@ -10,10 +10,12 @@ Cross-module invariant under test (Fitz methodology — test the boundary, not a
 function):
 
     Bankroll freshness for the per-event no-submit Kelly proof must be DECOUPLED
-    from the slow (~330s) reactor cycle. A dedicated frequent (~60s) warm job
+    from the slow (~330s) reactor cycle and from live wallet network I/O in the
+    trading daemon. A dedicated frequent (~60s) warm job consumes the durable
+    CollateralLedger snapshot produced by the post-trade-capital sidecar and
     keeps ``bankroll_provider._last_fetched_at`` advancing so that
-    ``bankroll_provider.cached()`` (300s window) ALWAYS resolves regardless of
-    how long the reactor cycle runs.
+    ``bankroll_provider.cached()`` resolves regardless of how long the reactor
+    cycle runs.
 
 Background (live evidence 2026-05-31):
     The reactor cycle warmed the cache ONCE at cycle start. But the canary cycle
@@ -44,6 +46,11 @@ from datetime import datetime, timedelta, timezone
 
 import src.main as main_module
 from src.runtime import bankroll_provider
+from src.state.collateral_ledger import (
+    CollateralLedger,
+    CollateralSnapshot,
+    configure_global_ledger,
+)
 
 
 def _set_cache(*, value_usd: float | None, fetched_age_seconds: float | None) -> None:
@@ -68,30 +75,23 @@ def _enable_warm_cfg(monkeypatch) -> None:
     )
 
 
-def _install_real_refresh_current(monkeypatch, *, fresh_value_usd: float, call_log: list) -> None:
-    """Override the conftest autouse `current` stub with one that ACTUALLY refreshes
-    the module cache (advances `_last_fetched_at`), mirroring real
-    `current(max_age_seconds=0.0)`. This is the behaviour the warm tick depends on:
-    the warm calls `current()`, which must update the module-global cache so the
-    downstream `cached()` (300s window) resolves. The conftest default stub returns
-    a record WITHOUT touching the cache, so the boundary can't be exercised without
-    this override. No live wallet fetch occurs — we set the globals directly.
-    """
-    def _refreshing_current(**_kwargs):
-        call_log.append(1)
-        now = datetime.now(timezone.utc)
-        bankroll_provider._last_value_usd = fresh_value_usd
-        bankroll_provider._last_fetched_at = now
-        return bankroll_provider.BankrollOfRecord(
-            value_usd=fresh_value_usd,
-            fetched_at=now.isoformat(),
-            source="polymarket_wallet",
-            authority="canonical",
-            staleness_seconds=0.0,
-            cached=False,
+def _install_collateral_snapshot(*, fresh_value_usd: float, age_seconds: float = 0.0) -> None:
+    captured_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    ledger = CollateralLedger()
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=int(fresh_value_usd * 1_000_000),
+            pusd_allowance_micro=int(fresh_value_usd * 1_000_000),
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=captured_at,
+            authority_tier="CHAIN",
         )
-
-    monkeypatch.setattr(bankroll_provider, "current", _refreshing_current)
+    )
+    configure_global_ledger(ledger)
 
 
 def test_cached_resilient_within_bound_failclosed_beyond(monkeypatch):
@@ -122,7 +122,7 @@ def test_cached_resilient_within_bound_failclosed_beyond(monkeypatch):
         bankroll_provider.reset_cache_for_tests()
 
 
-def test_warm_cycle_refreshes_aged_cache_so_cached_is_fresh(monkeypatch):
+def test_warm_cycle_refreshes_from_collateral_snapshot_without_wallet_current(monkeypatch):
     """GREEN-after-fix: warm tick after a beyond-resilient-bound fetch recovers cached().
 
     The boundary the warm job must hold: it forces a fresh on-chain fetch
@@ -134,29 +134,34 @@ def test_warm_cycle_refreshes_aged_cache_so_cached_is_fresh(monkeypatch):
         _set_cache(value_usd=199.40, fetched_age_seconds=2000.0)
         assert bankroll_provider.cached() is None  # pre-warm: genuinely stale → None
 
-        # The warm calls current(max_age_seconds=0.0); install a current() that
-        # actually refreshes the module cache (real-fetch semantics, no live wallet).
         call_log: list[int] = []
-        _install_real_refresh_current(monkeypatch, fresh_value_usd=201.10, call_log=call_log)
+
+        def _forbidden_current(**_kwargs):
+            call_log.append(1)
+            raise AssertionError("bankroll warm must not perform live wallet I/O")
+
+        monkeypatch.setattr(bankroll_provider, "current", _forbidden_current)
+        _install_collateral_snapshot(fresh_value_usd=201.10)
         _enable_warm_cfg(monkeypatch)
 
         # Run the dedicated warm tick.
         main_module._edli_bankroll_warm_cycle()
 
-        # The warm forced exactly one fresh fetch (max_age_seconds=0.0).
-        assert call_log == [1]
+        assert call_log == []
 
         # cached() now resolves non-None and reflects the fresh fetch.
         record = bankroll_provider.cached()
         assert record is not None
         assert record.value_usd == 201.10
+        assert record.source == "collateral_ledger_snapshot"
         assert record.staleness_seconds < 1.0
     finally:
         bankroll_provider.reset_cache_for_tests()
+        configure_global_ledger(None)
 
 
-def test_warm_cycle_failsoft_on_fetch_error(monkeypatch):
-    """The warm itself is fail-soft: a wallet-RPC error logs but does NOT crash.
+def test_warm_cycle_failsoft_on_missing_collateral_snapshot(monkeypatch):
+    """The warm itself is fail-soft: missing ledger data does NOT crash.
 
     Consumers (allocator / Kelly) already fail-closed correctly when bankroll is
     genuinely unavailable, so a failed warm just means this tick's freshness did
@@ -164,11 +169,7 @@ def test_warm_cycle_failsoft_on_fetch_error(monkeypatch):
     """
     try:
         _set_cache(value_usd=None, fetched_age_seconds=None)  # cold
-
-        def _raising_current(**_kwargs):
-            raise RuntimeError("wallet RPC timeout")
-
-        monkeypatch.setattr(bankroll_provider, "current", _raising_current)
+        configure_global_ledger(None)
         _enable_warm_cfg(monkeypatch)
 
         # Must not raise — the warm is fail-soft (and the @_scheduler_job decorator
@@ -179,6 +180,7 @@ def test_warm_cycle_failsoft_on_fetch_error(monkeypatch):
         assert bankroll_provider.cached() is None
     finally:
         bankroll_provider.reset_cache_for_tests()
+        configure_global_ledger(None)
 
 
 def test_warm_cycle_noop_when_edli_disabled(monkeypatch):
@@ -203,3 +205,14 @@ def test_warm_cycle_noop_when_edli_disabled(monkeypatch):
         assert call_log == []  # gated off → no current()/wallet side effect
     finally:
         bankroll_provider.reset_cache_for_tests()
+        configure_global_ledger(None)
+
+
+def test_event_reactor_bankroll_warm_is_snapshot_only() -> None:
+    """Static money-path guard: reactor must not do wallet network refreshes."""
+    import inspect
+
+    source = inspect.getsource(main_module._edli_event_reactor_cycle)
+
+    assert "warm_from_collateral_snapshot" in source
+    assert "current(max_age_seconds=0.0)" not in source
