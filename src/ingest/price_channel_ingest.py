@@ -1398,6 +1398,91 @@ def _edli_refresh_held_position_quote_evidence() -> dict:
             world_conn.close()
 
 
+def _edli_refresh_candidate_priority_quote_evidence(*, limit: int = 128) -> dict:
+    """Refresh executable quote evidence for recently selected candidate tokens.
+
+    The long-lived market-channel thread captures its token universe at thread
+    start. Candidate tokens can appear minutes later through reactor no-trade
+    receipts, so they need the same bounded REST freshness path as held exposure
+    rather than waiting for the WS universe to restart.
+    """
+
+    from src.data.polymarket_client import PolymarketClient
+    from src.events.event_coalescer import EventCoalescer
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.market_channel_ingestor import (
+        MarketChannelIngestor,
+        MarketChannelOnlineService,
+        _world_write_mutex,
+        active_weather_token_metadata_for_tokens,
+    )
+    from src.state.db import get_trade_connection, get_world_connection
+
+    world_read = get_world_connection(write_class=None)
+    try:
+        candidate_token_ids = _edli_candidate_priority_token_ids(
+            world_read,
+            limit=limit,
+        )
+    finally:
+        world_read.close()
+    if not candidate_token_ids:
+        return {"candidate_priority_token_ids": 0, "candidate_quote_refresh_events": 0}
+
+    trade_read = get_trade_connection(write_class=None)
+    try:
+        token_metadata = active_weather_token_metadata_for_tokens(
+            trade_read,
+            token_ids=candidate_token_ids,
+        )
+    finally:
+        trade_read.close()
+
+    if not token_metadata:
+        return {
+            "candidate_priority_token_ids": len(candidate_token_ids),
+            "candidate_quote_refresh_events": 0,
+            "skipped": "no_candidate_token_metadata",
+        }
+
+    world_conn = get_world_connection(write_class="live")
+    feasibility_conn = get_trade_connection(write_class="live")
+
+    def _commit_event_and_feasibility() -> None:
+        world_conn.commit()
+        feasibility_conn.commit()
+
+    try:
+        with PolymarketClient() as clob:
+            service = MarketChannelOnlineService(
+                MarketChannelIngestor(
+                    EventWriter(world_conn),
+                    active_token_ids=set(token_metadata),
+                    token_metadata=token_metadata,
+                    feasibility_conn=feasibility_conn,
+                    coalescer=EventCoalescer(max_market_keys=1000),
+                ),
+                fetch_orderbook=clob.get_orderbook_snapshot,
+            )
+            written = service.seed_rest_books_in_chunks(
+                token_ids=set(token_metadata),
+                received_at=datetime.now(timezone.utc).isoformat(),
+                world_mutex=_world_write_mutex(),
+                commit=_commit_event_and_feasibility,
+                logger=logger,
+            )
+        return {
+            "candidate_priority_token_ids": len(candidate_token_ids),
+            "candidate_token_metadata": len(token_metadata),
+            "candidate_quote_refresh_events": int(written),
+        }
+    finally:
+        try:
+            feasibility_conn.close()
+        finally:
+            world_conn.close()
+
+
 def _edli_held_quote_refresh_cycle() -> dict:
     """Scheduler entry point for held-position quote freshness.
 
@@ -1440,6 +1525,14 @@ def _edli_market_channel_ingestor_cycle() -> None:
         return
     global _edli_market_channel_thread
     if _edli_market_channel_thread is not None and _edli_market_channel_thread.is_alive():
+        candidate_refresh = _edli_refresh_candidate_priority_quote_evidence(
+            limit=_edli_bounded_positive_int(
+                edli_cfg,
+                "market_channel_candidate_priority_max_tokens",
+                default=128,
+                maximum=1000,
+            )
+        )
         _write_scheduler_health(
             "edli_market_channel_ingestor",
             failed=False,
@@ -1448,6 +1541,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                 "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
                 "fill_authority": "user_channel_or_reconcile_only",
                 "held_quote_refresh": "delegated_to_edli_held_quote_refresh",
+                "candidate_quote_refresh": candidate_refresh,
             },
         )
         return
