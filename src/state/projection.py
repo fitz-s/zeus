@@ -270,13 +270,17 @@ def _preserve_existing_monitor_refresh_authority(
 def _has_positive_chain_observation(projection: dict) -> bool:
     try:
         chain_shares = float(projection.get("chain_shares") or 0.0)
+        chain_avg_price = float(projection.get("chain_avg_price") or 0.0)
+        chain_cost_basis = float(projection.get("chain_cost_basis_usd") or 0.0)
     except (TypeError, ValueError):
         return False
     if chain_shares <= 0.0:
         return False
-    if not str(projection.get("chain_seen_at") or ""):
-        return False
     if str(projection.get("chain_absence_at") or ""):
+        return False
+    if not str(projection.get("chain_seen_at") or "") and (
+        chain_avg_price <= 0.0 or chain_cost_basis <= 0.0
+    ):
         return False
     return True
 

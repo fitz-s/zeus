@@ -3661,7 +3661,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
                chain_shares = 60.0,
                chain_avg_price = 0.74,
                chain_cost_basis_usd = 44.4,
-               chain_seen_at = '2026-06-17T20:51:29+00:00'
+               chain_seen_at = NULL
          WHERE position_id = ?
         """,
         ("monitor-preserve-chain-1",),
