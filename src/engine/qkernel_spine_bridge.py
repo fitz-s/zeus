@@ -1015,6 +1015,15 @@ def decide_family_via_spine(
         )
 
     overlaid = _overlay_spine_economics_onto_proof(selected_proof, decision)
+    if overlaid is None:
+        return SpineDecisionResult(
+            selected_proof=None,
+            no_trade_reason=(
+                f"{NO_TRADE_SPINE_WIRING_FAULT}:QKERNEL_EXECUTION_CERTIFICATE_OVERLAY_FAILED:"
+                f"{decision.selected.candidate_id}"
+            ),
+            decision=decision,
+        )
     return SpineDecisionResult(
         selected_proof=overlaid,
         no_trade_reason=None,
@@ -1215,7 +1224,7 @@ def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_
     return _build
 
 
-def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) -> Any:
+def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) -> Any | None:
     """Overlay the spine decision's economics onto the selected reactor proof.
 
     The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` / ``trade_score`` /
@@ -1233,7 +1242,7 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
 
     selected = decision.selected
     if selected is None:
-        return proof
+        return None
     selected_decision = None
     for candidate_decision in getattr(decision, "candidate_decisions", ()) or ():
         try:
@@ -1279,5 +1288,5 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
     }
     try:
         return replace(proof, **overlay)
-    except Exception:  # noqa: BLE001 — if the proof is not a replaceable dataclass, return as-is
-        return proof
+    except Exception:  # noqa: BLE001 — non-replaceable proof is a bridge wiring fault
+        return None

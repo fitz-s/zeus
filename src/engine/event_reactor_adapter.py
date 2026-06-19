@@ -7671,12 +7671,59 @@ def _proof_probability_uncertainty(
     )
 
 
+_QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
+    {
+        "source",
+        "candidate_id",
+        "route_id",
+        "payoff_q_lcb",
+        "edge_lcb",
+        "delta_u_at_min",
+        "optimal_stake_usd",
+        "optimal_delta_u",
+        "cost",
+    }
+)
+
+
+def _proof_uses_qkernel_spine(proof: "_CandidateProof") -> bool:
+    return str(getattr(proof, "q_source", "") or "") == "qkernel_spine"
+
+
 def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] | None:
-    """Return the qkernel guarded execution-economics certificate, if authoritative."""
-    if str(getattr(proof, "q_source", "") or "") != "qkernel_spine":
+    """Return the qkernel guarded execution-economics certificate, if valid.
+
+    ``q_source == "qkernel_spine"`` is an execution authority switch: the submit path
+    may size only from the guarded qkernel certificate. Missing or malformed
+    certificates therefore return ``None`` and the caller must fail closed rather than
+    fall back to legacy proof-qLCB sizing.
+    """
+    if not _proof_uses_qkernel_spine(proof):
         return None
     cert = getattr(proof, "qkernel_execution_economics", None)
     if not isinstance(cert, Mapping):
+        return None
+    if not _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS.issubset(cert.keys()):
+        return None
+    if str(cert.get("source") or "") != "qkernel_spine":
+        return None
+    if not str(cert.get("candidate_id") or "").strip():
+        return None
+    route_id = str(cert.get("route_id") or "").strip()
+    if not route_id:
+        return None
+    side = str(cert.get("side") or "").strip().upper()
+    native_side = _native_curve_side_for_direction(str(getattr(proof, "direction", "") or ""))
+    if side and native_side is not None and side != native_side:
+        return None
+    bin_id = str(cert.get("bin_id") or "").strip()
+    if bin_id and bin_id != _candidate_bin_id(proof):
+        return None
+    if route_id.startswith("DIRECT_YES:") and native_side != "YES":
+        return None
+    if route_id.startswith("DIRECT_NO:") and native_side != "NO":
+        return None
+    if not (route_id.startswith("DIRECT_YES:") or route_id.startswith("DIRECT_NO:")):
         return None
     return cert
 
@@ -9718,6 +9765,13 @@ def _robust_marginal_utility_stake_and_price(
     # law). max_stake is governed by the fractional-Kelly budget + concentration ceiling +
     # free-cash bound ONLY — no day0-specific notional clamp.
     qkernel_cert = _qkernel_execution_economics(selected_proof)
+    if qkernel_cert is None and _proof_uses_qkernel_spine(selected_proof):
+        # qkernel-spine proofs deliberately preserve q_posterior/q_lcb_5pct as
+        # receipt provenance. They are not execution-sizing authority. If the
+        # guarded qkernel execution certificate is missing or malformed, fail closed
+        # instead of falling through to the legacy scorer that would size from those
+        # preserved proof fields.
+        return 0.0, None
     if qkernel_cert is not None:
         qkernel_q_lcb = _qkernel_execution_q_lcb(selected_proof)
         qkernel_cost = _qkernel_execution_float(selected_proof, "cost")

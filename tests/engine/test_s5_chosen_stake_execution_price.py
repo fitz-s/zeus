@@ -426,3 +426,66 @@ def test_qkernel_execution_certificate_bounds_submit_sizing():
     assert guarded_stake == pytest.approx(6.25)
     assert guarded_price is not None
     assert guarded_price.value == pytest.approx(0.20)
+
+
+@pytest.mark.parametrize(
+    "certificate",
+    [
+        None,
+        ["not", "a", "mapping"],
+        {"source": "qkernel_spine", "payoff_q_lcb": 0.30},
+        {
+            "source": "qkernel_spine",
+            "candidate_id": "YES:bin-1:DIRECT_YES",
+            "route_id": "DIRECT_NO:bin-1@proof",
+            "payoff_q_lcb": 0.30,
+            "edge_lcb": 0.10,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "6.25",
+            "optimal_delta_u": 0.02,
+            "cost": 0.20,
+            "side": "YES",
+        },
+    ],
+)
+def test_qkernel_missing_or_malformed_certificate_fails_closed_before_legacy_scorer(
+    monkeypatch, certificate
+):
+    """qkernel source without a valid guarded cert cannot fall back to proof-qLCB sizing."""
+    from src.types.market import Bin
+
+    def _legacy_scorer_must_not_run(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("qkernel proof fell through to legacy robust scorer")
+
+    monkeypatch.setattr(
+        era,
+        "_score_family_candidates_by_robust_marginal_utility",
+        _legacy_scorer_must_not_run,
+    )
+
+    bin_x = Bin(low=60.0, high=61.0, unit="F", label="60-61F")
+    row = _snapshot_row(yes_asks=(("0.20", "1000000"),))
+    proof = replace(
+        _proof_from_row(
+            direction="buy_yes",
+            row=row,
+            token_id="yes-1",
+            q_posterior=0.90,
+            q_lcb_5pct=0.90,
+            bin_obj=bin_x,
+        ),
+        q_source="qkernel_spine",
+        qkernel_execution_economics=certificate,
+    )
+
+    stake, price = era._robust_marginal_utility_stake_and_price(
+        family_key="fam",
+        selected_proof=proof,
+        all_proofs=(proof,),
+        extra_exposure_by_bin_id={},
+        bankroll_usd=10000.0,
+        kelly_multiplier=1.0,
+    )
+
+    assert stake == 0.0
+    assert price is None

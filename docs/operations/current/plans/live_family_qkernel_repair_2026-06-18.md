@@ -136,6 +136,46 @@ Verification completed after this repair:
   - Result: `76 passed, 10 warnings`.
 - `git diff --check` passed.
 
+### Pro re-review fail-closed repair - 2026-06-19
+
+Recovered Pro re-review:
+
+- request: `REQ-20260619-014149-pp59a17m`
+- thread: `https://chatgpt.com/g/g-p-6a2990f77bdc81919f9702e3cb6ae20d-claude-code/c/6a34df05-bc6c-83ea-ab80-5bf8021196fb`
+- recovered answer file: `/tmp/cgc_answer_REQ-20260619-014149-pp59a17m.txt`
+- verdict: NO-GO until `q_source == "qkernel_spine"` with a missing or non-mapping
+  execution certificate fails closed instead of falling through to legacy proof-qLCB sizing.
+
+Repair implemented locally:
+
+- Added qkernel execution-certificate validation in `event_reactor_adapter`:
+  required fields, `source == "qkernel_spine"`, direct route identity, and optional side/bin
+  consistency with the selected proof.
+- `_robust_marginal_utility_stake_and_price` now returns `(0.0, None)` for any qkernel
+  proof whose guarded execution certificate is absent or malformed. It cannot call the legacy
+  robust scorer in that state.
+- `_overlay_spine_economics_onto_proof` now returns `None` on overlay/replace failure, and
+  `decide_family_via_spine` converts that to typed
+  `SPINE_WIRING_FAULT:QKERNEL_EXECUTION_CERTIFICATE_OVERLAY_FAILED:*` no-trade instead of
+  returning the original unguarded proof.
+- Regression added for missing, non-mapping, incomplete, and side/route-inconsistent
+  qkernel certificates. The tests monkeypatch the legacy scorer to raise, proving the
+  fail-closed path does not fall through.
+- Regression added for overlay failure returning `None` instead of the original proof.
+
+Verification completed after this repair:
+
+- `python3 -m py_compile src/engine/event_reactor_adapter.py src/engine/qkernel_spine_bridge.py tests/engine/test_s5_chosen_stake_execution_price.py tests/integration/test_qkernel_spine_blockers_pr409.py`
+- `/Users/leofitz/zeus/.venv/bin/python -m pytest -q tests/engine/test_s5_chosen_stake_execution_price.py::test_qkernel_execution_certificate_bounds_submit_sizing tests/engine/test_s5_chosen_stake_execution_price.py::test_qkernel_missing_or_malformed_certificate_fails_closed_before_legacy_scorer tests/integration/test_qkernel_spine_blockers_pr409.py::test_overlay_preserves_probability_fields_and_updates_score tests/integration/test_qkernel_spine_blockers_pr409.py::test_overlay_failure_returns_none_instead_of_original_proof`
+  - Result: `7 passed`.
+- `/Users/leofitz/zeus/.venv/bin/python -m pytest -q tests/engine/test_s5_chosen_stake_execution_price.py tests/engine/test_single_application_kelly.py tests/integration/test_qkernel_spine_blockers_pr409.py tests/integration/test_qkernel_spine_routing.py tests/decision/test_family_decision_engine.py tests/decision/test_payoff_vector_edge.py tests/decision/test_qlcb_guard_decision_integration.py tests/decision/test_qlcb_reliability_guard.py`
+  - Result: `81 passed, 10 warnings`.
+- `git diff --check` passed.
+- Topology gates passed:
+  - `python3 scripts/topology_doctor.py --task-boot-profiles`
+  - `python3 scripts/topology_doctor.py --map-maintenance --changed-files ...`
+  - `python3 scripts/topology_doctor.py --planning-lock --plan-evidence docs/operations/current/plans/live_family_qkernel_repair_2026-06-18.md --changed-files ...`
+
 ### Live runtime re-alignment snapshot - 2026-06-19 06:30 UTC
 
 This is a separate current-fact line from PR #412. Do not use it to claim the qkernel

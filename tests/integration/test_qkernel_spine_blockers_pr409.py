@@ -773,6 +773,24 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
 
 
+def test_overlay_failure_returns_none_instead_of_original_proof():
+    """A qkernel overlay wiring fault must become no-trade, not an unguarded proof."""
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.052, point_ev=0.050
+    )
+    proof = SimpleNamespace(
+        q_source=None,
+        q_posterior=0.80,
+        q_lcb_5pct=0.99,
+        trade_score=0.01,
+    )
+    decision = SimpleNamespace(selected=economics, candidate_decisions=())
+
+    assert bridge._overlay_spine_economics_onto_proof(proof, decision) is None
+
+
 def test_overlay_does_not_create_milan_buy_yes_probability_contradiction():
     """A payoff-space NO-like lower bound must not overwrite buy_yes probability fields."""
     economics = _selected_economics(
