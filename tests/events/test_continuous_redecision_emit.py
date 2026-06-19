@@ -1046,6 +1046,82 @@ def test_held_position_family_provider_excludes_closed_phases():
     }
 
 
+def test_held_position_family_provider_excludes_market_closed_pending_exit():
+    """Closed pending-exit rows wait for settlement; they must not refresh CLOB books."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            shares REAL,
+            chain_shares REAL,
+            cost_basis_usd REAL,
+            chain_cost_basis_usd REAL,
+            size_usd REAL,
+            chain_state TEXT,
+            phase TEXT,
+            order_status TEXT,
+            exit_reason TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "Seattle",
+                "2026-06-19",
+                "high",
+                9.39,
+                9.39,
+                6.85,
+                6.85,
+                6.85,
+                "synced",
+                "pending_exit",
+                "backoff_exhausted",
+                "MARKET_CLOSED_AWAITING_SETTLEMENT",
+            ),
+            (
+                "Tokyo",
+                "2026-06-21",
+                "low",
+                11.33,
+                11.33,
+                7.02,
+                7.02,
+                7.02,
+                "synced",
+                "active",
+                "filled",
+                "",
+            ),
+            (
+                "Paris",
+                "2026-06-20",
+                "low",
+                5.06,
+                5.06,
+                3.79,
+                3.79,
+                3.79,
+                "synced",
+                "pending_exit",
+                "backoff_exhausted",
+                "MODEL_DIVERGENCE_PANIC",
+            ),
+        ],
+    )
+
+    assert _held_position_families(conn) == {
+        ("Tokyo", "2026-06-21", "low"),
+        ("Paris", "2026-06-20", "low"),
+    }
+
+
 def test_held_position_family_provider_accepts_chain_confirmed_quantity():
     conn = sqlite3.connect(":memory:")
     conn.execute(
