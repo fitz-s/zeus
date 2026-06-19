@@ -262,6 +262,22 @@ def test_no_regression_cascade_liveness_antibody_travels_to_p4():
     )
 
 
+def test_order_daemon_cascade_guard_does_not_enforce_p4_owned_pollers():
+    """The order daemon must not fail boot for pollers lifted into P4.
+
+    architecture/cascade_liveness_contract.yaml now assigns settlement/redeem/wrap
+    pollers to owner_daemon=post_trade_capital. Those are enforced by the P4
+    daemon boot guard, not src.main.
+    """
+    import src.main as main
+
+    class EmptyScheduler:
+        def get_jobs(self):
+            return []
+
+    main._assert_cascade_liveness_contract(EmptyScheduler())
+
+
 # ---------------------------------------------------------------------------
 # CASCADE-LIVENESS CONTRACT SUITE-GREEN INVARIANTS (P4 fix pass, 2026-06-08)
 #

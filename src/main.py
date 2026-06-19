@@ -1328,6 +1328,12 @@ def _assert_cascade_liveness_contract(scheduler) -> None:
     missing: list[tuple[str, str]] = []
     for sm in contract.get("state_machines", []) or []:
         for poller in sm.get("required_pollers", []) or []:
+            owner_daemon = str(poller.get("owner_daemon") or "").strip()
+            owner = str(poller.get("owner") or "")
+            if owner_daemon and owner_daemon != "main":
+                continue
+            if not owner_daemon and "post_trade_capital" in owner:
+                continue
             if poller["id"] not in job_ids:
                 missing.append((sm["table"], poller["id"]))
     if missing:
