@@ -6677,6 +6677,93 @@ class TestRecoveryResolutionTable:
         ).fetchone()["phase"]
         assert phase == "pending_exit"
 
+    def test_confirmed_phantom_void_repair_quarantines_for_attribution(self, conn):
+        position_id = "pos-confirmed-phantom-void"
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_seen_at
+            ) VALUES (
+                ?, 'voided', ?, 'mkt-paris', 'Paris', 'Europe',
+                '2026-06-20',
+                'Will the lowest temperature in Paris be 19°C on June 20?',
+                'buy_no', 'C', 3.795, 5.06, 3.795, 0.75, 0.8248,
+                'snap-paris', 'ens_member_counting', 'settlement_capture',
+                'settlement_capture', 'day0', 'synced', 'tok-yes',
+                'tok-no', 'cond-paris', 'ord-entry', 'filled',
+                '2026-06-20T06:41:30+00:00', 'low', 'PHANTOM_NOT_ON_CHAIN',
+                'venue_confirmed_full', 5.0599, '2026-06-20T02:45:00+00:00'
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'ADMIN_VOIDED', '2026-06-20T06:41:30+00:00',
+                      'day0_window', 'voided', 'settlement_capture', NULL,
+                      'snap-paris', 'ord-entry', NULL, 'chain_reconciliation',
+                      ?, 'voided', 'src.state.chain_reconciliation',
+                      '{"reason":"PHANTOM_NOT_ON_CHAIN","token_id":"tok-no","chain_state":"synced"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_void:4",
+                position_id,
+                f"{position_id}:chain_void:4",
+            ),
+        )
+
+        from src.execution.command_recovery import repair_confirmed_phantom_voids
+
+        summary = repair_confirmed_phantom_voids(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, exit_reason, shares, chain_shares
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "quarantined",
+            "chain_state": "chain_absent_confirmed_position_unattributed",
+            "exit_reason": "chain_absent_confirmed_position_unattributed",
+            "shares": 5.06,
+            "chain_shares": 5.0599,
+        }
+        event = conn.execute(
+            """
+            SELECT event_type, sequence_no, phase_before, phase_after, source_module, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_REQUIRED"
+        assert event["sequence_no"] == 5
+        assert event["phase_before"] == "voided"
+        assert event["phase_after"] == "quarantined"
+        assert event["source_module"] == "src.execution.command_recovery"
+        assert payload["held_token_id"] == "tok-no"
+        assert payload["proof_class"] == "confirmed_fill_phantom_void_reclassified_to_review"
+
     def test_exit_matched_trade_fact_repairs_retry_pending_projection(
         self,
         conn,

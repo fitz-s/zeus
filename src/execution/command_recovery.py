@@ -5130,6 +5130,172 @@ def repair_structural_win_pending_exits(conn: sqlite3.Connection) -> dict:
     return summary
 
 
+def _confirmed_phantom_void_candidates(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        """
+        WITH latest_void AS (
+            SELECT pe.*
+              FROM position_events pe
+             WHERE pe.event_type = 'ADMIN_VOIDED'
+               AND pe.payload_json LIKE '%PHANTOM_NOT_ON_CHAIN%'
+               AND pe.sequence_no = (
+                   SELECT MAX(newer.sequence_no)
+                     FROM position_events newer
+                    WHERE newer.position_id = pe.position_id
+                      AND newer.event_type = 'ADMIN_VOIDED'
+                      AND newer.payload_json LIKE '%PHANTOM_NOT_ON_CHAIN%'
+               )
+        )
+        SELECT pc.*,
+               latest_void.event_id AS latest_void_event_id,
+               latest_void.sequence_no AS latest_void_sequence_no,
+               latest_void.payload_json AS latest_void_payload_json,
+               (
+                   SELECT MAX(any_event.sequence_no)
+                     FROM position_events any_event
+                    WHERE any_event.position_id = pc.position_id
+               ) AS latest_any_sequence_no
+          FROM position_current pc
+          JOIN latest_void
+            ON latest_void.position_id = pc.position_id
+         WHERE pc.phase = 'voided'
+           AND COALESCE(pc.exit_reason, '') = 'PHANTOM_NOT_ON_CHAIN'
+           AND COALESCE(pc.shares, 0) > 0
+           AND COALESCE(pc.fill_authority, '') <> ''
+         ORDER BY pc.updated_at
+        """
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
+    """Recover confirmed fills that chain reconciliation wrongly voided as phantom.
+
+    A venue-confirmed fill is real economic history. If its held token later
+    disappears from chain without an attributed exit/settlement/redeem record,
+    the correct state is REVIEW_REQUIRED/quarantined, not ADMIN_VOIDED.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    candidates = _confirmed_phantom_void_candidates(conn)
+    if not candidates:
+        return summary
+    try:
+        from src.state.chain_reconciliation import (
+            CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
+            CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+        )
+        from src.state.portfolio import has_verified_trade_fill
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("recovery: confirmed phantom-void repair unavailable: %s", exc)
+        summary["errors"] += len(candidates)
+        return summary
+
+    for row in candidates:
+        summary["scanned"] += 1
+        if not has_verified_trade_fill(row):
+            summary["stayed"] += 1
+            continue
+        position_id = str(row.get("position_id") or "")
+        if not position_id:
+            summary["stayed"] += 1
+            continue
+        direction = str(row.get("direction") or "")
+        held_token_id = (
+            str(row.get("no_token_id") or "")
+            if direction == "buy_no"
+            else str(row.get("token_id") or "")
+        )
+        now = _now_iso()
+        next_sequence = int(row.get("latest_any_sequence_no") or row.get("latest_void_sequence_no") or 0) + 1
+        safe_position_id = "".join(ch if ch.isalnum() else "_" for ch in position_id)
+        sp_name = f"sp_confirmed_phantom_void_repair_{safe_position_id}"
+        payload = {
+            "schema_version": 1,
+            "reason": CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+            "proof_class": "confirmed_fill_phantom_void_reclassified_to_review",
+            "position_id": position_id,
+            "phase_before": "voided",
+            "phase_after": "quarantined",
+            "latest_void_event_id": str(row.get("latest_void_event_id") or ""),
+            "latest_void_payload_json": str(row.get("latest_void_payload_json") or ""),
+            "held_token_id": held_token_id,
+            "token_id": str(row.get("token_id") or ""),
+            "no_token_id": str(row.get("no_token_id") or ""),
+            "fill_authority": str(row.get("fill_authority") or ""),
+            "shares": row.get("shares"),
+            "chain_shares": row.get("chain_shares"),
+            "source_proof": {
+                "source_function": "command_recovery.repair_confirmed_phantom_voids",
+                "source_reason": "venue_confirmed_fill_cannot_be_phantom_without_close_attribution",
+            },
+        }
+        try:
+            conn.execute(f"SAVEPOINT {sp_name}")
+            conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no,
+                    event_type, occurred_at, phase_before, phase_after,
+                    strategy_key, decision_id, snapshot_id, order_id,
+                    command_id, caused_by, idempotency_key, venue_status,
+                    source_module, payload_json, env
+                ) VALUES (?, ?, 1, ?, 'REVIEW_REQUIRED', ?, 'voided', 'quarantined',
+                          ?, NULL, ?, ?, NULL, ?, ?, 'review_required', ?, ?, 'live')
+                """,
+                (
+                    f"{position_id}:confirmed_phantom_void_repair:{next_sequence}",
+                    position_id,
+                    next_sequence,
+                    now,
+                    str(row.get("strategy_key") or "unknown"),
+                    str(row.get("decision_snapshot_id") or ""),
+                    str(row.get("order_id") or ""),
+                    CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+                    f"{position_id}:confirmed_phantom_void_repair:{next_sequence}",
+                    "src.execution.command_recovery",
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                ),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE position_current
+                   SET phase = 'quarantined',
+                       chain_state = ?,
+                       exit_reason = ?,
+                       chain_absence_at = CASE
+                           WHEN COALESCE(chain_absence_at, '') = '' THEN ?
+                           ELSE chain_absence_at
+                       END,
+                       updated_at = ?
+                 WHERE position_id = ?
+                   AND phase = 'voided'
+                   AND COALESCE(exit_reason, '') = 'PHANTOM_NOT_ON_CHAIN'
+                """,
+                (
+                    CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
+                    CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+                    now,
+                    now,
+                    position_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("position_current update did not affect exactly one row")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            summary["advanced"] += 1
+        except Exception as exc:  # noqa: BLE001
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: confirmed phantom-void repair failed for %s: %s",
+                position_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
 def _partial_remainder_candidates(
     conn: sqlite3.Connection,
     *,
@@ -9512,6 +9678,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += structural_win_exit_summary["stayed"]
         summary["errors"] += structural_win_exit_summary["errors"]
 
+        confirmed_phantom_void_summary = repair_confirmed_phantom_voids(conn)
+        summary["confirmed_phantom_void_repair"] = confirmed_phantom_void_summary
+        summary["advanced"] += confirmed_phantom_void_summary["advanced"]
+        summary["stayed"] += confirmed_phantom_void_summary["stayed"]
+        summary["errors"] += confirmed_phantom_void_summary["errors"]
+
         partial_summary = reconcile_partial_remainders(
             conn,
             client,
@@ -9814,6 +9986,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
     _db_pass("structural_win_pending_exit_repair",
              repair_structural_win_pending_exits,
              "structural_win_pending_exit_repair")
+    _db_pass("confirmed_phantom_void_repair",
+             repair_confirmed_phantom_voids, "confirmed_phantom_void_repair")
     _client_pass("partial_remainders",
                  reconcile_partial_remainders, "partial_remainders", updated_before=started_at)
 

@@ -1272,6 +1272,8 @@ def build_review_required_canonical_write(
     if not review_detected_at:
         raise ValueError("review_detected_at is required for build_review_required_canonical_write")
     occurred_at = review_detected_at
+    direction = getattr(position, "direction", "")
+    direction_value = str(getattr(direction, "value", direction) or "").lower()
     payload = json.dumps(
         {
             "source": "chain_reconciliation",
@@ -1282,6 +1284,12 @@ def build_review_required_canonical_write(
             "chain_shares": getattr(position, "chain_shares", None),
             "condition_id": getattr(position, "condition_id", ""),
             "token_id": getattr(position, "token_id", ""),
+            "no_token_id": getattr(position, "no_token_id", ""),
+            "held_token_id": (
+                getattr(position, "no_token_id", "")
+                if direction_value == "buy_no"
+                else getattr(position, "token_id", "")
+            ),
         },
         default=str,
         sort_keys=True,

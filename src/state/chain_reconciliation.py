@@ -50,6 +50,8 @@ logger = logging.getLogger(__name__)
 PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
 LIVE_TRADE_FACT_SOURCES = frozenset({"REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN"})
 FILL_TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
+CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON = "chain_absent_confirmed_position_unattributed"
+CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE = "chain_absent_confirmed_position_unattributed"
 
 # Slice A4 (PR #19 finding 8, 2026-04-26): structural anchor for the
 # learning-authority contract previously held only in resolve_rescue_authority's
@@ -1024,6 +1026,47 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             or getattr(position, "exit_state", "") in PENDING_EXIT_STATES
         )
 
+    def _has_confirmed_entry_authority(position: Position) -> bool:
+        return (
+            bool(getattr(position, "entry_fill_verified", False))
+            or str(getattr(position, "fill_authority", "") or "")
+            == FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+        )
+
+    def _quarantine_confirmed_chain_absence(
+        position: Position,
+        *,
+        token_id: str,
+        source: str,
+    ) -> None:
+        corrected = replace(position)
+        corrected.state = LifecycleState.QUARANTINED.value
+        corrected.chain_state = CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE
+        corrected.last_chain_absence_observed_at = now
+        corrected.quarantined_at = corrected.quarantined_at or now
+        logger.error(
+            "CONFIRMED_POSITION_CHAIN_ABSENT: trade_id=%s token=%s source=%s; "
+            "quarantining for attribution instead of phantom void",
+            getattr(position, "trade_id", "?"),
+            token_id,
+            source,
+        )
+        if _append_canonical_review_required(
+            corrected,
+            reason=CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+        ):
+            stats["review_required_persisted"] = (
+                stats.get("review_required_persisted", 0) + 1
+            )
+        position.state = corrected.state
+        position.chain_state = corrected.chain_state
+        position.last_chain_absence_observed_at = corrected.last_chain_absence_observed_at
+        position.quarantined_at = corrected.quarantined_at
+        stats["quarantined"] += 1
+        stats["confirmed_chain_absence_quarantined"] = (
+            stats.get("confirmed_chain_absence_quarantined", 0) + 1
+        )
+
     def _persist_chain_only_quarantine_fact(token_id: str, chain: ChainPosition) -> None:
         if conn is None:
             return
@@ -1158,6 +1201,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         # Pass-2: skip aggregate-phantom positions — chain cannot back them.
         # Void using the existing PHANTOM_NOT_ON_CHAIN state (no new enum).
         if pos.trade_id in phantom_set:
+            if _has_confirmed_entry_authority(pos):
+                _quarantine_confirmed_chain_absence(
+                    pos,
+                    token_id=tid,
+                    source="aggregate_allocation",
+                )
+                continue
             logger.warning(
                 "AGGREGATE_PHANTOM: trade_id=%s token=%s voided by chain aggregate reconciliation",
                 pos.trade_id,
@@ -1390,6 +1440,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 # verification — see Position.chain_verified_at docstring.
                 pos.last_chain_absence_observed_at = now
                 stats["skipped_pending_exit"] = stats.get("skipped_pending_exit", 0) + 1
+                continue
+            if _has_confirmed_entry_authority(pos):
+                _quarantine_confirmed_chain_absence(
+                    pos,
+                    token_id=tid,
+                    source="per_position_missing_token",
+                )
                 continue
             # Rule 2: Local but NOT on chain → VOID — but ONLY when the
             # chain snapshot reaching this line is CHAIN_EMPTY (fresh,
