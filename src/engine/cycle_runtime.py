@@ -3015,6 +3015,21 @@ def _dual_write_canonical_entry_if_available(
     if conn is None:
         return False
 
+    try:
+        has_position_events = conn.execute(
+            """
+            SELECT 1
+              FROM sqlite_master
+             WHERE type = 'table'
+               AND name = 'position_events'
+             LIMIT 1
+            """
+        ).fetchone()
+    except Exception:
+        has_position_events = None
+    if has_position_events is None:
+        return False
+
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.db import append_many_and_project
 

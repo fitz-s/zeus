@@ -5314,11 +5314,20 @@ def _live_order(
             if not fill_event_type:
                 from src.execution.command_recovery import ensure_live_entry_projection_for_command
 
-                ensure_live_entry_projection_for_command(
-                    conn,
-                    command_id=command_id,
-                    client=client,
-                )
+                try:
+                    ensure_live_entry_projection_for_command(
+                        conn,
+                        command_id=command_id,
+                        client=client,
+                    )
+                except Exception as projection_exc:
+                    logger.error(
+                        "_live_order: immediate live entry projection skipped "
+                        "(command_id=%s order_id=%s): %s",
+                        command_id,
+                        order_id,
+                        projection_exc,
+                    )
             # P1-1: durable commit independent of _own_conn — codereview-may19-2
             # ACK/order/trade facts must persist immediately regardless of whether
             # the caller provided an external connection. A crash after SDK ACK
