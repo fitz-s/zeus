@@ -1,5 +1,7 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-20 (lifecycle conversion fix: escalation arm-floor
+#   = screen maker-window; fixed stale 120-min-regime test; added screen-pulled
+#   RED-on-revert arming test)
 # Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K4.0
 """K4.0 adapter-seam relationship tests for REST-THEN-CROSS.
 
@@ -19,10 +21,20 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import src.engine.event_reactor_adapter as adapter
+from src.events.continuous_redecision import REST_VALUE_REFRESH_MIN_AGE_SECONDS
+from src.strategy.live_inference.mode_consistent_ev import (
+    MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+)
 
 UTC = timezone.utc
 NOW = datetime(2026, 6, 10, 22, 0, 0, tzinfo=UTC)
-DEADLINE_MIN = 120.0
+# The live escalation deadline (cut 120 -> 20 on 2026-06-16). The arm FLOOR after
+# which a cancelled-unfilled rest licenses the cross is the screen's own
+# minimum-maker-window (REST_VALUE_REFRESH_MIN_AGE_SECONDS = 5 min), since the
+# continuous-redecision screen cancels most rests at 5-20 min BEFORE the deadline
+# job fires (conversion death-line, 2026-06-20).
+DEADLINE_MIN = float(MAKER_REST_ESCALATION_DEADLINE_MINUTES)
+ARM_FLOOR_MIN = min(DEADLINE_MIN, float(REST_VALUE_REFRESH_MIN_AGE_SECONDS) / 60.0)
 
 
 def _db() -> sqlite3.Connection:
@@ -118,18 +130,52 @@ class TestFamilyRestState:
             True,
         )
 
-    def test_cancelled_unfilled_below_deadline_does_not_escalate(self):
+    def test_cancelled_unfilled_below_arm_floor_does_not_escalate(self):
+        """A rest cancelled UNFILLED before the maker-window arm floor (5 min) did
+        not have a real maker window -> no escalation license. Below-floor fails
+        toward REST (the Karachi rest-first antibody)."""
         conn = _db()
         created = NOW - timedelta(minutes=90)
+        # Cancelled 1 min after posting: below the 5-min arm floor.
         _add(
             conn,
             created_at=created,
             command_state="CANCELLED",
-            facts=[("CANCEL_CONFIRMED", "0", created + timedelta(minutes=30))],
+            facts=[("CANCEL_CONFIRMED", "0", created + timedelta(minutes=1))],
         )
         assert adapter._family_rest_state(conn, family=_family(), decision_time=NOW) == (
             False,
             False,
+        )
+
+    def test_screen_pulled_unfilled_rest_between_floor_and_deadline_escalates(self):
+        """RED-ON-REVERT (conversion death-line, 2026-06-20). The live break: the
+        continuous-redecision SCREEN cancels most rests at 5-20 min (CONFIRMED_VALUE
+        _REFRESH @5min / BOOK_MOVED @1 tick) BEFORE the 20-min deadline job — 60 of
+        64 terminal-unfilled rests on 06-19/06-20 died in this window. On the UNFIXED
+        tree such a rest (aged >= 5 min but < 20 min, cancelled UNFILLED) returns
+        escalated=False, so the family re-posts a fresh REST_DEFAULT and the screen
+        pulls it again -> infinite re-rest loop, 0 crosses. After the fix it returns
+        escalated=True, so the next decision can CROSS (still capped by FIX B's
+        conservative q_lcb bound) instead of re-resting the identical unfillable rest.
+        """
+        # 12 min: a genuine maker window (>= 5-min floor) but < the 20-min deadline.
+        assert ARM_FLOOR_MIN <= 12.0 < DEADLINE_MIN
+        conn = _db()
+        created = NOW - timedelta(minutes=30)
+        cancelled_at = created + timedelta(minutes=12)
+        _add(
+            conn,
+            created_at=created,
+            command_state="CANCELLED",
+            facts=[
+                ("LIVE", "0", created + timedelta(seconds=5)),
+                ("CANCEL_CONFIRMED", "0", cancelled_at),
+            ],
+        )
+        assert adapter._family_rest_state(conn, family=_family(), decision_time=NOW) == (
+            False,
+            True,
         )
 
     def test_filled_order_neither_blocks_nor_escalates(self):

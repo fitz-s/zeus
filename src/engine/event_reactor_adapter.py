@@ -4482,15 +4482,32 @@ def _build_event_bound_taker_quality_proof(
         maker_expected_profit_usd * min_profit_ratio,
         maker_expected_profit_usd + min_incremental_profit,
     )
-    passed = (
+    # SHADOW-GATE COLLAPSE (2026-06-20, operator law = NO CAPS). The taker that
+    # reaches here is ALREADY admissible only when the settlement-conservative
+    # after-cost law holds (fresh ask + fee <= q_lcb, i.e. taker_edge_dec >= 0 — the
+    # same FIX-B bound the policy enforces at select_rest_then_cross_mode). The
+    # 0.03 / 0.05 / 1.20 / 0.60 thresholds were an UNLICENSED cap layered on top of
+    # the conservative law: they fired ~26x (live order events 06-18..06-20) and
+    # ABORTED takers that passed the conservative bound -> TAKER_QUALITY_PROOF_NOT_PASSED
+    # -> the certified +EV cross never executed. They are DEMOTED TO TELEMETRY here:
+    # the metrics + the threshold values still travel on the receipt (the settlement
+    # loop can study them), but they NO LONGER abort. `passed` is True exactly when
+    # the conservative after-cost surplus is non-negative. A negative-edge taker
+    # (ask + fee > q_lcb) still fails closed (passed=False) — the conservative law is
+    # never loosened, only the extra cap is removed.
+    conservative_surplus_ok = taker_edge_dec >= Decimal("0")
+    legacy_threshold_pass = bool(
         taker_edge_dec >= min_taker_edge
         and incremental_expected_profit_usd >= min_incremental_profit
         and taker_expected_profit_usd >= required_profit
         and model_confidence >= min_model_confidence
     )
+    passed = bool(conservative_surplus_ok)
     return {
         "schema_version": 1,
         "passed": bool(passed),
+        "passed_basis": "conservative_after_cost_surplus_nonnegative",
+        "legacy_threshold_pass": legacy_threshold_pass,
         "taker_fee_adjusted_edge": str(taker_edge_dec),
         "taker_expected_profit_usd": str(taker_expected_profit_usd),
         "maker_expected_profit_usd": str(maker_expected_profit_usd),
@@ -9474,7 +9491,32 @@ def _family_rest_state(
         MAKER_REST_ESCALATION_DEADLINE_MINUTES,
     )
 
+    # CONVERSION FIX (2026-06-20, lifecycle death-line): the escalation age FLOOR is
+    # the maker window AFTER WHICH a cancelled-unfilled rest licenses the deadline
+    # cross — NOT the 20-min deadline-job cadence. Live death-line evidence
+    # (zeus_trades 06-19/06-20): 60 of 64 terminal-unfilled rests were cancelled at
+    # 5-20min by the continuous-redecision SCREEN (CONFIRMED_VALUE_REFRESH @5min,
+    # BOOK_MOVED @1 tick) BEFORE the 20-min deadline job could fire; each then
+    # re-decided as a fresh REST_DEFAULT (escalated_after_rest=False) and was pulled
+    # again -> an infinite rest->pull->re-rest loop, 0 crosses, MATCHED 19->0 by
+    # 06-20. The screen's own REST_VALUE_REFRESH_MIN_AGE_SECONDS is the canonical
+    # "a real maker window happened" floor (the same evidence the screen requires
+    # before a value-refresh pull); arming on it makes a screen-pulled unfilled rest
+    # escalation-eligible so the next decision CROSSES (if still admissible) or
+    # no-trades — instead of re-posting the identical unfillable rest. This adds NO
+    # cap and NO new constant (reuses the screen floor) and NEVER crosses above the
+    # conservative q_lcb (FIX B in the policy is unchanged). The first rest for a
+    # family (no prior cancelled-unfilled rest) still REST_DEFAULTs (Karachi
+    # rest-first antibody intact), and a concurrent LIVE rest still HOLDs via the
+    # unexpired_family_rest antibody (single-flight double-submit safety intact).
+    from src.events.continuous_redecision import (
+        REST_VALUE_REFRESH_MIN_AGE_SECONDS,
+    )
+
     deadline_seconds = float(MAKER_REST_ESCALATION_DEADLINE_MINUTES) * 60.0
+    escalation_arm_floor_seconds = min(
+        deadline_seconds, float(REST_VALUE_REFRESH_MIN_AGE_SECONDS)
+    )
     now = decision_time.astimezone(UTC)
     recent_cutoff = (now - timedelta(hours=24)).isoformat()
     placeholders = ",".join("?" for _ in token_ids)
@@ -9534,7 +9576,7 @@ def _family_rest_state(
             # order. `matched` is retained on the row read for receipt provenance.
             and created_at is not None
             and observed_at is not None
-            and (observed_at - created_at).total_seconds() >= deadline_seconds
+            and (observed_at - created_at).total_seconds() >= escalation_arm_floor_seconds
         ):
             escalated = True
     return (unexpired_rest, escalated)
