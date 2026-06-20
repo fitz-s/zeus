@@ -266,6 +266,72 @@ def _metar_rounded_extreme(
         return None
 
 
+def _durable_observation_instants_extremes(
+    *,
+    city: Any,
+    target_date: str,
+    now: datetime,
+    world_conn: Any = None,
+) -> tuple[Optional[float], Optional[float], str]:
+    """Verified durable WU-hourly extrema for the local target date.
+
+    This is the restart-safe side of the hard-fact lane. WU live API and METAR
+    memo are useful when warm, but monitor decisions must also consume verified
+    rows already written to the canonical observation surface. LOW uses the
+    monotone minimum over the local target date; HIGH uses the monotone maximum.
+    """
+
+    if world_conn is None:
+        return None, None, ""
+    city_name = str(getattr(city, "name", "") or "")
+    if not city_name or not target_date:
+        return None, None, ""
+
+    metric_filter = ("", "high", "low")
+    now_iso = now.astimezone(UTC).isoformat()
+    table_refs = (
+        "world.observation_instants",
+        "observation_instants",
+        "forecasts.observation_instants",
+    )
+    for table_ref in table_refs:
+        try:
+            row = world_conn.execute(
+                f"""
+                SELECT
+                    MAX(CASE WHEN running_max IS NOT NULL THEN CAST(running_max AS REAL) END) AS high,
+                    MIN(CASE WHEN running_min IS NOT NULL THEN CAST(running_min AS REAL) END) AS low,
+                    COUNT(*) AS n_rows
+                FROM {table_ref}
+                WHERE city = ?
+                  AND target_date = ?
+                  AND substr(local_timestamp, 1, 10) = target_date
+                  AND utc_timestamp <= ?
+                  AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
+                  AND COALESCE(causality_status, 'OK') = 'OK'
+                  AND LOWER(COALESCE(source, '')) LIKE 'wu%'
+                  AND LOWER(COALESCE(temperature_metric, '')) IN (?, ?, ?)
+                """,
+                (city_name, target_date, now_iso, *metric_filter),
+            ).fetchone()
+        except Exception:  # noqa: BLE001 - missing attachment/table/columns fail soft
+            continue
+        if row is None:
+            continue
+        try:
+            n_rows = int(row["n_rows"] if hasattr(row, "keys") else row[2] or 0)
+            high_raw = row["high"] if hasattr(row, "keys") else row[0]
+            low_raw = row["low"] if hasattr(row, "keys") else row[1]
+        except (TypeError, KeyError, IndexError, ValueError):
+            continue
+        if n_rows <= 0 or (high_raw is None and low_raw is None):
+            continue
+        high = float(high_raw) if high_raw is not None else None
+        low = float(low_raw) if low_raw is not None else None
+        return high, low, "durable_observation_instants"
+    return None, None, ""
+
+
 def settlement_grade_effective_extreme(
     *,
     city: Any,
@@ -289,7 +355,29 @@ def settlement_grade_effective_extreme(
     city_name = str(getattr(city, "name", "") or "")
     unit = str(getattr(city, "settlement_unit", "F") or "F").upper()
     wu_high, wu_low = _wu_rounded_extremes(city, target_date, now=now)
-    wu_value = wu_high if metric == "high" else wu_low
+    durable_high, durable_low, durable_source = _durable_observation_instants_extremes(
+        city=city,
+        target_date=target_date,
+        now=now,
+        world_conn=world_conn,
+    )
+
+    wu_values = []
+    wu_sources = []
+    api_value = wu_high if metric == "high" else wu_low
+    durable_value = durable_high if metric == "high" else durable_low
+    if api_value is not None:
+        wu_values.append(float(api_value))
+        wu_sources.append("wu_api")
+    if durable_value is not None:
+        wu_values.append(float(durable_value))
+        wu_sources.append(durable_source)
+    if wu_values:
+        wu_value = max(wu_values) if metric == "high" else min(wu_values)
+        wu_source = "+".join(dict.fromkeys(wu_sources))
+    else:
+        wu_value = None
+        wu_source = ""
 
     metar_value = None
     margin = _metar_kill_margin_units(city_name, unit)
@@ -301,12 +389,12 @@ def settlement_grade_effective_extreme(
     if wu_value is None and metar_value is None:
         return None, ""
     if metar_value is None:
-        return float(wu_value), "wu_api"
+        return float(wu_value), wu_source
     if wu_value is None:
         return float(metar_value), "metar_fast_lane"
     if metric == "high":
-        return float(max(wu_value, metar_value)), "wu_api+metar_fast_lane"
-    return float(min(wu_value, metar_value)), "wu_api+metar_fast_lane"
+        return float(max(wu_value, metar_value)), f"{wu_source}+metar_fast_lane"
+    return float(min(wu_value, metar_value)), f"{wu_source}+metar_fast_lane"
 
 
 def evaluate_hard_fact_exit(
@@ -315,6 +403,7 @@ def evaluate_hard_fact_exit(
     city: Any,
     now: Optional[datetime] = None,
     world_conn: Any = None,
+    durable_only: bool = False,
 ) -> Optional[HardFactVerdict]:
     """The lane entry point for one held day0 position. None = no hard fact
     (the estimator-evidence lane proceeds unchanged). Fail-soft everywhere:
@@ -348,6 +437,38 @@ def evaluate_hard_fact_exit(
 
         bin_low, bin_high = _parse_temp_range(str(getattr(position, "bin_label", "") or ""))
         if bin_low is None and bin_high is None:
+            return None
+
+        durable_high, durable_low, durable_source = _durable_observation_instants_extremes(
+            city=city,
+            target_date=target_date,
+            now=moment,
+            world_conn=world_conn,
+        )
+        durable_effective = durable_high if metric == "high" else durable_low
+        if durable_effective is not None:
+            durable_verdict = hard_fact_bin_verdict(
+                metric=metric, direction=direction,
+                bin_low=bin_low, bin_high=bin_high,
+                effective_extreme=float(durable_effective),
+            )
+            if durable_verdict is not None:
+                verdict = HardFactVerdict(
+                    action=durable_verdict.action,
+                    reason=durable_verdict.reason,
+                    metric=durable_verdict.metric,
+                    rounded_extreme=durable_verdict.rounded_extreme,
+                    source=durable_source,
+                )
+                log = logger.warning if verdict.action == "EXIT_DEAD_BIN" else logger.info
+                log(
+                    "DAY0_HARD_FACT_%s trade=%s city=%s date=%s dir=%s bin=[%s,%s] "
+                    "extreme=%s source=%s: %s",
+                    verdict.action, getattr(position, "trade_id", "?"), city_name, target_date,
+                    direction, bin_low, bin_high, durable_effective, durable_source, verdict.reason,
+                )
+                return verdict
+        if durable_only:
             return None
 
         effective, source = settlement_grade_effective_extreme(

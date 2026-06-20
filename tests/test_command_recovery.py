@@ -6469,6 +6469,214 @@ class TestRecoveryResolutionTable:
         assert event["source_module"] == "src.execution.command_recovery"
         assert payload["proof_class"] == "no_exit_command_model_divergence_panic_from_missing_buy_no_authority"
 
+    def test_structural_win_pending_exit_without_venue_order_releases_day0(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        position_id = "pos-paris-structural-win"
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, last_monitor_prob,
+                last_monitor_edge, last_monitor_market_price, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason
+            ) VALUES (
+                ?, 'pending_exit', ?, 'mkt-paris', 'Paris', 'Europe',
+                '2026-06-20',
+                'Will the lowest temperature in Paris be 19°C on June 20?',
+                'buy_no', 'C', 3.79, 5.06, 3.79, 0.75, 0.8248,
+                0.7943, -0.2007, 0.995, 'snap-paris',
+                'ens_member_counting', 'settlement_capture',
+                'settlement_capture', 'day0', 'synced', 'tok-no',
+                'tok-no', 'cond-paris', 'ord-entry', 'filled',
+                '2026-06-20T06:04:44+00:00', 'low', NULL
+            )
+            """,
+            (position_id, position_id),
+        )
+        _insert(
+            conn,
+            command_id="cmd-paris-exit",
+            position_id=position_id,
+            decision_id="dec-paris-exit",
+            intent_kind="EXIT",
+            side="SELL",
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            selected_token_id="tok-no",
+            outcome_label="NO",
+            size=5.06,
+            price=0.98,
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES
+              ('evt-paris-open', ?, 1, 'ENTRY_ORDER_FILLED', '2026-06-18T23:04:27+00:00',
+               'pending_entry', 'active', 'settlement_capture', 'dec-entry', 'snap-paris',
+               'ord-entry', 'cmd-entry', 'seed', 'idem-open', 'CONFIRMED',
+               'pytest', '{}', 'live'),
+              ('evt-paris-day0', ?, 2, 'MONITOR_REFRESHED', '2026-06-20T03:58:00+00:00',
+               'active', 'day0_window', 'settlement_capture', 'dec-entry', 'snap-paris',
+               'ord-entry', NULL, 'monitor', 'idem-day0', 'active',
+               'pytest', '{}', 'live'),
+              ('evt-paris-exit', ?, 3, 'EXIT_INTENT', '2026-06-20T04:02:40+00:00',
+               'day0_window', 'pending_exit', 'settlement_capture', 'dec-entry', 'snap-paris',
+               NULL, NULL, 'transition_phase', 'idem-exit', 'retry_pending',
+               'src.execution.exit_lifecycle',
+               '{"exit_reason":"CI_SEPARATED_REVERSAL (entry=0.8248, current=0.7943)"}',
+               'live'),
+              ('evt-paris-monitor-later', ?, 7, 'MONITOR_REFRESHED', '2026-06-20T06:04:44+00:00',
+               'pending_exit', 'pending_exit', 'settlement_capture', 'dec-entry', 'snap-paris',
+               'ord-entry', NULL, 'monitor', 'idem-monitor-later', 'pending_exit',
+               'pytest', '{}', 'live')
+            """,
+            (position_id, position_id, position_id, position_id),
+        )
+        verdict = SimpleNamespace(
+            action="HOLD_STRUCTURAL_WIN",
+            reason="running low extreme 18.0 killed bin [19.0,19.0] -- NO structurally won",
+            metric="low",
+            rounded_extreme=18.0,
+            source="durable_observation_instants",
+        )
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+            lambda *, position, city, now=None, world_conn=None, **kwargs: verdict,
+        )
+
+        from src.execution.command_recovery import repair_structural_win_pending_exits
+
+        summary = repair_structural_win_pending_exits(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, exit_reason, last_monitor_prob, shares
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "day0_window",
+            "exit_reason": None,
+            "last_monitor_prob": 1.0,
+            "shares": 5.06,
+        }
+        event = conn.execute(
+            """
+            SELECT event_type, sequence_no, phase_before, phase_after, source_module, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "MANUAL_OVERRIDE_APPLIED"
+        assert event["sequence_no"] == 8
+        assert event["phase_before"] == "pending_exit"
+        assert event["phase_after"] == "day0_window"
+        assert event["source_module"] == "src.execution.command_recovery"
+        assert payload["proof_class"] == "day0_hard_fact_structural_win_no_exit_venue_order"
+        assert payload["hard_fact"]["source"] == "durable_observation_instants"
+
+    def test_structural_win_pending_exit_repair_refuses_real_exit_order(
+        self,
+        conn,
+        monkeypatch,
+    ):
+        position_id = "pos-real-exit-order"
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric
+            ) VALUES (
+                ?, 'pending_exit', ?, 'mkt-paris', 'Paris', 'Europe',
+                '2026-06-20',
+                'Will the lowest temperature in Paris be 19°C on June 20?',
+                'buy_no', 'C', 3.79, 5.06, 3.79, 0.75, 0.8248,
+                'snap-paris', 'ens_member_counting', 'settlement_capture',
+                'settlement_capture', 'day0', 'synced', 'tok-no', 'tok-no',
+                'cond-paris', 'ord-entry', 'filled',
+                '2026-06-20T06:04:44+00:00', 'low'
+            )
+            """,
+            (position_id, position_id),
+        )
+        _insert(
+            conn,
+            command_id="cmd-real-exit",
+            position_id=position_id,
+            decision_id="dec-real-exit",
+            intent_kind="EXIT",
+            side="SELL",
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            selected_token_id="tok-no",
+            outcome_label="NO",
+            size=5.06,
+            price=0.98,
+        )
+        conn.execute(
+            "UPDATE venue_commands SET venue_order_id = '0xexit-live' WHERE command_id = 'cmd-real-exit'"
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES (
+               'evt-real-exit', ?, 1, 'EXIT_INTENT', '2026-06-20T04:02:40+00:00',
+               'day0_window', 'pending_exit', 'settlement_capture', 'dec-entry', 'snap-paris',
+               NULL, NULL, 'transition_phase', 'idem-exit', 'retry_pending',
+               'src.execution.exit_lifecycle',
+               '{"exit_reason":"CI_SEPARATED_REVERSAL (entry=0.8248, current=0.7943)"}',
+               'live')
+            """,
+            (position_id,),
+        )
+        verdict = SimpleNamespace(
+            action="HOLD_STRUCTURAL_WIN",
+            reason="structural win",
+            metric="low",
+            rounded_extreme=18.0,
+            source="durable_observation_instants",
+        )
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+            lambda *, position, city, now=None, world_conn=None, **kwargs: verdict,
+        )
+
+        from src.execution.command_recovery import repair_structural_win_pending_exits
+
+        summary = repair_structural_win_pending_exits(conn)
+
+        assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        phase = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()["phase"]
+        assert phase == "pending_exit"
+
     def test_exit_matched_trade_fact_repairs_retry_pending_projection(
         self,
         conn,

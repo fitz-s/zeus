@@ -85,6 +85,13 @@ def _wellington():
     )
 
 
+def _paris():
+    return SimpleNamespace(
+        name="Paris", timezone="Europe/Paris", settlement_unit="C",
+        wu_station="LFPB", settlement_source_type="wu_icao",
+    )
+
+
 def _position(**over):
     base = dict(
         trade_id="hf-test-1", city="Tokyo", target_date="2026-06-10",
@@ -206,6 +213,125 @@ class TestVerdictMatrix:
 # ===========================================================================
 
 class TestSourceDiscipline:
+    def _observation_instants_conn(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """CREATE TABLE observation_instants (
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                source TEXT NOT NULL,
+                timezone_name TEXT NOT NULL,
+                local_timestamp TEXT NOT NULL,
+                utc_timestamp TEXT NOT NULL,
+                running_max REAL,
+                running_min REAL,
+                authority TEXT NOT NULL,
+                causality_status TEXT,
+                temperature_metric TEXT
+            )"""
+        )
+        return conn
+
+    def test_durable_observation_instants_low_structural_win_drives_hold(self, monkeypatch):
+        """Paris regression: verified WU-hourly rows showed low 18C before the
+        monitor tried to sell a 19C buy_no. The durable rows must be a hard fact
+        source even when WU live API / METAR memo are cold."""
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
+            lambda city, target_date, now: (_ for _ in ()).throw(AssertionError("WU API must not be called")),
+        )
+        _set_metar_memo(monkeypatch, None)
+        conn = self._observation_instants_conn()
+        for local_ts, utc_ts, low in [
+            ("2026-06-20T00:00:00+02:00", "2026-06-19T22:00:00+00:00", 23.0),
+            ("2026-06-20T05:00:00+02:00", "2026-06-20T03:00:00+00:00", 19.0),
+            ("2026-06-20T06:00:00+02:00", "2026-06-20T04:00:00+00:00", 18.0),
+            ("2026-06-20T07:00:00+02:00", "2026-06-20T05:00:00+00:00", 19.0),
+        ]:
+            conn.execute(
+                "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "Paris",
+                    "2026-06-20",
+                    "wu_icao_history",
+                    "Europe/Paris",
+                    local_ts,
+                    utc_ts,
+                    24.0,
+                    low,
+                    "VERIFIED",
+                    "OK",
+                    None,
+                ),
+            )
+        verdict = evaluate_hard_fact_exit(
+            position=_position(
+                city="Paris",
+                target_date="2026-06-20",
+                bin_label="Will the lowest temperature in Paris be 19°C on June 20?",
+                direction="buy_no",
+                temperature_metric="low",
+            ),
+            city=_paris(),
+            now=datetime(2026, 6, 20, 4, 2, 40, tzinfo=UTC),
+            world_conn=conn,
+        )
+        assert verdict is not None
+        assert verdict.action == "HOLD_STRUCTURAL_WIN"
+        assert verdict.rounded_extreme == pytest.approx(18.0)
+        assert verdict.source == "durable_observation_instants"
+        belief = hard_fact_monitor_belief(verdict=verdict, direction="buy_no")
+        assert belief is not None
+        assert belief.held_side_prob == pytest.approx(1.0)
+
+    def test_durable_observation_instants_respects_local_date_and_now_floor(self, monkeypatch):
+        """The durable lane must not repeat the UTC-date floor bug: target_date is
+        the city-local date, while future UTC observations must still be ignored."""
+        _set_metar_memo(monkeypatch, None)
+        conn = self._observation_instants_conn()
+        conn.execute(
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "Paris",
+                "2026-06-20",
+                "wu_icao_history",
+                "Europe/Paris",
+                "2026-06-20T00:00:00+02:00",
+                "2026-06-19T22:00:00+00:00",
+                23.0,
+                23.0,
+                "VERIFIED",
+                "OK",
+                None,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "Paris",
+                "2026-06-20",
+                "wu_icao_history",
+                "Europe/Paris",
+                "2026-06-20T06:00:00+02:00",
+                "2026-06-20T04:00:00+00:00",
+                24.0,
+                18.0,
+                "VERIFIED",
+                "OK",
+                None,
+            ),
+        )
+        effective, source = settlement_grade_effective_extreme(
+            city=_paris(),
+            target_date="2026-06-20",
+            metric="low",
+            now=datetime(2026, 6, 20, 3, 30, tzinfo=UTC),
+            world_conn=conn,
+        )
+        assert effective == pytest.approx(23.0)
+        assert source == "durable_observation_instants"
+
     def test_evaluate_hard_fact_exit_normalizes_direction_enum(self, monkeypatch):
         from src.contracts.semantic_types import Direction
 
@@ -631,11 +757,11 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         # THE P0-4 condition: the canonical MONITOR_REFRESHED write FAILS
         monkeypatch.setattr(
             cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
-            lambda conn, pos, *, deps: False,
+            lambda conn, pos, *, deps, **kwargs: False,
         )
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
-            lambda *, position, city, now=None, world_conn=None: hard_fact_verdict,
+            lambda *, position, city, now=None, world_conn=None, **kwargs: hard_fact_verdict,
         )
 
         results = []
@@ -756,7 +882,7 @@ class TestStructuralWinTerminalHold:
         monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
         monkeypatch.setattr(
             cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
-            lambda conn, pos, *, deps: True,
+            lambda conn, pos, *, deps, **kwargs: True,
         )
         # Stub hard-fact verdict: HOLD_STRUCTURAL_WIN (buy_no dead bin)
         hold_verdict = HardFactVerdict(
@@ -766,7 +892,7 @@ class TestStructuralWinTerminalHold:
         )
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
-            lambda *, position, city, now=None, world_conn=None: hold_verdict,
+            lambda *, position, city, now=None, world_conn=None, **kwargs: hold_verdict,
         )
         # Stub evaluate_exit to return the requested should_exit value
         monkeypatch.setattr(
@@ -891,7 +1017,7 @@ class TestStructuralWinTerminalHold:
         monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
         monkeypatch.setattr(
             cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
-            lambda conn, pos, *, deps: True,
+            lambda conn, pos, *, deps, **kwargs: True,
         )
         exit_verdict = HardFactVerdict(
             action="EXIT_DEAD_BIN",
@@ -900,7 +1026,7 @@ class TestStructuralWinTerminalHold:
         )
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
-            lambda *, position, city, now=None, world_conn=None: exit_verdict,
+            lambda *, position, city, now=None, world_conn=None, **kwargs: exit_verdict,
         )
 
         results = []
@@ -997,12 +1123,12 @@ def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(mo
     )
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
-        lambda *, position, city, now=None, world_conn=None: None,
+        lambda *, position, city, now=None, world_conn=None, **kwargs: None,
     )
     monkeypatch.setattr(
         cycle_runtime,
         "_emit_monitor_refreshed_canonical_if_available",
-        lambda conn, pos, *, deps: True,
+        lambda conn, pos, *, deps, **kwargs: True,
     )
     monkeypatch.setattr(
         pos,

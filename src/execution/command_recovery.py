@@ -4920,6 +4920,216 @@ def repair_spurious_model_divergence_pending_exits(conn: sqlite3.Connection) -> 
     return summary
 
 
+def _structural_win_pending_exit_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not (
+        _table_exists(conn, "position_current")
+        and _table_exists(conn, "position_events")
+        and _table_exists(conn, "venue_commands")
+    ):
+        return []
+    rows = conn.execute(
+        """
+        WITH latest_bad_exit AS (
+            SELECT pe.*
+              FROM position_events pe
+             WHERE pe.event_type = 'EXIT_INTENT'
+               AND pe.phase_after = 'pending_exit'
+               AND pe.payload_json LIKE '%CI_SEPARATED_REVERSAL%'
+               AND pe.sequence_no = (
+                   SELECT MAX(newer.sequence_no)
+                     FROM position_events newer
+                    WHERE newer.position_id = pe.position_id
+                      AND newer.event_type = 'EXIT_INTENT'
+                      AND newer.phase_after = 'pending_exit'
+                      AND newer.payload_json LIKE '%CI_SEPARATED_REVERSAL%'
+               )
+        )
+        SELECT pc.*,
+               latest_bad_exit.event_id AS latest_exit_event_id,
+               latest_bad_exit.sequence_no AS latest_exit_sequence_no,
+               latest_bad_exit.phase_before AS latest_exit_phase_before,
+               latest_bad_exit.payload_json AS latest_exit_payload_json,
+               (
+                   SELECT MAX(any_event.sequence_no)
+                     FROM position_events any_event
+                    WHERE any_event.position_id = pc.position_id
+               ) AS latest_any_sequence_no
+          FROM position_current pc
+          JOIN latest_bad_exit
+            ON latest_bad_exit.position_id = pc.position_id
+         WHERE pc.phase = 'pending_exit'
+           AND COALESCE(pc.chain_state, '') = 'synced'
+           AND COALESCE(pc.shares, 0) > 0
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM venue_commands vc
+                WHERE vc.position_id = pc.position_id
+                  AND UPPER(COALESCE(vc.intent_kind, '')) = 'EXIT'
+                  AND COALESCE(vc.venue_order_id, '') <> ''
+           )
+         ORDER BY pc.updated_at
+        """
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def repair_structural_win_pending_exits(conn: sqlite3.Connection) -> dict:
+    """Release false pending_exit rows when live hard facts prove held-side win.
+
+    This is not a generic undo. It requires all of:
+      * pending_exit came from a CI_SEPARATED_REVERSAL EXIT_INTENT,
+      * chain projection still says the held shares are synced,
+      * no EXIT command has a venue order id,
+      * current hard-fact evaluation returns HOLD_STRUCTURAL_WIN.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    candidates = _structural_win_pending_exit_candidates(conn)
+    if not candidates:
+        return summary
+    try:
+        from src.config import runtime_cities_by_name
+        from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("recovery: structural-win pending_exit repair unavailable: %s", exc)
+        summary["errors"] += len(candidates)
+        return summary
+
+    cities = runtime_cities_by_name()
+    now_dt = datetime.now(timezone.utc)
+    for row in candidates:
+        summary["scanned"] += 1
+        position_id = str(row.get("position_id") or "")
+        city_name = str(row.get("city") or "")
+        city = cities.get(city_name)
+        if city is None:
+            summary["stayed"] += 1
+            continue
+        pos = SimpleNamespace(**row)
+        setattr(pos, "trade_id", position_id)
+        try:
+            verdict = evaluate_hard_fact_exit(
+                position=pos,
+                city=city,
+                now=now_dt,
+                world_conn=conn,
+                durable_only=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "recovery: structural-win pending_exit hard-fact proof failed for %s: %s",
+                position_id,
+                exc,
+            )
+            summary["errors"] += 1
+            continue
+        if verdict is None or verdict.action != "HOLD_STRUCTURAL_WIN":
+            summary["stayed"] += 1
+            continue
+
+        phase_before = str(row.get("phase") or "pending_exit")
+        phase_after = str(row.get("latest_exit_phase_before") or "day0_window")
+        if phase_after not in {"active", "day0_window"}:
+            phase_after = "day0_window"
+        now = _now_iso()
+        safe_position_id = "".join(ch if ch.isalnum() else "_" for ch in position_id)
+        sp_name = f"sp_structural_win_pending_exit_release_{safe_position_id}"
+        next_sequence = int(row.get("latest_any_sequence_no") or row.get("latest_exit_sequence_no") or 0) + 1
+        payload = {
+            "schema_version": 1,
+            "reason": "structural_win_pending_exit_released",
+            "proof_class": "day0_hard_fact_structural_win_no_exit_venue_order",
+            "position_id": position_id,
+            "phase_before": phase_before,
+            "phase_after": phase_after,
+            "latest_exit_event_id": str(row.get("latest_exit_event_id") or ""),
+            "latest_exit_payload_json": str(row.get("latest_exit_payload_json") or ""),
+            "hard_fact": {
+                "action": verdict.action,
+                "reason": verdict.reason,
+                "metric": verdict.metric,
+                "rounded_extreme": verdict.rounded_extreme,
+                "source": verdict.source,
+            },
+            "required_predicates": {
+                "position_phase_pending_exit": True,
+                "chain_state_synced": True,
+                "shares_positive": True,
+                "latest_exit_intent_ci_separated_reversal": True,
+                "no_exit_command_with_venue_order_id": True,
+                "hard_fact_hold_structural_win": True,
+            },
+            "source_proof": {
+                "source_function": "command_recovery.repair_structural_win_pending_exits",
+                "source_reason": "day0_absorbing_hard_fact_dominates_estimator_reversal",
+            },
+        }
+        try:
+            conn.execute(f"SAVEPOINT {sp_name}")
+            conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no,
+                    event_type, occurred_at, phase_before, phase_after,
+                    strategy_key, decision_id, snapshot_id, order_id,
+                    command_id, caused_by, idempotency_key, venue_status,
+                    source_module, payload_json, env
+                ) VALUES (?, ?, 1, ?, 'MANUAL_OVERRIDE_APPLIED', ?, ?, ?, ?, ?, ?, NULL,
+                          NULL, ?, ?, 'structural_win_pending_exit_released', ?, ?, 'live')
+                """,
+                (
+                    f"{position_id}:structural_win_pending_exit_release:{next_sequence}",
+                    position_id,
+                    next_sequence,
+                    now,
+                    phase_before,
+                    phase_after,
+                    str(row.get("strategy_key") or "unknown"),
+                    str(row.get("decision_snapshot_id") or ""),
+                    str(row.get("decision_snapshot_id") or ""),
+                    str(row.get("latest_exit_event_id") or ""),
+                    f"{position_id}:structural_win_pending_exit_release:{next_sequence}",
+                    "src.execution.command_recovery",
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                ),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE position_current
+                   SET phase = ?,
+                       exit_reason = NULL,
+                       last_monitor_prob = 1.0,
+                       last_monitor_edge = NULL,
+                       updated_at = ?
+                 WHERE position_id = ?
+                   AND phase = 'pending_exit'
+                   AND COALESCE(chain_state, '') = 'synced'
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM venue_commands vc
+                        WHERE vc.position_id = position_current.position_id
+                          AND UPPER(COALESCE(vc.intent_kind, '')) = 'EXIT'
+                          AND COALESCE(vc.venue_order_id, '') <> ''
+                   )
+                """,
+                (phase_after, now, position_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("position_current update did not affect exactly one row")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            summary["advanced"] += 1
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: structural-win pending_exit repair failed for %s: %s",
+                position_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
 def _partial_remainder_candidates(
     conn: sqlite3.Connection,
     *,
@@ -9296,6 +9506,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += spurious_panic_summary["stayed"]
         summary["errors"] += spurious_panic_summary["errors"]
 
+        structural_win_exit_summary = repair_structural_win_pending_exits(conn)
+        summary["structural_win_pending_exit_repair"] = structural_win_exit_summary
+        summary["advanced"] += structural_win_exit_summary["advanced"]
+        summary["stayed"] += structural_win_exit_summary["stayed"]
+        summary["errors"] += structural_win_exit_summary["errors"]
+
         partial_summary = reconcile_partial_remainders(
             conn,
             client,
@@ -9595,6 +9811,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
     _db_pass("spurious_model_divergence_pending_exit_repair",
              repair_spurious_model_divergence_pending_exits,
              "spurious_model_divergence_pending_exit_repair")
+    _db_pass("structural_win_pending_exit_repair",
+             repair_structural_win_pending_exits,
+             "structural_win_pending_exit_repair")
     _client_pass("partial_remainders",
                  reconcile_partial_remainders, "partial_remainders", updated_before=started_at)
 
