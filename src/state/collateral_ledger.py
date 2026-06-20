@@ -287,6 +287,14 @@ class CollateralLedger:
             if authority not in {"CHAIN", "VENUE", "DEGRADED"}:
                 authority = "DEGRADED"
         except Exception as exc:
+            fallback = self._load_latest_snapshot()
+            if (
+                fallback is not None
+                and fallback.authority_tier != "DEGRADED"
+                and _snapshot_is_fresh_enough_for_cache(fallback)
+            ):
+                self._snapshot = fallback
+                return fallback
             raw = {"error": str(exc), "authority_tier": "DEGRADED"}
             authority = "DEGRADED"
 

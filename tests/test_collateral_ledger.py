@@ -615,6 +615,27 @@ def test_authority_tier_DEGRADED_when_chain_unreachable(conn):
         ledger.buy_preflight(_buy_intent(size_usd=1.0))
 
 
+def test_refresh_keeps_fresh_chain_snapshot_when_next_attestation_fails(conn):
+    """RELATIONSHIP: transient collateral read failure -> latest live snapshot.
+
+    A short API/SDK failure must not insert a zero-balance DEGRADED row over a
+    still-fresh CHAIN snapshot. Once the authoritative snapshot ages out, the
+    same failure path remains fail-closed and may persist DEGRADED.
+    """
+
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=10_000_000, pusd_allowance=10_000_000))
+
+    snap = ledger.refresh(FakeCollateralAdapter(exc=RuntimeError("chain_unreachable")))
+
+    assert snap.authority_tier == "CHAIN"
+    assert snap.pusd_balance_micro == 10_000_000
+    rows = conn.execute(
+        "SELECT authority_tier, pusd_balance_micro FROM collateral_ledger_snapshots ORDER BY id DESC"
+    ).fetchall()
+    assert [(row[0], row[1]) for row in rows] == [("CHAIN", 10_000_000)]
+
+
 def test_wrap_command_lifecycle_atomic_states(conn):
     command_id = request_wrap(5_000_000, conn=conn)
     assert get_command(command_id, conn)["state"] == WrapUnwrapState.WRAP_REQUESTED.value
