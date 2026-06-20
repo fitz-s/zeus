@@ -1691,21 +1691,36 @@ def _stale_day0_observation_can_remain_monitor_authority(
     temperature_metric: MetricIdentity,
     temporal_context,
 ) -> bool:
-    """Allow mature HIGH bounds to keep held-position monitor authority.
+    """Allow stale-but-valid Day0 bounds to keep held-position monitor authority.
 
     This is deliberately monitor-only. Entry decisions still require a fresh
-    observation tick; held positions after the high peak need the latest known
-    running high plus temporal maturity so the exit/redecision loop does not go
-    blind merely because the station has not emitted another post-peak sample.
+    observation tick. Held positions need the latest known running high/low plus
+    remaining-window forecast so the exit/redecision loop does not go blind
+    merely because the settlement station has not emitted another hourly sample.
     """
 
     if not _is_stale_day0_observation_quality_rejection(quality_rejection):
         return False
-    if not temperature_metric.is_high():
+    if not (temperature_metric.is_high() or temperature_metric.is_low()):
         return False
-    daypart = str(getattr(temporal_context, "daypart", "") or "")
-    post_peak_confidence = float(getattr(temporal_context, "post_peak_confidence", 0.0) or 0.0)
-    return daypart == "post_peak" and post_peak_confidence >= 0.5
+    if temporal_context is None:
+        return False
+    return bool(str(getattr(temporal_context, "daypart", "") or ""))
+
+
+def _decision_local_hour_for_target(city, target_d: date, decision_time: datetime) -> float | None:
+    try:
+        decision_utc = decision_time if decision_time.tzinfo is not None else decision_time.replace(tzinfo=timezone.utc)
+        decision_local = decision_utc.astimezone(ZoneInfo(str(city.timezone)))
+    except Exception:
+        return None
+    if decision_local.date() != target_d:
+        return None
+    return (
+        float(decision_local.hour)
+        + float(decision_local.minute) / 60.0
+        + float(decision_local.second) / 3600.0
+    )
 
 
 def _is_position_day0_quote_eligible(pos: Position) -> bool:
@@ -1909,11 +1924,13 @@ def _refresh_day0_observation(
         coverage_validations.append("day0_observation_bound_only:coverage_window_incomplete")
 
     temporal_context = None
+    decision_time = datetime.now(timezone.utc)
+    decision_local_hour = _decision_local_hour_for_target(city, target_d, decision_time)
     quality_rejection = _day0_observation_quality_rejection_reason(
         city,
         obs,
         temperature_metric,
-        decision_time=datetime.now(timezone.utc),
+        decision_time=decision_time,
         allow_incomplete_window_bound=True,
     )
     if quality_rejection is not None:
@@ -1924,7 +1941,12 @@ def _refresh_day0_observation(
                     city.name,
                     target_d,
                     city.timezone,
-                    observation_time=_day0_observation_field(obs, "observation_time"),
+                    current_local_hour=decision_local_hour,
+                    observation_time=(
+                        None
+                        if decision_local_hour is not None
+                        else _day0_observation_field(obs, "observation_time")
+                    ),
                     observation_source=_day0_observation_field(obs, "source", ""),
                 )
             except Exception:
@@ -1934,7 +1956,8 @@ def _refresh_day0_observation(
             temperature_metric=temperature_metric,
             temporal_context=temporal_context,
         ):
-            coverage_validations.append("day0_observation_stale_post_peak_bound")
+            coverage_validations.append("day0_observation_stale_monitor_bound")
+            coverage_validations.append(quality_rejection)
         else:
             _set_monitor_probability_fresh(position, False)
             return position.p_posterior, [
@@ -1951,7 +1974,12 @@ def _refresh_day0_observation(
                 city.name,
                 target_d,
                 city.timezone,
-                observation_time=_day0_observation_field(obs, "observation_time"),
+                current_local_hour=decision_local_hour,
+                observation_time=(
+                    None
+                    if decision_local_hour is not None
+                    else _day0_observation_field(obs, "observation_time")
+                ),
                 observation_source=_day0_observation_field(obs, "source", ""),
             )
         except Exception:
@@ -1991,6 +2019,7 @@ def _refresh_day0_observation(
             _set_monitor_probability_fresh(position, False)
             return position.p_posterior, [
                 "day0_observation",
+                *coverage_validations,
                 "day0_live_forecast_unavailable",
             ]
         from src.signal.day0_extrema import RemainingMemberExtrema

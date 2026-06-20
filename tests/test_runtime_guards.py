@@ -7794,7 +7794,7 @@ def test_day0_monitor_refresh_records_forecast_fallback_provenance(monkeypatch):
     assert "season_arg" not in captured
 
 
-def test_day0_monitor_refresh_rejects_stale_observation_before_fetch(monkeypatch):
+def test_day0_monitor_refresh_uses_stale_observation_as_bound_before_forecast_gap(monkeypatch):
     from src.engine import monitor_refresh
 
     position = types.SimpleNamespace(
@@ -7833,6 +7833,19 @@ def test_day0_monitor_refresh_rejects_stale_observation_before_fetch(monkeypatch
         "fetch_ensemble",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fetch_ensemble must not run")),
     )
+    monkeypatch.setattr(
+        "src.signal.diurnal.build_day0_temporal_context",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            daypart="morning",
+            post_peak_confidence=0.0,
+            current_utc_timestamp=datetime(2026, 4, 1, 17, tzinfo=timezone.utc),
+            solar_day=None,
+            current_local_hour=13.0,
+            daylight_progress=0.5,
+        ),
+    )
+    monkeypatch.setattr(monitor_refresh, "_read_day0_hourly_vectors", lambda **kwargs: None)
+    monkeypatch.setattr(monitor_refresh, "_read_day0_raw_model_extrema", lambda **kwargs: None)
 
     posterior, applied = monitor_refresh._refresh_day0_observation(
         position=position,
@@ -7843,11 +7856,13 @@ def test_day0_monitor_refresh_rejects_stale_observation_before_fetch(monkeypatch
     )
 
     assert posterior == pytest.approx(position.p_posterior)
-    assert "observation_quality_gate" in applied
+    assert "observation_quality_gate" not in applied
+    assert "day0_observation_stale_monitor_bound" in applied
+    assert "day0_live_forecast_unavailable" in applied
     assert any("stale" in item for item in applied)
 
 
-def test_stale_day0_high_post_peak_bound_can_remain_monitor_authority():
+def test_stale_day0_bound_can_remain_monitor_authority_for_held_redecision():
     from src.engine import monitor_refresh
     from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
@@ -7863,12 +7878,12 @@ def test_stale_day0_high_post_peak_bound_can_remain_monitor_authority():
         temperature_metric=HIGH_LOCALDAY_MAX,
         temporal_context=post_peak,
     )
-    assert not monitor_refresh._stale_day0_observation_can_remain_monitor_authority(
+    assert monitor_refresh._stale_day0_observation_can_remain_monitor_authority(
         quality_rejection=reason,
         temperature_metric=HIGH_LOCALDAY_MAX,
         temporal_context=morning,
     )
-    assert not monitor_refresh._stale_day0_observation_can_remain_monitor_authority(
+    assert monitor_refresh._stale_day0_observation_can_remain_monitor_authority(
         quality_rejection=reason,
         temperature_metric=LOW_LOCALDAY_MIN,
         temporal_context=post_peak,
