@@ -648,6 +648,56 @@ def _insert_actionable_certificate_for_recovery(
     return cert_hash
 
 
+def _insert_final_intent_certificate_for_recovery(
+    conn,
+    *,
+    event_id: str = "evt-edli-cert",
+    final_intent_id: str = "intent:evt-edli-cert:tok-001",
+    token_id: str = "tok-001",
+    q_live: float = 0.91,
+    direction: str = "buy_yes",
+) -> str:
+    payload = {
+        "event_id": event_id,
+        "final_intent_id": final_intent_id,
+        "condition_id": "condition-test",
+        "token_id": token_id,
+        "city": "Karachi",
+        "target_date": "2026-05-17",
+        "bin_label": "Will the highest temperature in Karachi be 40C on May 17?",
+        "direction": direction,
+        "strategy_key": "center_buy" if direction == "buy_yes" else "opening_inertia",
+        "metric": "high",
+        "unit": "C",
+        "q_live": q_live,
+        "causal_snapshot_id": "forecast-snap-final-intent",
+    }
+    payload_json = json.dumps(payload, sort_keys=True)
+    payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+    cert_hash = hashlib.sha256((payload_json + ":final-cert").encode()).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO decision_certificates (
+            certificate_id, certificate_type, schema_version, canonicalization_version,
+            semantic_key, claim_type, mode, decision_time, authority_id,
+            authority_version, algorithm_id, algorithm_version, payload_json,
+            payload_hash, certificate_hash, verifier_status, created_at
+        ) VALUES (?, 'FinalIntentCertificate', 1, 'test-v1',
+                  ?, 'final_intent', 'LIVE', '2026-04-26T00:00:00Z',
+                  'test-authority', 'v1', 'test-algorithm', 'v1', ?,
+                  ?, ?, 'VERIFIED', '2026-04-26T00:00:01Z')
+        """,
+        (
+            f"FinalIntentCertificate:{cert_hash[:24]}",
+            f"final_intent:{event_id}:{final_intent_id}",
+            payload_json,
+            payload_hash,
+            cert_hash,
+        ),
+    )
+    return cert_hash
+
+
 def _advance_to_partial(conn, command_id="cmd-001", venue_order_id="ord-001"):
     from src.state.venue_command_repo import append_event
 
@@ -4328,6 +4378,63 @@ class TestRecoveryResolutionTable:
             "SELECT p_posterior FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
         assert current["p_posterior"] == pytest.approx(0.42)
+
+    def test_edli_entry_posterior_projection_repair_rejects_final_intent_q_live(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-final-q-only"
+        final_intent_id = f"intent:{event_id}:tok-001"
+        decision_id = f"edli_exec_cmd:{event_id}:{final_intent_id}:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-final-only")
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.0,
+            direction="buy_yes",
+        )
+        _insert_final_intent_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            final_intent_id=final_intent_id,
+            token_id="tok-001",
+            q_live=0.88,
+            direction="buy_yes",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric
+            ) VALUES (
+                'pos-001', 'active', 'condition-test', 'Karachi', 'Karachi',
+                '2026-05-17', 'Will the highest temperature in Karachi be 40C on May 17?',
+                'buy_yes', 'C', 0.06, 5.0, 0.06, 0.012,
+                0.0, 'forecast-snap-old', 'ens_member_counting', 'center_buy',
+                'center_buy', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
+                'condition-test', 'ord-edli-final-only', 'partial',
+                '2026-04-26T00:05:00Z', 'high'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_edli_entry_posterior_projection_repairs,
+        )
+
+        summary = reconcile_edli_entry_posterior_projection_repairs(conn, client=mock_client)
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        current = conn.execute(
+            "SELECT p_posterior FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["p_posterior"] == 0.0
 
     def test_live_entry_repair_prefers_forecasts_market_events_over_trade_ghost(
         self,

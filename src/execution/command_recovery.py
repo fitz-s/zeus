@@ -2337,7 +2337,7 @@ def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, cli
         "edge_source": strategy_key,
         "discovery_mode": "opening_hunt",
         "cluster": city,
-        "p_posterior": actionable.get("q_live") or final_intent.get("q_live") or 0.0,
+        "p_posterior": actionable.get("q_live") or 0.0,
         "decision_snapshot_id": (
             actionable.get("causal_snapshot_id")
             or final_intent.get("causal_snapshot_id")
