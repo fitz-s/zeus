@@ -1152,15 +1152,15 @@ class FamilyDecisionEngine:
         if not after_executable:
             return None, NO_TRADE_NO_EXECUTABLE_ROUTE
 
-        # NO-on-modal is direction-law illegal by geometry. It may only be admitted when the
-        # side-aware OOF reliability guard actively licensed that exact NO-complement claim.
-        # A positive edge from an INERT/missing-cell guard is not enough evidence for a live
-        # direction override; otherwise a missing NO cell can pass while a center YES cell is
-        # abstained, recreating the all-NO admission bias.
+        # Direction law is structural, but the q_lcb reliability guard is the empirical
+        # settlement evidence that can license an otherwise non-directional Arrow claim.
+        # Keep the override side-symmetric: a guarded YES tail and a guarded NO complement
+        # both have the same OOF_WILSON_95 burden. A positive edge from an INERT/missing
+        # guard is not enough evidence for live admission.
         def _direction_admitted(d):
             return d.direction_law_ok or (
-                d.route.side == "NO"
-                and d.economics.edge_lcb > 0.0
+                d.economics.edge_lcb > 0.0
+                and d.economics.optimal_delta_u > 0.0
                 and d.q_lcb_guard_basis == "OOF_WILSON_95"
                 and not d.q_lcb_guard_abstained
             )

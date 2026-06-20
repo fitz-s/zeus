@@ -1075,16 +1075,17 @@ def test_tokyo_impossible_bin_blocked_by_coherence_before_scoring(monkeypatch):
 
 
 # ===========================================================================
-# SPEC RED-on-revert #4: NO-on-modal requires side-aware OOF evidence.
+# SPEC RED-on-revert #4: direction-law override requires side-aware OOF evidence.
 # ===========================================================================
 
-def test_no_on_modal_requires_side_aware_oof_license():
-    """A NO-on-modal candidate cannot bypass direction law on edge alone.
+def test_direction_override_requires_side_aware_oof_license_for_yes_and_no():
+    """A candidate cannot bypass direction law on edge alone.
 
-    The prior relaxation admitted any NO candidate with edge_lcb>0. That was unsafe once the
-    q_lcb reliability guard became active, because a missing NO-complement cell could pass
-    through as INERT while the center YES cell was abstained. The override now requires an
-    active, non-abstaining side-aware OOF verdict for the exact NO claim.
+    The prior relaxation admitted NO-only candidates with edge_lcb>0 when an OOF guard
+    licensed them, while a positive-edge YES with the same guard burden still died at
+    direction-law admission. That recreated an all-NO live bias. The override now requires
+    an active, non-abstaining side-aware OOF verdict for the exact claim, and applies that
+    burden symmetrically to YES and NO.
     """
     case = _case()
     space = _outcome_space(case)
@@ -1153,10 +1154,11 @@ def test_no_on_modal_requires_side_aware_oof_license():
         "admission is via the side-aware OOF license, not bare direction-law legality"
     )
 
-    # ---- Confirm the relaxation is NO-side-only --------------------------------
+    # ---- Confirm the same license burden applies to YES ------------------------
     # A YES-on-non-modal (direction_law_ok=False, side="YES") with edge_lcb>0 must
-    # NOT be admitted. The "after graded after-cost NEGATIVE" evidence (documented in
-    # the engine's _select comment) means buy_yes on a NON-modal bin stays banned.
+    # NOT be admitted on edge alone, but must be admitted when the exact YES cell has
+    # active OOF_WILSON_95 evidence. This is the live-log failure mode where YES
+    # candidates had positive edge/Delta-U but were stamped dlok=0 adm=0.
     non_modal_bin_id = "b24"
     yes_on_non_modal_route = _hand_route(space, side="YES", bin_id=non_modal_bin_id, cost=0.30)
     yes_on_non_modal_economics = CandidateEconomics(
@@ -1177,15 +1179,32 @@ def test_no_on_modal_requires_side_aware_oof_license():
         coherence_allows=True,
         robust_trade_score=0.10,
     )
+    licensed_yes_on_non_modal_cand = CandidateDecision(
+        route=yes_on_non_modal_route,
+        economics=yes_on_non_modal_economics,
+        direction_law_ok=False,
+        coherence_allows=True,
+        robust_trade_score=0.10,
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="high|L1|YES|nonmodal|qb7",
+    )
 
     selected2, reason2 = engine._select([yes_on_non_modal_cand])
     assert selected2 is None, (
-        "YES-on-non-modal (direction_law_ok=False, side='YES') must NOT be admitted — "
-        "the favorite-longshot relaxation is NO-side-only"
+        "YES-on-non-modal (direction_law_ok=False, side='YES') must NOT be admitted "
+        "from bare positive edge alone"
     )
     assert reason2 == NO_TRADE_NO_DIRECTION_LAW, (
         f"expected NO_TRADE_NO_DIRECTION_LAW for YES-on-non-modal; got {reason2!r}"
     )
+
+    selected3, reason3 = engine._select([licensed_yes_on_non_modal_cand])
+    assert reason3 is None
+    assert selected3 is not None
+    assert selected3.route.side == "YES"
+    assert selected3.route.bin_id == non_modal_bin_id
+    assert selected3.direction_law_ok is False
 
 
 def test_qlcb_guard_exception_abstains_candidate(monkeypatch):
