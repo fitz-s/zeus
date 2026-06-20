@@ -401,8 +401,16 @@ class TestRCAMonitorLowMetricContinuity:
             "_day0_observation_quality_rejection_reason",
             lambda *a, **k: None,
         )
-        monkeypatch.setattr(monitor_refresh, "fetch_ensemble", lambda *a, **k: {"members_hourly": np.ones((51, 24)), "times": ["2026-04-29T00:00:00Z"] * 24})
-        monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda result: True)
+        monkeypatch.setattr(
+            monitor_refresh,
+            "_read_day0_hourly_vectors",
+            lambda **kw: {
+                "members_hourly": np.ones((2, 24)),
+                "times": ["2026-04-29T00:00:00Z"] * 24,
+                "source_id": "day0_hourly_vectors",
+                "forecast_source_role": "day0_remaining_window_live",
+            },
+        )
         monkeypatch.setattr(
             "src.signal.diurnal.build_day0_temporal_context",
             lambda *a, **k: SimpleNamespace(current_utc_timestamp=now),

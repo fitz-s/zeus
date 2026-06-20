@@ -24,9 +24,11 @@ class TestStalenessDerivation:
         )
 
     def test_inputs_match_their_declared_bases(self):
-        # Live-eligible cadence: 00Z/12Z only (operator cycle policy) => 12h.
+        # Live-eligible synoptic phases: all four standard UTC cycles. The
+        # serving-staleness bound remains a 12h refresh-cadence policy because
+        # that bound is empirical tolerance, not cycle-phase admission.
         assert policy.LIVE_CYCLE_REFRESH_INTERVAL_HOURS == 12.0
-        assert policy._SYNOPTIC_CYCLE_HOURS == frozenset({0, 12})
+        assert policy._SYNOPTIC_CYCLE_HOURS == frozenset({0, 6, 12, 18})
         # Measured P50 publication lag (2026-06-11 evidence): 6h. If re-measured,
         # update BOTH the constant and the derivation comment evidence pointer.
         assert policy.MEASURED_P50_PUBLICATION_LAG_HOURS == 6.0

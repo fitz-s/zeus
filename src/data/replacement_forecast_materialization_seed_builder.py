@@ -6,13 +6,14 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from src.config import cities_by_name
 from src.contracts.replacement_pipeline_files import validate_materialization_seed
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
+from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 
 
@@ -224,7 +225,11 @@ def build_replacement_forecast_materialization_seed(
             seed=None,
         )
     source_cycle_time = openmeteo_manifest.source_cycle_time
-    expiry = _dt(expires_at, field_name="expires_at") if expires_at is not None else computed + timedelta(hours=3)
+    expiry = (
+        _dt(expires_at, field_name="expires_at")
+        if expires_at is not None
+        else replacement_readiness_expires_at(source_cycle_time)
+    )
 
     seed = {
         "city": city_name,

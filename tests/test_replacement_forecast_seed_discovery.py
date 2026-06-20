@@ -12,10 +12,14 @@ import json
 import sqlite3
 from pathlib import Path
 
-from src.data.ecmwf_aifs_sampled_2t_localday import HIGH_DATA_VERSION as AIFS_HIGH_DATA_VERSION
 from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, write_manifest
-from src.data.replacement_forecast_seed_discovery import discover_replacement_forecast_materialization_seeds
+from src.data.replacement_forecast_readiness import SOURCE_ID as REPLACEMENT_SOURCE_ID
+from src.data.replacement_forecast_readiness import STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY
+from src.data.replacement_forecast_seed_discovery import (
+    _manifest_allows_target_date,
+    discover_replacement_forecast_materialization_seeds,
+)
 
 
 def _write_file(path: Path, payload: object) -> Path:
@@ -91,12 +95,13 @@ def _init_db(path: Path) -> None:
             CREATE TABLE forecast_posteriors (
                 posterior_id INTEGER PRIMARY KEY,
                 source_id TEXT NOT NULL,
-                product_id TEXT NOT NULL DEFAULT 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
-                data_version TEXT NOT NULL DEFAULT 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
+                product_id TEXT NOT NULL DEFAULT 'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+                data_version TEXT NOT NULL DEFAULT 'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
                 city TEXT NOT NULL,
                 target_date TEXT NOT NULL,
                 temperature_metric TEXT NOT NULL,
                 dependency_source_run_ids_json TEXT,
+                runtime_layer TEXT NOT NULL DEFAULT 'live',
                 trade_authority_status TEXT NOT NULL,
                 training_allowed INTEGER NOT NULL
             );
@@ -137,20 +142,7 @@ def _init_db(path: Path) -> None:
 
 
 def _write_raw_inputs(raw_dir: Path) -> None:
-    _write_file(raw_dir / "aifs_samples.json", {"samples": []})
     _write_file(raw_dir / "precision_metadata.json", {"city": "NYC"})
-    _write_manifest(
-        raw_dir,
-        name="aifs",
-        source_id="ecmwf_aifs_ens",
-        product_id="ecmwf_aifs_ens_sampled_2t_6h_v1",
-        data_version=AIFS_HIGH_DATA_VERSION,
-        metadata={
-            "aifs_samples_json": "aifs_samples.json",
-            "city": "NYC",
-            "target_date": "2026-06-08",
-        },
-    )
     _write_manifest(
         raw_dir,
         name="openmeteo",
@@ -186,10 +178,45 @@ def test_seed_discovery_writes_seed_from_db_target_and_raw_manifests(tmp_path: P
     seed = json.loads(seed_path.read_text(encoding="utf-8"))
     assert seed["city"] == "NYC"
     assert seed["baseline_source_run_id"] == "baseline-run"
-    assert seed["aifs_source_run_id"] == "aifs-run"
     assert seed["openmeteo_source_run_id"] == "openmeteo-run"
-    assert seed["aifs_samples_json"].endswith("raw/aifs_samples.json")
+    assert seed["openmeteo_payload_json"].endswith("raw/openmeteo.json")
+    assert seed["openmeteo_manifest_json"].endswith("raw/openmeteo.manifest.json")
     assert seed["precision_metadata_json"].endswith("raw/precision_metadata.json")
+
+
+def test_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) -> None:
+    """A multi-day single-runs payload must not be treated as a one-day manifest.
+
+    Live evidence 2026-06-20: raw_model_forecasts had 18Z rows for day+1 held
+    families, but the raw manifest metadata still listed only the artifact
+    filename's local start date. Cycle advance then reported NOT_NEEDED while
+    held-position belief correctly marked the older posterior stale.
+    """
+
+    artifact = _write_file(tmp_path / "openmeteo.json", {"hourly": {}})
+    manifest = RawForecastArtifactManifest.from_file(
+        artifact,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-19T18:00:00+00:00",
+        source_available_at="2026-06-19T23:30:00+00:00",
+        captured_at="2026-06-19T23:31:00+00:00",
+        request_url="https://example.invalid/openmeteo",
+        request_params={"run": "2026-06-19T18:00", "forecast_hours": 120},
+        product_metadata={
+            "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+            "openmeteo_endpoint": "single_runs_api",
+            "city": "Paris",
+            "target_date": "2026-06-19",
+            "target_dates": ["2026-06-19"],
+            "forecast_hours": 120,
+        },
+    )
+
+    assert _manifest_allows_target_date(manifest, target_date="2026-06-19")
+    assert _manifest_allows_target_date(manifest, target_date="2026-06-21")
+    assert not _manifest_allows_target_date(manifest, target_date="2026-06-26")
 
 
 def test_seed_discovery_reads_manifests_recursively_and_resolves_relative_to_manifest(tmp_path: Path) -> None:
@@ -209,7 +236,8 @@ def test_seed_discovery_reads_manifests_recursively_and_resolves_relative_to_man
 
     assert report.status == "DISCOVERED"
     seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
-    assert seed["aifs_samples_json"].endswith("raw/20260607T000000Z/aifs_samples.json")
+    assert seed["openmeteo_payload_json"].endswith("raw/20260607T000000Z/openmeteo.json")
+    assert seed["openmeteo_manifest_json"].endswith("raw/20260607T000000Z/openmeteo.manifest.json")
     assert seed["precision_metadata_json"].endswith("raw/20260607T000000Z/precision_metadata.json")
 
 
@@ -245,7 +273,7 @@ def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path:
                 source_id, city, target_date, temperature_metric,
                 dependency_source_run_ids_json, trade_authority_status, training_allowed
             ) VALUES (
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
+                'openmeteo_ecmwf_ifs9_bayes_fusion',
                 'NYC', '2026-06-09', 'high',
                 '{"baseline_b0":"covered-baseline-run"}',
                 'LIVE_AUTHORITY', 0
@@ -260,7 +288,7 @@ def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path:
             """,
             (
                 "ready-covered",
-                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
                 json.dumps({"dependencies": [{"role": "baseline_b0", "source_run_id": "covered-baseline-run"}]}),
                 json.dumps({"city": "NYC", "target_date": "2026-06-09", "temperature_metric": "high"}),
             ),
@@ -340,7 +368,7 @@ def test_seed_discovery_does_not_skip_current_source_run_because_stale_replaceme
                 dependency_source_run_ids_json, trade_authority_status,
                 training_allowed
             ) VALUES (
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
+                'openmeteo_ecmwf_ifs9_bayes_fusion',
                 'NYC', '2026-06-08', 'high',
                 '{"baseline_b0":"baseline-stale-run"}',
                 'LIVE_AUTHORITY', 0
@@ -355,7 +383,7 @@ def test_seed_discovery_does_not_skip_current_source_run_because_stale_replaceme
             """,
             (
                 "ready-stale",
-                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
                 json.dumps({"dependencies": [{"role": "baseline_b0", "source_run_id": "baseline-stale-run"}]}),
                 json.dumps({"city": "NYC", "target_date": "2026-06-08", "temperature_metric": "high"}),
             ),
@@ -391,12 +419,13 @@ def test_seed_discovery_retries_when_current_posterior_exists_but_readiness_is_m
                 dependency_source_run_ids_json, trade_authority_status,
                 training_allowed
             ) VALUES (
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
+                ?,
                 'NYC', '2026-06-08', 'high',
                 '{"baseline_b0":"baseline-run"}',
                 'LIVE_AUTHORITY', 0
             )
-            """
+            """,
+            (REPLACEMENT_SOURCE_ID,),
         )
         conn.commit()
     finally:
@@ -429,7 +458,7 @@ def test_seed_discovery_skips_when_current_posterior_and_readiness_exist(tmp_pat
                 dependency_source_run_ids_json, trade_authority_status,
                 training_allowed
             ) VALUES (
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
+                'openmeteo_ecmwf_ifs9_bayes_fusion',
                 'NYC', '2026-06-08', 'high',
                 '{"baseline_b0":"baseline-run"}',
                 'LIVE_AUTHORITY', 0
@@ -444,7 +473,7 @@ def test_seed_discovery_skips_when_current_posterior_and_readiness_exist(tmp_pat
             """,
             (
                 "ready-current",
-                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+                REPLACEMENT_STRATEGY_KEY,
                 json.dumps({"dependencies": [{"role": "baseline_b0", "source_run_id": "baseline-run"}]}),
                 json.dumps({"city": "NYC", "target_date": "2026-06-08", "temperature_metric": "high"}),
             ),
@@ -546,6 +575,7 @@ def test_seed_discovery_blocks_when_replacement_dependency_schema_is_missing(tmp
                 city TEXT NOT NULL,
                 target_date TEXT NOT NULL,
                 temperature_metric TEXT NOT NULL,
+                runtime_layer TEXT NOT NULL DEFAULT 'live',
                 trade_authority_status TEXT NOT NULL,
                 training_allowed INTEGER NOT NULL
             );
@@ -583,7 +613,7 @@ def test_seed_discovery_blocks_when_replacement_dependency_schema_is_missing(tmp
                 source_id, city, target_date, temperature_metric,
                 trade_authority_status, training_allowed
             ) VALUES (
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
+                'openmeteo_ecmwf_ifs9_bayes_fusion',
                 'NYC', '2026-06-07', 'high', 'LIVE_AUTHORITY', 0
             )
             """
@@ -595,7 +625,7 @@ def test_seed_discovery_blocks_when_replacement_dependency_schema_is_missing(tmp
             """,
             (
                 "ready-old-schema",
-                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
                 json.dumps({"city": "NYC", "target_date": "2026-06-07", "temperature_metric": "high"}),
             ),
         )

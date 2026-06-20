@@ -165,10 +165,12 @@ _MONITOR_SRC = _MONITOR_PATH.read_text(encoding="utf-8")
 
 
 def test_monitor_refresh_threads_temperature_metric_to_fetch_ensemble():
-    """Both monitor_refresh fetch_ensemble call sites must pass metric.
+    """The remaining non-Day0 monitor fetch_ensemble call must pass metric.
 
     critic ATTACK 3 flagged that monitor exit lanes were unprotected — the
-    same fix needs to land here so cached ens_result has data_version too.
+    same fix needs to stay on the non-Day0 fallback so cached ens_result has
+    data_version too. Day0 observation monitor no longer calls fetch_ensemble;
+    it reads live day0_hourly_vectors / raw_model_forecasts instead.
     """
     # Match `fetch_ensemble(` ... `temperature_metric=` within a small window;
     # nested parens (int(...), ensemble_primary_model()) inside the call mean a
@@ -178,8 +180,17 @@ def test_monitor_refresh_threads_temperature_metric_to_fetch_ensemble():
         r"fetch_ensemble\((?:.|\n){0,400}?temperature_metric\s*="
     )
     matches = pattern.findall(_MONITOR_SRC)
-    assert len(matches) >= 2, (
+    assert len(matches) >= 1, (
         f"BLOCKER 1 collateral regression: monitor_refresh.py fetch_ensemble "
         f"callsites missing temperature_metric kwarg ({len(matches)} matches; "
-        "expected ≥2)"
+        "expected ≥1)"
     )
+
+
+def test_day0_observation_monitor_does_not_fetch_legacy_ensemble():
+    day0_body = _MONITOR_SRC.split("def _refresh_day0_observation(", 1)[1].split(
+        "\ndef _day0_extreme_authority_rejection_reason", 1
+    )[0]
+    assert "fetch_ensemble(" not in day0_body
+    assert "_read_day0_hourly_vectors" in day0_body
+    assert "_read_day0_raw_model_extrema" in day0_body

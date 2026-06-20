@@ -21,6 +21,7 @@ Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_
 import logging
 import sqlite3
 import copy
+import json
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -591,6 +592,216 @@ def _monitor_forecast_source_validations(ens_result: dict) -> list[str]:
     if degradation_level:
         validations.append(f"forecast_degradation:{degradation_level}")
     return validations
+
+
+def _parse_utc_datetime(raw: object) -> datetime | None:
+    try:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = None) -> dict | None:
+    """Read the live Day0 remaining-window hourly vectors for monitor belief.
+
+    Day0 held-position redecision needs hourly trajectories. The daily
+    ``raw_model_forecasts`` extrema are already the replacement posterior input,
+    but they cannot tell the Day0 router which hours remain. The live hourly
+    vector table is therefore the only admissible remaining-window source here.
+    """
+
+    from src.state.db import get_forecasts_connection_read_only
+
+    city_name = str(getattr(city, "name", "") or "")
+    if not city_name:
+        return None
+    target_date = target_d.isoformat()
+    decision_time = now or datetime.now(timezone.utc)
+    try:
+        conn = get_forecasts_connection_read_only()
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return None
+    try:
+        latest = conn.execute(
+            """
+            SELECT captured_at
+            FROM day0_hourly_vectors
+            WHERE city = ? AND target_date = ?
+              AND datetime(captured_at) <= datetime(?)
+            ORDER BY datetime(captured_at) DESC
+            LIMIT 1
+            """,
+            (city_name, target_date, decision_time.isoformat()),
+        ).fetchone()
+        if latest is None:
+            return None
+        captured_at = str(latest["captured_at"] or "")
+        rows = conn.execute(
+            """
+            SELECT model, timezone_name, times_json, temps_c_json
+            FROM day0_hourly_vectors
+            WHERE city = ? AND target_date = ? AND captured_at = ?
+            ORDER BY model
+            """,
+            (city_name, target_date, captured_at),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if not rows:
+        return None
+
+    times: list[str] | None = None
+    member_rows: list[list[float]] = []
+    for row in rows:
+        try:
+            row_times = json.loads(row["times_json"] or "null")
+            temps_c = json.loads(row["temps_c_json"] or "null")
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(row_times, list) or not isinstance(temps_c, list):
+            return None
+        if len(row_times) != len(temps_c) or not row_times:
+            return None
+        row_times = [str(item) for item in row_times]
+        if times is None:
+            times = row_times
+        elif row_times != times:
+            return None
+        try:
+            values_c = [float(item) for item in temps_c]
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(np.asarray(values_c, dtype=float)).all():
+            return None
+        unit = str(getattr(city, "settlement_unit", "C") or "C").upper()
+        if unit == "F":
+            member_rows.append([(value * 9.0 / 5.0) + 32.0 for value in values_c])
+        elif unit == "C":
+            member_rows.append(values_c)
+        else:
+            return None
+    if times is None or not member_rows:
+        return None
+    captured_dt = _parse_utc_datetime(captured_at)
+    return {
+        "members_hourly": np.asarray(member_rows, dtype=float),
+        "times": times,
+        "fetch_time": captured_dt,
+        "source_id": "day0_hourly_vectors",
+        "forecast_source_role": "day0_remaining_window_live",
+    }
+
+
+def _local_hours_remaining(city, target_d: date, *, now: datetime | None) -> float:
+    try:
+        tz = ZoneInfo(str(getattr(city, "timezone")))
+    except Exception:
+        return 0.0
+    moment = (now or datetime.now(timezone.utc)).astimezone(tz)
+    end_local = datetime.combine(target_d + timedelta(days=1), datetime.min.time(), tzinfo=tz)
+    return max(0.0, (end_local - moment).total_seconds() / 3600.0)
+
+
+def _read_day0_raw_model_extrema(
+    *,
+    city,
+    target_d: date,
+    metric: str,
+    now: datetime | None = None,
+) -> dict | None:
+    """Read live same-day replacement raw extrema when no hourly vector exists."""
+
+    from src.state.db import get_forecasts_connection_read_only
+
+    city_name = str(getattr(city, "name", "") or "")
+    if not city_name or metric not in {"high", "low"}:
+        return None
+    decision_time = now or datetime.now(timezone.utc)
+    target_date = target_d.isoformat()
+    try:
+        conn = get_forecasts_connection_read_only()
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return None
+    try:
+        latest = conn.execute(
+            """
+            SELECT source_cycle_time
+            FROM raw_model_forecasts
+            WHERE city = ? AND target_date = ? AND metric = ?
+              AND endpoint = 'single_runs'
+              AND datetime(source_cycle_time) <= datetime(?)
+              AND (source_available_at IS NULL OR datetime(source_available_at) <= datetime(?))
+              AND (coverage_status IS NULL OR coverage_status = 'COVERED')
+            GROUP BY source_cycle_time
+            ORDER BY datetime(source_cycle_time) DESC
+            LIMIT 1
+            """,
+            (
+                city_name,
+                target_date,
+                metric,
+                decision_time.isoformat(),
+                decision_time.isoformat(),
+            ),
+        ).fetchone()
+        if latest is None:
+            return None
+        cycle = str(latest["source_cycle_time"] or "")
+        rows = conn.execute(
+            """
+            SELECT model, forecast_value_c
+            FROM raw_model_forecasts
+            WHERE city = ? AND target_date = ? AND metric = ?
+              AND endpoint = 'single_runs'
+              AND source_cycle_time = ?
+              AND (coverage_status IS NULL OR coverage_status = 'COVERED')
+            ORDER BY model
+            """,
+            (city_name, target_date, metric, cycle),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    values_c: list[float] = []
+    seen_models: set[str] = set()
+    for row in rows:
+        model = str(row["model"] or "")
+        if not model or model in seen_models:
+            continue
+        seen_models.add(model)
+        try:
+            value_c = float(row["forecast_value_c"])
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(value_c):
+            return None
+        values_c.append(value_c)
+    if not values_c:
+        return None
+    unit = str(getattr(city, "settlement_unit", "C") or "C").upper()
+    if unit == "F":
+        values = [(value * 9.0 / 5.0) + 32.0 for value in values_c]
+    elif unit == "C":
+        values = values_c
+    else:
+        return None
+    return {
+        "member_extrema": np.asarray(values, dtype=float),
+        "source_id": "raw_model_forecasts.single_runs",
+        "forecast_source_role": "day0_daily_extrema_live",
+        "source_cycle_time": cycle,
+    }
 
 
 def _monitor_city_id(city) -> str:
@@ -1733,23 +1944,6 @@ def _refresh_day0_observation(
                 quality_rejection,
             ]
 
-    ens_result = fetch_ensemble(
-        city,
-        forecast_days=2,
-        model=ensemble_primary_model(),
-        role="monitor_fallback",
-        temperature_metric=temperature_metric.temperature_metric,
-    )
-    if ens_result is None or not validate_ensemble(ens_result):
-        _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
-    forecast_source_validations = _monitor_forecast_source_validations(ens_result)
-
-    low, high = _parse_temp_range(position.bin_label)
-    if low is None and high is None:
-        _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
-
     if temporal_context is None:
         try:
             from src.signal.diurnal import build_day0_temporal_context
@@ -1765,19 +1959,57 @@ def _refresh_day0_observation(
 
     if temporal_context is None:
         _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "missing_solar_context"]
+        return position.p_posterior, ["day0_observation", "day0_live_forecast", "missing_solar_context"]
 
-    extrema, hours_remaining = remaining_member_extrema_for_day0(
-        ens_result["members_hourly"],
-        ens_result["times"],
-        city.timezone,
-        target_d,
-        now=temporal_context.current_utc_timestamp,
-        temperature_metric=temperature_metric,
-    )
-    if extrema is None:
+    low, high = _parse_temp_range(position.bin_label)
+    if low is None and high is None:
         _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, ["day0_observation", "fresh_ens_fetch"]
+        return position.p_posterior, ["day0_observation", "day0_live_forecast"]
+
+    ens_result = _read_day0_hourly_vectors(city=city, target_d=target_d)
+    live_forecast_source = "day0_hourly_vectors"
+    if ens_result is not None:
+        forecast_source_validations = _monitor_forecast_source_validations(ens_result)
+        extrema, hours_remaining = remaining_member_extrema_for_day0(
+            ens_result["members_hourly"],
+            ens_result["times"],
+            city.timezone,
+            target_d,
+            now=temporal_context.current_utc_timestamp,
+            temperature_metric=temperature_metric,
+        )
+        if extrema is None:
+            ens_result = None
+    if ens_result is None:
+        raw_extrema = _read_day0_raw_model_extrema(
+            city=city,
+            target_d=target_d,
+            metric=temperature_metric.temperature_metric,
+            now=temporal_context.current_utc_timestamp,
+        )
+        if raw_extrema is None:
+            _set_monitor_probability_fresh(position, False)
+            return position.p_posterior, [
+                "day0_observation",
+                "day0_live_forecast_unavailable",
+            ]
+        from src.signal.day0_extrema import RemainingMemberExtrema
+
+        extrema = RemainingMemberExtrema.for_metric(
+            raw_extrema["member_extrema"],
+            temperature_metric,
+        )
+        hours_remaining = _local_hours_remaining(
+            city,
+            target_d,
+            now=temporal_context.current_utc_timestamp,
+        )
+        live_forecast_source = "day0_raw_model_extrema"
+        forecast_source_validations = [
+            f"forecast_source_id:{raw_extrema['source_id']}",
+            f"forecast_source_role:{raw_extrema['forecast_source_role']}",
+            f"forecast_source_cycle_time:{raw_extrema['source_cycle_time']}",
+        ]
 
     semantics = SettlementSemantics.for_city(city)
     observed_high_so_far = _finite_day0_observation_float(obs, "high_so_far")
@@ -1787,7 +2019,7 @@ def _refresh_day0_observation(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, [
             "day0_observation",
-            "fresh_ens_fetch",
+            live_forecast_source,
             "observation_quality_gate",
         ]
     member_extrema_for_metric = extrema.mins if temperature_metric.is_low() else extrema.maxes
@@ -1799,13 +2031,14 @@ def _refresh_day0_observation(
         observed_extreme_so_far=observed_extreme_for_metric,
         member_extrema_remaining=member_extrema_for_metric,
     )
+    maturity_validations: list[str] = []
     if maturity_rejection is not None:
-        _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, [
-            "day0_observation",
-            "fresh_ens_fetch",
-            *forecast_source_validations,
-            "day0_extreme_maturity_gate",
+        # Non-absorbing Day0 observations are still valid probability evidence:
+        # Day0Router combines the observed-so-far bound with remaining live hourly
+        # vectors. The maturity gate only withholds hard-fact/absorbing authority;
+        # it must not blind the held-position redecision loop.
+        maturity_validations = [
+            "day0_extreme_not_absorbing",
             maturity_rejection,
         ]
     day0 = Day0Router.route(Day0SignalInputs(
@@ -1831,7 +2064,7 @@ def _refresh_day0_observation(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, [
             "day0_observation",
-            "fresh_ens_fetch",
+            live_forecast_source,
             *forecast_source_validations,
             "support_topology_stale",
             str(exc),
@@ -1848,7 +2081,7 @@ def _refresh_day0_observation(
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, [
             "day0_observation",
-            "fresh_ens_fetch",
+            live_forecast_source,
             *forecast_source_validations,
             "day0_honest_raw_invalid_p_raw",
         ]
@@ -1857,8 +2090,9 @@ def _refresh_day0_observation(
     applied = [
         "day0_observation",
         *coverage_validations,
-        "fresh_ens_fetch",
+        live_forecast_source,
         *forecast_source_validations,
+        *maturity_validations,
         "mc_instrument_noise",
         "day0_remaining_window_raw_vector_normalization",
     ]
@@ -1866,7 +2100,11 @@ def _refresh_day0_observation(
     member_extrema = extrema.mins if temperature_metric.is_low() else extrema.maxes
     if member_extrema is None:
         _set_monitor_probability_fresh(position, False)
-        return position.p_posterior, ["day0_observation", "fresh_ens_fetch", "metric_extrema_missing"]
+        return position.p_posterior, [
+            "day0_observation",
+            live_forecast_source,
+            "metric_extrema_missing",
+        ]
 
     # Day0 observation remaining-window belief is not legacy alpha blending.
     # The probability authority is the observed-so-far bound plus remaining

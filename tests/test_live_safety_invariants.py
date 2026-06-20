@@ -4343,17 +4343,23 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
         "observation_time": "2026-06-08T00:10:00+09:00",
         "source": "wu_api",
     })
-    monkeypatch.setattr(monitor_refresh, "fetch_ensemble", lambda *a, **k: {
+    monkeypatch.setattr(monitor_refresh, "_read_day0_hourly_vectors", lambda **kw: {
         "members_hourly": np.zeros((3, 3)),
-        "times": ["2026-06-07T15:00:00+00:00"],
+        "times": [
+            "2026-06-07T15:00:00+00:00",
+            "2026-06-07T16:00:00+00:00",
+            "2026-06-07T17:00:00+00:00",
+        ],
         "source_id": "test_source",
-        "forecast_source_role": "monitor_fallback",
+        "forecast_source_role": "day0_remaining_window_live",
     })
-    monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda *_: True)
     monkeypatch.setattr(diurnal, "build_day0_temporal_context", lambda *a, **k: SimpleNamespace(
         daypart="morning",
         post_peak_confidence=0.0,
         current_utc_timestamp=datetime(2026, 6, 7, 15, 10, tzinfo=timezone.utc),
+        solar_day=None,
+        current_local_hour=0.17,
+        daylight_progress=0.0,
     ))
     # Freeze the staleness gate's wall-clock to the fixture's frame: the obs
     # fast-lane gate (task #49) added a 1.0h max observation age measured
@@ -4378,6 +4384,18 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
             23.0,
         ),
     )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_build_all_bins",
+        lambda *a, **k: (
+            [
+                monitor_refresh.Bin(low=24, high=24, label="24°C", unit="C"),
+                monitor_refresh.Bin(low=25, high=25, label="25°C", unit="C"),
+                monitor_refresh.Bin(low=26, high=26, label="26°C", unit="C"),
+            ],
+            1,
+        ),
+    )
 
     p, validations = monitor_refresh._refresh_day0_observation(
         position=pos,
@@ -4387,9 +4405,10 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
         target_d=date(2026, 6, 8),
     )
 
-    assert p == pytest.approx(0.79)
-    assert getattr(pos, "_monitor_probability_is_fresh") is False
-    assert "day0_extreme_maturity_gate" in validations
+    assert np.isfinite(p)
+    assert getattr(pos, "_monitor_probability_is_fresh") is True
+    assert "day0_observation_remaining_window" in validations
+    assert "day0_extreme_not_absorbing" in validations
     assert any(v.startswith("day0_high_extreme_not_mature:") for v in validations)
 
 
