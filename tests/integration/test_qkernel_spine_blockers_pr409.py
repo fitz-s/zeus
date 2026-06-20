@@ -20,6 +20,7 @@ import datetime as _dt
 import json
 from decimal import Decimal
 
+import numpy as np
 import pytest
 
 from src.engine import event_reactor_adapter as era
@@ -809,7 +810,7 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     overlay must preserve the reactor proof's selected-side probability fields.
     """
     economics = _selected_economics(
-        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.052, point_ev=0.050
+        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
     new_proof = _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.990, economics=economics)
 
@@ -822,7 +823,47 @@ def test_overlay_preserves_probability_fields_and_updates_score():
         0.052
     )
     assert new_proof.qkernel_execution_economics["edge_lcb"] == pytest.approx(0.05)
+    assert new_proof.qkernel_execution_economics["point_ev"] == pytest.approx(0.20)
     assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
+
+
+def test_overlay_sets_qkernel_band_false_edge_p_value():
+    """FDR consumes the selected qkernel route's empirical false-edge rate.
+
+    A qkernel-selected proof must not keep the legacy proof p-value after the
+    qkernel band has selected a different payoff-space route. The p-value is the
+    finite-sample-corrected share of band route edges <= 0.
+    """
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.01, cost=0.05, q_dot_payoff=0.08, point_ev=0.03
+    )
+    selected_route = SimpleNamespace(side="NO", bin_id="b1", payoff_vector=np.array([1.0]))
+    selected_decision = SimpleNamespace(
+        economics=economics,
+        route=selected_route,
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="cell",
+    )
+    decision = SimpleNamespace(
+        selected=economics,
+        band=SimpleNamespace(samples=np.array([[0.03], [0.06], [0.08]])),
+        candidate_decisions=(selected_decision,),
+    )
+    base = _overlay_proof(
+        q_posterior=0.80,
+        q_lcb_5pct=0.70,
+        economics=economics,
+    )
+    new_proof = bridge._overlay_spine_economics_onto_proof(base, decision)
+
+    assert new_proof is not None
+    assert new_proof.trade_score == pytest.approx(0.01)
+    assert new_proof.p_value == pytest.approx(0.5)  # (one failure + 1) / (three draws + 1)
+    assert new_proof.passed_prefilter is True
+    assert new_proof.qkernel_execution_economics["false_edge_rate"] == pytest.approx(0.5)
 
 
 def test_overlay_failure_returns_none_instead_of_original_proof():

@@ -1212,11 +1212,17 @@ def _valid_qkernel_execution_economics_payload(
     try:
         payoff_q_lcb = float(cert.get("payoff_q_lcb"))
         cost = float(cert.get("cost"))
+        edge_lcb = float(cert.get("edge_lcb"))
+        optimal_delta_u = float(cert.get("optimal_delta_u"))
     except (TypeError, ValueError):
         return None
     if not (0.0 <= payoff_q_lcb <= 1.0):
         return None
-    if not (0.0 <= cost <= 1.0):
+    if not (0.0 < cost < 1.0):
+        return None
+    if edge_lcb <= 0.0 or optimal_delta_u <= 0.0 or optimal_stake <= 0.0:
+        return None
+    if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
         return None
     return cert
 
@@ -3209,6 +3215,18 @@ def _build_event_bound_no_submit_receipt_core(
             fdr_pass=False,
             fdr_family_id=fdr.fdr_family_id,
             fdr_hypothesis_count=fdr.attempted_hypotheses,
+            q_source=proof.q_source,
+            qkernel_execution_economics=proof.qkernel_execution_economics,
+            q_lcb_calibration_source=proof.q_lcb_calibration_source,
+            same_bin_yes_posterior=proof.same_bin_yes_posterior,
+            settlement_coverage_status=proof.settlement_coverage_status,
+            posterior_id=proof.posterior_id,
+            probability_authority=proof.probability_authority,
+            opportunity_book=opportunity_book.to_receipt_dict() if opportunity_book is not None else None,
+            execution_mode_intent=proof.execution_mode_intent,
+            maker_limit_price=proof.maker_limit_price,
+            rest_then_cross_policy=proof.rest_then_cross_policy,
+            rest_escalation_deadline_minutes=proof.rest_escalation_deadline_minutes,
             lfsr=_shrink.lfsr,
             edge_shrunk=_shrink.edge_shrunk,
             edge_shrunk_posterior_sd=_shrink.edge_shrunk_posterior_sd,
@@ -4028,6 +4046,8 @@ def build_event_bound_no_submit_receipt(
         candidate_book = _candidate_book_for_envelope(receipt.opportunity_book)
         if candidate_book is not None:
             envelope["candidate_book"] = candidate_book
+        if receipt.qkernel_execution_economics is not None:
+            envelope["qkernel_execution_economics"] = receipt.qkernel_execution_economics
         return dataclass_replace(receipt, envelope_json=envelope_to_json(envelope))
     except Exception:  # noqa: BLE001 — observability must never alter or fail a decision
         return receipt
@@ -8045,6 +8065,8 @@ _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
 
 
 def _proof_uses_qkernel_spine(proof: "_CandidateProof") -> bool:
+    if str(getattr(proof, "q_source", "") or "") == "qkernel_spine":
+        return True
     if str(getattr(proof, "selection_authority_applied", "") or "") == "qkernel_spine":
         return True
     cert = getattr(proof, "qkernel_execution_economics", None)
@@ -8770,11 +8792,14 @@ def _opportunity_book_from_proofs(
     selection_authority = None
     selected_qkernel_execution_economics = None
     if selected_proof is not None and decided_candidate_id is not None:
-        selection_authority = (
-            str(selected_proof.selection_authority_applied)
-            if selected_proof.selection_authority_applied is not None
-            else "robust_marginal_utility"
-        )
+        if _proof_uses_qkernel_spine(selected_proof):
+            selection_authority = "qkernel_spine"
+        else:
+            selection_authority = (
+                str(selected_proof.selection_authority_applied)
+                if selected_proof.selection_authority_applied is not None
+                else "robust_marginal_utility"
+            )
         selected_qkernel_execution_economics = selected_proof.qkernel_execution_economics
     cache_summary: dict[str, Any] = {
         "belief_cache": "source_run_bound",

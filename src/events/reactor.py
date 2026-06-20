@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -2094,6 +2095,13 @@ class OpportunityEventReactor:
         executable_snapshot_id = _receipt_or_payload(
             receipt, payload, "executable_snapshot_id"
         )
+        if receipt is not None:
+            qkernel_economics = _qkernel_regret_economics(receipt)
+            if qkernel_economics is not None:
+                q_lcb_5pct = qkernel_economics["q_lcb_5pct"]
+                c_fee_adjusted = qkernel_economics["c_fee_adjusted"]
+                c_cost_95pct = qkernel_economics["c_cost_95pct"]
+                trade_score = qkernel_economics["trade_score"]
         if family_level_all_rejected:
             condition_id = None
             token_id = None
@@ -2310,6 +2318,36 @@ def _optional_bool(value: Any) -> bool | None:
     if lowered in {"0", "false", "no"}:
         return False
     return None
+
+
+def _qkernel_regret_economics(receipt: EventSubmissionReceipt) -> dict[str, float] | None:
+    """Queryable no-trade columns for qkernel-selected receipts.
+
+    ``q_live`` / ``q_lcb_5pct`` on the receipt are selected-side probability
+    provenance. A qkernel-selected route is economically licensed by its guarded
+    payoff-space certificate: ``payoff_q_lcb``, ``cost`` and ``edge_lcb``. Project
+    those values into the regret table's scalar economic columns so operators and
+    continuous-redecision screens do not compare a preserved selected-side q_lcb
+    against a qkernel route score.
+    """
+
+    cert = receipt.qkernel_execution_economics
+    if not isinstance(cert, dict):
+        return None
+    try:
+        payoff_q_lcb = float(cert["payoff_q_lcb"])
+        cost = float(cert["cost"])
+        edge_lcb = float(cert["edge_lcb"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (payoff_q_lcb, cost, edge_lcb)):
+        return None
+    return {
+        "q_lcb_5pct": payoff_q_lcb,
+        "c_fee_adjusted": cost,
+        "c_cost_95pct": cost,
+        "trade_score": edge_lcb,
+    }
 
 
 def _submission_receipt(

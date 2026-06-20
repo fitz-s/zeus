@@ -1251,19 +1251,18 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
                 break
         except Exception:  # noqa: BLE001
             continue
-    try:
-        new_trade_score = float(selected.point_ev)
-    except Exception:  # noqa: BLE001
-        new_trade_score = float(getattr(proof, "trade_score", 0.0))
     cost_value = float(getattr(selected.cost, "value", 0.0) or 0.0)
+    edge_lcb = float(selected.edge_lcb)
+    payoff_q_lcb = edge_lcb + cost_value
+    false_edge_rate = _qkernel_false_edge_rate(decision, selected_decision)
     qkernel_execution_economics: dict[str, Any] = {
         "source": "qkernel_spine",
         "decision_id": getattr(decision, "decision_id", None),
         "receipt_hash": getattr(decision, "receipt_hash", None),
         "candidate_id": selected.candidate_id,
         "route_id": selected.route_id,
-        "payoff_q_lcb": float(selected.edge_lcb) + cost_value,
-        "edge_lcb": float(selected.edge_lcb),
+        "payoff_q_lcb": payoff_q_lcb,
+        "edge_lcb": edge_lcb,
         "point_ev": float(selected.point_ev),
         "delta_u_at_min": float(selected.delta_u_at_min),
         "optimal_stake_usd": str(selected.optimal_stake_usd),
@@ -1271,6 +1270,8 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         "q_dot_payoff": float(selected.q_dot_payoff),
         "cost": cost_value,
     }
+    if false_edge_rate is not None:
+        qkernel_execution_economics["false_edge_rate"] = false_edge_rate
     if selected_decision is not None:
         qkernel_execution_economics.update(
             {
@@ -1282,11 +1283,51 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
             }
         )
     overlay: dict[str, Any] = {
-        "trade_score": new_trade_score,
+        # The selected qkernel candidate is licensed by the conservative vector
+        # edge and robust utility, not by scalar point EV. Keep the score on the
+        # same conservative economics the downstream FDR/receipt surfaces consume.
+        "trade_score": edge_lcb,
         "qkernel_execution_economics": qkernel_execution_economics,
         "selection_authority_applied": "qkernel_spine",
     }
+    if false_edge_rate is not None:
+        overlay["p_value"] = false_edge_rate
+        overlay["passed_prefilter"] = edge_lcb > 0.0
     try:
         return replace(proof, **overlay)
     except Exception:  # noqa: BLE001 — non-replaceable proof is a bridge wiring fault
         return None
+
+
+def _qkernel_false_edge_rate(
+    decision: FamilyDecision,
+    selected_decision: Any | None,
+) -> float | None:
+    """Empirical false-edge rate from the qkernel band for the selected route.
+
+    ``edge_lcb`` is a quantile over ``band.samples @ payoff - cost``. FDR must
+    consume the same route and same sample distribution, not the legacy proof
+    p-value from a scalar selected-side bootstrap. Return ``mean(edge <= 0)`` with
+    a finite-sample correction so the selected qkernel candidate carries an
+    empirical p-value over the tested band draws.
+    """
+
+    if selected_decision is None or getattr(decision, "band", None) is None:
+        return None
+    try:
+        samples = np.asarray(decision.band.samples, dtype=float)
+        payoff = np.asarray(selected_decision.route.payoff_vector, dtype=float)
+        cost = float(selected_decision.economics.cost.value)
+    except Exception:  # noqa: BLE001
+        return None
+    if samples.ndim != 2 or payoff.ndim != 1 or samples.shape[1] != payoff.shape[0]:
+        return None
+    if not (np.isfinite(samples).all() and np.isfinite(payoff).all() and np.isfinite(cost)):
+        return None
+    edges = samples @ payoff - cost
+    if edges.size == 0 or not np.isfinite(edges).all():
+        return None
+    failures = float(np.count_nonzero(edges <= 0.0))
+    # Finite-sample correction mirrors the replacement bootstrap p-value style:
+    # never emit an exact zero from a finite Monte Carlo band.
+    return float((failures + 1.0) / (float(edges.size) + 1.0))

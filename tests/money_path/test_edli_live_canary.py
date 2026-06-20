@@ -1506,7 +1506,10 @@ def test_qkernel_taker_quality_uses_guarded_payoff_lcb_not_receipt_q_lcb():
             "direction": "buy_yes",
             "q_live": 0.90,
             "q_lcb_5pct": 0.90,
-            "qkernel_execution_economics": _qkernel_execution_cert(payoff_q_lcb=0.30),
+            "qkernel_execution_economics": _qkernel_execution_cert(
+                payoff_q_lcb=0.30,
+                cost=0.20,
+            ),
             "live_cap_reserved_notional_usd": 10.0,
             "proof_maker_limit_price": 0.45,
             "proof_ev_maker": 0.01,
@@ -2823,6 +2826,11 @@ def _qkernel_execution_cert(**overrides):
         "bin_id": "bin-1",
     }
     cert.update(overrides)
+    if (
+        ("payoff_q_lcb" in overrides or "cost" in overrides)
+        and "edge_lcb" not in overrides
+    ):
+        cert["edge_lcb"] = float(cert["payoff_q_lcb"]) - float(cert["cost"])
     return cert
 
 
