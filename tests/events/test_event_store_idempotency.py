@@ -667,6 +667,61 @@ def test_archive_recent_no_value_refuted_events_expires_queued_fsr_from_redecisi
     )
 
 
+def test_archive_recent_no_value_refuted_events_keeps_queued_redecision_live():
+    conn = _world_conn()
+    store = EventStore(conn)
+    prior_redecision = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Chicago|2026-05-24|high|snap-same",
+        source="edli_redecision:screen",
+        observed_at="2026-05-24T04:10:00+00:00",
+        available_at="2026-05-24T04:10:00+00:00",
+        received_at="2026-05-24T04:11:00+00:00",
+        causal_snapshot_id="snap-same",
+        payload=_payload("snap-same"),
+        priority=50,
+    )
+    queued_redecision = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Chicago|2026-05-24|high|snap-same-refresh",
+        source="edli_redecision:screen",
+        observed_at="2026-05-24T04:12:00+00:00",
+        available_at="2026-05-24T04:12:00+00:00",
+        received_at="2026-05-24T04:12:30+00:00",
+        causal_snapshot_id="snap-same",
+        payload=_payload("snap-same"),
+        priority=50,
+    )
+    for event in (prior_redecision, queued_redecision):
+        store.insert_or_ignore(event)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processed'
+         WHERE event_id = ?
+        """,
+        (prior_redecision.event_id,),
+    )
+    _insert_no_value_regret(conn, prior_redecision)
+
+    archived = store.archive_recent_no_value_refuted_events(
+        decision_time="2026-05-24T05:20:00+00:00"
+    )
+
+    assert archived == 0
+    assert (
+        conn.execute(
+            """
+            SELECT processing_status
+              FROM opportunity_event_processing
+             WHERE event_id = ?
+            """,
+            (queued_redecision.event_id,),
+        ).fetchone()[0]
+        == "pending"
+    )
+
+
 def test_archive_recent_no_value_refuted_events_keeps_price_conditioned_regret_live():
     conn = _world_conn()
     store = EventStore(conn)

@@ -58,6 +58,11 @@ def _no_value_refutation_event_types_compatible(
 ) -> bool:
     active = str(active_event_type or "").strip()
     regret = str(regret_event_type or "").strip()
+    # A redecision row is created only after the continuous screen sees current
+    # value/rest evidence. Older same-payload no-value receipts may suppress
+    # ordinary discovery rows, but must not expire the live redecision itself.
+    if active == "EDLI_REDECISION_PENDING":
+        return False
     if active in _FORECAST_DECISION_EVENT_TYPES:
         return not regret or regret in _FORECAST_DECISION_EVENT_TYPES
     if active == "DAY0_EXTREME_UPDATED":
@@ -1176,9 +1181,12 @@ class EventStore:
         preserving the append-only ``opportunity_events`` provenance.
 
         Same-evidence is deliberately narrow: same city/target/metric plus
-        matching payload hash or causal snapshot id. Forecast ordinary FSR and
-        ``EDLI_REDECISION_PENDING`` share one evidence family; Day0 remains a
-        separate observation lane and only Day0 no-value can refute Day0. Unlike
+        matching payload hash or causal snapshot id. Ordinary FSR rows can be
+        refuted by prior forecast/redecision no-value receipts. Active
+        ``EDLI_REDECISION_PENDING`` rows are not archive-refuted here because
+        the continuous screen already observed current value/rest evidence; the
+        reactor must decide them on the fresh path. Day0 remains a separate
+        observation lane and only Day0 no-value can refute Day0. Unlike
         emit-time suppression, this is not limited to the short cooldown window:
         if an old row is still queued and the same evidence was terminally
         refuted after that evidence became available, the row is stale.
