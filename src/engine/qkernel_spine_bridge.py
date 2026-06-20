@@ -49,22 +49,21 @@ selected proof still flows through the reactor's downstream submit-time re-proof
 
 DRIFT RESOLVED (recorded per operator law — see impl_w5b_integration.md §"Input mapping"):
 
-  * The belief authority runs at the seam. The spine builds the ONE predictive
-    distribution via the REAL ``PredictiveDistributionBuilder`` — ``build_center``
-    (envelope-locked) + ``build_sigma`` (realized-floor) — over the members threaded
-    under ``_edli_spine_debiased_members_native`` by the Stage-0 producer. POST-FIX
-    REALITY (spine-source rewire 2026-06-16): those members are the RAW MULTI-MODEL
-    member envelope sourced from ``raw_model_forecasts`` (~7-13 decorrelated NWP
-    providers, latest cycle per model) — the SAME source the ARM/settlement-EV replay
-    validates (``fresh_members_at_cycle``). SINGLE TRUTH: there is NO settlement-residual
-    de-bias layer — ``_spine_debias_authority`` is unconditionally ``_NoOpDebiasAuthority``
-    (ZERO shift, ``raw == debiased``), so the center this ships IS the raw precise
-    multi-model fused center, untouched. These members are the validated multi-model
-    envelope, NOT the reactor's legacy served
-    mu*/σ (the LEGACY EMOS/replacement values are no longer used for belief). If the
-    producer stashed no members at all (the threaded inputs are absent — e.g. <3 fresh
-    models on the causal cycle), the bridge returns a TYPED no-trade
-    (``SPINE_INPUTS_UNAVAILABLE``) rather than fabricating a center.
+  * The belief authority runs at the seam. The spine assembles the ONE predictive
+    distribution over the members threaded under ``_edli_spine_debiased_members_native``
+    by the Stage-0 producer, and it preserves the reactor-served predictive σ carried
+    on the same payload. POST-FIX REALITY (spine-source rewire 2026-06-16): those
+    members are the RAW MULTI-MODEL member envelope sourced from ``raw_model_forecasts``
+    (~7-13 decorrelated NWP providers, latest cycle per model) — the SAME source the
+    ARM/settlement-EV replay validates (``fresh_members_at_cycle``). SINGLE TRUTH:
+    there is NO settlement-residual de-bias layer — ``_spine_debias_authority`` is
+    unconditionally ``_NoOpDebiasAuthority`` (ZERO shift, ``raw == debiased``), so the
+    center this ships IS the raw precise multi-model fused center, untouched. The
+    qkernel must not rebuild a different σ from the payload; entry, monitor, and
+    qkernel score the same served distribution. If the producer stashed no members at
+    all (the threaded inputs are absent — e.g. <3 fresh models on the causal cycle),
+    the bridge returns a TYPED no-trade (``SPINE_INPUTS_UNAVAILABLE``) rather than
+    fabricating a center.
 
   * The spine's ``family_book`` step consumes ``ExecutableMarketSnapshot`` per
     sibling keyed by bin_id. The reactor's per-family decision seam holds the
@@ -91,7 +90,7 @@ a typed ``SPINE_WIRING_FAULT`` no-trade so the reactor emits a deterministic rec
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Optional, Sequence
@@ -109,6 +108,7 @@ from src.forecast.forecast_case_factory import forecast_case_metadata
 from src.forecast.predictive_distribution_builder import (
     PredictiveDistribution,
     PredictiveDistributionBuilder,
+    _identity_hash,
 )
 from src.forecast.types import ForecastCase, FreshModelSet, RawModelMember
 from src.probability.event_resolution import (
@@ -654,6 +654,88 @@ class _ReactorServedFreshModelReader:
         return self._models
 
 
+class _ReactorServedPredictiveBuilder:
+    """Build the spine predictive distribution while preserving reactor-served σ.
+
+    The bridge payload already carries the live materializer's served predictive
+    width. The generic builder is still the owner of center assembly, day0 support,
+    raw-law validation, and the receipt shape, but this seam must not recompute a
+    second sigma and feed q a different width than the live entry/monitor belief.
+    """
+
+    def __init__(self, debias_authority, *, served_sigma_native: float) -> None:
+        self._delegate = PredictiveDistributionBuilder(debias_authority)
+        self._served_sigma_native = float(served_sigma_native)
+
+    def build(
+        self,
+        case: ForecastCase,
+        models: FreshModelSet,
+        obs: Optional[Day0ObservationState] = None,
+        *,
+        use_emos: bool = True,
+        fused_center_sd_native: Optional[float] = None,
+        sigma_resid_native: Optional[float] = None,
+        has_fusion_capture: bool = True,
+    ) -> PredictiveDistribution:
+        base = self._delegate.build(
+            case,
+            models,
+            obs,
+            use_emos=use_emos,
+            fused_center_sd_native=fused_center_sd_native,
+            sigma_resid_native=sigma_resid_native,
+            has_fusion_capture=has_fusion_capture,
+        )
+        return self._with_served_sigma(base)
+
+    def _with_served_sigma(
+        self, base: PredictiveDistribution
+    ) -> PredictiveDistribution:
+        sigma = self._served_sigma_native
+        if not (np.isfinite(sigma) and sigma > 0.0):
+            return replace(
+                base,
+                live_eligible=False,
+                ineligibility_reason="REACTOR_SERVED_SIGMA_INVALID",
+            )
+
+        # Keep genuine non-sigma refusals closed. A missing local sigma authority is
+        # exactly what the reactor-served sigma resolves; center/raw-law refusals are not.
+        reason = str(base.ineligibility_reason or "")
+        sigma_only_refusal = reason.startswith("PREDICTIVE_SIGMA_AUTHORITY_MISSING")
+        if not base.live_eligible and not sigma_only_refusal:
+            return base
+
+        components = replace(
+            base.sigma_components,
+            sigma_before_floor_native=sigma,
+            sigma_after_floor_native=sigma,
+            artifact_id="reactor_served_predictive_sigma_payload",
+        )
+        identity_hash = _identity_hash(
+            base.case,
+            base.mu_native,
+            sigma,
+            base.debiased_members_native,
+            base.distribution_family,
+            base.center,
+            base.debias,
+            base.day0,
+            components,
+            True,
+            None,
+        )
+        return replace(
+            base,
+            sigma_native=sigma,
+            sigma_components=components,
+            live_eligible=True,
+            ineligibility_reason=None,
+            identity_hash=identity_hash,
+        )
+
+
 class _NoDay0Reader:
     """A ``Day0Reader`` that serves no observation (the reactor's forecast lane).
 
@@ -881,18 +963,16 @@ def decide_family_via_spine(
         engine = FamilyDecisionEngine(
             fresh_model_reader=_ReactorServedFreshModelReader(models),
             day0_reader=_NoDay0Reader(),
-            # The belief authority: build_center (envelope-lock) + build_sigma
-            # (realized-floor) run on the reactor's RAW MULTI-MODEL member envelope
-            # sourced from ``raw_model_forecasts`` (~7-13 decorrelated NWP providers,
-            # latest cycle per model at the family's causal cycle) — NOT the reactor's
-            # legacy served mu/σ. Source-corrected 2026-06-16: these members are RAW,
-            # NOT chain-of-record-debiased, and are NOT "the ARM-replay-validated
-            # center+σ" — the ARM replay reads the SAME ``raw_model_forecasts`` table
-            # but the live center is recomputed here, not lifted from a validated run.
-            # De-bias: IDENTITY always (``_NoOpDebiasAuthority`` → raw envelope is the
-            # center). Single-truth law: there is no settlement-residual de-bias layer and
-            # no bias flag — the raw precise multi-model fused center IS what ships.
-            predictive_builder=PredictiveDistributionBuilder(_spine_debias_authority(case)),
+            # The belief authority at this seam is the reactor-served live predictive
+            # payload: center/day0/raw-law structure is assembled by the spine builder
+            # over the RAW multi-model member envelope, while σ is preserved from the
+            # payload's served predictive width. This keeps entry, monitor, and qkernel
+            # on one belief; the bridge must not rebuild a second wider/narrower σ and
+            # then score a different distribution than the live materializer served.
+            predictive_builder=_ReactorServedPredictiveBuilder(
+                _spine_debias_authority(case),
+                served_sigma_native=float(served["sigma_native"]),
+            ),
             # ROUTE IDENTITY (consult_review_pr409.md §5 BLOCKER): DIRECT native routes
             # ONLY. The unchanged submit path executes ONE native leg, so the decision
             # may only choose a route a single _CandidateProof can execute. Disabling the

@@ -8485,12 +8485,13 @@ def _selection_scoped_proofs(
     def _qkernel_may_rescore_rejected_proof(missing_reason: str | None) -> bool:
         """Whether the qkernel may re-evaluate a legacy admission rejection.
 
-        The qkernel replaces scalar economics, not structural truth. It may restore a
-        proof removed by the old capital-efficiency prefilter so the vector payoff
-        engine can compare the leg honestly. It must not resurrect direction-law
-        failures, missing native structure, near-settled-price blocks, or buy-NO
-        conservative-evidence failures; those are executable/semantic defects, not a
-        legacy scalar objective.
+        The qkernel replaces scalar economics and owns the live forecast/bin direction
+        law for forecast families. It may restore a proof removed by the old
+        capital-efficiency prefilter or the retired distance-threshold direction law so
+        the vector payoff engine can compare the leg honestly under the qkernel's
+        settlement-bin law. It must not resurrect missing native structure,
+        near-settled-price blocks, or buy-NO conservative-evidence failures; those are
+        executable/semantic defects, not legacy scalar objective drift.
         """
         text = str(missing_reason or "").strip()
         if not text:
@@ -8499,6 +8500,7 @@ def _selection_scoped_proofs(
             (
                 "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
                 "ADMISSION_CAPITAL_EFFICIENCY",
+                "DIRECTION_LAW_BIN_FORECAST_MISMATCH",
             )
         )
 
