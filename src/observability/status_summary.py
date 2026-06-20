@@ -73,6 +73,31 @@ _TERMINAL_VENUE_ORDER_STATES = {
     "EXPIRED",
     "REJECTED",
 }
+_BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE = {
+    "mode",
+    "started_at",
+    "completed_at",
+    "candidates",
+    "candidates_evaluated",
+    "processed",
+    "proof_accepted",
+    "final_intents_built",
+    "final_execution_intents_built",
+    "submit_attempts",
+    "entry_submit_attempts",
+    "entry_orders_submitted",
+    "venue_acks",
+    "venue_ack_count",
+    "no_trades",
+    "no_trade_count",
+    "rejected",
+    "retried",
+    "dead_lettered",
+    "rejection_reason_counts",
+    "top_no_trade_reasons",
+    "no_trade_reasons",
+    "deterministic_rejections",
+}
 
 
 def _atomic_write_status_payload(payload: dict) -> None:
@@ -120,7 +145,12 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
             and "candidates" not in incoming_cycle
         ):
             merged_cycle = dict(prior_cycle)
-            merged_cycle.update(incoming_cycle)
+            auxiliary_cycle = dict(incoming_cycle)
+            for key in _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE:
+                auxiliary_cycle.pop(key, None)
+            merged_cycle.update(auxiliary_cycle)
+            if incoming_cycle:
+                merged_cycle["last_auxiliary_pulse"] = incoming_cycle
             status["cycle"] = merged_cycle
         else:
             status["cycle"] = incoming_cycle
