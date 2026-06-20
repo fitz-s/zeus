@@ -6115,13 +6115,21 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         fact_cols = {str(row[1]) for row in trade_conn.execute("PRAGMA table_info(venue_order_facts)").fetchall()}
     except Exception:  # noqa: BLE001
         fact_cols = set()
+    try:
+        command_cols = {str(row[1]) for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()}
+    except Exception:  # noqa: BLE001
+        command_cols = set()
     matched_select = "matched_size" if "matched_size" in fact_cols else "NULL AS matched_size"
+    command_state_filter = (
+        "AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')" if "state" in command_cols else ""
+    )
     command_rows = trade_conn.execute(
-        """
+        f"""
         SELECT command_id, venue_order_id, token_id, market_id,
                side, price, snapshot_id, created_at
           FROM venue_commands
          WHERE intent_kind = 'ENTRY'
+           {command_state_filter}
            AND venue_order_id IS NOT NULL AND venue_order_id != ''
         """
     ).fetchall()
