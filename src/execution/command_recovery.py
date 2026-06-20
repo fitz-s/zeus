@@ -833,6 +833,13 @@ def _positive_decimal_or_none(value: object) -> Decimal | None:
     return parsed if parsed is not None and parsed > 0 else None
 
 
+def _positive_probability_or_none(value: object) -> float | None:
+    parsed = _decimal_or_none(value)
+    if parsed is None or parsed <= 0 or parsed > 1:
+        return None
+    return float(parsed)
+
+
 def _float_or_none(value: object) -> float | None:
     parsed = _decimal_or_none(value)
     return float(parsed) if parsed is not None else None
@@ -2032,6 +2039,15 @@ def _decision_log_trade_case_for_command(
                 or (decision_id and str(case.get("decision_id") or "") == decision_id)
                 or (token_id and str(case.get("token_id") or "") == token_id)
             ):
+                if _positive_probability_or_none(case.get("p_posterior")) is None:
+                    edli_case = _edli_trade_case_for_command(conn, command, client=client)
+                    edli_posterior = _positive_probability_or_none(
+                        edli_case.get("p_posterior") if edli_case else None
+                    )
+                    if edli_posterior is not None:
+                        enriched = dict(case)
+                        enriched["p_posterior"] = edli_posterior
+                        return enriched, int(record.get("id") or 0)
                 return case, int(record.get("id") or 0)
     edli_case = _edli_trade_case_for_command(conn, command, client=client)
     if edli_case:
@@ -3185,6 +3201,111 @@ def reconcile_filled_entry_projection_repairs(conn: sqlite3.Connection, client=N
             logger.error(
                 "recovery: filled entry projection repair failed for command %s: %s",
                 command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+_EDLI_ENTRY_POSTERIOR_REPAIR_PHASES = ("pending_entry", "active", "day0_window", "pending_exit")
+
+
+def _edli_entry_posterior_repair_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not all(_table_exists(conn, table) for table in ("position_current", "venue_commands")):
+        return []
+    if _decision_certificates_ref(conn) is None:
+        return []
+    phase_placeholders = ", ".join("?" for _ in _EDLI_ENTRY_POSTERIOR_REPAIR_PHASES)
+    rows = conn.execute(
+        f"""
+        SELECT pc.position_id,
+               pc.p_posterior AS current_p_posterior,
+               pc.phase,
+               pc.order_id AS position_order_id,
+               cmd.*
+          FROM position_current pc
+          JOIN venue_commands cmd
+            ON cmd.position_id = pc.position_id
+            OR (
+                COALESCE(pc.order_id, '') != ''
+                AND COALESCE(cmd.venue_order_id, '') != ''
+                AND lower(pc.order_id) = lower(cmd.venue_order_id)
+            )
+         WHERE pc.phase IN ({phase_placeholders})
+           AND cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND cmd.decision_id LIKE 'edli_exec_cmd:%'
+           AND (pc.p_posterior IS NULL OR CAST(pc.p_posterior AS REAL) <= 0)
+         ORDER BY pc.updated_at DESC, cmd.created_at DESC
+        """,
+        tuple(_EDLI_ENTRY_POSTERIOR_REPAIR_PHASES),
+    ).fetchall()
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        candidate = _dict_row(row)
+        position_id = str(candidate.get("position_id") or "")
+        if not position_id or position_id in seen:
+            continue
+        seen.add(position_id)
+        candidates.append(candidate)
+    return candidates
+
+
+def reconcile_edli_entry_posterior_projection_repairs(
+    conn: sqlite3.Connection,
+    client=None,
+) -> dict:
+    """Backfill missing entry belief for EDLI positions from their Actionable certificate.
+
+    Live order projection can create a visible pending/active row before the
+    confirmed fill bridge runs. That row is only safe for monitoring if its
+    entry posterior is the same q_live that justified submission. This lane is
+    idempotent and strictly evidence-bound: no EDLI Actionable certificate q,
+    no update.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _edli_entry_posterior_repair_candidates(conn):
+        summary["scanned"] += 1
+        position_id = str(candidate.get("position_id") or "")
+        sp_name = "sp_edli_entry_posterior_" + "".join(
+            ch if ch.isalnum() else "_" for ch in position_id
+        )[:80]
+        conn.execute("SAVEPOINT " + sp_name)
+        try:
+            hydrated = _hydrate_command_execution_identity(conn, candidate)
+            trade_case, _decision_log_id = _decision_log_trade_case_for_command(
+                conn,
+                hydrated,
+                client=client,
+            )
+            posterior = _positive_probability_or_none(trade_case.get("p_posterior"))
+            if posterior is None:
+                conn.execute("RELEASE SAVEPOINT " + sp_name)
+                summary["stayed"] += 1
+                continue
+            cursor = conn.execute(
+                """
+                UPDATE position_current
+                   SET p_posterior = ?,
+                       updated_at = ?
+                 WHERE position_id = ?
+                   AND (p_posterior IS NULL OR CAST(p_posterior AS REAL) <= 0)
+                """,
+                (posterior, _now_iso(), position_id),
+            )
+            if cursor.rowcount > 0:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+            conn.execute("RELEASE SAVEPOINT " + sp_name)
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT " + sp_name)
+            conn.execute("RELEASE SAVEPOINT " + sp_name)
+            logger.error(
+                "recovery: EDLI entry posterior projection repair failed for position %s: %s",
+                position_id,
                 exc,
             )
             summary["errors"] += 1
@@ -9142,6 +9263,15 @@ def _reconcile_passes_inline(
         summary["stayed"] += filled_entry_repair_summary["stayed"]
         summary["errors"] += filled_entry_repair_summary["errors"]
 
+        edli_entry_posterior_summary = reconcile_edli_entry_posterior_projection_repairs(
+            conn,
+            client=client,
+        )
+        summary["edli_entry_posterior_projection_repair"] = edli_entry_posterior_summary
+        summary["advanced"] += edli_entry_posterior_summary["advanced"]
+        summary["stayed"] += edli_entry_posterior_summary["stayed"]
+        summary["errors"] += edli_entry_posterior_summary["errors"]
+
         filled_entry_lot_summary = reconcile_filled_entry_position_lot_repairs(conn)
         summary["filled_entry_position_lot_repair"] = filled_entry_lot_summary
         summary["advanced"] += filled_entry_lot_summary["advanced"]
@@ -9452,6 +9582,10 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
              reconcile_filled_entry_position_link_repairs, "filled_entry_position_link_repair")
     _client_pass("filled_entry_projection_repair",
                  reconcile_filled_entry_projection_repairs, "filled_entry_projection_repair", client_kw=True)
+    _client_pass("edli_entry_posterior_projection_repair",
+                 reconcile_edli_entry_posterior_projection_repairs,
+                 "edli_entry_posterior_projection_repair",
+                 client_kw=True)
     _db_pass("filled_entry_position_lot_repair",
              reconcile_filled_entry_position_lot_repairs, "filled_entry_position_lot_repair")
     _db_pass("filled_entry_execution_fact_repair",
