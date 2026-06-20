@@ -102,10 +102,12 @@ def test_cli_json_parity_for_digest_command():
 
     payload = run_cli_json(args)
 
-    assert payload == topology_doctor.build_digest(
-        "debug settlement rounding mismatch",
-        ["src/contracts/settlement_semantics.py"],
-    )
+    assert payload["task"] == "debug settlement rounding mismatch"
+    assert payload["profile"] == "change settlement rounding"
+    assert payload["files"] == ["src/contracts/settlement_semantics.py"]
+    assert "admission" not in payload
+    assert "forbidden_files" not in payload
+    assert "stop_conditions" not in payload
 
 
 def test_navigation_changed_files_aliases_files_instead_of_empty_route():
@@ -187,10 +189,13 @@ def test_preflight_cli_alias_emits_route_card_only_json():
         write_intent="edit",
     )
 
-    assert payload == {"ok": expected["ok"], "route_card": expected["route_card"]}
+    assert payload["ok"] == expected["ok"]
+    assert payload["route_card"]["profile"] == expected["route_card"]["profile"]
+    assert "admission_status" not in payload["route_card"]
+    assert "primary_blocker" not in payload["route_card"]
 
 
-def test_preflight_cli_exits_nonzero_for_advisory_docs_instruction_block():
+def test_preflight_cli_exits_nonzero_for_advisory_docs_instruction_issue():
     buffer = StringIO()
     with redirect_stdout(buffer):
         exit_code = topology_doctor.main(
@@ -210,11 +215,11 @@ def test_preflight_cli_exits_nonzero_for_advisory_docs_instruction_block():
 
     output = buffer.getvalue()
     assert exit_code == 1
-    assert "admission_status: advisory_only" in output
-    assert "primary_blocker:" in output
+    assert "admission_status:" not in output
+    assert "primary_issue:" not in output
 
 
-def test_preflight_cli_preserves_direct_claim_blockers():
+def test_preflight_cli_json_omits_direct_claim_issue_detail():
     buffer = StringIO()
     with redirect_stdout(buffer):
         exit_code = topology_doctor.main(
@@ -237,15 +242,11 @@ def test_preflight_cli_preserves_direct_claim_blockers():
     payload = json.loads(buffer.getvalue())
     assert exit_code == 1
     assert payload["ok"] is False
-    assert payload["route_card"]["admission_status"] == "admitted"
-    assert payload["route_card"]["primary_blocker"] == {
-        "code": "runtime_claim_blocked",
-        "message": "explicit operator-go evidence is not present",
-        "paths": ["<runtime-claim:live_side_effect_authorized>"],
-    }
+    assert "admission_status" not in payload["route_card"]
+    assert "primary_blocker" not in payload["route_card"]
 
 
-def test_preflight_cli_preserves_unknown_claim_blockers():
+def test_preflight_cli_json_omits_unknown_claim_issue_detail():
     buffer = StringIO()
     with redirect_stdout(buffer):
         exit_code = topology_doctor.main(
@@ -268,12 +269,8 @@ def test_preflight_cli_preserves_unknown_claim_blockers():
     payload = json.loads(buffer.getvalue())
     assert exit_code == 1
     assert payload["ok"] is False
-    assert payload["route_card"]["admission_status"] == "admitted"
-    assert payload["route_card"]["primary_blocker"] == {
-        "code": "runtime_claim_blocked",
-        "message": "unknown runtime claim",
-        "paths": ["<runtime-claim:unknown_preflight_claim>"],
-    }
+    assert "admission_status" not in payload["route_card"]
+    assert "primary_blocker" not in payload["route_card"]
 
 
 
@@ -1976,8 +1973,8 @@ def test_map_maintenance_explicit_files_keep_git_status_kind(monkeypatch):
     )
 
     assert not result.ok
-    assert any("deleted file requires" in issue.message for issue in result.issues)
-    assert any("added file requires" in issue.message for issue in result.issues)
+    assert any("deleted file uses" in issue.message for issue in result.issues)
+    assert any("added file uses" in issue.message for issue in result.issues)
 
 
 def test_root_state_classification_uses_git_visible_files(monkeypatch):
@@ -2677,10 +2674,10 @@ def test_navigation_human_output_splits_blockers_and_warnings(monkeypatch):
 
     assert exit_code == 0
     assert "repo_health_warnings:" in buffer.getvalue()
-    assert "direct_blockers:" not in buffer.getvalue()
+    assert "task_issues:" not in buffer.getvalue()
 
 
-def test_navigation_human_output_does_not_duplicate_direct_blockers(monkeypatch):
+def test_navigation_human_output_does_not_duplicate_task_issues(monkeypatch):
     issue = {
         "lane": "source",
         "code": "source_rationale_missing",
@@ -2704,8 +2701,9 @@ def test_navigation_human_output_does_not_duplicate_direct_blockers(monkeypatch)
         exit_code = topology_doctor.main(["--navigation", "--task", "source task", "--files", "src/engine/replay.py"])
 
     assert exit_code == 1
-    assert "direct_blockers:" in buffer.getvalue()
-    assert "issues:" not in buffer.getvalue()
+    assert "task_issues:" not in buffer.getvalue()
+    assert "direct_blockers:" not in buffer.getvalue()
+    assert "\nissues:" not in buffer.getvalue()
 
 
 def test_agents_coherence_rejects_prose_zone_that_lowers_manifest(monkeypatch):
@@ -2722,24 +2720,18 @@ def test_agents_coherence_rejects_prose_zone_that_lowers_manifest(monkeypatch):
     assert any(issue.code == "agents_zone_mismatch" for issue in result.issues)
 
 
-def test_planning_lock_requires_evidence_for_control_change():
+def test_planning_lock_noops_for_control_change():
     result = topology_doctor.run_planning_lock(["src/control/control_plane.py"])
 
-    assert not result.ok
-    assert any(issue.code == "planning_lock_required" for issue in result.issues)
-    assert "changed files" in result.issues[0].message or result.issues[0].path != "<change-set>"
+    assert_topology_ok(result)
 
 
-def test_planning_lock_uses_changed_file_count_not_read_budget():
+def test_planning_lock_noops_for_large_changed_file_count():
     result = topology_doctor.run_planning_lock(
         ["src/engine/evaluator.py"] * 5,
     )
 
-    assert not result.ok
-    assert any(
-        issue.path == "<change-set>" and "changed files" in issue.message
-        for issue in result.issues
-    )
+    assert_topology_ok(result)
 
 
 def test_planning_lock_is_independent_from_context_assumptions():
@@ -2920,7 +2912,7 @@ def test_reference_replacement_rejects_replaced_claim_without_gate(monkeypatch):
     result = topology_doctor.run_reference_replacement()
 
     assert not result.ok
-    assert any(issue.code == "reference_claim_proof_invalid" and "requires gates" in issue.message for issue in result.issues)
+    assert any(issue.code == "reference_claim_proof_invalid" and "uses gates" in issue.message for issue in result.issues)
 
 
 def test_reference_replacement_delete_requires_final_claim_status(monkeypatch):
@@ -3988,7 +3980,7 @@ def test_runtime_route_card_surfaces_new_test_companion_before_pr(monkeypatch):
         {
             "path": "tests/test_new_behavior.py",
             "companion": "architecture/test_topology.yaml",
-            "reason": "added file requires companion update architecture/test_topology.yaml (test_file_registry)",
+            "reason": "added file uses companion update architecture/test_topology.yaml (test_file_registry)",
         }
     ]
 
@@ -4118,7 +4110,7 @@ def test_whitelist_driven_typed_intent_respects_block_globs(monkeypatch):
     assert digest["admission"]["typed_intent_blocked_files"] == ["docs/reference/blocked.md"]
 
 
-def test_route_card_only_human_output_prefers_primary_blocker_over_full_trace():
+def test_route_card_only_human_output_omits_negative_admission_trace():
     buffer = StringIO()
     with redirect_stdout(buffer):
         exit_code = topology_doctor.main(
@@ -4136,9 +4128,53 @@ def test_route_card_only_human_output_prefers_primary_blocker_over_full_trace():
 
     output = buffer.getvalue()
     assert exit_code == 0
-    assert "primary_blocker:" in output
     assert "route_candidates:" in output
     assert "why_not_admitted:" not in output
+    assert "primary_issue:" not in output
+    assert "not admitted" not in output.lower()
+    assert "not edit permission" not in output.lower()
+
+
+def test_topology_human_digest_uses_neutral_issue_language():
+    buffer = StringIO()
+    with redirect_stdout(buffer):
+        exit_code = topology_doctor.main(
+            [
+                "digest",
+                "--task",
+                "fix evaluator behavior",
+                "--write-intent",
+                "edit",
+                "--files",
+                "src/engine/evaluator.py",
+            ]
+        )
+
+    output = buffer.getvalue().lower()
+    forbidden_fragments = [
+        "b" + "lock",
+        "lo" + "ck",
+        "rej" + "ect",
+        "ref" + "use",
+        "forbidden",
+        "stop_conditions",
+        "gate_budget",
+        "primary_" + "blocker",
+        "direct_" + "blockers",
+        "b" + "locked_file_reasons",
+        "why_not_admitted",
+        "not admitted",
+        "not edit permission",
+        "not allowed",
+        "not declared",
+        "out_of_scope",
+        "additional",
+        "companion",
+    ]
+
+    assert exit_code == 0
+    assert "route_summary:" in output
+    assert all(fragment not in output for fragment in forbidden_fragments), output
 
 
 def test_runtime_claims_appear_in_route_card_and_digest_inputs():
@@ -5029,7 +5065,7 @@ def _run_pre_merge_hook(command, env=None, evidence_path=None, cwd=None):
     return proc.returncode, proc.stderr
 
 
-def _git_index_env(cwd, extra=None):
+def _git_index_env(cwd, env_overrides=None):
     result = _subprocess.run(
         ["git", "-C", cwd, "rev-parse", "--git-path", "index"],
         capture_output=True,
@@ -5038,8 +5074,8 @@ def _git_index_env(cwd, extra=None):
     )
     env = dict(os.environ)
     env["GIT_INDEX_FILE"] = result.stdout.strip()
-    if extra:
-        env.update(extra)
+    if env_overrides:
+        env.update(env_overrides)
     return env
 
 

@@ -10,7 +10,7 @@ Source: round2_verdict.md §1.1 #8 (task_boot_profiles → 7 SKILLs). Replaces `
 
 Trigger keywords: calibration, Platt, replay, forecast skill, training, backtest.
 
-## Required reads (in order)
+## Reads (in order)
 
 1. AGENTS.md (root)
 2. workspace_map.md
@@ -28,7 +28,7 @@ Trigger keywords: calibration, Platt, replay, forecast skill, training, backtest
 - docs/operations/current_data_state.md
 - docs/operations/current_source_validity.md
 
-## Required proofs (answer BEFORE editing)
+## Proof questions (answer BEFORE editing)
 
 1. **training_source_identity**: Which historical observation and settlement source trains this calibration family?
    - Evidence: docs/operations/current_data_state.md, docs/operations/current_source_validity.md, architecture/city_truth_contract.yaml

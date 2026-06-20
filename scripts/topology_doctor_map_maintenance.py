@@ -150,7 +150,7 @@ def run_map_maintenance(api: Any, changed_files: list[str] | None = None, mode: 
                         issue_fn(
                             "map_maintenance_companion_missing",
                             path,
-                            f"{kind} file requires companion update {companion} ({rule.get('id')})",
+                            f"{kind} file uses companion update {companion} ({rule.get('id')})",
                             owner_manifest="architecture/map_maintenance.yaml",
                             repair_kind="update_companion",
                             related_paths=(companion,),

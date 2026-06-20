@@ -10,7 +10,7 @@ Source: round2_verdict.md §1.1 #8 (task_boot_profiles → 7 SKILLs). Replaces `
 
 Trigger keywords: Day0, day0, monitor, nowcast, observed so far, exit trigger.
 
-## Required reads (in order)
+## Reads (in order)
 
 1. AGENTS.md (root)
 2. workspace_map.md
@@ -27,7 +27,7 @@ Trigger keywords: Day0, day0, monitor, nowcast, observed so far, exit trigger.
 - docs/operations/current_source_validity.md
 - docs/operations/current_data_state.md
 
-## Required proofs (answer BEFORE editing)
+## Proof questions (answer BEFORE editing)
 
 1. **day0_source_vs_settlement_source**: Is the live Day0 monitor source the same as settlement for this city/date, or explicitly different?
    - Evidence: docs/operations/current_source_validity.md, docs/operations/current_data_state.md, architecture/city_truth_contract.yaml
@@ -56,9 +56,8 @@ INV-16 (causality_status != 'OK' must reject from historical Platt lookup) is en
 - Use for: callers, tests, impacted monitor paths
 - NOT for: live source validity, data freshness
 
-## Verification gates
+## Verification
 
 ```
-python3 scripts/topology_doctor.py --task-boot-profiles --json
 python3 scripts/topology_doctor.py --fatal-misreads --json
 ```

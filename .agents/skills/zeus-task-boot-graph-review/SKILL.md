@@ -10,7 +10,7 @@ Source: round2_verdict.md §1.1 #8 (task_boot_profiles → 7 SKILLs). Replaces `
 
 Trigger keywords: graph, Code Review Graph, CRG, impact, blast radius, review.
 
-## Required reads (in order)
+## Reads (in order)
 
 1. AGENTS.md (root) — §Code Review Graph (the authoritative summary post-BATCH A)
 2. workspace_map.md
@@ -22,7 +22,7 @@ Trigger keywords: graph, Code Review Graph, CRG, impact, blast radius, review.
 
 - docs/operations/current_state.md
 
-## Required proofs (answer BEFORE editing)
+## Proof questions (answer BEFORE editing)
 
 1. **semantic_boot_before_graph**: Has the task class been identified before graph impact analysis?
    - Evidence: architecture/task_boot_profiles.yaml (or the matching .Codex/skills/zeus-task-boot-* skill), architecture/fatal_misreads.yaml
@@ -35,7 +35,7 @@ Trigger keywords: graph, Code Review Graph, CRG, impact, blast radius, review.
 
 ## Forbidden shortcuts
 
-- Do NOT let graph results waive required reads, proofs, planning lock, or tests.
+- Do NOT let graph results waive Reads, proofs, planning lock, or tests.
 - Do NOT ask graph to decide settlement / source / current truth.
 - Prefer explicit `--changed-files` / `--repo-root` when graph tooling needs impact scope.
 
@@ -45,9 +45,8 @@ Trigger keywords: graph, Code Review Graph, CRG, impact, blast radius, review.
 - Use for: impacted files, callers, tests, review order
 - NOT for: semantic truth, source validity, packet authority
 
-## Verification gates
+## Verification
 
 ```
 python3 scripts/topology_doctor.py --code-review-graph-status --json
-python3 scripts/topology_doctor.py --task-boot-profiles --json
 ```

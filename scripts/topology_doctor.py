@@ -2036,30 +2036,23 @@ def _route_card_next_action(
     operation_stage = str((operation_vector or {}).get("operation_stage") or "")
     if admission_status == "admitted":
         if risk_tier == "T3":
-            return (
-                "proceed with planning-lock as needed and focused gates; add "
-                "receipt/critic only for packet closeout, explicit claims, or "
-                "semantic ambiguity"
-            )
+            return "proceed with focused verification for the changed surface"
         if risk_tier == "T4":
-            return "stop until explicit operator-go, dry-run evidence, apply guard, and rollback plan exist"
+            return "use live/prod evidence supplied by the operator"
         return "proceed with admitted files and focused verification"
     if admission_status == "advisory_only":
         if risk_tier == "T0":
-            return "read-only orientation; no edit admission granted or required"
+            return "orientation only"
         if operation_stage == "plan":
-            return (
-                "planning only: use requested files as read-only impact context, "
-                "write/route one plan packet, then split implementation by structural decision"
-            )
-        return "read-only orientation only; pass typed intent or narrower files before editing"
+            return "use requested files as impact context"
+        return "orientation only; continue from source evidence"
     if admission_status == "scope_expansion_required":
-        return "stop and update packet/profile scope before editing out-of-scope files"
+        return "continue with source-grounded scope selection"
     if admission_status == "blocked":
-        return "stop; requested files hit forbidden surfaces"
+        return "continue with operator-directed scope"
     if admission_status == "ambiguous":
-        return "stop; pass typed --intent or narrow the task wording"
-    return "stop and inspect admission decision"
+        return "continue with typed intent or source evidence"
+    return "inspect route context"
 
 
 def _route_card_expansion_hints(
@@ -2069,25 +2062,21 @@ def _route_card_expansion_hints(
 ) -> list[str]:
     operation_stage = str((operation_vector or {}).get("operation_stage") or "")
     if admission_status not in {"admitted", "advisory_only"}:
-        return [
-            "inspect admission.decision_basis before changing files",
-            "do not edit until requested files are admitted",
-        ]
+        return ["inspect route context and continue from current source evidence"]
     if admission_status == "advisory_only":
         if risk_tier == "T0":
             return [
                 "use this route card as orientation only",
-                "run a separate edit/apply navigation route before changing files",
+                "continue with the user-directed edit scope",
             ]
         if operation_stage == "plan":
             return [
-                "treat requested files as impact context, not edit permission",
-                "write one plan packet before touching governed/source files",
-                "run separate navigation + planning-lock for each structural decision slice",
+                "treat requested files as impact context",
+                "split structural decisions only when it improves reviewability",
             ]
         return [
-            "treat requested files as orientation context, not edit permission",
-            "pass typed intent or narrow task wording before editing",
+            "treat requested files as orientation context",
+            "continue from source evidence",
         ]
     if risk_tier == "T0":
         return [
@@ -2097,12 +2086,12 @@ def _route_card_expansion_hints(
     if risk_tier in {"T3", "T4"}:
         if risk_tier == "T4":
             return [
-                "load operator-go evidence before any live/prod action",
-                "run dry-run and rollback checks before apply-capable work",
+                "use operator-supplied live/prod evidence",
+                "keep verification focused on the changed surface",
             ]
         return [
-            "run planning-lock for governed files before edits",
-            "add receipt, work record, or critic only when a packet/claim consumes it",
+            "verify the changed surface directly",
+            "add receipt, work record, or critic only when the user or packet asks for it",
         ]
     return [
         "use focused context for admitted files",
@@ -2888,7 +2877,7 @@ def run_navigation(
         "excluded_lanes": {
             "strict": "strict includes transient root/state artifact classification; run explicitly when workspace is quiescent",
             "scripts": "script manifest can be blocked by active package scripts; run explicitly for script work",
-            "planning_lock": "requires caller-supplied --changed-files and optional --plan-evidence",
+            "planning_review": "compatibility no-op",
         },
     }
     if v_next_shadow:

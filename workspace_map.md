@@ -10,8 +10,8 @@ Use it after `AGENTS.md` to answer two questions quickly:
 ## Default route
 
 1. read `AGENTS.md` (establishes the money path and probability chain)
-2. run the topology digest for your task — this gives you `allowed_files`,
-   `forbidden_files`, `gates`, and `stop_conditions`:
+2. run the topology digest for your task — this gives a compact route,
+   context, and candidate-file orientation:
    `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
 3. read the scoped `AGENTS.md` for the module the digest routes you to
 4. read code and evidence only after the route is narrow
@@ -23,7 +23,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | tracked visible text | Tracked human-readable routing, law, plans, and docs | `AGENTS.md`, `workspace_map.md`, `docs/**`, `architecture/**` | Default-read when relevant |
 | tracked derived context | Tracked artifacts that help review and retrieval but are not authority | `.code-review-graph/graph.db` | Read as derived context, never as law |
 | historical cold storage | Historical bodies and bundles that may exist locally but are not part of the default boot path | `docs/archives/**`, local archive bundles | Do not default-read; route through `docs/archive_registry.md` |
-| runtime-local scratch and control | Runtime state, DBs, locks, and ignored planning scratch | `state/**`, `.omx/**`, `.omc/**` | Treat as runtime context, not repo law |
+| runtime-local scratch and control | Runtime state, DBs, coordination files, and ignored planning scratch | `state/**`, `.omx/**`, `.omc/**` | Treat as runtime context, not repo law |
 | generated evidence sinks | Reports, checklists, workbooks, and raw captures | `docs/reports/authority_history/**`, `docs/to-do-list/**`, `raw/**`; artifacts/historical_evidence untracked on disk | Evidence only unless promoted through a packet |
 
 ## Directory router
@@ -43,7 +43,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `docs/reference/modules/` | Dense module books; reference only, never constitutional law | `docs/reference/modules/AGENTS.md` (`state`, `engine`, and `data` landed first) |
 | `docs/reference/legacy/` | Demoted historical reference snapshots (`legacy_reference_*.md`); doc_class `legacy_reference` per 2026-05-17 W6 | `docs/reference/legacy/AGENTS.md` |
 | `docs/operations/` | Live control pointer, active packets (.archived stubs dropped 2026-05-17 — git is backup, docs/archives/packets/ holds canonical) | `docs/operations/AGENTS.md` |
-| `docs/operations/edli_v1/` | EDLI v1 operation package, context lock, and repo/spec cross-reference | `docs/operations/AGENTS.md` |
+| `docs/operations/edli_v1/` | EDLI v1 operation package, context envelope, and repo/spec cross-reference | `docs/operations/AGENTS.md` |
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
 | `docs/reports/authority_history/` | Durable authority history ADRs and delivery boundary (kept tracked; rest of docs/reports/ is untracked archive) | `docs/reports/authority_history/` |
 | `docs/to-do-list/` | Active checklist workbooks | `docs/to-do-list/AGENTS.md` |
@@ -63,7 +63,7 @@ Prefer these over prose when they exist:
 | Manifest | Use |
 |----------|-----|
 | `architecture/invariants.yaml` | Current invariant IDs and enforcement intent |
-| `architecture/negative_constraints.yaml` | Forbidden moves |
+| `architecture/negative_constraints.yaml` | Negative constraint definitions |
 | `architecture/zones.yaml` | Canonical file-level zone ownership |
 | `architecture/topology.yaml` | Coverage roots, docs registry, current-state contract |
 | `architecture/source_rationale.yaml` | Per-file `src/**` rationale, hazards, and write routes |

@@ -25,7 +25,7 @@ A frozen 8-category template is anti-Fitz-methodology: it would patch symptoms f
 3. Read sibling `AUDIT_HISTORY.md` — what past audits found and missed; note repeat-offender categories.
 4. Read repo root: `AGENTS.md`, `~/.Codex/AGENTS.md` (Fitz methodology), `architecture/invariants.yaml`, `architecture/db_table_ownership.yaml`, `architecture/fatal_misreads*`, `docs/current_*_validity*`.
 5. Read contracts: `src/contracts/settlement_semantics.py`, `execution_price.py`, `venue_submission_envelope.py`, `fx_classification.py`.
-6. Run `python3 scripts/topology_doctor.py --task-boot-profiles` and `--navigation --task "deep alignment audit"`.
+6. Use current source, manifests, and runtime evidence directly; topology output is optional context only.
 7. `git log --oneline --since="60 days ago" -- architecture/ src/contracts/` — locate assumption-drift hot zones.
 8. `git ls-files | wc -l`, `git ls-files 'src/**/*.py' | wc -l`, `git ls-files 'tests/**/*.py' | wc -l` — quantify full scope so the Coverage Map can be honest.
 

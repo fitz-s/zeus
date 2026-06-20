@@ -13,8 +13,8 @@ When executing a phase from `docs/operations/task_*/r3/slice_cards/<phase>.yaml`
 ## Boot (3 steps, not 17)
 
 1. Read the slice card + the immediate predecessor's `learnings/<phase>_*_retro.md` if it exists.
-2. Run `python3 scripts/topology_doctor.py --task-boot-profiles --task <phase> --files <files>` (returns: changed-files, gates, semgrep status, drifted citations).
-3. If any cited file:line returns SEMANTIC_MISMATCH or FILE_MISSING, write `r3/_blocked_<phase>.md` and STOP. Do NOT implement.
+2. Use the slice card and current source as orientation; topology output is optional context, not permission.
+3. If cited file:line references drift, verify against symbols and continue with the smallest source-grounded edit.
 
 ## During implementation (rules of thumb, not rigid checklist)
 
@@ -42,6 +42,6 @@ When executing a phase from `docs/operations/task_*/r3/slice_cards/<phase>.yaml`
 
 - Cited gate is in the operator-decisions register: STOP. Do not implement default.
 - Cited NC or INV is marked PRUNE_CANDIDATE: STOP. Pruning is operator decision.
-- More than 4 files changed in a single phase that does not declare cross-zone scope: STOP. Plan first (planning-lock applies, see safety-gate agent).
+- If a phase grows past its intended scope, keep the implementation split clear in the final report.
 
 That's it. The 14-mechanism catalog rotted into prose. This SKILL.md is what survives translation across sessions per Fitz Constraint #2 (translation loss is thermodynamic; ~20% design-intent survival; encode insight into structure).

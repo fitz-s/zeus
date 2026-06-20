@@ -10,7 +10,7 @@ Source: round2_verdict.md §1.1 #8 (task_boot_profiles → 7 SKILLs). Replaces `
 
 Trigger keywords: hourly, observation_instants, instants, backfill, Ogimet, historical hourly.
 
-## Required reads (in order)
+## Reads (in order)
 
 1. AGENTS.md (root)
 2. workspace_map.md
@@ -26,7 +26,7 @@ Trigger keywords: hourly, observation_instants, instants, backfill, Ogimet, hist
 - docs/operations/current_data_state.md
 - docs/operations/current_source_validity.md
 
-## Required proofs (answer BEFORE editing)
+## Proof questions (answer BEFORE editing)
 
 1. **hourly_source_and_extrema**: Which hourly source is valid for this city/date, and does aggregation preserve maxima/minima?
    - Evidence: docs/operations/current_data_state.md, docs/operations/current_source_validity.md, architecture/city_truth_contract.yaml, architecture/source_rationale.yaml

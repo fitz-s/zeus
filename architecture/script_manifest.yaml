@@ -779,6 +779,8 @@ scripts:
     required_helpers: [src.state.db.get_forecasts_connection]
     required_tests: [tests/test_data_rebuild_relationships.py, tests/test_k1_reader_isolation_batch2.py]
   investigate_ecmwf_bias.py: {class: diagnostic_report_writer, write_targets: [state/ecmwf_bias_investigation.json, stdout]}
+  install_codegraph_hooks.sh: {class: runtime_support, lifecycle: long_lived, status: active, canonical_command: "bash scripts/install_codegraph_hooks.sh [repo-or-worktree-root]", read_targets: [repo, git_config], write_targets: [git_hooks_path, git_hooks_path/codegraph-sync-roots, stdout], dangerous_if_run: false, dry_run_default: false, reason: "Installs an idempotent quiet post-commit CodeGraph sync hook at the effective git hooks path and registers only explicit roots, so global hooksPath does not make unrelated repos run codegraph."}
+  create_worktree_with_codegraph.sh: {class: runtime_support, lifecycle: long_lived, status: active, canonical_command: "bash scripts/create_worktree_with_codegraph.sh <worktree-path> <branch> [base]", read_targets: [repo, git_config], write_targets: [git_worktree, worktree/.codegraph, git_hooks_path/codegraph-sync-roots, stdout], dangerous_if_run: false, dry_run_default: false, required_helpers: [scripts/install_codegraph_hooks.sh], reason: "Creates a branch-backed git worktree, immediately runs codegraph init -i for that worktree root, registers it for quiet post-commit sync, and prints codegraph status evidence."}
   live_readiness_check.py:
     class: enforcement
     module_owner: scripts

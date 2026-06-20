@@ -10,7 +10,7 @@ Source: round2_verdict.md §1.1 #8 (task_boot_profiles → 7 SKILLs). Replaces `
 
 Trigger keywords: source, routing, station, endpoint, WU, HKO, NOAA, Ogimet, city source.
 
-## Required reads (in order)
+## Reads (in order)
 
 1. AGENTS.md (root)
 2. workspace_map.md
@@ -28,7 +28,7 @@ Trigger keywords: source, routing, station, endpoint, WU, HKO, NOAA, Ogimet, cit
 - docs/operations/current_source_validity.md
 - docs/operations/current_data_state.md
 
-## Required proofs (answer BEFORE editing)
+## Proof questions (answer BEFORE editing)
 
 1. **settlement_source_by_city_date**: Which source family settles this city/date, and is the evidence fresh enough?
    - Evidence: docs/operations/current_source_validity.md, config/cities.json, architecture/city_truth_contract.yaml
@@ -54,9 +54,8 @@ Trigger keywords: source, routing, station, endpoint, WU, HKO, NOAA, Ogimet, cit
 - Use for: impacted files, callers, tests, blast radius
 - NOT for: settlement truth, source validity, city/date authority
 
-## Verification gates (before claiming done)
+## Verification
 
 ```
-python3 scripts/topology_doctor.py --task-boot-profiles --json
 python3 scripts/topology_doctor.py --fatal-misreads --json
 ```
