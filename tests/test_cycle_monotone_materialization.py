@@ -530,7 +530,7 @@ def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypat
     check.row_factory = sqlite3.Row
     row = check.execute(
         """
-        SELECT consumed_cycle_time, target_cycle_time, seed_file, reason
+        SELECT consumed_cycle_time, target_cycle_time, held_position, seed_file, reason
         FROM cycle_advance_enqueues
         WHERE city = 'Shanghai' AND target_date = '2026-06-19' AND metric = 'high'
         """
@@ -538,8 +538,82 @@ def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypat
     check.close()
     assert row["consumed_cycle_time"] == "NO_LIVE_POSTERIOR"
     assert row["target_cycle_time"] == cycle.isoformat()
+    assert row["held_position"] == 0
     assert row["seed_file"] == str(seed_file)
     assert row["reason"] == "MISSING_LIVE_POSTERIOR"
+
+
+def test_single_family_monitor_reseed_promotes_existing_enqueue_to_held_priority(
+    tmp_path, monkeypatch
+) -> None:
+    """A monitor-owned stale-belief repair must not stay behind a non-held idempotency row."""
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    consumed = datetime(2026, 6, 19, 6, tzinfo=UTC)
+    target = datetime(2026, 6, 20, 0, tzinfo=UTC)
+    _insert_artifact(
+        conn,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        cycle_iso=target.isoformat(),
+    )
+    _insert_posterior(
+        conn,
+        city="Kuala Lumpur",
+        target_date="2026-06-21",
+        metric="high",
+        cycle_iso=consumed.isoformat(),
+        computed_at="2026-06-20T00:03:09+00:00",
+    )
+    conn.execute(
+        """
+        INSERT INTO cycle_advance_enqueues
+            (enqueued_at, city, target_date, metric, consumed_cycle_time,
+             target_cycle_time, held_position, seed_file, reason)
+        VALUES (?, 'Kuala Lumpur', '2026-06-21', 'high', ?, ?, 0, ?, NULL)
+        """,
+        (
+            "2026-06-20T05:54:42+00:00",
+            consumed.isoformat(),
+            target.isoformat(),
+            str(tmp_path / "seeds" / "Kuala_Lumpur.2026-06-21.high.seed.json"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (target, ()),
+    )
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Kuala Lumpur",
+        target_date="2026-06-21",
+        metric="high",
+        computed_at=datetime(2026, 6, 20, 7, tzinfo=UTC),
+        held_position=True,
+    )
+
+    assert report["status"] == "CYCLE_ADVANCE_ALREADY_ENQUEUED"
+    assert report["held_position"] is True
+    assert report["held_priority_promoted"] is True
+    check = sqlite3.connect(db_path)
+    check.row_factory = sqlite3.Row
+    row = check.execute(
+        """
+        SELECT held_position
+        FROM cycle_advance_enqueues
+        WHERE city = 'Kuala Lumpur' AND target_date = '2026-06-21' AND metric = 'high'
+        """
+    ).fetchone()
+    check.close()
+    assert row["held_position"] == 1
 
 
 # ===========================================================================

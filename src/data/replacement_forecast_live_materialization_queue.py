@@ -330,6 +330,69 @@ def _write_request(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def _cycle_advance_seed_priority_map(
+    forecast_db: Path | str | None,
+) -> dict[str, tuple[int, str]]:
+    """Return filename -> priority for cycle-advance seeds/requests.
+
+    The producer records whether a seed repairs a held-position family in
+    ``cycle_advance_enqueues``. The consumer must preserve that priority after a
+    seed becomes either a seed file or a request file; plain filename ordering
+    can otherwise spend live cycles on non-held cities while a held position has
+    stale belief.
+    """
+    if forecast_db is None:
+        return {}
+    db_path = Path(forecast_db)
+    if not db_path.exists():
+        return {}
+    try:
+        from src.state.db import _connect  # noqa: PLC0415
+
+        conn = _connect(db_path, write_class=None)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            table = conn.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type='table' AND name='cycle_advance_enqueues'
+                LIMIT 1
+                """
+            ).fetchone()
+            if table is None:
+                return {}
+            rows = conn.execute(
+                """
+                SELECT seed_file, held_position, enqueued_at
+                FROM cycle_advance_enqueues
+                WHERE seed_file IS NOT NULL AND seed_file != ''
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - priority is best-effort; queue must still drain
+        return {}
+
+    priority: dict[str, tuple[int, str]] = {}
+    for seed_file, held_position, enqueued_at in rows:
+        name = Path(str(seed_file)).name
+        if not name:
+            continue
+        value = (0 if int(held_position or 0) == 1 else 1, str(enqueued_at or ""))
+        current = priority.get(name)
+        if current is None or value < current:
+            priority[name] = value
+    return priority
+
+
+def _cycle_advance_file_sort_key(
+    path: Path,
+    priority: dict[str, tuple[int, str]],
+) -> tuple[int, str, str]:
+    return (*priority.get(path.name, (1, "")), path.name)
+
+
 # POISON-PILL IMMUNITY (2026-06-10): the materializer subprocess accesses these keys
 # unconditionally and immediately (scripts/materialize_replacement_forecast_live.py:163-165,
 # then the OpenMeteo/precision inputs). A request file missing any of them — e.g. a
@@ -404,7 +467,13 @@ def _prepare_seed_requests(
     seed_path = Path(seed_dir)
     if not seed_path.exists():
         return [], [], ["REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_ABSENT"]
-    seeds = tuple(sorted(path for path in seed_path.glob("*.json") if path.is_file()))
+    priority = _cycle_advance_seed_priority_map(forecast_db)
+    seeds = tuple(
+        sorted(
+            (path for path in seed_path.glob("*.json") if path.is_file()),
+            key=lambda path: _cycle_advance_file_sort_key(path, priority),
+        )
+    )
     if not seeds:
         return [], [], ["REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_EMPTY"]
     if seed_processed_dir is None or seed_failed_dir is None:
@@ -619,7 +688,13 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             seed_failed_files=tuple(seed_failed),
             reason_codes=tuple(seed_reasons + ["REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_ABSENT"]),
         )
-    requests = tuple(sorted(path for path in request_path.glob("*.json") if path.is_file()))
+    priority = _cycle_advance_seed_priority_map(forecast_db)
+    requests = tuple(
+        sorted(
+            (path for path in request_path.glob("*.json") if path.is_file()),
+            key=lambda path: _cycle_advance_file_sort_key(path, priority),
+        )
+    )
     if not requests:
         return ReplacementForecastLiveMaterializationQueueReport(
             status="NO_REQUESTS",

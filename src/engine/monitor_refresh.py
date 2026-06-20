@@ -483,6 +483,7 @@ def _enqueue_single_family_belief_reseed_failsoft(
             city=city,
             target_date=target_date,
             metric=metric,
+            held_position=True,
             **day0_payload,
         )
         logger.info(
