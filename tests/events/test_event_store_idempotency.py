@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-19
+# Last reused/audited: 2026-06-20
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
@@ -101,12 +101,19 @@ def _fsr_entity_event(
     source_run_completeness_status: str = "COMPLETE",
     coverage_completeness_status: str | None = None,
     coverage_readiness_status: str | None = None,
+    member_count: int = 51,
+    expected_members: int = 51,
 ):
     payload = _payload(
         snapshot_id,
         city=city,
         target_date=target_date,
         metric=metric,
+    )
+    payload = dataclasses.replace(
+        payload,
+        member_count=member_count,
+        expected_members=expected_members,
     )
     if source_run_completeness_status != "COMPLETE":
         payload = dataclasses.replace(
@@ -535,6 +542,76 @@ def test_archive_superseded_forecast_snapshot_events_keeps_window_complete_sourc
     )
     assert rows[older_incomplete.event_id] == "expired"
     assert rows[window_complete.event_id] == "pending"
+
+
+def test_archive_invalid_forecast_snapshot_events_expires_live_carrier_count_mismatch():
+    conn = _world_conn()
+    store = EventStore(conn)
+    invalid = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-bad",
+        "snap-invalid-carrier",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:11:00+00:00",
+        member_count=0,
+        expected_members=51,
+    )
+    valid = _fsr_entity_event(
+        "Denver|2026-05-24|high|source-run-good",
+        "snap-valid-carrier",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:11:00+00:00",
+        city="Denver",
+        member_count=3,
+        expected_members=3,
+    )
+    for event in (invalid, valid):
+        store.insert_or_ignore(event)
+
+    archived = store.archive_invalid_forecast_snapshot_events()
+
+    assert archived == 1
+    rows = {
+        event_id: (status, last_error)
+        for event_id, status, last_error in conn.execute(
+            "SELECT event_id, processing_status, last_error FROM opportunity_event_processing"
+        ).fetchall()
+    }
+    assert rows[invalid.event_id] == ("expired", "INVALID_FORECAST_SNAPSHOT_CARRIER_COUNTS")
+    assert rows[valid.event_id] == ("pending", None)
+
+
+def test_archive_superseded_forecast_snapshot_events_keeps_valid_carrier_over_newer_invalid():
+    conn = _world_conn()
+    store = EventStore(conn)
+    valid_older = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-good",
+        "snap-valid-older",
+        "2026-05-24T04:00:00+00:00",
+        "2026-05-24T04:01:00+00:00",
+        member_count=3,
+        expected_members=3,
+    )
+    invalid_newer = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-bad",
+        "snap-invalid-newer",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:11:00+00:00",
+        member_count=0,
+        expected_members=51,
+    )
+    for event in (valid_older, invalid_newer):
+        store.insert_or_ignore(event)
+
+    archived = store.archive_superseded_forecast_snapshot_events()
+
+    assert archived == 1
+    rows = dict(
+        conn.execute(
+            "SELECT event_id, processing_status FROM opportunity_event_processing"
+        ).fetchall()
+    )
+    assert rows[valid_older.event_id] == "pending"
+    assert rows[invalid_newer.event_id] == "expired"
 
 
 def test_archive_recent_no_value_refuted_events_expires_queued_fsr_from_redecision_refutation():

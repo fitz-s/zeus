@@ -7637,6 +7637,25 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         )
 
     try:
+        _invalid_fsr_archived = store.archive_invalid_forecast_snapshot_events(
+            batch_limit=batch_limit,
+        )
+        if _invalid_fsr_archived:
+            logger.info(
+                "EDLI reactor: archived %d invalid forecast-snapshot/redecision "
+                "events with impossible carrier counts → 'expired'; malformed live "
+                "carriers removed from active decision working set (batch_limit=%d)",
+                _invalid_fsr_archived,
+                batch_limit,
+            )
+    except Exception as _invalid_fsr_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_invalid_forecast_snapshot_events sweep failed "
+            "(non-fatal): %r",
+            _invalid_fsr_sweep_exc,
+        )
+
+    try:
         _fsr_archived = store.archive_superseded_forecast_snapshot_events(
             batch_limit=batch_limit,
         )

@@ -1019,8 +1019,32 @@ class EventStore:
                    CASE
                      WHEN json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
                       AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
+                      AND COALESCE(
+                            json_extract(e.payload_json, '$.member_count'),
+                            json_extract(e.payload_json, '$.observed_members'),
+                            json_extract(e.payload_json, '$.sr_observed_members')
+                          ) IS NOT NULL
+                      AND COALESCE(
+                            json_extract(e.payload_json, '$.expected_members'),
+                            json_extract(e.payload_json, '$.sr_expected_members')
+                          ) IS NOT NULL
+                      AND CAST(COALESCE(
+                            json_extract(e.payload_json, '$.expected_members'),
+                            json_extract(e.payload_json, '$.sr_expected_members')
+                          ) AS INTEGER) > 0
+                      AND CAST(COALESCE(
+                            json_extract(e.payload_json, '$.member_count'),
+                            json_extract(e.payload_json, '$.observed_members'),
+                            json_extract(e.payload_json, '$.sr_observed_members')
+                          ) AS INTEGER) >= CAST(COALESCE(
+                            json_extract(e.payload_json, '$.expected_members'),
+                            json_extract(e.payload_json, '$.sr_expected_members')
+                          ) AS INTEGER)
                      THEN 0
-                     ELSE 1
+                     WHEN json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
+                      AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
+                     THEN 1
+                     ELSE 2
                    END ASC,
                    e.available_at DESC,
                    e.received_at DESC,
@@ -1054,6 +1078,87 @@ class EventStore:
                 (now, now, self.consumer_name, *chunk),
             )
         return len(superseded_ids)
+
+    def archive_invalid_forecast_snapshot_events(
+        self, *, batch_limit: int = 5_000
+    ) -> int:
+        """Terminalize live-eligible FSR/redecision rows with impossible carrier counts.
+
+        ``FORECAST_SNAPSHOT_READY`` and ``EDLI_REDECISION_PENDING`` are money-path
+        carriers. If a row advertises ``COMPLETE``/``LIVE_ELIGIBLE`` coverage while
+        its observed carrier count is missing or smaller than its expected carrier
+        count, the row is not a conservative no-trade signal; it is a structurally
+        invalid live carrier. Leaving it ``pending`` or ``processing`` lets legacy
+        producer bugs re-enter the decision path after restart.
+
+        The immutable event remains append-only. Only the mutable processing row is
+        expired, with ``last_error`` explaining why it was removed from the active
+        working set.
+        """
+
+        self._require_world_event_tables()
+        rows = self.conn.execute(
+            """
+            SELECT e.event_id
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status IN ('pending', 'processing')
+               AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
+               AND json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
+               AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
+               AND COALESCE(
+                     json_extract(e.payload_json, '$.expected_members'),
+                     json_extract(e.payload_json, '$.sr_expected_members')
+                   ) IS NOT NULL
+               AND CAST(COALESCE(
+                     json_extract(e.payload_json, '$.expected_members'),
+                     json_extract(e.payload_json, '$.sr_expected_members')
+                   ) AS INTEGER) > 0
+               AND (
+                    COALESCE(
+                      json_extract(e.payload_json, '$.member_count'),
+                      json_extract(e.payload_json, '$.observed_members'),
+                      json_extract(e.payload_json, '$.sr_observed_members')
+                    ) IS NULL
+                 OR CAST(COALESCE(
+                      json_extract(e.payload_json, '$.member_count'),
+                      json_extract(e.payload_json, '$.observed_members'),
+                      json_extract(e.payload_json, '$.sr_observed_members')
+                    ) AS INTEGER) < CAST(COALESCE(
+                      json_extract(e.payload_json, '$.expected_members'),
+                      json_extract(e.payload_json, '$.sr_expected_members')
+                    ) AS INTEGER)
+               )
+             ORDER BY e.available_at ASC, e.received_at ASC, e.event_id ASC
+             LIMIT ?
+            """,
+            (self.consumer_name, batch_limit),
+        ).fetchall()
+        event_ids = [str(row[0]) for row in rows]
+        if not event_ids:
+            return 0
+
+        now = _utc_now()
+        _CHUNK = 500
+        for chunk_start in range(0, len(event_ids), _CHUNK):
+            chunk = event_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       last_error = 'INVALID_FORECAST_SNAPSHOT_CARRIER_COUNTS',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id IN ({placeholders})
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, self.consumer_name, *chunk),
+            )
+        return len(event_ids)
 
     def archive_recent_no_value_refuted_events(
         self,
