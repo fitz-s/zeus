@@ -246,6 +246,80 @@ def _pulse_only_summary(surface: str) -> dict:
     }
 
 
+def _check_armed_live_no_submit_receipts(
+    *,
+    status: dict,
+    cycle: dict,
+    window_seconds: int,
+) -> bool:
+    """Return True when the system is armed-live with no recent submit receipt.
+
+    armed_live is True when:
+      - the global entry gate (global_allow_submit) is True (entry is open), AND
+      - the current cycle produced at least one submit-admissible intent
+        (final_intents_built > 0 in the cycle summary).
+
+    recent_submit_receipt is True when at least one SUBMIT_REQUESTED or
+    SUBMIT_ACKED row exists in venue_command_events with occurred_at within
+    the last ``window_seconds`` seconds.
+
+    Returns True (→ append to consistency_issues) only when armed_live AND
+    zero recent submit receipts.  Detection-only: this function never blocks
+    or gates an order.
+    """
+    from datetime import datetime, timezone
+
+    # --- armed_live: gate open AND intents were built ---
+    entry_cap = (
+        status.get("execution_capability", {}).get("entry", {})
+        if isinstance(status.get("execution_capability"), dict)
+        else {}
+    )
+    global_allow_submit = bool(entry_cap.get("global_allow_submit", False))
+    final_intents_built = int(cycle.get("final_intents_built", 0) or 0)
+    armed_live = global_allow_submit and final_intents_built > 0
+
+    if not armed_live:
+        return False
+
+    # --- recent_submit_receipt: query venue_command_events ---
+    now_utc = datetime.now(timezone.utc)
+    window_start = now_utc.timestamp() - window_seconds
+    # ISO-8601 threshold string for SQL comparison (SQLite string comparison
+    # works correctly for ISO-8601 UTC timestamps in the same timezone).
+    import datetime as _dt
+    threshold_iso = _dt.datetime.fromtimestamp(window_start, tz=_dt.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    try:
+        conn = get_trade_connection_with_world()
+        try:
+            row = conn.execute(
+                """
+                SELECT 1 FROM venue_command_events
+                WHERE event_type IN ('SUBMIT_REQUESTED', 'SUBMIT_ACKED')
+                  AND occurred_at >= ?
+                LIMIT 1
+                """,
+                (threshold_iso,),
+            ).fetchone()
+            recent_submit_receipt = row is not None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "armed_live submit-receipt DB query failed (treating as no receipt): %s", exc
+        )
+        # Fail open: if we can't query, don't falsely alarm.
+        return False
+
+    return not recent_submit_receipt
+
+
 def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | None) -> None:
     """Recompute infrastructure truth for the surfaces a cycle pulse refreshes.
 
@@ -271,6 +345,23 @@ def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | Non
     )
     if isinstance(current_open_entry_orders, dict) and current_open_entry_orders.get("status") == "query_error":
         consistency_issues.append("current_open_entry_orders_query_error")
+
+    # B6 (2026-06-20): armed-live + zero submit receipts → RED (dead-submit detection).
+    # Detects the 2026-06-06 silent dead-submit mode: the entry gate is open AND
+    # the cycle produced submit-admissible intents, but no SUBMIT_REQUESTED/
+    # SUBMIT_ACKED event landed in venue_command_events in the last 30 minutes.
+    # DETECTION ONLY — never blocks an order; no throttle; no gate object.
+    _ARMED_LIVE_SUBMIT_RECEIPT_WINDOW_SECONDS = 1800  # 30 min
+    try:
+        _armed_live = _check_armed_live_no_submit_receipts(
+            status=status,
+            cycle=cycle,
+            window_seconds=_ARMED_LIVE_SUBMIT_RECEIPT_WINDOW_SECONDS,
+        )
+        if _armed_live:
+            consistency_issues.append("armed_live_no_recent_submit_receipts")
+    except Exception as _exc:  # noqa: BLE001 - armed-live check must never break the pulse
+        logger.warning("armed_live submit-receipt check failed (non-fatal): %s", _exc)
 
     risk = status.setdefault("risk", {})
     if not isinstance(risk, dict):

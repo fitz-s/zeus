@@ -117,6 +117,14 @@ invariants:
     tests:
       - tests/analysis/test_evidence_report_cohort_scope.py
       - tests/analysis/test_promotion_readiness.py
+  MP-OBS-001:
+    description: "B6 live-submit canary: submit→SUBMIT_REQUESTED→place_limit_order called→SUBMIT_ACKED durable→pending_entry projection→crash-then-reconcile resolves ACKED with no duplicate submit."
+    tests:
+      - tests/execution/test_live_submit_canary_chain.py
+  MP-OBS-002:
+    description: "B6 dead-submit detection: armed_live (global_allow_submit=True AND final_intents_built>=1) with zero SUBMIT_REQUESTED/SUBMIT_ACKED receipts in last 30 min escalates infrastructure_level to RED."
+    tests:
+      - tests/observability/test_status_red_on_armed_live_no_submit_receipts.py
   MP-STR-001:
     description: "strategy_key is the sole attribution identity; routing decisions from strategy registry, never ad-hoc from condition_id or market type."
     tests:
