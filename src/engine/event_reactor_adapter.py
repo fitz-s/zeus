@@ -1241,7 +1241,10 @@ def _assert_receipt_qkernel_execution_economics(
     book: Mapping[str, object],
     selected_candidate_id: str,
 ) -> Mapping[str, Any] | None:
+    q_source = str(receipt.q_source or "").strip()
     if receipt.qkernel_execution_economics is None:
+        if q_source == "qkernel_spine":
+            raise ValueError("EDLI_LIVE_QKERNEL_EXECUTION_ECONOMICS_INVALID")
         return None
     receipt_cert = _valid_qkernel_execution_economics_payload(
         receipt.qkernel_execution_economics,

@@ -77,6 +77,7 @@ def _isolate_edli_settings(monkeypatch):
     monkeypatch.setitem(settings._data, "edli", edli)
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = False
+    feature_flags["qkernel_spine_enabled"] = False
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
 
 
@@ -1166,6 +1167,7 @@ def _trade_conn_with_live_replacement_snapshot(**kwargs) -> sqlite3.Connection:
 
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = True
+    feature_flags["qkernel_spine_enabled"] = False
     settings._data["feature_flags"] = feature_flags
     conn = _trade_conn_with_snapshot(
         selected_ask="0.68",
@@ -3367,8 +3369,8 @@ def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
-    assert ":priced=0" in receipt.reason
+    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING:")
+    assert "native YES ask ladder is empty" in receipt.reason
     assert receipt.proof_accepted is False
 
 
@@ -3390,8 +3392,8 @@ def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
-    assert ":priced=0" in receipt.reason
+    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING:")
+    assert "synthetic_clob_market_info_substrate_only" in receipt.reason
     assert receipt.proof_accepted is False
 
 
@@ -3673,8 +3675,8 @@ def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoi
     )
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
-    assert ":priced=0" in receipt.reason
+    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING:")
+    assert "native YES ask ladder is empty" in receipt.reason
 
 
 def test_runtime_receipt_uses_runtime_kelly_authority_not_event_payload():
