@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-20
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
 # Last reused/audited: 2026-06-19
@@ -1240,6 +1240,9 @@ class TestRecoveryResolutionTable:
             {
                 "id": "matching-trade",
                 "asset_id": "tok-has-trade",
+                "side": "BUY",
+                "price": "0.5",
+                "size": "10.0",
                 "match_time": "2026-04-26T00:02:00Z",
             }
         ]
@@ -1253,6 +1256,54 @@ class TestRecoveryResolutionTable:
         assert summary["stayed"] == 1
         events = _get_events(conn, "cmd-has-trade")
         assert events[-1]["event_type"] == "REVIEW_REQUIRED"
+
+    def test_review_required_exit_no_order_id_ignores_historical_entry_side_trade(
+        self, conn, mock_client
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(
+            conn,
+            command_id="cmd-exit-no-order",
+            position_id="pos-exit-no-order",
+            decision_id="dec-exit-no-order",
+            intent_kind="EXIT",
+            token_id="tok-exit-no-order",
+            side="SELL",
+            size=5.06,
+            price=0.98,
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit-no-order",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={"reason": "recovery_no_venue_order_id"},
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "historical-entry-fill",
+                "status": "CONFIRMED",
+                "asset_id": "tok-exit-no-order",
+                "side": "BUY",
+                "price": "0.98",
+                "size": "5.06",
+                "match_time": "2026-04-26T00:02:00Z",
+            }
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-exit-no-order") == "EXPIRED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-exit-no-order")
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["venue_absence_proof"]["matching_trade_count"] == 0
+        assert payload["venue_absence_proof"]["trade_count"] == 1
 
     def test_cancel_unknown_review_required_live_order_restores_acked(self, conn, mock_client):
         _insert(conn, intent_kind="EXIT", side="SELL", size=11.62, price=0.02)

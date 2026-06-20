@@ -4885,7 +4885,7 @@ def _matching_trades_for_command(
     matches: list[dict] = []
     for trade in (_client_trades(client) if trades is None else trades):
         raw = _raw_payload(trade)
-        if not _raw_matches_command_exposure(raw, command):
+        if not _raw_matches_command_submit_trade_identity(raw, command):
             continue
         trade_epoch = _epoch_seconds(raw.get("match_time") or raw.get("last_update"))
         if trade_epoch is not None and trade_epoch < created_epoch:
@@ -7742,6 +7742,21 @@ def _raw_matches_command_submit_identity(raw: dict, command: dict) -> bool:
     return not status or status in _LIVE_ORDER_STATUSES
 
 
+def _raw_matches_command_submit_trade_identity(raw: dict, command: dict) -> bool:
+    if _review_required_trade_maker_match(command, raw) is not None:
+        return True
+    token_id = str(command.get("token_id") or "")
+    if not token_id or not _raw_mentions_token(raw, token_id):
+        return False
+    raw_side = str(raw.get("side") or "").upper()
+    if not raw_side or raw_side != str(command.get("side") or "").upper():
+        return False
+    if not _decimal_matches(raw.get("price"), command.get("price")):
+        return False
+    raw_size = raw.get("original_size") or raw.get("size") or raw.get("matched_amount")
+    return _decimal_matches(raw_size, command.get("size"))
+
+
 def _summarize_venue_match(raw: dict) -> dict:
     return {
         "id": raw.get("id") or raw.get("order_id") or raw.get("taker_order_id"),
@@ -7776,12 +7791,12 @@ def build_review_required_no_venue_exposure_proof(
     matching_open = [
         _summarize_venue_match(raw)
         for raw in (_raw_payload(order) for order in open_orders)
-        if _raw_matches_command_exposure(raw, command)
+        if _raw_matches_command_submit_identity(raw, command)
     ]
     matching_trades = []
     for trade in trades:
         raw = _raw_payload(trade)
-        if not _raw_matches_command_exposure(raw, command):
+        if not _raw_matches_command_submit_trade_identity(raw, command):
             continue
         trade_epoch = _epoch_seconds(raw.get("match_time") or raw.get("last_update"))
         if trade_epoch is not None and trade_epoch < created_epoch:
