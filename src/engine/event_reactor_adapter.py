@@ -10515,6 +10515,15 @@ def _family_rank_reversed_at_recapture(
     selected leg it is its own edge reversal (utility <= 0), which the EDGE gate owns.
     Conflating the two would mislabel a plain edge collapse as a family switch.
     """
+    if _proof_uses_qkernel_spine(selected_proof):
+        # The qkernel spine is the live selection authority for qkernel-selected proofs.
+        # Re-running the legacy robust-marginal-utility ranker here lets an inert
+        # legacy surface overrule the qkernel argmax after the qkernel has already
+        # selected and certified execution economics for this same fresh proof set.
+        # A qkernel-compatible submit rerank must route through the spine; until that
+        # exists, this legacy family-rank gate has no authority over qkernel proofs.
+        return False
+
     # S6 SCOPE-SET INVARIANT (2026-06-09): the fresh-curve re-rank MUST be computed over
     # the SAME scoped candidate set SELECTION ranked over — `_selection_scoped_proofs`
     # (limit-tradeable AND unlocked-with-price-improvement only), with `per_bin_yes_q_lcb`

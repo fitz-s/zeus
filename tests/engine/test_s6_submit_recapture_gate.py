@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-06-19
 # Authority basis: "bin selection.md" §5 submit_candidate pseudocode (recompute not
 #   validate) + §7 re-decision / reversal state machine + §9 Hidden #7/#14/#17 +
 #   §13 no-trade gates (snapshot stale / recapture fails / rank reversed without
@@ -40,6 +40,7 @@ Mapped to spec §12.E + the S6 money-path invariants:
 from __future__ import annotations
 
 import json as _json
+from dataclasses import replace as dataclass_replace
 from decimal import Decimal
 
 import pytest
@@ -589,6 +590,51 @@ def test_recapture_family_rank_still_detects_a_real_tradeable_sibling_reversal()
     assert era._family_rank_reversed_at_recapture(
         family_key="fam", selected_proof=a, all_proofs=(a, b),
     ) is True
+
+
+def test_qkernel_selected_proof_is_not_overruled_by_legacy_family_ranker():
+    """qkernel selection authority cannot be invalidated by the legacy rank surface.
+
+    Live regression: qkernel picked the primary proof, but submit recapture re-ran the
+    legacy robust-marginal-utility selector and returned SUBMIT_ABORTED_FAMILY_REVERSED
+    when the old surface preferred a sibling. That is two selection authorities fighting
+    in the execution layer. A qkernel proof may only be re-ranked by a qkernel-compatible
+    rerank, not by the inert legacy selector.
+    """
+
+    row_a = _snapshot_row(yes_asks=(("0.50", "1000000"),), condition_id="cond-A",
+                          yes_token_id="yes-A", no_token_id="no-A", snapshot_id="snapA")
+    row_b = _snapshot_row(yes_asks=(("0.20", "1000000"),), condition_id="cond-B2",
+                          yes_token_id="yes-B2", no_token_id="no-B2", snapshot_id="snapB2")
+    selected = _proof_from_row(direction="buy_yes", row=row_a, token_id="yes-A",
+                               q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_X)
+    sibling = _proof_from_row(direction="buy_yes", row=row_b, token_id="yes-B2",
+                              q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_Y)
+    qkernel_selected = dataclass_replace(
+        selected,
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "candidate_id": "DIRECT_YES:cond-A@proof",
+            "route_id": "DIRECT_YES:cond-A@proof",
+            "side": "YES",
+            "payoff_q_lcb": 0.58,
+            "edge_lcb": 0.08,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "5",
+            "optimal_delta_u": 0.02,
+            "cost": 0.50,
+        },
+    )
+
+    # The legacy ranker would prefer the sibling. That must not revoke a qkernel
+    # proof's submit authority via SUBMIT_ABORTED_FAMILY_REVERSED.
+    assert era._family_rank_reversed_at_recapture(
+        family_key="fam", selected_proof=selected, all_proofs=(selected, sibling),
+    ) is True
+    assert era._family_rank_reversed_at_recapture(
+        family_key="fam", selected_proof=qkernel_selected, all_proofs=(qkernel_selected, sibling),
+    ) is False
 
 
 def test_selection_scopes_out_open_position_token_but_keeps_tradeable_sibling():

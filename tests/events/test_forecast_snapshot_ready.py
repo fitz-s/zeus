@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-06-19
 # Authority basis: EDLI v1 implementation prompt §8 ForecastSnapshotReadyTrigger contract.
 from __future__ import annotations
 
@@ -616,6 +616,8 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
 
     payload = json.loads(world_conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
     assert payload["track"] == "replacement_0_1_openmeteo_bayes_fusion"
+    assert payload["member_count"] == 3
+    assert payload["expected_members"] == 3
 
 
 def test_scan_emits_only_for_families_with_a_market_when_markets_exist():
