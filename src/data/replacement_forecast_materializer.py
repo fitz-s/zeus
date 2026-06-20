@@ -24,6 +24,7 @@ import hashlib
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.replacement_forecast_cycle_policy import (
@@ -434,6 +435,74 @@ def _is_day0_target_window(request: ReplacementForecastMaterializeRequest, *, co
     return target_window.start_utc <= computed < target_window.end_utc
 
 
+def _local_hour_slot(value: datetime, *, city_timezone: str) -> datetime:
+    tz = ZoneInfo(city_timezone)
+    return value.astimezone(tz).replace(minute=0, second=0, microsecond=0)
+
+
+def _expected_localday_hour_slots(*, city_timezone: str, target_date: date) -> tuple[datetime, ...]:
+    window = compute_target_local_day_window_utc(
+        city_timezone=city_timezone,
+        target_local_date=target_date,
+    )
+    slots: list[datetime] = []
+    cursor = window.start_utc
+    while cursor < window.end_utc:
+        slots.append(_local_hour_slot(cursor, city_timezone=city_timezone))
+        cursor += timedelta(hours=1)
+    return tuple(slots)
+
+
+def _day0_observed_extreme_time(request: ReplacementForecastMaterializeRequest) -> datetime | None:
+    value = request.day0_observed_extreme_observation_time
+    if value is None:
+        return None
+    try:
+        return _to_utc(value, field_name="day0_observed_extreme_observation_time")
+    except ValueError:
+        return None
+
+
+def _om9_localday_hourly_coverage_ok(
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    expected_sample_count: int,
+    computed_at: datetime,
+) -> bool:
+    anchor = request.openmeteo_anchor
+    if anchor.sample_count == expected_sample_count:
+        return True
+    if not _is_day0_target_window(request, computed_at=computed_at):
+        return False
+    if _day0_observed_extreme_c(request) is None:
+        return False
+    observed_at = _day0_observed_extreme_time(request)
+    if observed_at is None:
+        return False
+
+    target_date_value = date.fromisoformat(_date_text(request.target_date))
+    expected_slots = set(
+        _expected_localday_hour_slots(
+            city_timezone=request.city_timezone,
+            target_date=target_date_value,
+        )
+    )
+    covered_slots = {
+        _local_hour_slot(item, city_timezone=request.city_timezone)
+        for item in anchor.contributing_local_times
+    }
+    if not covered_slots.issubset(expected_slots):
+        return False
+    missing_slots = expected_slots - covered_slots
+    if not missing_slots:
+        return True
+
+    observed_slot = _local_hour_slot(observed_at, city_timezone=request.city_timezone)
+    if observed_slot.date() != target_date_value:
+        return False
+    return all(slot <= observed_slot for slot in missing_slots)
+
+
 def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> tuple[str, ...]:
     metric = _metric(request.temperature_metric)
     computed_at = _to_utc(request.computed_at, field_name="computed_at")
@@ -461,7 +530,11 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         city_timezone=request.city_timezone,
         target_date=request.target_date,
     )
-    if request.openmeteo_anchor.sample_count != expected_om9_count:
+    if not _om9_localday_hourly_coverage_ok(
+        request,
+        expected_sample_count=expected_om9_count,
+        computed_at=computed_at,
+    ):
         reasons.append("REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE")
     if _is_day0_target_window(request, computed_at=computed_at) and _day0_observed_extreme_c(request) is None:
         reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_OBSERVED_EXTREME_REQUIRED")

@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-06
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-06
+# Last reused/audited: 2026-06-20
+# Lifecycle: created=2026-06-06; last_reviewed=2026-06-20; last_reused=2026-06-20
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -12,7 +12,7 @@ import json
 import sqlite3
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -90,6 +90,17 @@ def _anchor(*, source_cycle_time: datetime | None = None) -> OpenMeteoIfs9LocalD
         contributing_local_times=contributing_local_times,
         contributing_valid_times_utc=tuple(item.astimezone(UTC) for item in contributing_local_times),
         source_cycle_time=source_cycle_time or _dt(0),
+    )
+
+
+def _anchor_with_local_hours(*, hours: range | tuple[int, ...]) -> OpenMeteoIfs9LocalDayAnchor:
+    local_tz = timezone(timedelta(hours=8))
+    contributing_local_times = tuple(datetime(2026, 6, 7, hour, tzinfo=local_tz) for hour in hours)
+    return replace(
+        _anchor(),
+        sample_count=len(contributing_local_times),
+        contributing_local_times=contributing_local_times,
+        contributing_valid_times_utc=tuple(item.astimezone(UTC) for item in contributing_local_times),
     )
 
 
@@ -549,6 +560,44 @@ def test_materializer_day0_observed_extreme_conditions_q_and_bounds(monkeypatch:
     assert q["warm"] > q["hot"]
     assert provenance["q_shape"] == "fused_day0_conditioned_normal"
     assert provenance["day0_conditioning"]["observed_extreme_c"] == 26.0
+
+
+def test_materializer_day0_allows_elapsed_om9_hours_covered_by_observed_extreme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    request = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=26.0,
+        day0_observed_extreme_source="metar_fast_lane",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        day0_observed_extreme_sample_count=2,
+    )
+    partial_request = replace(request, openmeteo_anchor=_anchor_with_local_hours(hours=range(2, 24)))
+
+    result = materialize_replacement_forecast_live(conn, partial_request)
+
+    assert result.ok is True
+    assert "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE" not in result.reason_codes
+
+
+def test_materializer_day0_blocks_om9_missing_future_hours_after_observed_extreme() -> None:
+    request = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=26.0,
+        day0_observed_extreme_source="metar_fast_lane",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        day0_observed_extreme_sample_count=2,
+    )
+    partial_request = replace(request, openmeteo_anchor=_anchor_with_local_hours(hours=range(10, 24)))
+
+    result = materialize_replacement_forecast_live(_conn(), partial_request)
+
+    assert result.ok is False
+    assert "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE" in result.reason_codes
 
 
 def test_materializer_blocks_readiness_when_baseline_identity_is_wrong() -> None:

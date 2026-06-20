@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-19; last_reused=2026-06-19
+# Lifecycle: created=2026-06-18; last_reviewed=2026-06-20; last_reused=2026-06-20
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -420,7 +420,30 @@ def _init_sidecar_surfaces(conn, *, now: datetime):
         "INSERT INTO executable_market_snapshots VALUES (?, ?)",
         (now.isoformat(), (now + timedelta(minutes=2)).isoformat()),
     )
+    _insert_collateral_snapshot(conn, now=now)
     conn.commit()
+
+
+def _insert_collateral_snapshot(conn, *, now: datetime):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS collateral_ledger_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            captured_at TEXT NOT NULL,
+            authority_tier TEXT NOT NULL,
+            pusd_balance_micro INTEGER,
+            pusd_allowance_micro INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            captured_at, authority_tier, pusd_balance_micro, pusd_allowance_micro
+        ) VALUES (?, 'CHAIN', 1000000, 1000000)
+        """,
+        (now.isoformat(),),
+    )
 
 
 def _write_fresh_sidecar_heartbeats(state_dir, *, now: datetime):
@@ -480,6 +503,7 @@ def _init_sidecar_surfaces_for_identity(
             (now + timedelta(minutes=2)).isoformat(),
         ),
     )
+    _insert_collateral_snapshot(trade, now=now)
 
 
 def test_preflight_blocks_unhealthy_replacement_forecast_sidecar(monkeypatch, tmp_path):
