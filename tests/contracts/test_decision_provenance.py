@@ -384,17 +384,18 @@ CREATE TABLE IF NOT EXISTS executable_market_snapshots (
 
 def test_real_post_snapshot_rejection_carries_populated_book_and_settlement():
     """RELATIONSHIP through the REAL public builder: a rejection fired AFTER the executable
-    snapshot bind (OPENING_INERTIA_MARKET_TOO_OLD) carries an envelope whose book and
+    snapshot bind carries an envelope whose book and
     time-to-settlement are POPULATED (not UNAVAILABLE) — the production-starvation pin."""
     from datetime import timedelta
 
     from src.engine.event_reactor_adapter import build_event_bound_no_submit_receipt
     from src.events.opportunity_event import make_opportunity_event
     from src.riskguard.risk_level import RiskLevel
+    from src.state.db import init_schema_forecasts
 
     condition_id = "0xprovenance001"
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
-    opened = now - timedelta(hours=30)  # 30h old -> OPENING_INERTIA_MARKET_TOO_OLD for buy_no
+    opened = now - timedelta(hours=30)
     market_end = "2026-07-01T22:59:00+00:00"
 
     trade_conn = sqlite3.connect(":memory:")
@@ -417,17 +418,24 @@ def test_real_post_snapshot_rejection_carries_populated_book_and_settlement():
     trade_conn.commit()
     topo_conn = sqlite3.connect(":memory:")
     topo_conn.execute(_PROV_MARKET_EVENTS_DDL)
-    topo_conn.execute(
+    topo_conn.executemany(
         """
         INSERT INTO market_events
             (market_slug, city, target_date, temperature_metric, condition_id, token_id,
              range_label, range_low, range_high, outcome, created_at)
-        VALUES ('london-max-2026-07-01', 'London', '2026-07-01', 'max', ?, '0xtok',
-                '>30°C', 30.0, NULL, 'YES', ?)
+        VALUES ('london-max-2026-07-01', 'London', '2026-07-01', 'max', ?, ?,
+                ?, ?, ?, 'YES', ?)
         """,
-        (condition_id, opened.isoformat()),
+        (
+            ("0xprovenance000", "0xtok-left", "<=29°C", None, 29.0, opened.isoformat()),
+            (condition_id, "0xtok", "30°C", 30.0, 30.0, opened.isoformat()),
+            ("0xprovenance002", "0xtok-right", ">=31°C", 31.0, None, opened.isoformat()),
+        ),
     )
     topo_conn.commit()
+    forecast_conn = sqlite3.connect(":memory:")
+    forecast_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecast_conn)
 
     event = make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
@@ -445,19 +453,39 @@ def test_real_post_snapshot_rejection_carries_populated_book_and_settlement():
             "metric": "max",
             "temperature_metric": "max",
             "market_slug": "london-max-2026-07-01",
+            "source_id": "test_source",
+            "source_run_id": "test-run-001",
+            "cycle": "00",
+            "track": "live",
+            "snapshot_id": "snap-001",
+            "snapshot_hash": "snap-hash-001",
+            "captured_at": "2026-06-09T12:00:00+00:00",
+            "available_at": "2026-06-09T12:00:00+00:00",
+            "required_fields_present": True,
+            "required_steps_present": True,
+            "member_count": 51,
+            "min_members_floor": 40,
+            "completeness_status": "COMPLETE",
+            "required_steps": [0],
+            "observed_steps": [0],
+            "expected_members": 51,
+            "source_run_status": "SUCCESS",
+            "source_run_completeness_status": "COMPLETE",
+            "coverage_completeness_status": "COMPLETE",
+            "coverage_readiness_status": "LIVE_ELIGIBLE",
         },
     )
     receipt = build_event_bound_no_submit_receipt(
         event=event,
         trade_conn=trade_conn,
         topology_conn=topo_conn,
-        forecast_conn=topo_conn,
-        calibration_conn=topo_conn,
+        forecast_conn=forecast_conn,
+        calibration_conn=forecast_conn,
         decision_time=now,
         get_current_level=lambda: RiskLevel.GREEN,
     )
     assert receipt.submitted is False
-    assert "OPENING_INERTIA_MARKET_TOO_OLD" in (receipt.reason or "")
+    assert "LIVE_INFERENCE_INPUTS_MISSING:REPLACEMENT_0_1_LIVE_READINESS_MISSING" in (receipt.reason or "")
     assert receipt.envelope_json, "every adapter receipt must carry the provenance envelope"
     env = json.loads(receipt.envelope_json)
     # book POPULATED from the captured snapshot row (the production-starved half)
