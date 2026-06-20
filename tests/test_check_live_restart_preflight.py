@@ -760,7 +760,7 @@ def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tm
     assert belief["evidence"]["risky"][0]["risk"] == "stale_live_belief"
 
 
-def test_preflight_accepts_stale_belief_when_single_family_reseed_is_materializable(
+def test_preflight_blocks_stale_belief_repairable_but_not_materialized(
     monkeypatch, tmp_path
 ):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
@@ -836,17 +836,18 @@ def test_preflight_accepts_stale_belief_when_single_family_reseed_is_materializa
 
     result = preflight.evaluate()
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
-    assert belief["ok"] is True
-    assert belief["evidence"]["risky"] == []
+    assert belief["ok"] is False
+    risky_risks = [r["risk"] for r in belief["evidence"]["risky"]]
+    assert any("stale_live_belief_repairable_only_not_materialized" in r for r in risky_risks)
     repair = belief["evidence"]["repairable"][0]
     assert repair["position_id"] == "karachi-pos"
     assert repair["risk"] == "stale_live_belief_repairable_by_single_family_reseed"
     assert repair["posterior_id"] == "1"
 
 
-def test_preflight_accepts_missing_belief_when_single_family_reseed_is_materializable(
+def test_preflight_blocks_missing_belief_repairable_but_not_materialized(
     monkeypatch, tmp_path
 ):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
@@ -908,10 +909,11 @@ def test_preflight_accepts_missing_belief_when_single_family_reseed_is_materiali
 
     result = preflight.evaluate()
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
-    assert belief["ok"] is True
-    assert belief["evidence"]["risky"] == []
+    assert belief["ok"] is False
+    risky_risks = [r["risk"] for r in belief["evidence"]["risky"]]
+    assert any("missing_live_belief_repairable_only_not_materialized" in r for r in risky_risks)
     assert belief["evidence"]["repairable"][0]["position_id"] == "sh-pos"
 
 
@@ -1383,3 +1385,131 @@ def test_preflight_blocks_missing_sidecar_heartbeat(monkeypatch, tmp_path):
     heartbeat = next(c for c in result["checks"] if c["name"] == "price_channel_daemon_heartbeat")
     assert heartbeat["ok"] is False
     assert heartbeat["detail"] == "sidecar heartbeat file is missing"
+
+
+# --- B1: submit_authority_config fail-closed tests ---
+
+
+def _write_settings_with_edli(settings_path, *, real_order_submit_enabled, reactor_mode, live_execution_mode):
+    settings_path.write_text(
+        json.dumps(
+            {
+                "edli": {
+                    "real_order_submit_enabled": real_order_submit_enabled,
+                    "reactor_mode": reactor_mode,
+                    "live_execution_mode": live_execution_mode,
+                },
+                "feature_flags": {"qkernel_spine_enabled": True},
+            }
+        )
+    )
+
+
+def test_preflight_blocks_armed_live_when_real_submit_disabled(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+    _write_settings_with_edli(
+        preflight.SETTINGS_PATH,
+        real_order_submit_enabled=False,
+        reactor_mode="live",
+        live_execution_mode="edli_live",
+    )
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
+    assert submit["ok"] is False
+    assert any(c["name"] == "submit_authority_config" for c in result["blockers"])
+    # main() should return nonzero
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        exit_code = preflight.main(["--json"])
+    assert exit_code != 0
+
+
+def test_preflight_blocks_armed_live_when_reactor_mode_live_no_submit(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+    _write_settings_with_edli(
+        preflight.SETTINGS_PATH,
+        real_order_submit_enabled=True,
+        reactor_mode="live_no_submit",
+        live_execution_mode="edli_live",
+    )
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
+    assert submit["ok"] is False
+    assert any(c["name"] == "submit_authority_config" for c in result["blockers"])
+
+
+def test_preflight_submit_authority_passes_when_reactor_mode_live_and_real_submit_enabled(
+    monkeypatch, tmp_path
+):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+    _write_settings_with_edli(
+        preflight.SETTINGS_PATH,
+        real_order_submit_enabled=True,
+        reactor_mode="live",
+        live_execution_mode="edli_live",
+    )
+
+    result = preflight.evaluate()
+
+    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
+    assert submit["ok"] is True
+    assert not any(c["name"] == "submit_authority_config" for c in result["blockers"])

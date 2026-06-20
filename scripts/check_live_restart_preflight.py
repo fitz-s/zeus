@@ -1154,6 +1154,7 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
             repair = _single_family_reseed_repair_evidence(item)
             if repair is not None:
                 repairable.append(repair)
+                risky.append({**item, "risk": "missing_live_belief_repairable_only_not_materialized"})
                 continue
             risky.append({**item, "risk": "missing_live_belief"})
             continue
@@ -1183,6 +1184,7 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
                         "freshness_basis": belief.freshness_basis,
                     }
                 )
+                risky.append({**evidence, "risk": "stale_live_belief_repairable_only_not_materialized"})
                 continue
             risky.append({**evidence, "risk": "stale_live_belief"})
     return CheckResult(
@@ -1208,6 +1210,12 @@ def evaluate() -> dict[str, Any]:
     real_submit = bool((cfg.get("edli") or {}).get("real_order_submit_enabled", False))
     rows = _open_positions()
     quote_rows = _open_positions_requiring_executable_quote(rows)
+    edli_cfg = cfg.get("edli") or {}
+    reactor_mode = str(edli_cfg.get("reactor_mode") or "disabled")
+    live_execution_mode = str(edli_cfg.get("live_execution_mode") or "legacy_cron")
+    armed_live = live_execution_mode == "edli_live"
+    real_submit_effective = real_submit and reactor_mode == "live"
+    submit_ok = (not armed_live) or real_submit_effective
     checks = [
         CheckResult(
             "live_trading_process_absent",
@@ -1217,9 +1225,17 @@ def evaluate() -> dict[str, Any]:
         ),
         CheckResult(
             "submit_authority_config",
-            True,
-            "real order submit config read",
-            {"edli.real_order_submit_enabled": real_submit},
+            submit_ok,
+            "real order submit is enabled for armed live restart"
+            if submit_ok
+            else "armed live restart but real order submit is not actually enabled (real_order_submit_enabled False or reactor_mode != live)",
+            {
+                "edli.real_order_submit_enabled": real_submit,
+                "edli.reactor_mode": reactor_mode,
+                "edli.live_execution_mode": live_execution_mode,
+                "armed_live": armed_live,
+                "real_submit_effective": real_submit_effective,
+            },
         ),
         _qkernel_spine_cutover_check(cfg),
         _family_portfolio_single_leg_check(),
