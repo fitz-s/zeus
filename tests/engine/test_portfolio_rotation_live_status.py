@@ -33,6 +33,7 @@ def _create_main_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE position_current (
             position_id TEXT PRIMARY KEY,
+            trade_id TEXT,
             phase TEXT,
             city TEXT,
             target_date TEXT,
@@ -41,7 +42,9 @@ def _create_main_schema(conn: sqlite3.Connection) -> None:
             direction TEXT,
             shares REAL,
             last_monitor_prob REAL,
+            last_monitor_prob_is_fresh INTEGER,
             last_monitor_market_price REAL,
+            last_monitor_market_price_is_fresh INTEGER,
             token_id TEXT,
             no_token_id TEXT,
             condition_id TEXT
@@ -83,7 +86,7 @@ def _create_world_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def test_portfolio_rotation_live_status_does_not_emit_shadow_candidate(tmp_path) -> None:
+def test_portfolio_rotation_live_status_reports_rotation_candidate_ready(tmp_path) -> None:
     world_path = tmp_path / "world.db"
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -93,9 +96,9 @@ def test_portfolio_rotation_live_status_does_not_emit_shadow_candidate(tmp_path)
     conn.execute(
         """
         INSERT INTO position_current VALUES (
-            'pos-1', 'active', 'Seoul', '2026-06-08', 'high',
+            'pos-1', 'trade-1', 'active', 'Seoul', '2026-06-08', 'high',
             'Will the highest temperature in Seoul be 25°C on June 8?',
-            'buy_no', 10.0, 0.80, 0.79, 'held-token', '', 'held-condition'
+            'buy_no', 10.0, 0.80, 1, 0.79, 1, 'held-yes-token', 'held-no-token', 'held-condition'
         )
         """
     )
@@ -121,8 +124,46 @@ def test_portfolio_rotation_live_status_does_not_emit_shadow_candidate(tmp_path)
 
     _emit_portfolio_rotation_live_status(conn, summary, deps=_deps())
 
-    assert summary["portfolio_rotation_live_status"] == "disabled:no_live_rotation_executor"
-    assert sorted(summary) == ["portfolio_rotation_live_status"]
+    assert summary["portfolio_rotation_live_status"] == "evaluated:rotate_candidate_ready"
+    assert summary["portfolio_rotation_held_positions_evaluated"] == 1
+    assert summary["portfolio_rotation_candidates_evaluated"] == 1
+    best = summary["portfolio_rotation_best"]
+    assert best["hold_position_id"] == "pos-1"
+    assert best["candidate_event_id"] == "evt-1"
+    assert best["net_improvement_usd"] > 0.0
+
+
+def test_portfolio_rotation_live_status_holds_without_positive_candidate(tmp_path) -> None:
+    world_path = tmp_path / "world.db"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    _create_main_schema(conn)
+    _create_world_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'pos-1', 'trade-1', 'active', 'Seoul', '2026-06-08', 'high',
+            'Will the highest temperature in Seoul be 25°C on June 8?',
+            'buy_no', 10.0, 0.80, 1, 0.79, 1, 'held-yes-token', 'held-no-token', 'held-condition'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events VALUES (
+            'pos-1', 'MONITOR_REFRESHED', '2026-06-07T06:20:00+00:00', ?
+        )
+        """,
+        (json.dumps({"last_monitor_best_bid": 0.79}),),
+    )
+    summary: dict = {}
+
+    _emit_portfolio_rotation_live_status(conn, summary, deps=_deps())
+
+    assert summary["portfolio_rotation_live_status"] == "evaluated:no_capital_constrained_positive_candidates"
+    assert summary["portfolio_rotation_held_positions_evaluated"] == 1
+    assert summary["portfolio_rotation_candidates_evaluated"] == 0
 
 
 def test_portfolio_rotation_live_status_is_noop_without_connection() -> None:

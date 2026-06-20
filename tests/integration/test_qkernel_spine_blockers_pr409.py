@@ -930,6 +930,32 @@ def test_overlay_sets_qkernel_band_false_edge_p_value():
     assert new_proof.qkernel_execution_economics["false_edge_rate"] == pytest.approx(0.5)
 
 
+def test_fdr_maps_consume_selected_qkernel_overlay_authority():
+    """FDR must see the selected qkernel false-edge rate, not the stale base proof p-value."""
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.052, point_ev=0.050
+    )
+    base = _overlay_proof(
+        q_posterior=0.80,
+        q_lcb_5pct=0.70,
+        economics=economics,
+    )
+    stale_base = era.dataclass_replace(base, p_value=1.0, passed_prefilter=False)
+    selected = era.dataclass_replace(base, p_value=0.00025, passed_prefilter=True)
+
+    p_values, prefilter = era._fdr_maps_with_selected_authority(
+        family_id="family-qkernel",
+        proofs=(stale_base,),
+        selected_proof=selected,
+        selected_token_id=selected.token_id,
+    )
+
+    hypothesis_id = f"family-qkernel:{selected.token_id}"
+    assert p_values[hypothesis_id] == pytest.approx(0.00025)
+    assert prefilter[hypothesis_id] is True
+
+
 def test_overlay_failure_returns_none_instead_of_original_proof():
     """A qkernel overlay wiring fault must become no-trade, not an unguarded proof."""
     from types import SimpleNamespace

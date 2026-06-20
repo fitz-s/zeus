@@ -2430,6 +2430,35 @@ def _compute_selection_shrinkage(
         return _SelectionShrinkageVerdict(None, None, None, "BH_FDR", None)
 
 
+def _fdr_maps_with_selected_authority(
+    *,
+    family_id: str,
+    proofs: tuple["_CandidateProof", ...],
+    selected_proof: "_CandidateProof",
+    selected_token_id: str,
+) -> tuple[dict[str, float], dict[str, bool]]:
+    """Build FDR maps, replacing the selected hypothesis with its live authority.
+
+    qkernel_spine returns an overlaid selected proof carrying the route
+    false-edge-rate and conservative edge prefilter. The sibling ``proofs``
+    tuple remains the unmodified submission substrate, so selected authority must
+    be overlaid into the FDR maps explicitly.
+    """
+
+    p_values = {
+        f"{family_id}:{proof.token_id}": proof.p_value
+        for proof in proofs
+    }
+    prefilter = {
+        f"{family_id}:{proof.token_id}": proof.passed_prefilter
+        for proof in proofs
+    }
+    selected_hypothesis_id = f"{family_id}:{selected_token_id}"
+    p_values[selected_hypothesis_id] = selected_proof.p_value
+    prefilter[selected_hypothesis_id] = selected_proof.passed_prefilter
+    return p_values, prefilter
+
+
 def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
@@ -3153,16 +3182,20 @@ def _build_event_bound_no_submit_receipt_core(
         )
 
     try:
+        fdr_p_values, fdr_prefilter = _fdr_maps_with_selected_authority(
+            family_id=family.family_id,
+            proofs=proofs,
+            selected_proof=proof,
+            selected_token_id=selected_token_id,
+        )
         fdr = evaluate_fdr_full_family(
             family_id=family.family_id,
             all_hypothesis_ids=tuple(
                 f"{family.family_id}:{token}" for token in family.yes_token_ids + family.no_token_ids
             ),
             selected_hypothesis_ids=(hypothesis_id,),
-            hypothesis_p_values={f"{family.family_id}:{candidate.token_id}": candidate.p_value for candidate in proofs},
-            passed_prefilter={
-                f"{family.family_id}:{candidate.token_id}": candidate.passed_prefilter for candidate in proofs
-            },
+            hypothesis_p_values=fdr_p_values,
+            passed_prefilter=fdr_prefilter,
         )
     except (TypeError, ValueError) as exc:
         return _with_shrink(EventSubmissionReceipt(
