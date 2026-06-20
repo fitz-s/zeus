@@ -2853,6 +2853,67 @@ def reconcile_live_entry_projection_repairs(conn: sqlite3.Connection, client=Non
     return summary
 
 
+def ensure_live_entry_projection_for_command(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    client=None,
+) -> dict:
+    """Project one ACKED live entry order into pending_entry immediately.
+
+    The periodic recovery loop is a crash/backfill lane. A newly ACKED live
+    order must not wait for that loop before it becomes visible to continuous
+    redecision.
+    """
+
+    command_id = str(command_id or "").strip()
+    if not command_id:
+        raise ValueError("live entry projection requires command_id")
+    if not _table_exists(conn, "venue_commands"):
+        raise ValueError("live entry projection requires venue_commands")
+    current = conn.execute(
+        """
+        SELECT cmd.state, cmd.intent_kind, cmd.side, pc.position_id AS projected_position_id
+          FROM venue_commands cmd
+          LEFT JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE cmd.command_id = ?
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    if current is None:
+        raise ValueError(f"live entry projection command not found: {command_id}")
+    current_map = _dict_row(current)
+    if current_map.get("projected_position_id"):
+        return {"scanned": 0, "advanced": 0, "stayed": 1, "errors": 0}
+    if (
+        str(current_map.get("intent_kind") or "").upper() != "ENTRY"
+        or str(current_map.get("side") or "").upper() != "BUY"
+        or str(current_map.get("state") or "").upper() not in {"ACKED", "POST_ACKED"}
+    ):
+        return {"scanned": 0, "advanced": 0, "stayed": 1, "errors": 0}
+
+    candidates = [
+        candidate
+        for candidate in _latest_unprojected_live_entry_candidates(conn)
+        if str(candidate.get("command_id") or "") == command_id
+    ]
+    summary = {"scanned": len(candidates), "advanced": 0, "stayed": 0, "errors": 0}
+    if not candidates:
+        raise ValueError(
+            f"ACKED live entry command {command_id} has no open-order projection candidate"
+        )
+    for candidate in candidates:
+        try:
+            _append_live_entry_projection_repair(conn, candidate=candidate, client=client)
+            summary["advanced"] += 1
+        except Exception:
+            summary["errors"] += 1
+            raise
+    return summary
+
+
 def _canonical_payload_hash(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")

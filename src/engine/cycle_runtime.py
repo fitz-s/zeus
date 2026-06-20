@@ -3026,6 +3026,20 @@ def _dual_write_canonical_entry_if_available(
             source_module="src.engine.cycle_runtime",
             decision_evidence=decision_evidence,
         )
+        position_id = str(getattr(pos, "trade_id", "") or "")
+        if position_id:
+            already_posted = conn.execute(
+                """
+                SELECT 1
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'ENTRY_ORDER_POSTED'
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+            if already_posted is not None:
+                return True
         append_many_and_project(conn, events, projection)
     except RuntimeError as exc:
         deps.logger.warning("CANONICAL_DUAL_WRITE_SKIPPED trade_id=%s reason=%s", pos.trade_id, exc)

@@ -4322,6 +4322,60 @@ class TestRecoveryResolutionTable:
             {"position_id": "legacy-pos", "phase": "pending_entry", "shares": 0.0}
         ]
 
+    def test_ensure_live_entry_projection_for_command_projects_pending_order_immediately(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=13.45, price=0.01)
+        _advance_to_acked(conn, venue_order_id="ord-live")
+        _append_order_fact(
+            conn,
+            order_id="ord-live",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+        summary = ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, direction, shares, cost_basis_usd, order_id, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_entry",
+            "direction": "buy_yes",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "order_id": "ord-live",
+            "order_status": "pending",
+        }
+        event_types = [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT event_type
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                 ORDER BY sequence_no
+                """
+            ).fetchall()
+        ]
+        assert event_types == ["POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED"]
+
     def test_live_acked_entry_order_with_positive_trade_fact_waits_for_fill_reconciliation(
         self,
         conn,
