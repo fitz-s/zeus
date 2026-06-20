@@ -778,6 +778,59 @@ def test_exit_lifecycle_skips_inactive_position_before_order_status_check(conn):
     assert stats["skipped_inactive"] == 1
 
 
+def test_pending_exit_does_not_poll_entry_order_as_exit_order(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-entry-order-not-exit",
+        market_id="mkt-entry-order-not-exit",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-06-20",
+        bin_label="19C",
+        direction="buy_no",
+        strategy_key="opening_inertia",
+        size_usd=3.8,
+        entry_price=0.75,
+        shares=5.06,
+        cost_basis_usd=3.8,
+        state="pending_exit",
+        exit_state="sell_pending",
+        order_id="entry-order-filled",
+        order_status="filled",
+        last_exit_order_id=None,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-entry-order-not-exit",
+    )
+    portfolio = PortfolioState(positions=[position])
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"entry order must not be polled as exit order: {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 1
+    assert stats["unchanged"] == 0
+    assert position.exit_state == "retry_pending"
+    assert position.last_exit_error == "no_order_id"
+    events = conn.execute(
+        """
+        SELECT event_type, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no
+        """,
+        (position.trade_id,),
+    ).fetchall()
+    assert [event["event_type"] for event in events] == ["EXIT_ORDER_REJECTED"]
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["error"] == "no_order_id"
+
+
 def test_exit_lifecycle_full_fill_logs_commanded_execution_fact(conn):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position
