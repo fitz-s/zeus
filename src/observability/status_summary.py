@@ -98,6 +98,20 @@ _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE = {
     "no_trade_reasons",
     "deterministic_rejections",
 }
+_BUSINESS_CYCLE_KEYS = _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE - {
+    "mode",
+    "started_at",
+    "completed_at",
+}
+
+
+def _cycle_has_business_activity(cycle: dict | None) -> bool:
+    if not isinstance(cycle, dict):
+        return False
+    mode = str(cycle.get("mode") or "")
+    if mode and mode != "heartbeat_pulse":
+        return True
+    return any(key in cycle for key in _BUSINESS_CYCLE_KEYS)
 
 
 def _atomic_write_status_payload(payload: dict) -> None:
@@ -134,7 +148,6 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
         "pid": os.getpid(),
         "mode": get_mode(),
         "version": "zeus_v2",
-        "pulse_only": True,
     }
     if cycle_summary is not None:
         incoming_cycle = dict(cycle_summary)
@@ -154,6 +167,10 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
             status["cycle"] = merged_cycle
         else:
             status["cycle"] = incoming_cycle
+    status["process"]["pulse_only"] = not _cycle_has_business_activity(status.get("cycle"))
+    status["process"]["last_pulse_kind"] = (
+        "business_cycle" if not status["process"]["pulse_only"] else "auxiliary_pulse"
+    )
     minimal_refresh_ok = _refresh_minimal_runtime_read_model_for_status(status)
     try:
         status["execution_capability"] = _get_execution_capability_status()
@@ -259,6 +276,16 @@ def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | Non
     if not isinstance(risk, dict):
         risk = {}
         status["risk"] = risk
+    try:
+        risk["level"] = _get_risk_level()
+        risk["riskguard_level"] = risk["level"]
+        risk["details"] = _get_risk_details()
+    except Exception as exc:  # noqa: BLE001 - status pulse must remain non-fatal
+        risk["details"] = {
+            "status": "riskguard_status_refresh_failed",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
     fallback_risk_level = str(
         cycle.get("risk_level")
         or risk.get("level")
