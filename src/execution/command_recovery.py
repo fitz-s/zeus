@@ -734,6 +734,13 @@ def _hydrate_command_execution_identity(conn: sqlite3.Connection, command: dict)
         ):
             if hydrated.get(alias) in (None, "") and source.get(column) not in (None, ""):
                 hydrated[alias] = source.get(column)
+        if prefix == "snapshot":
+            for column, alias in (
+                ("event_slug", "snapshot_event_slug"),
+                ("gamma_market_id", "snapshot_gamma_market_id"),
+            ):
+                if hydrated.get(alias) in (None, "") and source.get(column) not in (None, ""):
+                    hydrated[alias] = source.get(column)
     return hydrated
 
 
@@ -922,6 +929,8 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
             cmd.state AS command_state,
             cmd.size AS command_size,
             cmd.position_id AS position_id,
+            pc.position_id AS projected_position_id,
+            pc.phase AS projected_phase,
             terminal_event.occurred_at AS terminal_event_occurred_at,
             fact.fact_id AS latest_order_fact_id,
             fact.state AS latest_order_fact_state,
@@ -929,7 +938,7 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
             fact.matched_size AS latest_order_fact_matched_size,
             fact.source AS latest_order_fact_source
           FROM venue_commands cmd
-          JOIN position_current pc
+          LEFT JOIN position_current pc
             ON pc.position_id = cmd.position_id
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
@@ -945,9 +954,14 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
            AND cmd.state IN ('CANCELLED', 'EXPIRED')
            AND cmd.venue_order_id IS NOT NULL
            AND cmd.venue_order_id != ''
-           AND pc.phase = 'pending_entry'
-           AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
-           AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+           AND (
+                pc.position_id IS NULL
+                OR (
+                    pc.phase = 'pending_entry'
+                    AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
+                    AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+                )
+           )
            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0
            AND NOT EXISTS (
                 SELECT 1
@@ -3884,6 +3898,194 @@ def _position_current_for_terminal_order(
     return _dict_row(row)
 
 
+_WEATHER_EVENT_SLUG_RE = re.compile(
+    r"^(?P<metric>highest|lowest)-temperature-in-(?P<city>.+)-on-"
+    r"(?P<month>[a-z]+)-(?P<day>\d{1,2})-(?P<year>\d{4})$"
+)
+_MONTH_NAME_TO_NUMBER = {
+    "january": "01",
+    "february": "02",
+    "march": "03",
+    "april": "04",
+    "may": "05",
+    "june": "06",
+    "july": "07",
+    "august": "08",
+    "september": "09",
+    "october": "10",
+    "november": "11",
+    "december": "12",
+}
+
+
+def _weather_identity_from_snapshot_slug(command: dict) -> dict:
+    slug = str(command.get("snapshot_event_slug") or "").strip().lower()
+    match = _WEATHER_EVENT_SLUG_RE.match(slug)
+    if not match:
+        return {}
+    month = _MONTH_NAME_TO_NUMBER.get(match.group("month"))
+    if not month:
+        return {}
+    city = " ".join(part.capitalize() for part in match.group("city").split("-") if part)
+    return {
+        "city": city,
+        "cluster": city,
+        "target_date": f"{match.group('year')}-{month}-{int(match.group('day')):02d}",
+        "temperature_metric": "high" if match.group("metric") == "highest" else "low",
+        "bin_label": slug,
+    }
+
+
+def _strategy_key_for_terminal_no_fill_direction(direction: str) -> str:
+    if direction == "buy_no":
+        return "opening_inertia"
+    if direction == "buy_yes":
+        return "center_buy"
+    raise ValueError("terminal no-fill void projection requires proven buy_yes/buy_no direction")
+
+
+def _append_zero_exposure_entry_void_projection(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    order_fact: dict,
+    occurred_at: str,
+) -> None:
+    """Append a closed zero-exposure projection for a canceled unprojected entry.
+
+    This is deliberately narrower than live-entry projection repair: it never
+    creates an open position and is used only after terminal no-fill venue truth.
+    """
+
+    from src.state.ledger import append_many_and_project
+
+    command = _hydrate_command_execution_identity(conn, command)
+    position_id = str(command.get("position_id") or "").strip()
+    command_id = str(command.get("command_id") or "").strip()
+    order_id = str(order_fact.get("order_fact_venue_order_id") or command.get("venue_order_id") or "").strip()
+    if not position_id or not command_id or not order_id:
+        raise ValueError("zero-exposure void projection requires position, command, and order ids")
+    if _latest_position_sequence(conn, position_id) != 0:
+        raise ValueError("zero-exposure void projection refuses partial position_events")
+    direction = _direction_from_command_tokens(command)
+    strategy_key = _strategy_key_for_terminal_no_fill_direction(direction)
+    weather_identity = _weather_identity_from_snapshot_slug(command)
+    selected_token_id = str(command.get("token_id") or "").strip()
+    yes_token_id = str(command.get("env_yes_token_id") or command.get("snapshot_yes_token_id") or "").strip()
+    no_token_id = str(command.get("env_no_token_id") or command.get("snapshot_no_token_id") or "").strip()
+    condition_id = str(
+        command.get("env_condition_id")
+        or command.get("snapshot_condition_id")
+        or command.get("market_id")
+        or ""
+    ).strip()
+    expected_selected = no_token_id if direction == "buy_no" else yes_token_id
+    if not condition_id or not yes_token_id or not no_token_id or not selected_token_id:
+        raise ValueError("zero-exposure void projection requires CTF condition/token identity")
+    if selected_token_id != expected_selected:
+        raise ValueError("zero-exposure void projection selected token does not match direction")
+
+    temperature_metric = str(weather_identity.get("temperature_metric") or "").strip()
+    if temperature_metric not in {"high", "low"}:
+        raise ValueError("zero-exposure void projection requires weather event metric")
+    bin_label = str(
+        weather_identity.get("bin_label")
+        or command.get("snapshot_event_slug")
+        or command.get("snapshot_outcome_label")
+        or command.get("env_outcome_label")
+        or ""
+    )
+    projection = {
+        "position_id": position_id,
+        "phase": "voided",
+        "trade_id": position_id,
+        "market_id": condition_id,
+        "city": weather_identity.get("city") or "",
+        "cluster": weather_identity.get("cluster") or weather_identity.get("city") or "",
+        "target_date": weather_identity.get("target_date") or "",
+        "bin_label": bin_label,
+        "direction": direction,
+        "unit": None,
+        "size_usd": 0.0,
+        "shares": 0.0,
+        "cost_basis_usd": 0.0,
+        "entry_price": 0.0,
+        "p_posterior": 0.0,
+        "entry_ci_width": 0.0,
+        "exit_retry_count": 0,
+        "next_exit_retry_at": None,
+        "last_monitor_prob": None,
+        "last_monitor_prob_is_fresh": None,
+        "last_monitor_edge": None,
+        "last_monitor_market_price": None,
+        "last_monitor_market_price_is_fresh": None,
+        "decision_snapshot_id": str(command.get("snapshot_id") or ""),
+        "entry_method": "zero_fill_terminal_no_fill",
+        "strategy_key": strategy_key,
+        "edge_source": strategy_key,
+        "discovery_mode": "terminal_no_fill_recovery",
+        "chain_state": "local_only",
+        "token_id": yes_token_id,
+        "no_token_id": no_token_id,
+        "condition_id": condition_id,
+        "order_id": order_id,
+        "order_status": "canceled",
+        "updated_at": occurred_at,
+        "temperature_metric": temperature_metric,
+        "fill_authority": None,
+        "recovery_authority": "terminal_no_fill_cancel_ack",
+        "chain_shares": 0.0,
+        "chain_avg_price": None,
+        "chain_cost_basis_usd": None,
+        "chain_seen_at": None,
+        "chain_absence_at": None,
+        "realized_pnl_usd": None,
+        "exit_price": None,
+        "settlement_price": None,
+        "settled_at": None,
+        "exit_reason": "ENTRY_TERMINAL_NO_FILL",
+    }
+    event_id = f"{position_id}:entry_order_voided:{command_id}"
+    event = {
+        "event_id": event_id,
+        "position_id": position_id,
+        "event_version": 1,
+        "sequence_no": 1,
+        "event_type": "ENTRY_ORDER_VOIDED",
+        "occurred_at": occurred_at,
+        "phase_before": None,
+        "phase_after": "voided",
+        "strategy_key": strategy_key,
+        "decision_id": command.get("decision_id"),
+        "snapshot_id": command.get("snapshot_id"),
+        "order_id": order_id,
+        "command_id": command_id,
+        "caused_by": f"venue_order_fact:{order_fact.get('order_fact_id')}",
+        "idempotency_key": event_id,
+        "venue_status": order_fact.get("order_fact_state"),
+        "source_module": "src.execution.command_recovery",
+        "env": "live",
+        "payload_json": json.dumps(
+            {
+                "reason": "venue_terminal_no_fill_without_prior_projection",
+                "proof_class": "cancel_ack_plus_zero_fill_no_position_projection",
+                "command_id": command_id,
+                "venue_order_id": order_id,
+                "order_fact_id": order_fact.get("order_fact_id"),
+                "order_fact_state": order_fact.get("order_fact_state"),
+                "remaining_size": order_fact.get("order_fact_remaining_size"),
+                "matched_size": order_fact.get("order_fact_matched_size"),
+                "source": order_fact.get("order_fact_source"),
+                "snapshot_event_slug": command.get("snapshot_event_slug"),
+                "semantic_guard": "closed_zero_exposure_projection_only",
+            },
+            sort_keys=True,
+            default=str,
+        ),
+    }
+    append_many_and_project(conn, [event], projection)
+
+
 def _append_entry_order_voided_projection(
     conn: sqlite3.Connection,
     *,
@@ -3897,8 +4099,17 @@ def _append_entry_order_voided_projection(
     try:
         current = _position_current_for_terminal_order(conn, command=command, order_id=order_id)
     except MissingPositionCurrentForTerminalOrder:
-        _append_live_entry_projection_repair(conn, candidate={**command, **order_fact})
-        current = _position_current_for_terminal_order(conn, command=command, order_id=order_id)
+        try:
+            _append_live_entry_projection_repair(conn, candidate={**command, **order_fact})
+            current = _position_current_for_terminal_order(conn, command=command, order_id=order_id)
+        except Exception:
+            _append_zero_exposure_entry_void_projection(
+                conn,
+                command=command,
+                order_fact=order_fact,
+                occurred_at=occurred_at,
+            )
+            return
     position_id = str(current.get("position_id") or "")
     if not position_id:
         raise ValueError("position_current row missing position_id")
@@ -4906,6 +5117,7 @@ def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dic
             summary["stayed"] += 1
             continue
         occurred_at = str(row.get("terminal_event_occurred_at") or _now_iso())
+        has_projection = bool(str(row.get("projected_position_id") or "").strip())
         remaining_size = str(
             row.get("latest_order_fact_remaining_size")
             or row.get("command_size")
@@ -4913,7 +5125,11 @@ def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dic
         )
         payload = {
             "reason": "cancel_ack_terminal_no_fill",
-            "proof_class": "cancel_ack_plus_zero_pending_projection",
+            "proof_class": (
+                "cancel_ack_plus_zero_pending_projection"
+                if has_projection
+                else "cancel_ack_plus_zero_unprojected_entry"
+            ),
             "command_id": command_id,
             "venue_order_id": venue_order_id,
             "command_state": command_state,
@@ -4928,7 +5144,8 @@ def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dic
                 "cancel_or_expire_event_observed": True,
                 "latest_order_fact_matches_command_order": True,
                 "latest_order_fact_no_fill": True,
-                "pending_entry_projection_zero_exposure": True,
+                "pending_entry_projection_zero_exposure": has_projection,
+                "position_projection_absent": not has_projection,
                 "no_positive_trade_facts": True,
                 "no_existing_terminal_order_fact": True,
             },

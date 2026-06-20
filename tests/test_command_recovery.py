@@ -59,6 +59,7 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
             no_token_id: str | None = None,
             selected_token_id: str | None = None,
             outcome_label: str | None = None,
+            event_slug: str | None = None,
             side="BUY", size=10.0, price=0.5,
             created_at="2026-04-26T00:00:00Z"):
     """Insert a command row and return its command_id."""
@@ -76,6 +77,7 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         no_token_id=no_token_id,
         selected_outcome_token_id=selected_token_id,
         outcome_label=outcome_label,
+        event_slug=event_slug,
     )
     insert_command(
         conn,
@@ -113,6 +115,7 @@ def _ensure_snapshot(
     no_token_id: str | None = None,
     selected_outcome_token_id: str | None = None,
     outcome_label: str = "YES",
+    event_slug: str | None = None,
 ) -> str:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -128,7 +131,7 @@ def _ensure_snapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-test",
             event_id="event-test",
-            event_slug="event-test",
+            event_slug=event_slug or "event-test",
             condition_id="condition-test",
             question_id="question-test",
             yes_token_id=token_id,
@@ -2731,6 +2734,114 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(terminal_fact["remaining_size"])) == Decimal("10.35")
         assert json.loads(terminal_fact["raw_payload_json"])["proof_class"] == (
             "cancel_ack_plus_zero_pending_projection"
+        )
+
+    def test_cancel_acked_zero_fill_without_position_projection_voids_unprojected_entry(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(
+            conn,
+            size=21.61,
+            price=0.72,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            selected_token_id="tok-no",
+            outcome_label="NO",
+            event_slug="highest-temperature-in-denver-on-june-21-2026",
+        )
+        _advance_to_acked(conn, venue_order_id="ord-cancelled")
+        _append_order_fact(
+            conn,
+            order_id="ord-cancelled",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="21.61",
+            source="REST",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={"venue_order_id": "ord-cancelled"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:05:00Z",
+            payload={"venue_order_id": "ord-cancelled", "venue_status": "CANCELED"},
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["cancel_ack_terminal_no_fill_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert summary["terminal_order_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, city, target_date, temperature_metric, direction,
+                   shares, cost_basis_usd, order_status, strategy_key
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "voided",
+            "city": "Denver",
+            "target_date": "2026-06-21",
+            "temperature_metric": "high",
+            "direction": "buy_no",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "order_status": "canceled",
+            "strategy_key": "opening_inertia",
+        }
+        position_events = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, command_id, order_id
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+        assert [dict(row) for row in position_events] == [
+            {
+                "event_type": "ENTRY_ORDER_VOIDED",
+                "phase_before": None,
+                "phase_after": "voided",
+                "command_id": "cmd-001",
+                "order_id": "ord-cancelled",
+            }
+        ]
+        terminal_fact = conn.execute(
+            """
+            SELECT state, matched_size, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert terminal_fact["state"] == "CANCEL_CONFIRMED"
+        assert Decimal(str(terminal_fact["matched_size"])) == Decimal("0")
+        assert json.loads(terminal_fact["raw_payload_json"])["proof_class"] == (
+            "cancel_ack_plus_zero_unprojected_entry"
         )
 
     def test_cancel_acked_zero_fill_with_positive_trade_fact_stays_pending(
