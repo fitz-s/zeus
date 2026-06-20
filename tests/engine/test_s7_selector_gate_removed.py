@@ -403,6 +403,7 @@ def test_opportunity_book_marks_qkernel_selected_candidate_as_live_admitted():
         "optimal_stake_usd": "6.25",
         "optimal_delta_u": 0.02,
         "cost": 0.20,
+        "false_edge_rate": 0.02,
     }
     selected = replace(
         proof_b,

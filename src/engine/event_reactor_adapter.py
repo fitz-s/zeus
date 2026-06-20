@@ -1210,6 +1210,12 @@ def _valid_qkernel_execution_economics_payload(
     if not math.isfinite(optimal_stake):
         return None
     try:
+        false_edge_rate = float(cert.get("false_edge_rate"))
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(false_edge_rate) and 0.0 < false_edge_rate <= 1.0):
+        return None
+    try:
         payoff_q_lcb = float(cert.get("payoff_q_lcb"))
         cost = float(cert.get("cost"))
         edge_lcb = float(cert.get("edge_lcb"))
@@ -8060,6 +8066,7 @@ _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
         "optimal_stake_usd",
         "optimal_delta_u",
         "cost",
+        "false_edge_rate",
     }
 )
 

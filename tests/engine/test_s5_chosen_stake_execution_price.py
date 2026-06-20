@@ -401,6 +401,7 @@ def test_qkernel_execution_certificate_bounds_submit_sizing():
             "optimal_delta_u": 0.02,
             "q_dot_payoff": 0.90,
             "cost": 0.20,
+            "false_edge_rate": 0.02,
             "q_lcb_guard_basis": "OOF_WILSON_95",
         },
     )

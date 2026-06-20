@@ -624,6 +624,7 @@ def test_qkernel_selected_proof_is_not_overruled_by_legacy_family_ranker():
             "optimal_stake_usd": "5",
             "optimal_delta_u": 0.02,
             "cost": 0.50,
+            "false_edge_rate": 0.02,
         },
     )
 

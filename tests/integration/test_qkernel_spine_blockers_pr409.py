@@ -846,7 +846,23 @@ def _overlay_proof(*, q_posterior, q_lcb_5pct, economics, direction="buy_no"):
         q_lcb_5pct=q_lcb_5pct,
         bin_obj=Bin(low=20.0, high=20.0, unit="C", label="20C"),
     )
-    decision = SimpleNamespace(selected=economics)
+    selected_route = SimpleNamespace(
+        side="NO" if direction == "buy_no" else "YES",
+        bin_id="b1",
+        payoff_vector=np.array([1.0]),
+    )
+    selected_decision = SimpleNamespace(
+        economics=economics,
+        route=selected_route,
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="cell",
+    )
+    decision = SimpleNamespace(
+        selected=economics,
+        band=SimpleNamespace(samples=np.array([[1.0], [1.0], [1.0]])),
+        candidate_decisions=(selected_decision,),
+    )
     return bridge._overlay_spine_economics_onto_proof(proof, decision)
 
 

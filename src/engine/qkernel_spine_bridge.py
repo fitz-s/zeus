@@ -1335,6 +1335,8 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
     edge_lcb = float(selected.edge_lcb)
     payoff_q_lcb = edge_lcb + cost_value
     false_edge_rate = _qkernel_false_edge_rate(decision, selected_decision)
+    if false_edge_rate is None:
+        return None
     qkernel_execution_economics: dict[str, Any] = {
         "source": "qkernel_spine",
         "decision_id": getattr(decision, "decision_id", None),
@@ -1349,9 +1351,8 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         "optimal_delta_u": float(selected.optimal_delta_u),
         "q_dot_payoff": float(selected.q_dot_payoff),
         "cost": cost_value,
+        "false_edge_rate": false_edge_rate,
     }
-    if false_edge_rate is not None:
-        qkernel_execution_economics["false_edge_rate"] = false_edge_rate
     if selected_decision is not None:
         qkernel_execution_economics.update(
             {
@@ -1369,10 +1370,9 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         "trade_score": edge_lcb,
         "qkernel_execution_economics": qkernel_execution_economics,
         "selection_authority_applied": "qkernel_spine",
+        "p_value": false_edge_rate,
+        "passed_prefilter": edge_lcb > 0.0,
     }
-    if false_edge_rate is not None:
-        overlay["p_value"] = false_edge_rate
-        overlay["passed_prefilter"] = edge_lcb > 0.0
     try:
         return replace(proof, **overlay)
     except Exception:  # noqa: BLE001 — non-replaceable proof is a bridge wiring fault

@@ -2822,6 +2822,7 @@ def _qkernel_execution_cert(**overrides):
         "optimal_stake_usd": "15.39",
         "optimal_delta_u": 0.03,
         "cost": 0.55,
+        "false_edge_rate": 0.02,
         "side": "YES",
         "bin_id": "bin-1",
     }
