@@ -605,7 +605,8 @@ def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):
 
 
 def _attempt_held_belief_readthrough(
-    pos: "Position", *, city, target_d, metric: str
+    pos: "Position", *, city, target_d, metric: str,
+    decision_now: datetime | None = None,
 ) -> float | None:
     """LAYER 2 — synchronous single-family read-through recompute (held-belief freeze fix).
 
@@ -615,6 +616,18 @@ def _attempt_held_belief_readthrough(
     fresh HELD-SIDE probability for the position's bin, or None when the family
     cannot be honestly recomputed (no on-disk anchor seed / no current single_runs
     / not live-eligible). Fewer providers ⇒ honestly wider fusion CI (correct).
+
+    ``decision_now`` is the CURRENT monitor cycle instant (the decision time for
+    this recompute).  The arrival guard inside the Bayes-precision fusion admits
+    only single_runs whose ``source_available_at <= decision_now``, so it MUST be
+    the live clock — not the seed's original ``computed_at`` (which could be hours
+    earlier, causing every recently-arrived single_run to be excluded and the
+    recompute to collapse to STALE_HISTORY_ONLY / live_eligible=False).  The seed's
+    ``source_cycle_time`` (the forecast cycle hour, e.g. "06:00 UTC") is kept
+    verbatim: it identifies WHICH cycle's single_runs to fuse, not a wall-clock.
+
+    Testability: ``decision_now`` defaults to ``None`` (→ ``datetime.now(UTC)``).
+    Pass an explicit value in tests to make the arrival-guard behaviour deterministic.
 
     INV-37: reads forecasts via a dedicated READ-ONLY forecasts-MAIN connection
     (``get_forecasts_connection_read_only``) — the SAME pattern this module already
@@ -649,6 +662,21 @@ def _attempt_held_belief_readthrough(
         request = build_materialize_request_dataclass(
             build.request, base_dir=seed_path.parent
         )
+
+        # ARRIVAL-GUARD DECISION INSTANT FIX (real-chain verified 2026-06-21):
+        # The seed's ``computed_at`` is the seed's BUILD time (e.g. 12:09:08 for
+        # Panama City's 12Z seed).  The Bayes-precision fusion's arrival guard
+        # excludes single_runs whose ``source_available_at > computed_at``; for
+        # frozen families the relevant single_runs arrived AFTER the seed's build
+        # time (e.g. 06:00-cycle at 14:10) — so using the seed's stale computed_at
+        # fuses ZERO multi-model extras → STALE_HISTORY_ONLY → live_eligible=False
+        # → read-through returns None → the freeze is reproduced, not cured.
+        # Fix: the DECISION INSTANT for this read-through recompute is NOW (the
+        # live monitor cycle), so all single_runs available at that instant are
+        # admitted.  source_cycle_time (the forecast cycle, "06:00 UTC") is kept
+        # verbatim — it is NOT a wall-clock and must NOT be advanced.
+        _now = decision_now if decision_now is not None else datetime.now(timezone.utc)
+        request = replace(request, computed_at=_now)
 
         from src.data.replacement_forecast_materializer import (
             compute_replacement_posterior_readonly,

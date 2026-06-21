@@ -44,6 +44,20 @@ makes the residual gap OBSERVABLE rather than a silent freeze. Forward-verify th
 split: of live held-freezes, what fraction fall in L2's synchronous window vs the
 L1-async window.
 
+DECISION-INSTANT SEMANTICS (real-chain verified 2026-06-21, post-commit fix): the
+read-through recompute calls `compute_replacement_posterior_readonly` with
+`request.computed_at` set to the LIVE MONITOR CYCLE INSTANT (datetime.now(UTC)),
+NOT the seed's original build time. The Bayes-precision fusion's arrival guard
+admits only single_runs whose `source_available_at <= computed_at`; for frozen
+families the relevant single_runs arrived AFTER the seed was built (Panama City:
+seed 12:09, single_runs 14:10) — using the seed's stale computed_at caused the
+recompute to fuse ZERO multi-model extras → STALE_HISTORY_ONLY → live_eligible=False
+→ read-through returned None → freeze reproduced. The fix: `_attempt_held_belief_
+readthrough` calls `dataclasses.replace(request, computed_at=_now)` before
+`compute_replacement_posterior_readonly`. `source_cycle_time` (the forecast cycle
+hour, e.g. "06:00 UTC") is kept verbatim — it identifies WHICH cycle's single_runs
+to fuse, not a wall-clock. `decision_now` is injectable for test determinism.
+
 ## Files + functions changed (file:line)
 
 ### 1. Read-only compute entrypoint (the extraction)

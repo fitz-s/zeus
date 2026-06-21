@@ -14,6 +14,7 @@ TDD: written RED first (the read-only entrypoint does not yet exist).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -130,6 +131,73 @@ def test_write_path_unchanged_after_compute_extraction(monkeypatch: pytest.Monke
     assert set(ro.q) == set(written_q)
     for b in written_q:
         assert abs(float(ro.q[b]) - float(written_q[b])) < 1e-9
+
+
+def test_arrival_guard_uses_decision_now_not_seed_computed_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REGRESSION (real-chain verified 2026-06-21): the read-through MUST pass the
+    LIVE decision instant — not the seed's stale ``computed_at`` — as the arrival
+    guard's cutoff.  Otherwise, single_runs that arrived AFTER the seed was built
+    (the common held-position freeze scenario) are excluded → STALE_HISTORY_ONLY →
+    live_eligible=False → read-through returns None → the freeze is reproduced.
+
+    Scenario:
+      seed computed_at = _dt(4)  (04:00 UTC — the stale seed decision time)
+      single_runs arrive at   _dt(5)  (05:00 UTC — AFTER the seed was built)
+      monitor decision instant = _dt(6)  (06:00 UTC — the live cycle, > arrivals)
+
+    With decision_now=_dt(6): arrival guard admits the 05:00 run → live_eligible=True.
+    With decision_now=_dt(4): arrival guard EXCLUDES the 05:00 run  → live_eligible=False.
+
+    This directly antibodies the arrival-guard / decision-time interaction that the
+    real-chain probe confirmed on Panama City 2026-06-22 high.
+    """
+    # Single-run arrivals AFTER the seed's build time but BEFORE the live monitor cycle.
+    late_available_at = _dt(5)   # 05:00 UTC: arrives after seed (04:00) but before monitor (06:00)
+    stale_seed_time   = _dt(4)   # 04:00 UTC: the on-disk seed's original computed_at
+    monitor_now       = _dt(6)   # 06:00 UTC: the live monitor cycle instant
+
+    base._install_live_fusion(monkeypatch)
+
+    # Build request with the late-arriving availability timestamps and the stale seed time.
+    request = base._request(
+        baseline_source_available_at=late_available_at,
+        openmeteo_source_available_at=late_available_at,
+        source_cycle_time=_dt(0),       # forecast cycle = 00Z
+        computed_at=stale_seed_time,    # seed's original decision instant
+        expires_at=_dt(12),
+    )
+
+    conn_fresh = base._conn()
+    conn_stale = base._conn()
+
+    # 1. decision_now = live monitor cycle (AFTER single_runs arrived): must admit them.
+    result_fresh = compute_replacement_posterior_readonly(
+        conn_fresh, replace(request, computed_at=monitor_now)
+    )
+    assert result_fresh is not None, "expected a result with monitor_now"
+    assert result_fresh.live_eligible is True, (
+        f"expected live_eligible=True with decision_now=monitor_now; "
+        f"capture_status={result_fresh.capture_status}, "
+        f"providers={result_fresh.decorrelated_providers_served}/{result_fresh.decorrelated_providers_expected}"
+    )
+
+    # 2. decision_now = stale seed time (BEFORE single_runs arrived): must NOT yield a
+    # live-eligible posterior.  The prewrite guard fires
+    # REPLACEMENT_MATERIALIZATION_DEPENDENCY_AFTER_COMPUTED_AT (source_available_at >
+    # computed_at) and compute_replacement_posterior_readonly returns None — that is the
+    # correct "not computable" signal, equivalent to live_eligible=False.
+    result_stale = compute_replacement_posterior_readonly(
+        conn_stale, replace(request, computed_at=stale_seed_time)
+    )
+    not_live_eligible = result_stale is None or not result_stale.live_eligible
+    assert not_live_eligible, (
+        f"expected None or live_eligible=False with stale decision time; "
+        f"got capture_status={getattr(result_stale, 'capture_status', 'N/A')}, "
+        f"providers={getattr(result_stale, 'decorrelated_providers_served', '?')}"
+        f"/{getattr(result_stale, 'decorrelated_providers_expected', '?')}"
+    )
 
 
 def test_request_dataclass_builder_assembles_from_on_disk_seed(tmp_path) -> None:
