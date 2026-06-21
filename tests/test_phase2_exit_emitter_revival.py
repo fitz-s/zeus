@@ -200,21 +200,110 @@ class TestStillHeldRoutesToEvaluate:
             f"still-held route must NOT stamp any EXIT_ORDER_REJECTED, got {total_rejects}"
         )
 
-    def test_in_flight_resting_order_is_not_re_routed(self, monkeypatch):
-        """Single-flight: a position with a sell already on the book must NOT be
-        released into a fresh evaluate→execute pass (double-submit hazard)."""
+    def test_in_flight_resting_order_branch_is_non_mutating(self, monkeypatch):
+        """BLOCKER-1: a position with a sell already on the book must be skipped
+        WITHOUT mutating its exit state. The fill poller (check_pending_exits)
+        owns the resting order and polls fills ONLY for exit_state in
+        {sell_placed, sell_pending, exit_intent}; flipping to retry_pending would
+        EVICT the order from that lane and risk a repost/cancel (the opposite of
+        single-flight)."""
         monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
         for in_flight_state in sorted(_EXIT_LIFECYCLE_IN_FLIGHT_STATES):
-            pos = _make_position(exit_state=in_flight_state)
+            pos = _make_position(
+                trade_id=f"inflight-{in_flight_state}",
+                exit_state=in_flight_state,
+                last_exit_order_id="ord-resting-1",
+                order_status="placed",
+                exit_retry_count=0,
+                next_exit_retry_at="",
+            )
             conn = _db()
             _seed_position_current(conn, pos)
             result = handle_exit_pending_missing(
                 _portfolio(pos), pos, conn=conn, rpc_call=_rpc_returning(6_000_000)
             )
-            assert result["action"] == "retry", (
-                f"in-flight exit_state={in_flight_state!r} must defer to the "
-                f"existing lane (retry), got {result['action']!r}"
+            conn.commit()
+
+            # Skip (let the fill poller own it) — RED on un-fixed tree: "retry".
+            assert result["action"] == "skip", (
+                f"in-flight exit_state={in_flight_state!r} must non-mutating-skip, "
+                f"got {result['action']!r}"
             )
+            # State PRESERVED so check_pending_exits keeps polling the order.
+            exit_state_value = getattr(pos.exit_state, "value", pos.exit_state)
+            assert exit_state_value == in_flight_state, (
+                f"in-flight branch must NOT mutate exit_state "
+                f"(expected {in_flight_state!r}, got {exit_state_value!r})"
+            )
+            assert pos.last_exit_order_id == "ord-resting-1", (
+                "in-flight branch must preserve last_exit_order_id"
+            )
+            assert not pos.next_exit_retry_at, (
+                f"in-flight branch must NOT arm a cooldown, got {pos.next_exit_retry_at!r}"
+            )
+            assert pos.exit_retry_count == 0, (
+                f"in-flight branch must NOT bump retry_count, got {pos.exit_retry_count}"
+            )
+            total_rejects = conn.execute(
+                """
+                SELECT COUNT(*) FROM position_events
+                 WHERE position_id = ? AND event_type = 'EXIT_ORDER_REJECTED'
+                """,
+                (pos.trade_id,),
+            ).fetchone()[0]
+            assert total_rejects == 0, (
+                f"in-flight branch must NOT write an EXIT_ORDER_REJECTED, got {total_rejects}"
+            )
+
+    def test_in_flight_resting_order_fills_with_exactly_one_submit(self, monkeypatch):
+        """End-to-end single-flight: across two exit_pending_missing cycles with a
+        resting sell that the venue fills on cycle 2, check_pending_exits detects
+        the fill and place_sell_order is NEVER called (no second submit)."""
+        from src.execution import exit_lifecycle as _el
+
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        pos = _make_position(
+            trade_id="inflight-fill-1",
+            exit_state="sell_placed",
+            exit_reason="EDGE_REVERSAL",
+            last_exit_order_id="ord-resting-2",
+            order_status="placed",
+        )
+        conn = _db()
+        _seed_position_current(conn, pos)
+        portfolio = _portfolio(pos)
+
+        # Any call to the live emitter would be a DOUBLE-SUBMIT.
+        submit_calls = {"n": 0}
+
+        def _boom_place(*a, **k):
+            submit_calls["n"] += 1
+            raise AssertionError("place_sell_order must NOT be called for a resting order")
+
+        monkeypatch.setattr(_el, "place_sell_order", _boom_place)
+
+        # Cycle 1: chain-truth still-held, in-flight → non-mutating skip.
+        r1 = handle_exit_pending_missing(
+            portfolio, pos, conn=conn, rpc_call=_rpc_returning(6_000_000)
+        )
+        conn.commit()
+        assert r1["action"] == "skip"
+        assert getattr(pos.exit_state, "value", pos.exit_state) == "sell_placed"
+
+        # Cycle 2: the resting order fills. The fill poller (check_pending_exits),
+        # which runs in the exit-preflight BEFORE the monitor loop, owns it.
+        class FillingClob:
+            def get_order_status(self, order_id):
+                return {"status": "CONFIRMED", "avgPrice": 0.5}
+
+        stats = _el.check_pending_exits(portfolio, FillingClob(), conn=conn)
+        conn.commit()
+
+        assert stats["filled"] == 1, f"the resting order must fill exactly once, got {stats}"
+        assert submit_calls["n"] == 0, "place_sell_order must never fire for a resting order"
+        # The filled position is economically closed via the poller, not resubmitted.
+        closed = stats["filled_positions"][0]
+        assert getattr(closed.exit_state, "value", closed.exit_state) == "sell_filled"
 
 
 # ---------------------------------------------------------------------------

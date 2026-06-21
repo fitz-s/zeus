@@ -488,7 +488,7 @@ def compute_realized_edge_from_authorities(
 
     if not cost_model_cert_hash or not expected_edge_cert_hash or not fill_event_hash:
         return None
-    cost_payload = _load_verified_cost_model_payload(conn, cost_model_cert_hash)
+    cost_payload = _load_verified_cost_model_payload(conn, cost_model_cert_hash, pre_submit)
     edge_payload = _load_verified_certificate_payload(conn, expected_edge_cert_hash)
     if cost_payload is None or edge_payload is None:
         return None
@@ -553,7 +553,11 @@ def _load_verified_certificate_payload(conn: sqlite3.Connection, certificate_has
         return None
 
 
-def _load_verified_cost_model_payload(conn: sqlite3.Connection, cost_hash: str) -> dict[str, Any] | None:
+def _load_verified_cost_model_payload(
+    conn: sqlite3.Connection,
+    cost_hash: str,
+    pre_submit: dict[str, Any],
+) -> dict[str, Any] | None:
     """Resolve the VERIFIED CostModelCertificate payload for an audit cost hash.
 
     Phase 3 W1 sub-fix 1 (2026-06-20): the value stamped into the audit row's
@@ -564,18 +568,39 @@ def _load_verified_cost_model_payload(conn: sqlite3.Connection, cost_hash: str) 
     653/682 (96%) equal the ``cost_basis_hash`` payload field of a VERIFIED
     CostModelCertificate. The edge leg resolves because its stamped value
     (``actionable_certificate_hash``) IS a real certificate_hash; only the cost
-    leg's key differs. This resolver keys on the field that the audit row actually
-    carries — the CostModelCertificate's own ``cost_basis_hash`` — which is the
-    authority's stable identity. A direct ``certificate_hash`` match is tried first
-    so the resolver stays correct if upstream is ever changed to stamp the primary
-    key (single source of truth, no behaviour change for that case).
+    leg's key differs.
+
+    Re-review fix (2026-06-21): the resolution is type-filtered to
+    ``CostModelCertificate`` on BOTH the direct (certificate_hash) and the inner-hash
+    paths — a bare certificate_hash match could otherwise return a different cert type
+    (e.g. FinalIntentCertificate, which on the live DB shares the inner
+    ``cost_basis_hash`` field but lacks ``c_fee_adjusted``). And the inner-hash path is
+    IDENTITY-FIRST: multiple VERIFIED CostModelCertificates can share one inner
+    ``cost_basis_hash``, so we iterate all of them and return the one whose
+    condition_id/token_id/side identity matches the audit fill — never ``rowid``-latest,
+    which could return a sibling with the wrong identity and leave a resolvable row NULL.
     """
     if not cost_hash or not _table_exists(conn, "decision_certificates"):
         return None
-    direct = _load_verified_certificate_payload(conn, cost_hash)
+    # Direct path: the stamped value IS a CostModelCertificate primary key
+    # (forward-compatible if upstream is ever changed to stamp the real hash).
+    direct = conn.execute(
+        """
+        SELECT payload_json
+        FROM decision_certificates
+        WHERE certificate_hash = ?
+          AND certificate_type = 'CostModelCertificate'
+          AND verifier_status = 'VERIFIED'
+        """,
+        (cost_hash,),
+    ).fetchone()
     if direct is not None:
-        return direct
-    row = conn.execute(
+        payload = _payload_json_or_none(direct)
+        if payload is not None:
+            return payload
+    # Inner-hash path: resolve by the CostModelCertificate's own ``cost_basis_hash``
+    # field, choosing the identity-matching cert (not the newest).
+    candidates = conn.execute(
         """
         SELECT payload_json
         FROM decision_certificates
@@ -583,12 +608,25 @@ def _load_verified_cost_model_payload(conn: sqlite3.Connection, cost_hash: str) 
           AND verifier_status = 'VERIFIED'
           AND json_extract(payload_json, '$.cost_basis_hash') = ?
         ORDER BY rowid DESC
-        LIMIT 1
         """,
         (cost_hash,),
-    ).fetchone()
-    if row is None:
-        return None
+    ).fetchall()
+    fallback: dict[str, Any] | None = None
+    for cand in candidates:
+        payload = _payload_json_or_none(cand)
+        if payload is None:
+            continue
+        if _certificate_identity_matches_pre_submit(payload, pre_submit):
+            return payload
+        if fallback is None:
+            fallback = payload
+    # No identity match: return the newest candidate so the caller's authority check
+    # (which re-validates identity) rejects it deterministically — never a silent
+    # wrong-identity acceptance, and never None when at least one candidate exists.
+    return fallback
+
+
+def _payload_json_or_none(row: Any) -> dict[str, Any] | None:
     try:
         return json.loads(str(row["payload_json"] if isinstance(row, sqlite3.Row) else row[0]))
     except json.JSONDecodeError:

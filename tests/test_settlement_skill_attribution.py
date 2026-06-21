@@ -484,3 +484,133 @@ def test_W2_unverified_settlement_yields_null_pnl(tmp_path) -> None:
     assert pnl[0] is None
     assert pnl[1] is None
     wconn.close()
+
+
+def _seed_position_with_events(
+    tconn: sqlite3.Connection,
+    *,
+    position_id: str,
+    entry_at: str,
+    updated_at: str,
+    direction: str = "buy_no",
+) -> None:
+    """A settled position_current row + an immutable POSITION_OPEN_INTENT entry event."""
+    tconn.execute(
+        """INSERT INTO position_current
+           (position_id, phase, strategy_key, condition_id, direction, entry_price,
+            shares, cost_basis_usd, city, target_date, temperature_metric, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (position_id, "settled", "center_buy", "cond-1", direction, 0.35, 10.0, 3.5,
+         "Denver", "2026-06-12", "high", updated_at),
+    )
+    tconn.execute(
+        """INSERT INTO position_events
+           (event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, strategy_key, source_module, env, payload_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (f"ev-{position_id}", position_id, 1, 1, "POSITION_OPEN_INTENT",
+         entry_at, "center_buy", "test", "test", "{}"),
+    )
+
+
+def test_BLOCKER2_decision_time_uses_immutable_entry_not_updated_at(tmp_path) -> None:
+    """BLOCKER 2 (RED on revert): the decision-time posterior bound must be the
+    IMMUTABLE entry time (position_events), NOT position_current.updated_at.
+
+    Scenario: entry T0=06-09, a FRESHER posterior at T1=06-10 (after entry), and a
+    mutated updated_at T2=06-12 (a settlement/monitor bump). The decision-time
+    posterior MUST be the T0 one, and a fresher cycle (T1) MUST be detected as having
+    existed at decision (stale signal). Under the old updated_at(T2) bound, the T1
+    posterior would itself be selected as 'decision-time' → no fresher cycle → the
+    stale classification is corrupted. Asserts the grade's decision posterior is the
+    T0 one and fresher_cycle_existed_at_decision is True.
+    """
+    world_path = str(tmp_path / "world.db")
+    fcst_path = str(tmp_path / "fcst.db")
+    trades_path = str(tmp_path / "trades.db")
+    wconn = sqlite3.connect(world_path); init_schema(wconn)
+    fconn = sqlite3.connect(fcst_path); init_schema_forecasts(fconn)
+    tconn = sqlite3.connect(trades_path); init_schema(tconn)
+
+    fconn.execute(
+        """INSERT INTO market_events
+           (market_slug, condition_id, city, target_date, temperature_metric,
+            range_low, range_high, recorded_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        ("m", "cond-1", "Denver", "2026-06-12", "high", 50.0, 51.0, "2026-06-08T00:00:00Z"),
+    )
+    fconn.execute(
+        """INSERT INTO settlement_outcomes
+           (city, target_date, temperature_metric, settlement_value,
+            settlement_unit, settled_at, authority, provenance_json, recorded_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        ("Denver", "2026-06-12", "high", 47.0, "F", "2026-06-12T20:00:00Z",
+         "VERIFIED", "{}", "2026-06-12T20:00:00Z"),
+    )
+    def _insert_posterior(pid, computed_at, q_json):
+        fconn.execute(
+            """INSERT INTO forecast_posteriors
+               (posterior_id, source_id, product_id, data_version, city, target_date,
+                temperature_metric, source_cycle_time, source_available_at, computed_at,
+                q_json, posterior_method, training_allowed, recorded_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (pid, "src", "prod", "v1", "Denver", "2026-06-12", "high",
+             computed_at, computed_at, computed_at, q_json, "test", 0, computed_at),
+        )
+
+    # Decision-time posterior at T0 (computed 06-09, before entry-time bound 06-09T12).
+    _insert_posterior(1, "2026-06-09T06:00:00Z", '{"50-51F": 0.30}')
+    # FRESHER posterior at T1 (computed 06-10, AFTER entry — must NOT be the decision one).
+    _insert_posterior(2, "2026-06-10T06:00:00Z", '{"50-51F": 0.10}')
+    fconn.commit(); fconn.close()
+
+    # Entry T0=06-09T12 (immutable), but updated_at mutated to T2=06-12 (post-fresh).
+    _seed_position_with_events(
+        tconn, position_id="pos-1",
+        entry_at="2026-06-09T12:00:00Z", updated_at="2026-06-12T20:00:00Z",
+    )
+    tconn.commit(); tconn.close()
+
+    wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
+    wconn.execute("ATTACH DATABASE ? AS trades", (trades_path,))
+
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    g = grades[0]
+    # The decision-time posterior is T0 (06-09), NOT the fresher T1 (06-10).
+    assert g.decision_posterior_computed_at == "2026-06-09T06:00:00Z"
+    # A strictly-fresher cycle (T1) existed at decision → stale signal present.
+    assert g.fresher_cycle_existed_at_decision is True
+    wconn.close()
+
+
+def test_INV37_trades_attached_read_only_blocks_writes(tmp_path) -> None:
+    """INV-37 re-review (RED on revert): the 'trades' ATTACH is read-only — an
+    attempted write to trades.position_current must fail. A plain ATTACH would
+    permit the write."""
+    from src.analysis.settlement_skill_attribution import _ensure_trades_attached
+    import src.state.db as dbmod
+    import pathlib
+
+    trades_path = str(tmp_path / "trades.db")
+    tconn = sqlite3.connect(trades_path); init_schema(tconn); tconn.commit(); tconn.close()
+
+    world_path = str(tmp_path / "world.db")
+    wconn = sqlite3.connect(world_path); init_schema(wconn)
+
+    orig = dbmod._zeus_trade_db_path
+    dbmod._zeus_trade_db_path = lambda: pathlib.Path(trades_path)
+    try:
+        _ensure_trades_attached(wconn)
+        # Reads work.
+        wconn.execute("SELECT COUNT(*) FROM trades.position_current").fetchone()
+        # Writes are rejected by the read-only attachment.
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            wconn.execute(
+                """INSERT INTO trades.position_current
+                   (position_id, phase, strategy_key, temperature_metric, updated_at)
+                   VALUES ('x','settled','center_buy','high','2026-06-12T00:00:00Z')"""
+            )
+    finally:
+        dbmod._zeus_trade_db_path = orig
+        wconn.close()

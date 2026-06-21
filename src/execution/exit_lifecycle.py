@@ -1052,26 +1052,33 @@ def handle_exit_pending_missing(
                 ) or ""
                 in_flight = _exit_state_value in _EXIT_LIFECYCLE_IN_FLIGHT_STATES
                 if in_flight:
+                    # BLOCKER-1 fix (2026-06-20): this branch MUST be
+                    # NON-MUTATING. A sell is already on the book (exit_state in
+                    # {exit_intent, sell_placed, sell_pending}) and
+                    # check_pending_exits (the exit-preflight fill poller) owns
+                    # it — but it polls fills ONLY for exactly those exit_states.
+                    # The prior _mark_exit_retry flipped exit_state→retry_pending
+                    # and armed a cooldown, which (a) EVICTED the resting sell
+                    # from the fast fill-polling lane and (b) could later
+                    # repost/cancel it = churn / double-submit — the OPPOSITE of
+                    # single-flight protection. So: do NOT _mark_exit_retry, do
+                    # NOT touch exit_state / last_exit_order_id / order_status /
+                    # next_exit_retry_at, and write NO EXIT_ORDER_REJECTED. Skip
+                    # this position for the monitor THIS cycle and let the fill
+                    # poller remain the sole order owner.
                     logger.info(
-                        "CHAIN_TRUTH_RETRY %s: on-chain balance=%s units "
+                        "CHAIN_TRUTH_IN_FLIGHT_SKIP %s: on-chain balance=%s units "
                         "(%s shares) for asset_id=%s; exit already in flight "
-                        "(exit_state=%s) → defer to existing exit lane",
+                        "(exit_state=%s, order_id=%s) → non-mutating skip, fill "
+                        "poller owns the resting order",
                         position.trade_id,
                         on_chain_balance,
                         chain_balance_shares,
                         asset_id,
-                        position.exit_state,
+                        _exit_state_value,
+                        getattr(position, "last_exit_order_id", "") or "",
                     )
-                    _mark_exit_retry(
-                        position,
-                        reason="EXIT_CHAIN_MISSING_STILL_HELD",
-                        error=(
-                            f"chain_balance_units={on_chain_balance};"
-                            f"chain_balance_shares={chain_balance_shares};asset_id={asset_id}"
-                        ),
-                        conn=conn,
-                    )
-                    return {"action": "retry", "position": position}
+                    return {"action": "skip", "position": None}
                 # No resting order: release the pending_exit pre-emption so the
                 # normal monitor path runs the full evaluate_exit → execute_exit →
                 # place_sell_order lane THIS cycle. No reject stamp and no

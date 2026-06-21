@@ -641,23 +641,66 @@ def _bin_yes_mass_from_q_json(q_json, bin_obj) -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 def _ensure_trades_attached(world_conn: sqlite3.Connection) -> bool:
-    """ATTACH zeus_trades.db as 'trades' (read-only join) on the single conn.
+    """ATTACH zeus_trades.db as 'trades' in READ-ONLY mode on the single conn.
 
     W3 (2026-06-20): the grader reads ``trades.position_current``, which lives in
     zeus_trades.db. INV-37 requires cross-DB access on a SINGLE connection (ATTACH),
     never an independent connection. This join is READ-ONLY (the grader's only
-    write target is WORLD.settlement_attribution), so no trades write-lock is taken;
-    the canonical lock order (zeus-forecasts < zeus-world < zeus_trades) is honoured
-    because WORLD already holds the bulk lock and trades is attached for reads only.
-    Idempotent: a no-op when 'trades' is already attached. Returns True when the
-    schema is available.
+    write target is WORLD.settlement_attribution), so the ATTACH is opened with the
+    ``file:<path>?mode=ro`` URI — SQLite then enforces read-only at the engine level
+    and any attempted write to ``trades.*`` raises "attempt to write a readonly
+    database". A read-only attachment also cannot take a write-lock, so the canonical
+    lock order (zeus-forecasts < zeus-world < zeus_trades) is structurally respected:
+    WORLD holds the bulk lock and trades is attached for reads only. (SQLite honours
+    the ``file:`` URI for ATTACH even when the main connection was opened without
+    ``uri=True``.) Idempotent: a no-op when 'trades' is already attached.
     """
     from src.state.db import _zeus_trade_db_path
 
     attached = {row[1] for row in world_conn.execute("PRAGMA database_list").fetchall()}
     if "trades" not in attached:
-        world_conn.execute("ATTACH DATABASE ? AS trades", (str(_zeus_trade_db_path()),))
+        trades_uri = f"file:{_zeus_trade_db_path()}?mode=ro"
+        world_conn.execute("ATTACH DATABASE ? AS trades", (trades_uri,))
     return True
+
+
+# The position lifecycle's entry/decision events. MIN(occurred_at) over these is the
+# immutable decision-time anchor (position_events.occurred_at is append-only, never
+# mutated — unlike position_current.updated_at). POSITION_OPEN_INTENT is the decision
+# intent; ENTRY_ORDER_POSTED/ENTRY_ORDER_FILLED bound the fill. The earliest of these
+# is the time the decision was made.
+_POSITION_ENTRY_EVENT_TYPES = (
+    "POSITION_OPEN_INTENT",
+    "ENTRY_ORDER_POSTED",
+    "ENTRY_ORDER_FILLED",
+)
+
+
+def _load_position_entry_times(world_conn: sqlite3.Connection) -> dict[str, str]:
+    """position_id -> immutable entry/decision timestamp (MIN occurred_at).
+
+    BLOCKER 2 fix (2026-06-21): reads ``trades.position_events`` (append-only) so the
+    grader's decision-time posterior bound is the real entry time, not the mutable
+    ``position_current.updated_at``. Single-connection read on the read-only ATTACH
+    (INV-37). Positions with no entry event are absent from the map (caller leaves the
+    decision-time bound None rather than fabricate one). Caller must have called
+    _ensure_trades_attached first.
+    """
+    placeholders = ",".join("?" for _ in _POSITION_ENTRY_EVENT_TYPES)
+    out: dict[str, str] = {}
+    for position_id, entry_at in world_conn.execute(
+        f"""
+        SELECT position_id, MIN(occurred_at) AS entry_at
+        FROM trades.position_events
+        WHERE event_type IN ({placeholders})
+          AND occurred_at IS NOT NULL
+        GROUP BY position_id
+        """,
+        _POSITION_ENTRY_EVENT_TYPES,
+    ).fetchall():
+        if entry_at is not None:
+            out[str(position_id)] = str(entry_at)
+    return out
 
 
 def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
@@ -684,13 +727,14 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
     _ensure_trades_attached(world_conn)
     market_meta = _load_market_meta(world_conn)
     settlements, settled_at = _load_settlements(world_conn)
+    entry_times = _load_position_entry_times(world_conn)
 
     out: list[SkillGrade] = []
     for (
-        position_id, condition_id, direction, entry_price, shares, created_at,
+        position_id, condition_id, direction, entry_price, shares,
     ) in world_conn.execute(
         """
-        SELECT position_id, condition_id, direction, entry_price, shares, updated_at
+        SELECT position_id, condition_id, direction, entry_price, shares
         FROM trades.position_current
         WHERE entry_price IS NOT NULL
           AND direction IS NOT NULL
@@ -704,6 +748,14 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
         filled_size = shares
         q_live = None       # not stored on position_current — posterior fallback
         q_lcb_5pct = None
+        # BLOCKER 2 fix (2026-06-21): the decision-time bound MUST be the IMMUTABLE
+        # entry timestamp from position_events (MIN occurred_at over the entry events),
+        # NOT position_current.updated_at — updated_at is mutable projection time that a
+        # settlement/monitor write bumps days later (live DB: 238/238 positions have
+        # updated_at LATER than entry, by up to 24 days), which would select a
+        # post-entry posterior as "decision-time" and corrupt the stale/skill/luck
+        # split. When no entry event exists the bound is left None (no fabricated time).
+        created_at = entry_times.get(position_id)
         meta = market_meta.get(condition_id)
         if meta is None:
             continue

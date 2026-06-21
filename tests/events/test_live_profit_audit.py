@@ -433,6 +433,62 @@ def test_W1_cost_cert_identity_mismatch_still_yields_null():
     assert realized is None
 
 
+def test_W1_cost_cert_inner_hash_collision_selects_identity_not_rowid_latest():
+    """W1 re-review (RED on revert): two VERIFIED CostModelCertificates share one
+    inner cost_basis_hash. The NEWEST (higher rowid) has the WRONG identity; an OLDER
+    one has the CORRECT identity. The resolver must select identity-first (return the
+    correct older cert), not rowid-latest.
+
+    Under the ORDER BY rowid DESC LIMIT 1 path, the wrong-identity cert is returned,
+    the caller's authority check rejects it, realized_edge stays NULL → RED.
+    """
+    conn = _conn()
+    ensure_decision_certificate_tables(conn)
+    _insert_cert(
+        conn, "actionable-cert-1", "ActionableTradeCertificate", "actionable-hash-1",
+        {
+            "q_live": 0.45, "condition_id": "condition-1", "token_id": "token-1",
+            "side": "BUY", "direction": "YES", "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+        },
+    )
+    # OLDER cert (lower rowid) — CORRECT identity, the real cost authority.
+    _insert_cert(
+        conn, "cost-cert-correct", "CostModelCertificate", "cost-cert-hash-correct",
+        {
+            "cost_basis_hash": "shared-inner-hash", "c_fee_adjusted": 0.421,
+            "condition_id": "condition-1", "token_id": "token-1",
+            "side": "BUY", "direction": "YES", "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+        },
+    )
+    # NEWER cert (higher rowid) — WRONG identity but the same inner hash.
+    _insert_cert(
+        conn, "cost-cert-wrong", "CostModelCertificate", "cost-cert-hash-wrong",
+        {
+            "cost_basis_hash": "shared-inner-hash", "c_fee_adjusted": 0.999,
+            "condition_id": "OTHER-condition", "token_id": "OTHER-token",
+            "side": "BUY", "direction": "YES", "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+        },
+    )
+    realized = compute_realized_edge_from_authorities(
+        conn=conn,
+        cost_model_cert_hash="shared-inner-hash",
+        expected_edge_cert_hash="actionable-hash-1",
+        fill_event_hash="fill-event-hash-1",
+        pre_submit={
+            "condition_id": "condition-1", "token_id": "token-1", "side": "BUY",
+            "direction": "YES", "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+        },
+        fill_payload={"avg_fill_price": 0.44, "filled_size": 10.0, "fees": 0.0},
+    )
+    assert realized is not None  # RED on revert (rowid-latest returns wrong-identity)
+    # The CORRECT cert (c_fee_adjusted=0.421) resolved, NOT the wrong one (0.999).
+    assert realized["expected_cost_basis"] == pytest.approx(0.421)
+
+
 @pytest.mark.parametrize(
     ("cert_kind", "field", "value"),
     (
@@ -710,10 +766,12 @@ def _seed_authority_certificates(
         )
     ]
     if include_cost:
+        # Production cost authority type is CostModelCertificate (the resolver is
+        # type-filtered to it); ExecutableCostCertificate was a non-production stand-in.
         rows.append(
             (
                 "cost-cert-1",
-                "ExecutableCostCertificate",
+                "CostModelCertificate",
                 "cost-hash-1",
                 cost_payload,
             )

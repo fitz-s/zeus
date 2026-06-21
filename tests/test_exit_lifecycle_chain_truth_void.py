@@ -194,9 +194,12 @@ class TestChainTruthRetryOnPositiveBalance:
         # FIX 2a: still-held with no resting order → live exit evaluation.
         assert result["action"] == "evaluate", f"expected 'evaluate', got {result['action']!r}"
 
-    def test_balance_positive_with_resting_order_retries(self, monkeypatch):
-        """Single-flight: a sell already on the book must defer (retry), NOT be
-        re-routed into a fresh evaluate→execute pass (double-submit hazard)."""
+    def test_balance_positive_with_resting_order_is_non_mutating_skip(self, monkeypatch):
+        """BLOCKER-1: a sell already on the book must be skipped WITHOUT mutating
+        exit_state/cooldown — the fill poller (check_pending_exits) owns it and
+        polls fills only for exit_state in {sell_placed, sell_pending,
+        exit_intent}. Flipping to retry_pending would evict the resting order
+        from that lane (churn / double-submit)."""
         monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
         pos = _make_position(
             trade_id="london-test-resting",
@@ -204,6 +207,9 @@ class TestChainTruthRetryOnPositiveBalance:
             condition_id=_CONDITION_ID_LONDON,
             city="London",
             exit_state="sell_placed",  # resting sell order on the book
+            last_exit_order_id="ord-resting-1",
+            next_exit_retry_at="",
+            exit_retry_count=0,
         )
         portfolio = _make_portfolio(pos)
 
@@ -211,7 +217,12 @@ class TestChainTruthRetryOnPositiveBalance:
             portfolio, pos, conn=None, rpc_call=_rpc_returning(6_000_000)
         )
 
-        assert result["action"] == "retry", f"expected 'retry', got {result['action']!r}"
+        assert result["action"] == "skip", f"expected 'skip', got {result['action']!r}"
+        # State PRESERVED so the fill poller keeps owning the resting order.
+        assert getattr(pos.exit_state, "value", pos.exit_state) == "sell_placed"
+        assert pos.last_exit_order_id == "ord-resting-1"
+        assert not pos.next_exit_retry_at
+        assert pos.exit_retry_count == 0
 
     def test_balance_positive_position_remains_in_portfolio(self, monkeypatch):
         monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
@@ -252,9 +263,10 @@ class TestChainTruthRetryOnPositiveBalance:
                 "balance>0 path must NOT transition to voided state"
             )
 
-    def test_balance_positive_with_resting_order_increments_retry_count(self, monkeypatch):
-        """The retry/cooldown path (and its counter) is now reserved for the
-        in-flight (resting-order) branch — the only branch that still defers."""
+    def test_balance_positive_with_resting_order_preserves_retry_count(self, monkeypatch):
+        """BLOCKER-1: the in-flight (resting-order) branch is NON-MUTATING — it
+        must NOT bump retry_count or arm a cooldown (doing so would evict the
+        resting order from check_pending_exits' fill-polling lane)."""
         monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
         pos = _make_position(
             trade_id="london-test-resting",
@@ -263,6 +275,7 @@ class TestChainTruthRetryOnPositiveBalance:
             city="London",
             exit_state="sell_placed",
             exit_retry_count=0,
+            next_exit_retry_at="",
         )
         portfolio = _make_portfolio(pos)
 
@@ -270,8 +283,14 @@ class TestChainTruthRetryOnPositiveBalance:
             portfolio, pos, conn=None, rpc_call=_rpc_returning(6_000_000)
         )
 
-        assert pos.exit_retry_count >= 1, (
-            f"exit_retry_count should be >= 1 after retry, got {pos.exit_retry_count}"
+        assert pos.exit_retry_count == 0, (
+            f"in-flight branch must NOT bump retry_count, got {pos.exit_retry_count}"
+        )
+        assert not pos.next_exit_retry_at, (
+            f"in-flight branch must NOT arm a cooldown, got {pos.next_exit_retry_at!r}"
+        )
+        assert getattr(pos.exit_state, "value", pos.exit_state) == "sell_placed", (
+            "in-flight branch must preserve exit_state"
         )
 
     def test_balance_positive_no_resting_order_arms_no_cooldown(self, monkeypatch):
